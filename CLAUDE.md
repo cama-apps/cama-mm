@@ -71,9 +71,16 @@ tests/                    # 41 test files total
 
 ## Testing
 
-- **Test fixtures** in `tests/conftest.py`: Use `temp_db_path` for database isolation
-- **Async testing**: All Discord interactions are async; tests use pytest-asyncio
-- **Guild ID**: Tests use `guild_id=None` for default behavior
+**All new functionality must include tests.** Run `uv run pytest -n auto` before committing.
+
+- **Unit tests**: For domain logic (shuffler, rating system, lobby)
+- **Integration tests**: For services and repositories
+- **E2E tests**: For complete workflows (see `tests/test_e2e_*.py`)
+
+**Conventions:**
+- Use `temp_db_path` fixture for database isolation
+- Use `guild_id=None` for default behavior in tests
+- Follow existing patterns in similar test files
 
 ## Important Notes
 
