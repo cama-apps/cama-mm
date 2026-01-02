@@ -575,3 +575,64 @@ class TestPoolBetting:
 
         with pytest.raises(ValueError, match="betting_mode must be"):
             match_service.shuffle_players(player_ids, guild_id=1, betting_mode="invalid")
+
+    def test_pool_payouts_are_integers_no_fractional_coins(self, services):
+        """Pool payouts must always be integers - no fractional jopacoins."""
+        match_service = services["match_service"]
+        betting_service = services["betting_service"]
+        player_repo = services["player_repo"]
+
+        player_ids = list(range(9900, 9910))
+        for pid in player_ids:
+            player_repo.add(
+                discord_id=pid,
+                discord_username=f"Player{pid}",
+                dotabuff_url=f"https://dotabuff.com/players/{pid}",
+                initial_mmr=1500,
+                glicko_rating=1500.0,
+                glicko_rd=350.0,
+                glicko_volatility=0.06,
+            )
+
+        # Create 3 spectators with bets that would cause fractional division
+        spectators = [9950, 9951, 9952]
+        for spec_id in spectators:
+            player_repo.add(
+                discord_id=spec_id,
+                discord_username=f"Spectator{spec_id}",
+                dotabuff_url=f"https://dotabuff.com/players/{spec_id}",
+            )
+            player_repo.add_balance(spec_id, 100)
+
+        match_service.shuffle_players(player_ids, guild_id=1, betting_mode="pool")
+        pending = match_service.get_last_shuffle(1)
+        pending["bet_lock_until"] = int(time.time()) + 600
+
+        # Bets: 10 + 10 + 10 = 30 on radiant, 70 on dire (from a participant)
+        # Total pool = 100
+        # If radiant wins: each gets int(10/30 * 100) = int(33.33) = 33
+        betting_service.place_bet(1, spectators[0], "radiant", 10, pending)
+        betting_service.place_bet(1, spectators[1], "radiant", 10, pending)
+        betting_service.place_bet(1, spectators[2], "radiant", 10, pending)
+
+        # Add a dire bet to create a pool
+        dire_bettor = pending["dire_team_ids"][0]
+        player_repo.add_balance(dire_bettor, 100)
+        betting_service.place_bet(1, dire_bettor, "dire", 70, pending)
+
+        distributions = betting_service.settle_bets(300, 1, "radiant", pending_state=pending)
+
+        # Verify all payouts are integers
+        for winner in distributions["winners"]:
+            assert isinstance(winner["payout"], int), "Payout must be an integer"
+            assert winner["payout"] == int(winner["payout"]), "No fractional coins"
+
+        # Each winner bet 10 out of 30 radiant pool, total pool is 100
+        # Payout = int(10/30 * 100) = 33 each
+        for winner in distributions["winners"]:
+            assert winner["payout"] == 33
+
+        # Note: 33*3 = 99, so 1 coin is "lost" to rounding truncation
+        # This is expected behavior - coins are never created, only potentially lost to rounding
+        total_paid = sum(w["payout"] for w in distributions["winners"])
+        assert total_paid == 99  # Less than the 100 total pool due to truncation
