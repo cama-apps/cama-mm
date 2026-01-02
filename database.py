@@ -1,0 +1,677 @@
+"""
+Database management for player data, matches, and ratings.
+Uses SQLite for lightweight, file-based storage.
+"""
+
+import os
+import sqlite3
+import json
+import uuid
+from typing import List, Optional, Dict, Tuple, TYPE_CHECKING
+from datetime import datetime
+from contextlib import contextmanager
+import logging
+import time
+from infrastructure.schema_manager import SchemaManager
+from utils.debug_logging import debug_log as _database_debug_log
+
+if TYPE_CHECKING:
+    from domain.models.player import Player
+
+logger = logging.getLogger('cama_bot.database')
+
+# Default database path - can be overridden via environment variable
+DEFAULT_DB_PATH = "cama_shuffle.db"
+
+
+class Database:
+    """Manages SQLite database for the matchmaking system."""
+    
+    def __init__(self, db_path: Optional[str] = None):
+        """
+        Initialize database connection.
+        
+        Args:
+            db_path: Path to SQLite database file. If not provided,
+                     uses DB_PATH environment variable or defaults to cama_shuffle.db
+        """
+        # region agent log
+        _database_debug_log(
+            "H2",
+            "database.py:Database.__init__",
+            "entering Database.__init__",
+            {"db_path": db_path},
+            run_id="pre-fix",
+        )
+        # endregion agent log
+
+        raw_path = db_path or os.getenv('DB_PATH', DEFAULT_DB_PATH)
+        self._is_memory = raw_path == ":memory:"
+        self._memory_connection: Optional[sqlite3.Connection] = None
+        self._use_uri = False
+
+        if self._is_memory:
+            unique_name = uuid.uuid4().hex
+            self.db_path = f"file:memdb_{unique_name}?mode=memory&cache=shared"
+            self._use_uri = True
+        else:
+            self.db_path = raw_path
+        logger.info(f"Using database path: {self.db_path}")
+
+        # Initialize schema via SchemaManager
+        self.schema_manager = SchemaManager(self.db_path, use_uri=self._use_uri)
+        self.init_database()
+
+        # region agent log
+        _database_debug_log(
+            "H2",
+            "database.py:Database.__init__",
+            "schema initialization completed",
+            {"db_path": self.db_path},
+            run_id="pre-fix",
+        )
+        # endregion agent log
+    
+    def get_connection(self) -> sqlite3.Connection:
+        """Get database connection."""
+        if self._is_memory:
+            if self._memory_connection is None:
+                conn = sqlite3.connect(self.db_path, uri=self._use_uri)
+                conn.row_factory = sqlite3.Row
+                self._memory_connection = conn
+            return self._memory_connection
+
+        conn = sqlite3.connect(self.db_path, uri=self._use_uri)
+        conn.row_factory = sqlite3.Row  # Enable column access by name
+        return conn
+    
+    @contextmanager
+    def connection(self):
+        """
+        Context manager for database connections.
+        
+        Automatically commits on success, rolls back on exception,
+        and always closes the connection.
+        
+        Usage:
+            with db.connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(...)
+                # Auto-commits if no exception, rolls back otherwise
+        """
+        conn = self.get_connection()
+        should_close = not self._is_memory
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            if should_close:
+                conn.close()
+    
+    def init_database(self):
+        """Initialize database schema via SchemaManager (idempotent)."""
+        self.schema_manager.initialize()
+    
+    def add_player(self, 
+                   discord_id: int,
+                   discord_username: str,
+                   dotabuff_url: Optional[str] = None,
+                   initial_mmr: Optional[int] = None,
+                   preferred_roles: Optional[List[str]] = None,
+                   main_role: Optional[str] = None,
+                   glicko_rating: Optional[float] = None,
+                   glicko_rd: Optional[float] = None,
+                   glicko_volatility: Optional[float] = None):
+        """
+        Add a new player to the database.
+        
+        Raises ValueError if player already exists (prevents accidental overwrites).
+        Use update_player_username() or other update methods to modify existing players.
+        
+        Args:
+            discord_id: Discord user ID
+            discord_username: Discord username
+            dotabuff_url: Optional Dotabuff profile URL
+            initial_mmr: Initial MMR seed
+            preferred_roles: List of preferred roles
+            main_role: Primary role from Dotabuff
+            glicko_rating: Initial Glicko-2 rating (if None, will be seeded from MMR)
+            glicko_rd: Initial Glicko-2 rating deviation
+            glicko_volatility: Initial Glicko-2 volatility
+        
+        Raises:
+            ValueError: If player with this discord_id already exists
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            
+            # Check if player already exists
+            cursor.execute("SELECT discord_id FROM players WHERE discord_id = ?", (discord_id,))
+            if cursor.fetchone():
+                raise ValueError(f"Player with Discord ID {discord_id} already exists. Cannot overwrite existing player data.")
+            
+            roles_json = json.dumps(preferred_roles) if preferred_roles else None
+            
+            cursor.execute("""
+                INSERT INTO players 
+                (discord_id, discord_username, dotabuff_url, initial_mmr, current_mmr, 
+                 preferred_roles, main_role, glicko_rating, glicko_rd, glicko_volatility, jopacoin_balance, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 3, CURRENT_TIMESTAMP)
+            """, (discord_id, discord_username, dotabuff_url, initial_mmr, initial_mmr,
+                  roles_json, main_role, glicko_rating, glicko_rd, glicko_volatility))
+    
+    def update_player_glicko_rating(self,
+                                    discord_id: int,
+                                    rating: float,
+                                    rd: float,
+                                    volatility: float):
+        """
+        Update player's Glicko-2 rating after a match.
+        
+        Args:
+            discord_id: Discord user ID
+            rating: New Glicko-2 rating
+            rd: New rating deviation
+            volatility: New volatility
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                UPDATE players 
+                SET glicko_rating = ?, glicko_rd = ?, glicko_volatility = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE discord_id = ?
+            """, (rating, rd, volatility, discord_id))
+    
+    def get_player_glicko_rating(self, discord_id: int) -> Optional[Tuple[float, float, float]]:
+        """
+        Get player's Glicko-2 rating data.
+        
+        Args:
+            discord_id: Discord user ID
+        
+        Returns:
+            Tuple of (rating, rd, volatility) or None if not found
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                SELECT glicko_rating, glicko_rd, glicko_volatility 
+                FROM players 
+                WHERE discord_id = ?
+            """, (discord_id,))
+            
+            row = cursor.fetchone()
+            
+            if row and row[0] is not None:
+                return (row[0], row[1], row[2])
+            return None
+    
+    def get_player(self, discord_id: int) -> Optional["Player"]:
+        """
+        Get player data by Discord ID.
+        
+        Args:
+            discord_id: Discord user ID
+        
+        Returns:
+            Player object or None if not found
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            
+            cursor.execute("SELECT * FROM players WHERE discord_id = ?", (discord_id,))
+            row = cursor.fetchone()
+            
+            if not row:
+                return None
+            
+            return self._row_to_player(row)
+
+    def get_player_balance(self, discord_id: int) -> int:
+        """Return the current jopacoin balance for a player."""
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COALESCE(jopacoin_balance, 0) as balance FROM players WHERE discord_id = ?", (discord_id,))
+            row = cursor.fetchone()
+            return int(row["balance"]) if row else 0
+    
+    def get_all_players(self) -> List["Player"]:
+        """Get all players from database."""
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            
+            cursor.execute("SELECT * FROM players")
+            rows = cursor.fetchall()
+            
+            return [self._row_to_player(row) for row in rows]
+    
+    def get_players_by_ids(self, discord_ids: List[int]) -> List["Player"]:
+        """
+        Get multiple players by their Discord IDs.
+        
+        IMPORTANT: Returns players in the SAME ORDER as the input discord_ids.
+        This is critical for maintaining the mapping between Discord IDs and Player objects.
+        
+        Args:
+            discord_ids: List of Discord user IDs
+        
+        Returns:
+            List of Player objects in the same order as input discord_ids
+        """
+        if not discord_ids:
+            return []
+        
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            
+            placeholders = ','.join('?' * len(discord_ids))
+            cursor.execute(f"SELECT * FROM players WHERE discord_id IN ({placeholders})", discord_ids)
+            rows = cursor.fetchall()
+            
+            id_to_row = {}
+            for row in rows:
+                discord_id = row['discord_id']
+                if discord_id in id_to_row:
+                    logger.warning(f"Duplicate player entry found in database: discord_id={discord_id}, name={row['discord_username']}")
+                    continue
+                id_to_row[discord_id] = row
+            
+            players = []
+            for discord_id in discord_ids:
+                if discord_id not in id_to_row:
+                    logger.warning(f"Player with discord_id={discord_id} not found in database")
+                    continue
+                
+                row = id_to_row[discord_id]
+                players.append(self._row_to_player(row))
+            
+            return players
+
+    def _row_to_player(self, row: sqlite3.Row) -> "Player":
+        from domain.models.player import Player
+
+        preferred_roles = json.loads(row['preferred_roles']) if row['preferred_roles'] else None
+        return Player(
+            name=row['discord_username'],
+            mmr=int(row['current_mmr']) if row['current_mmr'] else None,
+            wins=row['wins'],
+            losses=row['losses'],
+            preferred_roles=preferred_roles,
+            main_role=row['main_role'],
+            glicko_rating=row['glicko_rating'],
+            glicko_rd=row['glicko_rd'],
+            glicko_volatility=row['glicko_volatility']
+        )
+    
+    def record_match(self,
+                    radiant_team_ids: List[int] = None,
+                    dire_team_ids: List[int] = None,
+                    winning_team: str = None,  # "radiant" or "dire"
+                    # Backward compatibility: support old team1/team2 format
+                    team1_ids: List[int] = None,
+                    team2_ids: List[int] = None,
+                    dotabuff_match_id: Optional[str] = None,
+                    notes: Optional[str] = None) -> int:
+        """
+        Record a match result.
+        
+        New API (Radiant/Dire):
+            - team1_players in DB = radiant_team_ids
+            - team2_players in DB = dire_team_ids
+            - winning_team in DB = 1 (Radiant won) or 2 (Dire won)
+            - match_participants.side = 'radiant' or 'dire'
+        
+        Old API (team1/team2 with int winning_team):
+            - Kept for backward compatibility; treats team1 as Radiant, team2 as Dire.
+        
+        Args:
+            radiant_team_ids: Discord IDs of Radiant team players (new API)
+            dire_team_ids: Discord IDs of Dire team players (new API)
+            winning_team: "radiant" or "dire" (new API) or 1/2 (old API)
+            team1_ids: Discord IDs of team 1 players (old API - backward compat)
+            team2_ids: Discord IDs of team 2 players (old API - backward compat)
+            dotabuff_match_id: Optional Dotabuff match ID
+            notes: Optional notes about the match
+        
+        Returns:
+            Match ID
+        """
+        # Determine which API is being used and normalize to team1=Radiant, team2=Dire
+        using_new_api = isinstance(winning_team, str)
+        
+        if isinstance(winning_team, int):
+            # Old API: team1/team2 with winning_team as 1 or 2
+            if team1_ids is not None and team2_ids is not None:
+                pass  # Use explicit keyword args
+            elif radiant_team_ids is not None and dire_team_ids is not None:
+                # Positional args used for old API
+                team1_ids = radiant_team_ids
+                team2_ids = dire_team_ids
+            else:
+                raise ValueError("Old API requires team1_ids and team2_ids")
+            winning_team_db = winning_team
+            # Old API: treat team1 as Radiant, team2 as Dire going forward
+            radiant_ids_set = set(team1_ids)
+            dire_ids_set = set(team2_ids)
+        elif isinstance(winning_team, str):
+            # New API: Radiant/Dire directly
+            if winning_team not in ("radiant", "dire"):
+                raise ValueError(f"winning_team must be 'radiant' or 'dire', got '{winning_team}'")
+            if radiant_team_ids is None or dire_team_ids is None:
+                raise ValueError("New API requires radiant_team_ids and dire_team_ids")
+            # Store team1 = Radiant, team2 = Dire (no swapping)
+            team1_ids = radiant_team_ids
+            team2_ids = dire_team_ids
+            winning_team_db = 1 if winning_team == "radiant" else 2
+            radiant_ids_set = set(radiant_team_ids)
+            dire_ids_set = set(dire_team_ids)
+        else:
+            raise ValueError("winning_team must be 'radiant'/'dire' (str) or 1/2 (int)")
+        
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            
+            # Insert match record (team1=Radiant, team2=Dire)
+            cursor.execute("""
+                INSERT INTO matches (team1_players, team2_players, winning_team, dotabuff_match_id, notes)
+                VALUES (?, ?, ?, ?, ?)
+            """, (json.dumps(team1_ids), json.dumps(team2_ids), winning_team_db,
+                  dotabuff_match_id, notes))
+            
+            match_id = cursor.lastrowid
+            
+            # Determine win/loss based on winning_team_db (1=Radiant, 2=Dire)
+            team1_won = (winning_team_db == 1)
+            
+            # Insert participants with side info
+            for player_id in team1_ids:
+                side = "radiant"
+                cursor.execute("""
+                    INSERT INTO match_participants (match_id, discord_id, team_number, won, side)
+                    VALUES (?, ?, 1, ?, ?)
+                """, (match_id, player_id, team1_won, side))
+            
+            for player_id in team2_ids:
+                side = "dire"
+                cursor.execute("""
+                    INSERT INTO match_participants (match_id, discord_id, team_number, won, side)
+                    VALUES (?, ?, 2, ?, ?)
+                """, (match_id, player_id, not team1_won, side))
+            
+            # Update player win/loss counts
+            for player_id in team1_ids:
+                if team1_won:
+                    cursor.execute("""
+                        UPDATE players SET wins = wins + 1, updated_at = CURRENT_TIMESTAMP
+                        WHERE discord_id = ?
+                    """, (player_id,))
+                else:
+                    cursor.execute("""
+                        UPDATE players SET losses = losses + 1, updated_at = CURRENT_TIMESTAMP
+                        WHERE discord_id = ?
+                    """, (player_id,))
+            
+            for player_id in team2_ids:
+                if not team1_won:
+                    cursor.execute("""
+                        UPDATE players SET wins = wins + 1, updated_at = CURRENT_TIMESTAMP
+                        WHERE discord_id = ?
+                    """, (player_id,))
+                else:
+                    cursor.execute("""
+                        UPDATE players SET losses = losses + 1, updated_at = CURRENT_TIMESTAMP
+                        WHERE discord_id = ?
+                    """, (player_id,))
+            
+            return match_id
+    
+    def update_player_mmr(self, discord_id: int, new_mmr: float, match_id: Optional[int] = None):
+        """
+        Update player's current MMR and record in history.
+        
+        Args:
+            discord_id: Discord user ID
+            new_mmr: New MMR value
+            match_id: Optional match ID that triggered this update
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            
+            # Update current MMR
+            cursor.execute("""
+                UPDATE players 
+                SET current_mmr = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE discord_id = ?
+            """, (new_mmr, discord_id))
+            
+            # Record in history
+            cursor.execute("""
+                INSERT INTO rating_history (discord_id, rating, match_id)
+                VALUES (?, ?, ?)
+            """, (discord_id, new_mmr, match_id))
+    
+    def get_exclusion_counts(self, discord_ids: List[int]) -> Dict[int, int]:
+        """
+        Get exclusion counts for multiple players.
+        
+        Args:
+            discord_ids: List of Discord user IDs
+        
+        Returns:
+            Dict mapping discord_id to exclusion_count
+        """
+        if not discord_ids:
+            return {}
+        
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            
+            placeholders = ','.join('?' * len(discord_ids))
+            cursor.execute(
+                f"SELECT discord_id, COALESCE(exclusion_count, 0) as exclusion_count "
+                f"FROM players WHERE discord_id IN ({placeholders})",
+                discord_ids
+            )
+            rows = cursor.fetchall()
+            
+            return {row['discord_id']: row['exclusion_count'] for row in rows}
+    
+    def increment_exclusion_count(self, discord_id: int):
+        """
+        Increment a player's exclusion count by 1.
+        Called when a player is excluded from a match.
+        
+        Args:
+            discord_id: Discord user ID
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                UPDATE players 
+                SET exclusion_count = COALESCE(exclusion_count, 0) + 1, updated_at = CURRENT_TIMESTAMP
+                WHERE discord_id = ?
+            """, (discord_id,))
+    
+    def decay_exclusion_count(self, discord_id: int):
+        """
+        Decay a player's exclusion count by halving it (rounded down).
+        Called when a player is included in a match.
+        
+        Args:
+            discord_id: Discord user ID
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                UPDATE players 
+                SET exclusion_count = COALESCE(exclusion_count, 0) / 2, updated_at = CURRENT_TIMESTAMP
+                WHERE discord_id = ?
+            """, (discord_id,))
+    
+    def delete_player(self, discord_id: int) -> bool:
+        """
+        Delete a player from the database (removes all their data).
+        
+        Args:
+            discord_id: Discord user ID
+        
+        Returns:
+            True if player was deleted, False if player didn't exist
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            
+            # Check if player exists
+            cursor.execute("SELECT discord_id FROM players WHERE discord_id = ?", (discord_id,))
+            if not cursor.fetchone():
+                return False
+            
+            # Delete player (cascade will handle related records if foreign keys are set up)
+            cursor.execute("DELETE FROM players WHERE discord_id = ?", (discord_id,))
+            
+            # Also delete from match_participants (if foreign key cascade isn't set up)
+            cursor.execute("DELETE FROM match_participants WHERE discord_id = ?", (discord_id,))
+            
+            # Delete rating history
+            cursor.execute("DELETE FROM rating_history WHERE discord_id = ?", (discord_id,))
+            
+            return True
+
+    def delete_fake_users(self) -> int:
+        """
+        Delete all fake users (discord_id < 0) and their related data.
+        
+        Returns:
+            Number of fake users deleted.
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+
+            cursor.execute("SELECT COUNT(*) FROM players WHERE discord_id < 0")
+            count = cursor.fetchone()[0]
+            if count == 0:
+                return 0
+
+            # Remove related records first to avoid orphan rows if FK cascades aren't enforced
+            cursor.execute("DELETE FROM match_participants WHERE discord_id < 0")
+            cursor.execute("DELETE FROM rating_history WHERE discord_id < 0")
+            cursor.execute("DELETE FROM bets WHERE discord_id < 0")
+            cursor.execute("DELETE FROM players WHERE discord_id < 0")
+
+            return count
+    
+    def clear_all_players(self) -> int:
+        """
+        Delete all players from the database (for testing purposes).
+        
+        Returns:
+            Number of players deleted
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            
+            # Count players before deletion
+            cursor.execute("SELECT COUNT(*) FROM players")
+            count = cursor.fetchone()[0]
+            
+            # Delete all players and related data
+            cursor.execute("DELETE FROM players")
+            cursor.execute("DELETE FROM match_participants")
+            cursor.execute("DELETE FROM rating_history")
+            cursor.execute("DELETE FROM matches")
+            
+            return count
+
+
+    def save_pending_match(self, guild_id: Optional[int], payload: Dict) -> None:
+        """
+        Save pending match state for a guild.
+        """
+        normalized = self._normalize_guild_id(guild_id)
+        serialized = json.dumps(payload)
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO pending_matches (guild_id, payload)
+                VALUES (?, ?)
+                ON CONFLICT(guild_id) DO UPDATE SET payload = excluded.payload, updated_at = CURRENT_TIMESTAMP
+            """, (normalized, serialized))
+
+    def get_pending_match(self, guild_id: Optional[int]) -> Optional[Dict]:
+        normalized = self._normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT payload FROM pending_matches WHERE guild_id = ?", (normalized,))
+            row = cursor.fetchone()
+            if not row:
+                return None
+            return json.loads(row["payload"])
+
+    def clear_pending_match(self, guild_id: Optional[int]) -> None:
+        normalized = self._normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM pending_matches WHERE guild_id = ?", (normalized,))
+
+    def consume_pending_match(self, guild_id: Optional[int]) -> Optional[Dict]:
+        """
+        Atomically retrieve and delete the pending match for a guild.
+        
+        Returns the pending match payload if it exists, None otherwise.
+        This ensures only one caller can successfully consume a given match.
+        """
+        normalized = self._normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT payload FROM pending_matches WHERE guild_id = ?", (normalized,))
+            row = cursor.fetchone()
+            if not row:
+                return None
+            cursor.execute("DELETE FROM pending_matches WHERE guild_id = ?", (normalized,))
+            return json.loads(row["payload"])
+
+    def save_lobby_state(self, lobby_id: int, players: List[int], status: str, created_by: int, created_at: str) -> None:
+        payload = json.dumps(players)
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO lobby_state (lobby_id, players, status, created_by, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(lobby_id) DO UPDATE SET
+                    players = excluded.players,
+                    status = excluded.status,
+                    created_by = excluded.created_by,
+                    created_at = excluded.created_at,
+                    updated_at = CURRENT_TIMESTAMP
+            """, (lobby_id, payload, status, created_by, created_at))
+
+    def load_lobby_state(self, lobby_id: int) -> Optional[Dict]:
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM lobby_state WHERE lobby_id = ?", (lobby_id,))
+            row = cursor.fetchone()
+            if not row:
+                return None
+            return {
+                "lobby_id": row["lobby_id"],
+                "players": json.loads(row["players"]) if row["players"] else [],
+                "status": row["status"],
+                "created_by": row["created_by"],
+                "created_at": row["created_at"],
+            }
+
+    def clear_lobby_state(self, lobby_id: int) -> None:
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM lobby_state WHERE lobby_id = ?", (lobby_id,))
+
+    def _normalize_guild_id(self, guild_id: Optional[int]) -> int:
+        return guild_id if guild_id is not None else 0
+

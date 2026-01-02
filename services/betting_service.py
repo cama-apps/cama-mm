@@ -1,0 +1,197 @@
+"""
+Handles betting-related business logic.
+"""
+
+from typing import Any, Dict, List, Optional
+import time
+
+from config import HOUSE_PAYOUT_MULTIPLIER, JOPACOIN_WIN_REWARD
+from repositories.bet_repository import BetRepository
+from repositories.player_repository import PlayerRepository
+
+
+class BettingService:
+    """Encapsulates jopacoin wagering, timing, and house payouts."""
+
+    def __init__(self, bet_repo: BetRepository, player_repo: PlayerRepository):
+        self.bet_repo = bet_repo
+        self.player_repo = player_repo
+
+    def _since_ts(self, pending_state: Optional[Dict[str, Any]]) -> Optional[int]:
+        """Derive the start timestamp for the current pending match window."""
+        if not pending_state:
+            return None
+        return pending_state.get("shuffle_timestamp")
+
+    def place_bet(
+        self,
+        guild_id: Optional[int],
+        discord_id: int,
+        team: str,
+        amount: int,
+        pending_state: Dict[str, Any],
+    ) -> None:
+        """Place a bet after verifying timing and participant/team rules."""
+        if pending_state is None:
+            raise ValueError("No pending match to bet on.")
+
+        now_ts = int(time.time())
+        # Fast/strict check first (also preserves test behavior where pending_state is mutated).
+        lock_until = pending_state.get("bet_lock_until")
+        if lock_until is None or now_ts >= lock_until:
+            raise ValueError("Betting is closed for the current match.")
+
+        since_ts = self._since_ts(pending_state)
+        if since_ts is None:
+            raise ValueError("No pending match to bet on.")
+        if team not in self.bet_repo.VALID_TEAMS:
+            raise ValueError("Invalid team selection.")
+
+        if amount <= 0:
+            raise ValueError("Bet amount must be positive.")
+
+        # Prefer atomic placement using DB pending match payload (also enforces lock + team restriction).
+        if hasattr(self.bet_repo, "place_bet_against_pending_match_atomic"):
+            self.bet_repo.place_bet_against_pending_match_atomic(
+                guild_id=guild_id,
+                discord_id=discord_id,
+                team=team,
+                amount=amount,
+                bet_time=now_ts,
+            )
+            return
+
+        # Fallback: enforce timing and team restriction using in-memory pending_state.
+        self._enforce_team_restriction(discord_id, team, pending_state)
+
+        # Prefer atomic placement (balance debit + bet insert in one transaction).
+        if hasattr(self.bet_repo, "place_bet_atomic"):
+            self.bet_repo.place_bet_atomic(
+                guild_id=guild_id,
+                discord_id=discord_id,
+                team=team,
+                amount=amount,
+                bet_time=now_ts,
+                since_ts=int(since_ts),
+            )
+            return
+
+        # Fallback (older behavior)
+        balance = self.player_repo.get_balance(discord_id)
+        if balance < amount:
+            raise ValueError("Insufficient jopacoin balance.")
+        if self.bet_repo.get_player_pending_bet(guild_id, discord_id, since_ts=since_ts):
+            raise ValueError("You already have a bet on the current match.")
+        self.player_repo.add_balance(discord_id, -amount)
+        self.bet_repo.create_bet(guild_id, discord_id, team, amount, now_ts)
+
+    def award_participation(self, player_ids: List[int]) -> None:
+        """Give each participant 1 jopacoin for playing."""
+        if not player_ids:
+            return
+        deltas = {pid: 1 for pid in player_ids}
+        if hasattr(self.player_repo, "add_balance_many"):
+            self.player_repo.add_balance_many(deltas)  # type: ignore[attr-defined]
+            return
+        for pid in player_ids:
+            self.player_repo.add_balance(pid, 1)
+
+    def settle_bets(
+        self, match_id: int, guild_id: Optional[int], winning_team: str, pending_state: Dict[str, Any]
+    ) -> Dict[str, List[Dict]]:
+        """Pay winners 1:1 against the house and tag their bets with the match ID."""
+        since_ts = self._since_ts(pending_state)
+        if since_ts is None:
+            # If no pending state, treat as no bets to avoid pulling stale wagers.
+            return {"winners": [], "losers": []}
+        # Prefer atomic settlement (payouts + bet tagging in one DB transaction)
+        if hasattr(self.bet_repo, "settle_pending_bets_atomic"):
+            return self.bet_repo.settle_pending_bets_atomic(
+                match_id=match_id,
+                guild_id=guild_id,
+                since_ts=int(since_ts),
+                winning_team=winning_team,
+                house_payout_multiplier=HOUSE_PAYOUT_MULTIPLIER,
+            )
+
+        # Fallback (older behavior)
+        bets = self.bet_repo.get_bets_for_pending_match(guild_id, since_ts=since_ts)
+        distributions = {"winners": [], "losers": []}
+        if not bets:
+            return distributions
+
+        self.bet_repo.assign_match_id(guild_id, match_id, since_ts=since_ts)
+
+        for bet in bets:
+            outcome_entry = {
+                "discord_id": bet["discord_id"],
+                "amount": bet["amount"],
+                "team": bet["team_bet_on"],
+            }
+            if bet["team_bet_on"] != winning_team:
+                distributions["losers"].append(outcome_entry)
+                continue
+
+            payout = int(bet["amount"] * (1 + HOUSE_PAYOUT_MULTIPLIER))
+            self.player_repo.add_balance(bet["discord_id"], payout)
+            outcome_entry["payout"] = payout
+            distributions["winners"].append(outcome_entry)
+
+        return distributions
+
+    def award_win_bonus(self, winning_ids: List[int]) -> None:
+        """Reward winners with additional jopacoins."""
+        if not winning_ids:
+            return
+        deltas = {pid: JOPACOIN_WIN_REWARD for pid in winning_ids}
+        if hasattr(self.player_repo, "add_balance_many"):
+            self.player_repo.add_balance_many(deltas)  # type: ignore[attr-defined]
+            return
+        for pid in winning_ids:
+            self.player_repo.add_balance(pid, JOPACOIN_WIN_REWARD)
+
+    def get_pot_odds(self, guild_id: Optional[int], pending_state: Optional[Dict[str, Any]] = None) -> Dict[str, int]:
+        """Return current bet totals by team for odds calculation."""
+        since_ts = self._since_ts(pending_state)
+        if pending_state is None or since_ts is None:
+            return {team: 0 for team in self.bet_repo.VALID_TEAMS}
+        return self.bet_repo.get_total_bets_by_guild(guild_id, since_ts=since_ts)
+
+    def get_pending_bet(
+        self, guild_id: Optional[int], discord_id: int, pending_state: Optional[Dict[str, Any]] = None
+    ) -> Optional[Dict]:
+        """Get the pending bet for a player."""
+        since_ts = self._since_ts(pending_state)
+        if pending_state is None or since_ts is None:
+            return None
+        return self.bet_repo.get_player_pending_bet(guild_id, discord_id, since_ts=since_ts)
+
+    def refund_pending_bets(self, guild_id: Optional[int], pending_state: Optional[Dict[str, Any]]) -> int:
+        """
+        Refund all pending bets for the current match window.
+
+        Returns the number of bets refunded.
+        """
+        since_ts = self._since_ts(pending_state)
+        if pending_state is None or since_ts is None:
+            return 0
+        if hasattr(self.bet_repo, "refund_pending_bets_atomic"):
+            return self.bet_repo.refund_pending_bets_atomic(guild_id=guild_id, since_ts=int(since_ts))
+
+        bets = self.bet_repo.get_bets_for_pending_match(guild_id, since_ts=since_ts)
+        if not bets:
+            return 0
+
+        for bet in bets:
+            self.player_repo.add_balance(bet["discord_id"], bet["amount"])
+
+        return self.bet_repo.delete_pending_bets(guild_id, since_ts=since_ts)
+
+    def _enforce_team_restriction(self, discord_id: int, team: str, state: Dict[str, Any]) -> None:
+        radiant = set(state.get("radiant_team_ids", []))
+        dire = set(state.get("dire_team_ids", []))
+        if discord_id in radiant and team != "radiant":
+            raise ValueError("Participants on Radiant can only bet on Radiant.")
+        if discord_id in dire and team != "dire":
+            raise ValueError("Participants on Dire can only bet on Dire.")
+

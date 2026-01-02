@@ -1,0 +1,23 @@
+# Core dependencies
+numpy>=1.24.0
+pandas>=2.0.0
+
+# Discord bot
+discord.py>=2.3.0
+python-dotenv>=1.0.0
+
+# Database
+# SQLite is built into Python, no extra package needed
+
+# Web scraping/API access (for future Dotabuff integration)
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+
+# Rating system
+glicko2>=0.0.5
+
+# Testing
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+pytest-timeout>=2.1.0
+
