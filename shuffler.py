@@ -29,6 +29,7 @@ class BalancedShuffler:
                  role_penalty_weight: Optional[float] = None,
                  off_role_multiplier: Optional[float] = None,
                  off_role_flat_penalty: Optional[float] = None,
+                 role_matchup_delta_weight: Optional[float] = None,
                  exclusion_penalty_weight: Optional[float] = None):
         """
         Initialize the shuffler.
@@ -39,6 +40,7 @@ class BalancedShuffler:
             role_penalty_weight: Weight for role imbalance penalty (deprecated)
             off_role_multiplier: Multiplier for MMR when playing off-role (default 0.95 = 95% effectiveness)
             off_role_flat_penalty: Flat penalty per off-role player added to team value difference (default 100)
+            role_matchup_delta_weight: Weight applied to lane matchup delta when scoring teams
             exclusion_penalty_weight: Penalty per exclusion count for excluded players (default 5.0)
         """
         self.use_glicko = use_glicko
@@ -47,6 +49,7 @@ class BalancedShuffler:
         self.role_penalty_weight = role_penalty_weight if role_penalty_weight is not None else settings["role_penalty_weight"]
         self.off_role_multiplier = off_role_multiplier if off_role_multiplier is not None else settings["off_role_multiplier"]
         self.off_role_flat_penalty = off_role_flat_penalty if off_role_flat_penalty is not None else settings["off_role_flat_penalty"]
+        self.role_matchup_delta_weight = role_matchup_delta_weight if role_matchup_delta_weight is not None else settings["role_matchup_delta_weight"]
         self.exclusion_penalty_weight = exclusion_penalty_weight if exclusion_penalty_weight is not None else settings["exclusion_penalty_weight"]
     
     def _calculate_role_matchup_delta(self, team1: Team, team2: Team) -> float:
@@ -139,7 +142,8 @@ class BalancedShuffler:
                 
                 role_matchup_delta = self._calculate_role_matchup_delta(team1, team2)
                 
-                total_score = value_diff + off_role_penalty + role_matchup_delta
+                weighted_role_delta = role_matchup_delta * self.role_matchup_delta_weight
+                total_score = value_diff + off_role_penalty + weighted_role_delta
                 
                 if total_score < best_score:
                     best_score = total_score
@@ -374,7 +378,8 @@ class BalancedShuffler:
                 team2_off_roles = team2.get_off_role_count()
                 off_role_penalty = (team1_off_roles + team2_off_roles) * self.off_role_flat_penalty
                 role_matchup_delta = self._calculate_role_matchup_delta(team1, team2)
-                total_score = value_diff + off_role_penalty + role_matchup_delta + exclusion_penalty
+                weighted_role_delta = role_matchup_delta * self.role_matchup_delta_weight
+                total_score = value_diff + off_role_penalty + weighted_role_delta + exclusion_penalty
                 total_off_roles = team1_off_roles + team2_off_roles
 
                 # Track top-K only (avoid storing all matchups).

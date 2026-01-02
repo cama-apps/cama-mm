@@ -23,7 +23,8 @@ class TeamBalancingService:
     def __init__(self,
                  use_glicko: bool = True,
                  off_role_multiplier: float = 0.9,
-                 off_role_flat_penalty: float = 50.0):
+                 off_role_flat_penalty: float = 50.0,
+                 role_matchup_delta_weight: float = 1.0):
         """
         Initialize team balancing service.
         
@@ -31,10 +32,12 @@ class TeamBalancingService:
             use_glicko: Whether to use Glicko-2 ratings
             off_role_multiplier: Multiplier for rating when playing off-role
             off_role_flat_penalty: Flat penalty per off-role player
+            role_matchup_delta_weight: Weight applied to lane matchup delta in scores
         """
         self.use_glicko = use_glicko
         self.off_role_multiplier = off_role_multiplier
         self.off_role_flat_penalty = off_role_flat_penalty
+        self.role_matchup_delta_weight = role_matchup_delta_weight
         self.role_service = RoleAssignmentService()
     
     def calculate_team_value(self, team: Team) -> float:
@@ -139,7 +142,7 @@ class TeamBalancingService:
         # Calculate role matchup delta (max delta among critical matchups)
         role_matchup_delta = self.calculate_role_matchup_delta(team1, team2)
         
-        return value_diff + off_role_penalty + role_matchup_delta
+        return value_diff + off_role_penalty + (role_matchup_delta * self.role_matchup_delta_weight)
     
     def get_team_stats(self, team: Team) -> dict:
         """
