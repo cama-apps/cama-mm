@@ -336,3 +336,242 @@ def test_refund_pending_bets_on_abort(services):
     assert betting_service.get_pending_bet(1, spectator, pending_state=pending) is None
     totals = betting_service.get_pot_odds(1, pending_state=pending)
     assert totals["radiant"] == 0 and totals["dire"] == 0
+
+
+class TestPoolBetting:
+    """Tests for pool (parimutuel) betting mode."""
+
+    def test_pool_betting_proportional_payout(self, services):
+        """Pool mode: winners split the total pool proportionally."""
+        match_service = services["match_service"]
+        betting_service = services["betting_service"]
+        player_repo = services["player_repo"]
+
+        player_ids = list(range(9000, 9010))
+        for pid in player_ids:
+            player_repo.add(
+                discord_id=pid,
+                discord_username=f"Player{pid}",
+                dotabuff_url=f"https://dotabuff.com/players/{pid}",
+                initial_mmr=1500,
+                glicko_rating=1500.0,
+                glicko_rd=350.0,
+                glicko_volatility=0.06,
+            )
+
+        # Create spectators
+        spectator1 = 9100
+        spectator2 = 9101
+        spectator3 = 9102
+        for spec_id in [spectator1, spectator2, spectator3]:
+            player_repo.add(
+                discord_id=spec_id,
+                discord_username=f"Spectator{spec_id}",
+                dotabuff_url=f"https://dotabuff.com/players/{spec_id}",
+            )
+            player_repo.add_balance(spec_id, 100)
+
+        # Shuffle with pool mode
+        match_service.shuffle_players(player_ids, guild_id=1, betting_mode="pool")
+        pending = match_service.get_last_shuffle(1)
+        assert pending["betting_mode"] == "pool"
+
+        if pending.get("bet_lock_until") is None or pending["bet_lock_until"] <= int(time.time()):
+            pending["bet_lock_until"] = int(time.time()) + 600
+
+        # Place bets: 100 on radiant (spectator1), 200 on dire (spectator2 + spectator3)
+        betting_service.place_bet(1, spectator1, "radiant", 100, pending)
+        betting_service.place_bet(1, spectator2, "dire", 100, pending)
+        betting_service.place_bet(1, spectator3, "dire", 100, pending)
+
+        # Total pool = 300, Radiant pool = 100, Dire pool = 200
+        # If Radiant wins: spectator1 gets 300 (3.0x)
+        # If Dire wins: spectator2 and spectator3 each get 150 (1.5x)
+        distributions = betting_service.settle_bets(200, 1, "radiant", pending_state=pending)
+
+        assert len(distributions["winners"]) == 1
+        assert len(distributions["losers"]) == 2
+
+        winner = distributions["winners"][0]
+        assert winner["discord_id"] == spectator1
+        assert winner["payout"] == 300  # Gets entire pool
+        assert winner["multiplier"] == 3.0
+
+        # Check balances: spectator1 started with 103, bet 100, won 300 = 303
+        assert player_repo.get_balance(spectator1) == 303
+
+    def test_pool_betting_multiple_winners_split(self, services):
+        """Pool mode: multiple winners split proportionally."""
+        match_service = services["match_service"]
+        betting_service = services["betting_service"]
+        player_repo = services["player_repo"]
+
+        player_ids = list(range(9200, 9210))
+        for pid in player_ids:
+            player_repo.add(
+                discord_id=pid,
+                discord_username=f"Player{pid}",
+                dotabuff_url=f"https://dotabuff.com/players/{pid}",
+                initial_mmr=1500,
+                glicko_rating=1500.0,
+                glicko_rd=350.0,
+                glicko_volatility=0.06,
+            )
+
+        spectator1 = 9300
+        spectator2 = 9301
+        spectator3 = 9302
+        for spec_id in [spectator1, spectator2, spectator3]:
+            player_repo.add(
+                discord_id=spec_id,
+                discord_username=f"Spectator{spec_id}",
+                dotabuff_url=f"https://dotabuff.com/players/{spec_id}",
+            )
+            player_repo.add_balance(spec_id, 100)
+
+        match_service.shuffle_players(player_ids, guild_id=1, betting_mode="pool")
+        pending = match_service.get_last_shuffle(1)
+
+        if pending.get("bet_lock_until") is None or pending["bet_lock_until"] <= int(time.time()):
+            pending["bet_lock_until"] = int(time.time()) + 600
+
+        # Place bets: 50 on radiant (spectator1), 50 on radiant (spectator2), 100 on dire (spectator3)
+        betting_service.place_bet(1, spectator1, "radiant", 50, pending)
+        betting_service.place_bet(1, spectator2, "radiant", 50, pending)
+        betting_service.place_bet(1, spectator3, "dire", 100, pending)
+
+        # Total pool = 200, Radiant pool = 100
+        # Radiant wins: each radiant bettor gets (their_bet / 100) * 200 = 2x
+        distributions = betting_service.settle_bets(201, 1, "radiant", pending_state=pending)
+
+        assert len(distributions["winners"]) == 2
+        assert len(distributions["losers"]) == 1
+
+        for winner in distributions["winners"]:
+            assert winner["payout"] == 100  # Each gets 50 * 2.0
+            assert winner["multiplier"] == 2.0
+
+    def test_pool_betting_no_winners_refunds_all(self, services):
+        """Pool mode: if no bets on winning side, refund all bets."""
+        match_service = services["match_service"]
+        betting_service = services["betting_service"]
+        player_repo = services["player_repo"]
+
+        player_ids = list(range(9400, 9410))
+        for pid in player_ids:
+            player_repo.add(
+                discord_id=pid,
+                discord_username=f"Player{pid}",
+                dotabuff_url=f"https://dotabuff.com/players/{pid}",
+                initial_mmr=1500,
+                glicko_rating=1500.0,
+                glicko_rd=350.0,
+                glicko_volatility=0.06,
+            )
+
+        spectator1 = 9500
+        spectator2 = 9501
+        for spec_id in [spectator1, spectator2]:
+            player_repo.add(
+                discord_id=spec_id,
+                discord_username=f"Spectator{spec_id}",
+                dotabuff_url=f"https://dotabuff.com/players/{spec_id}",
+            )
+            player_repo.add_balance(spec_id, 50)
+
+        match_service.shuffle_players(player_ids, guild_id=1, betting_mode="pool")
+        pending = match_service.get_last_shuffle(1)
+
+        if pending.get("bet_lock_until") is None or pending["bet_lock_until"] <= int(time.time()):
+            pending["bet_lock_until"] = int(time.time()) + 600
+
+        # Both bet on dire
+        betting_service.place_bet(1, spectator1, "dire", 30, pending)
+        betting_service.place_bet(1, spectator2, "dire", 20, pending)
+
+        # Balances after betting: spectator1 = 53 - 30 = 23, spectator2 = 53 - 20 = 33
+        assert player_repo.get_balance(spectator1) == 23
+        assert player_repo.get_balance(spectator2) == 33
+
+        # Radiant wins - no winners, should refund all
+        distributions = betting_service.settle_bets(202, 1, "radiant", pending_state=pending)
+
+        assert len(distributions["winners"]) == 0
+        assert len(distributions["losers"]) == 2
+
+        # Check that all losers were refunded
+        for loser in distributions["losers"]:
+            assert loser.get("refunded") is True
+
+        # Balances should be restored
+        assert player_repo.get_balance(spectator1) == 53
+        assert player_repo.get_balance(spectator2) == 53
+
+    def test_house_mode_still_works(self, services):
+        """House mode (default) should still work as before."""
+        match_service = services["match_service"]
+        betting_service = services["betting_service"]
+        player_repo = services["player_repo"]
+
+        player_ids = list(range(9600, 9610))
+        for pid in player_ids:
+            player_repo.add(
+                discord_id=pid,
+                discord_username=f"Player{pid}",
+                dotabuff_url=f"https://dotabuff.com/players/{pid}",
+                initial_mmr=1500,
+                glicko_rating=1500.0,
+                glicko_rd=350.0,
+                glicko_volatility=0.06,
+            )
+
+        spectator = 9700
+        player_repo.add(
+            discord_id=spectator,
+            discord_username="HouseSpectator",
+            dotabuff_url="https://dotabuff.com/players/9700",
+        )
+        player_repo.add_balance(spectator, 50)
+
+        # Shuffle with house mode (default)
+        match_service.shuffle_players(player_ids, guild_id=1)
+        pending = match_service.get_last_shuffle(1)
+        assert pending["betting_mode"] == "house"
+
+        if pending.get("bet_lock_until") is None or pending["bet_lock_until"] <= int(time.time()):
+            pending["bet_lock_until"] = int(time.time()) + 600
+
+        betting_service.place_bet(1, spectator, "radiant", 20, pending)
+
+        # Balance: 53 (starting) - 20 (bet) = 33
+        assert player_repo.get_balance(spectator) == 33
+
+        distributions = betting_service.settle_bets(203, 1, "radiant", pending_state=pending)
+
+        assert len(distributions["winners"]) == 1
+        winner = distributions["winners"][0]
+        assert winner["payout"] == 40  # 1:1 payout (bet * 2)
+        assert "multiplier" not in winner  # House mode doesn't have multiplier
+
+        # Balance: 33 + 40 = 73
+        assert player_repo.get_balance(spectator) == 73
+
+    def test_shuffle_betting_mode_validation(self, services):
+        """Invalid betting mode should raise an error."""
+        match_service = services["match_service"]
+        player_repo = services["player_repo"]
+
+        player_ids = list(range(9800, 9810))
+        for pid in player_ids:
+            player_repo.add(
+                discord_id=pid,
+                discord_username=f"Player{pid}",
+                dotabuff_url=f"https://dotabuff.com/players/{pid}",
+                initial_mmr=1500,
+                glicko_rating=1500.0,
+                glicko_rd=350.0,
+                glicko_volatility=0.06,
+            )
+
+        with pytest.raises(ValueError, match="betting_mode must be"):
+            match_service.shuffle_players(player_ids, guild_id=1, betting_mode="invalid")

@@ -318,13 +318,15 @@ class BetRepository(BaseRepository, IBetRepository):
         since_ts: int,
         winning_team: str,
         house_payout_multiplier: float,
+        betting_mode: str = "house",
     ) -> Dict[str, List[Dict]]:
         """
         Atomically settle bets for the current match window:
         - credit winners in players.jopacoin_balance
         - tag all pending bets with match_id
 
-        NOTE: Bet placement (balance deduction + bet insert) is still two-step elsewhere.
+        Args:
+            betting_mode: "house" for 1:1 payouts, "pool" for parimutuel betting
         """
         normalized_guild = self._normalize_guild_id(guild_id)
         distributions: Dict[str, List[Dict]] = {"winners": [], "losers": []}
@@ -343,23 +345,12 @@ class BetRepository(BaseRepository, IBetRepository):
             if not rows:
                 return distributions
 
-            balance_deltas: Dict[int, int] = {}
-            for row in rows:
-                bet = dict(row)
-                entry = {
-                    "discord_id": bet["discord_id"],
-                    "amount": bet["amount"],
-                    "team": bet["team_bet_on"],
-                }
-
-                if bet["team_bet_on"] != winning_team:
-                    distributions["losers"].append(entry)
-                    continue
-
-                payout = int(bet["amount"] * (1 + house_payout_multiplier))
-                balance_deltas[bet["discord_id"]] = balance_deltas.get(bet["discord_id"], 0) + payout
-                entry["payout"] = payout
-                distributions["winners"].append(entry)
+            if betting_mode == "pool":
+                distributions, balance_deltas = self._calculate_pool_payouts(rows, winning_team)
+            else:
+                distributions, balance_deltas = self._calculate_house_payouts(
+                    rows, winning_team, house_payout_multiplier
+                )
 
             if balance_deltas:
                 cursor.executemany(
@@ -381,6 +372,79 @@ class BetRepository(BaseRepository, IBetRepository):
             )
 
         return distributions
+
+    def _calculate_house_payouts(
+        self, rows: List, winning_team: str, house_payout_multiplier: float
+    ) -> tuple:
+        """Calculate house mode payouts (1:1)."""
+        distributions: Dict[str, List[Dict]] = {"winners": [], "losers": []}
+        balance_deltas: Dict[int, int] = {}
+
+        for row in rows:
+            bet = dict(row)
+            entry = {
+                "discord_id": bet["discord_id"],
+                "amount": bet["amount"],
+                "team": bet["team_bet_on"],
+            }
+
+            if bet["team_bet_on"] != winning_team:
+                distributions["losers"].append(entry)
+                continue
+
+            payout = int(bet["amount"] * (1 + house_payout_multiplier))
+            balance_deltas[bet["discord_id"]] = balance_deltas.get(bet["discord_id"], 0) + payout
+            entry["payout"] = payout
+            distributions["winners"].append(entry)
+
+        return distributions, balance_deltas
+
+    def _calculate_pool_payouts(self, rows: List, winning_team: str) -> tuple:
+        """Calculate pool mode payouts (proportional from total pool)."""
+        distributions: Dict[str, List[Dict]] = {"winners": [], "losers": []}
+        balance_deltas: Dict[int, int] = {}
+
+        # Calculate totals
+        total_pool = sum(row["amount"] for row in rows)
+        winner_pool = sum(row["amount"] for row in rows if row["team_bet_on"] == winning_team)
+
+        # Edge case: no bets on winning side - refund all bets
+        if winner_pool == 0:
+            for row in rows:
+                bet = dict(row)
+                balance_deltas[bet["discord_id"]] = (
+                    balance_deltas.get(bet["discord_id"], 0) + bet["amount"]
+                )
+                distributions["losers"].append({
+                    "discord_id": bet["discord_id"],
+                    "amount": bet["amount"],
+                    "team": bet["team_bet_on"],
+                    "refunded": True,
+                })
+            return distributions, balance_deltas
+
+        multiplier = total_pool / winner_pool
+
+        for row in rows:
+            bet = dict(row)
+            entry = {
+                "discord_id": bet["discord_id"],
+                "amount": bet["amount"],
+                "team": bet["team_bet_on"],
+            }
+
+            if bet["team_bet_on"] != winning_team:
+                distributions["losers"].append(entry)
+                continue
+
+            # Proportional payout: (bet_amount / winner_pool) * total_pool
+            payout = int((bet["amount"] / winner_pool) * total_pool)
+            balance_deltas[bet["discord_id"]] = balance_deltas.get(bet["discord_id"], 0) + payout
+            entry["payout"] = payout
+            entry["multiplier"] = multiplier
+            distributions["winners"].append(entry)
+
+        return distributions, balance_deltas
 
     def refund_pending_bets_atomic(self, *, guild_id: Optional[int], since_ts: int) -> int:
         """
