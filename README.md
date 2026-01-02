@@ -27,9 +27,10 @@ The bot uses a **Glicko-2 rating system** for team balancing. Players are matche
 
 1. **Clone the repository or navigate to the project directory**
 
-2. **Install dependencies:**
+2. **Create virtual environment and install dependencies:**
    ```bash
-   pip install -r requirements.txt
+   uv venv
+   uv sync
    ```
 
 3. **Set up Discord Bot:**
@@ -71,7 +72,7 @@ The bot uses a **Glicko-2 rating system** for team balancing. Players are matche
 ## Running the Bot
 
 ```bash
-python bot.py
+uv run python bot.py
 ```
 
 The bot will connect to Discord and sync slash commands automatically.
@@ -203,12 +204,12 @@ Additional settings can be configured in `.env` (see `config.py` for all options
 Run the test suite:
 
 ```bash
-python run_tests.py
+uv run pytest -n auto
 ```
 
 ## Troubleshooting
 
-**Bot won't start:** Check `.env` file exists with `DISCORD_BOT_TOKEN` and run `pip install -r requirements.txt`
+**Bot won't start:** Check `.env` file exists with `DISCORD_BOT_TOKEN` and run `uv venv && uv sync`
 
 **Commands not showing:** Wait a few minutes for Discord to sync, or use `/sync` command (admin only)
 

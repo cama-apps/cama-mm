@@ -1,0 +1,38 @@
+[project]
+name = "cama-mm"
+version = "0.1.0"
+description = "Discord bot for balanced team shuffling in Dota 2 inhouse games"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=1.24.0",
+    "pandas>=2.0.0",
+    "discord-py>=2.3.0",
+    "python-dotenv>=1.0.0",
+    "requests>=2.31.0",
+    "beautifulsoup4>=4.12.0",
+    "glicko2>=0.0.5",
+]
+
+[dependency-groups]
+dev = [
+    "pytest-xdist>=3.8.0",
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-timeout>=2.1.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests", "."]
+python_files = "test_*.py"
+python_classes = "Test*"
+python_functions = "test_*"
+markers = [
+    "timeout: mark test with a timeout",
+]
+filterwarnings = [
+    "ignore:'asyncio\\.iscoroutinefunction' is deprecated:DeprecationWarning:discord\\..*",
+    "ignore:coroutine.*AsyncMockMixin._execute_mock_call.*was never awaited:RuntimeWarning",
+]
