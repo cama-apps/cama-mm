@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+.git/
+.github/
+.env
+*.db
+data/
+tests/
+.pytest_cache/
+.bot.lock
