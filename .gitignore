@@ -176,4 +176,9 @@ desktop.ini
 *.sqlite
 *.sqlite3
 *.db-journal
+*.db.backup.*
+
+# Scripts and temporary tools
+*.ps1
+fix_wins_losses.py
 
