@@ -16,8 +16,8 @@ async def test_update_shuffle_message_wagers_updates_field():
     match_service = MagicMock()
     player_service = MagicMock()
 
-    # Pending state and message info
-    pending_state = {"bet_lock_until": 1700000000}
+    # Pending state and message info (house mode is default)
+    pending_state = {"bet_lock_until": 1700000000, "betting_mode": "house"}
     match_service.get_last_shuffle.return_value = pending_state
     match_service.get_shuffle_message_info.return_value = {
         "message_id": 42,
@@ -28,9 +28,9 @@ async def test_update_shuffle_message_wagers_updates_field():
     # Pot totals to display
     betting_service.get_pot_odds.return_value = {"radiant": 5, "dire": 7}
 
-    # Fake embed/message/channel
+    # Fake embed/message/channel - use old field name to test update logic
     embed = discord.Embed(title="Balanced Team Shuffle")
-    embed.add_field(name="💰 Current Wagers", value="old", inline=False)
+    embed.add_field(name="💰 House Betting (1:1)", value="old", inline=False)
 
     message = MagicMock()
     message.embeds = [embed]
@@ -51,9 +51,11 @@ async def test_update_shuffle_message_wagers_updates_field():
     message.edit.assert_awaited_once()
     edited_embed = message.edit.call_args.kwargs["embed"]
     fields = {f.name: f.value for f in edited_embed.fields}
-    assert "Radiant: 5" in fields["💰 Current Wagers"]
-    assert "Dire: 7" in fields["💰 Current Wagers"]
-    assert "Closes" in fields["💰 Current Wagers"]
+    # Field name includes betting mode now
+    assert "💰 House Betting (1:1)" in fields
+    assert "Radiant: 5" in fields["💰 House Betting (1:1)"]
+    assert "Dire: 7" in fields["💰 House Betting (1:1)"]
+    assert "Closes" in fields["💰 House Betting (1:1)"]
 
 
 @pytest.mark.asyncio
@@ -65,7 +67,7 @@ async def test_update_shuffle_message_wagers_handles_missing_message():
     match_service = MagicMock()
     player_service = MagicMock()
 
-    pending_state = {"bet_lock_until": 1700000000}
+    pending_state = {"bet_lock_until": 1700000000, "betting_mode": "house"}
     match_service.get_last_shuffle.return_value = pending_state
     match_service.get_shuffle_message_info.return_value = {
         "message_id": 42,
@@ -95,7 +97,7 @@ async def test_send_betting_reminder_warning_formats_totals():
     match_service = MagicMock()
     player_service = MagicMock()
 
-    pending_state = {"bet_lock_until": lock_until}
+    pending_state = {"bet_lock_until": lock_until, "betting_mode": "house"}
     match_service.get_last_shuffle.return_value = pending_state
     match_service.get_shuffle_message_info.return_value = {
         "message_id": 42,
@@ -138,7 +140,7 @@ async def test_send_betting_reminder_closed_formats_totals():
     match_service = MagicMock()
     player_service = MagicMock()
 
-    pending_state = {"bet_lock_until": 1700000500}
+    pending_state = {"bet_lock_until": 1700000500, "betting_mode": "house"}
     match_service.get_last_shuffle.return_value = pending_state
     match_service.get_shuffle_message_info.return_value = {
         "message_id": 42,

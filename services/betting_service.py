@@ -99,11 +99,19 @@ class BettingService:
     def settle_bets(
         self, match_id: int, guild_id: Optional[int], winning_team: str, pending_state: Dict[str, Any]
     ) -> Dict[str, List[Dict]]:
-        """Pay winners 1:1 against the house and tag their bets with the match ID."""
+        """
+        Settle bets based on betting mode.
+
+        House mode: Pay winners 1:1 against the house.
+        Pool mode: Winners split the total pool proportionally.
+        """
         since_ts = self._since_ts(pending_state)
         if since_ts is None:
             # If no pending state, treat as no bets to avoid pulling stale wagers.
             return {"winners": [], "losers": []}
+
+        betting_mode = pending_state.get("betting_mode", "house")
+
         # Prefer atomic settlement (payouts + bet tagging in one DB transaction)
         if hasattr(self.bet_repo, "settle_pending_bets_atomic"):
             return self.bet_repo.settle_pending_bets_atomic(
@@ -112,15 +120,27 @@ class BettingService:
                 since_ts=int(since_ts),
                 winning_team=winning_team,
                 house_payout_multiplier=HOUSE_PAYOUT_MULTIPLIER,
+                betting_mode=betting_mode,
             )
 
-        # Fallback (older behavior)
+        # Fallback (older behavior) - only supports house mode
         bets = self.bet_repo.get_bets_for_pending_match(guild_id, since_ts=since_ts)
-        distributions = {"winners": [], "losers": []}
+        distributions: Dict[str, List[Dict]] = {"winners": [], "losers": []}
         if not bets:
             return distributions
 
         self.bet_repo.assign_match_id(guild_id, match_id, since_ts=since_ts)
+
+        if betting_mode == "pool":
+            return self._settle_pool_bets_fallback(bets, winning_team)
+        else:
+            return self._settle_house_bets_fallback(bets, winning_team)
+
+    def _settle_house_bets_fallback(
+        self, bets: List[Dict], winning_team: str
+    ) -> Dict[str, List[Dict]]:
+        """House mode fallback: 1:1 payouts."""
+        distributions: Dict[str, List[Dict]] = {"winners": [], "losers": []}
 
         for bet in bets:
             outcome_entry = {
@@ -135,6 +155,48 @@ class BettingService:
             payout = int(bet["amount"] * (1 + HOUSE_PAYOUT_MULTIPLIER))
             self.player_repo.add_balance(bet["discord_id"], payout)
             outcome_entry["payout"] = payout
+            distributions["winners"].append(outcome_entry)
+
+        return distributions
+
+    def _settle_pool_bets_fallback(
+        self, bets: List[Dict], winning_team: str
+    ) -> Dict[str, List[Dict]]:
+        """Pool mode fallback: proportional payouts from total pool."""
+        distributions: Dict[str, List[Dict]] = {"winners": [], "losers": []}
+
+        # Calculate totals
+        total_pool = sum(bet["amount"] for bet in bets)
+        winner_pool = sum(bet["amount"] for bet in bets if bet["team_bet_on"] == winning_team)
+
+        # Edge case: no bets on winning side - refund all bets
+        if winner_pool == 0:
+            for bet in bets:
+                self.player_repo.add_balance(bet["discord_id"], bet["amount"])
+                distributions["losers"].append({
+                    "discord_id": bet["discord_id"],
+                    "amount": bet["amount"],
+                    "team": bet["team_bet_on"],
+                    "refunded": True,
+                })
+            return distributions
+
+        for bet in bets:
+            outcome_entry = {
+                "discord_id": bet["discord_id"],
+                "amount": bet["amount"],
+                "team": bet["team_bet_on"],
+            }
+            if bet["team_bet_on"] != winning_team:
+                distributions["losers"].append(outcome_entry)
+                continue
+
+            # Proportional payout: (bet_amount / winner_pool) * total_pool
+            payout = int((bet["amount"] / winner_pool) * total_pool)
+            multiplier = total_pool / winner_pool
+            self.player_repo.add_balance(bet["discord_id"], payout)
+            outcome_entry["payout"] = payout
+            outcome_entry["multiplier"] = multiplier
             distributions["winners"].append(outcome_entry)
 
         return distributions

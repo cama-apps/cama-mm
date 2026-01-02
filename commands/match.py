@@ -16,7 +16,13 @@ from config import BET_LOCK_SECONDS, JOPACOIN_MIN_BET
 from services.match_service import MatchService
 from services.lobby_service import LobbyService
 from services.permissions import has_admin_permission
-from utils.formatting import JOPACOIN_EMOTE, ROLE_EMOJIS, ROLE_NAMES, get_player_display_name
+from utils.formatting import (
+    JOPACOIN_EMOTE,
+    ROLE_EMOJIS,
+    ROLE_NAMES,
+    format_betting_display,
+    get_player_display_name,
+)
 from utils.interaction_safety import safe_defer
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
 
@@ -71,7 +77,20 @@ class MatchCommands(commands.Cog):
         return lines
 
     @app_commands.command(name="shuffle", description="Create balanced teams from lobby")
-    async def shuffle(self, interaction: discord.Interaction):
+    @app_commands.describe(
+        betting_mode="Betting mode: House (1:1 fixed odds) or Pool (user-determined odds)",
+    )
+    @app_commands.choices(
+        betting_mode=[
+            app_commands.Choice(name="House (1:1)", value="house"),
+            app_commands.Choice(name="Pool (user odds)", value="pool"),
+        ]
+    )
+    async def shuffle(
+        self,
+        interaction: discord.Interaction,
+        betting_mode: app_commands.Choice[str] = None,
+    ):
         logger.info(f"Shuffle command: User {interaction.user.id} ({interaction.user})")
         guild = interaction.guild if hasattr(interaction, "guild") else None
         rl_gid = guild.id if guild else 0
@@ -119,8 +138,9 @@ class MatchCommands(commands.Cog):
 
         player_ids, players = self.lobby_service.get_lobby_players(lobby)
         # `guild` and `guild_id` already computed before the match check
+        mode = betting_mode.value if betting_mode else "house"
         try:
-            result = self.match_service.shuffle_players(player_ids, guild_id=guild_id)
+            result = self.match_service.shuffle_players(player_ids, guild_id=guild_id, betting_mode=mode)
         except ValueError as exc:
             logger.warning(f"Shuffle validation error: {exc}", exc_info=True)
             await interaction.followup.send(f"❌ {exc}", ephemeral=True)
@@ -181,22 +201,32 @@ class MatchCommands(commands.Cog):
             balance_info += f"\n**Excluded:** {', '.join(excluded_names)}"
         embed.add_field(name="📊 Balance", value=balance_info, inline=False)
 
-        betting_note = (
-            f"`/bet <Radiant/Dire> <amount>` (min {JOPACOIN_MIN_BET} {JOPACOIN_EMOTE}). "
-            "1:1 payouts."
-        )
+        # Betting instructions (mode-aware)
+        if mode == "pool":
+            betting_note = (
+                f"`/bet <Radiant/Dire> <amount>` (min {JOPACOIN_MIN_BET} {JOPACOIN_EMOTE}). "
+                "Pool betting: odds determined by bet distribution."
+            )
+        else:
+            betting_note = (
+                f"`/bet <Radiant/Dire> <amount>` (min {JOPACOIN_MIN_BET} {JOPACOIN_EMOTE}). "
+                "1:1 payouts."
+            )
         embed.add_field(name="💰 Betting", value=betting_note, inline=False)
+
+        # Current wagers display
         betting_service = getattr(self.bot, "betting_service", None)
         totals = {"radiant": 0, "dire": 0}
-        lock_text = "No active match"
+        lock_until = None
         if betting_service:
             pending_state = self.match_service.get_last_shuffle(guild_id)
             totals = betting_service.get_pot_odds(guild_id, pending_state=pending_state)
             lock_until = pending_state.get("bet_lock_until") if pending_state else None
-            if lock_until:
-                lock_text = f"Closes <t:{int(lock_until)}:R>"
-        totals_text = f"Radiant: {totals['radiant']} {JOPACOIN_EMOTE} | Dire: {totals['dire']} {JOPACOIN_EMOTE}\n{lock_text}"
-        embed.add_field(name="💰 Current Wagers", value=totals_text, inline=False)
+
+        wager_field_name, wager_field_value = format_betting_display(
+            totals["radiant"], totals["dire"], mode, lock_until
+        )
+        embed.add_field(name=wager_field_name, value=wager_field_value, inline=False)
 
         message = await interaction.followup.send(embed=embed)
 
@@ -322,20 +352,31 @@ class MatchCommands(commands.Cog):
         distribution_lines: List[str] = []
         if winners:
             distribution_lines.append("🏆 Winners:")
-            distribution_lines.extend(
-                [
-                    f"<@{entry['discord_id']}> won {entry['payout']} {JOPACOIN_EMOTE} (bet {entry['amount']})"
-                    for entry in winners
-                ]
-            )
+            for entry in winners:
+                multiplier = entry.get("multiplier")
+                if multiplier:
+                    # Pool mode - show multiplier
+                    distribution_lines.append(
+                        f"<@{entry['discord_id']}> won {entry['payout']} {JOPACOIN_EMOTE} "
+                        f"(bet {entry['amount']}, {multiplier:.2f}x)"
+                    )
+                else:
+                    # House mode - original format
+                    distribution_lines.append(
+                        f"<@{entry['discord_id']}> won {entry['payout']} {JOPACOIN_EMOTE} (bet {entry['amount']})"
+                    )
         if losers:
             distribution_lines.append("😞 Losers:")
-            distribution_lines.extend(
-                [
-                    f"<@{entry['discord_id']}> lost {entry['amount']} {JOPACOIN_EMOTE} (bet on {entry['team'].title()})"
-                    for entry in losers
-                ]
-            )
+            for entry in losers:
+                if entry.get("refunded"):
+                    # Pool mode edge case - refunded
+                    distribution_lines.append(
+                        f"<@{entry['discord_id']}> refunded {entry['amount']} {JOPACOIN_EMOTE} (no winners on opposing side)"
+                    )
+                else:
+                    distribution_lines.append(
+                        f"<@{entry['discord_id']}> lost {entry['amount']} {JOPACOIN_EMOTE} (bet on {entry['team'].title()})"
+                    )
         if distribution_lines:
             distribution_text = "\n" + "\n".join(distribution_lines)
 

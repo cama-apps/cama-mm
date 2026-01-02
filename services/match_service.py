@@ -153,6 +153,7 @@ class MatchService:
             "shuffle_message_jump_url": state.get("shuffle_message_jump_url"),
             "shuffle_message_id": state.get("shuffle_message_id"),
             "shuffle_channel_id": state.get("shuffle_channel_id"),
+            "betting_mode": state.get("betting_mode", "house"),
         }
 
     def _persist_match_state(self, guild_id: Optional[int], state: Dict) -> None:
@@ -289,12 +290,21 @@ class MatchService:
         # Requires MIN_NON_ADMIN_SUBMISSIONS matching submissions before a non-admin result can finalize
         return self.get_pending_record_result(guild_id) is not None
 
-    def shuffle_players(self, player_ids: List[int], guild_id: Optional[int] = None) -> Dict:
+    def shuffle_players(
+        self, player_ids: List[int], guild_id: Optional[int] = None, betting_mode: str = "house"
+    ) -> Dict:
         """
         Shuffle players into balanced teams.
 
+        Args:
+            player_ids: List of Discord user IDs to shuffle
+            guild_id: Guild ID for multi-guild support
+            betting_mode: "house" for 1:1 payouts, "pool" for parimutuel betting
+
         Returns a payload containing teams, role assignments, and Radiant/Dire mapping.
         """
+        if betting_mode not in ("house", "pool"):
+            raise ValueError("betting_mode must be 'house' or 'pool'")
         players = self.player_repo.get_by_ids(player_ids)
         if len(players) != len(player_ids):
             raise ValueError(f"Could not load all players: expected {len(player_ids)}, got {len(players)}")
@@ -392,6 +402,7 @@ class MatchService:
             "shuffle_message_jump_url": None,
             "shuffle_message_id": None,
             "shuffle_channel_id": None,
+            "betting_mode": betting_mode,
         }
         self.set_last_shuffle(guild_id, shuffle_state)
         self._persist_match_state(guild_id, shuffle_state)

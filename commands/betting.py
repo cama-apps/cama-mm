@@ -14,7 +14,7 @@ from services.betting_service import BettingService
 from services.match_service import MatchService
 from services.player_service import PlayerService
 from config import JOPACOIN_MIN_BET
-from utils.formatting import JOPACOIN_EMOTE
+from utils.formatting import JOPACOIN_EMOTE, format_betting_display
 from utils.interaction_safety import safe_defer
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
 
@@ -65,22 +65,24 @@ class BettingCommands(commands.Cog):
             embed = message.embeds[0]
             totals = self.betting_service.get_pot_odds(guild_id, pending_state=pending_state)
             lock_until = pending_state.get("bet_lock_until")
-            lock_text = f"Closes <t:{int(lock_until)}:R>" if lock_until else "No active match"
-            totals_text = (
-                f"Radiant: {totals['radiant']} {JOPACOIN_EMOTE} | "
-                f"Dire: {totals['dire']} {JOPACOIN_EMOTE}\n{lock_text}"
+            betting_mode = pending_state.get("betting_mode", "house")
+
+            field_name, field_value = format_betting_display(
+                totals["radiant"], totals["dire"], betting_mode, lock_until
             )
 
             embed_dict = embed.to_dict()
             fields = embed_dict.get("fields", [])
             updated = False
             for field in fields:
-                if field.get("name") == "💰 Current Wagers":
-                    field["value"] = totals_text
+                # Match either old or new field name patterns
+                if field.get("name", "").startswith("💰") and "Betting" in field.get("name", ""):
+                    field["name"] = field_name
+                    field["value"] = field_value
                     updated = True
                     break
             if not updated:
-                fields.append({"name": "💰 Current Wagers", "value": totals_text, "inline": False})
+                fields.append({"name": field_name, "value": field_value, "inline": False})
             embed_dict["fields"] = fields
 
             new_embed = discord.Embed.from_dict(embed_dict)
@@ -122,21 +124,26 @@ class BettingCommands(commands.Cog):
                 return
 
             totals = self.betting_service.get_pot_odds(guild_id, pending_state=pending_state)
-            totals_text = (
-                f"Radiant: {totals['radiant']} {JOPACOIN_EMOTE} | "
-                f"Dire: {totals['dire']} {JOPACOIN_EMOTE}"
+            betting_mode = pending_state.get("betting_mode", "house")
+
+            # Format bets with odds for pool mode
+            _, totals_text = format_betting_display(
+                totals["radiant"], totals["dire"], betting_mode, lock_until=None
             )
+            mode_label = "Pool" if betting_mode == "pool" else "House (1:1)"
 
             if reminder_type == "warning":
                 if not lock_until:
                     return
                 content = (
-                    f"⏰ **5 minutes remaining until betting closes!** (<t:{int(lock_until)}:R>)\n\n"
+                    f"⏰ **5 minutes remaining until betting closes!** (<t:{int(lock_until)}:R>)\n"
+                    f"Mode: {mode_label}\n\n"
                     f"Current bets:\n{totals_text}"
                 )
             elif reminder_type == "closed":
                 content = (
-                    "🔒 **Betting is now closed!**\n\n"
+                    f"🔒 **Betting is now closed!**\n"
+                    f"Mode: {mode_label}\n\n"
                     f"Final bets:\n{totals_text}"
                 )
             else:
