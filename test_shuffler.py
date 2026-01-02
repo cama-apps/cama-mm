@@ -483,6 +483,85 @@ class TestRoleMatchupDelta:
         # total should therefore be 600
         assert score == pytest.approx(600)
 
+    def test_role_matchup_delta_weight_applied_in_service(self):
+        """Weight should scale the matchup delta when computing scores."""
+        team1_players = [
+            Player(name="Carry1", mmr=2000, preferred_roles=["1"]),
+            Player(name="Mid1", mmr=1500, preferred_roles=["2"]),
+            Player(name="Offlane1", mmr=1200, preferred_roles=["3"]),
+            Player(name="Sup1", mmr=1100, preferred_roles=["4"]),
+            Player(name="Sup2", mmr=1000, preferred_roles=["5"]),
+        ]
+        team2_players = [
+            Player(name="Carry2", mmr=1000, preferred_roles=["1"]),
+            Player(name="Mid2", mmr=1500, preferred_roles=["2"]),
+            Player(name="Offlane2", mmr=1900, preferred_roles=["3"]),
+            Player(name="Sup3", mmr=1050, preferred_roles=["4"]),
+            Player(name="Sup4", mmr=950, preferred_roles=["5"]),
+        ]
+
+        team1 = Team(team1_players, role_assignments=["1", "2", "3", "4", "5"])
+        team2 = Team(team2_players, role_assignments=["1", "2", "3", "4", "5"])
+
+        service = TeamBalancingService(
+            use_glicko=False, off_role_multiplier=1.0, role_matchup_delta_weight=0.5
+        )
+
+        delta = service.calculate_role_matchup_delta(team1, team2)
+        assert delta == 200  # max of the three matchups
+
+        score = service.calculate_matchup_score(team1, team2)
+        # value difference = |6800 - 6400| = 400
+        # weighted role delta = 200 * 0.5 = 100
+        # off-role penalty = 0
+        assert score == pytest.approx(500)
+
+    def test_role_matchup_delta_weight_applied_in_shuffler_scoring(self):
+        """BalancedShuffler should apply the weight when scoring matchups."""
+        # Constrain roles to avoid off-role permutations.
+        team1_players = [
+            Player(name="RadiantCarry", mmr=2000, preferred_roles=["1"]),
+            Player(name="RadiantMid", mmr=1500, preferred_roles=["2"]),
+            Player(name="RadiantOfflane", mmr=1000, preferred_roles=["3"]),
+            Player(name="RadiantSoft", mmr=1000, preferred_roles=["4"]),
+            Player(name="RadiantHard", mmr=1000, preferred_roles=["5"]),
+        ]
+        team2_players = [
+            Player(name="DireCarry", mmr=1400, preferred_roles=["1"]),
+            Player(name="DireMid", mmr=1500, preferred_roles=["2"]),
+            Player(name="DireOfflane", mmr=1900, preferred_roles=["3"]),
+            Player(name="DireSoft", mmr=1000, preferred_roles=["4"]),
+            Player(name="DireHard", mmr=1000, preferred_roles=["5"]),
+        ]
+
+        # With fixed roles, there is exactly one assignment per team.
+        shuffler_full_weight = BalancedShuffler(
+            use_glicko=False,
+            consider_roles=True,
+            off_role_multiplier=1.0,
+            off_role_flat_penalty=0.0,
+            role_matchup_delta_weight=1.0,
+        )
+        _, _, score_full = shuffler_full_weight._optimize_role_assignments_for_matchup(
+            team1_players, team2_players, max_assignments_per_team=1
+        )
+
+        shuffler_half_weight = BalancedShuffler(
+            use_glicko=False,
+            consider_roles=True,
+            off_role_multiplier=1.0,
+            off_role_flat_penalty=0.0,
+            role_matchup_delta_weight=0.5,
+        )
+        _, _, score_half = shuffler_half_weight._optimize_role_assignments_for_matchup(
+            team1_players, team2_players, max_assignments_per_team=1
+        )
+
+        # value diff = |6500 - 6800| = 300
+        # role delta = max(|2000-1900|, |1400-1000|, |1500-1500|) = 400
+        assert score_full == pytest.approx(700)  # 300 + 400
+        assert score_half == pytest.approx(500)  # 300 + (400 * 0.5)
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

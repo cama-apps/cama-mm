@@ -48,6 +48,7 @@ class MatchService:
             use_glicko=use_glicko,
             off_role_multiplier=self.shuffler.off_role_multiplier,
             off_role_flat_penalty=self.shuffler.off_role_flat_penalty,
+            role_matchup_delta_weight=self.shuffler.role_matchup_delta_weight,
         )
         self._last_shuffle_by_guild: Dict[int, Dict] = {}
         self.betting_service = betting_service
@@ -325,6 +326,7 @@ class MatchService:
         team2_off_roles = team2.get_off_role_count()
         off_role_penalty = (team1_off_roles + team2_off_roles) * self.shuffler.off_role_flat_penalty
         role_matchup_delta = self.team_balancing_service.calculate_role_matchup_delta(team1, team2)
+        weighted_role_matchup_delta = role_matchup_delta * self.team_balancing_service.role_matchup_delta_weight
 
         team1_roles = team1.role_assignments if team1.role_assignments else team1._assign_roles_optimally()
         team2_roles = team2.role_assignments if team2.role_assignments else team2._assign_roles_optimally()
@@ -361,7 +363,7 @@ class MatchService:
             exclusion_sum = sum(exclusion_counts.get(name, 0) for name in excluded_names)
             excluded_penalty = exclusion_sum * self.shuffler.exclusion_penalty_weight
 
-        goodness_score = value_diff + off_role_penalty + role_matchup_delta + excluded_penalty
+        goodness_score = value_diff + off_role_penalty + weighted_role_matchup_delta + excluded_penalty
 
         # Update exclusion counts
         included_player_ids = set(radiant_team_ids + dire_team_ids)
