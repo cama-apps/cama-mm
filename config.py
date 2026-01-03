@@ -72,7 +72,7 @@ SHUFFLER_SETTINGS: Dict[str, Any] = {
     "role_penalty_weight": _parse_float("ROLE_PENALTY_WEIGHT", 0.1),
     "off_role_multiplier": _parse_float("OFF_ROLE_MULTIPLIER", 0.95),
     "off_role_flat_penalty": _parse_float("OFF_ROLE_FLAT_PENALTY", 100.0),
-    "role_matchup_delta_weight": _parse_float("ROLE_MATCHUP_DELTA_WEIGHT", 0.5),
+    "role_matchup_delta_weight": _parse_float("ROLE_MATCHUP_DELTA_WEIGHT", 0.3),
     "exclusion_penalty_weight": _parse_float("EXCLUSION_PENALTY_WEIGHT", 5.0),
 }
 
