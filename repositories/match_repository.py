@@ -283,8 +283,10 @@ class MatchRepository(BaseRepository, IMatchRepository):
         dire_score: int,
         game_mode: int,
         enrichment_data: Optional[str] = None,
+        enrichment_source: Optional[str] = None,
+        enrichment_confidence: Optional[float] = None,
     ) -> None:
-        """Update match with Valve API enrichment data."""
+        """Update match with API enrichment data."""
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -295,7 +297,9 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     radiant_score = ?,
                     dire_score = ?,
                     game_mode = ?,
-                    enrichment_data = ?
+                    enrichment_data = ?,
+                    enrichment_source = ?,
+                    enrichment_confidence = ?
                 WHERE match_id = ?
                 """,
                 (
@@ -305,6 +309,8 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     dire_score,
                     game_mode,
                     enrichment_data,
+                    enrichment_source,
+                    enrichment_confidence,
                     match_id,
                 ),
             )
@@ -374,4 +380,168 @@ class MatchRepository(BaseRepository, IMatchRepository):
             )
             rows = cursor.fetchall()
             return [dict(row) for row in rows]
+
+    def get_player_hero_stats(self, discord_id: int) -> dict:
+        """
+        Get hero statistics for a player from enriched matches.
+
+        Returns:
+            Dict with:
+            - last_hero_id: int or None (most recent enriched match)
+            - hero_counts: list of (hero_id, games, wins) tuples, sorted by games desc
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+
+            # Get last played hero (most recent enriched match)
+            cursor.execute(
+                """
+                SELECT mp.hero_id
+                FROM match_participants mp
+                JOIN matches m ON mp.match_id = m.match_id
+                WHERE mp.discord_id = ? AND mp.hero_id IS NOT NULL AND mp.hero_id > 0
+                ORDER BY m.match_date DESC
+                LIMIT 1
+                """,
+                (discord_id,),
+            )
+            row = cursor.fetchone()
+            last_hero_id = row["hero_id"] if row else None
+
+            # Get hero frequency (games and wins per hero)
+            cursor.execute(
+                """
+                SELECT mp.hero_id, COUNT(*) as games, SUM(CASE WHEN mp.won THEN 1 ELSE 0 END) as wins
+                FROM match_participants mp
+                WHERE mp.discord_id = ? AND mp.hero_id IS NOT NULL AND mp.hero_id > 0
+                GROUP BY mp.hero_id
+                ORDER BY games DESC
+                LIMIT 5
+                """,
+                (discord_id,),
+            )
+            rows = cursor.fetchall()
+            hero_counts = [(row["hero_id"], row["games"], row["wins"]) for row in rows]
+
+            return {
+                "last_hero_id": last_hero_id,
+                "hero_counts": hero_counts,
+            }
+
+    def wipe_match_enrichment(self, match_id: int) -> bool:
+        """
+        Clear all enrichment data for a specific match.
+
+        Returns True if match was found and wiped, False otherwise.
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+
+            # Clear match-level enrichment
+            cursor.execute(
+                """
+                UPDATE matches
+                SET valve_match_id = NULL,
+                    duration_seconds = NULL,
+                    radiant_score = NULL,
+                    dire_score = NULL,
+                    game_mode = NULL,
+                    enrichment_data = NULL,
+                    enrichment_source = NULL,
+                    enrichment_confidence = NULL
+                WHERE match_id = ?
+                """,
+                (match_id,),
+            )
+
+            if cursor.rowcount == 0:
+                return False
+
+            # Clear participant-level stats
+            cursor.execute(
+                """
+                UPDATE match_participants
+                SET hero_id = NULL,
+                    kills = NULL,
+                    deaths = NULL,
+                    assists = NULL,
+                    gpm = NULL,
+                    xpm = NULL,
+                    hero_damage = NULL,
+                    tower_damage = NULL,
+                    last_hits = NULL,
+                    denies = NULL,
+                    net_worth = NULL
+                WHERE match_id = ?
+                """,
+                (match_id,),
+            )
+
+            return True
+
+    def wipe_auto_discovered_enrichments(self) -> int:
+        """
+        Clear all enrichments that were auto-discovered.
+
+        Returns count of matches wiped.
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+
+            # Get match IDs that are auto-discovered
+            cursor.execute(
+                "SELECT match_id FROM matches WHERE enrichment_source = 'auto'"
+            )
+            match_ids = [row["match_id"] for row in cursor.fetchall()]
+
+            if not match_ids:
+                return 0
+
+            # Clear match-level enrichment
+            cursor.execute(
+                """
+                UPDATE matches
+                SET valve_match_id = NULL,
+                    duration_seconds = NULL,
+                    radiant_score = NULL,
+                    dire_score = NULL,
+                    game_mode = NULL,
+                    enrichment_data = NULL,
+                    enrichment_source = NULL,
+                    enrichment_confidence = NULL
+                WHERE enrichment_source = 'auto'
+                """
+            )
+
+            # Clear participant stats for those matches
+            placeholders = ",".join("?" * len(match_ids))
+            cursor.execute(
+                f"""
+                UPDATE match_participants
+                SET hero_id = NULL,
+                    kills = NULL,
+                    deaths = NULL,
+                    assists = NULL,
+                    gpm = NULL,
+                    xpm = NULL,
+                    hero_damage = NULL,
+                    tower_damage = NULL,
+                    last_hits = NULL,
+                    denies = NULL,
+                    net_worth = NULL
+                WHERE match_id IN ({placeholders})
+                """,
+                match_ids,
+            )
+
+            return len(match_ids)
+
+    def get_auto_discovered_count(self) -> int:
+        """Get count of auto-discovered enriched matches."""
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT COUNT(*) as count FROM matches WHERE enrichment_source = 'auto'"
+            )
+            return cursor.fetchone()["count"]
 

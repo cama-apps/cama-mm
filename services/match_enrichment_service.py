@@ -36,7 +36,13 @@ class MatchEnrichmentService:
         self.player_repo = player_repo
         self.opendota_api = opendota_api or OpenDotaAPI()
 
-    def enrich_match(self, internal_match_id: int, dota_match_id: int) -> Dict:
+    def enrich_match(
+        self,
+        internal_match_id: int,
+        dota_match_id: int,
+        source: str = "manual",
+        confidence: Optional[float] = None,
+    ) -> Dict:
         """
         Enrich an internal match with OpenDota API data.
 
@@ -74,6 +80,8 @@ class MatchEnrichmentService:
             dire_score=match_data.get("dire_score", 0),
             game_mode=match_data.get("game_mode", 0),
             enrichment_data=json.dumps(match_data),
+            enrichment_source=source,
+            enrichment_confidence=confidence,
         )
 
         # Get our match participants

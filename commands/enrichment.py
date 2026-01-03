@@ -303,15 +303,22 @@ class EnrichmentCommands(commands.Cog):
             )
             return
 
-        # Format matches
+        # Format matches as embed
         from utils.hero_lookup import get_hero_name
 
-        lines = [f"**Recent Matches for {target_name}**\n"]
+        # Count wins for color
+        wins = sum(1 for m in matches if m["player_won"])
+        losses = len(matches) - wins
+
+        embed = discord.Embed(
+            title=f"📜 Recent Matches for {target_name}",
+            description=f"Last {len(matches)} matches • **{wins}W - {losses}L**",
+            color=discord.Color.green() if wins > losses else discord.Color.red() if losses > wins else discord.Color.greyple()
+        )
 
         for match in matches:
             match_id = match["match_id"]
             won = match["player_won"]
-            result = "W" if won else "L"
             side = match.get("side", "?").capitalize()
 
             # Get participants for this match
@@ -324,17 +331,46 @@ class EnrichmentCommands(commands.Cog):
                     player_stats = p
                     break
 
+            result_emoji = "✅" if won else "❌"
+
             if player_stats and player_stats.get("hero_id"):
                 hero = get_hero_name(player_stats["hero_id"])
-                kda = f"{player_stats.get('kills', 0)}/{player_stats.get('deaths', 0)}/{player_stats.get('assists', 0)}"
+                k = player_stats.get('kills', 0)
+                d = player_stats.get('deaths', 0)
+                a = player_stats.get('assists', 0)
                 gpm = player_stats.get("gpm", 0)
-                lines.append(f"**#{match_id}** [{result}] {hero} - {kda} ({gpm} GPM) - {side}")
-            else:
-                lines.append(f"**#{match_id}** [{result}] {side} - *Not enriched*")
+                xpm = player_stats.get("xpm", 0)
+                dmg = player_stats.get("hero_damage", 0)
 
-        await safe_followup(
-            interaction, content="\n".join(lines), ephemeral=True
-        )
+                dmg_str = f"{dmg / 1000:.1f}k" if dmg >= 1000 else str(dmg)
+
+                embed.add_field(
+                    name=f"{result_emoji} #{match_id} • {hero}",
+                    value=(
+                        f"```\n"
+                        f"KDA:  {k}/{d}/{a}\n"
+                        f"GPM:  {gpm}  XPM: {xpm}\n"
+                        f"DMG:  {dmg_str}\n"
+                        f"Side: {side}\n"
+                        f"```"
+                    ),
+                    inline=True
+                )
+            else:
+                embed.add_field(
+                    name=f"{result_emoji} #{match_id} • ???",
+                    value=(
+                        f"```\n"
+                        f"KDA:  -/-/-\n"
+                        f"GPM:  -    XPM: -\n"
+                        f"DMG:  -\n"
+                        f"Side: {side}\n"
+                        f"```"
+                    ),
+                    inline=True
+                )
+
+        await safe_followup(interaction, embed=embed, ephemeral=True)
 
     @app_commands.command(
         name="profile",
@@ -420,6 +456,151 @@ class EnrichmentCommands(commands.Cog):
         embed.set_footer(text=profile_data.get("footer", "Data from OpenDota"))
 
         await safe_followup(interaction, embed=embed, ephemeral=True)
+
+    # ==================== Admin Discovery Commands ====================
+
+    @app_commands.command(
+        name="autodiscover",
+        description="[Admin] Auto-discover Dota match IDs for unenriched matches",
+    )
+    @app_commands.describe(
+        dry_run="Preview only, don't apply enrichments (default: False)",
+    )
+    async def autodiscover(
+        self,
+        interaction: discord.Interaction,
+        dry_run: bool = False,
+    ):
+        """Auto-discover Dota 2 match IDs by correlating player match histories."""
+        if not has_admin_permission(interaction):
+            await safe_followup(
+                interaction,
+                content="This command is admin-only.",
+                ephemeral=True,
+            )
+            return
+
+        logger.info(
+            f"Autodiscover command: User {interaction.user.id}, dry_run={dry_run}"
+        )
+
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+
+        from services.match_discovery_service import MatchDiscoveryService
+        discovery_service = MatchDiscoveryService(
+            self.match_repo, self.player_repo
+        )
+
+        await safe_followup(
+            interaction,
+            content=f"Starting match discovery (dry_run={dry_run})... This may take a while.",
+            ephemeral=True,
+        )
+
+        results = discovery_service.discover_all_matches(dry_run=dry_run)
+
+        # Build summary
+        lines = [
+            f"**Match Discovery {'(DRY RUN)' if dry_run else 'Complete'}**",
+            f"",
+            f"Total unenriched: {results['total_unenriched']}",
+            f"Discovered: {results['discovered']}",
+            f"Skipped (low confidence): {results['skipped_low_confidence']}",
+            f"Skipped (no steam IDs): {results['skipped_no_steam_ids']}",
+            f"Errors: {results['errors']}",
+        ]
+
+        # Add details for discovered matches
+        discovered = [d for d in results["details"] if d["status"] == "discovered"]
+        if discovered:
+            lines.append("")
+            lines.append("**Discovered Matches:**")
+            for d in discovered[:10]:  # Limit to 10
+                lines.append(
+                    f"  #{d['match_id']} → {d['valve_match_id']} "
+                    f"({d['confidence']:.0%} - {d['player_count']}/{d['total_players']} players)"
+                )
+            if len(discovered) > 10:
+                lines.append(f"  ... and {len(discovered) - 10} more")
+
+        await interaction.edit_original_response(content="\n".join(lines))
+
+    @app_commands.command(
+        name="wipediscovered",
+        description="[Admin] Wipe all auto-discovered enrichments",
+    )
+    async def wipediscovered(self, interaction: discord.Interaction):
+        """Clear all enrichments that were auto-discovered, keeping manual ones."""
+        if not has_admin_permission(interaction):
+            await safe_followup(
+                interaction,
+                content="This command is admin-only.",
+                ephemeral=True,
+            )
+            return
+
+        logger.info(f"Wipediscovered command: User {interaction.user.id}")
+
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+
+        # Get count first
+        auto_count = self.match_repo.get_auto_discovered_count()
+
+        if auto_count == 0:
+            await safe_followup(
+                interaction,
+                content="No auto-discovered enrichments to wipe.",
+                ephemeral=True,
+            )
+            return
+
+        # Wipe them
+        wiped = self.match_repo.wipe_auto_discovered_enrichments()
+
+        await safe_followup(
+            interaction,
+            content=f"Wiped {wiped} auto-discovered enrichments. Manual enrichments preserved.",
+            ephemeral=True,
+        )
+
+    @app_commands.command(
+        name="wipematch",
+        description="[Admin] Wipe enrichment data for a specific match",
+    )
+    @app_commands.describe(
+        match_id="Internal match ID to wipe enrichment from",
+    )
+    async def wipematch(self, interaction: discord.Interaction, match_id: int):
+        """Clear enrichment data for a specific match."""
+        if not has_admin_permission(interaction):
+            await safe_followup(
+                interaction,
+                content="This command is admin-only.",
+                ephemeral=True,
+            )
+            return
+
+        logger.info(f"Wipematch command: User {interaction.user.id}, match_id={match_id}")
+
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+
+        success = self.match_repo.wipe_match_enrichment(match_id)
+
+        if success:
+            await safe_followup(
+                interaction,
+                content=f"Wiped enrichment data for match #{match_id}.",
+                ephemeral=True,
+            )
+        else:
+            await safe_followup(
+                interaction,
+                content=f"Match #{match_id} not found.",
+                ephemeral=True,
+            )
 
 
 async def setup(bot: commands.Bot):

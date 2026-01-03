@@ -150,6 +150,7 @@ class SchemaManager:
             ("create_guild_config_table", self._migration_create_guild_config_table),
             ("add_steam_id_to_players", self._migration_add_steam_id_to_players),
             ("add_match_enrichment_columns", self._migration_add_match_enrichment_columns),
+            ("add_enrichment_source_columns", self._migration_add_enrichment_source_columns),
         ]
 
     # --- Migrations ---
@@ -349,4 +350,11 @@ class SchemaManager:
         self._add_column_if_not_exists(cursor, "match_participants", "hero_damage", "INTEGER")
         self._add_column_if_not_exists(cursor, "match_participants", "tower_damage", "INTEGER")
         self._add_column_if_not_exists(cursor, "match_participants", "net_worth", "INTEGER")
+
+    def _migration_add_enrichment_source_columns(self, cursor) -> None:
+        """Add columns to track enrichment source (manual vs auto-discovered)."""
+        # 'manual' = user ran /enrichmatch, 'auto' = discovered by /autodiscover
+        self._add_column_if_not_exists(cursor, "matches", "enrichment_source", "TEXT")
+        # Confidence score for auto-discovered matches (0.0 - 1.0)
+        self._add_column_if_not_exists(cursor, "matches", "enrichment_confidence", "REAL")
 

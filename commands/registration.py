@@ -146,13 +146,44 @@ class RegistrationCommands(commands.Cog):
             
             if player.main_role:
                 embed.add_field(name="Main Role", value=player.main_role, inline=True)
-            
+
             if player.preferred_roles:
                 role_display = ', '.join([format_role_display(r) for r in player.preferred_roles])
-                embed.add_field(name="Preferred Roles", 
+                embed.add_field(name="Preferred Roles",
                               value=role_display,
                               inline=False)
-            
+
+            # Add hero stats from enriched matches (if available)
+            match_repo = getattr(self.bot, 'match_repo', None)
+            if match_repo and hasattr(match_repo, 'get_player_hero_stats'):
+                try:
+                    from utils.hero_lookup import get_hero_name
+                    hero_stats = match_repo.get_player_hero_stats(target_discord_id)
+
+                    # Only process if we got a valid dict back
+                    if isinstance(hero_stats, dict):
+                        # Last played hero
+                        if hero_stats.get("last_hero_id"):
+                            last_hero = get_hero_name(hero_stats["last_hero_id"])
+                            embed.add_field(name="Last Played", value=last_hero, inline=True)
+
+                        # Most played heroes
+                        if hero_stats.get("hero_counts"):
+                            hero_lines = []
+                            for hero_id, games, wins in hero_stats["hero_counts"][:3]:
+                                hero_name = get_hero_name(hero_id)
+                                winrate = (wins / games * 100) if games > 0 else 0
+                                hero_lines.append(f"{hero_name}: {games}g ({winrate:.0f}%)")
+                            if hero_lines:
+                                embed.add_field(
+                                    name="Top Heroes",
+                                    value="\n".join(hero_lines),
+                                    inline=True
+                                )
+                except Exception as e:
+                    # Hero stats are optional, don't fail the whole command
+                    logger.debug(f"Could not fetch hero stats: {e}")
+
             await interaction.followup.send(embed=embed)
             
         except ValueError as e:

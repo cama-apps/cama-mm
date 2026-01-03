@@ -47,7 +47,7 @@ class InfoCommands(commands.Cog):
                 "`/register` - Register yourself as a player\n"
                 "`/setroles` - Set your preferred roles (1-5)\n"
                 "`/stats` - View your personal statistics\n"
-                "`/advstats` - View pairwise stats (best/worst teammates & matchups)\n"
+                "`/pairwise` - View pairwise stats (best/worst teammates & matchups)\n"
                 "`/matchup` - Head-to-head comparison between two players\n"
                 "`/profile` - View OpenDota profile (W/L, avg KDA, top heroes)\n"
                 "`/matchhistory` - View recent matches with heroes and stats"

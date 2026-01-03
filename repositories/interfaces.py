@@ -207,6 +207,11 @@ class IMatchRepository(ABC):
     def consume_pending_match(self, guild_id: Optional[int]) -> Optional[Dict]:
         ...
 
+    @abstractmethod
+    def get_player_hero_stats(self, discord_id: int) -> Dict:
+        """Get hero statistics for a player from enriched matches."""
+        ...
+
 
 class ILobbyRepository(ABC):
     @abstractmethod
