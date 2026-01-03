@@ -9,6 +9,7 @@ from services.match_service import MatchService
 from services.lobby_service import LobbyService
 from services.match_state_manager import MatchStateManager, MatchState
 from services.betting_service import BettingService
+from services.bankruptcy_service import BankruptcyService, BankruptcyRepository
 from services.permissions import has_admin_permission, has_allowlisted_admin
 
 __all__ = [
@@ -18,6 +19,8 @@ __all__ = [
     "MatchStateManager",
     "MatchState",
     "BettingService",
+    "BankruptcyService",
+    "BankruptcyRepository",
     "has_admin_permission",
     "has_allowlisted_admin",
 ]

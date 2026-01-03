@@ -90,7 +90,8 @@ class InfoCommands(commands.Cog):
                 "  • Cannot bet while in debt\n"
                 "`/mybets` - View your active bets and potential payout\n"
                 "`/balance` - Check your jopacoin balance and debt\n"
-                "`/paydebt` - Help another player pay off their debt (be a philanthropist!)"
+                "`/paydebt` - Help another player pay off their debt (be a philanthropist!)\n"
+                "`/bankruptcy` - Declare bankruptcy (clears debt, 1 week cooldown, 5 game penalty)"
             ),
             inline=False
         )

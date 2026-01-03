@@ -74,6 +74,7 @@ from services.lobby_service import LobbyService
 from services.match_service import MatchService
 from services.betting_service import BettingService
 from services.garnishment_service import GarnishmentService
+from services.bankruptcy_service import BankruptcyService, BankruptcyRepository
 from services.permissions import has_admin_permission, has_allowlisted_admin
 from utils.embeds import create_lobby_embed
 from utils.formatting import ROLE_EMOJIS, ROLE_NAMES, format_role_display
@@ -249,13 +250,18 @@ def _init_services():
     # Create garnishment service for debt repayment
     garnishment_service = GarnishmentService(player_repo, GARNISHMENT_PERCENTAGE)
 
-    # Create betting service with garnishment support
+    # Create bankruptcy service for debt clearing with penalties
+    bankruptcy_repo = BankruptcyRepository(DB_PATH)
+    bankruptcy_service = BankruptcyService(bankruptcy_repo, player_repo)
+
+    # Create betting service with garnishment and bankruptcy support
     betting_service = BettingService(
         bet_repo,
         player_repo,
         garnishment_service=garnishment_service,
         leverage_tiers=LEVERAGE_TIERS,
         max_debt=MAX_DEBT,
+        bankruptcy_service=bankruptcy_service,
     )
 
     player_service = PlayerService(player_repo)
@@ -290,6 +296,7 @@ def _init_services():
     bot.format_role_display = format_role_display
     bot.ADMIN_USER_IDS = ADMIN_USER_IDS
     bot.betting_service = betting_service
+    bot.bankruptcy_service = bankruptcy_service
 
     _services_initialized = True
 
