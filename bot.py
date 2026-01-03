@@ -299,6 +299,7 @@ EXTENSIONS = [
     "commands.match",
     "commands.admin",
     "commands.betting",
+    "commands.federal_reserve",
 ]
 
 
