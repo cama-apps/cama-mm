@@ -579,10 +579,86 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             
             return count
     
+    def get_by_steam_id(self, steam_id: int) -> Optional[Player]:
+        """
+        Get player by Steam ID (32-bit account_id).
+
+        Args:
+            steam_id: The 32-bit Steam account ID
+
+        Returns:
+            Player object or None if not found
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM players WHERE steam_id = ?", (steam_id,))
+            row = cursor.fetchone()
+
+            if not row:
+                return None
+
+            return self._row_to_player(row)
+
+    def get_steam_id(self, discord_id: int) -> Optional[int]:
+        """
+        Get a player's Steam ID.
+
+        Returns:
+            Steam ID (32-bit) or None if not set
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT steam_id FROM players WHERE discord_id = ?", (discord_id,))
+            row = cursor.fetchone()
+            return row["steam_id"] if row and row["steam_id"] else None
+
+    def set_steam_id(self, discord_id: int, steam_id: int) -> None:
+        """
+        Set a player's Steam ID.
+
+        Args:
+            discord_id: The player's Discord ID
+            steam_id: The 32-bit Steam account ID
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE players
+                SET steam_id = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE discord_id = ?
+                """,
+                (steam_id, discord_id),
+            )
+
+    def get_all_with_dotabuff_no_steam_id(self) -> List[Dict]:
+        """
+        Get all players who have a dotabuff_url but no steam_id set.
+        Used for backfilling steam_id from dotabuff URLs.
+
+        Returns:
+            List of dicts with discord_id and dotabuff_url
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT discord_id, dotabuff_url
+                FROM players
+                WHERE dotabuff_url IS NOT NULL
+                  AND dotabuff_url != ''
+                  AND steam_id IS NULL
+                """
+            )
+            return [
+                {"discord_id": row["discord_id"], "dotabuff_url": row["dotabuff_url"]}
+                for row in cursor.fetchall()
+            ]
+
     def delete_fake_users(self) -> int:
         """
         Delete all fake users (discord_id < 0) and their related data.
-        
+
         Returns:
             Number of fake users deleted.
         """

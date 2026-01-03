@@ -104,6 +104,26 @@ class IPlayerRepository(ABC):
     def delete_fake_users(self) -> int:
         ...
 
+    @abstractmethod
+    def get_by_steam_id(self, steam_id: int):
+        """Get player by Steam ID (32-bit account_id)."""
+        ...
+
+    @abstractmethod
+    def get_steam_id(self, discord_id: int) -> Optional[int]:
+        """Get a player's Steam ID."""
+        ...
+
+    @abstractmethod
+    def set_steam_id(self, discord_id: int, steam_id: int) -> None:
+        """Set a player's Steam ID."""
+        ...
+
+    @abstractmethod
+    def get_all_with_dotabuff_no_steam_id(self) -> List[Dict]:
+        """Get all players with dotabuff_url but no steam_id set."""
+        ...
+
 
 class IBetRepository(ABC):
     VALID_TEAMS: set

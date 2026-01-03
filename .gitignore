@@ -162,8 +162,6 @@ desktop.ini
 # Data files (add specific data files if needed)
 *.csv
 *.xlsx
-*.json
-!config.example.json
 
 # Environment variables
 .env
@@ -182,4 +180,4 @@ desktop.ini
 *.ps1
 fix_wins_losses.py
 scripts/
-
+docs/stats.md

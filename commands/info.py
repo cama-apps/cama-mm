@@ -48,7 +48,9 @@ class InfoCommands(commands.Cog):
                 "`/setroles` - Set your preferred roles (1-5)\n"
                 "`/stats` - View your personal statistics\n"
                 "`/advstats` - View pairwise stats (best/worst teammates & matchups)\n"
-                "`/matchup` - Head-to-head comparison between two players"
+                "`/matchup` - Head-to-head comparison between two players\n"
+                "`/profile` - View OpenDota profile (W/L, avg KDA, top heroes)\n"
+                "`/matchhistory` - View recent matches with heroes and stats"
             ),
             inline=False
         )
@@ -108,7 +110,12 @@ class InfoCommands(commands.Cog):
                 name="🔧 Admin Commands",
                 value=(
                     "`/addfake` - Add fake users to lobby for testing\n"
-                            "`/resetuser` - Reset a specific user's account"
+                    "`/resetuser` - Reset a specific user's account\n"
+                    "`/setleague` - Set Valve league ID for this server\n"
+                    "`/enrichmatch` - Enrich match with Valve API data\n"
+                    "`/backfillsteamid` - Backfill steam IDs from Dotabuff URLs\n"
+                    "`/showconfig` - View server configuration\n"
+                    "`/rebuildpairings` - Rebuild pairwise stats from match history"
                 ),
                 inline=False
             )

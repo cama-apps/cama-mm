@@ -282,6 +282,7 @@ def _init_services():
     bot.lobby_service = lobby_service
     bot.match_service = match_service
     bot.player_repo = player_repo
+    bot.match_repo = match_repo
     bot.pairings_repo = pairings_repo
     bot.guild_config_repo = guild_config_repo
     bot.role_emojis = ROLE_EMOJIS
@@ -307,6 +308,7 @@ EXTENSIONS = [
     "commands.admin",
     "commands.betting",
     "commands.advstats",
+    "commands.enrichment",
 ]
 
 

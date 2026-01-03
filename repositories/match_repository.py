@@ -201,19 +201,177 @@ class MatchRepository(BaseRepository, IMatchRepository):
     def delete_all_matches(self) -> int:
         """
         Delete all matches (for testing).
-        
+
         Returns:
             Number of matches deleted
         """
         with self.connection() as conn:
             cursor = conn.cursor()
-            
+
             cursor.execute("SELECT COUNT(*) FROM matches")
             count = cursor.fetchone()[0]
-            
+
             cursor.execute("DELETE FROM matches")
             cursor.execute("DELETE FROM match_participants")
             cursor.execute("DELETE FROM rating_history")
-            
+
             return count
+
+    def get_most_recent_match(self) -> Optional[dict]:
+        """Get the most recently recorded match."""
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM matches ORDER BY match_date DESC LIMIT 1"
+            )
+            row = cursor.fetchone()
+
+            if not row:
+                return None
+
+            return {
+                "match_id": row["match_id"],
+                "team1_players": json.loads(row["team1_players"]),
+                "team2_players": json.loads(row["team2_players"]),
+                "winning_team": row["winning_team"],
+                "match_date": row["match_date"],
+                "dotabuff_match_id": row["dotabuff_match_id"],
+                "valve_match_id": row["valve_match_id"] if "valve_match_id" in row.keys() else None,
+                "notes": row["notes"],
+            }
+
+    def get_matches_without_enrichment(self, limit: int = 10) -> List[dict]:
+        """Get matches that don't have Valve enrichment data yet."""
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT * FROM matches
+                WHERE valve_match_id IS NULL
+                ORDER BY match_date DESC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+            rows = cursor.fetchall()
+            return [
+                {
+                    "match_id": row["match_id"],
+                    "team1_players": json.loads(row["team1_players"]),
+                    "team2_players": json.loads(row["team2_players"]),
+                    "winning_team": row["winning_team"],
+                    "match_date": row["match_date"],
+                }
+                for row in rows
+            ]
+
+    def set_valve_match_id(self, match_id: int, valve_match_id: int) -> None:
+        """Set the Valve match ID for an internal match."""
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE matches SET valve_match_id = ? WHERE match_id = ?",
+                (valve_match_id, match_id),
+            )
+
+    def update_match_enrichment(
+        self,
+        match_id: int,
+        valve_match_id: int,
+        duration_seconds: int,
+        radiant_score: int,
+        dire_score: int,
+        game_mode: int,
+        enrichment_data: Optional[str] = None,
+    ) -> None:
+        """Update match with Valve API enrichment data."""
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE matches
+                SET valve_match_id = ?,
+                    duration_seconds = ?,
+                    radiant_score = ?,
+                    dire_score = ?,
+                    game_mode = ?,
+                    enrichment_data = ?
+                WHERE match_id = ?
+                """,
+                (
+                    valve_match_id,
+                    duration_seconds,
+                    radiant_score,
+                    dire_score,
+                    game_mode,
+                    enrichment_data,
+                    match_id,
+                ),
+            )
+
+    def update_participant_stats(
+        self,
+        match_id: int,
+        discord_id: int,
+        hero_id: int,
+        kills: int,
+        deaths: int,
+        assists: int,
+        gpm: int,
+        xpm: int,
+        hero_damage: int,
+        tower_damage: int,
+        last_hits: int,
+        denies: int,
+        net_worth: int,
+    ) -> None:
+        """Update a match participant with enriched stats from Valve API."""
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE match_participants
+                SET hero_id = ?,
+                    kills = ?,
+                    deaths = ?,
+                    assists = ?,
+                    gpm = ?,
+                    xpm = ?,
+                    hero_damage = ?,
+                    tower_damage = ?,
+                    last_hits = ?,
+                    denies = ?,
+                    net_worth = ?
+                WHERE match_id = ? AND discord_id = ?
+                """,
+                (
+                    hero_id,
+                    kills,
+                    deaths,
+                    assists,
+                    gpm,
+                    xpm,
+                    hero_damage,
+                    tower_damage,
+                    last_hits,
+                    denies,
+                    net_worth,
+                    match_id,
+                    discord_id,
+                ),
+            )
+
+    def get_match_participants(self, match_id: int) -> List[dict]:
+        """Get all participants for a match with their stats."""
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT * FROM match_participants
+                WHERE match_id = ?
+                """,
+                (match_id,),
+            )
+            rows = cursor.fetchall()
+            return [dict(row) for row in rows]
 
