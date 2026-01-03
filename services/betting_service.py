@@ -12,6 +12,7 @@ from repositories.player_repository import PlayerRepository
 
 if TYPE_CHECKING:
     from services.garnishment_service import GarnishmentService
+    from services.bankruptcy_service import BankruptcyService
 
 
 class BettingService:
@@ -24,12 +25,14 @@ class BettingService:
         garnishment_service: Optional["GarnishmentService"] = None,
         leverage_tiers: Optional[List[int]] = None,
         max_debt: Optional[int] = None,
+        bankruptcy_service: Optional["BankruptcyService"] = None,
     ):
         self.bet_repo = bet_repo
         self.player_repo = player_repo
         self.garnishment_service = garnishment_service
         self.leverage_tiers = leverage_tiers if leverage_tiers is not None else LEVERAGE_TIERS
         self.max_debt = max_debt if max_debt is not None else MAX_DEBT
+        self.bankruptcy_service = bankruptcy_service
 
     def _since_ts(self, pending_state: Optional[Dict[str, Any]]) -> Optional[int]:
         """Derive the start timestamp for the current pending match window."""
@@ -122,11 +125,18 @@ class BettingService:
         """
         Give each participant 1 jopacoin for playing.
 
+        Also decrements bankruptcy penalty games for each participant.
+
         Returns dict of {discord_id: {gross, garnished, net}} for each player.
         """
         results: Dict[int, Dict[str, int]] = {}
         if not player_ids:
             return results
+
+        # Decrement bankruptcy penalty games for all participants
+        if self.bankruptcy_service:
+            for pid in player_ids:
+                self.bankruptcy_service.on_game_played(pid)
 
         # If garnishment service is available, use it for individual processing
         if self.garnishment_service:
@@ -257,29 +267,40 @@ class BettingService:
         """
         Reward winners with additional jopacoins.
 
-        Returns dict of {discord_id: {gross, garnished, net}} for each player.
+        Applies bankruptcy penalty if applicable (reduced reward for players
+        who declared bankruptcy).
+
+        Returns dict of {discord_id: {gross, garnished, net, bankruptcy_penalty}} for each player.
         """
         results: Dict[int, Dict[str, int]] = {}
         if not winning_ids:
             return results
 
-        # If garnishment service is available, use it for individual processing
-        if self.garnishment_service:
-            for pid in winning_ids:
-                result = self.garnishment_service.add_income(pid, JOPACOIN_WIN_REWARD)
-                results[pid] = result
-            return results
-
-        # Otherwise, bulk add without garnishment tracking
-        deltas = {pid: JOPACOIN_WIN_REWARD for pid in winning_ids}
-        if hasattr(self.player_repo, "add_balance_many"):
-            self.player_repo.add_balance_many(deltas)  # type: ignore[attr-defined]
-        else:
-            for pid in winning_ids:
-                self.player_repo.add_balance(pid, JOPACOIN_WIN_REWARD)
-
         for pid in winning_ids:
-            results[pid] = {"gross": JOPACOIN_WIN_REWARD, "garnished": 0, "net": JOPACOIN_WIN_REWARD}
+            reward = JOPACOIN_WIN_REWARD
+            bankruptcy_penalty = 0
+
+            # Apply bankruptcy penalty if applicable
+            if self.bankruptcy_service:
+                penalty_result = self.bankruptcy_service.apply_penalty_to_winnings(pid, reward)
+                reward = penalty_result["penalized"]
+                bankruptcy_penalty = penalty_result["penalty_applied"]
+
+            # Apply garnishment if player has debt
+            if self.garnishment_service:
+                result = self.garnishment_service.add_income(pid, reward)
+                result["bankruptcy_penalty"] = bankruptcy_penalty
+                result["gross"] = JOPACOIN_WIN_REWARD  # Original before penalty
+                results[pid] = result
+            else:
+                self.player_repo.add_balance(pid, reward)
+                results[pid] = {
+                    "gross": JOPACOIN_WIN_REWARD,
+                    "garnished": 0,
+                    "net": reward,
+                    "bankruptcy_penalty": bankruptcy_penalty,
+                }
+
         return results
 
     def get_pot_odds(self, guild_id: Optional[int], pending_state: Optional[Dict[str, Any]] = None) -> Dict[str, int]:

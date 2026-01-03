@@ -3,6 +3,7 @@ Betting commands for jopacoin wagers.
 """
 
 import logging
+import random
 from typing import Optional
 
 import discord
@@ -10,15 +11,57 @@ from discord.ext import commands
 from discord import app_commands
 
 from services.betting_service import BettingService
+from services.bankruptcy_service import BankruptcyService
 from services.match_service import MatchService
 from services.player_service import PlayerService
-from config import JOPACOIN_MIN_BET, LEVERAGE_TIERS, GARNISHMENT_PERCENTAGE, MAX_DEBT
+from config import (
+    JOPACOIN_MIN_BET,
+    LEVERAGE_TIERS,
+    GARNISHMENT_PERCENTAGE,
+    MAX_DEBT,
+    BANKRUPTCY_PENALTY_GAMES,
+    BANKRUPTCY_PENALTY_RATE,
+)
 from utils.formatting import JOPACOIN_EMOTE, format_betting_display
 from utils.interaction_safety import safe_defer
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
 
 
 logger = logging.getLogger("cama_bot.commands.betting")
+
+
+# Snarky messages for those who don't deserve bankruptcy
+BANKRUPTCY_DENIED_MESSAGES = [
+    "You're not actually in debt. Nice try, freeloader.",
+    "Bankruptcy is for degenerates who lost it all. You still have coins.",
+    "You're trying to declare bankruptcy while being solvent? The audacity.",
+    "ERROR: Wealth detected. Cannot process bankruptcy request.",
+    "Your application for financial ruin has been denied. You're too rich.",
+    "Sorry, this service is exclusively for people who made terrible decisions.",
+    "The Jopacoin Bankruptcy Court rejects your attempt to game the system.",
+    "Imagine trying to go bankrupt when you have money. Couldn't be you.",
+]
+
+BANKRUPTCY_COOLDOWN_MESSAGES = [
+    "You already declared bankruptcy recently. The court isn't buying it again so soon.",
+    "Nice try, but your credit score hasn't recovered from the last bankruptcy.",
+    "The Jopacoin Financial Recovery Board says you need to wait longer.",
+    "Bankruptcy addiction is real. Seek help. And try again later.",
+    "One bankruptcy per week, please. We have standards.",
+    "Your previous bankruptcy paperwork hasn't even finished processing yet.",
+    "The judge remembers you. Come back when they've forgotten.",
+]
+
+BANKRUPTCY_SUCCESS_MESSAGES = [
+    "Congratulations on your complete financial ruin. Your debt has been erased, but at what cost?",
+    "The court has granted your bankruptcy. Your ancestors weep.",
+    "Chapter 7 approved. Your jopacoin legacy dies here.",
+    "Debt cleared. Dignity? Also cleared. For the next {games} games, you'll earn only {rate}% of win bonuses.",
+    "The Jopacoin Federal Reserve takes note of another fallen gambler. Debt erased.",
+    "Your bankruptcy filing has been accepted. The house always wins, but at least you don't owe it anymore.",
+    "Financial rock bottom achieved. Welcome to the Bankruptcy Hall of Shame.",
+    "Your debt of {debt} jopacoin has been forgiven. You're now starting from nothing. Again.",
+]
 
 
 class BettingCommands(commands.Cog):
@@ -30,11 +73,13 @@ class BettingCommands(commands.Cog):
         betting_service: BettingService,
         match_service: MatchService,
         player_service: PlayerService,
+        bankruptcy_service: Optional[BankruptcyService] = None,
     ):
         self.bot = bot
         self.betting_service = betting_service
         self.match_service = match_service
         self.player_service = player_service
+        self.bankruptcy_service = bankruptcy_service
 
     async def _update_shuffle_message_wagers(self, guild_id: Optional[int]) -> None:
         """
@@ -351,7 +396,7 @@ class BettingCommands(commands.Cog):
         )
         if not rl.allowed:
             await interaction.response.send_message(
-                f"⏳ Please wait {rl.retry_after_seconds}s before using `/balance` again.",
+                f"Please wait {rl.retry_after_seconds}s before using `/balance` again.",
                 ephemeral=True,
             )
             return
@@ -359,11 +404,24 @@ class BettingCommands(commands.Cog):
         if not await safe_defer(interaction, ephemeral=True):
             return
 
-        balance = self.player_service.get_balance(interaction.user.id)
+        user_id = interaction.user.id
+        balance = self.player_service.get_balance(user_id)
+
+        # Check for bankruptcy penalty
+        penalty_info = ""
+        if self.bankruptcy_service:
+            state = self.bankruptcy_service.get_state(user_id)
+            if state.penalty_games_remaining > 0:
+                penalty_rate_pct = int(BANKRUPTCY_PENALTY_RATE * 100)
+                penalty_info = (
+                    f"\n**Bankruptcy penalty:** {penalty_rate_pct}% win bonus "
+                    f"for {state.penalty_games_remaining} more game(s)"
+                )
 
         if balance >= 0:
             await interaction.followup.send(
-                f"{interaction.user.mention} has {balance} {JOPACOIN_EMOTE}.", ephemeral=True
+                f"{interaction.user.mention} has {balance} {JOPACOIN_EMOTE}.{penalty_info}",
+                ephemeral=True,
             )
         else:
             # Show debt information
@@ -371,7 +429,8 @@ class BettingCommands(commands.Cog):
 
             await interaction.followup.send(
                 f"{interaction.user.mention} has **{balance}** {JOPACOIN_EMOTE} (in debt)\n"
-                f"Garnishment: {garnishment_pct}% of winnings go to debt repayment",
+                f"Garnishment: {garnishment_pct}% of winnings go to debt repayment{penalty_info}\n\n"
+                f"Use `/bankruptcy` to clear your debt (with penalties).",
                 ephemeral=True,
             )
 
@@ -421,6 +480,99 @@ class BettingCommands(commands.Cog):
         except ValueError as exc:
             await interaction.followup.send(f"{exc}", ephemeral=True)
 
+    @app_commands.command(
+        name="bankruptcy",
+        description="Declare bankruptcy to clear your debt (once per week, with penalties)",
+    )
+    async def bankruptcy(self, interaction: discord.Interaction):
+        guild = interaction.guild if interaction.guild else None
+        rl_gid = guild.id if guild else 0
+        rl = GLOBAL_RATE_LIMITER.check(
+            scope="bankruptcy",
+            guild_id=rl_gid,
+            user_id=interaction.user.id,
+            limit=2,
+            per_seconds=30,
+        )
+        if not rl.allowed:
+            await interaction.response.send_message(
+                f"The bankruptcy court requires you to wait {rl.retry_after_seconds}s "
+                "before filing again.",
+                ephemeral=True,
+            )
+            return
+
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+
+        if not self.bankruptcy_service:
+            await interaction.followup.send(
+                "Bankruptcy service is not available.", ephemeral=True
+            )
+            return
+
+        user_id = interaction.user.id
+
+        # Check if player is registered
+        player = self.player_service.get_player(user_id)
+        if not player:
+            await interaction.followup.send(
+                "You need to `/register` before you can declare bankruptcy. "
+                "Though maybe that's a good sign you shouldn't gamble.",
+                ephemeral=True,
+            )
+            return
+
+        # Check if bankruptcy is allowed
+        check = self.bankruptcy_service.can_declare_bankruptcy(user_id)
+
+        if not check["allowed"]:
+            if check["reason"] == "not_in_debt":
+                message = random.choice(BANKRUPTCY_DENIED_MESSAGES)
+                balance = check.get("balance", 0)
+                await interaction.followup.send(
+                    f"{message}\n\nYour balance: {balance} {JOPACOIN_EMOTE}",
+                    ephemeral=True,
+                )
+                return
+            elif check["reason"] == "on_cooldown":
+                message = random.choice(BANKRUPTCY_COOLDOWN_MESSAGES)
+                cooldown_ends = check.get("cooldown_ends_at")
+                cooldown_str = f"<t:{cooldown_ends}:R>" if cooldown_ends else "soon"
+                await interaction.followup.send(
+                    f"{message}\n\nYou can file again {cooldown_str}.",
+                    ephemeral=True,
+                )
+                return
+
+        # Declare bankruptcy
+        result = self.bankruptcy_service.declare_bankruptcy(user_id)
+
+        if not result["success"]:
+            await interaction.followup.send(
+                "Something went wrong with your bankruptcy filing. The universe is cruel.",
+                ephemeral=True,
+            )
+            return
+
+        # Format success message
+        message = random.choice(BANKRUPTCY_SUCCESS_MESSAGES).format(
+            debt=result["debt_cleared"],
+            games=result["penalty_games"],
+            rate=int(result["penalty_rate"] * 100),
+        )
+
+        penalty_rate_pct = int(result["penalty_rate"] * 100)
+        await interaction.followup.send(
+            f"**BANKRUPTCY GRANTED**\n\n"
+            f"{message}\n\n"
+            f"**Details:**\n"
+            f"Debt cleared: {result['debt_cleared']} {JOPACOIN_EMOTE}\n"
+            f"Penalty: {penalty_rate_pct}% win bonus for the next {result['penalty_games']} games\n"
+            f"New balance: 0 {JOPACOIN_EMOTE}",
+            ephemeral=True,
+        )
+
 
 async def setup(bot: commands.Bot):
     betting_service = getattr(bot, "betting_service", None)
@@ -432,8 +584,10 @@ async def setup(bot: commands.Bot):
     player_service = getattr(bot, "player_service", None)
     if player_service is None:
         raise RuntimeError("Player service not registered on bot.")
+    bankruptcy_service = getattr(bot, "bankruptcy_service", None)
+    # bankruptcy_service is optional
 
     await bot.add_cog(
-        BettingCommands(bot, betting_service, match_service, player_service)
+        BettingCommands(bot, betting_service, match_service, player_service, bankruptcy_service)
     )
 

@@ -151,6 +151,7 @@ class SchemaManager:
             ("add_steam_id_to_players", self._migration_add_steam_id_to_players),
             ("add_match_enrichment_columns", self._migration_add_match_enrichment_columns),
             ("add_enrichment_source_columns", self._migration_add_enrichment_source_columns),
+            ("create_bankruptcy_table", self._migration_create_bankruptcy_table),
         ]
 
     # --- Migrations ---
@@ -357,4 +358,18 @@ class SchemaManager:
         self._add_column_if_not_exists(cursor, "matches", "enrichment_source", "TEXT")
         # Confidence score for auto-discovered matches (0.0 - 1.0)
         self._add_column_if_not_exists(cursor, "matches", "enrichment_confidence", "REAL")
+
+    def _migration_create_bankruptcy_table(self, cursor) -> None:
+        """Create table for tracking bankruptcy cooldowns and penalties."""
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS bankruptcy_state (
+                discord_id INTEGER PRIMARY KEY,
+                last_bankruptcy_at INTEGER,
+                penalty_games_remaining INTEGER DEFAULT 0,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (discord_id) REFERENCES players(discord_id)
+            )
+            """
+        )
 

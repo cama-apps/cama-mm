@@ -89,6 +89,11 @@ LEVERAGE_TIERS = _parse_int_list("LEVERAGE_TIERS", [2, 3, 5])
 MAX_DEBT = _parse_int("MAX_DEBT", 500)  # Floor: balance can't go below -MAX_DEBT
 GARNISHMENT_PERCENTAGE = _parse_float("GARNISHMENT_PERCENTAGE", 1.0)  # 100% of winnings go to debt
 
+# Bankruptcy configuration
+BANKRUPTCY_COOLDOWN_SECONDS = _parse_int("BANKRUPTCY_COOLDOWN_SECONDS", 604800)  # 1 week
+BANKRUPTCY_PENALTY_GAMES = _parse_int("BANKRUPTCY_PENALTY_GAMES", 5)  # 5 games with reduced rewards
+BANKRUPTCY_PENALTY_RATE = _parse_float("BANKRUPTCY_PENALTY_RATE", 0.5)  # 50% of win rewards
+
 # Steam/Valve API
 STEAM_API_KEY = os.getenv("STEAM_API_KEY")
 
