@@ -502,7 +502,7 @@ class BettingCommands(commands.Cog):
             )
             return
 
-        if not await safe_defer(interaction, ephemeral=True):
+        if not await safe_defer(interaction, ephemeral=False):
             return
 
         if not self.bankruptcy_service:
@@ -531,8 +531,9 @@ class BettingCommands(commands.Cog):
                 message = random.choice(BANKRUPTCY_DENIED_MESSAGES)
                 balance = check.get("balance", 0)
                 await interaction.followup.send(
-                    f"{message}\n\nYour balance: {balance} {JOPACOIN_EMOTE}",
-                    ephemeral=True,
+                    f"{interaction.user.mention} tried to declare bankruptcy...\n\n"
+                    f"{message}\n\nTheir balance: {balance} {JOPACOIN_EMOTE}",
+                    ephemeral=False,
                 )
                 return
             elif check["reason"] == "on_cooldown":
@@ -540,8 +541,9 @@ class BettingCommands(commands.Cog):
                 cooldown_ends = check.get("cooldown_ends_at")
                 cooldown_str = f"<t:{cooldown_ends}:R>" if cooldown_ends else "soon"
                 await interaction.followup.send(
-                    f"{message}\n\nYou can file again {cooldown_str}.",
-                    ephemeral=True,
+                    f"{interaction.user.mention} tried to declare bankruptcy again...\n\n"
+                    f"{message}\n\nThey can file again {cooldown_str}.",
+                    ephemeral=False,
                 )
                 return
 
@@ -564,13 +566,13 @@ class BettingCommands(commands.Cog):
 
         penalty_rate_pct = int(result["penalty_rate"] * 100)
         await interaction.followup.send(
-            f"**BANKRUPTCY GRANTED**\n\n"
+            f"**{interaction.user.mention} HAS DECLARED BANKRUPTCY**\n\n"
             f"{message}\n\n"
             f"**Details:**\n"
             f"Debt cleared: {result['debt_cleared']} {JOPACOIN_EMOTE}\n"
             f"Penalty: {penalty_rate_pct}% win bonus for the next {result['penalty_games']} games\n"
             f"New balance: 0 {JOPACOIN_EMOTE}",
-            ephemeral=True,
+            ephemeral=False,
         )
 
 
