@@ -65,8 +65,7 @@ def create_lobby_embed(lobby, players, player_ids, ready_threshold: int = 10):
     player_count = lobby.get_player_count()
 
     if lobby.created_at:
-        time_str = lobby.created_at.strftime("%I:%M %p")
-        timestamp_text = f"Opened at {time_str}"
+        timestamp_text = f"Opened at <t:{int(lobby.created_at.timestamp())}:t>"
     else:
         timestamp_text = "Opened just now"
 

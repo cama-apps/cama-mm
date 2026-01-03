@@ -1,4 +1,5 @@
 import pytest
+import time
 from unittest.mock import AsyncMock, MagicMock
 
 import discord
@@ -170,3 +171,78 @@ async def test_send_betting_reminder_closed_formats_totals():
     assert "Betting is now closed" in reply_text
     assert "Radiant: 3" in reply_text
     assert "Dire: 9" in reply_text
+
+
+@pytest.mark.asyncio
+async def test_mybets_uses_discord_timestamp_format():
+    """Verify /mybets displays bet time using Discord dynamic timestamp."""
+    bot = MagicMock()
+    betting_service = MagicMock()
+    match_service = MagicMock()
+    player_service = MagicMock()
+
+    bet_time = int(time.time()) - 300  # 5 minutes ago
+    pending_state = {"bet_lock_until": int(time.time()) + 600, "betting_mode": "house"}
+    match_service.get_last_shuffle.return_value = pending_state
+
+    betting_service.get_pending_bet.return_value = {
+        "amount": 100,
+        "team_bet_on": "radiant",
+        "bet_time": bet_time,
+        "leverage": 1,
+    }
+
+    interaction = MagicMock()
+    interaction.guild.id = 123
+    interaction.user.id = 456
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock()
+
+    commands = BettingCommands(bot, betting_service, match_service, player_service)
+    await commands.mybets.callback(commands, interaction)
+
+    interaction.followup.send.assert_awaited_once()
+    message = interaction.followup.send.call_args.kwargs.get(
+        "content", interaction.followup.send.call_args.args[0] if interaction.followup.send.call_args.args else ""
+    )
+
+    # Verify Discord timestamp format <t:TIMESTAMP:t>
+    assert f"<t:{bet_time}:t>" in message, f"Expected Discord timestamp in: {message}"
+
+
+@pytest.mark.asyncio
+async def test_mybets_leverage_uses_discord_timestamp_format():
+    """Verify /mybets with leverage displays bet time using Discord dynamic timestamp."""
+    bot = MagicMock()
+    betting_service = MagicMock()
+    match_service = MagicMock()
+    player_service = MagicMock()
+
+    bet_time = int(time.time()) - 120  # 2 minutes ago
+    pending_state = {"bet_lock_until": int(time.time()) + 600, "betting_mode": "house"}
+    match_service.get_last_shuffle.return_value = pending_state
+
+    betting_service.get_pending_bet.return_value = {
+        "amount": 50,
+        "team_bet_on": "dire",
+        "bet_time": bet_time,
+        "leverage": 3,
+    }
+
+    interaction = MagicMock()
+    interaction.guild.id = 123
+    interaction.user.id = 456
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock()
+
+    commands = BettingCommands(bot, betting_service, match_service, player_service)
+    await commands.mybets.callback(commands, interaction)
+
+    interaction.followup.send.assert_awaited_once()
+    message = interaction.followup.send.call_args.kwargs.get(
+        "content", interaction.followup.send.call_args.args[0] if interaction.followup.send.call_args.args else ""
+    )
+
+    # Verify Discord timestamp format and leverage info
+    assert f"<t:{bet_time}:t>" in message, f"Expected Discord timestamp in: {message}"
+    assert "3x leverage" in message
