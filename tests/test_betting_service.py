@@ -106,11 +106,14 @@ def test_participant_can_only_bet_on_own_team(services):
     with pytest.raises(ValueError, match="Participants on Radiant"):
         betting_service.place_bet(1, participant, "dire", 5, pending)
 
-    # Spectator can bet on either team
+    # Spectator can bet on either team initially
     betting_service.place_bet(1, spectator, "dire", 5, pending)
-    
-    # But cannot place a second bet
-    with pytest.raises(ValueError, match="already have a bet"):
+
+    # Can add another bet on the same team
+    betting_service.place_bet(1, spectator, "dire", 3, pending)
+
+    # But cannot bet on the opposite team after betting
+    with pytest.raises(ValueError, match="already have bets on Dire"):
         betting_service.place_bet(1, spectator, "radiant", 5, pending)
 
 
@@ -636,3 +639,534 @@ class TestPoolBetting:
         # This ensures winners never lose fractional coins
         total_paid = sum(w["payout"] for w in distributions["winners"])
         assert total_paid == 102
+
+
+class TestMultipleBets:
+    """Tests for placing multiple bets on the same team."""
+
+    def test_can_place_multiple_bets_same_team(self, services):
+        """User can place multiple bets on the same team."""
+        match_service = services["match_service"]
+        betting_service = services["betting_service"]
+        player_repo = services["player_repo"]
+
+        player_ids = list(range(10000, 10010))
+        for pid in player_ids:
+            player_repo.add(
+                discord_id=pid,
+                discord_username=f"Player{pid}",
+                dotabuff_url=f"https://dotabuff.com/players/{pid}",
+                initial_mmr=1500,
+                glicko_rating=1500.0,
+                glicko_rd=350.0,
+                glicko_volatility=0.06,
+            )
+
+        spectator = 10100
+        player_repo.add(
+            discord_id=spectator,
+            discord_username="MultiBetSpectator",
+            dotabuff_url="https://dotabuff.com/players/10100",
+        )
+        player_repo.add_balance(spectator, 100)
+
+        match_service.shuffle_players(player_ids, guild_id=1)
+        pending = match_service.get_last_shuffle(1)
+        pending["bet_lock_until"] = int(time.time()) + 600
+
+        # Place first bet
+        betting_service.place_bet(1, spectator, "radiant", 10, pending)
+        # Place second bet on same team
+        betting_service.place_bet(1, spectator, "radiant", 15, pending)
+        # Place third bet with leverage
+        betting_service.place_bet(1, spectator, "radiant", 5, pending, leverage=2)
+
+        # Balance: 103 (starting) - 10 - 15 - 10 (5*2) = 68
+        assert player_repo.get_balance(spectator) == 68
+
+        # Verify we can get all bets
+        bets = betting_service.get_pending_bets(1, spectator, pending_state=pending)
+        assert len(bets) == 3
+        assert bets[0]["amount"] == 10
+        assert bets[1]["amount"] == 15
+        assert bets[2]["amount"] == 5
+        assert bets[2]["leverage"] == 2
+
+    def test_cannot_bet_opposite_team_after_betting(self, services):
+        """Once bet on a team, cannot bet on the opposite team."""
+        match_service = services["match_service"]
+        betting_service = services["betting_service"]
+        player_repo = services["player_repo"]
+
+        player_ids = list(range(10200, 10210))
+        for pid in player_ids:
+            player_repo.add(
+                discord_id=pid,
+                discord_username=f"Player{pid}",
+                dotabuff_url=f"https://dotabuff.com/players/{pid}",
+                initial_mmr=1500,
+                glicko_rating=1500.0,
+                glicko_rd=350.0,
+                glicko_volatility=0.06,
+            )
+
+        spectator = 10300
+        player_repo.add(
+            discord_id=spectator,
+            discord_username="OppositeTeamSpectator",
+            dotabuff_url="https://dotabuff.com/players/10300",
+        )
+        player_repo.add_balance(spectator, 100)
+
+        match_service.shuffle_players(player_ids, guild_id=1)
+        pending = match_service.get_last_shuffle(1)
+        pending["bet_lock_until"] = int(time.time()) + 600
+
+        # Bet on radiant first
+        betting_service.place_bet(1, spectator, "radiant", 10, pending)
+
+        # Try to bet on dire - should fail
+        with pytest.raises(ValueError, match="already have bets on Radiant"):
+            betting_service.place_bet(1, spectator, "dire", 10, pending)
+
+    def test_multiple_bets_settlement_house_mode(self, services):
+        """Multiple bets from same user are all settled correctly in house mode."""
+        match_service = services["match_service"]
+        betting_service = services["betting_service"]
+        player_repo = services["player_repo"]
+
+        player_ids = list(range(10400, 10410))
+        for pid in player_ids:
+            player_repo.add(
+                discord_id=pid,
+                discord_username=f"Player{pid}",
+                dotabuff_url=f"https://dotabuff.com/players/{pid}",
+                initial_mmr=1500,
+                glicko_rating=1500.0,
+                glicko_rd=350.0,
+                glicko_volatility=0.06,
+            )
+
+        spectator = 10500
+        player_repo.add(
+            discord_id=spectator,
+            discord_username="HouseMultiBet",
+            dotabuff_url="https://dotabuff.com/players/10500",
+        )
+        player_repo.add_balance(spectator, 100)
+
+        match_service.shuffle_players(player_ids, guild_id=1)
+        pending = match_service.get_last_shuffle(1)
+        pending["bet_lock_until"] = int(time.time()) + 600
+
+        # Place multiple bets: 10 at 1x, 10 at 2x
+        betting_service.place_bet(1, spectator, "radiant", 10, pending)
+        betting_service.place_bet(1, spectator, "radiant", 10, pending, leverage=2)
+
+        # Balance: 103 - 10 - 20 (10*2) = 73
+        assert player_repo.get_balance(spectator) == 73
+
+        # Settle - radiant wins
+        distributions = betting_service.settle_bets(400, 1, "radiant", pending_state=pending)
+
+        # Should have 2 winner entries for the same user
+        assert len(distributions["winners"]) == 2
+        total_payout = sum(w["payout"] for w in distributions["winners"])
+        # First bet: 10 * 2 = 20, Second bet: 20 * 2 = 40, Total = 60
+        assert total_payout == 60
+
+        # Balance: 73 + 60 = 133
+        assert player_repo.get_balance(spectator) == 133
+
+    def test_multiple_bets_settlement_pool_mode(self, services):
+        """Multiple bets from same user are all settled correctly in pool mode."""
+        match_service = services["match_service"]
+        betting_service = services["betting_service"]
+        player_repo = services["player_repo"]
+
+        player_ids = list(range(10600, 10610))
+        for pid in player_ids:
+            player_repo.add(
+                discord_id=pid,
+                discord_username=f"Player{pid}",
+                dotabuff_url=f"https://dotabuff.com/players/{pid}",
+                initial_mmr=1500,
+                glicko_rating=1500.0,
+                glicko_rd=350.0,
+                glicko_volatility=0.06,
+            )
+
+        spectator1 = 10700
+        spectator2 = 10701
+        for spec_id in [spectator1, spectator2]:
+            player_repo.add(
+                discord_id=spec_id,
+                discord_username=f"PoolMultiBet{spec_id}",
+                dotabuff_url=f"https://dotabuff.com/players/{spec_id}",
+            )
+            player_repo.add_balance(spec_id, 100)
+
+        match_service.shuffle_players(player_ids, guild_id=1, betting_mode="pool")
+        pending = match_service.get_last_shuffle(1)
+        pending["bet_lock_until"] = int(time.time()) + 600
+
+        # Spectator1: 20 + 30 = 50 effective on radiant
+        betting_service.place_bet(1, spectator1, "radiant", 20, pending)
+        betting_service.place_bet(1, spectator1, "radiant", 30, pending)
+
+        # Spectator2: 50 on dire
+        betting_service.place_bet(1, spectator2, "dire", 50, pending)
+
+        # Total pool = 100, Radiant pool = 50, Dire pool = 50
+        distributions = betting_service.settle_bets(401, 1, "radiant", pending_state=pending)
+
+        # Spectator1 has 2 entries, both win
+        assert len(distributions["winners"]) == 2
+        assert len(distributions["losers"]) == 1
+
+        # Multiplier is 2.0 (100/50), each bet gets their share
+        # 20 -> 40, 30 -> 60, total 100
+        total_payout = sum(w["payout"] for w in distributions["winners"])
+        assert total_payout == 100
+
+    def test_multiple_bets_refund(self, services):
+        """All bets from a user are refunded when match is aborted."""
+        match_service = services["match_service"]
+        betting_service = services["betting_service"]
+        player_repo = services["player_repo"]
+
+        player_ids = list(range(10800, 10810))
+        for pid in player_ids:
+            player_repo.add(
+                discord_id=pid,
+                discord_username=f"Player{pid}",
+                dotabuff_url=f"https://dotabuff.com/players/{pid}",
+                initial_mmr=1500,
+                glicko_rating=1500.0,
+                glicko_rd=350.0,
+                glicko_volatility=0.06,
+            )
+
+        spectator = 10900
+        player_repo.add(
+            discord_id=spectator,
+            discord_username="RefundMultiBet",
+            dotabuff_url="https://dotabuff.com/players/10900",
+        )
+        player_repo.add_balance(spectator, 100)
+
+        match_service.shuffle_players(player_ids, guild_id=1)
+        pending = match_service.get_last_shuffle(1)
+        pending["bet_lock_until"] = int(time.time()) + 600
+
+        # Place multiple bets: 10 + 20 at 2x = 50 effective
+        betting_service.place_bet(1, spectator, "radiant", 10, pending)
+        betting_service.place_bet(1, spectator, "radiant", 20, pending, leverage=2)
+
+        # Balance: 103 - 10 - 40 = 53
+        assert player_repo.get_balance(spectator) == 53
+
+        # Refund all pending bets
+        refunded_count = betting_service.refund_pending_bets(1, pending)
+        assert refunded_count == 2
+
+        # Balance restored: 53 + 10 + 40 = 103
+        assert player_repo.get_balance(spectator) == 103
+
+        # No more pending bets
+        bets = betting_service.get_pending_bets(1, spectator, pending_state=pending)
+        assert len(bets) == 0
+
+    def test_get_pending_bets_returns_empty_when_none(self, services):
+        """get_pending_bets returns empty list when user has no bets."""
+        match_service = services["match_service"]
+        betting_service = services["betting_service"]
+        player_repo = services["player_repo"]
+
+        player_ids = list(range(11000, 11010))
+        for pid in player_ids:
+            player_repo.add(
+                discord_id=pid,
+                discord_username=f"Player{pid}",
+                dotabuff_url=f"https://dotabuff.com/players/{pid}",
+                initial_mmr=1500,
+                glicko_rating=1500.0,
+                glicko_rd=350.0,
+                glicko_volatility=0.06,
+            )
+
+        spectator = 11100
+        player_repo.add(
+            discord_id=spectator,
+            discord_username="NoBetsSpectator",
+            dotabuff_url="https://dotabuff.com/players/11100",
+        )
+
+        match_service.shuffle_players(player_ids, guild_id=1)
+        pending = match_service.get_last_shuffle(1)
+
+        # No bets placed - should return empty list
+        bets = betting_service.get_pending_bets(1, spectator, pending_state=pending)
+        assert bets == []
+
+    def test_multiple_bets_with_different_leverage(self, services):
+        """Bets with different leverage values are tracked correctly."""
+        match_service = services["match_service"]
+        betting_service = services["betting_service"]
+        player_repo = services["player_repo"]
+
+        player_ids = list(range(11200, 11210))
+        for pid in player_ids:
+            player_repo.add(
+                discord_id=pid,
+                discord_username=f"Player{pid}",
+                dotabuff_url=f"https://dotabuff.com/players/{pid}",
+                initial_mmr=1500,
+                glicko_rating=1500.0,
+                glicko_rd=350.0,
+                glicko_volatility=0.06,
+            )
+
+        spectator = 11300
+        player_repo.add(
+            discord_id=spectator,
+            discord_username="MixedLeverageSpectator",
+            dotabuff_url="https://dotabuff.com/players/11300",
+        )
+        player_repo.add_balance(spectator, 500)
+
+        match_service.shuffle_players(player_ids, guild_id=1)
+        pending = match_service.get_last_shuffle(1)
+        pending["bet_lock_until"] = int(time.time()) + 600
+
+        # Place bets with different leverage: 10@1x, 10@2x, 10@3x, 10@5x
+        betting_service.place_bet(1, spectator, "radiant", 10, pending)  # 10 effective
+        betting_service.place_bet(1, spectator, "radiant", 10, pending, leverage=2)  # 20 effective
+        betting_service.place_bet(1, spectator, "radiant", 10, pending, leverage=3)  # 30 effective
+        betting_service.place_bet(1, spectator, "radiant", 10, pending, leverage=5)  # 50 effective
+
+        # Balance: 503 - 10 - 20 - 30 - 50 = 393
+        assert player_repo.get_balance(spectator) == 393
+
+        bets = betting_service.get_pending_bets(1, spectator, pending_state=pending)
+        assert len(bets) == 4
+        assert bets[0]["leverage"] == 1
+        assert bets[1]["leverage"] == 2
+        assert bets[2]["leverage"] == 3
+        assert bets[3]["leverage"] == 5
+
+        # Totals should reflect effective amounts
+        totals = betting_service.get_pot_odds(1, pending_state=pending)
+        assert totals["radiant"] == 110  # 10 + 20 + 30 + 50
+
+    def test_multiple_bets_balance_enforced_each_bet(self, services):
+        """Each bet checks balance independently, so multiple small bets can fail if balance runs out."""
+        match_service = services["match_service"]
+        betting_service = services["betting_service"]
+        player_repo = services["player_repo"]
+
+        player_ids = list(range(11400, 11410))
+        for pid in player_ids:
+            player_repo.add(
+                discord_id=pid,
+                discord_username=f"Player{pid}",
+                dotabuff_url=f"https://dotabuff.com/players/{pid}",
+                initial_mmr=1500,
+                glicko_rating=1500.0,
+                glicko_rd=350.0,
+                glicko_volatility=0.06,
+            )
+
+        spectator = 11500
+        player_repo.add(
+            discord_id=spectator,
+            discord_username="LimitedBalanceSpectator",
+            dotabuff_url="https://dotabuff.com/players/11500",
+        )
+        # Only has 10 jopacoin (3 starting + 7 top-up)
+        player_repo.add_balance(spectator, 7)
+
+        match_service.shuffle_players(player_ids, guild_id=1)
+        pending = match_service.get_last_shuffle(1)
+        pending["bet_lock_until"] = int(time.time()) + 600
+
+        # First bet of 5 succeeds
+        betting_service.place_bet(1, spectator, "radiant", 5, pending)
+        assert player_repo.get_balance(spectator) == 5
+
+        # Second bet of 3 succeeds
+        betting_service.place_bet(1, spectator, "radiant", 3, pending)
+        assert player_repo.get_balance(spectator) == 2
+
+        # Third bet of 5 fails (only 2 left)
+        with pytest.raises(ValueError, match="Insufficient balance"):
+            betting_service.place_bet(1, spectator, "radiant", 5, pending)
+
+    def test_participant_can_place_multiple_bets_on_own_team(self, services):
+        """Match participant can place multiple bets on their own team."""
+        match_service = services["match_service"]
+        betting_service = services["betting_service"]
+        player_repo = services["player_repo"]
+
+        player_ids = list(range(11600, 11610))
+        for pid in player_ids:
+            player_repo.add(
+                discord_id=pid,
+                discord_username=f"Player{pid}",
+                dotabuff_url=f"https://dotabuff.com/players/{pid}",
+                initial_mmr=1500,
+                glicko_rating=1500.0,
+                glicko_rd=350.0,
+                glicko_volatility=0.06,
+            )
+            player_repo.add_balance(pid, 100)
+
+        match_service.shuffle_players(player_ids, guild_id=1)
+        pending = match_service.get_last_shuffle(1)
+        pending["bet_lock_until"] = int(time.time()) + 600
+
+        # Get a participant from radiant team
+        radiant_player = pending["radiant_team_ids"][0]
+
+        # First bet on own team succeeds
+        betting_service.place_bet(1, radiant_player, "radiant", 10, pending)
+
+        # Second bet on own team also succeeds
+        betting_service.place_bet(1, radiant_player, "radiant", 15, pending)
+
+        # Third bet with leverage succeeds
+        betting_service.place_bet(1, radiant_player, "radiant", 5, pending, leverage=2)
+
+        # Verify all bets recorded
+        bets = betting_service.get_pending_bets(1, radiant_player, pending_state=pending)
+        assert len(bets) == 3
+
+        # Trying to bet on opposite team fails (participant restriction)
+        with pytest.raises(ValueError, match="Participants on Radiant can only bet on Radiant"):
+            betting_service.place_bet(1, radiant_player, "dire", 5, pending)
+
+    def test_leverage_respects_max_debt(self, services):
+        """Leverage bets cannot push you past MAX_DEBT."""
+        match_service = services["match_service"]
+        betting_service = services["betting_service"]
+        player_repo = services["player_repo"]
+
+        player_ids = list(range(11700, 11710))
+        for pid in player_ids:
+            player_repo.add(
+                discord_id=pid,
+                discord_username=f"Player{pid}",
+                dotabuff_url=f"https://dotabuff.com/players/{pid}",
+                initial_mmr=1500,
+                glicko_rating=1500.0,
+                glicko_rd=350.0,
+                glicko_volatility=0.06,
+            )
+
+        spectator = 11800
+        player_repo.add(
+            discord_id=spectator,
+            discord_username="DebtSpectator",
+            dotabuff_url="https://dotabuff.com/players/11800",
+        )
+        # Start with 100 jopacoin (3 default + 97)
+        player_repo.add_balance(spectator, 97)
+
+        match_service.shuffle_players(player_ids, guild_id=1)
+        pending = match_service.get_last_shuffle(1)
+        pending["bet_lock_until"] = int(time.time()) + 600
+
+        # Trying to bet 150 at 5x = 750 effective would go to -650 (past -500 MAX_DEBT)
+        with pytest.raises(ValueError, match="exceed maximum debt"):
+            betting_service.place_bet(1, spectator, "radiant", 150, pending, leverage=5)
+
+        # But 100 at 5x = 500 effective, goes to -400 (within limit)
+        betting_service.place_bet(1, spectator, "radiant", 100, pending, leverage=5)
+        assert player_repo.get_balance(spectator) == -400
+
+        # Once in debt, cannot place any more bets
+        with pytest.raises(ValueError, match="cannot place bets while in debt"):
+            betting_service.place_bet(1, spectator, "radiant", 10, pending, leverage=2)
+
+    def test_in_debt_user_cannot_place_any_bet(self, services):
+        """User in debt cannot place any bets (1x or leverage)."""
+        match_service = services["match_service"]
+        betting_service = services["betting_service"]
+        player_repo = services["player_repo"]
+
+        player_ids = list(range(11900, 11910))
+        for pid in player_ids:
+            player_repo.add(
+                discord_id=pid,
+                discord_username=f"Player{pid}",
+                dotabuff_url=f"https://dotabuff.com/players/{pid}",
+                initial_mmr=1500,
+                glicko_rating=1500.0,
+                glicko_rd=350.0,
+                glicko_volatility=0.06,
+            )
+
+        spectator = 12000
+        player_repo.add(
+            discord_id=spectator,
+            discord_username="DebtNoBets",
+            dotabuff_url="https://dotabuff.com/players/12000",
+        )
+        # Put them in debt: start with 3, then go negative
+        player_repo.add_balance(spectator, 47)  # Has 50
+
+        match_service.shuffle_players(player_ids, guild_id=1)
+        pending = match_service.get_last_shuffle(1)
+        pending["bet_lock_until"] = int(time.time()) + 600
+
+        # Place leverage bet to go into debt
+        betting_service.place_bet(1, spectator, "radiant", 100, pending, leverage=5)
+        assert player_repo.get_balance(spectator) == -450
+
+        # Cannot place 1x bet while in debt
+        with pytest.raises(ValueError, match="cannot place bets while in debt"):
+            betting_service.place_bet(1, spectator, "radiant", 1, pending)
+
+        # Cannot place leverage bet while in debt either
+        with pytest.raises(ValueError, match="cannot place bets while in debt"):
+            betting_service.place_bet(1, spectator, "radiant", 10, pending, leverage=5)
+
+    def test_spectator_bet_then_opposite_team_blocked(self, services):
+        """Spectator who bet on one team cannot switch to opposite team."""
+        match_service = services["match_service"]
+        betting_service = services["betting_service"]
+        player_repo = services["player_repo"]
+
+        player_ids = list(range(12100, 12110))
+        for pid in player_ids:
+            player_repo.add(
+                discord_id=pid,
+                discord_username=f"Player{pid}",
+                dotabuff_url=f"https://dotabuff.com/players/{pid}",
+                initial_mmr=1500,
+                glicko_rating=1500.0,
+                glicko_rd=350.0,
+                glicko_volatility=0.06,
+            )
+
+        spectator = 12200
+        player_repo.add(
+            discord_id=spectator,
+            discord_username="SwitchAttempt",
+            dotabuff_url="https://dotabuff.com/players/12200",
+        )
+        player_repo.add_balance(spectator, 100)
+
+        match_service.shuffle_players(player_ids, guild_id=1)
+        pending = match_service.get_last_shuffle(1)
+        pending["bet_lock_until"] = int(time.time()) + 600
+
+        # Bet on dire first
+        betting_service.place_bet(1, spectator, "dire", 10, pending)
+
+        # Can add more to dire
+        betting_service.place_bet(1, spectator, "dire", 15, pending)
+
+        # Cannot switch to radiant
+        with pytest.raises(ValueError, match="already have bets on Dire"):
+            betting_service.place_bet(1, spectator, "radiant", 5, pending)

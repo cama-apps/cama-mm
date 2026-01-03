@@ -267,43 +267,62 @@ class BettingCommands(commands.Cog):
 
         if not await safe_defer(interaction, ephemeral=True):
             return
-        
+
         guild_id = interaction.guild.id if interaction.guild else None
         pending_state = self.match_service.get_last_shuffle(guild_id)
-        bet = self.betting_service.get_pending_bet(guild_id, interaction.user.id, pending_state=pending_state)
-        if not bet:
+        bets = self.betting_service.get_pending_bets(guild_id, interaction.user.id, pending_state=pending_state)
+        if not bets:
             await interaction.followup.send("You have no active bets.", ephemeral=True)
             return
 
-        leverage = bet.get("leverage", 1) or 1
-        effective_bet = bet["amount"] * leverage
-        time_str = f"<t:{int(bet['bet_time'])}:t>"
-        team_name = bet["team_bet_on"].title()
+        # Calculate totals across all bets
+        total_amount = sum(b["amount"] for b in bets)
+        total_effective = sum(b["amount"] * (b.get("leverage", 1) or 1) for b in bets)
+        team_name = bets[0]["team_bet_on"].title()  # All bets are on the same team
 
-        # Build base message
-        if leverage > 1:
-            base_msg = (
-                f"Active bet: {bet['amount']} {JOPACOIN_EMOTE} at {leverage}x leverage "
-                f"(effective: {effective_bet} {JOPACOIN_EMOTE}) on {team_name} "
-                f"(placed at {time_str})"
-            )
+        # Build message with each bet enumerated
+        bet_lines = []
+        for i, bet in enumerate(bets, 1):
+            leverage = bet.get("leverage", 1) or 1
+            effective = bet["amount"] * leverage
+            time_str = f"<t:{int(bet['bet_time'])}:t>"
+            if leverage > 1:
+                bet_lines.append(
+                    f"{i}. {bet['amount']} {JOPACOIN_EMOTE} at {leverage}x "
+                    f"(effective: {effective} {JOPACOIN_EMOTE}) — {time_str}"
+                )
+            else:
+                bet_lines.append(f"{i}. {bet['amount']} {JOPACOIN_EMOTE} — {time_str}")
+
+        # Header with totals
+        if len(bets) == 1:
+            header = f"**Active bet on {team_name}:**"
         else:
-            base_msg = (
-                f"Active bet: {bet['amount']} {JOPACOIN_EMOTE} on {team_name} "
-                f"(placed at {time_str})"
-            )
+            header = f"**Active bets on {team_name}** ({len(bets)} bets):"
+
+        # Show total if multiple bets
+        if len(bets) > 1:
+            if total_amount != total_effective:
+                bet_lines.append(
+                    f"\n**Total:** {total_amount} {JOPACOIN_EMOTE} "
+                    f"(effective: {total_effective} {JOPACOIN_EMOTE})"
+                )
+            else:
+                bet_lines.append(f"\n**Total:** {total_amount} {JOPACOIN_EMOTE}")
+
+        base_msg = header + "\n" + "\n".join(bet_lines)
 
         # Add EV info for pool mode
         betting_mode = pending_state.get("betting_mode", "house") if pending_state else "house"
         if betting_mode == "pool":
             totals = self.betting_service.get_pot_odds(guild_id, pending_state=pending_state)
             total_pool = totals["radiant"] + totals["dire"]
-            my_team_total = totals[bet["team_bet_on"]]
+            my_team_total = totals[bets[0]["team_bet_on"]]
 
             if my_team_total > 0 and total_pool > 0:
-                my_share = effective_bet / my_team_total
+                my_share = total_effective / my_team_total
                 potential_payout = int(total_pool * my_share)
-                other_team = "dire" if bet["team_bet_on"] == "radiant" else "radiant"
+                other_team = "dire" if bets[0]["team_bet_on"] == "radiant" else "radiant"
                 odds_ratio = totals[other_team] / my_team_total if my_team_total > 0 else 0
 
                 base_msg += (
@@ -314,7 +333,7 @@ class BettingCommands(commands.Cog):
                 )
         elif betting_mode == "house":
             # House mode: 1:1 payout
-            potential_payout = effective_bet * 2
+            potential_payout = total_effective * 2
             base_msg += f"\n\nIf you win: {potential_payout} {JOPACOIN_EMOTE} (1:1 odds)"
 
         await interaction.followup.send(base_msg, ephemeral=True)

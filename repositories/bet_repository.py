@@ -75,17 +75,23 @@ class BetRepository(BaseRepository, IBetRepository):
             # Take a write lock up-front so two concurrent bet attempts can't interleave.
             cursor.execute("BEGIN IMMEDIATE")
 
+            # Check for existing bets - allow additional bets only on the same team
             cursor.execute(
                 """
-                SELECT 1
+                SELECT team_bet_on
                 FROM bets
                 WHERE guild_id = ? AND discord_id = ? AND match_id IS NULL AND bet_time >= ?
-                LIMIT 1
                 """,
                 (normalized_guild, discord_id, int(since_ts)),
             )
-            if cursor.fetchone():
-                raise ValueError("You already have a bet on the current match.")
+            existing_bets = cursor.fetchall()
+            if existing_bets:
+                existing_team = existing_bets[0]["team_bet_on"]
+                if existing_team != team:
+                    raise ValueError(
+                        f"You already have bets on {existing_team.title()}. "
+                        "You can only add more bets on the same team."
+                    )
 
             cursor.execute(
                 "SELECT COALESCE(jopacoin_balance, 0) as balance FROM players WHERE discord_id = ?",
@@ -96,6 +102,10 @@ class BetRepository(BaseRepository, IBetRepository):
                 raise ValueError("Player not found.")
 
             balance = int(row["balance"])
+
+            # Users in debt cannot place any bets
+            if balance < 0:
+                raise ValueError("You cannot place bets while in debt. Win some games to pay it off!")
 
             # Balance check depends on leverage:
             # - No leverage (1x): cannot go negative, must have enough balance
@@ -189,17 +199,23 @@ class BetRepository(BaseRepository, IBetRepository):
             if discord_id in dire_ids and team != "dire":
                 raise ValueError("Participants on Dire can only bet on Dire.")
 
+            # Check for existing bets - allow additional bets only on the same team
             cursor.execute(
                 """
-                SELECT 1
+                SELECT team_bet_on
                 FROM bets
                 WHERE guild_id = ? AND discord_id = ? AND match_id IS NULL AND bet_time >= ?
-                LIMIT 1
                 """,
                 (normalized_guild, discord_id, int(since_ts)),
             )
-            if cursor.fetchone():
-                raise ValueError("You already have a bet on the current match.")
+            existing_bets = cursor.fetchall()
+            if existing_bets:
+                existing_team = existing_bets[0]["team_bet_on"]
+                if existing_team != team:
+                    raise ValueError(
+                        f"You already have bets on {existing_team.title()}. "
+                        "You can only add more bets on the same team."
+                    )
 
             cursor.execute(
                 "SELECT COALESCE(jopacoin_balance, 0) as balance FROM players WHERE discord_id = ?",
@@ -210,6 +226,10 @@ class BetRepository(BaseRepository, IBetRepository):
                 raise ValueError("Player not found.")
 
             balance = int(prow["balance"])
+
+            # Users in debt cannot place any bets
+            if balance < 0:
+                raise ValueError("You cannot place bets while in debt. Win some games to pay it off!")
 
             # Balance check depends on leverage:
             # - No leverage (1x): cannot go negative, must have enough balance
@@ -263,6 +283,31 @@ class BetRepository(BaseRepository, IBetRepository):
 
             row = cursor.fetchone()
             return dict(row) if row else None
+
+    def get_player_pending_bets(
+        self, guild_id: Optional[int], discord_id: int, since_ts: Optional[int] = None
+    ) -> List[Dict]:
+        """
+        Return all bets placed by a player for the pending match in the guild.
+        Ordered by bet_time ascending.
+        """
+        normalized_guild = self._normalize_guild_id(guild_id)
+        ts_filter = "AND bet_time >= ?" if since_ts is not None else ""
+        params = (normalized_guild, discord_id) if since_ts is None else (normalized_guild, discord_id, since_ts)
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT bet_id, guild_id, match_id, discord_id, team_bet_on, amount, bet_time, created_at,
+                       COALESCE(leverage, 1) as leverage
+                FROM bets
+                WHERE guild_id = ? AND discord_id = ? AND match_id IS NULL
+                {ts_filter}
+                ORDER BY bet_time ASC
+                """.format(ts_filter=ts_filter),
+                params,
+            )
+            return [dict(row) for row in cursor.fetchall()]
 
     def get_bets_for_pending_match(self, guild_id: Optional[int], since_ts: Optional[int] = None) -> List[Dict]:
         """

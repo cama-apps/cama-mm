@@ -6,7 +6,7 @@ import asyncio
 import logging
 import random
 import time
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import discord
 from discord.ext import commands
@@ -350,41 +350,102 @@ class MatchCommands(commands.Cog):
         losers = distributions.get("losers", [])
         distribution_text = ""
         distribution_lines: List[str] = []
+
+        # Group winners by user (supports multiple bets per user)
         if winners:
             distribution_lines.append("🏆 Winners:")
+            winners_by_user: Dict[int, List[Dict]] = {}
             for entry in winners:
-                leverage = entry.get("leverage", 1) or 1
-                multiplier = entry.get("multiplier")
-                leverage_text = f" at {leverage}x" if leverage > 1 else ""
-                if multiplier:
-                    # Pool mode - show multiplier
-                    distribution_lines.append(
-                        f"<@{entry['discord_id']}> won {entry['payout']} {JOPACOIN_EMOTE} "
-                        f"(bet {entry['amount']}{leverage_text}, {multiplier:.2f}x)"
-                    )
+                uid = entry["discord_id"]
+                if uid not in winners_by_user:
+                    winners_by_user[uid] = []
+                winners_by_user[uid].append(entry)
+
+            for uid, user_bets in winners_by_user.items():
+                total_payout = sum(b["payout"] for b in user_bets)
+                multiplier = user_bets[0].get("multiplier")  # Same for all bets in pool mode
+
+                if len(user_bets) == 1:
+                    # Single bet - original display
+                    bet = user_bets[0]
+                    leverage = bet.get("leverage", 1) or 1
+                    leverage_text = f" at {leverage}x" if leverage > 1 else ""
+                    if multiplier:
+                        distribution_lines.append(
+                            f"<@{uid}> won {total_payout} {JOPACOIN_EMOTE} "
+                            f"(bet {bet['amount']}{leverage_text}, {multiplier:.2f}x)"
+                        )
+                    else:
+                        distribution_lines.append(
+                            f"<@{uid}> won {total_payout} {JOPACOIN_EMOTE} "
+                            f"(bet {bet['amount']}{leverage_text})"
+                        )
                 else:
-                    # House mode
-                    distribution_lines.append(
-                        f"<@{entry['discord_id']}> won {entry['payout']} {JOPACOIN_EMOTE} "
-                        f"(bet {entry['amount']}{leverage_text})"
-                    )
+                    # Multiple bets - show breakdown
+                    bet_parts = []
+                    for b in user_bets:
+                        lev = b.get("leverage", 1) or 1
+                        if lev > 1:
+                            bet_parts.append(f"{b['amount']}@{lev}x")
+                        else:
+                            bet_parts.append(str(b["amount"]))
+                    bets_str = "+".join(bet_parts)
+                    if multiplier:
+                        distribution_lines.append(
+                            f"<@{uid}> won {total_payout} {JOPACOIN_EMOTE} "
+                            f"(bets: {bets_str}, {multiplier:.2f}x)"
+                        )
+                    else:
+                        distribution_lines.append(
+                            f"<@{uid}> won {total_payout} {JOPACOIN_EMOTE} "
+                            f"(bets: {bets_str})"
+                        )
+
+        # Group losers by user (supports multiple bets per user)
         if losers:
             # Calculate total lost by losing side (use effective_bet when available)
             total_lost = sum(entry.get("effective_bet", entry["amount"]) for entry in losers if not entry.get("refunded"))
             distribution_lines.append(f"😞 Losers (total: {total_lost} {JOPACOIN_EMOTE}):")
 
+            losers_by_user: Dict[int, List[Dict]] = {}
             for entry in losers:
-                leverage = entry.get("leverage", 1) or 1
-                leverage_text = f" at {leverage}x" if leverage > 1 else ""
-                if entry.get("refunded"):
-                    # Pool mode edge case - refunded
+                uid = entry["discord_id"]
+                if uid not in losers_by_user:
+                    losers_by_user[uid] = []
+                losers_by_user[uid].append(entry)
+
+            for uid, user_bets in losers_by_user.items():
+                # Check if all refunded (pool edge case)
+                all_refunded = all(b.get("refunded") for b in user_bets)
+                if all_refunded:
+                    total_refunded = sum(b["amount"] for b in user_bets)
                     distribution_lines.append(
-                        f"<@{entry['discord_id']}> refunded {entry['amount']} {JOPACOIN_EMOTE} (no winners on opposing side)"
+                        f"<@{uid}> refunded {total_refunded} {JOPACOIN_EMOTE} (no winners on opposing side)"
+                    )
+                elif len(user_bets) == 1:
+                    # Single bet - original display
+                    bet = user_bets[0]
+                    leverage = bet.get("leverage", 1) or 1
+                    leverage_text = f" at {leverage}x" if leverage > 1 else ""
+                    distribution_lines.append(
+                        f"<@{uid}> lost {bet['amount']} {JOPACOIN_EMOTE}{leverage_text}"
                     )
                 else:
+                    # Multiple bets - show breakdown
+                    bet_parts = []
+                    total_base = 0
+                    for b in user_bets:
+                        lev = b.get("leverage", 1) or 1
+                        total_base += b["amount"]
+                        if lev > 1:
+                            bet_parts.append(f"{b['amount']}@{lev}x")
+                        else:
+                            bet_parts.append(str(b["amount"]))
+                    bets_str = "+".join(bet_parts)
                     distribution_lines.append(
-                        f"<@{entry['discord_id']}> lost {entry['amount']} {JOPACOIN_EMOTE}{leverage_text}"
+                        f"<@{uid}> lost {bets_str} {JOPACOIN_EMOTE}"
                     )
+
         if distribution_lines:
             distribution_text = "\n" + "\n".join(distribution_lines)
 

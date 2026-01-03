@@ -82,9 +82,10 @@ def test_betting_flow_with_repos():
             pass
 
 
-def test_place_bet_atomic_debits_and_prevents_duplicate():
+def test_place_bet_atomic_debits_and_allows_same_team():
     """
-    Ensure bet placement is atomic (debit + insert) and prevents double-bets for the same match window.
+    Ensure bet placement is atomic (debit + insert) and allows additional bets on the same team.
+    Bets on the opposite team should be rejected.
     """
     import time
 
@@ -104,6 +105,8 @@ def test_place_bet_atomic_debits_and_prevents_duplicate():
             glicko_rd=350.0,
             glicko_volatility=0.06,
         )
+        # Give player more balance for multiple bets
+        player_repo.add_balance(pid, 10)  # Now has 13
 
         now_ts = int(time.time())
         since_ts = now_ts - 5
@@ -116,23 +119,36 @@ def test_place_bet_atomic_debits_and_prevents_duplicate():
             since_ts=since_ts,
         )
         assert bet_id > 0
-        assert player_repo.get_balance(pid) == 1  # default 3 - 2
+        assert player_repo.get_balance(pid) == 11  # 13 - 2
 
-        # Duplicate bet in same match window should be rejected (and not debit again).
+        # Additional bet on same team should succeed
+        bet_id2 = bet_repo.place_bet_atomic(
+            guild_id=42,
+            discord_id=pid,
+            team="radiant",
+            amount=1,
+            bet_time=now_ts + 1,
+            since_ts=since_ts,
+        )
+        assert bet_id2 > 0
+        assert player_repo.get_balance(pid) == 10  # 11 - 1
+
+        # Bet on opposite team should be rejected
         try:
             bet_repo.place_bet_atomic(
                 guild_id=42,
                 discord_id=pid,
-                team="radiant",
+                team="dire",
                 amount=1,
-                bet_time=now_ts + 1,
+                bet_time=now_ts + 2,
                 since_ts=since_ts,
             )
-            raise AssertionError("Expected duplicate bet to raise ValueError")
+            raise AssertionError("Expected opposite team bet to raise ValueError")
         except ValueError as exc:
-            assert "already have a bet" in str(exc)
+            assert "already have bets on Radiant" in str(exc)
 
-        assert player_repo.get_balance(pid) == 1
+        # Balance should not have changed after rejected bet
+        assert player_repo.get_balance(pid) == 10
     finally:
         try:
             os.unlink(db_path)

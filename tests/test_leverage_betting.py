@@ -271,7 +271,7 @@ class TestLeverageIntegration:
     """Integration tests for full leverage betting flow."""
 
     def test_full_leverage_betting_flow(self, bet_repo, player_repo):
-        """E2E: bet with leverage, lose, go into debt, win next, see garnishment."""
+        """E2E: bet with leverage, go into debt, cannot bet again until out of debt."""
         # Setup player with 50 balance
         player_repo.add(
             discord_id=4001,
@@ -307,33 +307,42 @@ class TestLeverageIntegration:
         )
         assert player_repo.get_balance(4001) == -50  # Still -50, lost bet
 
-        # Second bet: 10 at 2x leverage (required since in debt - non-leveraged bets blocked)
+        # Once in debt, cannot place ANY bets (even leverage)
         now_ts2 = now_ts + 100
+        with pytest.raises(ValueError, match="cannot place bets while in debt"):
+            bet_repo.place_bet_atomic(
+                guild_id=1,
+                discord_id=4001,
+                team="radiant",
+                amount=10,
+                bet_time=now_ts2,
+                since_ts=now_ts2 - 1,
+                leverage=2,
+                max_debt=500,
+            )
+
+        # User must win games to pay off debt via garnishment
+        # Simulate getting participation reward (garnished to pay debt)
+        player_repo.add_balance(4001, 10)  # e.g., from garnished winnings
+        assert player_repo.get_balance(4001) == -40
+
+        # Add more until positive
+        player_repo.add_balance(4001, 50)
+        assert player_repo.get_balance(4001) == 10  # Back in positive!
+
+        # Now can bet again
+        now_ts3 = now_ts + 200
         bet_repo.place_bet_atomic(
             guild_id=1,
             discord_id=4001,
             team="radiant",
-            amount=10,
-            bet_time=now_ts2,
-            since_ts=now_ts2 - 1,
-            leverage=2,
+            amount=5,
+            bet_time=now_ts3,
+            since_ts=now_ts3 - 1,
+            leverage=1,
             max_debt=500,
         )
-        assert player_repo.get_balance(4001) == -70  # -50 - 20 (effective) = -70
-
-        # Win this bet (Radiant wins)
-        distributions = bet_repo.settle_pending_bets_atomic(
-            match_id=101,
-            guild_id=1,
-            since_ts=now_ts2 - 1,
-            winning_team="radiant",
-            house_payout_multiplier=1.0,
-            betting_mode="house",
-        )
-
-        # Should get 40 payout (10 * 2 leverage * 2 house mode)
-        assert distributions["winners"][0]["payout"] == 40
-        assert player_repo.get_balance(4001) == -30  # -70 + 40 = -30
+        assert player_repo.get_balance(4001) == 5  # 10 - 5 = 5
 
     def test_leverage_pool_mode_proportional_payout(self, bet_repo, player_repo):
         """Pool mode with leverage calculates correct proportional payout."""

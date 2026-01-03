@@ -185,12 +185,13 @@ async def test_mybets_uses_discord_timestamp_format():
     pending_state = {"bet_lock_until": int(time.time()) + 600, "betting_mode": "house"}
     match_service.get_last_shuffle.return_value = pending_state
 
-    betting_service.get_pending_bet.return_value = {
+    # Now uses get_pending_bets (plural) instead of get_pending_bet
+    betting_service.get_pending_bets.return_value = [{
         "amount": 100,
         "team_bet_on": "radiant",
         "bet_time": bet_time,
         "leverage": 1,
-    }
+    }]
 
     interaction = MagicMock()
     interaction.guild.id = 123
@@ -222,12 +223,13 @@ async def test_mybets_leverage_uses_discord_timestamp_format():
     pending_state = {"bet_lock_until": int(time.time()) + 600, "betting_mode": "house"}
     match_service.get_last_shuffle.return_value = pending_state
 
-    betting_service.get_pending_bet.return_value = {
+    # Now uses get_pending_bets (plural) instead of get_pending_bet
+    betting_service.get_pending_bets.return_value = [{
         "amount": 50,
         "team_bet_on": "dire",
         "bet_time": bet_time,
         "leverage": 3,
-    }
+    }]
 
     interaction = MagicMock()
     interaction.guild.id = 123
@@ -245,4 +247,4 @@ async def test_mybets_leverage_uses_discord_timestamp_format():
 
     # Verify Discord timestamp format and leverage info
     assert f"<t:{bet_time}:t>" in message, f"Expected Discord timestamp in: {message}"
-    assert "3x leverage" in message
+    assert "3x" in message  # Leverage is shown in format "at 3x"

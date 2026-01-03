@@ -105,8 +105,16 @@ class BettingService:
         balance = self.player_repo.get_balance(discord_id)
         if balance - effective_bet < -self.max_debt:
             raise ValueError(f"Bet would exceed maximum debt limit of {self.max_debt} jopacoin.")
-        if self.bet_repo.get_player_pending_bet(guild_id, discord_id, since_ts=since_ts):
-            raise ValueError("You already have a bet on the current match.")
+
+        # Check for existing bets - allow additional bets only on the same team
+        existing_bet = self.bet_repo.get_player_pending_bet(guild_id, discord_id, since_ts=since_ts)
+        if existing_bet and existing_bet["team_bet_on"] != team:
+            existing_team = existing_bet["team_bet_on"].title()
+            raise ValueError(
+                f"You already have bets on {existing_team}. "
+                "You can only add more bets on the same team."
+            )
+
         self.player_repo.add_balance(discord_id, -effective_bet)
         self.bet_repo.create_bet(guild_id, discord_id, team, amount, now_ts)
 
@@ -289,6 +297,15 @@ class BettingService:
         if pending_state is None or since_ts is None:
             return None
         return self.bet_repo.get_player_pending_bet(guild_id, discord_id, since_ts=since_ts)
+
+    def get_pending_bets(
+        self, guild_id: Optional[int], discord_id: int, pending_state: Optional[Dict[str, Any]] = None
+    ) -> List[Dict]:
+        """Get all pending bets for a player, ordered by bet_time."""
+        since_ts = self._since_ts(pending_state)
+        if pending_state is None or since_ts is None:
+            return []
+        return self.bet_repo.get_player_pending_bets(guild_id, discord_id, since_ts=since_ts)
 
     def refund_pending_bets(self, guild_id: Optional[int], pending_state: Optional[Dict[str, Any]]) -> int:
         """
