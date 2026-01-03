@@ -40,7 +40,7 @@ class SteamAPIRateLimiter:
 class SteamAPI:
     """Wrapper for Valve's Dota 2 Web API with rate limiting."""
 
-    BASE_URL = "http://api.steampowered.com/IDOTA2Match_570"
+    BASE_URL = "https://api.steampowered.com/IDOTA2Match_570"
 
     # Shared rate limiter across all instances
     _rate_limiter = None

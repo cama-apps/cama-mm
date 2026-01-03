@@ -1,12 +1,14 @@
 """
-Service for enriching match data from Valve's Steam Web API.
+Service for enriching match data from OpenDota API.
+
+Note: Valve's GetMatchDetails API has been broken since May 2024 (patch 7.36).
+We use OpenDota instead, which parses replay files directly.
 """
 
 import json
 import logging
 from typing import Dict, List, Optional, Tuple
 
-from steam_api import SteamAPI
 from opendota_integration import OpenDotaAPI
 from utils.hero_lookup import get_hero_name
 
@@ -15,33 +17,32 @@ logger = logging.getLogger("cama_bot.services.match_enrichment")
 
 class MatchEnrichmentService:
     """
-    Enriches match records with data from Valve's Steam Web API.
+    Enriches match records with data from OpenDota API.
 
-    Correlates Valve API account_id with registered players' steam_id
+    Correlates OpenDota account_id with registered players' steam_id
     to populate KDA, hero, GPM, damage, etc.
     """
 
-    def __init__(self, match_repo, player_repo, steam_api: Optional[SteamAPI] = None):
+    def __init__(self, match_repo, player_repo, opendota_api: Optional[OpenDotaAPI] = None):
         """
         Initialize the enrichment service.
 
         Args:
             match_repo: MatchRepository instance
             player_repo: PlayerRepository instance
-            steam_api: Optional SteamAPI instance (creates one if not provided)
+            opendota_api: Optional OpenDotaAPI instance (creates one if not provided)
         """
         self.match_repo = match_repo
         self.player_repo = player_repo
-        self.steam_api = steam_api or SteamAPI()
-        self.opendota_api = OpenDotaAPI()
+        self.opendota_api = opendota_api or OpenDotaAPI()
 
-    def enrich_match(self, internal_match_id: int, valve_match_id: int) -> Dict:
+    def enrich_match(self, internal_match_id: int, dota_match_id: int) -> Dict:
         """
-        Enrich an internal match with Valve API data.
+        Enrich an internal match with OpenDota API data.
 
         Args:
             internal_match_id: Our database match_id
-            valve_match_id: The Dota 2 match ID from Valve
+            dota_match_id: The Dota 2 match ID
 
         Returns:
             Dict with enrichment results:
@@ -51,15 +52,15 @@ class MatchEnrichmentService:
             - error: str if failed
         """
         logger.info(
-            f"Enriching match {internal_match_id} with Valve match {valve_match_id}"
+            f"Enriching match {internal_match_id} with Dota match {dota_match_id}"
         )
 
-        # Fetch match details from Valve API
-        match_data = self.steam_api.get_match_details(valve_match_id)
+        # Fetch match details from OpenDota API
+        match_data = self.opendota_api.get_match_details(dota_match_id)
         if not match_data:
             return {
                 "success": False,
-                "error": "Failed to fetch match from Valve API",
+                "error": "Failed to fetch match from OpenDota API",
                 "players_enriched": 0,
                 "players_not_found": [],
             }
@@ -67,7 +68,7 @@ class MatchEnrichmentService:
         # Update match-level data
         self.match_repo.update_match_enrichment(
             match_id=internal_match_id,
-            valve_match_id=valve_match_id,
+            valve_match_id=dota_match_id,
             duration_seconds=match_data.get("duration", 0),
             radiant_score=match_data.get("radiant_score", 0),
             dire_score=match_data.get("dire_score", 0),
@@ -83,8 +84,8 @@ class MatchEnrichmentService:
             if steam_id:
                 discord_to_steam[p["discord_id"]] = steam_id
 
-        # Build account_id -> player data mapping from Valve response
-        valve_players = {p["account_id"]: p for p in match_data.get("players", [])}
+        # Build account_id -> player data mapping from OpenDota response
+        opendota_players = {p["account_id"]: p for p in match_data.get("players", [])}
 
         players_enriched = 0
         players_not_found = []
@@ -100,15 +101,15 @@ class MatchEnrichmentService:
                 )
                 continue
 
-            player_data = valve_players.get(steam_id)
+            player_data = opendota_players.get(steam_id)
             if not player_data:
                 logger.warning(
-                    f"Steam ID {steam_id} (discord {discord_id}) not found in Valve match"
+                    f"Steam ID {steam_id} (discord {discord_id}) not found in match"
                 )
                 players_not_found.append(steam_id)
                 continue
 
-            # Update participant stats
+            # Update participant stats (OpenDota uses same field names as Valve API)
             self.match_repo.update_participant_stats(
                 match_id=internal_match_id,
                 discord_id=discord_id,
@@ -122,7 +123,7 @@ class MatchEnrichmentService:
                 tower_damage=player_data.get("tower_damage", 0),
                 last_hits=player_data.get("last_hits", 0),
                 denies=player_data.get("denies", 0),
-                net_worth=player_data.get("net_worth", 0),
+                net_worth=player_data.get("net_worth", player_data.get("total_gold", 0)),
             )
             players_enriched += 1
 

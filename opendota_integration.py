@@ -297,11 +297,11 @@ class OpenDotaAPI:
     def get_player_matches(self, steam_id: int, limit: int = 20) -> Optional[list]:
         """
         Get recent matches for a player.
-        
+
         Args:
             steam_id: Steam ID (32-bit)
             limit: Number of matches to fetch
-        
+
         Returns:
             List of match data
         """
@@ -317,6 +317,39 @@ class OpenDotaAPI:
             return response.json()
         except requests.exceptions.RequestException as e:
             logger.error(f"Error fetching matches: {e}")
+            return None
+
+    def get_match_details(self, match_id: int) -> Optional[Dict]:
+        """
+        Get detailed match data from OpenDota.
+
+        Note: Valve's GetMatchDetails API has been broken since May 2024 (patch 7.36).
+        OpenDota parses replay files directly, so it still works.
+
+        Args:
+            match_id: The Dota 2 match ID
+
+        Returns:
+            Match details dict or None if not found
+        """
+        try:
+            logger.info(f"Fetching match details from OpenDota for match_id={match_id}")
+            response = self._make_request(f"{self.BASE_URL}/matches/{match_id}")
+            if response is None:
+                logger.warning(f"Rate limit prevented fetching match {match_id}")
+                return None
+            response.raise_for_status()
+            data = response.json()
+
+            # Check if match was found (OpenDota returns empty object or error for missing matches)
+            if not data or data.get("error"):
+                logger.warning(f"Match {match_id} not found in OpenDota")
+                return None
+
+            logger.info(f"Successfully fetched match {match_id} from OpenDota")
+            return data
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error fetching match {match_id}: {e}")
             return None
 
 

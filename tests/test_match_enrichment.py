@@ -20,17 +20,17 @@ class TestMatchEnrichmentService:
         return match_repo, player_repo
 
     @pytest.fixture
-    def mock_steam_api(self):
-        """Create mock Steam API."""
-        steam_api = Mock()
-        return steam_api
+    def mock_opendota_api(self):
+        """Create mock OpenDota API."""
+        opendota_api = Mock()
+        return opendota_api
 
-    def test_enrich_match_success(self, mock_repos, mock_steam_api):
+    def test_enrich_match_success(self, mock_repos, mock_opendota_api):
         """Test successful match enrichment."""
         match_repo, player_repo = mock_repos
 
-        # Setup mock Valve API response
-        mock_steam_api.get_match_details.return_value = {
+        # Setup mock OpenDota API response
+        mock_opendota_api.get_match_details.return_value = {
             "match_id": 8181518332,
             "duration": 2400,
             "radiant_win": True,
@@ -63,7 +63,7 @@ class TestMatchEnrichmentService:
         # Setup mock steam_id lookup
         player_repo.get_steam_id.return_value = 12345
 
-        service = MatchEnrichmentService(match_repo, player_repo, mock_steam_api)
+        service = MatchEnrichmentService(match_repo, player_repo, mock_opendota_api)
         result = service.enrich_match(1, 8181518332)
 
         assert result["success"] is True
@@ -75,22 +75,22 @@ class TestMatchEnrichmentService:
         match_repo.update_match_enrichment.assert_called_once()
         match_repo.update_participant_stats.assert_called_once()
 
-    def test_enrich_match_valve_api_failure(self, mock_repos, mock_steam_api):
-        """Test enrichment when Valve API fails."""
+    def test_enrich_match_api_failure(self, mock_repos, mock_opendota_api):
+        """Test enrichment when OpenDota API fails."""
         match_repo, player_repo = mock_repos
-        mock_steam_api.get_match_details.return_value = None
+        mock_opendota_api.get_match_details.return_value = None
 
-        service = MatchEnrichmentService(match_repo, player_repo, mock_steam_api)
+        service = MatchEnrichmentService(match_repo, player_repo, mock_opendota_api)
         result = service.enrich_match(1, 8181518332)
 
         assert result["success"] is False
         assert "Failed to fetch" in result["error"]
 
-    def test_enrich_match_player_not_found(self, mock_repos, mock_steam_api):
-        """Test enrichment when player steam_id not in Valve response."""
+    def test_enrich_match_player_not_found(self, mock_repos, mock_opendota_api):
+        """Test enrichment when player steam_id not in API response."""
         match_repo, player_repo = mock_repos
 
-        mock_steam_api.get_match_details.return_value = {
+        mock_opendota_api.get_match_details.return_value = {
             "match_id": 8181518332,
             "duration": 2400,
             "radiant_win": True,
@@ -105,20 +105,20 @@ class TestMatchEnrichmentService:
         match_repo.get_match_participants.return_value = [
             {"discord_id": 100, "side": "radiant"},
         ]
-        player_repo.get_steam_id.return_value = 12345  # Different from Valve response
+        player_repo.get_steam_id.return_value = 12345  # Different from API response
 
-        service = MatchEnrichmentService(match_repo, player_repo, mock_steam_api)
+        service = MatchEnrichmentService(match_repo, player_repo, mock_opendota_api)
         result = service.enrich_match(1, 8181518332)
 
         assert result["success"] is True
         assert result["players_enriched"] == 0
         assert 12345 in result["players_not_found"]
 
-    def test_enrich_match_no_steam_id(self, mock_repos, mock_steam_api):
+    def test_enrich_match_no_steam_id(self, mock_repos, mock_opendota_api):
         """Test enrichment when player has no steam_id."""
         match_repo, player_repo = mock_repos
 
-        mock_steam_api.get_match_details.return_value = {
+        mock_opendota_api.get_match_details.return_value = {
             "match_id": 8181518332,
             "duration": 2400,
             "radiant_win": True,
@@ -133,13 +133,13 @@ class TestMatchEnrichmentService:
         ]
         player_repo.get_steam_id.return_value = None  # No steam_id
 
-        service = MatchEnrichmentService(match_repo, player_repo, mock_steam_api)
+        service = MatchEnrichmentService(match_repo, player_repo, mock_opendota_api)
         result = service.enrich_match(1, 8181518332)
 
         assert result["success"] is True
         assert result["players_enriched"] == 0
 
-    def test_backfill_steam_ids(self, mock_repos, mock_steam_api):
+    def test_backfill_steam_ids(self, mock_repos, mock_opendota_api):
         """Test steam_id backfill from dotabuff URLs."""
         match_repo, player_repo = mock_repos
 
@@ -148,21 +148,17 @@ class TestMatchEnrichmentService:
             {"discord_id": 101, "dotabuff_url": "https://www.dotabuff.com/players/76561198087654321"},
         ]
 
-        service = MatchEnrichmentService(match_repo, player_repo, mock_steam_api)
+        service = MatchEnrichmentService(match_repo, player_repo, mock_opendota_api)
 
         # Mock the opendota_api extract method
-        with patch.object(
-            service.opendota_api,
-            "extract_player_id_from_dotabuff",
-            side_effect=[52079950, 127388593],
-        ):
-            result = service.backfill_steam_ids()
+        mock_opendota_api.extract_player_id_from_dotabuff.side_effect = [52079950, 127388593]
+        result = service.backfill_steam_ids()
 
         assert result["players_updated"] == 2
         assert len(result["players_failed"]) == 0
         assert player_repo.set_steam_id.call_count == 2
 
-    def test_backfill_steam_ids_with_failures(self, mock_repos, mock_steam_api):
+    def test_backfill_steam_ids_with_failures(self, mock_repos, mock_opendota_api):
         """Test steam_id backfill with some failures."""
         match_repo, player_repo = mock_repos
 
@@ -171,14 +167,9 @@ class TestMatchEnrichmentService:
             {"discord_id": 101, "dotabuff_url": "invalid_url"},
         ]
 
-        service = MatchEnrichmentService(match_repo, player_repo, mock_steam_api)
-
-        with patch.object(
-            service.opendota_api,
-            "extract_player_id_from_dotabuff",
-            side_effect=[52079950, None],  # Second one fails
-        ):
-            result = service.backfill_steam_ids()
+        service = MatchEnrichmentService(match_repo, player_repo, mock_opendota_api)
+        mock_opendota_api.extract_player_id_from_dotabuff.side_effect = [52079950, None]
+        result = service.backfill_steam_ids()
 
         assert result["players_updated"] == 1
         assert 101 in result["players_failed"]
