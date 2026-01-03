@@ -7,6 +7,7 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 
+from config import LEVERAGE_TIERS
 from services.permissions import has_admin_permission
 from utils.formatting import JOPACOIN_EMOTE
 from utils.interaction_safety import safe_defer, safe_followup
@@ -63,11 +64,29 @@ class InfoCommands(commands.Cog):
         )
         
         # Match Management
+        leverage_str = ", ".join(f"{x}x" for x in LEVERAGE_TIERS)
         embed.add_field(
             name="⚔️ Match Management",
             value=(
                 "`/shuffle` - Create balanced teams from lobby\n"
+                "  • `betting_mode:house` - 1:1 fixed odds (default)\n"
+                "  • `betting_mode:pool` - Parimutuel odds based on bet distribution\n"
                 "`/record` - Record a match result"
+            ),
+            inline=False
+        )
+
+        # Betting
+        embed.add_field(
+            name=f"🎰 Betting ({JOPACOIN_EMOTE} Jopacoin)",
+            value=(
+                f"`/bet` - Bet on Radiant or Dire (leverage: {leverage_str})\n"
+                "  • Can place multiple bets on the same team\n"
+                "  • Leverage can push you into debt\n"
+                "  • Cannot bet while in debt\n"
+                "`/mybets` - View your active bets and potential payout\n"
+                "`/balance` - Check your jopacoin balance and debt\n"
+                "`/paydebt` - Help another player pay off their debt (be a philanthropist!)"
             ),
             inline=False
         )
