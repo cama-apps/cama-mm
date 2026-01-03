@@ -2,20 +2,33 @@
 Handles betting-related business logic.
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 import time
 
-from config import HOUSE_PAYOUT_MULTIPLIER, JOPACOIN_WIN_REWARD
+from config import HOUSE_PAYOUT_MULTIPLIER, JOPACOIN_WIN_REWARD, LEVERAGE_TIERS, MAX_DEBT
 from repositories.bet_repository import BetRepository
 from repositories.player_repository import PlayerRepository
+
+if TYPE_CHECKING:
+    from services.garnishment_service import GarnishmentService
 
 
 class BettingService:
     """Encapsulates jopacoin wagering, timing, and house payouts."""
 
-    def __init__(self, bet_repo: BetRepository, player_repo: PlayerRepository):
+    def __init__(
+        self,
+        bet_repo: BetRepository,
+        player_repo: PlayerRepository,
+        garnishment_service: Optional["GarnishmentService"] = None,
+        leverage_tiers: Optional[List[int]] = None,
+        max_debt: Optional[int] = None,
+    ):
         self.bet_repo = bet_repo
         self.player_repo = player_repo
+        self.garnishment_service = garnishment_service
+        self.leverage_tiers = leverage_tiers if leverage_tiers is not None else LEVERAGE_TIERS
+        self.max_debt = max_debt if max_debt is not None else MAX_DEBT
 
     def _since_ts(self, pending_state: Optional[Dict[str, Any]]) -> Optional[int]:
         """Derive the start timestamp for the current pending match window."""
@@ -30,6 +43,7 @@ class BettingService:
         team: str,
         amount: int,
         pending_state: Dict[str, Any],
+        leverage: int = 1,
     ) -> None:
         """Place a bet after verifying timing and participant/team rules."""
         if pending_state is None:
@@ -50,6 +64,11 @@ class BettingService:
         if amount <= 0:
             raise ValueError("Bet amount must be positive.")
 
+        # Validate leverage tier
+        if leverage != 1 and leverage not in self.leverage_tiers:
+            valid_tiers = ", ".join(str(t) for t in self.leverage_tiers)
+            raise ValueError(f"Invalid leverage. Valid tiers: 1 (none), {valid_tiers}")
+
         # Prefer atomic placement using DB pending match payload (also enforces lock + team restriction).
         if hasattr(self.bet_repo, "place_bet_against_pending_match_atomic"):
             self.bet_repo.place_bet_against_pending_match_atomic(
@@ -58,6 +77,8 @@ class BettingService:
                 team=team,
                 amount=amount,
                 bet_time=now_ts,
+                leverage=leverage,
+                max_debt=self.max_debt,
             )
             return
 
@@ -73,28 +94,49 @@ class BettingService:
                 amount=amount,
                 bet_time=now_ts,
                 since_ts=int(since_ts),
+                leverage=leverage,
+                max_debt=self.max_debt,
             )
             return
 
-        # Fallback (older behavior)
+        # Fallback (older behavior) - doesn't support leverage
+        effective_bet = amount * leverage
         balance = self.player_repo.get_balance(discord_id)
-        if balance < amount:
-            raise ValueError("Insufficient jopacoin balance.")
+        if balance - effective_bet < -self.max_debt:
+            raise ValueError(f"Bet would exceed maximum debt limit of {self.max_debt} jopacoin.")
         if self.bet_repo.get_player_pending_bet(guild_id, discord_id, since_ts=since_ts):
             raise ValueError("You already have a bet on the current match.")
-        self.player_repo.add_balance(discord_id, -amount)
+        self.player_repo.add_balance(discord_id, -effective_bet)
         self.bet_repo.create_bet(guild_id, discord_id, team, amount, now_ts)
 
-    def award_participation(self, player_ids: List[int]) -> None:
-        """Give each participant 1 jopacoin for playing."""
+    def award_participation(self, player_ids: List[int]) -> Dict[int, Dict[str, int]]:
+        """
+        Give each participant 1 jopacoin for playing.
+
+        Returns dict of {discord_id: {gross, garnished, net}} for each player.
+        """
+        results: Dict[int, Dict[str, int]] = {}
         if not player_ids:
-            return
+            return results
+
+        # If garnishment service is available, use it for individual processing
+        if self.garnishment_service:
+            for pid in player_ids:
+                result = self.garnishment_service.add_income(pid, 1)
+                results[pid] = result
+            return results
+
+        # Otherwise, bulk add without garnishment tracking
         deltas = {pid: 1 for pid in player_ids}
         if hasattr(self.player_repo, "add_balance_many"):
             self.player_repo.add_balance_many(deltas)  # type: ignore[attr-defined]
-            return
+        else:
+            for pid in player_ids:
+                self.player_repo.add_balance(pid, 1)
+
         for pid in player_ids:
-            self.player_repo.add_balance(pid, 1)
+            results[pid] = {"gross": 1, "garnished": 0, "net": 1}
+        return results
 
     def settle_bets(
         self, match_id: int, guild_id: Optional[int], winning_team: str, pending_state: Dict[str, Any]
@@ -201,16 +243,34 @@ class BettingService:
 
         return distributions
 
-    def award_win_bonus(self, winning_ids: List[int]) -> None:
-        """Reward winners with additional jopacoins."""
+    def award_win_bonus(self, winning_ids: List[int]) -> Dict[int, Dict[str, int]]:
+        """
+        Reward winners with additional jopacoins.
+
+        Returns dict of {discord_id: {gross, garnished, net}} for each player.
+        """
+        results: Dict[int, Dict[str, int]] = {}
         if not winning_ids:
-            return
+            return results
+
+        # If garnishment service is available, use it for individual processing
+        if self.garnishment_service:
+            for pid in winning_ids:
+                result = self.garnishment_service.add_income(pid, JOPACOIN_WIN_REWARD)
+                results[pid] = result
+            return results
+
+        # Otherwise, bulk add without garnishment tracking
         deltas = {pid: JOPACOIN_WIN_REWARD for pid in winning_ids}
         if hasattr(self.player_repo, "add_balance_many"):
             self.player_repo.add_balance_many(deltas)  # type: ignore[attr-defined]
-            return
+        else:
+            for pid in winning_ids:
+                self.player_repo.add_balance(pid, JOPACOIN_WIN_REWARD)
+
         for pid in winning_ids:
-            self.player_repo.add_balance(pid, JOPACOIN_WIN_REWARD)
+            results[pid] = {"gross": JOPACOIN_WIN_REWARD, "garnished": 0, "net": JOPACOIN_WIN_REWARD}
+        return results
 
     def get_pot_odds(self, guild_id: Optional[int], pending_state: Optional[Dict[str, Any]] = None) -> Dict[str, int]:
         """Return current bet totals by team for odds calculation."""

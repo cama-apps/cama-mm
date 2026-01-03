@@ -282,6 +282,27 @@ class InfoCommands(commands.Cog):
                 shown = min(limit, len(players_with_stats))
                 embed.set_footer(text=f"Showing top {shown} of {len(players_with_stats)} players")
 
+            # Add Wall of Shame section for players with negative balances
+            debtors = [p for p in players_with_stats if p["jopacoin_balance"] < 0]
+            if debtors:
+                # Sort by most debt (most negative first)
+                debtors.sort(key=lambda x: x["jopacoin_balance"])
+                shame_text = ""
+                for i, debtor in enumerate(debtors[:10], 1):  # Cap at 10 debtors
+                    is_real_user = debtor["discord_id"] and debtor["discord_id"] > 0
+                    display_name = (
+                        f"<@{debtor['discord_id']}>"
+                        if is_real_user
+                        else debtor["username"]
+                    )
+                    shame_text += f"{i}. {display_name} - {debtor['jopacoin_balance']} {JOPACOIN_EMOTE}\n"
+
+                embed.add_field(
+                    name="Wall of Shame",
+                    value=shame_text,
+                    inline=False,
+                )
+
             await safe_followup(
                 interaction,
                 embed=embed,

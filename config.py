@@ -39,6 +39,16 @@ def _parse_bool(env_var: str, default: bool) -> bool:
     return raw.lower() in {"1", "true", "yes", "on"}
 
 
+def _parse_int_list(env_var: str, default: List[int]) -> List[int]:
+    raw = os.getenv(env_var)
+    if raw is None:
+        return default
+    try:
+        return [int(x.strip()) for x in raw.split(",") if x.strip()]
+    except ValueError:
+        return default
+
+
 DB_PATH = os.getenv("DB_PATH", "cama_shuffle.db")
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 ADMIN_USER_IDS: List[int] = []
@@ -71,5 +81,12 @@ JOPACOIN_MIN_BET = _parse_int("JOPACOIN_MIN_BET", 1)
 JOPACOIN_WIN_REWARD = _parse_int("JOPACOIN_WIN_REWARD", 2)
 BET_LOCK_SECONDS = _parse_int("BET_LOCK_SECONDS", 600)
 HOUSE_PAYOUT_MULTIPLIER = _parse_float("HOUSE_PAYOUT_MULTIPLIER", 1.0)
+
+# Leverage betting configuration
+LEVERAGE_TIERS = _parse_int_list("LEVERAGE_TIERS", [2, 3, 5])
+
+# Debt configuration
+MAX_DEBT = _parse_int("MAX_DEBT", 500)  # Floor: balance can't go below -MAX_DEBT
+GARNISHMENT_PERCENTAGE = _parse_float("GARNISHMENT_PERCENTAGE", 1.0)  # 100% of winnings go to debt
 
 

@@ -47,13 +47,15 @@ class BetRepository(BaseRepository, IBetRepository):
         amount: int,
         bet_time: int,
         since_ts: int,
+        leverage: int = 1,
+        max_debt: int = 500,
     ) -> int:
         """
-        Atomically place a bet:
+        Atomically place a bet with optional leverage:
         - ensure player has no pending bet for the current match window
-        - ensure player has sufficient balance
-        - debit balance
-        - insert bet row
+        - ensure player has sufficient balance (or won't exceed max debt with leverage)
+        - debit effective bet amount (amount * leverage)
+        - insert bet row with leverage
 
         This prevents race conditions where concurrent calls could double-spend.
         """
@@ -61,8 +63,12 @@ class BetRepository(BaseRepository, IBetRepository):
             raise ValueError("Bet amount must be positive.")
         if team not in self.VALID_TEAMS:
             raise ValueError("Invalid team selection.")
+        if leverage < 1:
+            raise ValueError("Leverage must be at least 1.")
 
+        effective_bet = amount * leverage
         normalized_guild = self._normalize_guild_id(guild_id)
+
         with self.connection() as conn:
             cursor = conn.cursor()
             # Take a write lock up-front so two concurrent bet attempts can't interleave.
@@ -89,8 +95,11 @@ class BetRepository(BaseRepository, IBetRepository):
                 raise ValueError("Player not found.")
 
             balance = int(row["balance"])
-            if balance < amount:
-                raise ValueError("Insufficient jopacoin balance.")
+
+            # Check debt floor - new balance after bet can't go below -max_debt
+            new_balance = balance - effective_bet
+            if new_balance < -max_debt:
+                raise ValueError(f"Bet would exceed maximum debt limit of {max_debt} jopacoin.")
 
             cursor.execute(
                 """
@@ -98,15 +107,15 @@ class BetRepository(BaseRepository, IBetRepository):
                 SET jopacoin_balance = COALESCE(jopacoin_balance, 0) - ?, updated_at = CURRENT_TIMESTAMP
                 WHERE discord_id = ?
                 """,
-                (amount, discord_id),
+                (effective_bet, discord_id),
             )
 
             cursor.execute(
                 """
-                INSERT INTO bets (guild_id, match_id, discord_id, team_bet_on, amount, bet_time)
-                VALUES (?, NULL, ?, ?, ?, ?)
+                INSERT INTO bets (guild_id, match_id, discord_id, team_bet_on, amount, bet_time, leverage)
+                VALUES (?, NULL, ?, ?, ?, ?, ?)
                 """,
-                (normalized_guild, discord_id, team, amount, bet_time),
+                (normalized_guild, discord_id, team, amount, bet_time, leverage),
             )
             return cursor.lastrowid
 
@@ -118,23 +127,29 @@ class BetRepository(BaseRepository, IBetRepository):
         team: str,
         amount: int,
         bet_time: int,
+        leverage: int = 1,
+        max_debt: int = 500,
     ) -> int:
         """
-        Atomically place a bet using the DB as the source of truth for the pending match.
+        Atomically place a bet with optional leverage using the DB as the source of truth.
 
         Uses `pending_matches.payload` to enforce:
         - there is an active pending match
         - betting is still open (bet_lock_until)
         - participants may only bet on their own team
         - per-match-window duplicate-bet prevention (shuffle_timestamp)
-        - sufficient balance, then debits + inserts bet in the same transaction
+        - sufficient balance or debt limit, then debits + inserts bet in the same transaction
         """
         if amount <= 0:
             raise ValueError("Bet amount must be positive.")
         if team not in self.VALID_TEAMS:
             raise ValueError("Invalid team selection.")
+        if leverage < 1:
+            raise ValueError("Leverage must be at least 1.")
 
+        effective_bet = amount * leverage
         normalized_guild = self._normalize_guild_id(guild_id)
+
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute("BEGIN IMMEDIATE")
@@ -188,8 +203,11 @@ class BetRepository(BaseRepository, IBetRepository):
                 raise ValueError("Player not found.")
 
             balance = int(prow["balance"])
-            if balance < amount:
-                raise ValueError("Insufficient jopacoin balance.")
+
+            # Check debt floor - new balance after bet can't go below -max_debt
+            new_balance = balance - effective_bet
+            if new_balance < -max_debt:
+                raise ValueError(f"Bet would exceed maximum debt limit of {max_debt} jopacoin.")
 
             cursor.execute(
                 """
@@ -197,14 +215,14 @@ class BetRepository(BaseRepository, IBetRepository):
                 SET jopacoin_balance = COALESCE(jopacoin_balance, 0) - ?, updated_at = CURRENT_TIMESTAMP
                 WHERE discord_id = ?
                 """,
-                (amount, discord_id),
+                (effective_bet, discord_id),
             )
             cursor.execute(
                 """
-                INSERT INTO bets (guild_id, match_id, discord_id, team_bet_on, amount, bet_time)
-                VALUES (?, NULL, ?, ?, ?, ?)
+                INSERT INTO bets (guild_id, match_id, discord_id, team_bet_on, amount, bet_time, leverage)
+                VALUES (?, NULL, ?, ?, ?, ?, ?)
                 """,
-                (normalized_guild, discord_id, team, amount, bet_time),
+                (normalized_guild, discord_id, team, amount, bet_time, leverage),
             )
             return cursor.lastrowid
 
@@ -221,7 +239,8 @@ class BetRepository(BaseRepository, IBetRepository):
             cursor = conn.cursor()
             cursor.execute(
                 """
-                SELECT bet_id, guild_id, match_id, discord_id, team_bet_on, amount, bet_time, created_at
+                SELECT bet_id, guild_id, match_id, discord_id, team_bet_on, amount, bet_time, created_at,
+                       COALESCE(leverage, 1) as leverage
                 FROM bets
                 WHERE guild_id = ? AND discord_id = ? AND match_id IS NULL
                 {ts_filter}
@@ -322,7 +341,7 @@ class BetRepository(BaseRepository, IBetRepository):
     ) -> Dict[str, List[Dict]]:
         """
         Atomically settle bets for the current match window:
-        - credit winners in players.jopacoin_balance
+        - credit winners in players.jopacoin_balance (based on effective bet with leverage)
         - tag all pending bets with match_id
 
         Args:
@@ -335,7 +354,7 @@ class BetRepository(BaseRepository, IBetRepository):
             cursor = conn.cursor()
             cursor.execute(
                 """
-                SELECT bet_id, discord_id, team_bet_on, amount
+                SELECT bet_id, discord_id, team_bet_on, amount, COALESCE(leverage, 1) as leverage
                 FROM bets
                 WHERE guild_id = ? AND match_id IS NULL AND bet_time >= ?
                 """,
@@ -376,15 +395,20 @@ class BetRepository(BaseRepository, IBetRepository):
     def _calculate_house_payouts(
         self, rows: List, winning_team: str, house_payout_multiplier: float
     ) -> tuple:
-        """Calculate house mode payouts (1:1)."""
+        """Calculate house mode payouts (1:1) with leverage support."""
         distributions: Dict[str, List[Dict]] = {"winners": [], "losers": []}
         balance_deltas: Dict[int, int] = {}
 
         for row in rows:
             bet = dict(row)
+            leverage = bet.get("leverage", 1) or 1
+            effective_bet = bet["amount"] * leverage
+
             entry = {
                 "discord_id": bet["discord_id"],
                 "amount": bet["amount"],
+                "leverage": leverage,
+                "effective_bet": effective_bet,
                 "team": bet["team_bet_on"],
             }
 
@@ -392,7 +416,8 @@ class BetRepository(BaseRepository, IBetRepository):
                 distributions["losers"].append(entry)
                 continue
 
-            payout = int(bet["amount"] * (1 + house_payout_multiplier))
+            # Payout based on effective bet (amount * leverage)
+            payout = int(effective_bet * (1 + house_payout_multiplier))
             balance_deltas[bet["discord_id"]] = balance_deltas.get(bet["discord_id"], 0) + payout
             entry["payout"] = payout
             distributions["winners"].append(entry)
@@ -400,24 +425,35 @@ class BetRepository(BaseRepository, IBetRepository):
         return distributions, balance_deltas
 
     def _calculate_pool_payouts(self, rows: List, winning_team: str) -> tuple:
-        """Calculate pool mode payouts (proportional from total pool)."""
+        """Calculate pool mode payouts (proportional from total pool) with leverage support."""
         distributions: Dict[str, List[Dict]] = {"winners": [], "losers": []}
         balance_deltas: Dict[int, int] = {}
 
-        # Calculate totals
-        total_pool = sum(row["amount"] for row in rows)
-        winner_pool = sum(row["amount"] for row in rows if row["team_bet_on"] == winning_team)
+        # Convert rows to dicts for .get() support
+        rows = [dict(row) for row in rows]
 
-        # Edge case: no bets on winning side - refund all bets
+        # Calculate totals using effective bets (amount * leverage)
+        total_pool = sum(row["amount"] * (row.get("leverage") or 1) for row in rows)
+        winner_pool = sum(
+            row["amount"] * (row.get("leverage") or 1)
+            for row in rows
+            if row["team_bet_on"] == winning_team
+        )
+
+        # Edge case: no bets on winning side - refund all effective bets
         if winner_pool == 0:
             for row in rows:
                 bet = dict(row)
+                leverage = bet.get("leverage", 1) or 1
+                effective_bet = bet["amount"] * leverage
                 balance_deltas[bet["discord_id"]] = (
-                    balance_deltas.get(bet["discord_id"], 0) + bet["amount"]
+                    balance_deltas.get(bet["discord_id"], 0) + effective_bet
                 )
                 distributions["losers"].append({
                     "discord_id": bet["discord_id"],
                     "amount": bet["amount"],
+                    "leverage": leverage,
+                    "effective_bet": effective_bet,
                     "team": bet["team_bet_on"],
                     "refunded": True,
                 })
@@ -427,9 +463,14 @@ class BetRepository(BaseRepository, IBetRepository):
 
         for row in rows:
             bet = dict(row)
+            leverage = bet.get("leverage", 1) or 1
+            effective_bet = bet["amount"] * leverage
+
             entry = {
                 "discord_id": bet["discord_id"],
                 "amount": bet["amount"],
+                "leverage": leverage,
+                "effective_bet": effective_bet,
                 "team": bet["team_bet_on"],
             }
 
@@ -437,8 +478,8 @@ class BetRepository(BaseRepository, IBetRepository):
                 distributions["losers"].append(entry)
                 continue
 
-            # Proportional payout: (bet_amount / winner_pool) * total_pool
-            payout = int((bet["amount"] / winner_pool) * total_pool)
+            # Proportional payout: (effective_bet / winner_pool) * total_pool
+            payout = int((effective_bet / winner_pool) * total_pool)
             balance_deltas[bet["discord_id"]] = balance_deltas.get(bet["discord_id"], 0) + payout
             entry["payout"] = payout
             entry["multiplier"] = multiplier
@@ -450,13 +491,15 @@ class BetRepository(BaseRepository, IBetRepository):
         """
         Atomically refund + delete pending bets for the current match window.
         Returns number of bets refunded.
+
+        Refunds the effective bet amount (amount * leverage).
         """
         normalized_guild = self._normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                SELECT discord_id, amount
+                SELECT discord_id, amount, COALESCE(leverage, 1) as leverage
                 FROM bets
                 WHERE guild_id = ? AND match_id IS NULL AND bet_time >= ?
                 """,
@@ -468,7 +511,9 @@ class BetRepository(BaseRepository, IBetRepository):
 
             refund_deltas: Dict[int, int] = {}
             for row in rows:
-                refund_deltas[row["discord_id"]] = refund_deltas.get(row["discord_id"], 0) + int(row["amount"])
+                # Refund the effective bet (amount * leverage)
+                effective_bet = int(row["amount"]) * int(row["leverage"])
+                refund_deltas[row["discord_id"]] = refund_deltas.get(row["discord_id"], 0) + effective_bet
 
             cursor.executemany(
                 """

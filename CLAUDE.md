@@ -43,7 +43,7 @@ services/                 # Application services orchestrating repos + domain
 infrastructure/
   schema_manager.py       # SQLite schema creation and migrations
 utils/                    # Helpers (embeds, formatting, rate limiting)
-tests/                    # 41 test files total
+tests/                    # Test files (unit, integration, e2e)
 ```
 
 **Key Patterns:**
@@ -56,7 +56,8 @@ tests/                    # 41 test files total
 - **BalancedShuffler** (`shuffler.py`): Team balancing algorithm minimizing skill difference using Glicko-2 ratings with role assignment optimization
 - **CamaRatingSystem** (`rating_system.py`): Converts OpenDota MMR (0-12000) to Glicko-2 scale (0-3000)
 - **MatchService** (`services/match_service.py`): Core orchestration for team shuffling and match recording
-- **BettingService** (`services/betting_service.py`): Jopacoin wagering with house multiplier payouts
+- **BettingService** (`services/betting_service.py`): Jopacoin wagering with two modes: house (1:1 fixed odds) or pool (parimutuel user-determined odds). Supports leverage betting (2x, 3x, 5x) with debt mechanics.
+- **GarnishmentService** (`services/garnishment_service.py`): Handles debt repayment by garnishing winnings when players have negative balances
 
 ## Configuration
 
@@ -68,6 +69,11 @@ tests/                    # 41 test files total
 - `OPENDOTA_API_KEY` - API key for higher rate limits
 - `LOBBY_READY_THRESHOLD` - Min players to shuffle (default: 10)
 - `OFF_ROLE_MULTIPLIER` / `OFF_ROLE_FLAT_PENALTY` - Role assignment tuning
+
+**Betting/Debt Configuration:**
+- `LEVERAGE_TIERS` - Comma-separated leverage options (default: `2,3,5`)
+- `MAX_DEBT` - Maximum debt from leveraged bets (default: 500)
+- `GARNISHMENT_PERCENTAGE` - Portion of winnings applied to debt (default: 1.0 = 100%)
 
 ## Testing
 
@@ -88,3 +94,6 @@ tests/                    # 41 test files total
 - **Rating System**: Uses Glicko-2, not simple MMR; initial RD=350.0, volatility=0.06
 - **5 Roles**: 1=carry, 2=mid, 3=offlane, 4=support, 5=hard_support (stored as strings)
 - **OpenDota Integration**: Rate-limited API client in `opendota_integration.py`
+- **Betting Modes**: `/shuffle betting_mode:` accepts "house" (default, 1:1 payouts) or "pool" (parimutuel, odds from bet distribution)
+- **Leverage Betting**: `/bet` supports leverage (2x, 3x, 5x) multiplying effective bet. Losses can push players into debt up to `MAX_DEBT`. Debtors have 100% of winnings garnished until debt is repaid.
+- **Debt Commands**: `/balance` shows debt info, `/paydebt` allows helping another player pay down their debt (requires positive balance)

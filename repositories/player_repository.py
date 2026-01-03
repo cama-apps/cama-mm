@@ -254,6 +254,190 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 [(delta, discord_id) for discord_id, delta in deltas_by_discord_id.items()],
             )
 
+    def add_balance_with_garnishment(
+        self, discord_id: int, amount: int, garnishment_rate: float
+    ) -> Dict[str, int]:
+        """
+        Add income with garnishment applied if player has debt.
+
+        When a player has a negative balance (debt), a portion of their income
+        is garnished to pay down the debt. The full amount is credited to the
+        balance, but the return value indicates how much was "garnished" vs "net".
+
+        Returns:
+            Dict with 'gross', 'garnished', 'net' amounts.
+            - gross: The original income amount
+            - garnished: Amount that went toward debt repayment
+            - net: Amount the player "feels" they received (gross - garnished)
+        """
+        if amount <= 0:
+            return {"gross": amount, "garnished": 0, "net": amount}
+
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("BEGIN IMMEDIATE")
+
+            cursor.execute(
+                "SELECT COALESCE(jopacoin_balance, 0) as balance FROM players WHERE discord_id = ?",
+                (discord_id,),
+            )
+            row = cursor.fetchone()
+            if not row:
+                raise ValueError("Player not found.")
+
+            current_balance = int(row["balance"])
+
+            if current_balance >= 0:
+                # No debt, full amount credited without garnishment
+                cursor.execute(
+                    """
+                    UPDATE players
+                    SET jopacoin_balance = jopacoin_balance + ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE discord_id = ?
+                    """,
+                    (amount, discord_id),
+                )
+                return {"gross": amount, "garnished": 0, "net": amount}
+
+            # Player has debt - apply garnishment
+            garnished = int(amount * garnishment_rate)
+            net = amount - garnished
+
+            # Full amount goes to balance (paying down debt + net income)
+            cursor.execute(
+                """
+                UPDATE players
+                SET jopacoin_balance = jopacoin_balance + ?, updated_at = CURRENT_TIMESTAMP
+                WHERE discord_id = ?
+                """,
+                (amount, discord_id),
+            )
+
+            return {"gross": amount, "garnished": garnished, "net": net}
+
+    def pay_debt_atomic(
+        self, from_discord_id: int, to_discord_id: int, amount: int
+    ) -> Dict[str, int]:
+        """
+        Atomically transfer jopacoin from one player to pay down another's debt.
+
+        Args:
+            from_discord_id: Player paying (must have positive balance)
+            to_discord_id: Player receiving (can be same as from for self-payment)
+            amount: Amount to transfer
+
+        Returns:
+            Dict with 'amount_paid', 'from_new_balance', 'to_new_balance'
+
+        Raises:
+            ValueError if insufficient funds, player not found, or recipient has no debt
+        """
+        if amount <= 0:
+            raise ValueError("Amount must be positive.")
+
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("BEGIN IMMEDIATE")
+
+            # Get sender balance
+            cursor.execute(
+                "SELECT COALESCE(jopacoin_balance, 0) as balance FROM players WHERE discord_id = ?",
+                (from_discord_id,),
+            )
+            from_row = cursor.fetchone()
+            if not from_row:
+                raise ValueError("Sender not found.")
+
+            from_balance = int(from_row["balance"])
+            if from_balance < amount:
+                raise ValueError(f"Insufficient balance. You have {from_balance} jopacoin.")
+
+            # Get recipient balance
+            cursor.execute(
+                "SELECT COALESCE(jopacoin_balance, 0) as balance FROM players WHERE discord_id = ?",
+                (to_discord_id,),
+            )
+            to_row = cursor.fetchone()
+            if not to_row:
+                raise ValueError("Recipient not found.")
+
+            to_balance = int(to_row["balance"])
+            if to_balance >= 0:
+                raise ValueError("Recipient has no debt to pay off.")
+
+            # Cap amount at the debt (don't overpay)
+            debt = abs(to_balance)
+            actual_amount = min(amount, debt)
+
+            # Deduct from sender
+            cursor.execute(
+                """
+                UPDATE players
+                SET jopacoin_balance = jopacoin_balance - ?, updated_at = CURRENT_TIMESTAMP
+                WHERE discord_id = ?
+                """,
+                (actual_amount, from_discord_id),
+            )
+
+            # Add to recipient (reduces debt)
+            cursor.execute(
+                """
+                UPDATE players
+                SET jopacoin_balance = jopacoin_balance + ?, updated_at = CURRENT_TIMESTAMP
+                WHERE discord_id = ?
+                """,
+                (actual_amount, to_discord_id),
+            )
+
+            return {
+                "amount_paid": actual_amount,
+                "from_new_balance": from_balance - actual_amount,
+                "to_new_balance": to_balance + actual_amount,
+            }
+
+    def get_players_with_negative_balance(self) -> List[Dict]:
+        """
+        Get all players with negative balance for interest application.
+
+        Returns:
+            List of dicts with 'discord_id' and 'balance' for each debtor.
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT discord_id, jopacoin_balance FROM players WHERE jopacoin_balance < 0"
+            )
+            return [
+                {"discord_id": row["discord_id"], "balance": row["jopacoin_balance"]}
+                for row in cursor.fetchall()
+            ]
+
+    def apply_interest_bulk(self, updates: List[Tuple[int, int]]) -> int:
+        """
+        Apply interest charges to multiple players in a single transaction.
+
+        Interest is subtracted from balance (making debt larger/more negative).
+
+        Args:
+            updates: List of (discord_id, interest_amount) tuples
+
+        Returns:
+            Number of rows updated.
+        """
+        if not updates:
+            return 0
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.executemany(
+                """
+                UPDATE players
+                SET jopacoin_balance = jopacoin_balance - ?, updated_at = CURRENT_TIMESTAMP
+                WHERE discord_id = ?
+                """,
+                [(interest, discord_id) for discord_id, interest in updates],
+            )
+            return cursor.rowcount
+
     def increment_wins(self, discord_id: int) -> None:
         """Increment player's win count."""
         with self.connection() as conn:
