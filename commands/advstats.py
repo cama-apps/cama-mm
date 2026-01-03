@@ -1,5 +1,5 @@
 """
-Advanced statistics commands: /advstats, /matchup
+Advanced statistics commands: /advstats, /matchup, /rebuildpairings
 """
 
 import logging
@@ -10,6 +10,7 @@ from discord.ext import commands
 from discord import app_commands
 
 from repositories.interfaces import IPairingsRepository
+from services.permissions import has_admin_permission
 from utils.interaction_safety import safe_defer, safe_followup
 
 logger = logging.getLogger('cama_bot.commands.advstats')
@@ -245,6 +246,42 @@ class AdvancedStatsCommands(commands.Cog):
             embed.add_field(name="As Opponents", value="Never played against each other", inline=False)
 
         await interaction.followup.send(embed=embed)
+
+    @app_commands.command(name="rebuildpairings", description="Rebuild pairwise stats from match history (Admin only)")
+    async def rebuildpairings(self, interaction: discord.Interaction):
+        """Admin command to rebuild all pairwise statistics from match history."""
+        logger.info(
+            "Rebuildpairings command: User %s (%s)",
+            interaction.user.id,
+            interaction.user,
+        )
+
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+
+        if not has_admin_permission(interaction):
+            await safe_followup(
+                interaction,
+                content="This command is admin-only.",
+                ephemeral=True,
+            )
+            return
+
+        try:
+            count = self.pairings_repo.rebuild_all_pairings()
+            await safe_followup(
+                interaction,
+                content=f"Rebuilt pairwise statistics. {count} pairings calculated from match history.",
+                ephemeral=True,
+            )
+            logger.info(f"Rebuildpairings: rebuilt {count} pairings")
+        except Exception as e:
+            logger.error(f"Error rebuilding pairings: {e}", exc_info=True)
+            await safe_followup(
+                interaction,
+                content=f"Error rebuilding pairings: {e}",
+                ephemeral=True,
+            )
 
 
 async def setup(bot: commands.Bot):
