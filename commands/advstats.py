@@ -27,12 +27,14 @@ class AdvancedStatsCommands(commands.Cog):
     @app_commands.describe(
         user="Player to view stats for (defaults to yourself)",
         min_games="Minimum games together/against to show (default: 3)",
+        limit="Number of players to show per category (default: 5, max: 15)",
     )
     async def advstats(
         self,
         interaction: discord.Interaction,
         user: Optional[discord.Member] = None,
         min_games: int = 3,
+        limit: int = 5,
     ):
         """View pairwise statistics: best/worst teammates, best/worst matchups."""
         logger.info(
@@ -45,6 +47,9 @@ class AdvancedStatsCommands(commands.Cog):
 
         target_id = user.id if user else interaction.user.id
         target_name = user.display_name if user else interaction.user.display_name
+
+        # Clamp limit to reasonable bounds
+        limit = max(1, min(limit, 15))
 
         # Verify player is registered
         player = self.player_repo.get_by_id(target_id)
@@ -62,7 +67,7 @@ class AdvancedStatsCommands(commands.Cog):
         )
 
         # Best Teammates
-        best_teammates = self.pairings_repo.get_best_teammates(target_id, min_games=min_games, limit=5)
+        best_teammates = self.pairings_repo.get_best_teammates(target_id, min_games=min_games, limit=limit)
         if best_teammates:
             lines = []
             for i, tm in enumerate(best_teammates, 1):
@@ -77,10 +82,10 @@ class AdvancedStatsCommands(commands.Cog):
                 inline=True,
             )
         else:
-            embed.add_field(name="Best Teammates", value=f"Need {min_games}+ games", inline=True)
+            embed.add_field(name="Best Teammates", value="No winning records yet", inline=True)
 
         # Worst Teammates
-        worst_teammates = self.pairings_repo.get_worst_teammates(target_id, min_games=min_games, limit=5)
+        worst_teammates = self.pairings_repo.get_worst_teammates(target_id, min_games=min_games, limit=limit)
         if worst_teammates:
             lines = []
             for i, tm in enumerate(worst_teammates, 1):
@@ -95,13 +100,13 @@ class AdvancedStatsCommands(commands.Cog):
                 inline=True,
             )
         else:
-            embed.add_field(name="Worst Teammates", value=f"Need {min_games}+ games", inline=True)
+            embed.add_field(name="Worst Teammates", value="No losing records yet", inline=True)
 
         # Spacer
         embed.add_field(name="\u200b", value="\u200b", inline=True)
 
         # Best Matchups (dominates)
-        best_matchups = self.pairings_repo.get_best_matchups(target_id, min_games=min_games, limit=5)
+        best_matchups = self.pairings_repo.get_best_matchups(target_id, min_games=min_games, limit=limit)
         if best_matchups:
             lines = []
             for i, m in enumerate(best_matchups, 1):
@@ -116,10 +121,10 @@ class AdvancedStatsCommands(commands.Cog):
                 inline=True,
             )
         else:
-            embed.add_field(name="Dominates", value=f"Need {min_games}+ games", inline=True)
+            embed.add_field(name="Dominates", value="No winning matchups yet", inline=True)
 
         # Worst Matchups (struggles against)
-        worst_matchups = self.pairings_repo.get_worst_matchups(target_id, min_games=min_games, limit=5)
+        worst_matchups = self.pairings_repo.get_worst_matchups(target_id, min_games=min_games, limit=limit)
         if worst_matchups:
             lines = []
             for i, m in enumerate(worst_matchups, 1):
@@ -134,9 +139,86 @@ class AdvancedStatsCommands(commands.Cog):
                 inline=True,
             )
         else:
-            embed.add_field(name="Struggles Against", value=f"Need {min_games}+ games", inline=True)
+            embed.add_field(name="Struggles Against", value="No losing matchups yet", inline=True)
 
-        embed.set_footer(text=f"Minimum {min_games} games required for pairwise stats")
+        # Spacer for row alignment
+        embed.add_field(name="\u200b", value="\u200b", inline=True)
+
+        # Most Played With
+        most_played_with = self.pairings_repo.get_most_played_with(target_id, min_games=min_games, limit=limit)
+        if most_played_with:
+            lines = []
+            for i, tm in enumerate(most_played_with, 1):
+                teammate_name = self._get_player_mention(tm["teammate_id"])
+                wins = tm["wins_together"]
+                games = tm["games_together"]
+                rate = tm["win_rate"] * 100
+                lines.append(f"{i}. {teammate_name} - {games}g ({rate:.0f}%)")
+            embed.add_field(
+                name="Most Played With",
+                value="\n".join(lines),
+                inline=True,
+            )
+        else:
+            embed.add_field(name="Most Played With", value="No data yet", inline=True)
+
+        # Most Played Against
+        most_played_against = self.pairings_repo.get_most_played_against(target_id, min_games=min_games, limit=limit)
+        if most_played_against:
+            lines = []
+            for i, m in enumerate(most_played_against, 1):
+                opponent_name = self._get_player_mention(m["opponent_id"])
+                wins = m["wins_against"]
+                games = m["games_against"]
+                rate = m["win_rate"] * 100
+                lines.append(f"{i}. {opponent_name} - {games}g ({rate:.0f}%)")
+            embed.add_field(
+                name="Most Played Against",
+                value="\n".join(lines),
+                inline=True,
+            )
+        else:
+            embed.add_field(name="Most Played Against", value="No data yet", inline=True)
+
+        # Spacer for row alignment
+        embed.add_field(name="\u200b", value="\u200b", inline=True)
+
+        # Evenly Matched Teammates (50% win rate)
+        even_teammates = self.pairings_repo.get_evenly_matched_teammates(target_id, min_games=min_games, limit=limit)
+        if even_teammates:
+            lines = []
+            for i, tm in enumerate(even_teammates, 1):
+                teammate_name = self._get_player_mention(tm["teammate_id"])
+                wins = tm["wins_together"]
+                games = tm["games_together"]
+                lines.append(f"{i}. {teammate_name} ({wins}W/{games - wins}L)")
+            embed.add_field(
+                name="Evenly Matched (Teammates)",
+                value="\n".join(lines),
+                inline=True,
+            )
+
+        # Evenly Matched Opponents (50% win rate)
+        even_opponents = self.pairings_repo.get_evenly_matched_opponents(target_id, min_games=min_games, limit=limit)
+        if even_opponents:
+            lines = []
+            for i, m in enumerate(even_opponents, 1):
+                opponent_name = self._get_player_mention(m["opponent_id"])
+                wins = m["wins_against"]
+                games = m["games_against"]
+                lines.append(f"{i}. {opponent_name} ({wins}W/{games - wins}L)")
+            embed.add_field(
+                name="Evenly Matched (Opponents)",
+                value="\n".join(lines),
+                inline=True,
+            )
+
+        # Get totals for footer
+        counts = self.pairings_repo.get_pairing_counts(target_id, min_games=min_games)
+        footer_parts = [f"Min {min_games} games"]
+        if counts["unique_teammates"] > 0 or counts["unique_opponents"] > 0:
+            footer_parts.append(f"{counts['unique_teammates']} teammates, {counts['unique_opponents']} opponents tracked")
+        embed.set_footer(text=" | ".join(footer_parts))
         await interaction.followup.send(embed=embed)
 
     def _get_player_mention(self, discord_id: int) -> str:

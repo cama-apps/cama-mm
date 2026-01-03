@@ -240,6 +240,31 @@ class IPairingsRepository(ABC):
         ...
 
     @abstractmethod
+    def get_most_played_with(self, discord_id: int, min_games: int = 3, limit: int = 5) -> List[Dict]:
+        """Get teammates sorted by most games played together."""
+        ...
+
+    @abstractmethod
+    def get_most_played_against(self, discord_id: int, min_games: int = 3, limit: int = 5) -> List[Dict]:
+        """Get opponents sorted by most games played against."""
+        ...
+
+    @abstractmethod
+    def get_evenly_matched_teammates(self, discord_id: int, min_games: int = 3, limit: int = 5) -> List[Dict]:
+        """Get teammates with exactly 50% win rate."""
+        ...
+
+    @abstractmethod
+    def get_evenly_matched_opponents(self, discord_id: int, min_games: int = 3, limit: int = 5) -> List[Dict]:
+        """Get opponents with exactly 50% win rate."""
+        ...
+
+    @abstractmethod
+    def get_pairing_counts(self, discord_id: int, min_games: int = 1) -> Dict:
+        """Get total counts of unique teammates and opponents."""
+        ...
+
+    @abstractmethod
     def get_head_to_head(self, player1_id: int, player2_id: int) -> Optional[Dict]:
         """Get detailed stats between two specific players."""
         ...
