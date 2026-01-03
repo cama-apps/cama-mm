@@ -46,7 +46,9 @@ class InfoCommands(commands.Cog):
             value=(
                 "`/register` - Register yourself as a player\n"
                 "`/setroles` - Set your preferred roles (1-5)\n"
-                "`/stats` - View your personal statistics"
+                "`/stats` - View your personal statistics\n"
+                "`/advstats` - View pairwise stats (best/worst teammates & matchups)\n"
+                "`/matchup` - Head-to-head comparison between two players"
             ),
             inline=False
         )

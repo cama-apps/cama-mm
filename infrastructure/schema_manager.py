@@ -146,6 +146,10 @@ class SchemaManager:
             ("recreate_bets_table_with_guild_id", self._migration_recreate_bets_table_with_guild_id),
             ("add_indexes_v1", self._migration_add_indexes_v1),
             ("add_bet_leverage_column", self._migration_add_bet_leverage_column),
+            ("create_player_pairings_table", self._migration_create_player_pairings_table),
+            ("create_guild_config_table", self._migration_create_guild_config_table),
+            ("add_steam_id_to_players", self._migration_add_steam_id_to_players),
+            ("add_match_enrichment_columns", self._migration_add_match_enrichment_columns),
         ]
 
     # --- Migrations ---
@@ -273,4 +277,76 @@ class SchemaManager:
     def _migration_add_bet_leverage_column(self, cursor) -> None:
         """Add leverage column to bets table for leverage betting."""
         self._add_column_if_not_exists(cursor, "bets", "leverage", "INTEGER DEFAULT 1")
+
+    def _migration_create_player_pairings_table(self, cursor) -> None:
+        """Create table for pairwise player statistics."""
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS player_pairings (
+                player1_id INTEGER NOT NULL,
+                player2_id INTEGER NOT NULL,
+                games_together INTEGER DEFAULT 0,
+                wins_together INTEGER DEFAULT 0,
+                games_against INTEGER DEFAULT 0,
+                player1_wins_against INTEGER DEFAULT 0,
+                last_match_id INTEGER,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (player1_id, player2_id),
+                FOREIGN KEY (player1_id) REFERENCES players(discord_id),
+                FOREIGN KEY (player2_id) REFERENCES players(discord_id),
+                FOREIGN KEY (last_match_id) REFERENCES matches(match_id),
+                CHECK (player1_id < player2_id)
+            )
+            """
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_player_pairings_player1 ON player_pairings(player1_id)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_player_pairings_player2 ON player_pairings(player2_id)"
+        )
+
+    def _migration_create_guild_config_table(self, cursor) -> None:
+        """Create table for per-guild configuration."""
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS guild_config (
+                guild_id INTEGER PRIMARY KEY,
+                league_id INTEGER,
+                auto_enrich_matches INTEGER DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+
+    def _migration_add_steam_id_to_players(self, cursor) -> None:
+        """Add steam_id column for direct Valve API correlation."""
+        self._add_column_if_not_exists(cursor, "players", "steam_id", "INTEGER")
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_players_steam_id ON players(steam_id)"
+        )
+
+    def _migration_add_match_enrichment_columns(self, cursor) -> None:
+        """Add columns for Valve API match enrichment."""
+        # Match-level enrichment
+        self._add_column_if_not_exists(cursor, "matches", "valve_match_id", "INTEGER")
+        self._add_column_if_not_exists(cursor, "matches", "duration_seconds", "INTEGER")
+        self._add_column_if_not_exists(cursor, "matches", "radiant_score", "INTEGER")
+        self._add_column_if_not_exists(cursor, "matches", "dire_score", "INTEGER")
+        self._add_column_if_not_exists(cursor, "matches", "game_mode", "INTEGER")
+        self._add_column_if_not_exists(cursor, "matches", "enrichment_data", "TEXT")
+
+        # Per-participant enrichment
+        self._add_column_if_not_exists(cursor, "match_participants", "hero_id", "INTEGER")
+        self._add_column_if_not_exists(cursor, "match_participants", "kills", "INTEGER")
+        self._add_column_if_not_exists(cursor, "match_participants", "deaths", "INTEGER")
+        self._add_column_if_not_exists(cursor, "match_participants", "assists", "INTEGER")
+        self._add_column_if_not_exists(cursor, "match_participants", "last_hits", "INTEGER")
+        self._add_column_if_not_exists(cursor, "match_participants", "denies", "INTEGER")
+        self._add_column_if_not_exists(cursor, "match_participants", "gpm", "INTEGER")
+        self._add_column_if_not_exists(cursor, "match_participants", "xpm", "INTEGER")
+        self._add_column_if_not_exists(cursor, "match_participants", "hero_damage", "INTEGER")
+        self._add_column_if_not_exists(cursor, "match_participants", "tower_damage", "INTEGER")
+        self._add_column_if_not_exists(cursor, "match_participants", "net_worth", "INTEGER")
 

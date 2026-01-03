@@ -201,3 +201,68 @@ class ILobbyRepository(ABC):
     def clear_lobby_state(self, lobby_id: int) -> None:
         ...
 
+
+class IPairingsRepository(ABC):
+    @abstractmethod
+    def update_pairings_for_match(
+        self,
+        match_id: int,
+        team1_ids: List[int],
+        team2_ids: List[int],
+        winning_team: int,
+    ) -> None:
+        """Update pairwise statistics for all player pairs in a match."""
+        ...
+
+    @abstractmethod
+    def get_pairings_for_player(self, discord_id: int) -> List[Dict]:
+        """Get all pairwise stats involving a player."""
+        ...
+
+    @abstractmethod
+    def get_best_teammates(self, discord_id: int, min_games: int = 3, limit: int = 5) -> List[Dict]:
+        """Get players with highest win rate when on same team."""
+        ...
+
+    @abstractmethod
+    def get_worst_teammates(self, discord_id: int, min_games: int = 3, limit: int = 5) -> List[Dict]:
+        """Get players with lowest win rate when on same team."""
+        ...
+
+    @abstractmethod
+    def get_best_matchups(self, discord_id: int, min_games: int = 3, limit: int = 5) -> List[Dict]:
+        """Get players with highest win rate when on opposing teams."""
+        ...
+
+    @abstractmethod
+    def get_worst_matchups(self, discord_id: int, min_games: int = 3, limit: int = 5) -> List[Dict]:
+        """Get players with lowest win rate when on opposing teams."""
+        ...
+
+    @abstractmethod
+    def get_head_to_head(self, player1_id: int, player2_id: int) -> Optional[Dict]:
+        """Get detailed stats between two specific players."""
+        ...
+
+    @abstractmethod
+    def rebuild_all_pairings(self) -> int:
+        """Recalculate all pairings from match history. Returns count of pairings updated."""
+        ...
+
+
+class IGuildConfigRepository(ABC):
+    @abstractmethod
+    def get_config(self, guild_id: int) -> Optional[Dict]:
+        """Get configuration for a guild."""
+        ...
+
+    @abstractmethod
+    def set_league_id(self, guild_id: int, league_id: int) -> None:
+        """Set the league ID for a guild."""
+        ...
+
+    @abstractmethod
+    def get_league_id(self, guild_id: int) -> Optional[int]:
+        """Get the league ID for a guild."""
+        ...
+

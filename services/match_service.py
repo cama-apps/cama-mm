@@ -13,7 +13,7 @@ from shuffler import BalancedShuffler
 from domain.models.team import Team
 from domain.models.player import Player
 from domain.services.team_balancing_service import TeamBalancingService
-from repositories.interfaces import IPlayerRepository, IMatchRepository
+from repositories.interfaces import IPlayerRepository, IMatchRepository, IPairingsRepository
 from services.betting_service import BettingService
 
 
@@ -29,6 +29,7 @@ class MatchService:
         *,
         use_glicko: bool = True,
         betting_service: Optional[BettingService] = None,
+        pairings_repo: Optional[IPairingsRepository] = None,
     ):
         """
         Initialize MatchService with required repository dependencies.
@@ -38,6 +39,7 @@ class MatchService:
             match_repo: Repository for match data access
             use_glicko: Whether to use Glicko rating system
             betting_service: Optional betting service for wager handling
+            pairings_repo: Optional repository for pairwise player statistics
         """
         self.player_repo = player_repo
         self.match_repo = match_repo
@@ -52,6 +54,7 @@ class MatchService:
         )
         self._last_shuffle_by_guild: Dict[int, Dict] = {}
         self.betting_service = betting_service
+        self.pairings_repo = pairings_repo
         # Guard against concurrent finalizations per guild
         self._recording_lock = threading.Lock()
         self._recording_in_progress: Set[int] = set()
@@ -525,6 +528,15 @@ class MatchService:
                 for pid, rating, rd, vol in updates:
                     self.player_repo.update_glicko_rating(pid, rating, rd, vol)
                     updated_count += 1
+
+            # Update pairwise player statistics
+            if self.pairings_repo:
+                self.pairings_repo.update_pairings_for_match(
+                    match_id=match_id,
+                    team1_ids=radiant_team_ids,
+                    team2_ids=dire_team_ids,
+                    winning_team=1 if winning_team == "radiant" else 2,
+                )
 
             # Clear state after successful record
             self.clear_last_shuffle(guild_id)

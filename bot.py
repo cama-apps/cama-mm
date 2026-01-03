@@ -67,6 +67,8 @@ from repositories.bet_repository import BetRepository
 from repositories.match_repository import MatchRepository
 from repositories.player_repository import PlayerRepository
 from repositories.lobby_repository import LobbyRepository
+from repositories.pairings_repository import PairingsRepository
+from repositories.guild_config_repository import GuildConfigRepository
 from services.player_service import PlayerService
 from services.lobby_service import LobbyService
 from services.match_service import MatchService
@@ -241,6 +243,8 @@ def _init_services():
     player_repo = PlayerRepository(DB_PATH)
     bet_repo = BetRepository(DB_PATH)
     match_repo = MatchRepository(DB_PATH)
+    pairings_repo = PairingsRepository(DB_PATH)
+    guild_config_repo = GuildConfigRepository(DB_PATH)
 
     # Create garnishment service for debt repayment
     garnishment_service = GarnishmentService(player_repo, GARNISHMENT_PERCENTAGE)
@@ -268,6 +272,7 @@ def _init_services():
         match_repo=match_repo,
         use_glicko=USE_GLICKO,
         betting_service=betting_service,
+        pairings_repo=pairings_repo,
     )
 
     # Expose on bot for cogs
@@ -277,6 +282,8 @@ def _init_services():
     bot.lobby_service = lobby_service
     bot.match_service = match_service
     bot.player_repo = player_repo
+    bot.pairings_repo = pairings_repo
+    bot.guild_config_repo = guild_config_repo
     bot.role_emojis = ROLE_EMOJIS
     bot.role_names = ROLE_NAMES
     bot.format_role_display = format_role_display
@@ -299,6 +306,7 @@ EXTENSIONS = [
     "commands.match",
     "commands.admin",
     "commands.betting",
+    "commands.advstats",
 ]
 
 
