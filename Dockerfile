@@ -14,5 +14,11 @@ RUN uv sync --frozen --no-dev
 # Copy application code
 COPY . .
 
+# Create non-root user for security
+RUN useradd --create-home --shell /bin/bash --uid 1001 appuser && \
+    chown -R appuser:appuser /app
+
+USER appuser
+
 # Run the bot
 CMD ["uv", "run", "--no-sync", "python", "bot.py"]

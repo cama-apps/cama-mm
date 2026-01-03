@@ -35,4 +35,5 @@ markers = [
 filterwarnings = [
     "ignore:'asyncio\\.iscoroutinefunction' is deprecated:DeprecationWarning:discord\\..*",
     "ignore:coroutine.*AsyncMockMixin._execute_mock_call.*was never awaited:RuntimeWarning",
+    "ignore:'audioop' is deprecated:DeprecationWarning:discord\\.player",
 ]
