@@ -2,6 +2,7 @@
 Handles betting-related business logic.
 """
 
+import math
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 import time
 
@@ -234,7 +235,8 @@ class BettingService:
                 continue
 
             # Proportional payout: (bet_amount / winner_pool) * total_pool
-            payout = int((bet["amount"] / winner_pool) * total_pool)
+            # Round up to ensure winners never lose fractional coins
+            payout = math.ceil((bet["amount"] / winner_pool) * total_pool)
             multiplier = total_pool / winner_pool
             self.player_repo.add_balance(bet["discord_id"], payout)
             outcome_entry["payout"] = payout

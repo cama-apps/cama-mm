@@ -5,6 +5,7 @@ Repository for managing betting data.
 from __future__ import annotations
 
 import json
+import math
 from typing import Dict, List, Optional
 
 from repositories.base_repository import BaseRepository
@@ -96,10 +97,16 @@ class BetRepository(BaseRepository, IBetRepository):
 
             balance = int(row["balance"])
 
-            # Check debt floor - new balance after bet can't go below -max_debt
+            # Balance check depends on leverage:
+            # - No leverage (1x): cannot go negative, must have enough balance
+            # - With leverage (>1x): can go into debt up to -max_debt
             new_balance = balance - effective_bet
-            if new_balance < -max_debt:
-                raise ValueError(f"Bet would exceed maximum debt limit of {max_debt} jopacoin.")
+            if leverage == 1:
+                if balance < amount:
+                    raise ValueError(f"Insufficient balance. You have {balance} jopacoin.")
+            else:
+                if new_balance < -max_debt:
+                    raise ValueError(f"Bet would exceed maximum debt limit of {max_debt} jopacoin.")
 
             cursor.execute(
                 """
@@ -204,10 +211,16 @@ class BetRepository(BaseRepository, IBetRepository):
 
             balance = int(prow["balance"])
 
-            # Check debt floor - new balance after bet can't go below -max_debt
+            # Balance check depends on leverage:
+            # - No leverage (1x): cannot go negative, must have enough balance
+            # - With leverage (>1x): can go into debt up to -max_debt
             new_balance = balance - effective_bet
-            if new_balance < -max_debt:
-                raise ValueError(f"Bet would exceed maximum debt limit of {max_debt} jopacoin.")
+            if leverage == 1:
+                if balance < amount:
+                    raise ValueError(f"Insufficient balance. You have {balance} jopacoin.")
+            else:
+                if new_balance < -max_debt:
+                    raise ValueError(f"Bet would exceed maximum debt limit of {max_debt} jopacoin.")
 
             cursor.execute(
                 """
@@ -482,7 +495,8 @@ class BetRepository(BaseRepository, IBetRepository):
                 continue
 
             # Proportional payout: (effective_bet / winner_pool) * total_pool
-            payout = int((effective_bet / winner_pool) * total_pool)
+            # Round up to ensure winners never lose fractional coins
+            payout = math.ceil((effective_bet / winner_pool) * total_pool)
             balance_deltas[bet["discord_id"]] = balance_deltas.get(bet["discord_id"], 0) + payout
             entry["payout"] = payout
             entry["multiplier"] = multiplier

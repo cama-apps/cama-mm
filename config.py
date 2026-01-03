@@ -79,7 +79,7 @@ SHUFFLER_SETTINGS: Dict[str, Any] = {
 JOPACOIN_PER_GAME = _parse_int("JOPACOIN_PER_GAME", 1)
 JOPACOIN_MIN_BET = _parse_int("JOPACOIN_MIN_BET", 1)
 JOPACOIN_WIN_REWARD = _parse_int("JOPACOIN_WIN_REWARD", 2)
-BET_LOCK_SECONDS = _parse_int("BET_LOCK_SECONDS", 600)
+BET_LOCK_SECONDS = _parse_int("BET_LOCK_SECONDS", 900)  # 15 minutes
 HOUSE_PAYOUT_MULTIPLIER = _parse_float("HOUSE_PAYOUT_MULTIPLIER", 1.0)
 
 # Leverage betting configuration

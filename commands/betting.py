@@ -73,17 +73,29 @@ class BettingCommands(commands.Cog):
 
             embed_dict = embed.to_dict()
             fields = embed_dict.get("fields", [])
+
+            # Known wager field names to look for
+            wager_field_names = {"💰 Pool Betting", "💰 House Betting (1:1)", "💰 Betting"}
+
+            # Find and update wager field, remove duplicates
             updated = False
+            new_fields = []
             for field in fields:
-                # Match either old or new field name patterns
-                if field.get("name", "").startswith("💰") and "Betting" in field.get("name", ""):
-                    field["name"] = field_name
-                    field["value"] = field_value
-                    updated = True
-                    break
+                fname = field.get("name", "")
+                if fname in wager_field_names:
+                    if not updated:
+                        # Update the first matching wager field
+                        field["name"] = field_name
+                        field["value"] = field_value
+                        new_fields.append(field)
+                        updated = True
+                    # Skip duplicates (don't add them to new_fields)
+                else:
+                    new_fields.append(field)
+
             if not updated:
-                fields.append({"name": field_name, "value": field_value, "inline": False})
-            embed_dict["fields"] = fields
+                new_fields.append({"name": field_name, "value": field_value, "inline": False})
+            embed_dict["fields"] = new_fields
 
             new_embed = discord.Embed.from_dict(embed_dict)
             await message.edit(embed=new_embed, allowed_mentions=discord.AllowedMentions.none())
@@ -345,16 +357,16 @@ class BettingCommands(commands.Cog):
                 ephemeral=True,
             )
 
-    @app_commands.command(name="paydebt", description="Pay off debt (your own or help another player)")
+    @app_commands.command(name="paydebt", description="Help another player pay off their debt")
     @app_commands.describe(
-        amount="Amount of jopacoin to pay toward debt",
-        player="Player whose debt to pay (leave empty to pay your own)",
+        player="Player whose debt to pay",
+        amount="Amount of jopacoin to pay toward their debt",
     )
     async def paydebt(
         self,
         interaction: discord.Interaction,
+        player: discord.Member,
         amount: int,
-        player: discord.Member = None,
     ):
         guild = interaction.guild if interaction.guild else None
         rl_gid = guild.id if guild else 0
@@ -372,33 +384,22 @@ class BettingCommands(commands.Cog):
             )
             return
 
-        # Paying another player's debt should be public; paying your own is private
-        is_helping_other = player is not None and player.id != interaction.user.id
-        if not await safe_defer(interaction, ephemeral=not is_helping_other):
+        # Always public since helping another player
+        if not await safe_defer(interaction, ephemeral=False):
             return
-
-        target_id = player.id if player else interaction.user.id
 
         try:
             result = self.player_service.player_repo.pay_debt_atomic(
                 from_discord_id=interaction.user.id,
-                to_discord_id=target_id,
+                to_discord_id=player.id,
                 amount=amount,
             )
 
-            if player and player.id != interaction.user.id:
-                # Send public announcement for helping another player
-                await interaction.followup.send(
-                    f"{interaction.user.mention} paid {result['amount_paid']} {JOPACOIN_EMOTE} "
-                    f"toward {player.mention}'s debt!",
-                    ephemeral=False,
-                )
-            else:
-                await interaction.followup.send(
-                    f"Paid {result['amount_paid']} {JOPACOIN_EMOTE} toward your debt.\n"
-                    f"New balance: {result['to_new_balance']} {JOPACOIN_EMOTE}",
-                    ephemeral=True,
-                )
+            await interaction.followup.send(
+                f"{interaction.user.mention} paid {result['amount_paid']} {JOPACOIN_EMOTE} "
+                f"toward {player.mention}'s debt!",
+                ephemeral=False,
+            )
         except ValueError as exc:
             await interaction.followup.send(f"{exc}", ephemeral=True)
 

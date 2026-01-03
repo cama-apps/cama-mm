@@ -212,7 +212,7 @@ class MatchCommands(commands.Cog):
                 f"`/bet <Radiant/Dire> <amount>` (min {JOPACOIN_MIN_BET} {JOPACOIN_EMOTE}). "
                 "1:1 payouts."
             )
-        embed.add_field(name="💰 Betting", value=betting_note, inline=False)
+        embed.add_field(name="📝 How to Bet", value=betting_note, inline=False)
 
         # Current wagers display
         betting_service = getattr(self.bot, "betting_service", None)
@@ -353,21 +353,29 @@ class MatchCommands(commands.Cog):
         if winners:
             distribution_lines.append("🏆 Winners:")
             for entry in winners:
+                leverage = entry.get("leverage", 1) or 1
                 multiplier = entry.get("multiplier")
+                leverage_text = f" at {leverage}x" if leverage > 1 else ""
                 if multiplier:
                     # Pool mode - show multiplier
                     distribution_lines.append(
                         f"<@{entry['discord_id']}> won {entry['payout']} {JOPACOIN_EMOTE} "
-                        f"(bet {entry['amount']}, {multiplier:.2f}x)"
+                        f"(bet {entry['amount']}{leverage_text}, {multiplier:.2f}x)"
                     )
                 else:
-                    # House mode - original format
+                    # House mode
                     distribution_lines.append(
-                        f"<@{entry['discord_id']}> won {entry['payout']} {JOPACOIN_EMOTE} (bet {entry['amount']})"
+                        f"<@{entry['discord_id']}> won {entry['payout']} {JOPACOIN_EMOTE} "
+                        f"(bet {entry['amount']}{leverage_text})"
                     )
         if losers:
-            distribution_lines.append("😞 Losers:")
+            # Calculate total lost by losing side (use effective_bet when available)
+            total_lost = sum(entry.get("effective_bet", entry["amount"]) for entry in losers if not entry.get("refunded"))
+            distribution_lines.append(f"😞 Losers (total: {total_lost} {JOPACOIN_EMOTE}):")
+
             for entry in losers:
+                leverage = entry.get("leverage", 1) or 1
+                leverage_text = f" at {leverage}x" if leverage > 1 else ""
                 if entry.get("refunded"):
                     # Pool mode edge case - refunded
                     distribution_lines.append(
@@ -375,7 +383,7 @@ class MatchCommands(commands.Cog):
                     )
                 else:
                     distribution_lines.append(
-                        f"<@{entry['discord_id']}> lost {entry['amount']} {JOPACOIN_EMOTE} (bet on {entry['team'].title()})"
+                        f"<@{entry['discord_id']}> lost {entry['amount']} {JOPACOIN_EMOTE}{leverage_text}"
                     )
         if distribution_lines:
             distribution_text = "\n" + "\n".join(distribution_lines)

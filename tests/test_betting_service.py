@@ -628,11 +628,11 @@ class TestPoolBetting:
             assert winner["payout"] == int(winner["payout"]), "No fractional coins"
 
         # Each winner bet 10 out of 30 radiant pool, total pool is 100
-        # Payout = int(10/30 * 100) = 33 each
+        # Payout = ceil(10/30 * 100) = ceil(33.33) = 34 each
         for winner in distributions["winners"]:
-            assert winner["payout"] == 33
+            assert winner["payout"] == 34
 
-        # Note: 33*3 = 99, so 1 coin is "lost" to rounding truncation
-        # This is expected behavior - coins are never created, only potentially lost to rounding
+        # Note: 34*3 = 102, slightly more than the 100 total pool due to rounding up
+        # This ensures winners never lose fractional coins
         total_paid = sum(w["payout"] for w in distributions["winners"])
-        assert total_paid == 99  # Less than the 100 total pool due to truncation
+        assert total_paid == 102

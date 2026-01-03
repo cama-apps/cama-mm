@@ -181,4 +181,5 @@ desktop.ini
 # Scripts and temporary tools
 *.ps1
 fix_wins_losses.py
+scripts/
 
