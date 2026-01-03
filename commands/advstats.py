@@ -1,5 +1,5 @@
 """
-Advanced statistics commands: /advstats, /matchup, /rebuildpairings
+Pairwise statistics commands: /advstats, /matchup, /rebuildpairings
 """
 
 import logging
@@ -17,14 +17,14 @@ logger = logging.getLogger('cama_bot.commands.advstats')
 
 
 class AdvancedStatsCommands(commands.Cog):
-    """Commands for viewing advanced player statistics."""
+    """Commands for viewing pairwise player statistics."""
 
     def __init__(self, bot: commands.Bot, pairings_repo: IPairingsRepository, player_repo):
         self.bot = bot
         self.pairings_repo = pairings_repo
         self.player_repo = player_repo
 
-    @app_commands.command(name="advstats", description="View advanced pairwise statistics")
+    @app_commands.command(name="pairwise", description="View pairwise statistics")
     @app_commands.describe(
         user="Player to view stats for (defaults to yourself)",
         min_games="Minimum games together/against to show (default: 3)",
@@ -43,7 +43,7 @@ class AdvancedStatsCommands(commands.Cog):
             interaction.user.id,
             user.id if user else "self",
         )
-        if not await safe_defer(interaction, ephemeral=True):
+        if not await safe_defer(interaction, ephemeral=False):
             return
 
         target_id = user.id if user else interaction.user.id
@@ -63,7 +63,7 @@ class AdvancedStatsCommands(commands.Cog):
             return
 
         embed = discord.Embed(
-            title=f"Advanced Stats for {target_name}",
+            title=f"Pairwise Stats for {target_name}",
             color=discord.Color.purple(),
         )
 
@@ -248,7 +248,7 @@ class AdvancedStatsCommands(commands.Cog):
             player2.id,
             interaction.user.id,
         )
-        if not await safe_defer(interaction, ephemeral=True):
+        if not await safe_defer(interaction, ephemeral=False):
             return
 
         if player1.id == player2.id:
