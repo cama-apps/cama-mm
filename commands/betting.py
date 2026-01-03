@@ -3,7 +3,6 @@ Betting commands for jopacoin wagers.
 """
 
 import logging
-from datetime import datetime
 from typing import Optional
 
 import discord
@@ -278,7 +277,7 @@ class BettingCommands(commands.Cog):
 
         leverage = bet.get("leverage", 1) or 1
         effective_bet = bet["amount"] * leverage
-        time_str = datetime.utcfromtimestamp(bet["bet_time"]).strftime("%H:%M UTC")
+        time_str = f"<t:{int(bet['bet_time'])}:t>"
         team_name = bet["team_bet_on"].title()
 
         # Build base message
