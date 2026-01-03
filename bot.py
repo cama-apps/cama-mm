@@ -57,6 +57,9 @@ from config import (
     LOBBY_MAX_PLAYERS,
     LOBBY_READY_THRESHOLD,
     USE_GLICKO,
+    LEVERAGE_TIERS,
+    MAX_DEBT,
+    GARNISHMENT_PERCENTAGE,
 )
 from database import Database
 from domain.models.lobby import LobbyManager
@@ -68,6 +71,7 @@ from services.player_service import PlayerService
 from services.lobby_service import LobbyService
 from services.match_service import MatchService
 from services.betting_service import BettingService
+from services.garnishment_service import GarnishmentService
 from services.permissions import has_admin_permission, has_allowlisted_admin
 from utils.embeds import create_lobby_embed
 from utils.formatting import ROLE_EMOJIS, ROLE_NAMES, format_role_display
@@ -223,21 +227,33 @@ def _init_services():
     """Initialize database and services lazily (on first use, not at import time)."""
     global _services_initialized, db, lobby_manager, player_service, lobby_service
     global player_repo, bet_repo, betting_service, match_service
-    
+
     # region agent log
     _debug_log("H2", "bot.py:_init_services", "entering _init_services", {"initialized": _services_initialized})
     # endregion agent log
 
     if _services_initialized:
         return
-    
+
     db = Database(db_path=DB_PATH)
     lobby_repo = LobbyRepository(DB_PATH)
     lobby_manager = LobbyManager(lobby_repo)
     player_repo = PlayerRepository(DB_PATH)
     bet_repo = BetRepository(DB_PATH)
     match_repo = MatchRepository(DB_PATH)
-    betting_service = BettingService(bet_repo, player_repo)
+
+    # Create garnishment service for debt repayment
+    garnishment_service = GarnishmentService(player_repo, GARNISHMENT_PERCENTAGE)
+
+    # Create betting service with garnishment support
+    betting_service = BettingService(
+        bet_repo,
+        player_repo,
+        garnishment_service=garnishment_service,
+        leverage_tiers=LEVERAGE_TIERS,
+        max_debt=MAX_DEBT,
+    )
+
     player_service = PlayerService(player_repo)
     lobby_service = LobbyService(
         lobby_manager,
@@ -245,13 +261,15 @@ def _init_services():
         ready_threshold=LOBBY_READY_THRESHOLD,
         max_players=LOBBY_MAX_PLAYERS,
     )
+
+    # Create match service
     match_service = MatchService(
         player_repo=player_repo,
         match_repo=match_repo,
         use_glicko=USE_GLICKO,
         betting_service=betting_service,
     )
-    
+
     # Expose on bot for cogs
     bot.db = db
     bot.lobby_manager = lobby_manager
@@ -264,7 +282,7 @@ def _init_services():
     bot.format_role_display = format_role_display
     bot.ADMIN_USER_IDS = ADMIN_USER_IDS
     bot.betting_service = betting_service
-    
+
     _services_initialized = True
 
 

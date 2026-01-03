@@ -5,7 +5,7 @@ Match orchestration: shuffling and recording.
 import random
 import threading
 import time
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple, TYPE_CHECKING
 
 from config import BET_LOCK_SECONDS
 from rating_system import CamaRatingSystem
@@ -32,7 +32,7 @@ class MatchService:
     ):
         """
         Initialize MatchService with required repository dependencies.
-        
+
         Args:
             player_repo: Repository for player data access
             match_repo: Repository for match data access

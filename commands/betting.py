@@ -13,7 +13,7 @@ from discord import app_commands
 from services.betting_service import BettingService
 from services.match_service import MatchService
 from services.player_service import PlayerService
-from config import JOPACOIN_MIN_BET
+from config import JOPACOIN_MIN_BET, LEVERAGE_TIERS, GARNISHMENT_PERCENTAGE, MAX_DEBT
 from utils.formatting import JOPACOIN_EMOTE, format_betting_display
 from utils.interaction_safety import safe_defer
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
@@ -160,14 +160,27 @@ class BettingCommands(commands.Cog):
     @app_commands.describe(
         team="Radiant or Dire",
         amount="Amount of jopacoin to wager (view balance with /balance)",
+        leverage="Leverage multiplier (2x, 3x, 5x) - can cause debt!",
     )
     @app_commands.choices(
         team=[
             app_commands.Choice(name="Radiant", value="radiant"),
             app_commands.Choice(name="Dire", value="dire"),
-        ]
+        ],
+        leverage=[
+            app_commands.Choice(name="None (1x)", value=1),
+            app_commands.Choice(name="2x", value=2),
+            app_commands.Choice(name="3x", value=3),
+            app_commands.Choice(name="5x", value=5),
+        ],
     )
-    async def bet(self, interaction: discord.Interaction, team: app_commands.Choice[str], amount: int):
+    async def bet(
+        self,
+        interaction: discord.Interaction,
+        team: app_commands.Choice[str],
+        amount: int,
+        leverage: app_commands.Choice[int] = None,
+    ):
         guild = interaction.guild if interaction.guild else None
         rl_gid = guild.id if guild else 0
         rl = GLOBAL_RATE_LIMITER.check(
@@ -193,16 +206,26 @@ class BettingCommands(commands.Cog):
             await interaction.followup.send(f"Minimum bet is {JOPACOIN_MIN_BET} {JOPACOIN_EMOTE}.", ephemeral=True)
             return
 
+        lev = leverage.value if leverage else 1
+        effective_bet = amount * lev
+
         pending_state = self.match_service.get_last_shuffle(guild_id)
         try:
-            self.betting_service.place_bet(guild_id, user_id, team.value, amount, pending_state)
+            self.betting_service.place_bet(guild_id, user_id, team.value, amount, pending_state, leverage=lev)
         except ValueError as exc:
             await interaction.followup.send(f"❌ {exc}", ephemeral=True)
             return
 
         await self._update_shuffle_message_wagers(guild_id)
 
-        await interaction.followup.send(f"✅ Bet placed: {amount} {JOPACOIN_EMOTE} on {team.name}.", ephemeral=True)
+        if lev > 1:
+            await interaction.followup.send(
+                f"Bet placed: {amount} {JOPACOIN_EMOTE} on {team.name} at {lev}x leverage "
+                f"(effective: {effective_bet} {JOPACOIN_EMOTE}).",
+                ephemeral=True,
+            )
+        else:
+            await interaction.followup.send(f"Bet placed: {amount} {JOPACOIN_EMOTE} on {team.name}.", ephemeral=True)
 
     @app_commands.command(name="mybets", description="Show your active bets")
     async def mybets(self, interaction: discord.Interaction):
@@ -232,10 +255,23 @@ class BettingCommands(commands.Cog):
             await interaction.followup.send("You have no active bets.", ephemeral=True)
             return
 
-        await interaction.followup.send(
-            f"Active bet: {bet['amount']} {JOPACOIN_EMOTE} on {bet['team_bet_on'].title()} (placed at {datetime.utcfromtimestamp(bet['bet_time']).strftime('%H:%M UTC')})",
-            ephemeral=True,
-        )
+        leverage = bet.get("leverage", 1) or 1
+        effective_bet = bet["amount"] * leverage
+        time_str = datetime.utcfromtimestamp(bet["bet_time"]).strftime("%H:%M UTC")
+
+        if leverage > 1:
+            await interaction.followup.send(
+                f"Active bet: {bet['amount']} {JOPACOIN_EMOTE} at {leverage}x leverage "
+                f"(effective: {effective_bet} {JOPACOIN_EMOTE}) on {bet['team_bet_on'].title()} "
+                f"(placed at {time_str})",
+                ephemeral=True,
+            )
+        else:
+            await interaction.followup.send(
+                f"Active bet: {bet['amount']} {JOPACOIN_EMOTE} on {bet['team_bet_on'].title()} "
+                f"(placed at {time_str})",
+                ephemeral=True,
+            )
 
     @app_commands.command(name="balance", description="Check your jopacoin balance")
     async def balance(self, interaction: discord.Interaction):
@@ -257,11 +293,80 @@ class BettingCommands(commands.Cog):
 
         if not await safe_defer(interaction, ephemeral=True):
             return
-        
+
         balance = self.player_service.get_balance(interaction.user.id)
-        await interaction.followup.send(
-            f"💰 {interaction.user.mention} has {balance} jopacoin.", ephemeral=True
+
+        if balance >= 0:
+            await interaction.followup.send(
+                f"{interaction.user.mention} has {balance} {JOPACOIN_EMOTE}.", ephemeral=True
+            )
+        else:
+            # Show debt information
+            garnishment_pct = int(GARNISHMENT_PERCENTAGE * 100)
+
+            await interaction.followup.send(
+                f"{interaction.user.mention} has **{balance}** {JOPACOIN_EMOTE} (in debt)\n"
+                f"Garnishment: {garnishment_pct}% of winnings go to debt repayment",
+                ephemeral=True,
+            )
+
+    @app_commands.command(name="paydebt", description="Pay off debt (your own or help another player)")
+    @app_commands.describe(
+        amount="Amount of jopacoin to pay toward debt",
+        player="Player whose debt to pay (leave empty to pay your own)",
+    )
+    async def paydebt(
+        self,
+        interaction: discord.Interaction,
+        amount: int,
+        player: discord.Member = None,
+    ):
+        guild = interaction.guild if interaction.guild else None
+        rl_gid = guild.id if guild else 0
+        rl = GLOBAL_RATE_LIMITER.check(
+            scope="paydebt",
+            guild_id=rl_gid,
+            user_id=interaction.user.id,
+            limit=5,
+            per_seconds=10,
         )
+        if not rl.allowed:
+            await interaction.response.send_message(
+                f"Please wait {rl.retry_after_seconds}s before using `/paydebt` again.",
+                ephemeral=True,
+            )
+            return
+
+        # Paying another player's debt should be public; paying your own is private
+        is_helping_other = player is not None and player.id != interaction.user.id
+        if not await safe_defer(interaction, ephemeral=not is_helping_other):
+            return
+
+        target_id = player.id if player else interaction.user.id
+
+        try:
+            result = self.player_service.player_repo.pay_debt_atomic(
+                from_discord_id=interaction.user.id,
+                to_discord_id=target_id,
+                amount=amount,
+            )
+
+            if player and player.id != interaction.user.id:
+                # Send public announcement for helping another player
+                await interaction.followup.send(
+                    f"{interaction.user.mention} paid {result['amount_paid']} {JOPACOIN_EMOTE} "
+                    f"toward {player.mention}'s debt!",
+                    ephemeral=False,
+                )
+            else:
+                await interaction.followup.send(
+                    f"Paid {result['amount_paid']} {JOPACOIN_EMOTE} toward your debt.\n"
+                    f"New balance: {result['to_new_balance']} {JOPACOIN_EMOTE}",
+                    ephemeral=True,
+                )
+        except ValueError as exc:
+            await interaction.followup.send(f"{exc}", ephemeral=True)
+
 
 async def setup(bot: commands.Bot):
     betting_service = getattr(bot, "betting_service", None)

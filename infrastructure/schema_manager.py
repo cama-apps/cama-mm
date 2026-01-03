@@ -145,6 +145,7 @@ class SchemaManager:
             ("create_bets_table", self._migration_create_bets_table),
             ("recreate_bets_table_with_guild_id", self._migration_recreate_bets_table_with_guild_id),
             ("add_indexes_v1", self._migration_add_indexes_v1),
+            ("add_bet_leverage_column", self._migration_add_bet_leverage_column),
         ]
 
     # --- Migrations ---
@@ -268,4 +269,8 @@ class SchemaManager:
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_bets_guild_match_bet_time ON bets(guild_id, match_id, bet_time)"
         )
+
+    def _migration_add_bet_leverage_column(self, cursor) -> None:
+        """Add leverage column to bets table for leverage betting."""
+        self._add_column_if_not_exists(cursor, "bets", "leverage", "INTEGER DEFAULT 1")
 
