@@ -110,7 +110,7 @@ class PairingsRepository(BaseRepository, IPairingsRepository):
             return [dict(row) for row in cursor.fetchall()]
 
     def get_best_teammates(self, discord_id: int, min_games: int = 3, limit: int = 5) -> List[Dict]:
-        """Get players with highest win rate when on same team."""
+        """Get players with highest win rate when on same team (win rate > 50%)."""
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -123,6 +123,7 @@ class PairingsRepository(BaseRepository, IPairingsRepository):
                 FROM player_pairings
                 WHERE (player1_id = ? OR player2_id = ?)
                     AND games_together >= ?
+                    AND CAST(wins_together AS REAL) / games_together > 0.5
                 ORDER BY win_rate DESC, games_together DESC
                 LIMIT ?
                 """,
@@ -131,7 +132,7 @@ class PairingsRepository(BaseRepository, IPairingsRepository):
             return [dict(row) for row in cursor.fetchall()]
 
     def get_worst_teammates(self, discord_id: int, min_games: int = 3, limit: int = 5) -> List[Dict]:
-        """Get players with lowest win rate when on same team."""
+        """Get players with lowest win rate when on same team (win rate < 50%)."""
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -144,6 +145,7 @@ class PairingsRepository(BaseRepository, IPairingsRepository):
                 FROM player_pairings
                 WHERE (player1_id = ? OR player2_id = ?)
                     AND games_together >= ?
+                    AND CAST(wins_together AS REAL) / games_together < 0.5
                 ORDER BY win_rate ASC, games_together DESC
                 LIMIT ?
                 """,
@@ -152,7 +154,7 @@ class PairingsRepository(BaseRepository, IPairingsRepository):
             return [dict(row) for row in cursor.fetchall()]
 
     def get_best_matchups(self, discord_id: int, min_games: int = 3, limit: int = 5) -> List[Dict]:
-        """Get players with highest win rate when on opposing teams."""
+        """Get players with highest win rate when on opposing teams (win rate > 50%)."""
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -173,15 +175,128 @@ class PairingsRepository(BaseRepository, IPairingsRepository):
                 FROM player_pairings
                 WHERE (player1_id = ? OR player2_id = ?)
                     AND games_against >= ?
+                    AND CAST(
+                        CASE WHEN player1_id = ?
+                            THEN player1_wins_against
+                            ELSE games_against - player1_wins_against
+                        END AS REAL
+                    ) / games_against > 0.5
                 ORDER BY win_rate DESC, games_against DESC
+                LIMIT ?
+                """,
+                (discord_id, discord_id, discord_id, discord_id, discord_id, min_games, discord_id, limit),
+            )
+            return [dict(row) for row in cursor.fetchall()]
+
+    def get_worst_matchups(self, discord_id: int, min_games: int = 3, limit: int = 5) -> List[Dict]:
+        """Get players with lowest win rate when on opposing teams (win rate < 50%)."""
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT
+                    CASE WHEN player1_id = ? THEN player2_id ELSE player1_id END as opponent_id,
+                    games_against,
+                    CASE WHEN player1_id = ?
+                        THEN player1_wins_against
+                        ELSE games_against - player1_wins_against
+                    END as wins_against,
+                    CAST(
+                        CASE WHEN player1_id = ?
+                            THEN player1_wins_against
+                            ELSE games_against - player1_wins_against
+                        END AS REAL
+                    ) / games_against as win_rate
+                FROM player_pairings
+                WHERE (player1_id = ? OR player2_id = ?)
+                    AND games_against >= ?
+                    AND CAST(
+                        CASE WHEN player1_id = ?
+                            THEN player1_wins_against
+                            ELSE games_against - player1_wins_against
+                        END AS REAL
+                    ) / games_against < 0.5
+                ORDER BY win_rate ASC, games_against DESC
+                LIMIT ?
+                """,
+                (discord_id, discord_id, discord_id, discord_id, discord_id, min_games, discord_id, limit),
+            )
+            return [dict(row) for row in cursor.fetchall()]
+
+    def get_most_played_with(self, discord_id: int, min_games: int = 3, limit: int = 5) -> List[Dict]:
+        """Get teammates sorted by most games played together."""
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT
+                    CASE WHEN player1_id = ? THEN player2_id ELSE player1_id END as teammate_id,
+                    games_together,
+                    wins_together,
+                    CAST(wins_together AS REAL) / games_together as win_rate
+                FROM player_pairings
+                WHERE (player1_id = ? OR player2_id = ?)
+                    AND games_together >= ?
+                ORDER BY games_together DESC, win_rate DESC
+                LIMIT ?
+                """,
+                (discord_id, discord_id, discord_id, min_games, limit),
+            )
+            return [dict(row) for row in cursor.fetchall()]
+
+    def get_most_played_against(self, discord_id: int, min_games: int = 3, limit: int = 5) -> List[Dict]:
+        """Get opponents sorted by most games played against."""
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT
+                    CASE WHEN player1_id = ? THEN player2_id ELSE player1_id END as opponent_id,
+                    games_against,
+                    CASE WHEN player1_id = ?
+                        THEN player1_wins_against
+                        ELSE games_against - player1_wins_against
+                    END as wins_against,
+                    CAST(
+                        CASE WHEN player1_id = ?
+                            THEN player1_wins_against
+                            ELSE games_against - player1_wins_against
+                        END AS REAL
+                    ) / games_against as win_rate
+                FROM player_pairings
+                WHERE (player1_id = ? OR player2_id = ?)
+                    AND games_against >= ?
+                ORDER BY games_against DESC, win_rate DESC
                 LIMIT ?
                 """,
                 (discord_id, discord_id, discord_id, discord_id, discord_id, min_games, limit),
             )
             return [dict(row) for row in cursor.fetchall()]
 
-    def get_worst_matchups(self, discord_id: int, min_games: int = 3, limit: int = 5) -> List[Dict]:
-        """Get players with lowest win rate when on opposing teams."""
+    def get_evenly_matched_teammates(self, discord_id: int, min_games: int = 3, limit: int = 5) -> List[Dict]:
+        """Get teammates with exactly 50% win rate."""
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT
+                    CASE WHEN player1_id = ? THEN player2_id ELSE player1_id END as teammate_id,
+                    games_together,
+                    wins_together,
+                    CAST(wins_together AS REAL) / games_together as win_rate
+                FROM player_pairings
+                WHERE (player1_id = ? OR player2_id = ?)
+                    AND games_together >= ?
+                    AND CAST(wins_together AS REAL) / games_together = 0.5
+                ORDER BY games_together DESC
+                LIMIT ?
+                """,
+                (discord_id, discord_id, discord_id, min_games, limit),
+            )
+            return [dict(row) for row in cursor.fetchall()]
+
+    def get_evenly_matched_opponents(self, discord_id: int, min_games: int = 3, limit: int = 5) -> List[Dict]:
+        """Get opponents with exactly 50% win rate."""
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -202,12 +317,38 @@ class PairingsRepository(BaseRepository, IPairingsRepository):
                 FROM player_pairings
                 WHERE (player1_id = ? OR player2_id = ?)
                     AND games_against >= ?
-                ORDER BY win_rate ASC, games_against DESC
+                    AND CAST(
+                        CASE WHEN player1_id = ?
+                            THEN player1_wins_against
+                            ELSE games_against - player1_wins_against
+                        END AS REAL
+                    ) / games_against = 0.5
+                ORDER BY games_against DESC
                 LIMIT ?
                 """,
-                (discord_id, discord_id, discord_id, discord_id, discord_id, min_games, limit),
+                (discord_id, discord_id, discord_id, discord_id, discord_id, min_games, discord_id, limit),
             )
             return [dict(row) for row in cursor.fetchall()]
+
+    def get_pairing_counts(self, discord_id: int, min_games: int = 1) -> Dict:
+        """Get total counts of unique teammates and opponents."""
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT
+                    COUNT(CASE WHEN games_together >= ? THEN 1 END) as unique_teammates,
+                    COUNT(CASE WHEN games_against >= ? THEN 1 END) as unique_opponents
+                FROM player_pairings
+                WHERE player1_id = ? OR player2_id = ?
+                """,
+                (min_games, min_games, discord_id, discord_id),
+            )
+            row = cursor.fetchone()
+            return {
+                "unique_teammates": row["unique_teammates"] or 0,
+                "unique_opponents": row["unique_opponents"] or 0,
+            }
 
     def get_head_to_head(self, player1_id: int, player2_id: int) -> Optional[Dict]:
         """Get detailed stats between two specific players."""
