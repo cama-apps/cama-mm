@@ -218,14 +218,23 @@ class BettingCommands(commands.Cog):
 
         await self._update_shuffle_message_wagers(guild_id)
 
+        # Build response message
+        betting_mode = pending_state.get("betting_mode", "house") if pending_state else "house"
+        pool_warning = ""
+        if betting_mode == "pool":
+            pool_warning = "\n⚠️ Pool mode: odds may shift as more bets come in. Use `/mybets` to check current EV."
+
         if lev > 1:
             await interaction.followup.send(
                 f"Bet placed: {amount} {JOPACOIN_EMOTE} on {team.name} at {lev}x leverage "
-                f"(effective: {effective_bet} {JOPACOIN_EMOTE}).",
+                f"(effective: {effective_bet} {JOPACOIN_EMOTE}).{pool_warning}",
                 ephemeral=True,
             )
         else:
-            await interaction.followup.send(f"Bet placed: {amount} {JOPACOIN_EMOTE} on {team.name}.", ephemeral=True)
+            await interaction.followup.send(
+                f"Bet placed: {amount} {JOPACOIN_EMOTE} on {team.name}.{pool_warning}",
+                ephemeral=True,
+            )
 
     @app_commands.command(name="mybets", description="Show your active bets")
     async def mybets(self, interaction: discord.Interaction):
@@ -258,20 +267,46 @@ class BettingCommands(commands.Cog):
         leverage = bet.get("leverage", 1) or 1
         effective_bet = bet["amount"] * leverage
         time_str = datetime.utcfromtimestamp(bet["bet_time"]).strftime("%H:%M UTC")
+        team_name = bet["team_bet_on"].title()
 
+        # Build base message
         if leverage > 1:
-            await interaction.followup.send(
+            base_msg = (
                 f"Active bet: {bet['amount']} {JOPACOIN_EMOTE} at {leverage}x leverage "
-                f"(effective: {effective_bet} {JOPACOIN_EMOTE}) on {bet['team_bet_on'].title()} "
-                f"(placed at {time_str})",
-                ephemeral=True,
+                f"(effective: {effective_bet} {JOPACOIN_EMOTE}) on {team_name} "
+                f"(placed at {time_str})"
             )
         else:
-            await interaction.followup.send(
-                f"Active bet: {bet['amount']} {JOPACOIN_EMOTE} on {bet['team_bet_on'].title()} "
-                f"(placed at {time_str})",
-                ephemeral=True,
+            base_msg = (
+                f"Active bet: {bet['amount']} {JOPACOIN_EMOTE} on {team_name} "
+                f"(placed at {time_str})"
             )
+
+        # Add EV info for pool mode
+        betting_mode = pending_state.get("betting_mode", "house") if pending_state else "house"
+        if betting_mode == "pool":
+            totals = self.betting_service.get_pot_odds(guild_id, pending_state=pending_state)
+            total_pool = totals["radiant"] + totals["dire"]
+            my_team_total = totals[bet["team_bet_on"]]
+
+            if my_team_total > 0 and total_pool > 0:
+                my_share = effective_bet / my_team_total
+                potential_payout = int(total_pool * my_share)
+                other_team = "dire" if bet["team_bet_on"] == "radiant" else "radiant"
+                odds_ratio = totals[other_team] / my_team_total if my_team_total > 0 else 0
+
+                base_msg += (
+                    f"\n\n📊 **Current Pool Odds** (may change):"
+                    f"\nTotal pool: {total_pool} {JOPACOIN_EMOTE}"
+                    f"\nYour team ({team_name}): {my_team_total} {JOPACOIN_EMOTE}"
+                    f"\nIf you win: ~{potential_payout} {JOPACOIN_EMOTE} ({odds_ratio:.1f}:1 odds)"
+                )
+        elif betting_mode == "house":
+            # House mode: 1:1 payout
+            potential_payout = effective_bet * 2
+            base_msg += f"\n\nIf you win: {potential_payout} {JOPACOIN_EMOTE} (1:1 odds)"
+
+        await interaction.followup.send(base_msg, ephemeral=True)
 
     @app_commands.command(name="balance", description="Check your jopacoin balance")
     async def balance(self, interaction: discord.Interaction):

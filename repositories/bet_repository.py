@@ -280,7 +280,10 @@ class BetRepository(BaseRepository, IBetRepository):
             return cursor.rowcount
 
     def get_total_bets_by_guild(self, guild_id: Optional[int], since_ts: Optional[int] = None) -> Dict[str, int]:
-        """Return total wager amounts grouped by team for a guild."""
+        """Return total effective wager amounts grouped by team for a guild.
+
+        Effective amount = amount * leverage, used for pool mode calculations.
+        """
         normalized_guild = self._normalize_guild_id(guild_id)
         ts_filter = "AND bet_time >= ?" if since_ts is not None else ""
         params = (normalized_guild,) if since_ts is None else (normalized_guild, since_ts)
@@ -288,7 +291,7 @@ class BetRepository(BaseRepository, IBetRepository):
             cursor = conn.cursor()
             cursor.execute(
                 """
-                SELECT team_bet_on, SUM(amount) as total
+                SELECT team_bet_on, SUM(amount * COALESCE(leverage, 1)) as total
                 FROM bets
                 WHERE guild_id = ? AND match_id IS NULL
                 {ts_filter}
