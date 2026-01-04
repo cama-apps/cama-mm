@@ -30,6 +30,20 @@ ROLE_COLORS = {
     "Jungler": "#607D8B",
 }
 
+# Fixed role order for consistent radar graph positioning
+# Arranged for visual clarity: core roles at top, support at bottom
+ROLE_ORDER = [
+    "Carry",      # Top
+    "Nuker",      # Top-right
+    "Initiator",  # Right
+    "Disabler",   # Bottom-right
+    "Durable",    # Bottom
+    "Escape",     # Bottom-left
+    "Support",    # Left
+    "Pusher",     # Top-left
+    "Jungler",    # Near top-left
+]
+
 
 def _get_font(size: int = 16) -> ImageFont.FreeTypeFont:
     """Get a font, falling back to default if custom fonts unavailable."""
@@ -225,9 +239,14 @@ def draw_role_graph(
     title_w = _get_text_size(title_font, title)[0]
     draw.text(((size - title_w) // 2, 10), title, fill=DISCORD_WHITE, font=title_font)
 
-    # Get roles and values
-    roles = list(role_values.keys())
-    raw_values = [role_values[r] for r in roles]
+    # Use fixed role order for consistent positioning across graphs
+    # Always include all roles for visual consistency (0 value for missing roles)
+    roles = list(ROLE_ORDER)
+    # Add any roles not in ROLE_ORDER (shouldn't happen, but be safe)
+    for r in role_values:
+        if r not in roles:
+            roles.append(r)
+    raw_values = [role_values.get(r, 0) for r in roles]
 
     # Auto-scale: find the max value and scale so max reaches ~90% of radius
     # This makes the graph visually meaningful even when values are small percentages
@@ -331,7 +350,7 @@ def draw_role_graph(
             ly -= text_h // 2
 
         # Draw label with value
-        pct_text = f"{int(role_values[role])}%"
+        pct_text = f"{int(role_values.get(role, 0))}%"
         draw.text((lx, ly), role, fill=DISCORD_WHITE, font=label_font)
         draw.text((lx, ly + text_h), pct_text, fill=DISCORD_GREY, font=label_font)
 
