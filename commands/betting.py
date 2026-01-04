@@ -374,7 +374,7 @@ class BettingCommands(commands.Cog):
                     f"\n\n📊 **Current Pool Odds** (may change):"
                     f"\nTotal pool: {total_pool} {JOPACOIN_EMOTE}"
                     f"\nYour team ({team_name}): {my_team_total} {JOPACOIN_EMOTE}"
-                    f"\nIf you win: ~{potential_payout} {JOPACOIN_EMOTE} ({odds_ratio:.1f}:1 odds)"
+                    f"\nIf you win: ~{potential_payout} {JOPACOIN_EMOTE} ({odds_ratio:.2f}:1 odds)"
                 )
         elif betting_mode == "house":
             # House mode: 1:1 payout
