@@ -14,7 +14,9 @@ logger = logging.getLogger("cama_bot.services.opendota_player")
 CACHE_TTL_SECONDS = 3600
 
 # Lane role mapping from OpenDota
+# 0 = Unknown/Roaming, 1-4 = Standard lanes
 LANE_ROLE_NAMES = {
+    0: "Roaming",
     1: "Safe Lane",
     2: "Mid",
     3: "Off Lane",
@@ -328,7 +330,7 @@ class OpenDotaPlayerService:
 
             # Calculate distributions
             attr_dist = self._calc_attribute_distribution(matches)
-            lane_dist = self._calc_lane_distribution(matches)
+            lane_dist, lane_parsed_count = self._calc_lane_distribution(matches)
 
             # Calculate recent performance (last 20 matches)
             recent_matches = matches[:20] if matches else []
@@ -354,6 +356,7 @@ class OpenDotaPlayerService:
                 # Distributions
                 "attribute_distribution": attr_dist,
                 "lane_distribution": lane_dist,
+                "lane_parsed_count": lane_parsed_count,
                 # Top heroes
                 "top_heroes": profile.get("top_heroes", []),
                 # Recent matches (for display)
@@ -440,28 +443,32 @@ class OpenDotaPlayerService:
 
         return {attr: round((count / total) * 100, 1) for attr, count in counts.items()}
 
-    def _calc_lane_distribution(self, matches: list[dict]) -> dict[str, float]:
+    def _calc_lane_distribution(self, matches: list[dict]) -> tuple[dict[str, float], int]:
         """
         Calculate lane role distribution from matches.
 
-        Returns dict like {"Safe Lane": 40.0, "Mid": 20.0, "Off Lane": 30.0, "Jungle": 10.0}
+        Returns:
+            Tuple of (distribution dict, parsed match count)
+            Distribution like {"Safe Lane": 40.0, "Mid": 20.0, "Off Lane": 30.0, ...}
         """
         if not matches:
-            return dict.fromkeys(LANE_ROLE_NAMES.values(), 0)
+            return dict.fromkeys(LANE_ROLE_NAMES.values(), 0), 0
 
         counts = dict.fromkeys(LANE_ROLE_NAMES.values(), 0)
         total = 0
 
         for match in matches:
             lane_role = match.get("lane_role")
-            if lane_role and lane_role in LANE_ROLE_NAMES:
+            # Use 'is not None' since lane_role=0 (Roaming) is valid but falsy
+            if lane_role is not None and lane_role in LANE_ROLE_NAMES:
                 counts[LANE_ROLE_NAMES[lane_role]] += 1
                 total += 1
 
         if total == 0:
-            return dict.fromkeys(LANE_ROLE_NAMES.values(), 0)
+            return dict.fromkeys(LANE_ROLE_NAMES.values(), 0), 0
 
-        return {lane: round((count / total) * 100, 1) for lane, count in counts.items()}
+        distribution = {lane: round((count / total) * 100, 1) for lane, count in counts.items()}
+        return distribution, total
 
     def get_recent_matches_detailed(self, discord_id: int, limit: int = 10) -> list[dict] | None:
         """

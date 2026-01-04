@@ -375,6 +375,7 @@ def draw_lane_distribution(lane_values: dict[str, float]) -> BytesIO:
         "Mid": "#2196F3",
         "Off Lane": "#FF9800",
         "Jungle": "#9C27B0",
+        "Roaming": "#E91E63",  # Pink for roaming/support
     }
 
     label_font = _get_font(13)

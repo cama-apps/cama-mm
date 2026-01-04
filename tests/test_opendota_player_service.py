@@ -287,12 +287,14 @@ class TestDistributionCalculations:
     def test_calc_lane_distribution_empty(self, mock_player_repo):
         """Test lane distribution with no matches."""
         service = OpenDotaPlayerService(mock_player_repo)
-        result = service._calc_lane_distribution([])
+        result, count = service._calc_lane_distribution([])
 
         assert result["Safe Lane"] == 0
         assert result["Mid"] == 0
         assert result["Off Lane"] == 0
         assert result["Jungle"] == 0
+        assert result["Roaming"] == 0
+        assert count == 0
 
     def test_calc_lane_distribution_with_data(self, mock_player_repo):
         """Test lane distribution calculation."""
@@ -305,12 +307,31 @@ class TestDistributionCalculations:
             {"lane_role": 3},  # Off Lane
             {"lane_role": None},  # Unknown - should be skipped
         ]
-        result = service._calc_lane_distribution(matches)
+        result, count = service._calc_lane_distribution(matches)
 
         assert result["Safe Lane"] == 50.0  # 2/4 = 50%
         assert result["Mid"] == 25.0  # 1/4 = 25%
         assert result["Off Lane"] == 25.0  # 1/4 = 25%
         assert result["Jungle"] == 0  # 0/4 = 0%
+        assert result["Roaming"] == 0  # 0/4 = 0%
+        assert count == 4
+
+    def test_calc_lane_distribution_with_roaming(self, mock_player_repo):
+        """Test lane distribution includes roaming (lane_role=0)."""
+        service = OpenDotaPlayerService(mock_player_repo)
+
+        matches = [
+            {"lane_role": 0},  # Roaming
+            {"lane_role": 0},  # Roaming
+            {"lane_role": 1},  # Safe Lane
+            {"lane_role": 2},  # Mid
+        ]
+        result, count = service._calc_lane_distribution(matches)
+
+        assert result["Roaming"] == 50.0  # 2/4 = 50%
+        assert result["Safe Lane"] == 25.0  # 1/4 = 25%
+        assert result["Mid"] == 25.0  # 1/4 = 25%
+        assert count == 4
 
     def test_get_full_stats_no_steam_id(self, mock_player_repo):
         """Test get_full_stats when player has no steam_id."""
@@ -363,7 +384,10 @@ class TestDistributionCalculations:
                     with patch.object(
                         service,
                         "_calc_lane_distribution",
-                        return_value={"Safe Lane": 50.0, "Mid": 50.0, "Off Lane": 0, "Jungle": 0},
+                        return_value=(
+                            {"Safe Lane": 50.0, "Mid": 50.0, "Off Lane": 0, "Jungle": 0, "Roaming": 0},
+                            2,  # parsed count
+                        ),
                     ):
                         result = service.get_full_stats(discord_id=100)
 
@@ -373,4 +397,5 @@ class TestDistributionCalculations:
         assert result["total_losses"] == 400
         assert result["attribute_distribution"]["str"] == 50.0
         assert result["lane_distribution"]["Safe Lane"] == 50.0
+        assert result["lane_parsed_count"] == 2
         assert len(result["top_heroes"]) == 1
