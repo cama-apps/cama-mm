@@ -1,5 +1,6 @@
 """
-Match enrichment commands: /setleague, /enrichmatch, /backfillsteamid, /profile, /matchhistory
+Match enrichment commands: /setleague, /enrichmatch, /backfillsteamid, /profile, /matchhistory,
+/dotastats, /viewmatch, /recent, /rolesgraph
 """
 
 import logging
@@ -11,6 +12,8 @@ from discord.ext import commands
 from services.match_enrichment_service import MatchEnrichmentService
 from services.opendota_player_service import OpenDotaPlayerService
 from services.permissions import has_admin_permission
+from utils.drawing import draw_lane_distribution, draw_matches_table, draw_role_graph
+from utils.embeds import _determine_lane_outcomes, create_enriched_match_embed
 from utils.interaction_safety import safe_defer, safe_followup
 
 logger = logging.getLogger("cama_bot.commands.enrichment")
@@ -157,26 +160,51 @@ class EnrichmentCommands(commands.Cog):
             )
             return
 
-        # Format response
-        duration_min = result.get("duration", 0) // 60
-        duration_sec = result.get("duration", 0) % 60
-        winner = "Radiant" if result.get("radiant_win") else "Dire"
+        # Fetch enriched data for embed
+        match_data = self.match_repo.get_match(internal_match_id)
+        participants = self.match_repo.get_match_participants(internal_match_id)
 
-        response = (
-            f"Match #{internal_match_id} enriched successfully!\n\n"
-            f"**Valve Match ID:** {valve_match_id}\n"
-            f"**Duration:** {duration_min}:{duration_sec:02d}\n"
-            f"**Score:** Radiant {result.get('radiant_score', 0)} - {result.get('dire_score', 0)} Dire\n"
-            f"**Winner:** {winner}\n"
-            f"**Players enriched:** {result['players_enriched']}/10"
-        )
+        if match_data and participants:
+            radiant = [p for p in participants if p.get("side") == "radiant"]
+            dire = [p for p in participants if p.get("side") == "dire"]
 
-        if result["players_not_found"]:
-            response += (
-                f"\n\n*{len(result['players_not_found'])} players not matched (missing steam_id)*"
+            embed = create_enriched_match_embed(
+                match_id=internal_match_id,
+                valve_match_id=valve_match_id,
+                duration_seconds=match_data.get("duration_seconds"),
+                radiant_score=match_data.get("radiant_score"),
+                dire_score=match_data.get("dire_score"),
+                winning_team=match_data.get("winning_team", 1),
+                radiant_participants=radiant,
+                dire_participants=dire,
             )
 
-        await safe_followup(interaction, content=response, ephemeral=True)
+            # Add summary note
+            note = f"Enriched {result['players_enriched']}/10 players"
+            if result["players_not_found"]:
+                note += f" ({len(result['players_not_found'])} missing steam_id)"
+
+            await safe_followup(interaction, content=note, embed=embed, ephemeral=True)
+        else:
+            # Fallback to text response
+            duration_min = result.get("duration", 0) // 60
+            duration_sec = result.get("duration", 0) % 60
+            winner = "Radiant" if result.get("radiant_win") else "Dire"
+
+            response = (
+                f"Match #{internal_match_id} enriched successfully!\n\n"
+                f"**Valve Match ID:** {valve_match_id}\n"
+                f"**Duration:** {duration_min}:{duration_sec:02d}\n"
+                f"**Score:** Radiant {result.get('radiant_score', 0)} - {result.get('dire_score', 0)} Dire\n"
+                f"**Winner:** {winner}\n"
+                f"**Players enriched:** {result['players_enriched']}/10"
+            )
+
+            if result["players_not_found"]:
+                response += f"\n\n*{len(result['players_not_found'])} players not matched (missing steam_id)*"
+
+            await safe_followup(interaction, content=response, ephemeral=True)
+
         logger.info(f"Match {internal_match_id} enriched: {result['players_enriched']} players")
 
     @app_commands.command(
@@ -303,7 +331,10 @@ class EnrichmentCommands(commands.Cog):
             return
 
         # Format matches as embed
-        from utils.hero_lookup import get_hero_name
+        from utils.hero_lookup import get_hero_image_url, get_hero_name
+
+        # Lane role names
+        lane_names = {1: "Safe", 2: "Mid", 3: "Off", 4: "Jgl"}
 
         # Count wins for color
         wins = sum(1 for m in matches if m["player_won"])
@@ -318,6 +349,9 @@ class EnrichmentCommands(commands.Cog):
             if losses > wins
             else discord.Color.greyple(),
         )
+
+        # Set thumbnail to most recent hero played
+        first_hero_id = None
 
         for match in matches:
             match_id = match["match_id"]
@@ -338,41 +372,363 @@ class EnrichmentCommands(commands.Cog):
 
             valve_match_id = match.get("valve_match_id")
             dotabuff_link = (
-                f"[Dotabuff](https://www.dotabuff.com/matches/{valve_match_id})"
+                f"[DB](https://www.dotabuff.com/matches/{valve_match_id})"
                 if valve_match_id
                 else None
             )
 
             if player_stats and player_stats.get("hero_id"):
-                hero = get_hero_name(player_stats["hero_id"])
+                hero_id = player_stats["hero_id"]
+                hero = get_hero_name(hero_id)
+
+                # Set thumbnail to first match's hero
+                if first_hero_id is None:
+                    first_hero_id = hero_id
+
                 k = player_stats.get("kills", 0)
                 d = player_stats.get("deaths", 0)
                 a = player_stats.get("assists", 0)
                 gpm = player_stats.get("gpm", 0)
-                xpm = player_stats.get("xpm", 0)
                 dmg = player_stats.get("hero_damage", 0)
+                nw = player_stats.get("net_worth", 0)
+                tower_dmg = player_stats.get("tower_damage", 0)
+                heal = player_stats.get("hero_healing", 0)
+                lane_role = player_stats.get("lane_role")
 
-                dmg_str = f"{dmg / 1000:.1f}k" if dmg >= 1000 else str(dmg)
+                # Format large numbers compactly
+                def fmt(n):
+                    return f"{n / 1000:.1f}k" if n and n >= 1000 else str(n or 0)
+
+                dmg_str = fmt(dmg)
+                nw_str = fmt(nw)
+                td_str = fmt(tower_dmg)
+                heal_str = fmt(heal)
+
+                # Determine lane outcome (W/L/D) by comparing with opponents
+                lane_str = lane_names.get(lane_role, "")
+                if lane_str and player_stats.get("lane_efficiency") is not None:
+                    # Split participants by team to calculate lane outcomes
+                    radiant = [p for p in participants if p.get("side") == "radiant"]
+                    dire = [p for p in participants if p.get("side") == "dire"]
+
+                    lane_outcomes = _determine_lane_outcomes(radiant, dire)
+
+                    # Find player's position in their team's list
+                    player_team = "radiant" if side.lower() == "radiant" else "dire"
+                    team_list = radiant if player_team == "radiant" else dire
+                    team_idx = next(
+                        (i for i, p in enumerate(team_list) if p["discord_id"] == target_id),
+                        None,
+                    )
+
+                    if team_idx is not None:
+                        outcome = lane_outcomes.get((player_team, team_idx))
+                        if outcome:
+                            lane_str = f"{lane_str} {outcome}"
 
                 stats_block = (
                     f"```\n"
-                    f"KDA:  {k}/{d}/{a}\n"
-                    f"GPM:  {gpm}  XPM: {xpm}\n"
-                    f"DMG:  {dmg_str}\n"
-                    f"Side: {side}\n"
-                    f"```"
+                    f"KDA: {k}/{d}/{a}  GPM: {gpm}\n"
+                    f"DMG: {dmg_str}  TD: {td_str}\n"
+                    f"NW:  {nw_str}  Heal: {heal_str}\n"
+                    f"Side: {side}"
                 )
+                if lane_str:
+                    stats_block += f"  Lane: {lane_str}"
+                stats_block += "\n```"
+
                 if dotabuff_link:
-                    stats_block += f"\n{dotabuff_link}"
+                    stats_block += f"{dotabuff_link}"
 
                 embed.add_field(
                     name=f"{result_emoji} #{match_id} • {hero}", value=stats_block, inline=True
                 )
             else:
-                stats_block = f"```\nKDA:  -/-/-\nGPM:  -    XPM: -\nDMG:  -\nSide: {side}\n```"
+                stats_block = f"```\nKDA: -/-/-  GPM: -\nDMG: -  TD: -\nNW: -  Side: {side}\n```"
                 embed.add_field(
                     name=f"{result_emoji} #{match_id} • ???", value=stats_block, inline=True
                 )
+
+        # Set thumbnail to most recently played hero
+        if first_hero_id:
+            hero_img = get_hero_image_url(first_hero_id)
+            if hero_img:
+                embed.set_thumbnail(url=hero_img)
+
+        embed.set_footer(text="Use /viewmatch <id> for detailed match stats")
+
+        await safe_followup(interaction, embed=embed, ephemeral=True)
+
+    @app_commands.command(
+        name="viewmatch",
+        description="View detailed stats for a specific match",
+    )
+    @app_commands.describe(
+        match_id="Internal match ID to view (defaults to most recent)",
+        user="Player whose most recent match to view (if no match_id)",
+    )
+    async def viewmatch(
+        self,
+        interaction: discord.Interaction,
+        match_id: int | None = None,
+        user: discord.Member | None = None,
+    ):
+        """View detailed stats for a specific match with the enriched embed."""
+        target_id = user.id if user else interaction.user.id
+        target_name = user.display_name if user else interaction.user.display_name
+
+        logger.info(
+            f"Viewmatch command: User {interaction.user.id}, match_id={match_id}, target={target_id}"
+        )
+
+        # Not ephemeral so others can see
+        if not await safe_defer(interaction, ephemeral=False):
+            return
+
+        # Get match - default to target's most recent match
+        if match_id:
+            match_data = self.match_repo.get_match(match_id)
+            if not match_data:
+                await safe_followup(
+                    interaction,
+                    content=f"Match #{match_id} not found.",
+                )
+                return
+        else:
+            # Try to get target's most recent match first
+            user_matches = self.match_repo.get_player_matches(target_id, limit=1)
+            if user_matches:
+                match_id = user_matches[0]["match_id"]
+                match_data = self.match_repo.get_match(match_id)
+            else:
+                # Fall back to globally most recent
+                match_data = self.match_repo.get_most_recent_match()
+
+            if not match_data:
+                await safe_followup(
+                    interaction,
+                    content=f"No matches found for {target_name}." if user else "No matches found.",
+                )
+                return
+            match_id = match_data["match_id"]
+
+        # Get participants
+        participants = self.match_repo.get_match_participants(match_id)
+
+        if not participants:
+            await safe_followup(
+                interaction,
+                content=f"No participant data for match #{match_id}.",
+            )
+            return
+
+        radiant = [p for p in participants if p.get("side") == "radiant"]
+        dire = [p for p in participants if p.get("side") == "dire"]
+
+        # Check if enriched
+        is_enriched = any(p.get("hero_id") for p in participants)
+
+        if is_enriched:
+            embed = create_enriched_match_embed(
+                match_id=match_id,
+                valve_match_id=match_data.get("valve_match_id"),
+                duration_seconds=match_data.get("duration_seconds"),
+                radiant_score=match_data.get("radiant_score"),
+                dire_score=match_data.get("dire_score"),
+                winning_team=match_data.get("winning_team", 1),
+                radiant_participants=radiant,
+                dire_participants=dire,
+            )
+
+            # Generate and attach stats image
+            from utils.hero_lookup import get_hero_image_url
+
+            # If user was in this match, show their hero as thumbnail
+            user_participant = None
+            for p in participants:
+                if p.get("discord_id") == interaction.user.id:
+                    user_participant = p
+                    break
+
+            if user_participant and user_participant.get("hero_id"):
+                hero_img = get_hero_image_url(user_participant["hero_id"])
+                if hero_img:
+                    # Override MVP thumbnail with user's hero
+                    embed.set_thumbnail(url=hero_img)
+
+            await safe_followup(interaction, embed=embed)
+        else:
+            # Not enriched - show basic info
+            from utils.embeds import create_match_summary_embed
+
+            embed = create_match_summary_embed(
+                match_id=match_id,
+                winning_team=match_data.get("winning_team", 1),
+                radiant_participants=radiant,
+                dire_participants=dire,
+                valve_match_id=match_data.get("valve_match_id"),
+            )
+            note = (
+                "ℹ️ This match has not been enriched yet. Use `/enrichmatch` to add detailed stats."
+            )
+            await safe_followup(interaction, content=note, embed=embed)
+
+    @app_commands.command(
+        name="dotastats",
+        description="View comprehensive Dota 2 statistics from OpenDota",
+    )
+    @app_commands.describe(
+        user="Player to view stats for (defaults to yourself)",
+    )
+    async def dotastats(
+        self,
+        interaction: discord.Interaction,
+        user: discord.Member | None = None,
+    ):
+        """
+        View comprehensive Dota 2 statistics including hero and lane distributions.
+
+        Shows:
+        - Overall win/loss and recent performance
+        - Average KDA, GPM, XPM
+        - Hero attribute distribution (STR/AGI/INT/Universal)
+        - Lane distribution (Safe/Mid/Off/Jungle)
+        - Top heroes
+        """
+        logger.info(
+            f"Dotastats command: User {interaction.user.id}, target={user.id if user else 'self'}"
+        )
+
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+
+        target_id = user.id if user else interaction.user.id
+        target_name = user.display_name if user else interaction.user.display_name
+
+        # Validate player exists
+        player = self.player_repo.get_by_id(target_id)
+        if not player:
+            await safe_followup(
+                interaction,
+                content=f"{'That user is' if user else 'You are'} not registered.",
+                ephemeral=True,
+            )
+            return
+
+        # Check for steam_id
+        steam_id = self.player_repo.get_steam_id(target_id)
+        if not steam_id:
+            await safe_followup(
+                interaction,
+                content=(
+                    f"{'That user has' if user else 'You have'} no Steam ID linked.\n"
+                    "Use `/register` with your Steam ID to link your account."
+                ),
+                ephemeral=True,
+            )
+            return
+
+        # Fetch full stats
+        stats = self.opendota_player_service.get_full_stats(target_id)
+
+        if not stats:
+            await safe_followup(
+                interaction,
+                content="Could not fetch stats from OpenDota. The profile may be private or the API unavailable.",
+                ephemeral=True,
+            )
+            return
+
+        # Build embed
+        embed = discord.Embed(
+            title=f"Dota 2 Stats: {target_name}",
+            color=discord.Color.blue(),
+        )
+
+        # Overall stats
+        total_games = stats["total_wins"] + stats["total_losses"]
+        overall_text = (
+            f"**{stats['total_wins']}W / {stats['total_losses']}L** ({stats['total_winrate']}%)\n"
+            f"Total: {total_games:,} games"
+        )
+        embed.add_field(name="Overall", value=overall_text, inline=True)
+
+        # Recent performance (last 20)
+        recent_games = stats["recent_wins"] + stats["recent_losses"]
+        if recent_games > 0:
+            recent_text = (
+                f"**{stats['recent_wins']}W / {stats['recent_losses']}L** ({stats['recent_winrate']}%)\n"
+                f"Last {recent_games} games"
+            )
+            embed.add_field(name="Recent", value=recent_text, inline=True)
+
+        # Averages
+        kda = f"{stats['avg_kills']}/{stats['avg_deaths']}/{stats['avg_assists']}"
+        avg_text = f"**KDA:** {kda}\n**GPM:** {stats['avg_gpm']}  **XPM:** {stats['avg_xpm']}"
+        embed.add_field(name="Averages", value=avg_text, inline=True)
+
+        # Hero attribute distribution
+        attr_dist = stats.get("attribute_distribution", {})
+        if any(v > 0 for v in attr_dist.values()):
+            attr_lines = []
+            # Use emoji for attributes
+            attr_emoji = {"str": "💪", "agi": "🏃", "int": "🧠", "all": "⭐"}
+            attr_names = {
+                "str": "Strength",
+                "agi": "Agility",
+                "int": "Intelligence",
+                "all": "Universal",
+            }
+            for attr in ["str", "agi", "int", "all"]:
+                pct = attr_dist.get(attr, 0)
+                if pct > 0:
+                    bar_len = int(pct / 10)  # 10% per block
+                    bar = "█" * bar_len + "░" * (10 - bar_len)
+                    attr_lines.append(f"{attr_emoji[attr]} {attr_names[attr]}: {bar} {pct}%")
+            embed.add_field(
+                name="Hero Attributes",
+                value="\n".join(attr_lines) if attr_lines else "No data",
+                inline=False,
+            )
+
+        # Lane distribution
+        lane_dist = stats.get("lane_distribution", {})
+        if any(v > 0 for v in lane_dist.values()):
+            lane_lines = []
+            lane_emoji = {"Safe Lane": "🛡️", "Mid": "⚔️", "Off Lane": "🗡️", "Jungle": "🌲"}
+            for lane in ["Safe Lane", "Mid", "Off Lane", "Jungle"]:
+                pct = lane_dist.get(lane, 0)
+                if pct > 0:
+                    bar_len = int(pct / 10)
+                    bar = "█" * bar_len + "░" * (10 - bar_len)
+                    lane_lines.append(f"{lane_emoji[lane]} {lane}: {bar} {pct}%")
+            embed.add_field(
+                name="Lane Distribution",
+                value="\n".join(lane_lines) if lane_lines else "No data",
+                inline=False,
+            )
+
+        # Top heroes
+        top_heroes = stats.get("top_heroes", [])[:5]
+        if top_heroes:
+            hero_lines = []
+            for i, hero in enumerate(top_heroes, 1):
+                hero_lines.append(
+                    f"{i}. **{hero['hero_name']}** - {hero['games']} games ({hero['win_rate']}% WR)"
+                )
+            embed.add_field(
+                name="Top Heroes",
+                value="\n".join(hero_lines),
+                inline=False,
+            )
+
+        # Footer with links
+        embed.set_footer(
+            text=f"Based on {stats['matches_analyzed']} recent matches | Data from OpenDota"
+        )
+
+        # Add OpenDota link
+        embed.description = f"[View on OpenDota](https://www.opendota.com/players/{steam_id})"
 
         await safe_followup(interaction, embed=embed, ephemeral=True)
 
@@ -598,6 +954,192 @@ class EnrichmentCommands(commands.Cog):
                 interaction,
                 content=f"Match #{match_id} not found.",
                 ephemeral=True,
+            )
+
+    @app_commands.command(
+        name="recent",
+        description="View your recent Dota 2 matches as an image",
+    )
+    @app_commands.describe(
+        user="User to show matches for (defaults to yourself)",
+        limit="Number of matches to show (default 10, max 20)",
+    )
+    async def recent(
+        self,
+        interaction: discord.Interaction,
+        user: discord.Member | None = None,
+        limit: int = 10,
+    ):
+        """Display recent matches as an image table."""
+        if not await safe_defer(interaction):
+            return
+
+        target = user or interaction.user
+        target_id = target.id
+        target_name = target.display_name
+
+        # Validate limit
+        limit = max(1, min(20, limit))
+
+        logger.info(
+            f"Recent command: User {interaction.user.id} viewing {target_id}, limit={limit}"
+        )
+
+        matches = self.opendota_player_service.get_recent_matches_detailed(target_id, limit=limit)
+
+        if not matches:
+            await safe_followup(
+                interaction,
+                content=f"{target_name} hasn't linked their Steam account. Use `/linksteam` first.",
+            )
+            return
+
+        # Generate image
+        try:
+            image_bytes = draw_matches_table(matches)
+            file = discord.File(image_bytes, filename="recent_matches.png")
+
+            embed = discord.Embed(
+                title=f"Recent Matches: {target_name}",
+                color=discord.Color.blue(),
+            )
+            embed.set_image(url="attachment://recent_matches.png")
+            embed.set_footer(text=f"Showing {len(matches)} most recent matches")
+
+            await safe_followup(interaction, embed=embed, file=file)
+        except Exception as e:
+            logger.error(f"Error generating recent matches image: {e}")
+            await safe_followup(
+                interaction,
+                content="Failed to generate match image. Please try again.",
+            )
+
+    @app_commands.command(
+        name="rolesgraph",
+        description="View hero role distribution as a radar graph",
+    )
+    @app_commands.describe(
+        user="User to show roles for (defaults to yourself)",
+        matches="Number of recent matches to analyze (default 50, max 100)",
+    )
+    async def rolesgraph(
+        self,
+        interaction: discord.Interaction,
+        user: discord.Member | None = None,
+        matches: int = 50,
+    ):
+        """Display hero role distribution as a radar graph."""
+        if not await safe_defer(interaction):
+            return
+
+        target = user or interaction.user
+        target_id = target.id
+        target_name = target.display_name
+
+        # Validate matches
+        matches = max(10, min(100, matches))
+
+        logger.info(
+            f"Rolesgraph command: User {interaction.user.id} viewing {target_id}, matches={matches}"
+        )
+
+        role_dist = self.opendota_player_service.get_hero_role_distribution(
+            target_id, match_limit=matches
+        )
+
+        if not role_dist:
+            await safe_followup(
+                interaction,
+                content=f"{target_name} hasn't linked their Steam account or has no recent matches.",
+            )
+            return
+
+        # Generate image
+        try:
+            image_bytes = draw_role_graph(role_dist, title=f"Roles: {target_name}")
+            file = discord.File(image_bytes, filename="roles_graph.png")
+
+            embed = discord.Embed(
+                title=f"Hero Role Distribution: {target_name}",
+                description=f"Based on last {matches} matches",
+                color=discord.Color.gold(),
+            )
+            embed.set_image(url="attachment://roles_graph.png")
+
+            await safe_followup(interaction, embed=embed, file=file)
+        except Exception as e:
+            logger.error(f"Error generating roles graph: {e}")
+            await safe_followup(
+                interaction,
+                content="Failed to generate roles graph. Please try again.",
+            )
+
+    @app_commands.command(
+        name="lanegraph",
+        description="View lane distribution as a bar chart",
+    )
+    @app_commands.describe(
+        user="User to show lanes for (defaults to yourself)",
+        matches="Number of recent matches to analyze (default 50, max 100)",
+    )
+    async def lanegraph(
+        self,
+        interaction: discord.Interaction,
+        user: discord.Member | None = None,
+        matches: int = 50,
+    ):
+        """Display lane distribution as a bar chart."""
+        if not await safe_defer(interaction):
+            return
+
+        target = user or interaction.user
+        target_id = target.id
+        target_name = target.display_name
+
+        # Validate matches
+        matches = max(10, min(100, matches))
+
+        logger.info(
+            f"Lanegraph command: User {interaction.user.id} viewing {target_id}, matches={matches}"
+        )
+
+        # Get full stats which includes lane distribution
+        stats = self.opendota_player_service.get_full_stats(target_id, match_limit=matches)
+
+        if not stats:
+            await safe_followup(
+                interaction,
+                content=f"{target_name} hasn't linked their Steam account or has no recent matches.",
+            )
+            return
+
+        lane_dist = stats.get("lane_distribution", {})
+        if not lane_dist or all(v == 0 for v in lane_dist.values()):
+            await safe_followup(
+                interaction,
+                content=f"No lane data available for {target_name}. Matches may not be parsed.",
+            )
+            return
+
+        # Generate image
+        try:
+            image_bytes = draw_lane_distribution(lane_dist)
+            file = discord.File(image_bytes, filename="lane_graph.png")
+
+            embed = discord.Embed(
+                title=f"Lane Distribution: {target_name}",
+                description=f"Based on last {stats.get('matches_analyzed', matches)} matches",
+                color=discord.Color.green(),
+            )
+            embed.set_image(url="attachment://lane_graph.png")
+            embed.set_footer(text="Only parsed matches have lane data")
+
+            await safe_followup(interaction, embed=embed, file=file)
+        except Exception as e:
+            logger.error(f"Error generating lane graph: {e}")
+            await safe_followup(
+                interaction,
+                content="Failed to generate lane graph. Please try again.",
             )
 
 

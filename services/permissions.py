@@ -32,4 +32,10 @@ def has_admin_permission(interaction: discord.Interaction) -> bool:
         return True
 
     # Check Discord permissions (Administrator or Manage Server)
-    return bool(interaction.user.guild_permissions and (interaction.user.guild_permissions.administrator or interaction.user.guild_permissions.manage_guild))
+    return bool(
+        interaction.user.guild_permissions
+        and (
+            interaction.user.guild_permissions.administrator
+            or interaction.user.guild_permissions.manage_guild
+        )
+    )

@@ -170,6 +170,14 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 "match_date": row["match_date"],
                 "dotabuff_match_id": row["dotabuff_match_id"],
                 "notes": row["notes"],
+                # Enrichment fields (may be None if not enriched)
+                "valve_match_id": row["valve_match_id"] if "valve_match_id" in row.keys() else None,
+                "duration_seconds": row["duration_seconds"]
+                if "duration_seconds" in row.keys()
+                else None,
+                "radiant_score": row["radiant_score"] if "radiant_score" in row.keys() else None,
+                "dire_score": row["dire_score"] if "dire_score" in row.keys() else None,
+                "game_mode": row["game_mode"] if "game_mode" in row.keys() else None,
             }
 
     def get_player_matches(self, discord_id: int, limit: int = 10) -> list[dict]:
@@ -358,8 +366,11 @@ class MatchRepository(BaseRepository, IMatchRepository):
         last_hits: int,
         denies: int,
         net_worth: int,
+        hero_healing: int = 0,
+        lane_role: int | None = None,
+        lane_efficiency: int | None = None,
     ) -> None:
-        """Update a match participant with enriched stats from Valve API."""
+        """Update a match participant with enriched stats from OpenDota API."""
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -375,7 +386,10 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     tower_damage = ?,
                     last_hits = ?,
                     denies = ?,
-                    net_worth = ?
+                    net_worth = ?,
+                    hero_healing = ?,
+                    lane_role = ?,
+                    lane_efficiency = ?
                 WHERE match_id = ? AND discord_id = ?
                 """,
                 (
@@ -390,6 +404,9 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     last_hits,
                     denies,
                     net_worth,
+                    hero_healing,
+                    lane_role,
+                    lane_efficiency,
                     match_id,
                     discord_id,
                 ),

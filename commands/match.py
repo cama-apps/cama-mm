@@ -15,6 +15,7 @@ from services.lobby_service import LobbyService
 from services.match_discovery_service import MatchDiscoveryService
 from services.match_service import MatchService
 from services.permissions import has_admin_permission
+from utils.embeds import create_enriched_match_embed
 from utils.formatting import (
     JOPACOIN_EMOTE,
     ROLE_EMOJIS,
@@ -561,10 +562,34 @@ class MatchCommands(commands.Cog):
                 )
                 if channel:
                     try:
-                        await channel.send(
-                            f"📊 Match #{match_id} auto-enriched! "
-                            f"(Dota Match ID: {valve_match_id}, {confidence:.0%} confidence)"
-                        )
+                        # Fetch enriched match data for embed
+                        match_data = self.match_repo.get_match(match_id)
+                        participants = self.match_repo.get_match_participants(match_id)
+
+                        if match_data and participants:
+                            radiant = [p for p in participants if p.get("side") == "radiant"]
+                            dire = [p for p in participants if p.get("side") == "dire"]
+
+                            embed = create_enriched_match_embed(
+                                match_id=match_id,
+                                valve_match_id=valve_match_id,
+                                duration_seconds=match_data.get("duration_seconds"),
+                                radiant_score=match_data.get("radiant_score"),
+                                dire_score=match_data.get("dire_score"),
+                                winning_team=match_data.get("winning_team", 1),
+                                radiant_participants=radiant,
+                                dire_participants=dire,
+                            )
+                            await channel.send(
+                                f"📊 Match #{match_id} auto-enriched ({confidence:.0%} confidence)",
+                                embed=embed,
+                            )
+                        else:
+                            # Fallback to simple message
+                            await channel.send(
+                                f"📊 Match #{match_id} auto-enriched! "
+                                f"(Dota Match ID: {valve_match_id}, {confidence:.0%} confidence)"
+                            )
                     except Exception:
                         pass  # Ignore if we can't send message
             else:

@@ -119,3 +119,90 @@ def get_all_heroes() -> dict[str, str]:
     """Get all heroes as a dict mapping hero_id (str) to name."""
     _load_heroes()
     return _HEROES.copy()
+
+
+# Steam CDN base URL for hero images
+_STEAM_CDN_BASE = "https://cdn.cloudflare.steamstatic.com/apps/dota2/images/dota_react/heroes"
+
+# Cache for hero info from dotabase
+_HERO_INFO_CACHE: dict[int, dict] = {}
+
+
+def _load_hero_info_from_dotabase():
+    """Load hero info (slug, color) from dotabase if available."""
+    global _HERO_INFO_CACHE
+    if _HERO_INFO_CACHE:
+        return
+
+    try:
+        from dotabase import Hero, dotabase_session
+
+        session = dotabase_session()
+        heroes = session.query(Hero).all()
+        for hero in heroes:
+            # Get the CDN slug (e.g., "antimage" from "npc_dota_hero_antimage")
+            slug = hero.name if hero.name else ""
+            if slug.startswith("npc_dota_hero_"):
+                slug = slug[14:]  # Remove prefix
+
+            _HERO_INFO_CACHE[hero.id] = {
+                "slug": slug,
+                "color": hero.color,  # e.g., "#784094"
+                "localized_name": hero.localized_name,
+            }
+    except ImportError:
+        pass
+    except Exception:
+        pass
+
+
+def get_hero_image_url(hero_id: int, size: str = "full") -> str | None:
+    """
+    Get the Steam CDN URL for a hero image.
+
+    Args:
+        hero_id: The Dota 2 hero ID
+        size: "full" for large image, "icon" for small icon
+
+    Returns:
+        URL to hero image, or None if hero not found
+    """
+    _load_hero_info_from_dotabase()
+
+    if hero_id not in _HERO_INFO_CACHE:
+        return None
+
+    slug = _HERO_INFO_CACHE[hero_id]["slug"]
+    if not slug:
+        return None
+
+    if size == "icon":
+        return f"{_STEAM_CDN_BASE}/icons/{slug}.png"
+    else:
+        return f"{_STEAM_CDN_BASE}/{slug}.png"
+
+
+def get_hero_color(hero_id: int) -> int | None:
+    """
+    Get the hero's color as an integer for Discord embed.
+
+    Args:
+        hero_id: The Dota 2 hero ID
+
+    Returns:
+        Color as integer (e.g., 0x784094), or None if not found
+    """
+    _load_hero_info_from_dotabase()
+
+    if hero_id not in _HERO_INFO_CACHE:
+        return None
+
+    color_str = _HERO_INFO_CACHE[hero_id].get("color")
+    if not color_str:
+        return None
+
+    try:
+        # Convert "#784094" to 0x784094
+        return int(color_str.lstrip("#"), 16)
+    except (ValueError, TypeError):
+        return None

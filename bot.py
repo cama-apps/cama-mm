@@ -319,6 +319,7 @@ EXTENSIONS = [
     "commands.betting",
     "commands.advstats",
     "commands.enrichment",
+    "commands.dota_info",
 ]
 
 

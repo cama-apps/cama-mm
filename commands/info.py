@@ -48,9 +48,32 @@ class InfoCommands(commands.Cog):
                 "`/setroles` - Set your preferred roles (1-5)\n"
                 "`/stats` - View your personal statistics\n"
                 "`/pairwise` - View pairwise stats (best/worst teammates & matchups)\n"
-                "`/matchup` - Head-to-head comparison between two players\n"
-                "`/profile` - View OpenDota profile (W/L, avg KDA, top heroes)\n"
-                "`/matchhistory` - View recent matches with heroes and stats"
+                "`/matchup` - Head-to-head comparison between two players"
+            ),
+            inline=False,
+        )
+
+        # Dota 2 Stats
+        embed.add_field(
+            name="📊 Dota 2 Stats (OpenDota)",
+            value=(
+                "`/profile` - View OpenDota profile (W/L, KDA, top heroes)\n"
+                "`/dotastats` - Comprehensive stats with distributions\n"
+                "`/matchhistory` - Recent matches with heroes and stats\n"
+                "`/viewmatch` - View detailed match embed\n"
+                "`/recent` - Recent matches as image table\n"
+                "`/rolesgraph` - Hero role distribution radar graph\n"
+                "`/lanegraph` - Lane distribution bar chart"
+            ),
+            inline=False,
+        )
+
+        # Dota 2 Reference
+        embed.add_field(
+            name="📖 Dota 2 Reference",
+            value=(
+                "`/hero` - Look up hero stats, abilities, talents\n"
+                "`/ability` - Look up ability details"
             ),
             inline=False,
         )

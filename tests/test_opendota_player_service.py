@@ -237,3 +237,140 @@ class TestPlayerRepositorySteamId:
         needs_backfill = repo.get_all_with_dotabuff_no_steam_id()
         assert len(needs_backfill) == 1
         assert needs_backfill[0]["discord_id"] == 101
+
+
+class TestDistributionCalculations:
+    """Tests for hero attribute and lane distribution calculations."""
+
+    @pytest.fixture
+    def mock_player_repo(self):
+        """Create mock player repository."""
+        repo = Mock()
+        return repo
+
+    def test_calc_attribute_distribution_empty(self, mock_player_repo):
+        """Test attribute distribution with no matches."""
+        service = OpenDotaPlayerService(mock_player_repo)
+        result = service._calc_attribute_distribution([])
+
+        assert result == {"str": 0, "agi": 0, "int": 0, "all": 0}
+
+    def test_calc_attribute_distribution_with_data(self, mock_player_repo):
+        """Test attribute distribution calculation."""
+        service = OpenDotaPlayerService(mock_player_repo)
+
+        # Mock hero attributes (normally fetched from API)
+        with patch.object(
+            service,
+            "_get_hero_attributes",
+            return_value={
+                1: "agi",  # Anti-Mage
+                2: "str",  # Axe
+                3: "int",  # Bane
+                138: "all",  # Primal Beast (Universal)
+            },
+        ):
+            matches = [
+                {"hero_id": 1},  # agi
+                {"hero_id": 1},  # agi
+                {"hero_id": 2},  # str
+                {"hero_id": 3},  # int
+                {"hero_id": 138},  # all
+            ]
+            result = service._calc_attribute_distribution(matches)
+
+        assert result["agi"] == 40.0  # 2/5 = 40%
+        assert result["str"] == 20.0  # 1/5 = 20%
+        assert result["int"] == 20.0  # 1/5 = 20%
+        assert result["all"] == 20.0  # 1/5 = 20%
+
+    def test_calc_lane_distribution_empty(self, mock_player_repo):
+        """Test lane distribution with no matches."""
+        service = OpenDotaPlayerService(mock_player_repo)
+        result = service._calc_lane_distribution([])
+
+        assert result["Safe Lane"] == 0
+        assert result["Mid"] == 0
+        assert result["Off Lane"] == 0
+        assert result["Jungle"] == 0
+
+    def test_calc_lane_distribution_with_data(self, mock_player_repo):
+        """Test lane distribution calculation."""
+        service = OpenDotaPlayerService(mock_player_repo)
+
+        matches = [
+            {"lane_role": 1},  # Safe Lane
+            {"lane_role": 1},  # Safe Lane
+            {"lane_role": 2},  # Mid
+            {"lane_role": 3},  # Off Lane
+            {"lane_role": None},  # Unknown - should be skipped
+        ]
+        result = service._calc_lane_distribution(matches)
+
+        assert result["Safe Lane"] == 50.0  # 2/4 = 50%
+        assert result["Mid"] == 25.0  # 1/4 = 25%
+        assert result["Off Lane"] == 25.0  # 1/4 = 25%
+        assert result["Jungle"] == 0  # 0/4 = 0%
+
+    def test_get_full_stats_no_steam_id(self, mock_player_repo):
+        """Test get_full_stats when player has no steam_id."""
+        mock_player_repo.get_steam_id.return_value = None
+
+        service = OpenDotaPlayerService(mock_player_repo)
+        result = service.get_full_stats(discord_id=100)
+
+        assert result is None
+
+    def test_get_full_stats_success(self, mock_player_repo):
+        """Test get_full_stats returns complete data structure."""
+        mock_player_repo.get_steam_id.return_value = 12345
+
+        service = OpenDotaPlayerService(mock_player_repo)
+
+        # Mock all the dependencies
+        with patch.object(
+            service,
+            "get_player_profile",
+            return_value={
+                "persona_name": "TestPlayer",
+                "rank_tier": 55,
+                "mmr_estimate": 4500,
+                "wins": 500,
+                "losses": 400,
+                "win_rate": 55.6,
+                "avg_kills": 8.0,
+                "avg_deaths": 5.0,
+                "avg_assists": 10.0,
+                "avg_gpm": 450,
+                "avg_xpm": 500,
+                "avg_last_hits": 150,
+                "top_heroes": [{"hero_name": "Pudge", "games": 100, "win_rate": 55.0}],
+            },
+        ):
+            with patch.object(
+                service,
+                "_fetch_matches_for_stats",
+                return_value=[
+                    {"hero_id": 1, "lane_role": 1, "player_slot": 0, "radiant_win": True},
+                    {"hero_id": 2, "lane_role": 2, "player_slot": 0, "radiant_win": False},
+                ],
+            ):
+                with patch.object(
+                    service,
+                    "_calc_attribute_distribution",
+                    return_value={"str": 50.0, "agi": 50.0, "int": 0, "all": 0},
+                ):
+                    with patch.object(
+                        service,
+                        "_calc_lane_distribution",
+                        return_value={"Safe Lane": 50.0, "Mid": 50.0, "Off Lane": 0, "Jungle": 0},
+                    ):
+                        result = service.get_full_stats(discord_id=100)
+
+        assert result is not None
+        assert result["steam_id"] == 12345
+        assert result["total_wins"] == 500
+        assert result["total_losses"] == 400
+        assert result["attribute_distribution"]["str"] == 50.0
+        assert result["lane_distribution"]["Safe Lane"] == 50.0
+        assert len(result["top_heroes"]) == 1

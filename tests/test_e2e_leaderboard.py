@@ -379,9 +379,7 @@ class TestLeaderboardEdgeCases:
         total_games = wins + losses
         win_rate = (wins / total_games * 100) if total_games > 0 else 0.0
         rating_value = row["glicko_rating"]
-        (
-            rating_system.rating_to_display(rating_value) if rating_value is not None else None
-        )
+        (rating_system.rating_to_display(rating_value) if rating_value is not None else None)
         jopacoin_balance = row["jopacoin_balance"] or 0
 
         # Format like the leaderboard command does
