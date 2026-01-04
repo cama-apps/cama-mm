@@ -72,10 +72,9 @@ def create_lobby_embed(lobby, players, player_ids, ready_threshold: int = 10):
 
     embed = discord.Embed(
         title="🎮 Matchmaking Lobby",
-        description="Join to play!",
+        description=f"Join to play!\n{timestamp_text}",
         color=discord.Color.green() if player_count >= ready_threshold else discord.Color.blue(),
     )
-    embed.set_footer(text=timestamp_text)
 
     player_list, unique_count = format_player_list(players, player_ids)
 
@@ -288,16 +287,10 @@ def create_enriched_match_embed(
             return "No data"
 
         lines = []
-        # Header with columns - add Lane column
-        lines.append("```")
-        lines.append(f"{'Hero':<11} {'KDA':<8} {'DMG':>5} {'NW':>5} {'Lane':>6}")
-        lines.append("-" * 41)
 
         for i, p in enumerate(participants):
             hero = get_hero_name(p.get("hero_id") or 0)
-            # Truncate hero name if too long
-            if len(hero) > 10:
-                hero = hero[:9] + "."
+            discord_id = p.get("discord_id")
 
             kills = p.get("kills") or 0
             deaths = p.get("deaths") or 0
@@ -317,12 +310,21 @@ def create_enriched_match_embed(
                 else:
                     lane_str = lane_abbrev
             else:
-                lane_str = "—"
+                lane_str = ""
 
-            line = f"{hero:<11} {kda:<8} {dmg:>5} {nw:>5} {lane_str:>6}"
+            # Format: <@id> **Hero** `K/D/A` | stats
+            player_ref = f"<@{discord_id}>" if discord_id and discord_id > 0 else "?"
+            stats_parts = [f"`{kda}`"]
+            if dmg != "—":
+                stats_parts.append(f"`{dmg} dmg`")
+            if nw != "—":
+                stats_parts.append(f"`{nw} nw`")
+            if lane_str:
+                stats_parts.append(f"`{lane_str}`")
+
+            line = f"{player_ref} **{hero}** {' '.join(stats_parts)}"
             lines.append(line)
 
-        lines.append("```")
         return "\n".join(lines)
 
     # Radiant team field

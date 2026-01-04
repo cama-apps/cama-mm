@@ -10,6 +10,7 @@ from discord import app_commands
 from discord.ext import commands
 from dotabase import Ability, Hero, dotabase_session
 
+from utils.hero_lookup import get_hero_image_url
 from utils.interaction_safety import safe_defer, safe_followup
 
 logger = logging.getLogger("cama_bot.commands.dota_info")
@@ -169,6 +170,11 @@ class DotaInfoCommands(commands.Cog):
             else hero.hype,
             color=attr_color,
         )
+
+        # Add hero image
+        hero_img = get_hero_image_url(hero.id)
+        if hero_img:
+            embed.set_thumbnail(url=hero_img)
 
         # Base stats
         stats_lines = []

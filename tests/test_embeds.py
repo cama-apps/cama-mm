@@ -18,7 +18,7 @@ class TestLobbyEmbedTimestamp:
     """Test that lobby embed uses Discord dynamic timestamps."""
 
     def test_lobby_embed_uses_discord_timestamp_format(self):
-        """Verify lobby footer uses <t:TIMESTAMP:t> format for user-local time."""
+        """Verify lobby description uses <t:TIMESTAMP:t> format for user-local time."""
         # Create a lobby with a known created_at time
         lobby = MagicMock()
         lobby.created_at = datetime(2026, 1, 2, 12, 30, 0)
@@ -26,11 +26,10 @@ class TestLobbyEmbedTimestamp:
 
         embed = create_lobby_embed(lobby, players=[], player_ids={}, ready_threshold=10)
 
-        footer_text = embed.footer.text
         expected_ts = int(lobby.created_at.timestamp())
 
-        assert f"<t:{expected_ts}:t>" in footer_text
-        assert "Opened at" in footer_text
+        assert f"<t:{expected_ts}:t>" in embed.description
+        assert "Opened at" in embed.description
 
     def test_lobby_embed_no_created_at_fallback(self):
         """Verify fallback when lobby has no created_at."""
@@ -40,7 +39,7 @@ class TestLobbyEmbedTimestamp:
 
         embed = create_lobby_embed(lobby, players=[], player_ids={}, ready_threshold=10)
 
-        assert embed.footer.text == "Opened just now"
+        assert "Opened just now" in embed.description
 
     def test_lobby_embed_timestamp_is_unix_epoch(self):
         """Verify the timestamp is a valid Unix epoch integer."""
@@ -50,12 +49,11 @@ class TestLobbyEmbedTimestamp:
 
         embed = create_lobby_embed(lobby, players=[], player_ids={}, ready_threshold=10)
 
-        footer_text = embed.footer.text
         # Extract timestamp from <t:TIMESTAMP:t>
         import re
 
-        match = re.search(r"<t:(\d+):t>", footer_text)
-        assert match is not None, f"No Discord timestamp found in: {footer_text}"
+        match = re.search(r"<t:(\d+):t>", embed.description)
+        assert match is not None, f"No Discord timestamp found in: {embed.description}"
 
         timestamp = int(match.group(1))
         # Verify it's a reasonable Unix timestamp (after year 2020)

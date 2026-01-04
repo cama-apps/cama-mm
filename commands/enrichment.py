@@ -1,6 +1,6 @@
 """
-Match enrichment commands: /setleague, /enrichmatch, /backfillsteamid, /profile, /matchhistory,
-/dotastats, /viewmatch, /recent, /rolesgraph
+Match enrichment commands: /setleague, /enrichmatch, /backfillsteamid, /matchhistory,
+/dotastats, /viewmatch, /recent, /rolesgraph, /lanegraph
 """
 
 import logging
@@ -722,6 +722,20 @@ class EnrichmentCommands(commands.Cog):
                 inline=False,
             )
 
+        # Recent matches
+        recent_matches = stats.get("recent_matches", [])[:5]
+        if recent_matches:
+            match_lines = []
+            for match in recent_matches:
+                result = "✅" if match.get("won") else "❌"
+                kda = f"{match.get('kills', 0)}/{match.get('deaths', 0)}/{match.get('assists', 0)}"
+                match_lines.append(f"{result} **{match.get('hero_name', '?')}** ({kda})")
+            embed.add_field(
+                name="Recent Matches",
+                value="\n".join(match_lines),
+                inline=False,
+            )
+
         # Footer with links
         embed.set_footer(
             text=f"Based on {stats['matches_analyzed']} recent matches | Data from OpenDota"
@@ -729,88 +743,6 @@ class EnrichmentCommands(commands.Cog):
 
         # Add OpenDota link
         embed.description = f"[View on OpenDota](https://www.opendota.com/players/{steam_id})"
-
-        await safe_followup(interaction, embed=embed, ephemeral=True)
-
-    @app_commands.command(
-        name="profile",
-        description="View OpenDota profile stats for a player",
-    )
-    @app_commands.describe(
-        user="Player to view profile for (defaults to yourself)",
-    )
-    async def profile(
-        self,
-        interaction: discord.Interaction,
-        user: discord.Member | None = None,
-    ):
-        """View OpenDota profile stats including W/L, avg KDA, top heroes."""
-        logger.info(
-            f"Profile command: User {interaction.user.id}, target={user.id if user else 'self'}"
-        )
-
-        if not await safe_defer(interaction, ephemeral=True):
-            return
-
-        target_id = user.id if user else interaction.user.id
-        target_name = user.display_name if user else interaction.user.display_name
-
-        # Validate player exists
-        player = self.player_repo.get_by_id(target_id)
-        if not player:
-            await safe_followup(
-                interaction,
-                content=f"{'That user is' if user else 'You are'} not registered.",
-                ephemeral=True,
-            )
-            return
-
-        # Check for steam_id
-        steam_id = self.player_repo.get_steam_id(target_id)
-        if not steam_id:
-            await safe_followup(
-                interaction,
-                content=(
-                    f"{'That user has' if user else 'You have'} no Steam ID linked.\n"
-                    "An admin can run `/backfillsteamid` to populate Steam IDs from Dotabuff URLs."
-                ),
-                ephemeral=True,
-            )
-            return
-
-        # Fetch profile
-        profile_data = self.opendota_player_service.format_profile_embed(target_id, target_name)
-
-        if not profile_data:
-            await safe_followup(
-                interaction,
-                content="Could not fetch OpenDota profile. The player's profile may be private or the API may be unavailable.",
-                ephemeral=True,
-            )
-            return
-
-        # Build embed
-        embed = discord.Embed(
-            title=profile_data["title"],
-            color=discord.Color.blue(),
-        )
-
-        for field in profile_data["fields"]:
-            embed.add_field(
-                name=field["name"],
-                value=field["value"],
-                inline=field.get("inline", True),
-            )
-
-        # Add Dotabuff link
-        if profile_data.get("last_match_id"):
-            embed.add_field(
-                name="Last Match",
-                value=f"[View on Dotabuff](https://www.dotabuff.com/matches/{profile_data['last_match_id']})",
-                inline=False,
-            )
-
-        embed.set_footer(text=profile_data.get("footer", "Data from OpenDota"))
 
         await safe_followup(interaction, embed=embed, ephemeral=True)
 

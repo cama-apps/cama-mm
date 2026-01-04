@@ -57,8 +57,7 @@ class InfoCommands(commands.Cog):
         embed.add_field(
             name="📊 Dota 2 Stats (OpenDota)",
             value=(
-                "`/profile` - View OpenDota profile (W/L, KDA, top heroes)\n"
-                "`/dotastats` - Comprehensive stats with distributions\n"
+                "`/dotastats` - Comprehensive stats (W/L, KDA, heroes, distributions)\n"
                 "`/matchhistory` - Recent matches with heroes and stats\n"
                 "`/viewmatch` - View detailed match embed\n"
                 "`/recent` - Recent matches as image table\n"

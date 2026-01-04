@@ -356,6 +356,8 @@ class OpenDotaPlayerService:
                 "lane_distribution": lane_dist,
                 # Top heroes
                 "top_heroes": profile.get("top_heroes", []),
+                # Recent matches (for display)
+                "recent_matches": profile.get("recent_matches", []),
                 # Recent performance
                 "recent_wins": recent_wins,
                 "recent_losses": recent_losses,

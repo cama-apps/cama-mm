@@ -31,6 +31,7 @@ async def safe_followup(
     *,
     content: str | None = None,
     embed: discord.Embed | None = None,
+    file: discord.File | None = None,
     ephemeral: bool = False,
     allowed_mentions: discord.AllowedMentions | None = None,
 ) -> discord.Message | None:
@@ -47,6 +48,7 @@ async def safe_followup(
         {
             "has_content": content is not None,
             "has_embed": embed is not None,
+            "has_file": file is not None,
             "ephemeral": ephemeral,
             "interaction_id": getattr(interaction, "id", None),
         },
@@ -57,6 +59,7 @@ async def safe_followup(
         msg = await interaction.followup.send(
             content=content,
             embed=embed,
+            file=file,
             ephemeral=ephemeral,
             allowed_mentions=allowed_mentions,
         )
@@ -104,7 +107,7 @@ async def safe_followup(
         channel = interaction.channel
         if not channel:
             raise
-        msg = await channel.send(content=content, embed=embed, allowed_mentions=allowed_mentions)
+        msg = await channel.send(content=content, embed=embed, file=file, allowed_mentions=allowed_mentions)
         # region agent log
         _dbg(
             "H7",
