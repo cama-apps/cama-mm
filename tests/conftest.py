@@ -85,3 +85,21 @@ def lobby_repository(repo_db_path):
 def lobby_manager(lobby_repository):
     """Create a lobby manager wired to lobby repository."""
     return LobbyManager(lobby_repository)
+
+
+@pytest.fixture
+def test_db(temp_db_path):
+    """Create a Database instance with temporary file.
+
+    Use this fixture instead of defining custom fixtures with time.sleep().
+    """
+    return Database(temp_db_path)
+
+
+@pytest.fixture
+def test_db_memory():
+    """Create an in-memory Database instance for faster tests.
+
+    Use this when you don't need persistence across restarts.
+    """
+    return Database(":memory:")

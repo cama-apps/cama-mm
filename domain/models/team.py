@@ -3,8 +3,39 @@ Team domain model.
 """
 
 import itertools
+from functools import lru_cache
 from typing import List, Optional, Dict, Tuple
 from domain.models.player import Player
+
+
+# Module-level cache for role assignment calculations
+# Key: tuple of (player_preferred_roles_tuple, ...)
+# Value: list of optimal role assignments
+@lru_cache(maxsize=1024)
+def _cached_optimal_role_assignments(player_roles_key: Tuple[Tuple[str, ...], ...]) -> Tuple[Tuple[str, ...], ...]:
+    """
+    Compute optimal role assignments for players based on their preferred roles.
+
+    This is cached because the same 5 players will be evaluated many times
+    during shuffle operations.
+    """
+    ROLES = ["1", "2", "3", "4", "5"]
+    min_off_roles = float('inf')
+    optimal_assignments: List[Tuple[str, ...]] = []
+
+    for role_perm in itertools.permutations(ROLES):
+        off_role_count = 0
+        for player_roles, assigned_role in zip(player_roles_key, role_perm):
+            if not player_roles or assigned_role not in player_roles:
+                off_role_count += 1
+
+        if off_role_count < min_off_roles:
+            min_off_roles = off_role_count
+            optimal_assignments = [role_perm]
+        elif off_role_count == min_off_roles:
+            optimal_assignments.append(role_perm)
+
+    return tuple(optimal_assignments) if optimal_assignments else (tuple(ROLES),)
 
 
 class Team:
@@ -75,22 +106,22 @@ class Team:
                 off_role_count += 1
         return off_role_count
     
+    def _get_player_roles_key(self) -> Tuple[Tuple[str, ...], ...]:
+        """Create a hashable key from player preferred roles for caching."""
+        return tuple(
+            tuple(p.preferred_roles) if p.preferred_roles else ()
+            for p in self.players
+        )
+
     def get_all_optimal_role_assignments(self) -> List[List[str]]:
         """
         Return all permutations that minimize off-role penalties.
+
+        Uses caching to avoid recalculating for the same player role combinations.
         """
-        min_off_roles = float('inf')
-        optimal_assignments: List[List[str]] = []
-        
-        for role_perm in itertools.permutations(self.ROLES):
-            off_role_count = self._count_off_roles(self.players, list(role_perm))
-            if off_role_count < min_off_roles:
-                min_off_roles = off_role_count
-                optimal_assignments = [list(role_perm)]
-            elif off_role_count == min_off_roles:
-                optimal_assignments.append(list(role_perm))
-        
-        return optimal_assignments or [list(self.ROLES)]
+        player_roles_key = self._get_player_roles_key()
+        cached_result = _cached_optimal_role_assignments(player_roles_key)
+        return [list(assignment) for assignment in cached_result]
 
     def _assign_roles_optimally(self) -> List[str]:
         """
