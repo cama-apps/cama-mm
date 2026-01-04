@@ -34,16 +34,15 @@ class LobbyService:
         if lobby.get_player_count() >= self.max_players:
             return False, f"Lobby is full ({self.max_players}/{self.max_players})."
 
-        if not lobby.add_player(discord_id):
+        # Use manager's join_lobby which persists to database
+        if not self.lobby_manager.join_lobby(discord_id, self.max_players):
             return False, "Already in lobby or lobby is closed."
 
         return True, ""
 
     def leave_lobby(self, discord_id: int) -> bool:
-        lobby = self.get_lobby()
-        if not lobby:
-            return False
-        return lobby.remove_player(discord_id)
+        # Use manager's leave_lobby which persists to database
+        return self.lobby_manager.leave_lobby(discord_id)
 
     def reset_lobby(self):
         self.lobby_manager.reset_lobby()
