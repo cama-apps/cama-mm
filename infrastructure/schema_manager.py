@@ -152,6 +152,7 @@ class SchemaManager:
             ("add_match_enrichment_columns", self._migration_add_match_enrichment_columns),
             ("add_enrichment_source_columns", self._migration_add_enrichment_source_columns),
             ("create_bankruptcy_table", self._migration_create_bankruptcy_table),
+            ("add_lobby_message_columns", self._migration_add_lobby_message_columns),
         ]
 
     # --- Migrations ---
@@ -372,4 +373,9 @@ class SchemaManager:
             )
             """
         )
+
+    def _migration_add_lobby_message_columns(self, cursor) -> None:
+        """Add message_id and channel_id columns to lobby_state for persistence across restarts."""
+        self._add_column_if_not_exists(cursor, "lobby_state", "message_id", "INTEGER")
+        self._add_column_if_not_exists(cursor, "lobby_state", "channel_id", "INTEGER")
 

@@ -637,20 +637,31 @@ class Database:
             cursor.execute("DELETE FROM pending_matches WHERE guild_id = ?", (normalized,))
             return json.loads(row["payload"])
 
-    def save_lobby_state(self, lobby_id: int, players: List[int], status: str, created_by: int, created_at: str) -> None:
+    def save_lobby_state(
+        self,
+        lobby_id: int,
+        players: List[int],
+        status: str,
+        created_by: int,
+        created_at: str,
+        message_id: Optional[int] = None,
+        channel_id: Optional[int] = None,
+    ) -> None:
         payload = json.dumps(players)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                INSERT INTO lobby_state (lobby_id, players, status, created_by, created_at)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO lobby_state (lobby_id, players, status, created_by, created_at, message_id, channel_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(lobby_id) DO UPDATE SET
                     players = excluded.players,
                     status = excluded.status,
                     created_by = excluded.created_by,
                     created_at = excluded.created_at,
+                    message_id = excluded.message_id,
+                    channel_id = excluded.channel_id,
                     updated_at = CURRENT_TIMESTAMP
-            """, (lobby_id, payload, status, created_by, created_at))
+            """, (lobby_id, payload, status, created_by, created_at, message_id, channel_id))
 
     def load_lobby_state(self, lobby_id: int) -> Optional[Dict]:
         with self.connection() as conn:
@@ -659,12 +670,15 @@ class Database:
             row = cursor.fetchone()
             if not row:
                 return None
+            row_dict = dict(row)
             return {
-                "lobby_id": row["lobby_id"],
-                "players": json.loads(row["players"]) if row["players"] else [],
-                "status": row["status"],
-                "created_by": row["created_by"],
-                "created_at": row["created_at"],
+                "lobby_id": row_dict["lobby_id"],
+                "players": json.loads(row_dict["players"]) if row_dict.get("players") else [],
+                "status": row_dict["status"],
+                "created_by": row_dict["created_by"],
+                "created_at": row_dict["created_at"],
+                "message_id": row_dict.get("message_id"),
+                "channel_id": row_dict.get("channel_id"),
             }
 
     def clear_lobby_state(self, lobby_id: int) -> None:

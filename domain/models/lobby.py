@@ -75,12 +75,13 @@ class Lobby:
 
 class LobbyManager:
     """Manages a single global lobby."""
-    
+
     DEFAULT_LOBBY_ID = 1
 
     def __init__(self, lobby_repo: ILobbyRepository):
         self.lobby_repo = lobby_repo
         self.lobby_message_id: Optional[int] = None
+        self.lobby_channel_id: Optional[int] = None
         self.lobby: Optional[Lobby] = None
         self._load_state()
 
@@ -114,11 +115,19 @@ class LobbyManager:
             self._persist_lobby()
         return success
 
+    def set_lobby_message(self, message_id: Optional[int], channel_id: Optional[int]) -> None:
+        """Set the lobby message and channel IDs, persisting to database."""
+        self.lobby_message_id = message_id
+        self.lobby_channel_id = channel_id
+        if self.lobby:
+            self._persist_lobby()
+
     def reset_lobby(self) -> None:
         if self.lobby:
             self.lobby.status = "closed"
         self.lobby = None
         self.lobby_message_id = None
+        self.lobby_channel_id = None
         self._clear_persistent_lobby()
 
     def _persist_lobby(self) -> None:
@@ -130,6 +139,8 @@ class LobbyManager:
             status=self.lobby.status,
             created_by=self.lobby.created_by,
             created_at=self.lobby.created_at.isoformat(),
+            message_id=self.lobby_message_id,
+            channel_id=self.lobby_channel_id,
         )
 
     def _clear_persistent_lobby(self) -> None:
@@ -140,4 +151,6 @@ class LobbyManager:
         if not data:
             return
         self.lobby = Lobby.from_dict(data)
+        self.lobby_message_id = data.get("message_id")
+        self.lobby_channel_id = data.get("channel_id")
 

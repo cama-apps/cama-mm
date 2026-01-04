@@ -50,11 +50,15 @@ class LobbyService:
     def reset_lobby(self):
         self.lobby_manager.reset_lobby()
 
-    def set_lobby_message_id(self, message_id: Optional[int]):
-        self.lobby_manager.lobby_message_id = message_id
+    def set_lobby_message_id(self, message_id: Optional[int], channel_id: Optional[int] = None):
+        """Set the lobby message ID and optionally channel ID, persisting to database."""
+        self.lobby_manager.set_lobby_message(message_id, channel_id)
 
     def get_lobby_message_id(self) -> Optional[int]:
         return self.lobby_manager.lobby_message_id
+
+    def get_lobby_channel_id(self) -> Optional[int]:
+        return self.lobby_manager.lobby_channel_id
 
     def get_lobby_players(self, lobby: Lobby) -> Tuple[List[int], List]:
         player_ids = list(lobby.players)
