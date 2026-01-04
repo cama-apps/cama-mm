@@ -7,7 +7,7 @@ import os
 import tempfile
 import time
 
-from config import JOPACOIN_WIN_REWARD
+from config import JOPACOIN_EXCLUSION_REWARD, JOPACOIN_WIN_REWARD
 from database import Database
 from repositories.bet_repository import BetRepository
 from repositories.player_repository import PlayerRepository
@@ -96,6 +96,42 @@ class TestBettingEndToEnd:
         assert player_repo.get_balance(participant) == expected_participant_balance
         # Spectator starts with 3, gets +10 top-up, -5 lost bet = 8
         assert player_repo.get_balance(spectator) == 8
+
+    def test_excluded_players_receive_exclusion_bonus(self, test_db):
+        player_repo = PlayerRepository(test_db.db_path)
+        bet_repo = BetRepository(test_db.db_path)
+        match_repo = MatchRepository(test_db.db_path)
+        betting_service = BettingService(bet_repo, player_repo)
+        match_service = MatchService(player_repo=player_repo, match_repo=match_repo, use_glicko=False, betting_service=betting_service)
+
+        player_ids = list(range(5101, 5113))  # 12 players -> 2 excluded
+        for pid in player_ids:
+            test_db.add_player(
+                discord_id=pid,
+                discord_username=f"Player{pid}",
+                initial_mmr=1500,
+                glicko_rating=1500.0,
+                glicko_rd=350.0,
+                glicko_volatility=0.06,
+            )
+
+        match_service.shuffle_players(player_ids, guild_id=1)
+        pending = match_service.get_last_shuffle(1)
+        excluded_ids = pending["excluded_player_ids"]
+        assert len(excluded_ids) == 2
+
+        # Start everyone at zero for deterministic balance checks
+        for pid in player_ids:
+            player_repo.update_balance(pid, 0)
+
+        match_service.record_match("radiant", guild_id=1)
+
+        for pid in excluded_ids:
+            assert player_repo.get_balance(pid) == JOPACOIN_EXCLUSION_REWARD
+
+        included_ids = set(player_ids) - set(excluded_ids)
+        for pid in included_ids:
+            assert player_repo.get_balance(pid) != JOPACOIN_EXCLUSION_REWARD
 
     def test_betting_totals_display_correctly_after_previous_match(self, test_db, test_players):
         """

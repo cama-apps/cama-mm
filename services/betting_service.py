@@ -6,7 +6,13 @@ import math
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 import time
 
-from config import HOUSE_PAYOUT_MULTIPLIER, JOPACOIN_WIN_REWARD, LEVERAGE_TIERS, MAX_DEBT
+from config import (
+    HOUSE_PAYOUT_MULTIPLIER,
+    JOPACOIN_EXCLUSION_REWARD,
+    JOPACOIN_WIN_REWARD,
+    LEVERAGE_TIERS,
+    MAX_DEBT,
+)
 from repositories.bet_repository import BetRepository
 from repositories.player_repository import PlayerRepository
 
@@ -296,6 +302,41 @@ class BettingService:
                 self.player_repo.add_balance(pid, reward)
                 results[pid] = {
                     "gross": JOPACOIN_WIN_REWARD,
+                    "garnished": 0,
+                    "net": reward,
+                    "bankruptcy_penalty": bankruptcy_penalty,
+                }
+
+        return results
+
+    def award_exclusion_bonus(self, excluded_ids: List[int]) -> Dict[int, Dict[str, int]]:
+        """
+        Reward excluded players with a small consolation bonus.
+
+        Mirrors win bonus processing so bankruptcy and garnishment rules still apply.
+        """
+        results: Dict[int, Dict[str, int]] = {}
+        if not excluded_ids:
+            return results
+
+        for pid in excluded_ids:
+            reward = JOPACOIN_EXCLUSION_REWARD
+            bankruptcy_penalty = 0
+
+            if self.bankruptcy_service:
+                penalty_result = self.bankruptcy_service.apply_penalty_to_winnings(pid, reward)
+                reward = penalty_result["penalized"]
+                bankruptcy_penalty = penalty_result["penalty_applied"]
+
+            if self.garnishment_service:
+                result = self.garnishment_service.add_income(pid, reward)
+                result["bankruptcy_penalty"] = bankruptcy_penalty
+                result["gross"] = JOPACOIN_EXCLUSION_REWARD
+                results[pid] = result
+            else:
+                self.player_repo.add_balance(pid, reward)
+                results[pid] = {
+                    "gross": JOPACOIN_EXCLUSION_REWARD,
                     "garnished": 0,
                     "net": reward,
                     "bankruptcy_penalty": bankruptcy_penalty,

@@ -2,10 +2,30 @@
 Unit tests for lobby management.
 """
 
+import os
 import pytest
+import time
 from domain.models.lobby import Lobby, LobbyManager
 from datetime import datetime
 from database import Database
+
+
+def _cleanup_db_file(db_path: str) -> None:
+    """Close sqlite handles and remove temp db with retries for Windows."""
+    try:
+        import sqlite3
+        sqlite3.connect(db_path).close()
+    except Exception:
+        pass
+    time.sleep(0.1)
+    try:
+        os.unlink(db_path)
+    except PermissionError:
+        time.sleep(0.2)
+        try:
+            os.unlink(db_path)
+        except Exception:
+            pass
 
 
 class TestLobby:
@@ -220,7 +240,7 @@ class TestLobbyPersistence:
             assert manager2.lobby_message_id == 111222333
             assert manager2.lobby_channel_id == 444555666
         finally:
-            os.unlink(db_path)
+            _cleanup_db_file(db_path)
 
     def test_players_persist_across_restart(self):
         """Test that lobby players are restored after restart."""
@@ -252,7 +272,7 @@ class TestLobbyPersistence:
             assert 1003 in lobby.players
             assert lobby.get_player_count() == 3
         finally:
-            os.unlink(db_path)
+            _cleanup_db_file(db_path)
 
     def test_can_join_lobby_after_restart(self):
         """Test that new players can join the lobby after restart."""
@@ -283,7 +303,7 @@ class TestLobbyPersistence:
             assert 1002 in lobby.players
             assert lobby.get_player_count() == 2
         finally:
-            os.unlink(db_path)
+            _cleanup_db_file(db_path)
 
     def test_can_leave_lobby_after_restart(self):
         """Test that players can leave the lobby after restart."""
@@ -315,7 +335,7 @@ class TestLobbyPersistence:
             assert 1002 in lobby.players
             assert lobby.get_player_count() == 1
         finally:
-            os.unlink(db_path)
+            _cleanup_db_file(db_path)
 
     def test_lobby_creator_persists_across_restart(self):
         """Test that lobby creator info is preserved after restart."""
@@ -339,7 +359,7 @@ class TestLobbyPersistence:
             assert lobby is not None
             assert lobby.created_by == 99999
         finally:
-            os.unlink(db_path)
+            _cleanup_db_file(db_path)
 
     def test_lobby_status_persists_across_restart(self):
         """Test that lobby status is preserved after restart."""
@@ -363,7 +383,7 @@ class TestLobbyPersistence:
             assert lobby is not None
             assert lobby.status == "open"
         finally:
-            os.unlink(db_path)
+            _cleanup_db_file(db_path)
 
     def test_closed_lobby_not_restored_after_restart(self):
         """Test that a closed lobby doesn't restore message IDs."""
@@ -390,7 +410,7 @@ class TestLobbyPersistence:
             assert manager2.lobby_message_id is None
             assert manager2.lobby_channel_id is None
         finally:
-            os.unlink(db_path)
+            _cleanup_db_file(db_path)
 
     def test_message_id_without_channel_id(self):
         """Test handling when message_id is set but channel_id is None."""
@@ -417,7 +437,7 @@ class TestLobbyPersistence:
             lobby = manager2.get_lobby()
             assert lobby is not None
         finally:
-            os.unlink(db_path)
+            _cleanup_db_file(db_path)
 
     def test_set_lobby_message_persists_immediately(self):
         """Test that set_lobby_message triggers immediate persistence."""
@@ -442,7 +462,7 @@ class TestLobbyPersistence:
             assert manager2.lobby_message_id == 111
             assert manager2.lobby_channel_id == 222
         finally:
-            os.unlink(db_path)
+            _cleanup_db_file(db_path)
 
     def test_multiple_restarts_preserve_state(self):
         """Test that state is preserved across multiple restarts."""
@@ -475,7 +495,7 @@ class TestLobbyPersistence:
             assert 1001 in lobby.players
             assert 1002 in lobby.players
         finally:
-            os.unlink(db_path)
+            _cleanup_db_file(db_path)
 
     def test_join_persists_message_id(self):
         """Test that joining lobby also persists message_id if already set."""
@@ -502,7 +522,7 @@ class TestLobbyPersistence:
             assert manager2.lobby_channel_id == 222
             assert 1001 in manager2.get_lobby().players
         finally:
-            os.unlink(db_path)
+            _cleanup_db_file(db_path)
 
     def test_leave_persists_message_id(self):
         """Test that leaving lobby preserves message_id."""
@@ -532,7 +552,7 @@ class TestLobbyPersistence:
             assert 1001 not in manager2.get_lobby().players
             assert 1002 in manager2.get_lobby().players
         finally:
-            os.unlink(db_path)
+            _cleanup_db_file(db_path)
 
     def test_empty_lobby_still_has_message_id(self):
         """Test that an empty lobby (all players left) still has message_id."""
@@ -562,7 +582,7 @@ class TestLobbyPersistence:
             assert lobby is not None
             assert lobby.get_player_count() == 0
         finally:
-            os.unlink(db_path)
+            _cleanup_db_file(db_path)
 
     def test_update_message_id_persists(self):
         """Test that updating message_id to a new value persists correctly."""
@@ -589,7 +609,7 @@ class TestLobbyPersistence:
             assert manager2.lobby_message_id == 333
             assert manager2.lobby_channel_id == 444
         finally:
-            os.unlink(db_path)
+            _cleanup_db_file(db_path)
 
 
 if __name__ == "__main__":

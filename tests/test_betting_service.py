@@ -2,6 +2,8 @@ import os
 import tempfile
 import time
 
+from config import JOPACOIN_EXCLUSION_REWARD
+
 import pytest
 
 from database import Database
@@ -149,6 +151,36 @@ def test_settle_bets_pays_out_on_house(services):
     assert distributions["winners"][0]["discord_id"] == participant
     # Starting balance is now 3, plus 20, minus 5 bet, plus 10 payout = 28
     assert player_repo.get_balance(participant) == 28
+
+
+def test_award_exclusion_bonus_adds_reward(services):
+    betting_service = services["betting_service"]
+    player_repo = services["player_repo"]
+
+    pid = 7070
+    player_repo.add(
+        discord_id=pid,
+        discord_username="ExcludedUser",
+        dotabuff_url="https://dotabuff.com/players/7070",
+        initial_mmr=1500,
+        glicko_rating=1500.0,
+        glicko_rd=350.0,
+        glicko_volatility=0.06,
+    )
+    player_repo.update_balance(pid, 0)
+
+    result = betting_service.award_exclusion_bonus([pid])
+
+    assert result[pid]["gross"] == JOPACOIN_EXCLUSION_REWARD
+    assert result[pid]["net"] == JOPACOIN_EXCLUSION_REWARD
+    assert result[pid]["garnished"] == 0
+    assert player_repo.get_balance(pid) == JOPACOIN_EXCLUSION_REWARD
+
+
+def test_award_exclusion_bonus_empty_list_noop(services):
+    betting_service = services["betting_service"]
+    result = betting_service.award_exclusion_bonus([])
+    assert result == {}
 
 
 def test_betting_totals_only_include_pending_bets(services):
