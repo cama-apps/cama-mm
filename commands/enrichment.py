@@ -333,8 +333,8 @@ class EnrichmentCommands(commands.Cog):
         # Format matches as embed
         from utils.hero_lookup import get_hero_image_url, get_hero_name
 
-        # Lane role names
-        lane_names = {1: "Safe", 2: "Mid", 3: "Off", 4: "Jgl"}
+        # Lane role names (0 = Roaming is valid but falsy)
+        lane_names = {0: "Roam", 1: "Safe", 2: "Mid", 3: "Off", 4: "Jgl"}
 
         # Count wins for color
         wins = sum(1 for m in matches if m["player_won"])
@@ -1046,6 +1046,9 @@ class EnrichmentCommands(commands.Cog):
             return
 
         lane_dist = stats.get("lane_distribution", {})
+        lane_parsed = stats.get("lane_parsed_count", 0)
+        matches_analyzed = stats.get("matches_analyzed", matches)
+
         if not lane_dist or all(v == 0 for v in lane_dist.values()):
             await safe_followup(
                 interaction,
@@ -1053,18 +1056,20 @@ class EnrichmentCommands(commands.Cog):
             )
             return
 
+        # Filter out lanes with 0% to reduce clutter (Jungle/Roaming often empty)
+        lane_dist_filtered = {k: v for k, v in lane_dist.items() if v > 0}
+
         # Generate image
         try:
-            image_bytes = draw_lane_distribution(lane_dist)
+            image_bytes = draw_lane_distribution(lane_dist_filtered)
             file = discord.File(image_bytes, filename="lane_graph.png")
 
             embed = discord.Embed(
                 title=f"Lane Distribution: {target_name}",
-                description=f"Based on last {stats.get('matches_analyzed', matches)} matches",
+                description=f"Based on {lane_parsed} parsed matches (of {matches_analyzed} fetched)",
                 color=discord.Color.green(),
             )
             embed.set_image(url="attachment://lane_graph.png")
-            embed.set_footer(text="Only parsed matches have lane data")
 
             await safe_followup(interaction, embed=embed, file=file)
         except Exception as e:

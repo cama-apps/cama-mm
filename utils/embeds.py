@@ -162,7 +162,8 @@ def _determine_lane_outcomes(
         for i, p in enumerate(participants):
             lane = p.get("lane_role")
             eff = p.get("lane_efficiency")
-            if lane and eff is not None:
+            # Only lanes 1,2,3 (Safe/Mid/Off) have matchups - skip Roaming (0) and Jungle (4)
+            if lane in (1, 2, 3) and eff is not None:
                 if lane not in lanes:
                     lanes[lane] = []
                 lanes[lane].append((i, eff))
@@ -303,8 +304,11 @@ def create_enriched_match_embed(
             # Lane with W/L/D outcome (e.g., "Mid W" or "Safe L")
             lane_role = p.get("lane_role")
             outcome = lane_outcomes.get((team, i))
-            if lane_role:
-                lane_abbrev = {1: "Safe", 2: "Mid", 3: "Off", 4: "Jgl"}.get(lane_role, "")
+            # Use 'is not None' since lane_role=0 (Roaming) is valid but falsy
+            if lane_role is not None:
+                lane_abbrev = {0: "Roam", 1: "Safe", 2: "Mid", 3: "Off", 4: "Jgl"}.get(
+                    lane_role, ""
+                )
                 if outcome:
                     lane_str = f"{lane_abbrev} {outcome}"
                 else:
