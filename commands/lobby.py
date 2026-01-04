@@ -109,7 +109,7 @@ class LobbyCommands(commands.Cog):
             embed=embed,
             allowed_mentions=discord.AllowedMentions.none(),
         )
-        self.lobby_service.set_lobby_message_id(message.id)
+        self.lobby_service.set_lobby_message_id(message.id, interaction.channel.id)
         await self._safe_pin(message)
         try:
             await message.add_reaction("⚔️")

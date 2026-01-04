@@ -215,7 +215,16 @@ class IMatchRepository(ABC):
 
 class ILobbyRepository(ABC):
     @abstractmethod
-    def save_lobby_state(self, lobby_id: int, players: List[int], status: str, created_by: int, created_at: str) -> None:
+    def save_lobby_state(
+        self,
+        lobby_id: int,
+        players: List[int],
+        status: str,
+        created_by: int,
+        created_at: str,
+        message_id: Optional[int] = None,
+        channel_id: Optional[int] = None,
+    ) -> None:
         ...
 
     @abstractmethod
