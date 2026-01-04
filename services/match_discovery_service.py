@@ -214,6 +214,19 @@ class MatchDiscoveryService:
                 "total_players": len(steam_ids),
             }
 
+    def discover_match(self, match_id: int) -> Dict:
+        """
+        Public method to discover and enrich a single match.
+
+        Args:
+            match_id: Internal match ID to discover
+
+        Returns:
+            Dict with status and details (same as _discover_single_match)
+        """
+        logger.info(f"Auto-discovery triggered for match {match_id}")
+        return self._discover_single_match(match_id, dry_run=False)
+
     def _parse_match_time(self, match_date) -> Optional[int]:
         """Parse match_date to Unix timestamp."""
         if not match_date:

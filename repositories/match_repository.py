@@ -177,7 +177,8 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 'match_date': row['match_date'],
                 'player_team': row['team_number'],
                 'player_won': bool(row['won']),
-                'side': row['side']
+                'side': row['side'],
+                'valve_match_id': row['valve_match_id'],
             } for row in rows]
     
     def get_rating_history(self, discord_id: int, limit: int = 20) -> List[dict]:

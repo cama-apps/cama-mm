@@ -333,6 +333,9 @@ class EnrichmentCommands(commands.Cog):
 
             result_emoji = "✅" if won else "❌"
 
+            valve_match_id = match.get("valve_match_id")
+            dotabuff_link = f"[Dotabuff](https://www.dotabuff.com/matches/{valve_match_id})" if valve_match_id else None
+
             if player_stats and player_stats.get("hero_id"):
                 hero = get_hero_name(player_stats["hero_id"])
                 k = player_stats.get('kills', 0)
@@ -344,29 +347,34 @@ class EnrichmentCommands(commands.Cog):
 
                 dmg_str = f"{dmg / 1000:.1f}k" if dmg >= 1000 else str(dmg)
 
+                stats_block = (
+                    f"```\n"
+                    f"KDA:  {k}/{d}/{a}\n"
+                    f"GPM:  {gpm}  XPM: {xpm}\n"
+                    f"DMG:  {dmg_str}\n"
+                    f"Side: {side}\n"
+                    f"```"
+                )
+                if dotabuff_link:
+                    stats_block += f"\n{dotabuff_link}"
+
                 embed.add_field(
                     name=f"{result_emoji} #{match_id} • {hero}",
-                    value=(
-                        f"```\n"
-                        f"KDA:  {k}/{d}/{a}\n"
-                        f"GPM:  {gpm}  XPM: {xpm}\n"
-                        f"DMG:  {dmg_str}\n"
-                        f"Side: {side}\n"
-                        f"```"
-                    ),
+                    value=stats_block,
                     inline=True
                 )
             else:
+                stats_block = (
+                    f"```\n"
+                    f"KDA:  -/-/-\n"
+                    f"GPM:  -    XPM: -\n"
+                    f"DMG:  -\n"
+                    f"Side: {side}\n"
+                    f"```"
+                )
                 embed.add_field(
                     name=f"{result_emoji} #{match_id} • ???",
-                    value=(
-                        f"```\n"
-                        f"KDA:  -/-/-\n"
-                        f"GPM:  -    XPM: -\n"
-                        f"DMG:  -\n"
-                        f"Side: {side}\n"
-                        f"```"
-                    ),
+                    value=stats_block,
                     inline=True
                 )
 

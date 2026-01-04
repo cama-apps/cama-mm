@@ -14,6 +14,7 @@ from discord import app_commands
 
 from config import BET_LOCK_SECONDS, JOPACOIN_MIN_BET
 from services.match_service import MatchService
+from services.match_discovery_service import MatchDiscoveryService
 from services.lobby_service import LobbyService
 from services.permissions import has_admin_permission
 from utils.formatting import (
@@ -32,11 +33,24 @@ logger = logging.getLogger("cama_bot.commands.match")
 class MatchCommands(commands.Cog):
     """Slash commands for shuffling teams and recording results."""
 
-    def __init__(self, bot: commands.Bot, lobby_service: LobbyService, match_service: MatchService, player_service):
+    def __init__(
+        self,
+        bot: commands.Bot,
+        lobby_service: LobbyService,
+        match_service: MatchService,
+        player_service,
+        *,
+        guild_config_repo=None,
+        player_repo=None,
+        match_repo=None,
+    ):
         self.bot = bot
         self.lobby_service = lobby_service
         self.match_service = match_service
         self.player_service = player_service
+        self.guild_config_repo = guild_config_repo
+        self.player_repo = player_repo
+        self.match_repo = match_repo
         # Track scheduled betting reminder tasks per guild for cleanup
         self._betting_tasks_by_guild = {}
 
@@ -287,6 +301,11 @@ class MatchCommands(commands.Cog):
         if not await safe_defer(interaction, ephemeral=False):
             return
 
+        logger.info(
+            f"Record command: User {interaction.user.id} ({interaction.user.name}) "
+            f"result={result.value} match_id={dotabuff_match_id}"
+        )
+
         guild_id = interaction.guild.id if hasattr(interaction, "guild") and interaction.guild else None
         is_admin = has_admin_permission(interaction)
         if result.value == "abort":
@@ -458,6 +477,74 @@ class MatchCommands(commands.Cog):
         )
         await interaction.followup.send(message, ephemeral=False)
 
+        # Trigger auto-discovery in background if enabled
+        match_id = record_result.get("match_id")
+        if match_id:
+            asyncio.create_task(
+                self._trigger_auto_discovery(guild_id, match_id, interaction.channel)
+            )
+
+    async def _trigger_auto_discovery(
+        self,
+        guild_id: Optional[int],
+        match_id: int,
+        channel: Optional[discord.abc.Messageable],
+    ) -> None:
+        """
+        Trigger auto-discovery for a match in the background.
+
+        Checks if auto_enrich is enabled, then attempts to find and enrich
+        the Dota 2 match ID using player match histories from OpenDota.
+        """
+        try:
+            # Check if auto_enrich is enabled for this guild
+            if self.guild_config_repo:
+                auto_enrich = self.guild_config_repo.get_auto_enrich(guild_id or 0)
+                if not auto_enrich:
+                    logger.debug(f"Auto-enrich disabled for guild {guild_id}, skipping discovery")
+                    return
+
+            # Need repos to create discovery service
+            if not self.match_repo or not self.player_repo:
+                logger.warning("Cannot auto-discover: missing match_repo or player_repo")
+                return
+
+            # Small delay to let OpenDota parse the match (matches take time to appear)
+            await asyncio.sleep(60)  # Wait 1 minute before trying
+
+            # Run discovery in executor to avoid blocking
+            discovery_service = MatchDiscoveryService(
+                self.match_repo, self.player_repo
+            )
+
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                None, discovery_service.discover_match, match_id
+            )
+
+            if result.get("status") == "discovered":
+                valve_match_id = result.get("valve_match_id")
+                confidence = result.get("confidence", 0)
+                logger.info(
+                    f"Auto-discovered match {match_id} -> valve_match_id={valve_match_id} "
+                    f"(confidence: {confidence:.0%})"
+                )
+                if channel:
+                    try:
+                        await channel.send(
+                            f"📊 Match #{match_id} auto-enriched! "
+                            f"(Dota Match ID: {valve_match_id}, {confidence:.0%} confidence)"
+                        )
+                    except Exception:
+                        pass  # Ignore if we can't send message
+            else:
+                logger.debug(
+                    f"Auto-discovery for match {match_id}: {result.get('status')} "
+                    f"(best confidence: {result.get('confidence', 0):.0%})"
+                )
+
+        except Exception as exc:
+            logger.error(f"Error in auto-discovery for match {match_id}: {exc}", exc_info=True)
 
     async def _finalize_abort(self, interaction: discord.Interaction, guild_id: Optional[int], admin_override: bool):
         betting_service = getattr(self.bot, "betting_service", None)
@@ -576,5 +663,13 @@ async def setup(bot: commands.Bot):
     lobby_service = getattr(bot, "lobby_service", None)
     match_service = getattr(bot, "match_service", None)
     player_service = getattr(bot, "player_service", None)
-    await bot.add_cog(MatchCommands(bot, lobby_service, match_service, player_service))
+    guild_config_repo = getattr(bot, "guild_config_repo", None)
+    player_repo = getattr(bot, "player_repo", None)
+    match_repo = getattr(bot, "match_repo", None)
+    await bot.add_cog(MatchCommands(
+        bot, lobby_service, match_service, player_service,
+        guild_config_repo=guild_config_repo,
+        player_repo=player_repo,
+        match_repo=match_repo,
+    ))
 
