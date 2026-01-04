@@ -227,7 +227,20 @@ def draw_role_graph(
 
     # Get roles and values
     roles = list(role_values.keys())
-    values = [role_values[r] / 100.0 for r in roles]  # Normalize to 0-1
+    raw_values = [role_values[r] for r in roles]
+
+    # Auto-scale: find the max value and scale so max reaches ~90% of radius
+    # This makes the graph visually meaningful even when values are small percentages
+    max_val = max(raw_values) if raw_values else 1
+    # Round up to a nice scale (next multiple of 5 or 10)
+    if max_val <= 10:
+        scale_max = 10
+    elif max_val <= 25:
+        scale_max = ((int(max_val) // 5) + 1) * 5  # Round to next 5
+    else:
+        scale_max = ((int(max_val) // 10) + 1) * 10  # Round to next 10
+
+    values = [v / scale_max for v in raw_values]  # Normalize to 0-1 based on scale_max
     n = len(roles)
 
     if n < 3:
@@ -249,10 +262,19 @@ def draw_role_graph(
             points.append((px, py))
         return points
 
-    # Draw grid circles (at 25%, 50%, 75%, 100%)
+    # Draw grid circles (at 25%, 50%, 75%, 100% of scale_max)
+    scale_font = _get_font(10)
     for pct in [0.25, 0.5, 0.75, 1.0]:
         grid_points = get_points(radius, pct)
         draw.polygon(grid_points, outline=DISCORD_DARKER)
+
+        # Add scale label on right side of each ring
+        label_val = int(scale_max * pct)
+        label_text = f"{label_val}%"
+        # Position slightly to the right of center
+        label_x = center[0] + radius * pct + 3
+        label_y = center[1] - 5
+        draw.text((label_x, label_y), label_text, fill=DISCORD_GREY, font=scale_font)
 
     # Draw grid lines from center to each vertex
     outer_points = get_points(radius)
