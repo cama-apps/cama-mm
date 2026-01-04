@@ -36,7 +36,7 @@ async def safe_followup(
 ) -> discord.Message | None:
     """
     Send a followup via the interaction if possible; otherwise post directly in the channel.
-    
+
     Returns None if the interaction was already responded to (to prevent duplicate messages).
     """
     # region agent log
@@ -98,7 +98,7 @@ async def safe_followup(
                 f"Not sending fallback message to prevent duplicates. Error: {exc}"
             )
             return None
-        
+
         # Only send fallback if interaction wasn't already responded to
         logger.warning("Followup failed, sending to channel instead: %s", exc)
         channel = interaction.channel
@@ -120,4 +120,3 @@ async def safe_followup(
         )
         # endregion agent log
         return msg
-

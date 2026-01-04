@@ -3,7 +3,6 @@ Repository for lobby persistence.
 """
 
 import json
-from typing import Dict, List, Optional
 
 from repositories.base_repository import BaseRepository
 from repositories.interfaces import ILobbyRepository
@@ -17,12 +16,12 @@ class LobbyRepository(BaseRepository, ILobbyRepository):
     def save_lobby_state(
         self,
         lobby_id: int,
-        players: List[int],
+        players: list[int],
         status: str,
         created_by: int,
         created_at: str,
-        message_id: Optional[int] = None,
-        channel_id: Optional[int] = None,
+        message_id: int | None = None,
+        channel_id: int | None = None,
     ) -> None:
         payload = json.dumps(players)
         with self.connection() as conn:
@@ -43,7 +42,7 @@ class LobbyRepository(BaseRepository, ILobbyRepository):
                 (lobby_id, payload, status, created_by, created_at, message_id, channel_id),
             )
 
-    def load_lobby_state(self, lobby_id: int) -> Optional[Dict]:
+    def load_lobby_state(self, lobby_id: int) -> dict | None:
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM lobby_state WHERE lobby_id = ?", (lobby_id,))
@@ -65,4 +64,3 @@ class LobbyRepository(BaseRepository, ILobbyRepository):
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM lobby_state WHERE lobby_id = ?", (lobby_id,))
-

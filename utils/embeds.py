@@ -5,7 +5,7 @@ Reusable Discord embed builders.
 import discord
 
 from rating_system import CamaRatingSystem
-from utils.formatting import ROLE_EMOJIS, ROLE_NAMES, get_player_display_name
+from utils.formatting import ROLE_EMOJIS
 
 
 def format_player_list(players, player_ids):
@@ -98,4 +98,3 @@ def create_lobby_embed(lobby, players, player_ids, ready_threshold: int = 10):
         )
 
     return embed
-

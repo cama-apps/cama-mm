@@ -1,8 +1,8 @@
-import pytest
 import time
 from unittest.mock import AsyncMock, MagicMock
 
 import discord
+import pytest
 
 from commands.betting import BettingCommands
 
@@ -186,12 +186,14 @@ async def test_mybets_uses_discord_timestamp_format():
     match_service.get_last_shuffle.return_value = pending_state
 
     # Now uses get_pending_bets (plural) instead of get_pending_bet
-    betting_service.get_pending_bets.return_value = [{
-        "amount": 100,
-        "team_bet_on": "radiant",
-        "bet_time": bet_time,
-        "leverage": 1,
-    }]
+    betting_service.get_pending_bets.return_value = [
+        {
+            "amount": 100,
+            "team_bet_on": "radiant",
+            "bet_time": bet_time,
+            "leverage": 1,
+        }
+    ]
 
     interaction = MagicMock()
     interaction.guild.id = 123
@@ -204,7 +206,10 @@ async def test_mybets_uses_discord_timestamp_format():
 
     interaction.followup.send.assert_awaited_once()
     message = interaction.followup.send.call_args.kwargs.get(
-        "content", interaction.followup.send.call_args.args[0] if interaction.followup.send.call_args.args else ""
+        "content",
+        interaction.followup.send.call_args.args[0]
+        if interaction.followup.send.call_args.args
+        else "",
     )
 
     # Verify Discord timestamp format <t:TIMESTAMP:t>
@@ -224,12 +229,14 @@ async def test_mybets_leverage_uses_discord_timestamp_format():
     match_service.get_last_shuffle.return_value = pending_state
 
     # Now uses get_pending_bets (plural) instead of get_pending_bet
-    betting_service.get_pending_bets.return_value = [{
-        "amount": 50,
-        "team_bet_on": "dire",
-        "bet_time": bet_time,
-        "leverage": 3,
-    }]
+    betting_service.get_pending_bets.return_value = [
+        {
+            "amount": 50,
+            "team_bet_on": "dire",
+            "bet_time": bet_time,
+            "leverage": 3,
+        }
+    ]
 
     interaction = MagicMock()
     interaction.guild.id = 123
@@ -242,7 +249,10 @@ async def test_mybets_leverage_uses_discord_timestamp_format():
 
     interaction.followup.send.assert_awaited_once()
     message = interaction.followup.send.call_args.kwargs.get(
-        "content", interaction.followup.send.call_args.args[0] if interaction.followup.send.call_args.args else ""
+        "content",
+        interaction.followup.send.call_args.args[0]
+        if interaction.followup.send.call_args.args
+        else "",
     )
 
     # Verify Discord timestamp format and leverage info

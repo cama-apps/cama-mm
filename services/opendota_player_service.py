@@ -3,7 +3,6 @@ Service for fetching player profile statistics from OpenDota API.
 """
 
 import logging
-from typing import Dict, List, Optional
 from datetime import datetime, timedelta
 
 from opendota_integration import OpenDotaAPI
@@ -38,9 +37,9 @@ class OpenDotaPlayerService:
         self.profile_cache_repo = profile_cache_repo
         self.api = OpenDotaAPI()
         # In-memory cache (fallback if no DB cache)
-        self._memory_cache: Dict[int, Dict] = {}
+        self._memory_cache: dict[int, dict] = {}
 
-    def get_player_profile(self, discord_id: int, force_refresh: bool = False) -> Optional[Dict]:
+    def get_player_profile(self, discord_id: int, force_refresh: bool = False) -> dict | None:
         """
         Get comprehensive player profile from OpenDota.
 
@@ -77,7 +76,7 @@ class OpenDotaPlayerService:
 
         return profile
 
-    def _fetch_profile(self, steam_id: int) -> Optional[Dict]:
+    def _fetch_profile(self, steam_id: int) -> dict | None:
         """Fetch all profile data from OpenDota APIs."""
         try:
             # Basic player info
@@ -120,7 +119,7 @@ class OpenDotaPlayerService:
             logger.error(f"Error fetching profile for steam_id {steam_id}: {e}")
             return None
 
-    def _fetch_win_loss(self, steam_id: int) -> Dict:
+    def _fetch_win_loss(self, steam_id: int) -> dict:
         """Fetch win/loss totals."""
         try:
             response = self.api._make_request(f"{self.api.BASE_URL}/players/{steam_id}/wl")
@@ -130,7 +129,7 @@ class OpenDotaPlayerService:
             logger.error(f"Error fetching W/L for {steam_id}: {e}")
         return {"win": 0, "lose": 0}
 
-    def _fetch_totals(self, steam_id: int) -> Dict:
+    def _fetch_totals(self, steam_id: int) -> dict:
         """Fetch player totals for calculating averages."""
         try:
             response = self.api._make_request(f"{self.api.BASE_URL}/players/{steam_id}/totals")
@@ -160,7 +159,7 @@ class OpenDotaPlayerService:
             logger.error(f"Error fetching totals for {steam_id}: {e}")
         return {}
 
-    def _fetch_top_heroes(self, steam_id: int, limit: int = 5) -> List[Dict]:
+    def _fetch_top_heroes(self, steam_id: int, limit: int = 5) -> list[dict]:
         """Fetch top heroes by games played."""
         try:
             response = self.api._make_request(f"{self.api.BASE_URL}/players/{steam_id}/heroes")
@@ -174,7 +173,9 @@ class OpenDotaPlayerService:
                         "hero_name": get_hero_name(int(h["hero_id"])),
                         "games": h.get("games", 0),
                         "wins": h.get("win", 0),
-                        "win_rate": self._calc_win_rate(h.get("win", 0), h.get("games", 0) - h.get("win", 0)),
+                        "win_rate": self._calc_win_rate(
+                            h.get("win", 0), h.get("games", 0) - h.get("win", 0)
+                        ),
                     }
                     for h in top
                     if h.get("games", 0) > 0
@@ -183,7 +184,7 @@ class OpenDotaPlayerService:
             logger.error(f"Error fetching heroes for {steam_id}: {e}")
         return []
 
-    def _fetch_recent_matches(self, steam_id: int, limit: int = 5) -> List[Dict]:
+    def _fetch_recent_matches(self, steam_id: int, limit: int = 5) -> list[dict]:
         """Fetch recent matches."""
         try:
             response = self.api._make_request(
@@ -209,7 +210,7 @@ class OpenDotaPlayerService:
             logger.error(f"Error fetching recent matches for {steam_id}: {e}")
         return []
 
-    def _did_win(self, match: Dict) -> bool:
+    def _did_win(self, match: dict) -> bool:
         """Determine if player won the match."""
         player_slot = match.get("player_slot", 0)
         radiant_win = match.get("radiant_win", False)
@@ -223,7 +224,7 @@ class OpenDotaPlayerService:
             return 0.0
         return round((wins / total) * 100, 1)
 
-    def format_profile_embed(self, discord_id: int, target_name: str) -> Optional[Dict]:
+    def format_profile_embed(self, discord_id: int, target_name: str) -> dict | None:
         """
         Format profile data for Discord embed.
 

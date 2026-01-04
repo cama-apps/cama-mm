@@ -2,16 +2,13 @@
 Tests for MatchDiscoveryService and related functionality.
 """
 
-import json
-import pytest
-from unittest.mock import Mock, patch
 from datetime import datetime
+from unittest.mock import Mock
+
+import pytest
 
 from services.match_discovery_service import (
     MatchDiscoveryService,
-    MIN_PLAYERS_FOR_DISCOVERY,
-    MIN_CONFIDENCE_FOR_AUTO,
-    TIME_WINDOW_SECONDS,
 )
 
 
@@ -40,7 +37,8 @@ class TestMatchDiscoveryService:
             "match_date": "2024-01-15 12:00:00",
         }
         match_repo.get_match_participants.return_value = [
-            {"discord_id": i} for i in range(1, 11)  # 10 players
+            {"discord_id": i}
+            for i in range(1, 11)  # 10 players
         ]
 
         # All players have steam_ids
@@ -68,9 +66,7 @@ class TestMatchDiscoveryService:
             "match_id": 1,
             "match_date": "2024-01-15 12:00:00",
         }
-        match_repo.get_match_participants.return_value = [
-            {"discord_id": i} for i in range(1, 11)
-        ]
+        match_repo.get_match_participants.return_value = [{"discord_id": i} for i in range(1, 11)]
 
         # All players have steam_ids
         player_repo.get_steam_id.side_effect = list(range(1001, 1011))
@@ -100,9 +96,7 @@ class TestMatchDiscoveryService:
             "match_id": 1,
             "match_date": "2024-01-15 12:00:00",
         }
-        match_repo.get_match_participants.return_value = [
-            {"discord_id": i} for i in range(1, 11)
-        ]
+        match_repo.get_match_participants.return_value = [{"discord_id": i} for i in range(1, 11)]
 
         # Only 3 players have steam_ids (below MIN_PLAYERS_FOR_DISCOVERY)
         def mock_get_steam_id(discord_id):
@@ -126,9 +120,7 @@ class TestMatchDiscoveryService:
             "match_id": 1,
             "match_date": "2024-01-15 12:00:00",
         }
-        match_repo.get_match_participants.return_value = [
-            {"discord_id": i} for i in range(1, 11)
-        ]
+        match_repo.get_match_participants.return_value = [{"discord_id": i} for i in range(1, 11)]
 
         player_repo.get_steam_id.side_effect = list(range(1001, 1011))
 
@@ -152,9 +144,7 @@ class TestMatchDiscoveryService:
             "match_id": 1,
             "match_date": "2024-01-15 12:00:00",
         }
-        match_repo.get_match_participants.return_value = [
-            {"discord_id": i} for i in range(1, 11)
-        ]
+        match_repo.get_match_participants.return_value = [{"discord_id": i} for i in range(1, 11)]
 
         player_repo.get_steam_id.side_effect = list(range(1001, 1011))
 
@@ -186,9 +176,7 @@ class TestMatchDiscoveryService:
             {"match_id": 1, "match_date": "2024-01-15 12:00:00"},
             {"match_id": 2, "match_date": "2024-01-16 12:00:00"},
         ]
-        match_repo.get_match_participants.return_value = [
-            {"discord_id": i} for i in range(1, 11)
-        ]
+        match_repo.get_match_participants.return_value = [{"discord_id": i} for i in range(1, 11)]
 
         # Only 3 steam_ids (will skip both)
         player_repo.get_steam_id.side_effect = lambda x: x + 1000 if x <= 3 else None
@@ -346,6 +334,7 @@ class TestMatchRepositoryWipeMethods:
 
         # Get the manual match and verify it's still enriched
         import sqlite3
+
         conn = sqlite3.connect(temp_db_path)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
@@ -382,9 +371,10 @@ class TestMatchRepositoryWipeMethods:
 
     def test_enrichment_source_and_confidence_stored(self, temp_db_path):
         """Test enrichment source and confidence are properly stored."""
+        import sqlite3
+
         from infrastructure.schema_manager import SchemaManager
         from repositories.match_repository import MatchRepository
-        import sqlite3
 
         SchemaManager(temp_db_path).initialize()
         repo = MatchRepository(temp_db_path)
@@ -407,7 +397,7 @@ class TestMatchRepositoryWipeMethods:
         cursor = conn.cursor()
         cursor.execute(
             "SELECT enrichment_source, enrichment_confidence FROM matches WHERE match_id = ?",
-            (match_id,)
+            (match_id,),
         )
         row = cursor.fetchone()
         conn.close()

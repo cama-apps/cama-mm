@@ -2,11 +2,9 @@
 Lobby orchestration and embed helpers.
 """
 
-from typing import List, Optional, Tuple
-
-from domain.models.lobby import LobbyManager, Lobby
-from utils.embeds import create_lobby_embed
+from domain.models.lobby import Lobby, LobbyManager
 from repositories.interfaces import IPlayerRepository
+from utils.embeds import create_lobby_embed
 
 
 class LobbyService:
@@ -24,13 +22,13 @@ class LobbyService:
         self.ready_threshold = ready_threshold
         self.max_players = max_players
 
-    def get_or_create_lobby(self, creator_id: Optional[int] = None) -> Lobby:
+    def get_or_create_lobby(self, creator_id: int | None = None) -> Lobby:
         return self.lobby_manager.get_or_create_lobby(creator_id=creator_id)
 
-    def get_lobby(self) -> Optional[Lobby]:
+    def get_lobby(self) -> Lobby | None:
         return self.lobby_manager.get_lobby()
 
-    def join_lobby(self, discord_id: int) -> Tuple[bool, str]:
+    def join_lobby(self, discord_id: int) -> tuple[bool, str]:
         lobby = self.get_or_create_lobby()
 
         if lobby.get_player_count() >= self.max_players:
@@ -50,22 +48,22 @@ class LobbyService:
     def reset_lobby(self):
         self.lobby_manager.reset_lobby()
 
-    def set_lobby_message_id(self, message_id: Optional[int], channel_id: Optional[int] = None):
+    def set_lobby_message_id(self, message_id: int | None, channel_id: int | None = None):
         """Set the lobby message ID and optionally channel ID, persisting to database."""
         self.lobby_manager.set_lobby_message(message_id, channel_id)
 
-    def get_lobby_message_id(self) -> Optional[int]:
+    def get_lobby_message_id(self) -> int | None:
         return self.lobby_manager.lobby_message_id
 
-    def get_lobby_channel_id(self) -> Optional[int]:
+    def get_lobby_channel_id(self) -> int | None:
         return self.lobby_manager.lobby_channel_id
 
-    def get_lobby_players(self, lobby: Lobby) -> Tuple[List[int], List]:
+    def get_lobby_players(self, lobby: Lobby) -> tuple[list[int], list]:
         player_ids = list(lobby.players)
         players = self.player_repo.get_by_ids(player_ids)
         return player_ids, players
 
-    def build_lobby_embed(self, lobby: Lobby) -> Optional[object]:
+    def build_lobby_embed(self, lobby: Lobby) -> object | None:
         if not lobby:
             return None
         player_ids, players = self.get_lobby_players(lobby)
@@ -73,4 +71,3 @@ class LobbyService:
 
     def is_ready(self, lobby: Lobby) -> bool:
         return lobby.get_player_count() >= self.ready_threshold
-

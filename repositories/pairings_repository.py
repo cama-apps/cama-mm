@@ -2,8 +2,6 @@
 Repository for managing pairwise player statistics.
 """
 
-from typing import Dict, List, Optional
-
 from repositories.base_repository import BaseRepository
 from repositories.interfaces import IPairingsRepository
 
@@ -22,8 +20,8 @@ class PairingsRepository(BaseRepository, IPairingsRepository):
     def update_pairings_for_match(
         self,
         match_id: int,
-        team1_ids: List[int],
-        team2_ids: List[int],
+        team1_ids: list[int],
+        team2_ids: list[int],
         winning_team: int,
     ) -> None:
         """
@@ -41,13 +39,13 @@ class PairingsRepository(BaseRepository, IPairingsRepository):
             # Process teammates on team 1
             team1_won = winning_team == 1
             for i, p1 in enumerate(team1_ids):
-                for p2 in team1_ids[i + 1:]:
+                for p2 in team1_ids[i + 1 :]:
                     self._update_together(cursor, p1, p2, team1_won, match_id)
 
             # Process teammates on team 2
             team2_won = winning_team == 2
             for i, p1 in enumerate(team2_ids):
-                for p2 in team2_ids[i + 1:]:
+                for p2 in team2_ids[i + 1 :]:
                     self._update_together(cursor, p1, p2, team2_won, match_id)
 
             # Process opponents (team1 vs team2)
@@ -91,7 +89,7 @@ class PairingsRepository(BaseRepository, IPairingsRepository):
             (p1, p2, 1 if player1_won else 0, match_id, 1 if player1_won else 0, match_id),
         )
 
-    def get_pairings_for_player(self, discord_id: int) -> List[Dict]:
+    def get_pairings_for_player(self, discord_id: int) -> list[dict]:
         """Get all pairwise stats involving a player."""
         with self.connection() as conn:
             cursor = conn.cursor()
@@ -109,7 +107,7 @@ class PairingsRepository(BaseRepository, IPairingsRepository):
             )
             return [dict(row) for row in cursor.fetchall()]
 
-    def get_best_teammates(self, discord_id: int, min_games: int = 3, limit: int = 5) -> List[Dict]:
+    def get_best_teammates(self, discord_id: int, min_games: int = 3, limit: int = 5) -> list[dict]:
         """Get players with highest win rate when on same team (win rate > 50%)."""
         with self.connection() as conn:
             cursor = conn.cursor()
@@ -131,7 +129,9 @@ class PairingsRepository(BaseRepository, IPairingsRepository):
             )
             return [dict(row) for row in cursor.fetchall()]
 
-    def get_worst_teammates(self, discord_id: int, min_games: int = 3, limit: int = 5) -> List[Dict]:
+    def get_worst_teammates(
+        self, discord_id: int, min_games: int = 3, limit: int = 5
+    ) -> list[dict]:
         """Get players with lowest win rate when on same team (win rate < 50%)."""
         with self.connection() as conn:
             cursor = conn.cursor()
@@ -153,7 +153,7 @@ class PairingsRepository(BaseRepository, IPairingsRepository):
             )
             return [dict(row) for row in cursor.fetchall()]
 
-    def get_best_matchups(self, discord_id: int, min_games: int = 3, limit: int = 5) -> List[Dict]:
+    def get_best_matchups(self, discord_id: int, min_games: int = 3, limit: int = 5) -> list[dict]:
         """Get players with highest win rate when on opposing teams (win rate > 50%)."""
         with self.connection() as conn:
             cursor = conn.cursor()
@@ -184,11 +184,20 @@ class PairingsRepository(BaseRepository, IPairingsRepository):
                 ORDER BY win_rate DESC, games_against DESC
                 LIMIT ?
                 """,
-                (discord_id, discord_id, discord_id, discord_id, discord_id, min_games, discord_id, limit),
+                (
+                    discord_id,
+                    discord_id,
+                    discord_id,
+                    discord_id,
+                    discord_id,
+                    min_games,
+                    discord_id,
+                    limit,
+                ),
             )
             return [dict(row) for row in cursor.fetchall()]
 
-    def get_worst_matchups(self, discord_id: int, min_games: int = 3, limit: int = 5) -> List[Dict]:
+    def get_worst_matchups(self, discord_id: int, min_games: int = 3, limit: int = 5) -> list[dict]:
         """Get players with lowest win rate when on opposing teams (win rate < 50%)."""
         with self.connection() as conn:
             cursor = conn.cursor()
@@ -219,11 +228,22 @@ class PairingsRepository(BaseRepository, IPairingsRepository):
                 ORDER BY win_rate ASC, games_against DESC
                 LIMIT ?
                 """,
-                (discord_id, discord_id, discord_id, discord_id, discord_id, min_games, discord_id, limit),
+                (
+                    discord_id,
+                    discord_id,
+                    discord_id,
+                    discord_id,
+                    discord_id,
+                    min_games,
+                    discord_id,
+                    limit,
+                ),
             )
             return [dict(row) for row in cursor.fetchall()]
 
-    def get_most_played_with(self, discord_id: int, min_games: int = 3, limit: int = 5) -> List[Dict]:
+    def get_most_played_with(
+        self, discord_id: int, min_games: int = 3, limit: int = 5
+    ) -> list[dict]:
         """Get teammates sorted by most games played together."""
         with self.connection() as conn:
             cursor = conn.cursor()
@@ -244,7 +264,9 @@ class PairingsRepository(BaseRepository, IPairingsRepository):
             )
             return [dict(row) for row in cursor.fetchall()]
 
-    def get_most_played_against(self, discord_id: int, min_games: int = 3, limit: int = 5) -> List[Dict]:
+    def get_most_played_against(
+        self, discord_id: int, min_games: int = 3, limit: int = 5
+    ) -> list[dict]:
         """Get opponents sorted by most games played against."""
         with self.connection() as conn:
             cursor = conn.cursor()
@@ -273,7 +295,9 @@ class PairingsRepository(BaseRepository, IPairingsRepository):
             )
             return [dict(row) for row in cursor.fetchall()]
 
-    def get_evenly_matched_teammates(self, discord_id: int, min_games: int = 3, limit: int = 5) -> List[Dict]:
+    def get_evenly_matched_teammates(
+        self, discord_id: int, min_games: int = 3, limit: int = 5
+    ) -> list[dict]:
         """Get teammates with exactly 50% win rate."""
         with self.connection() as conn:
             cursor = conn.cursor()
@@ -295,7 +319,9 @@ class PairingsRepository(BaseRepository, IPairingsRepository):
             )
             return [dict(row) for row in cursor.fetchall()]
 
-    def get_evenly_matched_opponents(self, discord_id: int, min_games: int = 3, limit: int = 5) -> List[Dict]:
+    def get_evenly_matched_opponents(
+        self, discord_id: int, min_games: int = 3, limit: int = 5
+    ) -> list[dict]:
         """Get opponents with exactly 50% win rate."""
         with self.connection() as conn:
             cursor = conn.cursor()
@@ -326,11 +352,20 @@ class PairingsRepository(BaseRepository, IPairingsRepository):
                 ORDER BY games_against DESC
                 LIMIT ?
                 """,
-                (discord_id, discord_id, discord_id, discord_id, discord_id, min_games, discord_id, limit),
+                (
+                    discord_id,
+                    discord_id,
+                    discord_id,
+                    discord_id,
+                    discord_id,
+                    min_games,
+                    discord_id,
+                    limit,
+                ),
             )
             return [dict(row) for row in cursor.fetchall()]
 
-    def get_pairing_counts(self, discord_id: int, min_games: int = 1) -> Dict:
+    def get_pairing_counts(self, discord_id: int, min_games: int = 1) -> dict:
         """Get total counts of unique teammates and opponents."""
         with self.connection() as conn:
             cursor = conn.cursor()
@@ -350,7 +385,7 @@ class PairingsRepository(BaseRepository, IPairingsRepository):
                 "unique_opponents": row["unique_opponents"] or 0,
             }
 
-    def get_head_to_head(self, player1_id: int, player2_id: int) -> Optional[Dict]:
+    def get_head_to_head(self, player1_id: int, player2_id: int) -> dict | None:
         """Get detailed stats between two specific players."""
         p1, p2 = self._canonical_pair(player1_id, player2_id)
         with self.connection() as conn:
@@ -376,7 +411,9 @@ class PairingsRepository(BaseRepository, IPairingsRepository):
             if player1_id == p1:
                 result["queried_player_wins_against"] = result["player1_wins_against"]
             else:
-                result["queried_player_wins_against"] = result["games_against"] - result["player1_wins_against"]
+                result["queried_player_wins_against"] = (
+                    result["games_against"] - result["player1_wins_against"]
+                )
             return result
 
     def rebuild_all_pairings(self) -> int:
@@ -404,7 +441,7 @@ class PairingsRepository(BaseRepository, IPairingsRepository):
             rows = cursor.fetchall()
 
             # Group by match
-            matches: Dict[int, Dict] = {}
+            matches: dict[int, dict] = {}
             for row in rows:
                 match_id = row["match_id"]
                 if match_id not in matches:
@@ -427,13 +464,13 @@ class PairingsRepository(BaseRepository, IPairingsRepository):
                 # Process teammates on team 1
                 team1_won = winning_team == 1
                 for i, p1 in enumerate(team1_ids):
-                    for p2 in team1_ids[i + 1:]:
+                    for p2 in team1_ids[i + 1 :]:
                         self._update_together(cursor, p1, p2, team1_won, match_id)
 
                 # Process teammates on team 2
                 team2_won = winning_team == 2
                 for i, p1 in enumerate(team2_ids):
-                    for p2 in team2_ids[i + 1:]:
+                    for p2 in team2_ids[i + 1 :]:
                         self._update_together(cursor, p1, p2, team2_won, match_id)
 
                 # Process opponents

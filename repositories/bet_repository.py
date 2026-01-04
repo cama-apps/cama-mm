@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import json
 import math
-from typing import Dict, List, Optional
 
 from repositories.base_repository import BaseRepository
 from repositories.interfaces import IBetRepository
@@ -20,10 +19,12 @@ class BetRepository(BaseRepository, IBetRepository):
     VALID_TEAMS = {"radiant", "dire"}
 
     @staticmethod
-    def _normalize_guild_id(guild_id: Optional[int]) -> int:
+    def _normalize_guild_id(guild_id: int | None) -> int:
         return guild_id if guild_id is not None else 0
 
-    def create_bet(self, guild_id: Optional[int], discord_id: int, team: str, amount: int, bet_time: int) -> int:
+    def create_bet(
+        self, guild_id: int | None, discord_id: int, team: str, amount: int, bet_time: int
+    ) -> int:
         """
         Place a bet for the current pending match.
         """
@@ -42,7 +43,7 @@ class BetRepository(BaseRepository, IBetRepository):
     def place_bet_atomic(
         self,
         *,
-        guild_id: Optional[int],
+        guild_id: int | None,
         discord_id: int,
         team: str,
         amount: int,
@@ -105,7 +106,9 @@ class BetRepository(BaseRepository, IBetRepository):
 
             # Users in debt cannot place any bets
             if balance < 0:
-                raise ValueError("You cannot place bets while in debt. Win some games to pay it off!")
+                raise ValueError(
+                    "You cannot place bets while in debt. Win some games to pay it off!"
+                )
 
             # Balance check depends on leverage:
             # - No leverage (1x): cannot go negative, must have enough balance
@@ -139,7 +142,7 @@ class BetRepository(BaseRepository, IBetRepository):
     def place_bet_against_pending_match_atomic(
         self,
         *,
-        guild_id: Optional[int],
+        guild_id: int | None,
         discord_id: int,
         team: str,
         amount: int,
@@ -182,7 +185,7 @@ class BetRepository(BaseRepository, IBetRepository):
             try:
                 payload = json.loads(row["payload"])
             except Exception:
-                raise ValueError("No pending match to bet on.")
+                raise ValueError("No pending match to bet on.") from None
 
             lock_until = payload.get("bet_lock_until")
             if lock_until is None or int(bet_time) >= int(lock_until):
@@ -229,7 +232,9 @@ class BetRepository(BaseRepository, IBetRepository):
 
             # Users in debt cannot place any bets
             if balance < 0:
-                raise ValueError("You cannot place bets while in debt. Win some games to pay it off!")
+                raise ValueError(
+                    "You cannot place bets while in debt. Win some games to pay it off!"
+                )
 
             # Balance check depends on leverage:
             # - No leverage (1x): cannot go negative, must have enough balance
@@ -260,24 +265,28 @@ class BetRepository(BaseRepository, IBetRepository):
             return cursor.lastrowid
 
     def get_player_pending_bet(
-        self, guild_id: Optional[int], discord_id: int, since_ts: Optional[int] = None
-    ) -> Optional[Dict]:
+        self, guild_id: int | None, discord_id: int, since_ts: int | None = None
+    ) -> dict | None:
         """
         Return the bet placed by a player for the pending match in the guild.
         """
         normalized_guild = self._normalize_guild_id(guild_id)
         ts_filter = "AND bet_time >= ?" if since_ts is not None else ""
-        params = (normalized_guild, discord_id) if since_ts is None else (normalized_guild, discord_id, since_ts)
+        params = (
+            (normalized_guild, discord_id)
+            if since_ts is None
+            else (normalized_guild, discord_id, since_ts)
+        )
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                """
+                f"""
                 SELECT bet_id, guild_id, match_id, discord_id, team_bet_on, amount, bet_time, created_at,
                        COALESCE(leverage, 1) as leverage
                 FROM bets
                 WHERE guild_id = ? AND discord_id = ? AND match_id IS NULL
                 {ts_filter}
-                """.format(ts_filter=ts_filter),
+                """,
                 params,
             )
 
@@ -285,31 +294,37 @@ class BetRepository(BaseRepository, IBetRepository):
             return dict(row) if row else None
 
     def get_player_pending_bets(
-        self, guild_id: Optional[int], discord_id: int, since_ts: Optional[int] = None
-    ) -> List[Dict]:
+        self, guild_id: int | None, discord_id: int, since_ts: int | None = None
+    ) -> list[dict]:
         """
         Return all bets placed by a player for the pending match in the guild.
         Ordered by bet_time ascending.
         """
         normalized_guild = self._normalize_guild_id(guild_id)
         ts_filter = "AND bet_time >= ?" if since_ts is not None else ""
-        params = (normalized_guild, discord_id) if since_ts is None else (normalized_guild, discord_id, since_ts)
+        params = (
+            (normalized_guild, discord_id)
+            if since_ts is None
+            else (normalized_guild, discord_id, since_ts)
+        )
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                """
+                f"""
                 SELECT bet_id, guild_id, match_id, discord_id, team_bet_on, amount, bet_time, created_at,
                        COALESCE(leverage, 1) as leverage
                 FROM bets
                 WHERE guild_id = ? AND discord_id = ? AND match_id IS NULL
                 {ts_filter}
                 ORDER BY bet_time ASC
-                """.format(ts_filter=ts_filter),
+                """,
                 params,
             )
             return [dict(row) for row in cursor.fetchall()]
 
-    def get_bets_for_pending_match(self, guild_id: Optional[int], since_ts: Optional[int] = None) -> List[Dict]:
+    def get_bets_for_pending_match(
+        self, guild_id: int | None, since_ts: int | None = None
+    ) -> list[dict]:
         """
         Return bets associated with the pending match for a guild.
         """
@@ -319,17 +334,17 @@ class BetRepository(BaseRepository, IBetRepository):
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                """
+                f"""
                 SELECT bet_id, guild_id, match_id, discord_id, team_bet_on, amount, bet_time, created_at
                 FROM bets
                 WHERE guild_id = ? AND match_id IS NULL
                 {ts_filter}
-                """.format(ts_filter=ts_filter),
+                """,
                 params,
             )
             return [dict(row) for row in cursor.fetchall()]
 
-    def delete_bets_for_guild(self, guild_id: Optional[int]) -> int:
+    def delete_bets_for_guild(self, guild_id: int | None) -> int:
         """Remove all bets for the specified guild."""
         normalized_guild = self._normalize_guild_id(guild_id)
         with self.connection() as conn:
@@ -337,7 +352,9 @@ class BetRepository(BaseRepository, IBetRepository):
             cursor.execute("DELETE FROM bets WHERE guild_id = ?", (normalized_guild,))
             return cursor.rowcount
 
-    def get_total_bets_by_guild(self, guild_id: Optional[int], since_ts: Optional[int] = None) -> Dict[str, int]:
+    def get_total_bets_by_guild(
+        self, guild_id: int | None, since_ts: int | None = None
+    ) -> dict[str, int]:
         """Return total effective wager amounts grouped by team for a guild.
 
         Effective amount = amount * leverage, used for pool mode calculations.
@@ -348,36 +365,42 @@ class BetRepository(BaseRepository, IBetRepository):
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                """
+                f"""
                 SELECT team_bet_on, SUM(amount * COALESCE(leverage, 1)) as total
                 FROM bets
                 WHERE guild_id = ? AND match_id IS NULL
                 {ts_filter}
                 GROUP BY team_bet_on
-                """.format(ts_filter=ts_filter),
+                """,
                 params,
             )
             totals = {row["team_bet_on"]: row["total"] for row in cursor.fetchall()}
             return {team: totals.get(team, 0) for team in self.VALID_TEAMS}
 
-    def assign_match_id(self, guild_id: Optional[int], match_id: int, since_ts: Optional[int] = None) -> None:
+    def assign_match_id(
+        self, guild_id: int | None, match_id: int, since_ts: int | None = None
+    ) -> None:
         """Tie all pending bets for the current match window to a recorded match."""
         normalized_guild = self._normalize_guild_id(guild_id)
         ts_filter = "AND bet_time >= ?" if since_ts is not None else ""
-        params = (match_id, normalized_guild) if since_ts is None else (match_id, normalized_guild, since_ts)
+        params = (
+            (match_id, normalized_guild)
+            if since_ts is None
+            else (match_id, normalized_guild, since_ts)
+        )
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                """
+                f"""
                 UPDATE bets
                 SET match_id = ?
                 WHERE guild_id = ? AND match_id IS NULL
                 {ts_filter}
-                """.format(ts_filter=ts_filter),
+                """,
                 params,
             )
 
-    def delete_pending_bets(self, guild_id: Optional[int], since_ts: Optional[int] = None) -> int:
+    def delete_pending_bets(self, guild_id: int | None, since_ts: int | None = None) -> int:
         """Delete pending bets (match_id IS NULL) for the current match window."""
         normalized_guild = self._normalize_guild_id(guild_id)
         ts_filter = "AND bet_time >= ?" if since_ts is not None else ""
@@ -394,12 +417,12 @@ class BetRepository(BaseRepository, IBetRepository):
         self,
         *,
         match_id: int,
-        guild_id: Optional[int],
+        guild_id: int | None,
         since_ts: int,
         winning_team: str,
         house_payout_multiplier: float,
         betting_mode: str = "house",
-    ) -> Dict[str, List[Dict]]:
+    ) -> dict[str, list[dict]]:
         """
         Atomically settle bets for the current match window:
         - credit winners in players.jopacoin_balance (based on effective bet with leverage)
@@ -409,7 +432,7 @@ class BetRepository(BaseRepository, IBetRepository):
             betting_mode: "house" for 1:1 payouts, "pool" for parimutuel betting
         """
         normalized_guild = self._normalize_guild_id(guild_id)
-        distributions: Dict[str, List[Dict]] = {"winners": [], "losers": []}
+        distributions: dict[str, list[dict]] = {"winners": [], "losers": []}
 
         with self.connection() as conn:
             cursor = conn.cursor()
@@ -454,11 +477,11 @@ class BetRepository(BaseRepository, IBetRepository):
         return distributions
 
     def _calculate_house_payouts(
-        self, rows: List, winning_team: str, house_payout_multiplier: float
+        self, rows: list, winning_team: str, house_payout_multiplier: float
     ) -> tuple:
         """Calculate house mode payouts (1:1) with leverage support."""
-        distributions: Dict[str, List[Dict]] = {"winners": [], "losers": []}
-        balance_deltas: Dict[int, int] = {}
+        distributions: dict[str, list[dict]] = {"winners": [], "losers": []}
+        balance_deltas: dict[int, int] = {}
 
         for row in rows:
             bet = dict(row)
@@ -485,10 +508,10 @@ class BetRepository(BaseRepository, IBetRepository):
 
         return distributions, balance_deltas
 
-    def _calculate_pool_payouts(self, rows: List, winning_team: str) -> tuple:
+    def _calculate_pool_payouts(self, rows: list, winning_team: str) -> tuple:
         """Calculate pool mode payouts (proportional from total pool) with leverage support."""
-        distributions: Dict[str, List[Dict]] = {"winners": [], "losers": []}
-        balance_deltas: Dict[int, int] = {}
+        distributions: dict[str, list[dict]] = {"winners": [], "losers": []}
+        balance_deltas: dict[int, int] = {}
 
         # Convert rows to dicts for .get() support
         rows = [dict(row) for row in rows]
@@ -510,14 +533,16 @@ class BetRepository(BaseRepository, IBetRepository):
                 balance_deltas[bet["discord_id"]] = (
                     balance_deltas.get(bet["discord_id"], 0) + effective_bet
                 )
-                distributions["losers"].append({
-                    "discord_id": bet["discord_id"],
-                    "amount": bet["amount"],
-                    "leverage": leverage,
-                    "effective_bet": effective_bet,
-                    "team": bet["team_bet_on"],
-                    "refunded": True,
-                })
+                distributions["losers"].append(
+                    {
+                        "discord_id": bet["discord_id"],
+                        "amount": bet["amount"],
+                        "leverage": leverage,
+                        "effective_bet": effective_bet,
+                        "team": bet["team_bet_on"],
+                        "refunded": True,
+                    }
+                )
             return distributions, balance_deltas
 
         multiplier = total_pool / winner_pool
@@ -549,7 +574,7 @@ class BetRepository(BaseRepository, IBetRepository):
 
         return distributions, balance_deltas
 
-    def refund_pending_bets_atomic(self, *, guild_id: Optional[int], since_ts: int) -> int:
+    def refund_pending_bets_atomic(self, *, guild_id: int | None, since_ts: int) -> int:
         """
         Atomically refund + delete pending bets for the current match window.
         Returns number of bets refunded.
@@ -571,11 +596,13 @@ class BetRepository(BaseRepository, IBetRepository):
             if not rows:
                 return 0
 
-            refund_deltas: Dict[int, int] = {}
+            refund_deltas: dict[int, int] = {}
             for row in rows:
                 # Refund the effective bet (amount * leverage)
                 effective_bet = int(row["amount"]) * int(row["leverage"])
-                refund_deltas[row["discord_id"]] = refund_deltas.get(row["discord_id"], 0) + effective_bet
+                refund_deltas[row["discord_id"]] = (
+                    refund_deltas.get(row["discord_id"], 0) + effective_bet
+                )
 
             cursor.executemany(
                 """
@@ -591,4 +618,3 @@ class BetRepository(BaseRepository, IBetRepository):
                 (normalized_guild, since_ts),
             )
             return cursor.rowcount
-

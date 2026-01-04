@@ -34,4 +34,3 @@ async def test_safe_followup_does_not_raise_due_to_dbg():
     assert result == "ok"
     assert interaction.followup.last_kwargs["content"] == "hi"
     assert interaction.followup.last_kwargs["ephemeral"] is True
-

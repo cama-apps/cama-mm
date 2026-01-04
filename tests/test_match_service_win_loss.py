@@ -4,8 +4,8 @@ Integration tests for MatchService win/loss recording.
 
 import pytest
 
-from repositories.player_repository import PlayerRepository
 from repositories.match_repository import MatchRepository
+from repositories.player_repository import PlayerRepository
 from services.match_service import MatchService
 
 
@@ -104,4 +104,3 @@ def test_double_record_prevented(repo_db_path):
         player = player_repo.get_by_id(pid)
         assert player.wins == 1
         assert player.losses == 0
-

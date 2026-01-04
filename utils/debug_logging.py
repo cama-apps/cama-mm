@@ -10,14 +10,14 @@ from __future__ import annotations
 import json
 import os
 import time
-from typing import Any, Dict, Optional
+from typing import Any
 
 
 def debug_log(
     hypothesis_id: str,
     location: str,
     message: str,
-    data: Optional[Dict[str, Any]] = None,
+    data: dict[str, Any] | None = None,
     *,
     run_id: str = "run1",
     session_id: str = "debug-session",
@@ -45,5 +45,3 @@ def debug_log(
     except Exception:
         # Debug logging must never impact bot functionality
         return
-
-

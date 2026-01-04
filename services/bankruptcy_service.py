@@ -7,11 +7,10 @@ but at the cost of reduced winnings for the next several games.
 
 import time
 from dataclasses import dataclass
-from typing import Dict, Optional
 
 from config import BANKRUPTCY_COOLDOWN_SECONDS, BANKRUPTCY_PENALTY_GAMES, BANKRUPTCY_PENALTY_RATE
-from repositories.player_repository import PlayerRepository
 from repositories.base_repository import BaseRepository
+from repositories.player_repository import PlayerRepository
 
 
 @dataclass
@@ -19,16 +18,16 @@ class BankruptcyState:
     """Current bankruptcy state for a player."""
 
     discord_id: int
-    last_bankruptcy_at: Optional[int]  # Unix timestamp
+    last_bankruptcy_at: int | None  # Unix timestamp
     penalty_games_remaining: int
     is_on_cooldown: bool
-    cooldown_ends_at: Optional[int]  # Unix timestamp
+    cooldown_ends_at: int | None  # Unix timestamp
 
 
 class BankruptcyRepository(BaseRepository):
     """Data access for bankruptcy state."""
 
-    def get_state(self, discord_id: int) -> Optional[Dict]:
+    def get_state(self, discord_id: int) -> dict | None:
         """Get bankruptcy state for a player."""
         with self.connection() as conn:
             cursor = conn.cursor()
@@ -117,9 +116,9 @@ class BankruptcyService:
         self,
         bankruptcy_repo: BankruptcyRepository,
         player_repo: PlayerRepository,
-        cooldown_seconds: Optional[int] = None,
-        penalty_games: Optional[int] = None,
-        penalty_rate: Optional[float] = None,
+        cooldown_seconds: int | None = None,
+        penalty_games: int | None = None,
+        penalty_rate: float | None = None,
     ):
         self.bankruptcy_repo = bankruptcy_repo
         self.player_repo = player_repo
@@ -129,9 +128,7 @@ class BankruptcyService:
         self.penalty_games = (
             penalty_games if penalty_games is not None else BANKRUPTCY_PENALTY_GAMES
         )
-        self.penalty_rate = (
-            penalty_rate if penalty_rate is not None else BANKRUPTCY_PENALTY_RATE
-        )
+        self.penalty_rate = penalty_rate if penalty_rate is not None else BANKRUPTCY_PENALTY_RATE
 
     def get_state(self, discord_id: int) -> BankruptcyState:
         """Get the current bankruptcy state for a player."""
@@ -159,7 +156,7 @@ class BankruptcyService:
             cooldown_ends_at=cooldown_ends if is_on_cooldown else None,
         )
 
-    def can_declare_bankruptcy(self, discord_id: int) -> Dict:
+    def can_declare_bankruptcy(self, discord_id: int) -> dict:
         """
         Check if a player can declare bankruptcy.
 
@@ -185,7 +182,7 @@ class BankruptcyService:
 
         return {"allowed": True, "debt": abs(balance)}
 
-    def declare_bankruptcy(self, discord_id: int) -> Dict:
+    def declare_bankruptcy(self, discord_id: int) -> dict:
         """
         Declare bankruptcy for a player.
 
@@ -218,7 +215,7 @@ class BankruptcyService:
             "penalty_rate": self.penalty_rate,
         }
 
-    def apply_penalty_to_winnings(self, discord_id: int, amount: int) -> Dict[str, int]:
+    def apply_penalty_to_winnings(self, discord_id: int, amount: int) -> dict[str, int]:
         """
         Apply bankruptcy penalty to winnings if applicable.
 

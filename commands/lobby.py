@@ -3,15 +3,13 @@ Lobby commands: /lobby, /kick.
 """
 
 import logging
-from typing import Optional
-import discord
-from discord.ext import commands
-from discord import app_commands
 
-from services.permissions import has_admin_permission
+import discord
+from discord import app_commands
+from discord.ext import commands
+
 from services.lobby_service import LobbyService
-from utils.embeds import create_lobby_embed
-from utils.formatting import ROLE_EMOJIS, ROLE_NAMES
+from services.permissions import has_admin_permission
 from utils.interaction_safety import safe_defer
 
 logger = logging.getLogger("cama_bot.commands.lobby")
@@ -34,7 +32,9 @@ class LobbyCommands(commands.Cog):
         except Exception as exc:
             logger.warning(f"Failed to pin lobby message: {exc}")
 
-    async def _safe_unpin(self, channel: Optional[discord.abc.Messageable], message_id: Optional[int]) -> None:
+    async def _safe_unpin(
+        self, channel: discord.abc.Messageable | None, message_id: int | None
+    ) -> None:
         """Unpin the lobby message safely, tolerating missing perms or missing message."""
         if not channel or not message_id:
             return
@@ -72,7 +72,9 @@ class LobbyCommands(commands.Cog):
 
         player = self.player_service.get_player(interaction.user.id)
         if not player:
-            await interaction.followup.send("❌ You're not registered! Use `/register` first.", ephemeral=True)
+            await interaction.followup.send(
+                "❌ You're not registered! Use `/register` first.", ephemeral=True
+            )
             return
 
         # Block if a match is pending recording
@@ -141,16 +143,23 @@ class LobbyCommands(commands.Cog):
             return
 
         if player.id == interaction.user.id:
-            await interaction.followup.send("❌ You can't kick yourself. Remove your reaction (⚔️) to leave instead.", ephemeral=True)
+            await interaction.followup.send(
+                "❌ You can't kick yourself. Remove your reaction (⚔️) to leave instead.",
+                ephemeral=True,
+            )
             return
 
         if player.id not in lobby.players:
-            await interaction.followup.send(f"⚠️ {player.mention} is not in the lobby.", ephemeral=True)
+            await interaction.followup.send(
+                f"⚠️ {player.mention} is not in the lobby.", ephemeral=True
+            )
             return
 
         removed = self.lobby_service.leave_lobby(player.id)
         if removed:
-            await interaction.followup.send(f"✅ Kicked {player.mention} from the lobby.", ephemeral=True)
+            await interaction.followup.send(
+                f"✅ Kicked {player.mention} from the lobby.", ephemeral=True
+            )
             message_id = self.lobby_service.get_lobby_message_id()
             if message_id:
                 try:
@@ -160,7 +169,9 @@ class LobbyCommands(commands.Cog):
                     logger.warning(f"Failed to remove reaction for kicked player: {exc}")
             await self._update_lobby_message(interaction, lobby)
             try:
-                await player.send(f"You were kicked from the matchmaking lobby by {interaction.user.mention}.")
+                await player.send(
+                    f"You were kicked from the matchmaking lobby by {interaction.user.mention}."
+                )
             except Exception:
                 pass
         else:
@@ -206,11 +217,12 @@ class LobbyCommands(commands.Cog):
 
         await self._safe_unpin(interaction.channel, self.lobby_service.get_lobby_message_id())
         self.lobby_service.reset_lobby()
-        await interaction.followup.send("✅ Lobby reset. You can create a new lobby with `/lobby`.", ephemeral=True)
+        await interaction.followup.send(
+            "✅ Lobby reset. You can create a new lobby with `/lobby`.", ephemeral=True
+        )
 
 
 async def setup(bot: commands.Bot):
     lobby_service = getattr(bot, "lobby_service", None)
     player_service = getattr(bot, "player_service", None)
     await bot.add_cog(LobbyCommands(bot, lobby_service, player_service))
-

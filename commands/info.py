@@ -3,43 +3,43 @@ Information commands for the bot: /help, /leaderboard
 """
 
 import logging
+
 import discord
-from discord.ext import commands
 from discord import app_commands
+from discord.ext import commands
 
 from config import LEVERAGE_TIERS
 from services.permissions import has_admin_permission
+from utils.debug_logging import debug_log as _dbg_log
 from utils.formatting import JOPACOIN_EMOTE
 from utils.interaction_safety import safe_defer, safe_followup
-from utils.debug_logging import debug_log as _dbg_log
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
 
-logger = logging.getLogger('cama_bot.commands.info')
+logger = logging.getLogger("cama_bot.commands.info")
 
 
 class InfoCommands(commands.Cog):
     """Commands for viewing information and leaderboards."""
-    
+
     def __init__(self, bot: commands.Bot, player_repo, role_emojis: dict, role_names: dict):
         self.bot = bot
         self.player_repo = player_repo
         self.role_emojis = role_emojis
         self.role_names = role_names
 
-    
     @app_commands.command(name="help", description="List all available commands")
     async def help_command(self, interaction: discord.Interaction):
         """Show all available commands."""
         logger.info(f"Help command: User {interaction.user.id} ({interaction.user})")
         if not await safe_defer(interaction, ephemeral=True):
             return
-        
+
         embed = discord.Embed(
             title="📚 Cama Shuffle Bot Commands",
             description="All available commands for the matchmaking bot",
-            color=discord.Color.blue()
+            color=discord.Color.blue(),
         )
-        
+
         # Registration & Profile
         embed.add_field(
             name="👤 Registration & Profile",
@@ -52,9 +52,9 @@ class InfoCommands(commands.Cog):
                 "`/profile` - View OpenDota profile (W/L, avg KDA, top heroes)\n"
                 "`/matchhistory` - View recent matches with heroes and stats"
             ),
-            inline=False
+            inline=False,
         )
-        
+
         # Lobby Management
         embed.add_field(
             name="🎮 Lobby Management",
@@ -64,9 +64,9 @@ class InfoCommands(commands.Cog):
                 "`/resetlobby` - Reset the current lobby (Admin or lobby creator only)\n"
                 "React with ⚔️ to join/leave the lobby"
             ),
-            inline=False
+            inline=False,
         )
-        
+
         # Match Management
         leverage_str = ", ".join(f"{x}x" for x in LEVERAGE_TIERS)
         embed.add_field(
@@ -77,7 +77,7 @@ class InfoCommands(commands.Cog):
                 "  • `betting_mode:pool` - Parimutuel odds based on bet distribution\n"
                 "`/record` - Record a match result"
             ),
-            inline=False
+            inline=False,
         )
 
         # Betting
@@ -93,18 +93,16 @@ class InfoCommands(commands.Cog):
                 "`/paydebt` - Help another player pay off their debt (be a philanthropist!)\n"
                 "`/bankruptcy` - Declare bankruptcy (clears debt, 1 week cooldown, 5 game penalty)"
             ),
-            inline=False
+            inline=False,
         )
-        
+
         # Leaderboard
         embed.add_field(
             name="🏆 Leaderboard",
-            value=(
-                "`/leaderboard` - View leaderboard sorted by jopacoin"
-            ),
-            inline=False
+            value=("`/leaderboard` - View leaderboard sorted by jopacoin"),
+            inline=False,
         )
-        
+
         # Admin Commands (only show to admins)
         if has_admin_permission(interaction):
             embed.add_field(
@@ -118,13 +116,13 @@ class InfoCommands(commands.Cog):
                     "`/showconfig` - View server configuration\n"
                     "`/rebuildpairings` - Rebuild pairwise stats from match history"
                 ),
-                inline=False
+                inline=False,
             )
-        
+
         embed.set_footer(text="Tip: Type / and use Discord's autocomplete to see command details!")
-        
+
         await interaction.followup.send(embed=embed, ephemeral=True)
-    
+
     @app_commands.command(name="leaderboard", description="View leaderboard sorted by jopacoin")
     @app_commands.describe(limit="Number of players to show (default: 20, max: 100)")
     async def leaderboard(self, interaction: discord.Interaction, limit: int = 20):
@@ -156,7 +154,7 @@ class InfoCommands(commands.Cog):
         # Defer response immediately to prevent interaction timeout
         if not await safe_defer(interaction, ephemeral=False):
             logger.warning("Leaderboard: defer failed, proceeding to send fallback response")
-        
+
         # Validate limit to stay within safe Discord embed boundaries
         if limit < 1 or limit > 100:
             await safe_followup(
@@ -168,6 +166,7 @@ class InfoCommands(commands.Cog):
 
         try:
             from rating_system import CamaRatingSystem
+
             rating_system = CamaRatingSystem()
 
             all_players = self.player_repo.get_all()
@@ -176,9 +175,7 @@ class InfoCommands(commands.Cog):
             if all_players:
                 sample = all_players[:3]
                 for player in sample:
-                    logger.info(
-                        f"  Sample: {player.name} - jopacoin={player.jopacoin_balance}"
-                    )
+                    logger.info(f"  Sample: {player.name} - jopacoin={player.jopacoin_balance}")
             _dbg_log(
                 "H2",
                 "commands/info.py:leaderboard:query",
@@ -243,23 +240,39 @@ class InfoCommands(commands.Cog):
                         "jopacoin_balance": jopacoin_balance,
                     }
                 )
-            _dbg_log("H3", "commands/info.py:leaderboard:stats_built", "built stats", {
-                "count": len(players_with_stats),
-                "first": players_with_stats[:1],
-            })
+            _dbg_log(
+                "H3",
+                "commands/info.py:leaderboard:stats_built",
+                "built stats",
+                {
+                    "count": len(players_with_stats),
+                    "first": players_with_stats[:1],
+                },
+            )
 
             players_with_stats.sort(
-                key=lambda x: (x["jopacoin_balance"], x["wins"], x["rating"] if x["rating"] is not None else 0),
+                key=lambda x: (
+                    x["jopacoin_balance"],
+                    x["wins"],
+                    x["rating"] if x["rating"] is not None else 0,
+                ),
                 reverse=True,
             )
-            
+
             # Log top 3 players after sorting
             logger.info("Top 3 players after jopacoin sort:")
             for i, entry in enumerate(players_with_stats[:3], 1):
-                logger.info(f"  {i}. {entry['username']} - jopacoin={entry['jopacoin_balance']}, wins={entry['wins']}, rating={entry['rating']}")
-            _dbg_log("H4", "commands/info.py:leaderboard:sorted", "sorted stats", {
-                "top3": players_with_stats[:3],
-            })
+                logger.info(
+                    f"  {i}. {entry['username']} - jopacoin={entry['jopacoin_balance']}, wins={entry['wins']}, rating={entry['rating']}"
+                )
+            _dbg_log(
+                "H4",
+                "commands/info.py:leaderboard:sorted",
+                "sorted stats",
+                {
+                    "top3": players_with_stats[:3],
+                },
+            )
 
             if not players_with_stats:
                 await safe_followup(
@@ -269,43 +282,48 @@ class InfoCommands(commands.Cog):
                 )
                 return
 
-            embed = discord.Embed(
-                title="🏆 Leaderboard",
-                color=discord.Color.gold()
-            )
+            embed = discord.Embed(title="🏆 Leaderboard", color=discord.Color.gold())
 
             leaderboard_text = ""
             for i, entry in enumerate(players_with_stats[:limit], 1):
                 medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"{i}."
                 stats = f"{entry['wins']}-{entry['losses']}"
-                if entry['wins'] + entry['losses'] > 0:
+                if entry["wins"] + entry["losses"] > 0:
                     stats += f" ({entry['win_rate']:.0f}%)"
                 rating_display = f" [{entry['rating']}]" if entry["rating"] is not None else ""
                 is_real_user = entry["discord_id"] and entry["discord_id"] > 0
-                display_name = (
-                    f"<@{entry['discord_id']}>"
-                    if is_real_user
-                    else entry["username"]
-                )
-                jopacoin_balance = entry.get('jopacoin_balance', 0) or 0
+                display_name = f"<@{entry['discord_id']}>" if is_real_user else entry["username"]
+                jopacoin_balance = entry.get("jopacoin_balance", 0) or 0
                 jopacoin_display = f"{jopacoin_balance} {JOPACOIN_EMOTE}"
-                line = f"{medal} **{display_name}** - {jopacoin_display} - {stats}{rating_display}\n"
+                line = (
+                    f"{medal} **{display_name}** - {jopacoin_display} - {stats}{rating_display}\n"
+                )
                 leaderboard_text += line
                 # Log first entry to verify format
                 if i == 1:
                     logger.info(f"First leaderboard line format: {line.strip()}")
-                    _dbg_log("H5", "commands/info.py:leaderboard:first_line", "first line formatted", {
-                        "line": line.strip()
-                    })
+                    _dbg_log(
+                        "H5",
+                        "commands/info.py:leaderboard:first_line",
+                        "first line formatted",
+                        {"line": line.strip()},
+                    )
 
             embed.description = leaderboard_text
             displayed_count = len(players_with_stats[:limit])
             logger.info(f"Leaderboard embed created with {displayed_count} entries (limit={limit})")
-            _dbg_log("H6", "commands/info.py:leaderboard:embed", "embed ready", {
-                "entries": displayed_count,
-                "limit": limit,
-                "first_line": leaderboard_text.splitlines()[0] if leaderboard_text.splitlines() else ""
-            })
+            _dbg_log(
+                "H6",
+                "commands/info.py:leaderboard:embed",
+                "embed ready",
+                {
+                    "entries": displayed_count,
+                    "limit": limit,
+                    "first_line": leaderboard_text.splitlines()[0]
+                    if leaderboard_text.splitlines()
+                    else "",
+                },
+            )
 
             if len(players_with_stats) > limit:
                 shown = min(limit, len(players_with_stats))
@@ -320,11 +338,11 @@ class InfoCommands(commands.Cog):
                 for i, debtor in enumerate(debtors[:10], 1):  # Cap at 10 debtors
                     is_real_user = debtor["discord_id"] and debtor["discord_id"] > 0
                     display_name = (
-                        f"<@{debtor['discord_id']}>"
-                        if is_real_user
-                        else debtor["username"]
+                        f"<@{debtor['discord_id']}>" if is_real_user else debtor["username"]
                     )
-                    shame_text += f"{i}. {display_name} - {debtor['jopacoin_balance']} {JOPACOIN_EMOTE}\n"
+                    shame_text += (
+                        f"{i}. {display_name} - {debtor['jopacoin_balance']} {JOPACOIN_EMOTE}\n"
+                    )
 
                 embed.add_field(
                     name="Wall of Shame",
@@ -353,9 +371,8 @@ class InfoCommands(commands.Cog):
 async def setup(bot: commands.Bot):
     """Setup function called when loading the cog."""
     # Get player_repo and config from bot
-    player_repo = getattr(bot, 'player_repo', None)
-    role_emojis = getattr(bot, 'role_emojis', {})
-    role_names = getattr(bot, 'role_names', {})
-    
-    await bot.add_cog(InfoCommands(bot, player_repo, role_emojis, role_names))
+    player_repo = getattr(bot, "player_repo", None)
+    role_emojis = getattr(bot, "role_emojis", {})
+    role_names = getattr(bot, "role_names", {})
 
+    await bot.add_cog(InfoCommands(bot, player_repo, role_emojis, role_names))

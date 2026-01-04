@@ -2,13 +2,14 @@
 Unit tests for win/loss reporting and stats calculation.
 """
 
-import pytest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
+import pytest
+
+from commands.registration import RegistrationCommands
 from repositories.player_repository import PlayerRepository
 from services.player_service import PlayerService
-from commands.registration import RegistrationCommands
 
 
 def _set_wins_losses(repo: PlayerRepository, discord_id: int, wins: int, losses: int) -> None:
@@ -86,10 +87,14 @@ async def test_stats_command_includes_win_loss_and_win_rate(player_repo):
 
     player_service = PlayerService(player_repo)
     bot = Mock()
-    commands_cog = RegistrationCommands(bot, db=None, player_service=player_service, role_emojis={}, role_names={})
+    commands_cog = RegistrationCommands(
+        bot, db=None, player_service=player_service, role_emojis={}, role_names={}
+    )
 
     interaction = FakeInteraction(user_id=requester_id, user_name="Requester")
-    target_member = SimpleNamespace(id=target_id, mention=f"<@{target_id}>", display_name="TargetUser")
+    target_member = SimpleNamespace(
+        id=target_id, mention=f"<@{target_id}>", display_name="TargetUser"
+    )
 
     await RegistrationCommands.stats.callback(commands_cog, interaction, user=target_member)
 
@@ -107,4 +112,3 @@ async def test_stats_command_includes_win_loss_and_win_rate(player_repo):
     assert wins_field is not None and wins_field.value == "4"
     assert losses_field is not None and losses_field.value == "1"
     assert win_rate_field is not None and "80.0%" in win_rate_field.value
-

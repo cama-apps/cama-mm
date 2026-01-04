@@ -9,11 +9,10 @@ import time
 import pytest
 
 from database import Database
-from repositories.player_repository import PlayerRepository
 from repositories.bet_repository import BetRepository
-from services.bankruptcy_service import BankruptcyService, BankruptcyRepository
+from repositories.player_repository import PlayerRepository
+from services.bankruptcy_service import BankruptcyRepository, BankruptcyService
 from services.betting_service import BettingService
-from services.garnishment_service import GarnishmentService
 
 
 @pytest.fixture
@@ -70,7 +69,9 @@ def create_test_player(player_repo, discord_id, balance=3):
 class TestBankruptcyEligibility:
     """Tests for bankruptcy eligibility checks."""
 
-    def test_cannot_declare_bankruptcy_with_positive_balance(self, db_and_repos, bankruptcy_service):
+    def test_cannot_declare_bankruptcy_with_positive_balance(
+        self, db_and_repos, bankruptcy_service
+    ):
         """Players with positive balance cannot declare bankruptcy."""
         player_repo = db_and_repos["player_repo"]
         pid = create_test_player(player_repo, 1001, balance=100)

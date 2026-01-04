@@ -1,8 +1,8 @@
 import os
 import tempfile
 
-from repositories.lobby_repository import LobbyRepository
 from domain.models.lobby import LobbyManager
+from repositories.lobby_repository import LobbyRepository
 
 
 def test_lobby_manager_persists_and_recovers_state():
@@ -28,4 +28,3 @@ def test_lobby_manager_persists_and_recovers_state():
             os.unlink(db_path)
         except OSError:
             pass
-

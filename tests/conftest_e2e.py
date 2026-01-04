@@ -2,37 +2,39 @@
 Shared fixtures and utilities for end-to-end tests.
 """
 
-import pytest
 import os
 import tempfile
 import time
-from unittest.mock import Mock, AsyncMock
+from unittest.mock import AsyncMock, Mock
+
+import pytest
 
 from database import Database
-from domain.models.lobby import LobbyManager
 
 
 class MockDiscordUser:
     """Mock Discord user for testing."""
+
     def __init__(self, user_id, username="TestUser"):
         self.id = user_id
         self.name = username
         self.display_name = username
         self.mention = f"<@{user_id}>"
-    
+
     def __str__(self):
         return self.name
 
 
 class MockDiscordInteraction:
     """Mock Discord interaction for testing."""
+
     def __init__(self, user_id, username="TestUser"):
         self.user = MockDiscordUser(user_id, username)
         self.response = AsyncMock()
         self.followup = AsyncMock()
         self.channel = Mock()
         self.guild = None
-    
+
     async def defer(self, **kwargs):
         """Mock defer response."""
         pass
@@ -47,6 +49,7 @@ def e2e_test_db():
     yield db
     try:
         import sqlite3
+
         sqlite3.connect(db_path).close()
     except Exception:
         pass
@@ -69,6 +72,7 @@ def match_test_db():
     yield db
     try:
         import sqlite3
+
         sqlite3.connect(db_path).close()
     except Exception:
         pass
@@ -99,7 +103,7 @@ def create_test_players(db, start_id=60000, count=10):
 
 def create_test_db_fixture():
     """Factory function for creating test_db fixtures (used in class-based tests)."""
-    fd, db_path = tempfile.mkstemp(suffix='.db')
+    fd, db_path = tempfile.mkstemp(suffix=".db")
     os.close(fd)
     db = Database(db_path)
     return db, db_path
@@ -109,8 +113,9 @@ def cleanup_test_db(db_path):
     """Cleanup function for test databases."""
     try:
         import sqlite3
+
         sqlite3.connect(db_path).close()
-    except:
+    except Exception:
         pass
     time.sleep(0.1)
     try:
@@ -119,6 +124,5 @@ def cleanup_test_db(db_path):
         time.sleep(0.2)
         try:
             os.unlink(db_path)
-        except:
+        except Exception:
             pass
-

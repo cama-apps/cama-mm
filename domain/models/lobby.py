@@ -2,9 +2,8 @@
 Lobby domain model with persistence helpers.
 """
 
-from typing import Dict, List, Set, Optional
-from datetime import datetime
 from dataclasses import dataclass, field
+from datetime import datetime
 
 from repositories.interfaces import ILobbyRepository
 
@@ -12,13 +11,13 @@ from repositories.interfaces import ILobbyRepository
 @dataclass
 class Lobby:
     """Represents a matchmaking lobby."""
-    
+
     lobby_id: int
     created_by: int  # Discord ID of creator
     created_at: datetime
-    players: Set[int] = field(default_factory=set)
+    players: set[int] = field(default_factory=set)
     status: str = "open"
-    
+
     def add_player(self, discord_id: int) -> bool:
         if self.status != "open":
             return False
@@ -26,21 +25,21 @@ class Lobby:
             return False
         self.players.add(discord_id)
         return True
-    
+
     def remove_player(self, discord_id: int) -> bool:
         if discord_id in self.players:
             self.players.remove(discord_id)
             return True
         return False
-    
+
     def get_player_count(self) -> int:
         return len(self.players)
-    
+
     def is_ready(self, min_players: int = 10) -> bool:
         return len(self.players) >= min_players
-    
-    def can_create_teams(self, player_roles: Dict[int, List[str]]) -> bool:
-        role_counts = {'1': 0, '2': 0, '3': 0, '4': 0, '5': 0}
+
+    def can_create_teams(self, player_roles: dict[int, list[str]]) -> bool:
+        role_counts = {"1": 0, "2": 0, "3": 0, "4": 0, "5": 0}
 
         for player_id in self.players:
             if player_id in player_roles and player_roles[player_id]:
@@ -50,7 +49,7 @@ class Lobby:
 
         return all(count >= 2 for count in role_counts.values())
 
-    def to_dict(self) -> Dict:
+    def to_dict(self) -> dict:
         return {
             "lobby_id": self.lobby_id,
             "created_by": self.created_by,
@@ -60,7 +59,7 @@ class Lobby:
         }
 
     @classmethod
-    def from_dict(cls, data: Dict) -> "Lobby":
+    def from_dict(cls, data: dict) -> "Lobby":
         created_at = data.get("created_at")
         created_at_dt = datetime.fromisoformat(created_at) if created_at else datetime.now()
         players = set(data.get("players", []))
@@ -80,22 +79,22 @@ class LobbyManager:
 
     def __init__(self, lobby_repo: ILobbyRepository):
         self.lobby_repo = lobby_repo
-        self.lobby_message_id: Optional[int] = None
-        self.lobby_channel_id: Optional[int] = None
-        self.lobby: Optional[Lobby] = None
+        self.lobby_message_id: int | None = None
+        self.lobby_channel_id: int | None = None
+        self.lobby: Lobby | None = None
         self._load_state()
 
-    def get_or_create_lobby(self, creator_id: Optional[int] = None) -> Lobby:
+    def get_or_create_lobby(self, creator_id: int | None = None) -> Lobby:
         if self.lobby is None or self.lobby.status != "open":
             self.lobby = Lobby(
                 lobby_id=self.DEFAULT_LOBBY_ID,
                 created_by=creator_id or 0,
-                created_at=datetime.now()
+                created_at=datetime.now(),
             )
             self._persist_lobby()
         return self.lobby
 
-    def get_lobby(self) -> Optional[Lobby]:
+    def get_lobby(self) -> Lobby | None:
         return self.lobby if self.lobby and self.lobby.status == "open" else None
 
     def join_lobby(self, discord_id: int, max_players: int = 12) -> bool:
@@ -115,7 +114,7 @@ class LobbyManager:
             self._persist_lobby()
         return success
 
-    def set_lobby_message(self, message_id: Optional[int], channel_id: Optional[int]) -> None:
+    def set_lobby_message(self, message_id: int | None, channel_id: int | None) -> None:
         """Set the lobby message and channel IDs, persisting to database."""
         self.lobby_message_id = message_id
         self.lobby_channel_id = channel_id
@@ -153,4 +152,3 @@ class LobbyManager:
         self.lobby = Lobby.from_dict(data)
         self.lobby_message_id = data.get("message_id")
         self.lobby_channel_id = data.get("channel_id")
-

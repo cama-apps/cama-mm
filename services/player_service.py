@@ -2,13 +2,10 @@
 Player-facing business logic (registration, roles, stats).
 """
 
-from typing import Dict, List, Optional
-
+from domain.models.player import Player
 from opendota_integration import OpenDotaAPI
 from rating_system import CamaRatingSystem
-from domain.models.player import Player
 from repositories.interfaces import IPlayerRepository
-
 
 STEAM_ID64_OFFSET = 76561197960265728
 
@@ -25,7 +22,7 @@ class PlayerService:
         if steam_id <= 0 or steam_id > 2147483647:
             raise ValueError("Invalid Steam ID. Must be Steam32 (positive, 32-bit).")
 
-    def register_player(self, discord_id: int, discord_username: str, steam_id: int) -> Dict:
+    def register_player(self, discord_id: int, discord_username: str, steam_id: int) -> dict:
         """
         Register a new player and seed their rating.
 
@@ -68,14 +65,14 @@ class PlayerService:
             "mmr": mmr,
         }
 
-    def set_roles(self, discord_id: int, roles: List[str]):
+    def set_roles(self, discord_id: int, roles: list[str]):
         """Persist preferred roles for a player."""
         player = self.player_repo.get_by_id(discord_id)
         if not player:
             raise ValueError("Player not registered.")
         self.player_repo.update_roles(discord_id, roles)
 
-    def get_player(self, discord_id: int) -> Optional[Player]:
+    def get_player(self, discord_id: int) -> Player | None:
         """Fetch a Player model by Discord ID."""
         return self.player_repo.get_by_id(discord_id)
 
@@ -83,7 +80,7 @@ class PlayerService:
         """Return the player's current jopacoin balance."""
         return self.player_repo.get_balance(discord_id)
 
-    def get_stats(self, discord_id: int) -> Dict:
+    def get_stats(self, discord_id: int) -> dict:
         """Return stats payload for a player."""
         player = self.player_repo.get_by_id(discord_id)
         if not player:
@@ -107,4 +104,3 @@ class PlayerService:
             "win_rate": win_rate,
             "jopacoin_balance": self.player_repo.get_balance(discord_id),
         }
-

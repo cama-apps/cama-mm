@@ -4,18 +4,16 @@ Match commands: /shuffle and /record.
 
 import asyncio
 import logging
-import random
 import time
-from typing import Dict, List, Optional
 
 import discord
-from discord.ext import commands
 from discord import app_commands
+from discord.ext import commands
 
-from config import BET_LOCK_SECONDS, JOPACOIN_MIN_BET
-from services.match_service import MatchService
-from services.match_discovery_service import MatchDiscoveryService
+from config import JOPACOIN_MIN_BET
 from services.lobby_service import LobbyService
+from services.match_discovery_service import MatchDiscoveryService
+from services.match_service import MatchService
 from services.permissions import has_admin_permission
 from utils.formatting import (
     JOPACOIN_EMOTE,
@@ -54,7 +52,9 @@ class MatchCommands(commands.Cog):
         # Track scheduled betting reminder tasks per guild for cleanup
         self._betting_tasks_by_guild = {}
 
-    async def _safe_unpin(self, channel: Optional[discord.abc.Messageable], message_id: Optional[int]) -> None:
+    async def _safe_unpin(
+        self, channel: discord.abc.Messageable | None, message_id: int | None
+    ) -> None:
         """Unpin the lobby message safely, tolerating missing perms or missing message."""
         if not channel or not message_id:
             return
@@ -79,11 +79,17 @@ class MatchCommands(commands.Cog):
 
         for player, role in zip(team.players, roles):
             pid = name_to_id.get(player.name)
-            display_name = get_player_display_name(player, discord_id=pid, guild=guild) if pid else player.name
+            display_name = (
+                get_player_display_name(player, discord_id=pid, guild=guild) if pid else player.name
+            )
             is_on_role = player.preferred_roles and role in player.preferred_roles
             role_emoji = ROLE_EMOJIS.get(role, "")
             role_name = ROLE_NAMES.get(role, role)
-            rating = rating_system.rating_to_display(player.glicko_rating) if player.glicko_rating else "N/A"
+            rating = (
+                rating_system.rating_to_display(player.glicko_rating)
+                if player.glicko_rating
+                else "N/A"
+            )
 
             name_part = f"**{display_name}**" if is_on_role else display_name
             warn = "" if is_on_role else " ⚠️"
@@ -140,7 +146,9 @@ class MatchCommands(commands.Cog):
 
         lobby = self.lobby_service.get_lobby()
         if not lobby:
-            await interaction.followup.send("❌ No active lobby. Use `/lobby` to create one!", ephemeral=True)
+            await interaction.followup.send(
+                "❌ No active lobby. Use `/lobby` to create one!", ephemeral=True
+            )
             return
 
         if lobby.get_player_count() < 10:
@@ -154,14 +162,18 @@ class MatchCommands(commands.Cog):
         # `guild` and `guild_id` already computed before the match check
         mode = betting_mode.value if betting_mode else "house"
         try:
-            result = self.match_service.shuffle_players(player_ids, guild_id=guild_id, betting_mode=mode)
+            result = self.match_service.shuffle_players(
+                player_ids, guild_id=guild_id, betting_mode=mode
+            )
         except ValueError as exc:
             logger.warning(f"Shuffle validation error: {exc}", exc_info=True)
             await interaction.followup.send(f"❌ {exc}", ephemeral=True)
             return
         except Exception as exc:
             logger.error(f"Shuffle error: {exc}", exc_info=True)
-            await interaction.followup.send("❌ Unexpected error while shuffling. Please try again.", ephemeral=True)
+            await interaction.followup.send(
+                "❌ Unexpected error while shuffling. Please try again.", ephemeral=True
+            )
             return
 
         radiant_team = result["radiant_team"]
@@ -171,12 +183,18 @@ class MatchCommands(commands.Cog):
         value_diff = result["value_diff"]
         goodness_score = result.get("goodness_score")
         # Sum of raw ratings (without off-role multipliers) for display
-        radiant_sum = sum(player.get_value(self.match_service.use_glicko) for player in radiant_team.players)
-        dire_sum = sum(player.get_value(self.match_service.use_glicko) for player in dire_team.players)
+        radiant_sum = sum(
+            player.get_value(self.match_service.use_glicko) for player in radiant_team.players
+        )
+        dire_sum = sum(
+            player.get_value(self.match_service.use_glicko) for player in dire_team.players
+        )
         first_pick_team = result["first_pick_team"]
         excluded_ids = result["excluded_ids"]
 
-        radiant_lines = self._format_team_lines(radiant_team, radiant_roles, player_ids, players, guild)
+        radiant_lines = self._format_team_lines(
+            radiant_team, radiant_roles, player_ids, players, guild
+        )
         dire_lines = self._format_team_lines(dire_team, dire_roles, player_ids, players, guild)
 
         # Sort by role number for cleaner view
@@ -184,14 +202,15 @@ class MatchCommands(commands.Cog):
         dire_sorted = sorted(zip(dire_roles, dire_lines), key=lambda x: int(x[0]))
 
         head_to_head = []
-        for (r_role, r_line), (d_role, d_line) in zip(radiant_sorted, dire_sorted):
+        for (_r_role, r_line), (_d_role, d_line) in zip(radiant_sorted, dire_sorted):
             head_to_head.append(f"{r_line}  |  {d_line}")
 
         embed = discord.Embed(title="Balanced Team Shuffle", color=discord.Color.blue())
         first_pick_emoji = "🟢" if first_pick_team == "Radiant" else "🔴"
         embed.add_field(
             name=f"🟢 Radiant ({radiant_sum:.0f})  |  🔴 Dire ({dire_sum:.0f})",
-            value=f"{first_pick_emoji} **First Pick: {first_pick_team}**\n\n" + "\n".join(head_to_head),
+            value=f"{first_pick_emoji} **First Pick: {first_pick_team}**\n\n"
+            + "\n".join(head_to_head),
             inline=False,
         )
 
@@ -281,7 +300,12 @@ class MatchCommands(commands.Cog):
             app_commands.Choice(name="Abort Match", value="abort"),
         ]
     )
-    async def record(self, interaction: discord.Interaction, result: app_commands.Choice[str], dotabuff_match_id: str = None):
+    async def record(
+        self,
+        interaction: discord.Interaction,
+        result: app_commands.Choice[str],
+        dotabuff_match_id: str = None,
+    ):
         guild = interaction.guild if hasattr(interaction, "guild") else None
         rl_gid = guild.id if guild else 0
         rl = GLOBAL_RATE_LIMITER.check(
@@ -306,7 +330,9 @@ class MatchCommands(commands.Cog):
             f"result={result.value} match_id={dotabuff_match_id}"
         )
 
-        guild_id = interaction.guild.id if hasattr(interaction, "guild") and interaction.guild else None
+        guild_id = (
+            interaction.guild.id if hasattr(interaction, "guild") and interaction.guild else None
+        )
         is_admin = has_admin_permission(interaction)
         if result.value == "abort":
             if is_admin:
@@ -358,7 +384,9 @@ class MatchCommands(commands.Cog):
             return
         except Exception as exc:
             logger.error(f"Error recording match: {exc}", exc_info=True)
-            await interaction.followup.send("❌ Unexpected error recording match. Please try again.", ephemeral=True)
+            await interaction.followup.send(
+                "❌ Unexpected error recording match. Please try again.", ephemeral=True
+            )
             return
         finally:
             # Cancel any pending betting reminders when recording completes (success or failure)
@@ -368,12 +396,12 @@ class MatchCommands(commands.Cog):
         winners = distributions.get("winners", [])
         losers = distributions.get("losers", [])
         distribution_text = ""
-        distribution_lines: List[str] = []
+        distribution_lines: list[str] = []
 
         # Group winners by user (supports multiple bets per user)
         if winners:
             distribution_lines.append("🏆 Winners:")
-            winners_by_user: Dict[int, List[Dict]] = {}
+            winners_by_user: dict[int, list[dict]] = {}
             for entry in winners:
                 uid = entry["discord_id"]
                 if uid not in winners_by_user:
@@ -416,17 +444,20 @@ class MatchCommands(commands.Cog):
                         )
                     else:
                         distribution_lines.append(
-                            f"<@{uid}> won {total_payout} {JOPACOIN_EMOTE} "
-                            f"(bets: {bets_str})"
+                            f"<@{uid}> won {total_payout} {JOPACOIN_EMOTE} (bets: {bets_str})"
                         )
 
         # Group losers by user (supports multiple bets per user)
         if losers:
             # Calculate total lost by losing side (use effective_bet when available)
-            total_lost = sum(entry.get("effective_bet", entry["amount"]) for entry in losers if not entry.get("refunded"))
+            total_lost = sum(
+                entry.get("effective_bet", entry["amount"])
+                for entry in losers
+                if not entry.get("refunded")
+            )
             distribution_lines.append(f"😞 Losers (total: {total_lost} {JOPACOIN_EMOTE}):")
 
-            losers_by_user: Dict[int, List[Dict]] = {}
+            losers_by_user: dict[int, list[dict]] = {}
             for entry in losers:
                 uid = entry["discord_id"]
                 if uid not in losers_by_user:
@@ -461,20 +492,23 @@ class MatchCommands(commands.Cog):
                         else:
                             bet_parts.append(str(b["amount"]))
                     bets_str = "+".join(bet_parts)
-                    distribution_lines.append(
-                        f"<@{uid}> lost {bets_str} {JOPACOIN_EMOTE}"
-                    )
+                    distribution_lines.append(f"<@{uid}> lost {bets_str} {JOPACOIN_EMOTE}")
 
         if distribution_lines:
             distribution_text = "\n" + "\n".join(distribution_lines)
 
-        admin_override = is_admin and submission["non_admin_count"] < self.match_service.MIN_NON_ADMIN_SUBMISSIONS
+        admin_override = (
+            is_admin
+            and submission["non_admin_count"] < self.match_service.MIN_NON_ADMIN_SUBMISSIONS
+        )
         winning_team_name = "Radiant Won" if winning_result == "radiant" else "Dire Won"
         vote_counts = submission.get("vote_counts", {"radiant": 0, "dire": 0})
-        confirmations_text = f" (🟢 {vote_counts['radiant']} vs 🔴 {vote_counts['dire']})" if not admin_override else ""
-        message = (
-            f"✅ Match recorded — {winning_team_name}{confirmations_text}.{distribution_text}"
+        confirmations_text = (
+            f" (🟢 {vote_counts['radiant']} vs 🔴 {vote_counts['dire']})"
+            if not admin_override
+            else ""
         )
+        message = f"✅ Match recorded — {winning_team_name}{confirmations_text}.{distribution_text}"
         await interaction.followup.send(message, ephemeral=False)
 
         # Trigger auto-discovery in background if enabled
@@ -486,9 +520,9 @@ class MatchCommands(commands.Cog):
 
     async def _trigger_auto_discovery(
         self,
-        guild_id: Optional[int],
+        guild_id: int | None,
         match_id: int,
-        channel: Optional[discord.abc.Messageable],
+        channel: discord.abc.Messageable | None,
     ) -> None:
         """
         Trigger auto-discovery for a match in the background.
@@ -513,14 +547,10 @@ class MatchCommands(commands.Cog):
             await asyncio.sleep(60)  # Wait 1 minute before trying
 
             # Run discovery in executor to avoid blocking
-            discovery_service = MatchDiscoveryService(
-                self.match_repo, self.player_repo
-            )
+            discovery_service = MatchDiscoveryService(self.match_repo, self.player_repo)
 
             loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(
-                None, discovery_service.discover_match, match_id
-            )
+            result = await loop.run_in_executor(None, discovery_service.discover_match, match_id)
 
             if result.get("status") == "discovered":
                 valve_match_id = result.get("valve_match_id")
@@ -546,7 +576,9 @@ class MatchCommands(commands.Cog):
         except Exception as exc:
             logger.error(f"Error in auto-discovery for match {match_id}: {exc}", exc_info=True)
 
-    async def _finalize_abort(self, interaction: discord.Interaction, guild_id: Optional[int], admin_override: bool):
+    async def _finalize_abort(
+        self, interaction: discord.Interaction, guild_id: int | None, admin_override: bool
+    ):
         betting_service = getattr(self.bot, "betting_service", None)
         pending_state = self.match_service.get_last_shuffle(guild_id)
         if betting_service and pending_state:
@@ -559,9 +591,13 @@ class MatchCommands(commands.Cog):
         self.match_service.clear_last_shuffle(guild_id)
         await self._safe_unpin(interaction.channel, self.lobby_service.get_lobby_message_id())
         self.lobby_service.reset_lobby()
-        await interaction.followup.send("✅ Match aborted. You can create a new lobby.", ephemeral=False)
+        await interaction.followup.send(
+            "✅ Match aborted. You can create a new lobby.", ephemeral=False
+        )
 
-    async def _schedule_betting_reminders(self, guild_id: Optional[int], bet_lock_until: Optional[int]) -> None:
+    async def _schedule_betting_reminders(
+        self, guild_id: int | None, bet_lock_until: int | None
+    ) -> None:
         """
         Schedule betting reminder tasks (5-minute warning and close) for the current shuffle.
         """
@@ -612,9 +648,9 @@ class MatchCommands(commands.Cog):
         self,
         *,
         delay_seconds: int,
-        guild_id: Optional[int],
+        guild_id: int | None,
         reminder_type: str,
-        lock_until: Optional[int],
+        lock_until: int | None,
     ) -> None:
         """Sleep for delay_seconds then send the requested reminder, if still relevant."""
         try:
@@ -640,15 +676,17 @@ class MatchCommands(commands.Cog):
             # Task was cancelled because match ended/aborted
             return
         except Exception as exc:
-            logger.warning(f"Failed to run betting reminder ({reminder_type}): {exc}", exc_info=True)
+            logger.warning(
+                f"Failed to run betting reminder ({reminder_type}): {exc}", exc_info=True
+            )
 
-    def _register_betting_tasks(self, guild_id: Optional[int], tasks) -> None:
+    def _register_betting_tasks(self, guild_id: int | None, tasks) -> None:
         """Store reminder tasks for the guild and cancel any existing tasks first."""
         self._cancel_betting_tasks(guild_id)
         normalized = self.match_service._normalize_guild_id(guild_id)  # type: ignore[attr-defined]
         self._betting_tasks_by_guild[normalized] = tasks
 
-    def _cancel_betting_tasks(self, guild_id: Optional[int]) -> None:
+    def _cancel_betting_tasks(self, guild_id: int | None) -> None:
         """Cancel any scheduled betting reminder tasks for the guild."""
         normalized = self.match_service._normalize_guild_id(guild_id)  # type: ignore[attr-defined]
         tasks = self._betting_tasks_by_guild.pop(normalized, [])
@@ -666,10 +704,14 @@ async def setup(bot: commands.Bot):
     guild_config_repo = getattr(bot, "guild_config_repo", None)
     player_repo = getattr(bot, "player_repo", None)
     match_repo = getattr(bot, "match_repo", None)
-    await bot.add_cog(MatchCommands(
-        bot, lobby_service, match_service, player_service,
-        guild_config_repo=guild_config_repo,
-        player_repo=player_repo,
-        match_repo=match_repo,
-    ))
-
+    await bot.add_cog(
+        MatchCommands(
+            bot,
+            lobby_service,
+            match_service,
+            player_service,
+            guild_config_repo=guild_config_repo,
+            player_repo=player_repo,
+            match_repo=match_repo,
+        )
+    )

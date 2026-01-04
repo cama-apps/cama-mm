@@ -3,8 +3,8 @@ Handles betting-related business logic.
 """
 
 import math
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
 import time
+from typing import TYPE_CHECKING, Any, Optional
 
 from config import (
     HOUSE_PAYOUT_MULTIPLIER,
@@ -17,8 +17,8 @@ from repositories.bet_repository import BetRepository
 from repositories.player_repository import PlayerRepository
 
 if TYPE_CHECKING:
-    from services.garnishment_service import GarnishmentService
     from services.bankruptcy_service import BankruptcyService
+    from services.garnishment_service import GarnishmentService
 
 
 class BettingService:
@@ -29,8 +29,8 @@ class BettingService:
         bet_repo: BetRepository,
         player_repo: PlayerRepository,
         garnishment_service: Optional["GarnishmentService"] = None,
-        leverage_tiers: Optional[List[int]] = None,
-        max_debt: Optional[int] = None,
+        leverage_tiers: list[int] | None = None,
+        max_debt: int | None = None,
         bankruptcy_service: Optional["BankruptcyService"] = None,
     ):
         self.bet_repo = bet_repo
@@ -40,7 +40,7 @@ class BettingService:
         self.max_debt = max_debt if max_debt is not None else MAX_DEBT
         self.bankruptcy_service = bankruptcy_service
 
-    def _since_ts(self, pending_state: Optional[Dict[str, Any]]) -> Optional[int]:
+    def _since_ts(self, pending_state: dict[str, Any] | None) -> int | None:
         """Derive the start timestamp for the current pending match window."""
         if not pending_state:
             return None
@@ -48,11 +48,11 @@ class BettingService:
 
     def place_bet(
         self,
-        guild_id: Optional[int],
+        guild_id: int | None,
         discord_id: int,
         team: str,
         amount: int,
-        pending_state: Dict[str, Any],
+        pending_state: dict[str, Any],
         leverage: int = 1,
     ) -> None:
         """Place a bet after verifying timing and participant/team rules."""
@@ -127,7 +127,7 @@ class BettingService:
         self.player_repo.add_balance(discord_id, -effective_bet)
         self.bet_repo.create_bet(guild_id, discord_id, team, amount, now_ts)
 
-    def award_participation(self, player_ids: List[int]) -> Dict[int, Dict[str, int]]:
+    def award_participation(self, player_ids: list[int]) -> dict[int, dict[str, int]]:
         """
         Give each participant 1 jopacoin for playing.
 
@@ -135,7 +135,7 @@ class BettingService:
 
         Returns dict of {discord_id: {gross, garnished, net}} for each player.
         """
-        results: Dict[int, Dict[str, int]] = {}
+        results: dict[int, dict[str, int]] = {}
         if not player_ids:
             return results
 
@@ -152,7 +152,7 @@ class BettingService:
             return results
 
         # Otherwise, bulk add without garnishment tracking
-        deltas = {pid: 1 for pid in player_ids}
+        deltas = dict.fromkeys(player_ids, 1)
         if hasattr(self.player_repo, "add_balance_many"):
             self.player_repo.add_balance_many(deltas)  # type: ignore[attr-defined]
         else:
@@ -164,8 +164,8 @@ class BettingService:
         return results
 
     def settle_bets(
-        self, match_id: int, guild_id: Optional[int], winning_team: str, pending_state: Dict[str, Any]
-    ) -> Dict[str, List[Dict]]:
+        self, match_id: int, guild_id: int | None, winning_team: str, pending_state: dict[str, Any]
+    ) -> dict[str, list[dict]]:
         """
         Settle bets based on betting mode.
 
@@ -192,7 +192,7 @@ class BettingService:
 
         # Fallback (older behavior) - only supports house mode
         bets = self.bet_repo.get_bets_for_pending_match(guild_id, since_ts=since_ts)
-        distributions: Dict[str, List[Dict]] = {"winners": [], "losers": []}
+        distributions: dict[str, list[dict]] = {"winners": [], "losers": []}
         if not bets:
             return distributions
 
@@ -204,10 +204,10 @@ class BettingService:
             return self._settle_house_bets_fallback(bets, winning_team)
 
     def _settle_house_bets_fallback(
-        self, bets: List[Dict], winning_team: str
-    ) -> Dict[str, List[Dict]]:
+        self, bets: list[dict], winning_team: str
+    ) -> dict[str, list[dict]]:
         """House mode fallback: 1:1 payouts."""
-        distributions: Dict[str, List[Dict]] = {"winners": [], "losers": []}
+        distributions: dict[str, list[dict]] = {"winners": [], "losers": []}
 
         for bet in bets:
             outcome_entry = {
@@ -227,10 +227,10 @@ class BettingService:
         return distributions
 
     def _settle_pool_bets_fallback(
-        self, bets: List[Dict], winning_team: str
-    ) -> Dict[str, List[Dict]]:
+        self, bets: list[dict], winning_team: str
+    ) -> dict[str, list[dict]]:
         """Pool mode fallback: proportional payouts from total pool."""
-        distributions: Dict[str, List[Dict]] = {"winners": [], "losers": []}
+        distributions: dict[str, list[dict]] = {"winners": [], "losers": []}
 
         # Calculate totals
         total_pool = sum(bet["amount"] for bet in bets)
@@ -240,12 +240,14 @@ class BettingService:
         if winner_pool == 0:
             for bet in bets:
                 self.player_repo.add_balance(bet["discord_id"], bet["amount"])
-                distributions["losers"].append({
-                    "discord_id": bet["discord_id"],
-                    "amount": bet["amount"],
-                    "team": bet["team_bet_on"],
-                    "refunded": True,
-                })
+                distributions["losers"].append(
+                    {
+                        "discord_id": bet["discord_id"],
+                        "amount": bet["amount"],
+                        "team": bet["team_bet_on"],
+                        "refunded": True,
+                    }
+                )
             return distributions
 
         for bet in bets:
@@ -269,7 +271,7 @@ class BettingService:
 
         return distributions
 
-    def award_win_bonus(self, winning_ids: List[int]) -> Dict[int, Dict[str, int]]:
+    def award_win_bonus(self, winning_ids: list[int]) -> dict[int, dict[str, int]]:
         """
         Reward winners with additional jopacoins.
 
@@ -278,7 +280,7 @@ class BettingService:
 
         Returns dict of {discord_id: {gross, garnished, net, bankruptcy_penalty}} for each player.
         """
-        results: Dict[int, Dict[str, int]] = {}
+        results: dict[int, dict[str, int]] = {}
         if not winning_ids:
             return results
 
@@ -309,13 +311,13 @@ class BettingService:
 
         return results
 
-    def award_exclusion_bonus(self, excluded_ids: List[int]) -> Dict[int, Dict[str, int]]:
+    def award_exclusion_bonus(self, excluded_ids: list[int]) -> dict[int, dict[str, int]]:
         """
         Reward excluded players with a small consolation bonus.
 
         Mirrors win bonus processing so bankruptcy and garnishment rules still apply.
         """
-        results: Dict[int, Dict[str, int]] = {}
+        results: dict[int, dict[str, int]] = {}
         if not excluded_ids:
             return results
 
@@ -344,16 +346,18 @@ class BettingService:
 
         return results
 
-    def get_pot_odds(self, guild_id: Optional[int], pending_state: Optional[Dict[str, Any]] = None) -> Dict[str, int]:
+    def get_pot_odds(
+        self, guild_id: int | None, pending_state: dict[str, Any] | None = None
+    ) -> dict[str, int]:
         """Return current bet totals by team for odds calculation."""
         since_ts = self._since_ts(pending_state)
         if pending_state is None or since_ts is None:
-            return {team: 0 for team in self.bet_repo.VALID_TEAMS}
+            return dict.fromkeys(self.bet_repo.VALID_TEAMS, 0)
         return self.bet_repo.get_total_bets_by_guild(guild_id, since_ts=since_ts)
 
     def get_pending_bet(
-        self, guild_id: Optional[int], discord_id: int, pending_state: Optional[Dict[str, Any]] = None
-    ) -> Optional[Dict]:
+        self, guild_id: int | None, discord_id: int, pending_state: dict[str, Any] | None = None
+    ) -> dict | None:
         """Get the pending bet for a player."""
         since_ts = self._since_ts(pending_state)
         if pending_state is None or since_ts is None:
@@ -361,15 +365,17 @@ class BettingService:
         return self.bet_repo.get_player_pending_bet(guild_id, discord_id, since_ts=since_ts)
 
     def get_pending_bets(
-        self, guild_id: Optional[int], discord_id: int, pending_state: Optional[Dict[str, Any]] = None
-    ) -> List[Dict]:
+        self, guild_id: int | None, discord_id: int, pending_state: dict[str, Any] | None = None
+    ) -> list[dict]:
         """Get all pending bets for a player, ordered by bet_time."""
         since_ts = self._since_ts(pending_state)
         if pending_state is None or since_ts is None:
             return []
         return self.bet_repo.get_player_pending_bets(guild_id, discord_id, since_ts=since_ts)
 
-    def refund_pending_bets(self, guild_id: Optional[int], pending_state: Optional[Dict[str, Any]]) -> int:
+    def refund_pending_bets(
+        self, guild_id: int | None, pending_state: dict[str, Any] | None
+    ) -> int:
         """
         Refund all pending bets for the current match window.
 
@@ -379,7 +385,9 @@ class BettingService:
         if pending_state is None or since_ts is None:
             return 0
         if hasattr(self.bet_repo, "refund_pending_bets_atomic"):
-            return self.bet_repo.refund_pending_bets_atomic(guild_id=guild_id, since_ts=int(since_ts))
+            return self.bet_repo.refund_pending_bets_atomic(
+                guild_id=guild_id, since_ts=int(since_ts)
+            )
 
         bets = self.bet_repo.get_bets_for_pending_match(guild_id, since_ts=since_ts)
         if not bets:
@@ -390,11 +398,10 @@ class BettingService:
 
         return self.bet_repo.delete_pending_bets(guild_id, since_ts=since_ts)
 
-    def _enforce_team_restriction(self, discord_id: int, team: str, state: Dict[str, Any]) -> None:
+    def _enforce_team_restriction(self, discord_id: int, team: str, state: dict[str, Any]) -> None:
         radiant = set(state.get("radiant_team_ids", []))
         dire = set(state.get("dire_team_ids", []))
         if discord_id in radiant and team != "radiant":
             raise ValueError("Participants on Radiant can only bet on Radiant.")
         if discord_id in dire and team != "dire":
             raise ValueError("Participants on Dire can only bet on Dire.")
-

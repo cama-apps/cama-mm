@@ -2,10 +2,8 @@
 Schema and migration management for SQLite database.
 """
 
-import json
 import logging
 import sqlite3
-from typing import Dict, List, Optional
 
 logger = logging.getLogger("cama_bot.schema")
 
@@ -143,7 +141,10 @@ class SchemaManager:
             ("add_match_participants_side", self._migration_add_match_participants_side_column),
             ("add_jopacoin_balance", self._migration_add_jopacoin_balance),
             ("create_bets_table", self._migration_create_bets_table),
-            ("recreate_bets_table_with_guild_id", self._migration_recreate_bets_table_with_guild_id),
+            (
+                "recreate_bets_table_with_guild_id",
+                self._migration_recreate_bets_table_with_guild_id,
+            ),
             ("add_indexes_v1", self._migration_add_indexes_v1),
             ("add_bet_leverage_column", self._migration_add_bet_leverage_column),
             ("create_player_pairings_table", self._migration_create_player_pairings_table),
@@ -270,9 +271,7 @@ class SchemaManager:
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_rating_history_match_id ON rating_history(match_id)"
         )
-        cursor.execute(
-            "CREATE INDEX IF NOT EXISTS idx_matches_match_date ON matches(match_date)"
-        )
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_matches_match_date ON matches(match_date)")
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_bets_guild_match_bet_time ON bets(guild_id, match_id, bet_time)"
         )
@@ -326,9 +325,7 @@ class SchemaManager:
     def _migration_add_steam_id_to_players(self, cursor) -> None:
         """Add steam_id column for direct Valve API correlation."""
         self._add_column_if_not_exists(cursor, "players", "steam_id", "INTEGER")
-        cursor.execute(
-            "CREATE INDEX IF NOT EXISTS idx_players_steam_id ON players(steam_id)"
-        )
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_players_steam_id ON players(steam_id)")
 
     def _migration_add_match_enrichment_columns(self, cursor) -> None:
         """Add columns for Valve API match enrichment."""
@@ -378,4 +375,3 @@ class SchemaManager:
         """Add message_id and channel_id columns to lobby_state for persistence across restarts."""
         self._add_column_if_not_exists(cursor, "lobby_state", "message_id", "INTEGER")
         self._add_column_if_not_exists(cursor, "lobby_state", "channel_id", "INTEGER")
-

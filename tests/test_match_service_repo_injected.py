@@ -3,10 +3,10 @@ import tempfile
 
 import pytest
 
-from services.match_service import MatchService
-from repositories.player_repository import PlayerRepository
-from repositories.match_repository import MatchRepository
 from domain.models.team import Team
+from repositories.match_repository import MatchRepository
+from repositories.player_repository import PlayerRepository
+from services.match_service import MatchService
 
 
 def _seed_players(repo: PlayerRepository, count: int = 10):

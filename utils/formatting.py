@@ -2,8 +2,7 @@
 Shared formatting helpers and role constants.
 """
 
-from typing import Iterable, Optional, Tuple
-
+from collections.abc import Iterable
 
 # Role configuration with emojis and friendly names
 ROLE_EMOJIS = {
@@ -38,7 +37,7 @@ def format_roles_list(roles: Iterable[str]) -> str:
     return ", ".join(format_role_display(r) for r in roles)
 
 
-def calculate_pool_odds(radiant_total: int, dire_total: int) -> Tuple[Optional[float], Optional[float]]:
+def calculate_pool_odds(radiant_total: int, dire_total: int) -> tuple[float | None, float | None]:
     """
     Calculate pool betting multipliers for each team.
 
@@ -59,8 +58,8 @@ def format_betting_display(
     radiant_total: int,
     dire_total: int,
     betting_mode: str,
-    lock_until: Optional[int] = None,
-) -> Tuple[str, str]:
+    lock_until: int | None = None,
+) -> tuple[str, str]:
     """
     Format the betting display for embeds.
 
@@ -91,8 +90,7 @@ def format_betting_display(
     else:
         # House mode - original format
         totals_text = (
-            f"Radiant: {radiant_total} {JOPACOIN_EMOTE} | "
-            f"Dire: {dire_total} {JOPACOIN_EMOTE}"
+            f"Radiant: {radiant_total} {JOPACOIN_EMOTE} | Dire: {dire_total} {JOPACOIN_EMOTE}"
         )
         if lock_text:
             totals_text += f"\n{lock_text}"
@@ -100,7 +98,7 @@ def format_betting_display(
         return "💰 House Betting (1:1)", totals_text
 
 
-def get_player_display_name(player, discord_id: Optional[int] = None, guild=None) -> str:
+def get_player_display_name(player, discord_id: int | None = None, guild=None) -> str:
     """
     Get a player's display name, preferring Discord nickname when available.
 
@@ -120,4 +118,3 @@ def get_player_display_name(player, discord_id: Optional[int] = None, guild=None
             pass
 
     return player.name if hasattr(player, "name") else str(player)
-

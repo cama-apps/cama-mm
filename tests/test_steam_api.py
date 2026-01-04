@@ -2,8 +2,8 @@
 Tests for SteamAPI client.
 """
 
-import pytest
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import Mock, patch
+
 import requests
 
 from steam_api import SteamAPI, SteamAPIRateLimiter

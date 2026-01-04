@@ -2,8 +2,6 @@
 Service for applying garnishment to income for players with debt.
 """
 
-from typing import Dict, Optional
-
 from config import GARNISHMENT_PERCENTAGE
 from repositories.player_repository import PlayerRepository
 
@@ -14,14 +12,14 @@ class GarnishmentService:
     def __init__(
         self,
         player_repo: PlayerRepository,
-        garnishment_rate: Optional[float] = None,
+        garnishment_rate: float | None = None,
     ):
         self.player_repo = player_repo
         self.garnishment_rate = (
             garnishment_rate if garnishment_rate is not None else GARNISHMENT_PERCENTAGE
         )
 
-    def add_income(self, discord_id: int, amount: int) -> Dict[str, int]:
+    def add_income(self, discord_id: int, amount: int) -> dict[str, int]:
         """
         Add income to a player, applying garnishment if they have debt.
 

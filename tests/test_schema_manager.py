@@ -33,4 +33,3 @@ def test_schema_manager_initializes_tables():
             os.unlink(db_path)
         except OSError:
             pass
-
