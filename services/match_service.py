@@ -502,6 +502,8 @@ class MatchService:
                     match_id, guild_id, winning_team, pending_state=last_shuffle
                 )
                 self.betting_service.award_win_bonus(winning_ids)
+                if excluded_player_ids:
+                    self.betting_service.award_exclusion_bonus(excluded_player_ids)
 
             # Build Glicko players
             radiant_glicko = [self._load_glicko_player(pid) for pid in radiant_team_ids]
