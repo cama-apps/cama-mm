@@ -487,6 +487,25 @@ async def on_ready():
         logger.error(f"Failed to sync commands: {exc}", exc_info=True)
 
 
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: discord.app_commands.AppCommandError):
+    """Global error handler for app commands - prevents infinite 'thinking...' state."""
+    logger.error(f"App command error in '{interaction.command.name if interaction.command else 'unknown'}': {error}", exc_info=error)
+
+    # Try to send error message to user
+    error_msg = "An error occurred while processing your command. Please try again."
+
+    try:
+        if interaction.response.is_done():
+            # Interaction was deferred, use followup
+            await interaction.followup.send(content=f"❌ {error_msg}", ephemeral=True)
+        else:
+            # Interaction not yet responded, use response
+            await interaction.response.send_message(content=f"❌ {error_msg}", ephemeral=True)
+    except Exception as followup_error:
+        logger.error(f"Failed to send error message to user: {followup_error}")
+
+
 @bot.event
 async def on_raw_reaction_add(payload):
     """Handle reaction adds for lobby joining."""

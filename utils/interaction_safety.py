@@ -56,13 +56,17 @@ async def safe_followup(
     )
     # endregion agent log
     try:
-        msg = await interaction.followup.send(
-            content=content,
-            embed=embed,
-            file=file,
-            ephemeral=ephemeral,
-            allowed_mentions=allowed_mentions,
-        )
+        # Build kwargs, only including file if provided (Discord errors on file=None)
+        send_kwargs = {
+            "content": content,
+            "embed": embed,
+            "ephemeral": ephemeral,
+            "allowed_mentions": allowed_mentions,
+        }
+        if file is not None:
+            send_kwargs["file"] = file
+
+        msg = await interaction.followup.send(**send_kwargs)
         # region agent log
         _dbg(
             "H7",
@@ -107,7 +111,11 @@ async def safe_followup(
         channel = interaction.channel
         if not channel:
             raise
-        msg = await channel.send(content=content, embed=embed, file=file, allowed_mentions=allowed_mentions)
+        # Build kwargs for fallback send
+        fallback_kwargs = {"content": content, "embed": embed, "allowed_mentions": allowed_mentions}
+        if file is not None:
+            fallback_kwargs["file"] = file
+        msg = await channel.send(**fallback_kwargs)
         # region agent log
         _dbg(
             "H7",
