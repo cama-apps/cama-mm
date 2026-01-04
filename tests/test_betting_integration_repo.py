@@ -2,11 +2,11 @@ import os
 import tempfile
 
 from config import HOUSE_PAYOUT_MULTIPLIER, JOPACOIN_WIN_REWARD
-from services.match_service import MatchService
-from services.betting_service import BettingService
-from repositories.player_repository import PlayerRepository
 from repositories.bet_repository import BetRepository
 from repositories.match_repository import MatchRepository
+from repositories.player_repository import PlayerRepository
+from services.betting_service import BettingService
+from services.match_service import MatchService
 
 
 def _seed_players(repo: PlayerRepository, ids):
@@ -65,10 +65,7 @@ def test_betting_flow_with_repos():
 
         # Bettor started with 3, spent bet_amount, then won payout and win bonus
         expected = (
-            3
-            - bet_amount
-            + int(bet_amount * (1 + HOUSE_PAYOUT_MULTIPLIER))
-            + JOPACOIN_WIN_REWARD
+            3 - bet_amount + int(bet_amount * (1 + HOUSE_PAYOUT_MULTIPLIER)) + JOPACOIN_WIN_REWARD
         )
         assert player_repo.get_balance(bettor_id) == expected
 

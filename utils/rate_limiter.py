@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Dict, Tuple
 
 
 @dataclass(frozen=True)
@@ -25,9 +24,11 @@ class RateLimiter:
 
     def __init__(self) -> None:
         # key -> list of timestamps (monotonic seconds)
-        self._hits: Dict[Tuple[str, int, int], list[float]] = {}
+        self._hits: dict[tuple[str, int, int], list[float]] = {}
 
-    def check(self, *, scope: str, guild_id: int, user_id: int, limit: int, per_seconds: int) -> RateLimitResult:
+    def check(
+        self, *, scope: str, guild_id: int, user_id: int, limit: int, per_seconds: int
+    ) -> RateLimitResult:
         now = time.monotonic()
         key = (scope, guild_id, user_id)
         window_start = now - per_seconds
@@ -47,5 +48,3 @@ class RateLimiter:
 
 
 GLOBAL_RATE_LIMITER = RateLimiter()
-
-

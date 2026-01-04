@@ -2,11 +2,12 @@
 Tests for OpenDotaPlayerService.
 """
 
-import pytest
-from unittest.mock import Mock, patch, MagicMock
 from datetime import datetime, timedelta
+from unittest.mock import Mock, patch
 
-from services.opendota_player_service import OpenDotaPlayerService, CACHE_TTL_SECONDS
+import pytest
+
+from services.opendota_player_service import CACHE_TTL_SECONDS, OpenDotaPlayerService
 
 
 class TestOpenDotaPlayerService:
@@ -216,10 +217,18 @@ class TestPlayerRepositorySteamId:
         repo = PlayerRepository(temp_db_path)
 
         # Add players with various states
-        repo.add(discord_id=100, discord_username="HasBoth", dotabuff_url="https://dotabuff.com/players/123")
+        repo.add(
+            discord_id=100,
+            discord_username="HasBoth",
+            dotabuff_url="https://dotabuff.com/players/123",
+        )
         repo.set_steam_id(100, 12345)
 
-        repo.add(discord_id=101, discord_username="NeedsSteamId", dotabuff_url="https://dotabuff.com/players/456")
+        repo.add(
+            discord_id=101,
+            discord_username="NeedsSteamId",
+            dotabuff_url="https://dotabuff.com/players/456",
+        )
         # No steam_id set
 
         repo.add(discord_id=102, discord_username="NoDotabuff")

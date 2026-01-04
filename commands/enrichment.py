@@ -3,11 +3,10 @@ Match enrichment commands: /setleague, /enrichmatch, /backfillsteamid, /profile,
 """
 
 import logging
-from typing import Optional
 
 import discord
-from discord.ext import commands
 from discord import app_commands
+from discord.ext import commands
 
 from services.match_enrichment_service import MatchEnrichmentService
 from services.opendota_player_service import OpenDotaPlayerService
@@ -42,9 +41,7 @@ class EnrichmentCommands(commands.Cog):
     @app_commands.describe(league_id="The Valve/Dota 2 league ID")
     async def setleague(self, interaction: discord.Interaction, league_id: int):
         """Set the league ID for match discovery."""
-        logger.info(
-            f"Setleague command: User {interaction.user.id} setting league to {league_id}"
-        )
+        logger.info(f"Setleague command: User {interaction.user.id} setting league to {league_id}")
 
         if not await safe_defer(interaction, ephemeral=True):
             return
@@ -85,8 +82,8 @@ class EnrichmentCommands(commands.Cog):
     async def enrichmatch(
         self,
         interaction: discord.Interaction,
-        valve_match_id: Optional[int] = None,
-        internal_match_id: Optional[int] = None,
+        valve_match_id: int | None = None,
+        internal_match_id: int | None = None,
     ):
         """
         Manually enrich a match with Valve API data.
@@ -175,12 +172,12 @@ class EnrichmentCommands(commands.Cog):
         )
 
         if result["players_not_found"]:
-            response += f"\n\n*{len(result['players_not_found'])} players not matched (missing steam_id)*"
+            response += (
+                f"\n\n*{len(result['players_not_found'])} players not matched (missing steam_id)*"
+            )
 
         await safe_followup(interaction, content=response, ephemeral=True)
-        logger.info(
-            f"Match {internal_match_id} enriched: {result['players_enriched']} players"
-        )
+        logger.info(f"Match {internal_match_id} enriched: {result['players_enriched']} players")
 
     @app_commands.command(
         name="backfillsteamid",
@@ -203,10 +200,14 @@ class EnrichmentCommands(commands.Cog):
 
         result = self.enrichment_service.backfill_steam_ids()
 
-        response = f"Steam ID backfill complete!\n\n**Players updated:** {result['players_updated']}"
+        response = (
+            f"Steam ID backfill complete!\n\n**Players updated:** {result['players_updated']}"
+        )
 
         if result["players_failed"]:
-            response += f"\n**Failed:** {len(result['players_failed'])} players (invalid dotabuff URLs)"
+            response += (
+                f"\n**Failed:** {len(result['players_failed'])} players (invalid dotabuff URLs)"
+            )
 
         await safe_followup(interaction, content=response, ephemeral=True)
         logger.info(
@@ -214,9 +215,7 @@ class EnrichmentCommands(commands.Cog):
             f"{len(result['players_failed'])} failed"
         )
 
-    @app_commands.command(
-        name="showconfig", description="Show current server configuration"
-    )
+    @app_commands.command(name="showconfig", description="Show current server configuration")
     async def showconfig(self, interaction: discord.Interaction):
         """Show the current configuration for this server."""
         logger.info(f"Showconfig command: User {interaction.user.id}")
@@ -265,7 +264,7 @@ class EnrichmentCommands(commands.Cog):
     async def matchhistory(
         self,
         interaction: discord.Interaction,
-        user: Optional[discord.Member] = None,
+        user: discord.Member | None = None,
         limit: int = 5,
     ):
         """View recent matches with enriched stats (heroes, KDA, etc)."""
@@ -313,7 +312,11 @@ class EnrichmentCommands(commands.Cog):
         embed = discord.Embed(
             title=f"📜 Recent Matches for {target_name}",
             description=f"Last {len(matches)} matches • **{wins}W - {losses}L**",
-            color=discord.Color.green() if wins > losses else discord.Color.red() if losses > wins else discord.Color.greyple()
+            color=discord.Color.green()
+            if wins > losses
+            else discord.Color.red()
+            if losses > wins
+            else discord.Color.greyple(),
         )
 
         for match in matches:
@@ -334,13 +337,17 @@ class EnrichmentCommands(commands.Cog):
             result_emoji = "✅" if won else "❌"
 
             valve_match_id = match.get("valve_match_id")
-            dotabuff_link = f"[Dotabuff](https://www.dotabuff.com/matches/{valve_match_id})" if valve_match_id else None
+            dotabuff_link = (
+                f"[Dotabuff](https://www.dotabuff.com/matches/{valve_match_id})"
+                if valve_match_id
+                else None
+            )
 
             if player_stats and player_stats.get("hero_id"):
                 hero = get_hero_name(player_stats["hero_id"])
-                k = player_stats.get('kills', 0)
-                d = player_stats.get('deaths', 0)
-                a = player_stats.get('assists', 0)
+                k = player_stats.get("kills", 0)
+                d = player_stats.get("deaths", 0)
+                a = player_stats.get("assists", 0)
                 gpm = player_stats.get("gpm", 0)
                 xpm = player_stats.get("xpm", 0)
                 dmg = player_stats.get("hero_damage", 0)
@@ -359,23 +366,12 @@ class EnrichmentCommands(commands.Cog):
                     stats_block += f"\n{dotabuff_link}"
 
                 embed.add_field(
-                    name=f"{result_emoji} #{match_id} • {hero}",
-                    value=stats_block,
-                    inline=True
+                    name=f"{result_emoji} #{match_id} • {hero}", value=stats_block, inline=True
                 )
             else:
-                stats_block = (
-                    f"```\n"
-                    f"KDA:  -/-/-\n"
-                    f"GPM:  -    XPM: -\n"
-                    f"DMG:  -\n"
-                    f"Side: {side}\n"
-                    f"```"
-                )
+                stats_block = f"```\nKDA:  -/-/-\nGPM:  -    XPM: -\nDMG:  -\nSide: {side}\n```"
                 embed.add_field(
-                    name=f"{result_emoji} #{match_id} • ???",
-                    value=stats_block,
-                    inline=True
+                    name=f"{result_emoji} #{match_id} • ???", value=stats_block, inline=True
                 )
 
         await safe_followup(interaction, embed=embed, ephemeral=True)
@@ -390,12 +386,11 @@ class EnrichmentCommands(commands.Cog):
     async def profile(
         self,
         interaction: discord.Interaction,
-        user: Optional[discord.Member] = None,
+        user: discord.Member | None = None,
     ):
         """View OpenDota profile stats including W/L, avg KDA, top heroes."""
         logger.info(
-            f"Profile command: User {interaction.user.id}, "
-            f"target={user.id if user else 'self'}"
+            f"Profile command: User {interaction.user.id}, target={user.id if user else 'self'}"
         )
 
         if not await safe_defer(interaction, ephemeral=True):
@@ -428,9 +423,7 @@ class EnrichmentCommands(commands.Cog):
             return
 
         # Fetch profile
-        profile_data = self.opendota_player_service.format_profile_embed(
-            target_id, target_name
-        )
+        profile_data = self.opendota_player_service.format_profile_embed(target_id, target_name)
 
         if not profile_data:
             await safe_followup(
@@ -488,17 +481,14 @@ class EnrichmentCommands(commands.Cog):
             )
             return
 
-        logger.info(
-            f"Autodiscover command: User {interaction.user.id}, dry_run={dry_run}"
-        )
+        logger.info(f"Autodiscover command: User {interaction.user.id}, dry_run={dry_run}")
 
         if not await safe_defer(interaction, ephemeral=True):
             return
 
         from services.match_discovery_service import MatchDiscoveryService
-        discovery_service = MatchDiscoveryService(
-            self.match_repo, self.player_repo
-        )
+
+        discovery_service = MatchDiscoveryService(self.match_repo, self.player_repo)
 
         await safe_followup(
             interaction,
@@ -511,7 +501,7 @@ class EnrichmentCommands(commands.Cog):
         # Build summary
         lines = [
             f"**Match Discovery {'(DRY RUN)' if dry_run else 'Complete'}**",
-            f"",
+            "",
             f"Total unenriched: {results['total_unenriched']}",
             f"Discovered: {results['discovered']}",
             f"Skipped (low confidence): {results['skipped_low_confidence']}",
@@ -618,9 +608,7 @@ async def setup(bot: commands.Bot):
     guild_config_repo = getattr(bot, "guild_config_repo", None)
 
     if not all([match_repo, player_repo, guild_config_repo]):
-        logger.warning(
-            "enrichment cog: required repos not available, skipping"
-        )
+        logger.warning("enrichment cog: required repos not available, skipping")
         return
 
     enrichment_service = MatchEnrichmentService(match_repo, player_repo)

@@ -27,7 +27,6 @@ def _create_players(db: Database, start_id: int = 91001, count: int = 10):
 
 
 def _sort_leaderboard_like_command(repo: PlayerRepository):
-    rating_system = repo  # placeholder to mirror access; actual conversion done inline below
     with repo.connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -113,4 +112,3 @@ def test_multi_match_accumulation_and_nonparticipant(e2e_test_db):
     assert bench_stats["player"].wins == 0
     assert bench_stats["player"].losses == 0
     assert bench_stats["win_rate"] is None
-

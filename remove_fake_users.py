@@ -5,6 +5,7 @@ Respects the DB_PATH environment variable if set; otherwise uses the default.
 
 import os
 import sys
+
 from repositories.player_repository import PlayerRepository
 
 
@@ -25,4 +26,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-

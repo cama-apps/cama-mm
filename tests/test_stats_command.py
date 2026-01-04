@@ -2,13 +2,14 @@
 Tests for the /stats command behavior with user mentions.
 """
 
-import pytest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
+import pytest
+
+from commands.registration import RegistrationCommands
 from repositories.player_repository import PlayerRepository
 from services.player_service import PlayerService
-from commands.registration import RegistrationCommands
 
 
 class FakeInteraction:
@@ -49,7 +50,9 @@ async def test_stats_command_targets_mentioned_user(repo_db_path):
 
     player_service = PlayerService(player_repo)
     bot = Mock()
-    commands_cog = RegistrationCommands(bot, db=None, player_service=player_service, role_emojis={}, role_names={})
+    commands_cog = RegistrationCommands(
+        bot, db=None, player_service=player_service, role_emojis={}, role_names={}
+    )
 
     interaction = FakeInteraction(user_id=123, user_name="SelfUser")
     target_member = SimpleNamespace(id=456, mention="<@456>", display_name="TargetUser")
@@ -64,4 +67,3 @@ async def test_stats_command_targets_mentioned_user(repo_db_path):
     assert "embed" in kwargs
     embed = kwargs["embed"]
     assert embed.title == "📊 Stats for TargetUser"
-

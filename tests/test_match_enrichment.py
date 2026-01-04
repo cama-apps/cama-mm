@@ -3,8 +3,9 @@ Tests for MatchEnrichmentService and related functionality.
 """
 
 import json
+from unittest.mock import Mock
+
 import pytest
-from unittest.mock import Mock, patch, MagicMock
 
 from services.match_enrichment_service import MatchEnrichmentService
 
@@ -144,8 +145,14 @@ class TestMatchEnrichmentService:
         match_repo, player_repo = mock_repos
 
         player_repo.get_all_with_dotabuff_no_steam_id.return_value = [
-            {"discord_id": 100, "dotabuff_url": "https://www.dotabuff.com/players/76561198012345678"},
-            {"discord_id": 101, "dotabuff_url": "https://www.dotabuff.com/players/76561198087654321"},
+            {
+                "discord_id": 100,
+                "dotabuff_url": "https://www.dotabuff.com/players/76561198012345678",
+            },
+            {
+                "discord_id": 101,
+                "dotabuff_url": "https://www.dotabuff.com/players/76561198087654321",
+            },
         ]
 
         service = MatchEnrichmentService(match_repo, player_repo, mock_opendota_api)
@@ -163,7 +170,10 @@ class TestMatchEnrichmentService:
         match_repo, player_repo = mock_repos
 
         player_repo.get_all_with_dotabuff_no_steam_id.return_value = [
-            {"discord_id": 100, "dotabuff_url": "https://www.dotabuff.com/players/76561198012345678"},
+            {
+                "discord_id": 100,
+                "dotabuff_url": "https://www.dotabuff.com/players/76561198012345678",
+            },
             {"discord_id": 101, "dotabuff_url": "invalid_url"},
         ]
 
@@ -192,7 +202,7 @@ class TestMatchRepositoryEnrichment:
         repo = MatchRepository(temp_db_path)
 
         # Record two matches
-        match1_id = repo.record_match([1, 2, 3, 4, 5], [6, 7, 8, 9, 10], 1)
+        repo.record_match([1, 2, 3, 4, 5], [6, 7, 8, 9, 10], 1)
         match2_id = repo.record_match([11, 12, 13, 14, 15], [16, 17, 18, 19, 20], 2)
 
         # Most recent should be match2

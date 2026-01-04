@@ -2,14 +2,13 @@ import os
 import tempfile
 import time
 
-from config import JOPACOIN_EXCLUSION_REWARD
-
 import pytest
 
+from config import JOPACOIN_EXCLUSION_REWARD
 from database import Database
 from repositories.bet_repository import BetRepository
-from repositories.player_repository import PlayerRepository
 from repositories.match_repository import MatchRepository
+from repositories.player_repository import PlayerRepository
 from services.betting_service import BettingService
 from services.match_service import MatchService
 
@@ -19,21 +18,26 @@ def services():
     """Create test services with a temporary database."""
     fd, db_path = tempfile.mkstemp(suffix=".db")
     os.close(fd)
-    
-    db = Database(db_path)
+
+    Database(db_path)
     player_repo = PlayerRepository(db_path)
     bet_repo = BetRepository(db_path)
     match_repo = MatchRepository(db_path)
     betting_service = BettingService(bet_repo, player_repo)
-    match_service = MatchService(player_repo=player_repo, match_repo=match_repo, use_glicko=True, betting_service=betting_service)
-    
+    match_service = MatchService(
+        player_repo=player_repo,
+        match_repo=match_repo,
+        use_glicko=True,
+        betting_service=betting_service,
+    )
+
     yield {
         "match_service": match_service,
         "betting_service": betting_service,
         "player_repo": player_repo,
         "db_path": db_path,
     }
-    
+
     # Cleanup
     try:
         os.unlink(db_path)
@@ -100,7 +104,7 @@ def test_participant_can_only_bet_on_own_team(services):
     )
     player_repo.add_balance(participant, 20)
     player_repo.add_balance(spectator, 20)
-    
+
     # Ensure betting is still open
     if pending.get("bet_lock_until") is None or pending["bet_lock_until"] <= int(time.time()):
         pending["bet_lock_until"] = int(time.time()) + 600  # 10 minutes in the future
@@ -140,7 +144,7 @@ def test_settle_bets_pays_out_on_house(services):
     pending = match_service.get_last_shuffle(1)
     participant = pending["radiant_team_ids"][0]
     player_repo.add_balance(participant, 20)
-    
+
     # Ensure betting is still open
     if pending.get("bet_lock_until") is None or pending["bet_lock_until"] <= int(time.time()):
         pending["bet_lock_until"] = int(time.time()) + 600  # 10 minutes in the future
@@ -200,7 +204,7 @@ def test_betting_totals_only_include_pending_bets(services):
             glicko_rd=350.0,
             glicko_volatility=0.06,
         )
-    
+
     spectator1 = 4000
     spectator2 = 4001
     player_repo.add(
@@ -218,7 +222,7 @@ def test_betting_totals_only_include_pending_bets(services):
 
     match_service.shuffle_players(player_ids, guild_id=1)
     pending1 = match_service.get_last_shuffle(1)
-    
+
     # Ensure betting is still open
     if pending1.get("bet_lock_until") is None or pending1["bet_lock_until"] <= int(time.time()):
         pending1["bet_lock_until"] = int(time.time()) + 600
@@ -226,20 +230,20 @@ def test_betting_totals_only_include_pending_bets(services):
     # Place bets on first match: 3 on radiant, 2 on dire
     betting_service.place_bet(1, spectator1, "radiant", 3, pending1)
     betting_service.place_bet(1, spectator2, "dire", 2, pending1)
-    
+
     # Verify totals show pending bets
     totals = betting_service.get_pot_odds(1, pending_state=pending1)
     assert totals["radiant"] == 3, "Should show 3 jopacoin on Radiant"
     assert totals["dire"] == 2, "Should show 2 jopacoin on Dire"
-    
+
     # Settle the first match (assigns match_id to bets)
     betting_service.settle_bets(100, 1, "radiant", pending_state=pending1)
-    
+
     # After settling, totals should be 0 (no pending bets)
     totals = betting_service.get_pot_odds(1, pending_state=pending1)
     assert totals["radiant"] == 0, "Should show 0 after settling (no pending bets)"
     assert totals["dire"] == 0, "Should show 0 after settling (no pending bets)"
-    
+
     # Second match: place new bets
     player_ids2 = list(range(3010, 3020))
     for pid in player_ids2:
@@ -252,7 +256,7 @@ def test_betting_totals_only_include_pending_bets(services):
             glicko_rd=350.0,
             glicko_volatility=0.06,
         )
-    
+
     spectator3 = 4002
     player_repo.add(
         discord_id=spectator3,
@@ -263,14 +267,14 @@ def test_betting_totals_only_include_pending_bets(services):
 
     match_service.shuffle_players(player_ids2, guild_id=1)
     pending2 = match_service.get_last_shuffle(1)
-    
+
     # Ensure betting is still open
     if pending2.get("bet_lock_until") is None or pending2["bet_lock_until"] <= int(time.time()):
         pending2["bet_lock_until"] = int(time.time()) + 600
 
     # Place bet on second match: 6 on dire
     betting_service.place_bet(1, spectator3, "dire", 6, pending2)
-    
+
     # Verify totals only show the new pending bet, not the old settled ones
     totals = betting_service.get_pot_odds(1, pending_state=pending2)
     assert totals["radiant"] == 0, "Should show 0 on Radiant (no pending bets)"
@@ -306,7 +310,9 @@ def test_stale_pending_bets_do_not_show_or_block_new_match(services):
     # First shuffle + bet (will become stale)
     match_service.shuffle_players(player_ids, guild_id=1)
     pending_old = match_service.get_last_shuffle(1)
-    if pending_old.get("bet_lock_until") is None or pending_old["bet_lock_until"] <= int(time.time()):
+    if pending_old.get("bet_lock_until") is None or pending_old["bet_lock_until"] <= int(
+        time.time()
+    ):
         pending_old["bet_lock_until"] = int(time.time()) + 600
     betting_service.place_bet(1, spectator, "radiant", 5, pending_old)
 
@@ -316,11 +322,15 @@ def test_stale_pending_bets_do_not_show_or_block_new_match(services):
     # New shuffle; old bet remains match_id NULL but should be ignored
     match_service.shuffle_players(player_ids, guild_id=1)
     pending_new = match_service.get_last_shuffle(1)
-    if pending_new.get("bet_lock_until") is None or pending_new["bet_lock_until"] <= int(time.time()):
+    if pending_new.get("bet_lock_until") is None or pending_new["bet_lock_until"] <= int(
+        time.time()
+    ):
         pending_new["bet_lock_until"] = int(time.time()) + 600
 
     totals = betting_service.get_pot_odds(1, pending_state=pending_new)
-    assert totals["radiant"] == 0 and totals["dire"] == 0, "Stale bets must not appear in new match totals"
+    assert totals["radiant"] == 0 and totals["dire"] == 0, (
+        "Stale bets must not appear in new match totals"
+    )
 
     # Old bet should not block placing a new bet on the new match
     betting_service.place_bet(1, spectator, "dire", 4, pending_new)

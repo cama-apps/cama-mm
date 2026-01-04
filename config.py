@@ -5,7 +5,7 @@ Centralized configuration for the Cama Balanced Shuffle bot.
 from __future__ import annotations
 
 import os
-from typing import List, Dict, Any
+from typing import Any
 
 from dotenv import load_dotenv
 
@@ -39,7 +39,7 @@ def _parse_bool(env_var: str, default: bool) -> bool:
     return raw.lower() in {"1", "true", "yes", "on"}
 
 
-def _parse_int_list(env_var: str, default: List[int]) -> List[int]:
+def _parse_int_list(env_var: str, default: list[int]) -> list[int]:
     raw = os.getenv(env_var)
     if raw is None:
         return default
@@ -51,7 +51,7 @@ def _parse_int_list(env_var: str, default: List[int]) -> List[int]:
 
 DB_PATH = os.getenv("DB_PATH", "cama_shuffle.db")
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-ADMIN_USER_IDS: List[int] = []
+ADMIN_USER_IDS: list[int] = []
 
 _admin_env = os.getenv("ADMIN_USER_IDS", "")
 if _admin_env:
@@ -68,7 +68,7 @@ WIN_LOSS_MULTIPLIER = _parse_int("WIN_LOSS_MULTIPLIER", 200)
 MMR_WEIGHT = _parse_float("MMR_WEIGHT", 1.0)
 USE_GLICKO = _parse_bool("USE_GLICKO", True)
 
-SHUFFLER_SETTINGS: Dict[str, Any] = {
+SHUFFLER_SETTINGS: dict[str, Any] = {
     "role_penalty_weight": _parse_float("ROLE_PENALTY_WEIGHT", 0.1),
     "off_role_multiplier": _parse_float("OFF_ROLE_MULTIPLIER", 0.95),
     "off_role_flat_penalty": _parse_float("OFF_ROLE_FLAT_PENALTY", 100.0),
@@ -97,5 +97,3 @@ BANKRUPTCY_PENALTY_RATE = _parse_float("BANKRUPTCY_PENALTY_RATE", 0.5)  # 50% of
 
 # Steam/Valve API
 STEAM_API_KEY = os.getenv("STEAM_API_KEY")
-
-

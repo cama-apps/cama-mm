@@ -7,7 +7,6 @@ We use OpenDota instead, which parses replay files directly.
 
 import json
 import logging
-from typing import Dict, List, Optional, Tuple
 
 from opendota_integration import OpenDotaAPI
 from utils.hero_lookup import get_hero_name
@@ -23,7 +22,7 @@ class MatchEnrichmentService:
     to populate KDA, hero, GPM, damage, etc.
     """
 
-    def __init__(self, match_repo, player_repo, opendota_api: Optional[OpenDotaAPI] = None):
+    def __init__(self, match_repo, player_repo, opendota_api: OpenDotaAPI | None = None):
         """
         Initialize the enrichment service.
 
@@ -41,8 +40,8 @@ class MatchEnrichmentService:
         internal_match_id: int,
         dota_match_id: int,
         source: str = "manual",
-        confidence: Optional[float] = None,
-    ) -> Dict:
+        confidence: float | None = None,
+    ) -> dict:
         """
         Enrich an internal match with OpenDota API data.
 
@@ -57,9 +56,7 @@ class MatchEnrichmentService:
             - players_not_found: list of account_ids not matched
             - error: str if failed
         """
-        logger.info(
-            f"Enriching match {internal_match_id} with Dota match {dota_match_id}"
-        )
+        logger.info(f"Enriching match {internal_match_id} with Dota match {dota_match_id}")
 
         # Fetch match details from OpenDota API
         match_data = self.opendota_api.get_match_details(dota_match_id)
@@ -104,16 +101,12 @@ class MatchEnrichmentService:
             steam_id = discord_to_steam.get(discord_id)
 
             if not steam_id:
-                logger.warning(
-                    f"Player {discord_id} has no steam_id, cannot enrich"
-                )
+                logger.warning(f"Player {discord_id} has no steam_id, cannot enrich")
                 continue
 
             player_data = opendota_players.get(steam_id)
             if not player_data:
-                logger.warning(
-                    f"Steam ID {steam_id} (discord {discord_id}) not found in match"
-                )
+                logger.warning(f"Steam ID {steam_id} (discord {discord_id}) not found in match")
                 players_not_found.append(steam_id)
                 continue
 
@@ -150,7 +143,7 @@ class MatchEnrichmentService:
             "dire_score": match_data.get("dire_score", 0),
         }
 
-    def backfill_steam_ids(self) -> Dict:
+    def backfill_steam_ids(self) -> dict:
         """
         Backfill steam_id from dotabuff_url for all players missing it.
 
@@ -180,7 +173,7 @@ class MatchEnrichmentService:
 
         return {"players_updated": updated, "players_failed": failed}
 
-    def format_match_summary(self, internal_match_id: int) -> Optional[str]:
+    def format_match_summary(self, internal_match_id: int) -> str | None:
         """
         Format a human-readable summary of an enriched match.
 

@@ -2,9 +2,10 @@
 Tests for the /kick command in LobbyCommands.
 """
 
-import pytest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+
+import pytest
 
 from commands.lobby import LobbyCommands
 from database import Database
@@ -37,7 +38,12 @@ class FakeFollowup:
 
     async def send(self, content=None, ephemeral=None, embed=None, allowed_mentions=None):
         self.messages.append(
-            {"content": content, "ephemeral": ephemeral, "embed": embed, "allowed_mentions": allowed_mentions}
+            {
+                "content": content,
+                "ephemeral": ephemeral,
+                "embed": embed,
+                "allowed_mentions": allowed_mentions,
+            }
         )
 
 
@@ -105,5 +111,3 @@ async def test_kick_removes_reaction_and_updates_message(monkeypatch):
     # Confirmation message should be sent to the admin
     assert interaction.followup.messages
     assert "Kicked" in interaction.followup.messages[0]["content"]
-
-

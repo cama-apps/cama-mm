@@ -2,34 +2,34 @@
 Unit tests for database operations.
 """
 
+import os
+import tempfile
+
 import pytest
-import os
-import tempfile
-import json
-from database import Database
-from domain.models.player import Player
+
 import remove_fake_users
-import tempfile
-import os
+from database import Database
 
 
 class TestDatabase:
     """Test Database class functionality."""
-    
+
     @pytest.fixture
     def test_db(self):
         """Create a temporary test database."""
-        fd, db_path = tempfile.mkstemp(suffix='.db')
+        fd, db_path = tempfile.mkstemp(suffix=".db")
         os.close(fd)
         db = Database(db_path)
         yield db
         # Close any open connections before cleanup
         try:
             import sqlite3
+
             sqlite3.connect(db_path).close()
-        except:
+        except Exception:
             pass
         import time
+
         time.sleep(0.1)
         try:
             os.unlink(db_path)
@@ -37,9 +37,9 @@ class TestDatabase:
             time.sleep(0.2)
             try:
                 os.unlink(db_path)
-            except:
+            except Exception:
                 pass
-    
+
     def test_add_player(self, test_db):
         """Test adding a player to the database."""
         player_id = 5001
@@ -49,20 +49,20 @@ class TestDatabase:
             initial_mmr=2000,
             glicko_rating=1800.0,
             glicko_rd=300.0,
-            glicko_volatility=0.06
+            glicko_volatility=0.06,
         )
-        
+
         player = test_db.get_player(player_id)
         assert player is not None
         assert player.name == "TestPlayer"
         assert player.mmr == 2000
         assert player.glicko_rating == 1800.0
-    
+
     def test_get_player_not_found(self, test_db):
         """Test getting a player that doesn't exist."""
         player = test_db.get_player(99999)
         assert player is None
-    
+
     def test_update_player_glicko_rating(self, test_db):
         """Test updating a player's Glicko-2 rating."""
         player_id = 5002
@@ -72,61 +72,53 @@ class TestDatabase:
             initial_mmr=1500,
             glicko_rating=1500.0,
             glicko_rd=350.0,
-            glicko_volatility=0.06
+            glicko_volatility=0.06,
         )
-        
+
         # Update rating
         test_db.update_player_glicko_rating(player_id, 1600.0, 300.0, 0.05)
-        
+
         # Verify update
         rating, rd, vol = test_db.get_player_glicko_rating(player_id)
         assert rating == 1600.0
         assert rd == 300.0
         assert vol == 0.05
-    
+
     def test_get_players_by_ids(self, test_db):
         """Test getting multiple players by their IDs."""
         player_ids = [6001, 6002, 6003]
         for pid in player_ids:
-            test_db.add_player(
-                discord_id=pid,
-                discord_username=f"Player{pid}",
-                initial_mmr=1500
-            )
-        
+            test_db.add_player(discord_id=pid, discord_username=f"Player{pid}", initial_mmr=1500)
+
         players = test_db.get_players_by_ids(player_ids)
         assert len(players) == 3
         # Verify all players exist and have correct names
         player_names = {p.name for p in players}
         expected_names = {f"Player{pid}" for pid in player_ids}
         assert player_names == expected_names
-    
+
     def test_get_players_by_ids_with_missing(self, test_db):
         """Test getting players when some IDs don't exist."""
         player_ids = [7001, 7002, 99999]  # 99999 doesn't exist
         test_db.add_player(discord_id=7001, discord_username="Player1", initial_mmr=1500)
         test_db.add_player(discord_id=7002, discord_username="Player2", initial_mmr=1500)
-        
+
         players = test_db.get_players_by_ids(player_ids)
         # Should return only existing players
         assert len(players) == 2
         assert all(p.name in ["Player1", "Player2"] for p in players)
-    
+
     def test_record_match_creates_match(self, test_db):
         """Test that record_match creates a match entry."""
         # Create players first
         team1_ids = [8001, 8002]
         team2_ids = [8003, 8004]
-        
+
         for pid in team1_ids + team2_ids:
             test_db.add_player(discord_id=pid, discord_username=f"P{pid}", initial_mmr=1500)
-        
-        match_id = test_db.record_match(
-            team1_ids=team1_ids,
-            team2_ids=team2_ids,
-            winning_team=1
-        )
-        
+
+        match_id = test_db.record_match(team1_ids=team1_ids, team2_ids=team2_ids, winning_team=1)
+
         # Verify match exists
         conn = test_db.get_connection()
         cursor = conn.cursor()
@@ -135,19 +127,19 @@ class TestDatabase:
         assert match is not None
         assert match[3] == 1  # winning_team column
         conn.close()
-    
+
     def test_delete_player(self, test_db):
         """Test deleting a player."""
         player_id = 9001
         test_db.add_player(discord_id=player_id, discord_username="ToDelete", initial_mmr=1500)
-        
+
         # Verify player exists
         assert test_db.get_player(player_id) is not None
-        
+
         # Delete player
         result = test_db.delete_player(player_id)
         assert result is True
-        
+
         # Verify player is gone
         assert test_db.get_player(player_id) is None
 
@@ -157,7 +149,9 @@ class TestDatabase:
         test_db.add_player(discord_id=100, discord_username="RealUser", initial_mmr=1500)
         # Fake users (negative IDs)
         for pid in (-1, -2):
-            test_db.add_player(discord_id=pid, discord_username=f"FakeUser{abs(pid)}", initial_mmr=1500)
+            test_db.add_player(
+                discord_id=pid, discord_username=f"FakeUser{abs(pid)}", initial_mmr=1500
+            )
 
         with test_db.connection() as conn:
             cursor = conn.cursor()
@@ -211,19 +205,19 @@ class TestDatabase:
 
         # Real user remains
         assert test_db.get_player(100) is not None
-    
+
     def test_clear_all_players(self, test_db):
         """Test clearing all players."""
         # Add some players
         for pid in range(10001, 10006):
             test_db.add_player(discord_id=pid, discord_username=f"P{pid}", initial_mmr=1500)
-        
+
         # Verify players exist
         assert test_db.get_player(10001) is not None
-        
+
         # Clear all
         test_db.clear_all_players()
-        
+
         # Verify all are gone
         assert test_db.get_player(10001) is None
 
@@ -244,80 +238,80 @@ class TestDatabase:
         assert exit_code == 0
         assert db.get_player(-1) is None
         assert db.get_player(200) is not None
-    
+
     def test_get_exclusion_counts(self, test_db):
         """Test retrieving exclusion counts for multiple players."""
         player_ids = [11001, 11002, 11003]
         for pid in player_ids:
             test_db.add_player(discord_id=pid, discord_username=f"P{pid}", initial_mmr=1500)
-        
+
         # Initially, all should have 0 exclusion count
         exclusion_counts = test_db.get_exclusion_counts(player_ids)
         assert len(exclusion_counts) == 3
         for pid in player_ids:
             assert exclusion_counts[pid] == 0
-    
+
     def test_increment_exclusion_count(self, test_db):
         """Test incrementing a player's exclusion count."""
         player_id = 11101
         test_db.add_player(discord_id=player_id, discord_username="TestPlayer", initial_mmr=1500)
-        
+
         # Increment exclusion count
         test_db.increment_exclusion_count(player_id)
-        
+
         # Verify count increased
         exclusion_counts = test_db.get_exclusion_counts([player_id])
         assert exclusion_counts[player_id] == 1
-        
+
         # Increment again
         test_db.increment_exclusion_count(player_id)
         exclusion_counts = test_db.get_exclusion_counts([player_id])
         assert exclusion_counts[player_id] == 2
-    
+
     def test_decay_exclusion_count(self, test_db):
         """Test decaying a player's exclusion count (halves it)."""
         player_id = 11201
         test_db.add_player(discord_id=player_id, discord_username="TestPlayer", initial_mmr=1500)
-        
+
         # Set exclusion count to 10
         for _ in range(10):
             test_db.increment_exclusion_count(player_id)
-        
+
         exclusion_counts = test_db.get_exclusion_counts([player_id])
         assert exclusion_counts[player_id] == 10
-        
+
         # Decay (should become 5)
         test_db.decay_exclusion_count(player_id)
         exclusion_counts = test_db.get_exclusion_counts([player_id])
         assert exclusion_counts[player_id] == 5
-        
+
         # Decay again (should become 2)
         test_db.decay_exclusion_count(player_id)
         exclusion_counts = test_db.get_exclusion_counts([player_id])
         assert exclusion_counts[player_id] == 2
-        
+
         # Decay again (should become 1)
         test_db.decay_exclusion_count(player_id)
         exclusion_counts = test_db.get_exclusion_counts([player_id])
         assert exclusion_counts[player_id] == 1
-        
+
         # Decay again (should become 0)
         test_db.decay_exclusion_count(player_id)
         exclusion_counts = test_db.get_exclusion_counts([player_id])
         assert exclusion_counts[player_id] == 0
-    
+
     def test_exclusion_count_with_odd_numbers(self, test_db):
         """Test decay with odd numbers (should round down)."""
         player_id = 11301
         test_db.add_player(discord_id=player_id, discord_username="TestPlayer", initial_mmr=1500)
-        
+
         # Set count to 7
         for _ in range(7):
             test_db.increment_exclusion_count(player_id)
-        
+
         exclusion_counts = test_db.get_exclusion_counts([player_id])
         assert exclusion_counts[player_id] == 7
-        
+
         # Decay: 7 / 2 = 3 (rounded down)
         test_db.decay_exclusion_count(player_id)
         exclusion_counts = test_db.get_exclusion_counts([player_id])
@@ -326,4 +320,3 @@ class TestDatabase:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
-

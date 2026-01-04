@@ -3,9 +3,10 @@ Tests for PairingsRepository - pairwise player statistics.
 """
 
 import pytest
+
+from repositories.match_repository import MatchRepository
 from repositories.pairings_repository import PairingsRepository
 from repositories.player_repository import PlayerRepository
-from repositories.match_repository import MatchRepository
 
 
 @pytest.fixture

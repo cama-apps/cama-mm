@@ -4,10 +4,10 @@ Admin commands: maintenance helpers and testing utilities.
 
 import logging
 import random
-import json
+
 import discord
-from discord.ext import commands
 from discord import app_commands
+from discord.ext import commands
 
 from services.permissions import has_admin_permission
 from utils.formatting import ROLE_EMOJIS
@@ -29,7 +29,9 @@ class AdminCommands(commands.Cog):
         self.lobby_service = lobby_service
         self.player_repo = player_repo
 
-    @app_commands.command(name="addfake", description="Add fake users to lobby for testing (Admin only)")
+    @app_commands.command(
+        name="addfake", description="Add fake users to lobby for testing (Admin only)"
+    )
     @app_commands.describe(count="Number of fake users to add (1-10)")
     async def addfake(self, interaction: discord.Interaction, count: int = 1):
         guild = interaction.guild if interaction.guild else None
@@ -56,21 +58,21 @@ class AdminCommands(commands.Cog):
                 f"by user {interaction.user.id} ({interaction.user}) - already processed"
             )
             return
-        
+
         # Mark interaction as being processed
         _processed_interactions.add(interaction_key)
-        
+
         # Clean up old entries (keep only last 1000 to prevent memory leak)
         if len(_processed_interactions) > 1000:
             # Remove oldest entries (simple approach: clear half)
             _processed_interactions.clear()
             # Note: We clear entirely to avoid complexity, interactions expire after 15 minutes anyway
-        
+
         logger.info(
             f"addfake command invoked by user {interaction.user.id} ({interaction.user}) "
             f"with count={count}"
         )
-        
+
         # Check if defer succeeds - if False, another handler already processed this
         defer_success = await safe_defer(interaction, ephemeral=True)
         if not defer_success:
@@ -161,7 +163,9 @@ class AdminCommands(commands.Cog):
             ephemeral=True,
         )
 
-    @app_commands.command(name="resetuser", description="Reset a specific user's account (Admin only)")
+    @app_commands.command(
+        name="resetuser", description="Reset a specific user's account (Admin only)"
+    )
     @app_commands.describe(user="The user whose account to reset")
     async def resetuser(self, interaction: discord.Interaction, user: discord.Member):
         guild = interaction.guild if interaction.guild else None
@@ -270,18 +274,19 @@ async def setup(bot: commands.Bot):
     lobby_service = getattr(bot, "lobby_service", None)
     # Use player_repo directly from bot for admin operations
     player_repo = getattr(bot, "player_repo", None)
-    
+
     # Check if cog is already loaded
     if "AdminCommands" in [cog.__class__.__name__ for cog in bot.cogs.values()]:
         logger.warning("AdminCommands cog is already loaded, skipping duplicate registration")
         return
-    
+
     await bot.add_cog(AdminCommands(bot, lobby_service, player_repo))
-    
+
     # Log command registration
-    admin_commands = [cmd.name for cmd in bot.tree.walk_commands() if cmd.name in ["addfake", "resetuser", "sync"]]
+    admin_commands = [
+        cmd.name for cmd in bot.tree.walk_commands() if cmd.name in ["addfake", "resetuser", "sync"]
+    ]
     logger.info(
         f"AdminCommands cog loaded. Registered commands: {admin_commands}. "
         f"Total addfake commands found: {len([c for c in bot.tree.walk_commands() if c.name == 'addfake'])}"
     )
-

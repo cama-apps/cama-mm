@@ -2,14 +2,15 @@
 End-to-end tests for guild-specific match state tracking.
 """
 
-import pytest
 import os
 import tempfile
 import time
 
+import pytest
+
 from database import Database
-from repositories.player_repository import PlayerRepository
 from repositories.match_repository import MatchRepository
+from repositories.player_repository import PlayerRepository
 from services.match_service import MatchService
 
 
@@ -22,6 +23,7 @@ def match_test_db():
     yield db
     try:
         import sqlite3
+
         sqlite3.connect(db_path).close()
     except Exception:
         pass
@@ -95,4 +97,3 @@ class TestGuildIdMatchState:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
-

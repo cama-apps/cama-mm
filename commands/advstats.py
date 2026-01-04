@@ -3,17 +3,16 @@ Pairwise statistics commands: /advstats, /matchup, /rebuildpairings
 """
 
 import logging
-from typing import Optional
 
 import discord
-from discord.ext import commands
 from discord import app_commands
+from discord.ext import commands
 
 from repositories.interfaces import IPairingsRepository
 from services.permissions import has_admin_permission
 from utils.interaction_safety import safe_defer, safe_followup
 
-logger = logging.getLogger('cama_bot.commands.advstats')
+logger = logging.getLogger("cama_bot.commands.advstats")
 
 
 class AdvancedStatsCommands(commands.Cog):
@@ -33,7 +32,7 @@ class AdvancedStatsCommands(commands.Cog):
     async def advstats(
         self,
         interaction: discord.Interaction,
-        user: Optional[discord.Member] = None,
+        user: discord.Member | None = None,
         min_games: int = 3,
         limit: int = 5,
     ):
@@ -68,7 +67,9 @@ class AdvancedStatsCommands(commands.Cog):
         )
 
         # Best Teammates
-        best_teammates = self.pairings_repo.get_best_teammates(target_id, min_games=min_games, limit=limit)
+        best_teammates = self.pairings_repo.get_best_teammates(
+            target_id, min_games=min_games, limit=limit
+        )
         if best_teammates:
             lines = []
             for i, tm in enumerate(best_teammates, 1):
@@ -86,7 +87,9 @@ class AdvancedStatsCommands(commands.Cog):
             embed.add_field(name="Best Teammates", value="No winning records yet", inline=True)
 
         # Worst Teammates
-        worst_teammates = self.pairings_repo.get_worst_teammates(target_id, min_games=min_games, limit=limit)
+        worst_teammates = self.pairings_repo.get_worst_teammates(
+            target_id, min_games=min_games, limit=limit
+        )
         if worst_teammates:
             lines = []
             for i, tm in enumerate(worst_teammates, 1):
@@ -107,7 +110,9 @@ class AdvancedStatsCommands(commands.Cog):
         embed.add_field(name="\u200b", value="\u200b", inline=True)
 
         # Best Matchups (dominates)
-        best_matchups = self.pairings_repo.get_best_matchups(target_id, min_games=min_games, limit=limit)
+        best_matchups = self.pairings_repo.get_best_matchups(
+            target_id, min_games=min_games, limit=limit
+        )
         if best_matchups:
             lines = []
             for i, m in enumerate(best_matchups, 1):
@@ -125,7 +130,9 @@ class AdvancedStatsCommands(commands.Cog):
             embed.add_field(name="Dominates", value="No winning matchups yet", inline=True)
 
         # Worst Matchups (struggles against)
-        worst_matchups = self.pairings_repo.get_worst_matchups(target_id, min_games=min_games, limit=limit)
+        worst_matchups = self.pairings_repo.get_worst_matchups(
+            target_id, min_games=min_games, limit=limit
+        )
         if worst_matchups:
             lines = []
             for i, m in enumerate(worst_matchups, 1):
@@ -146,7 +153,9 @@ class AdvancedStatsCommands(commands.Cog):
         embed.add_field(name="\u200b", value="\u200b", inline=True)
 
         # Most Played With
-        most_played_with = self.pairings_repo.get_most_played_with(target_id, min_games=min_games, limit=limit)
+        most_played_with = self.pairings_repo.get_most_played_with(
+            target_id, min_games=min_games, limit=limit
+        )
         if most_played_with:
             lines = []
             for i, tm in enumerate(most_played_with, 1):
@@ -164,7 +173,9 @@ class AdvancedStatsCommands(commands.Cog):
             embed.add_field(name="Most Played With", value="No data yet", inline=True)
 
         # Most Played Against
-        most_played_against = self.pairings_repo.get_most_played_against(target_id, min_games=min_games, limit=limit)
+        most_played_against = self.pairings_repo.get_most_played_against(
+            target_id, min_games=min_games, limit=limit
+        )
         if most_played_against:
             lines = []
             for i, m in enumerate(most_played_against, 1):
@@ -185,7 +196,9 @@ class AdvancedStatsCommands(commands.Cog):
         embed.add_field(name="\u200b", value="\u200b", inline=True)
 
         # Evenly Matched Teammates (50% win rate)
-        even_teammates = self.pairings_repo.get_evenly_matched_teammates(target_id, min_games=min_games, limit=limit)
+        even_teammates = self.pairings_repo.get_evenly_matched_teammates(
+            target_id, min_games=min_games, limit=limit
+        )
         if even_teammates:
             lines = []
             for i, tm in enumerate(even_teammates, 1):
@@ -200,7 +213,9 @@ class AdvancedStatsCommands(commands.Cog):
             )
 
         # Evenly Matched Opponents (50% win rate)
-        even_opponents = self.pairings_repo.get_evenly_matched_opponents(target_id, min_games=min_games, limit=limit)
+        even_opponents = self.pairings_repo.get_evenly_matched_opponents(
+            target_id, min_games=min_games, limit=limit
+        )
         if even_opponents:
             lines = []
             for i, m in enumerate(even_opponents, 1):
@@ -218,7 +233,9 @@ class AdvancedStatsCommands(commands.Cog):
         counts = self.pairings_repo.get_pairing_counts(target_id, min_games=min_games)
         footer_parts = [f"Min {min_games} games"]
         if counts["unique_teammates"] > 0 or counts["unique_opponents"] > 0:
-            footer_parts.append(f"{counts['unique_teammates']} teammates, {counts['unique_opponents']} opponents tracked")
+            footer_parts.append(
+                f"{counts['unique_teammates']} teammates, {counts['unique_opponents']} opponents tracked"
+            )
         embed.set_footer(text=" | ".join(footer_parts))
         await interaction.followup.send(embed=embed)
 
@@ -325,11 +342,15 @@ class AdvancedStatsCommands(commands.Cog):
                 inline=False,
             )
         else:
-            embed.add_field(name="As Opponents", value="Never played against each other", inline=False)
+            embed.add_field(
+                name="As Opponents", value="Never played against each other", inline=False
+            )
 
         await interaction.followup.send(embed=embed)
 
-    @app_commands.command(name="rebuildpairings", description="Rebuild pairwise stats from match history (Admin only)")
+    @app_commands.command(
+        name="rebuildpairings", description="Rebuild pairwise stats from match history (Admin only)"
+    )
     async def rebuildpairings(self, interaction: discord.Interaction):
         """Admin command to rebuild all pairwise statistics from match history."""
         logger.info(
@@ -368,8 +389,8 @@ class AdvancedStatsCommands(commands.Cog):
 
 async def setup(bot: commands.Bot):
     """Setup function called when loading the cog."""
-    pairings_repo = getattr(bot, 'pairings_repo', None)
-    player_repo = getattr(bot, 'player_repo', None)
+    pairings_repo = getattr(bot, "pairings_repo", None)
+    player_repo = getattr(bot, "player_repo", None)
 
     if pairings_repo is None or player_repo is None:
         logger.warning("advstats cog: pairings_repo or player_repo not available, skipping")

@@ -2,8 +2,6 @@
 Repository for managing per-guild configuration.
 """
 
-from typing import Dict, Optional
-
 from repositories.base_repository import BaseRepository
 from repositories.interfaces import IGuildConfigRepository
 
@@ -13,7 +11,7 @@ class GuildConfigRepository(BaseRepository, IGuildConfigRepository):
     Handles CRUD operations for guild-specific configuration.
     """
 
-    def get_config(self, guild_id: int) -> Optional[Dict]:
+    def get_config(self, guild_id: int) -> dict | None:
         """Get configuration for a guild."""
         with self.connection() as conn:
             cursor = conn.cursor()
@@ -43,7 +41,7 @@ class GuildConfigRepository(BaseRepository, IGuildConfigRepository):
                 (guild_id, league_id, league_id),
             )
 
-    def get_league_id(self, guild_id: int) -> Optional[int]:
+    def get_league_id(self, guild_id: int) -> int | None:
         """Get the league ID for a guild."""
         with self.connection() as conn:
             cursor = conn.cursor()

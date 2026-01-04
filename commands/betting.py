@@ -4,28 +4,23 @@ Betting commands for jopacoin wagers.
 
 import logging
 import random
-from typing import Optional
 
 import discord
-from discord.ext import commands
 from discord import app_commands
+from discord.ext import commands
 
-from services.betting_service import BettingService
+from config import (
+    BANKRUPTCY_PENALTY_RATE,
+    GARNISHMENT_PERCENTAGE,
+    JOPACOIN_MIN_BET,
+)
 from services.bankruptcy_service import BankruptcyService
+from services.betting_service import BettingService
 from services.match_service import MatchService
 from services.player_service import PlayerService
-from config import (
-    JOPACOIN_MIN_BET,
-    LEVERAGE_TIERS,
-    GARNISHMENT_PERCENTAGE,
-    MAX_DEBT,
-    BANKRUPTCY_PENALTY_GAMES,
-    BANKRUPTCY_PENALTY_RATE,
-)
 from utils.formatting import JOPACOIN_EMOTE, format_betting_display
 from utils.interaction_safety import safe_defer
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
-
 
 logger = logging.getLogger("cama_bot.commands.betting")
 
@@ -73,7 +68,7 @@ class BettingCommands(commands.Cog):
         betting_service: BettingService,
         match_service: MatchService,
         player_service: PlayerService,
-        bankruptcy_service: Optional[BankruptcyService] = None,
+        bankruptcy_service: BankruptcyService | None = None,
     ):
         self.bot = bot
         self.betting_service = betting_service
@@ -81,7 +76,7 @@ class BettingCommands(commands.Cog):
         self.player_service = player_service
         self.bankruptcy_service = bankruptcy_service
 
-    async def _update_shuffle_message_wagers(self, guild_id: Optional[int]) -> None:
+    async def _update_shuffle_message_wagers(self, guild_id: int | None) -> None:
         """
         Refresh the shuffle message's wager field with current totals.
         """
@@ -148,10 +143,10 @@ class BettingCommands(commands.Cog):
 
     async def _send_betting_reminder(
         self,
-        guild_id: Optional[int],
+        guild_id: int | None,
         *,
         reminder_type: str,
-        lock_until: Optional[int],
+        lock_until: int | None,
     ) -> None:
         """
         Send a reminder message replying to the shuffle embed with current bet totals.
@@ -259,7 +254,9 @@ class BettingCommands(commands.Cog):
         user_id = interaction.user.id
 
         if amount < JOPACOIN_MIN_BET:
-            await interaction.followup.send(f"Minimum bet is {JOPACOIN_MIN_BET} {JOPACOIN_EMOTE}.", ephemeral=True)
+            await interaction.followup.send(
+                f"Minimum bet is {JOPACOIN_MIN_BET} {JOPACOIN_EMOTE}.", ephemeral=True
+            )
             return
 
         lev = leverage.value if leverage else 1
@@ -267,7 +264,9 @@ class BettingCommands(commands.Cog):
 
         pending_state = self.match_service.get_last_shuffle(guild_id)
         try:
-            self.betting_service.place_bet(guild_id, user_id, team.value, amount, pending_state, leverage=lev)
+            self.betting_service.place_bet(
+                guild_id, user_id, team.value, amount, pending_state, leverage=lev
+            )
         except ValueError as exc:
             await interaction.followup.send(f"❌ {exc}", ephemeral=True)
             return
@@ -315,7 +314,9 @@ class BettingCommands(commands.Cog):
 
         guild_id = interaction.guild.id if interaction.guild else None
         pending_state = self.match_service.get_last_shuffle(guild_id)
-        bets = self.betting_service.get_pending_bets(guild_id, interaction.user.id, pending_state=pending_state)
+        bets = self.betting_service.get_pending_bets(
+            guild_id, interaction.user.id, pending_state=pending_state
+        )
         if not bets:
             await interaction.followup.send("You have no active bets.", ephemeral=True)
             return
@@ -506,9 +507,7 @@ class BettingCommands(commands.Cog):
             return
 
         if not self.bankruptcy_service:
-            await interaction.followup.send(
-                "Bankruptcy service is not available.", ephemeral=True
-            )
+            await interaction.followup.send("Bankruptcy service is not available.", ephemeral=True)
             return
 
         user_id = interaction.user.id
@@ -592,4 +591,3 @@ async def setup(bot: commands.Bot):
     await bot.add_cog(
         BettingCommands(bot, betting_service, match_service, player_service, bankruptcy_service)
     )
-

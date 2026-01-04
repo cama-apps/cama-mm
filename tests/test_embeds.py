@@ -2,7 +2,6 @@
 Tests for embed utilities.
 """
 
-import pytest
 from datetime import datetime
 from unittest.mock import MagicMock
 
@@ -48,6 +47,7 @@ class TestLobbyEmbedTimestamp:
         footer_text = embed.footer.text
         # Extract timestamp from <t:TIMESTAMP:t>
         import re
+
         match = re.search(r"<t:(\d+):t>", footer_text)
         assert match is not None, f"No Discord timestamp found in: {footer_text}"
 

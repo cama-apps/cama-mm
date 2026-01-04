@@ -2,7 +2,7 @@
 
 import pytest
 
-from utils.formatting import calculate_pool_odds, format_betting_display, JOPACOIN_EMOTE
+from utils.formatting import JOPACOIN_EMOTE, calculate_pool_odds, format_betting_display
 
 
 class TestPoolOdds:

@@ -67,4 +67,3 @@ async def test_schedule_betting_reminders_includes_warning_when_enough_time(monk
     delays = {call.kwargs["delay_seconds"] for call in calls}
     assert reminder_types == {"warning", "closed"}
     assert delays == {900, 600}  # close at 900s, warning at 600s before close
-

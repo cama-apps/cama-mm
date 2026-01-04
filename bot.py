@@ -2,13 +2,10 @@
 Main Discord bot entry for Cama Balanced Shuffle.
 """
 
-import os
 import asyncio
-import logging
-import json
-import time
-import sys
 import atexit
+import logging
+import os
 
 from utils.debug_logging import debug_log as _debug_log
 
@@ -31,18 +28,20 @@ logging.basicConfig(
 )
 logger = logging.getLogger("cama_bot")
 
+
 # Suppress PyNaCl warning since voice support isn't needed
 class _PyNaClFilter(logging.Filter):
     """Filter out the PyNaCl warning from discord.py."""
+
     def filter(self, record):
         return "PyNaCl is not installed" not in record.getMessage()
+
 
 # Apply filter to discord.client logger to suppress PyNaCl warning
 logging.getLogger("discord.client").addFilter(_PyNaClFilter())
 
 # Now import discord after logging is configured
 import discord
-from discord import app_commands
 from discord.ext import commands
 
 # Remove any handlers discord.py added to prevent duplicate output
@@ -54,29 +53,28 @@ _discord_logger.setLevel(logging.INFO)  # Ensure it logs at INFO level
 from config import (
     ADMIN_USER_IDS,
     DB_PATH,
+    GARNISHMENT_PERCENTAGE,
+    LEVERAGE_TIERS,
     LOBBY_MAX_PLAYERS,
     LOBBY_READY_THRESHOLD,
-    USE_GLICKO,
-    LEVERAGE_TIERS,
     MAX_DEBT,
-    GARNISHMENT_PERCENTAGE,
+    USE_GLICKO,
 )
 from database import Database
 from domain.models.lobby import LobbyManager
 from repositories.bet_repository import BetRepository
-from repositories.match_repository import MatchRepository
-from repositories.player_repository import PlayerRepository
-from repositories.lobby_repository import LobbyRepository
-from repositories.pairings_repository import PairingsRepository
 from repositories.guild_config_repository import GuildConfigRepository
-from services.player_service import PlayerService
-from services.lobby_service import LobbyService
-from services.match_service import MatchService
+from repositories.lobby_repository import LobbyRepository
+from repositories.match_repository import MatchRepository
+from repositories.pairings_repository import PairingsRepository
+from repositories.player_repository import PlayerRepository
+from services.bankruptcy_service import BankruptcyRepository, BankruptcyService
 from services.betting_service import BettingService
 from services.garnishment_service import GarnishmentService
-from services.bankruptcy_service import BankruptcyService, BankruptcyRepository
-from services.permissions import has_admin_permission, has_allowlisted_admin
-from utils.embeds import create_lobby_embed
+from services.lobby_service import LobbyService
+from services.match_service import MatchService
+from services.permissions import has_admin_permission  # noqa: F401 - used by tests
+from services.player_service import PlayerService
 from utils.formatting import ROLE_EMOJIS, ROLE_NAMES, format_role_display
 
 # Bot setup
@@ -102,7 +100,7 @@ def _cleanup_stale_lock(lock_path: str) -> None:
     try:
         if not os.path.exists(lock_path):
             return
-        with open(lock_path, "r", encoding="utf-8") as lock_file:
+        with open(lock_path, encoding="utf-8") as lock_file:
             content = lock_file.read().strip()
         try:
             pid = int(content) if content else -1
@@ -232,7 +230,12 @@ def _init_services():
     global player_repo, bet_repo, betting_service, match_service
 
     # region agent log
-    _debug_log("H2", "bot.py:_init_services", "entering _init_services", {"initialized": _services_initialized})
+    _debug_log(
+        "H2",
+        "bot.py:_init_services",
+        "entering _init_services",
+        {"initialized": _services_initialized},
+    )
     # endregion agent log
 
     if _services_initialized:
@@ -323,15 +326,17 @@ async def _load_extensions():
     """Load command extensions if not already loaded."""
     # Ensure services are initialized before loading extensions
     _init_services()
-    
+
     # region agent log
-    _debug_log("H1", "bot.py:_load_extensions", "starting extension load loop", {"extensions": EXTENSIONS})
+    _debug_log(
+        "H1", "bot.py:_load_extensions", "starting extension load loop", {"extensions": EXTENSIONS}
+    )
     # endregion agent log
 
     loaded_extensions = []
     skipped_extensions = []
     failed_extensions = []
-    
+
     for ext in EXTENSIONS:
         if ext in bot.extensions:
             skipped_extensions.append(ext)
@@ -344,24 +349,24 @@ async def _load_extensions():
         except Exception as exc:
             failed_extensions.append(ext)
             logger.error(f"Failed to load extension {ext}: {exc}", exc_info=True)
-    
+
     # Log summary
     logger.info(
         f"Extension loading complete: {len(loaded_extensions)} loaded, "
         f"{len(skipped_extensions)} skipped, {len(failed_extensions)} failed"
     )
-    
+
     # Diagnostic: Log all registered commands
     all_commands = list(bot.tree.walk_commands())
     command_counts = {}
     for cmd in all_commands:
         command_counts[cmd.name] = command_counts.get(cmd.name, 0) + 1
-    
+
     # Log duplicate commands if any
     duplicates = {name: count for name, count in command_counts.items() if count > 1}
     if duplicates:
         logger.warning(f"Found duplicate command registrations: {duplicates}")
-    
+
     logger.info(
         f"Total registered commands: {len(all_commands)}. "
         f"Unique command names: {len(command_counts)}"
@@ -374,7 +379,12 @@ def _ensure_extensions_loaded_for_import():
     load extensions so command definitions exist on the command tree.
     """
     # region agent log
-    _debug_log("H1", "bot.py:_ensure_extensions_loaded_for_import", "called to ensure extensions loaded", {})
+    _debug_log(
+        "H1",
+        "bot.py:_ensure_extensions_loaded_for_import",
+        "called to ensure extensions loaded",
+        {},
+    )
     # endregion agent log
     try:
         loop = asyncio.get_event_loop()
@@ -441,13 +451,13 @@ async def setup_hook():
 async def on_ready():
     """Called when bot is ready."""
     logger.info(f"{bot.user} connected. Guilds: {len(bot.guilds)}")
-    
+
     # Diagnostic: Log all registered commands before sync
     all_commands = list(bot.tree.walk_commands())
     command_counts = {}
     for cmd in all_commands:
         command_counts[cmd.name] = command_counts.get(cmd.name, 0) + 1
-    
+
     # Log duplicate commands if any
     duplicates = {name: count for name, count in command_counts.items() if count > 1}
     if duplicates:
@@ -459,16 +469,16 @@ async def on_ready():
                 f"Found {len(addfake_cmds)} addfake command registrations. "
                 f"Details: {[{'cog': cmd.cog.__class__.__name__ if cmd.cog else None, 'qualified_name': cmd.qualified_name} for cmd in addfake_cmds]}"
             )
-    
+
     logger.info(
         f"Pre-sync: {len(all_commands)} total commands, {len(command_counts)} unique names. "
         f"Loaded cogs: {list(bot.cogs.keys())}"
     )
-    
+
     try:
         await bot.tree.sync()
         logger.info("Slash commands synced globally.")
-        
+
         # Diagnostic: Log commands after sync
         post_sync_commands = list(bot.tree.walk_commands())
         logger.info(f"Post-sync: {len(post_sync_commands)} commands available")

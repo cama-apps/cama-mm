@@ -20,6 +20,7 @@ dev = [
     "pytest>=7.4.0",
     "pytest-asyncio>=0.21.0",
     "pytest-timeout>=2.1.0",
+    "ruff>=0.8.0",
 ]
 
 [tool.pytest.ini_options]
@@ -36,4 +37,33 @@ filterwarnings = [
     "ignore:'asyncio\\.iscoroutinefunction' is deprecated:DeprecationWarning:discord\\..*",
     "ignore:coroutine.*AsyncMockMixin._execute_mock_call.*was never awaited:RuntimeWarning",
     "ignore:'audioop' is deprecated:DeprecationWarning:discord\\.player",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+    "E",      # pycodestyle errors
+    "F",      # pyflakes
+    "W",      # pycodestyle warnings
+    "I",      # isort
+    "UP",     # pyupgrade (modern Python)
+    "B",      # bugbear (common bugs)
+    "C4",     # flake8-comprehensions
+    "SIM",    # flake8-simplify
+]
+ignore = [
+    "E501",   # line too long (formatter handles this)
+    "B008",   # function call in default arg (common in FastAPI/discord.py)
+    "SIM108", # ternary instead of if-else (readability)
+    "SIM105", # contextlib.suppress instead of try-except-pass (less readable)
+    "B905",   # zip() without strict= (pedantic)
+    "E402",   # import not at top (sometimes intentional)
+    "B007",   # unused loop control variable (often intentional)
+    "B024",   # abstract base class without abstract methods (marker class)
+    "SIM115", # context manager for open (not always applicable)
+    "SIM117", # nested with statements (sometimes clearer)
+    "SIM118", # in dict.keys() - sqlite3.Row doesn't support .get()
 ]

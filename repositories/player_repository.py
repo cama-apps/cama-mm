@@ -4,64 +4,78 @@ Repository for player data access.
 
 import json
 import logging
-from typing import List, Optional, Dict, Tuple
 
+from domain.models.player import Player
 from repositories.base_repository import BaseRepository
 from repositories.interfaces import IPlayerRepository
-from domain.models.player import Player
 
-logger = logging.getLogger('cama_bot.repositories.player')
+logger = logging.getLogger("cama_bot.repositories.player")
 
 
 class PlayerRepository(BaseRepository, IPlayerRepository):
     """
     Handles all player-related database operations.
-    
+
     Responsibilities:
     - CRUD operations for players
     - Glicko rating persistence
     - Role preferences storage
     - Exclusion count tracking
     """
-    
-    def add(self,
-            discord_id: int,
-            discord_username: str,
-            dotabuff_url: Optional[str] = None,
-            initial_mmr: Optional[int] = None,
-            preferred_roles: Optional[List[str]] = None,
-            main_role: Optional[str] = None,
-            glicko_rating: Optional[float] = None,
-            glicko_rd: Optional[float] = None,
-            glicko_volatility: Optional[float] = None) -> None:
+
+    def add(
+        self,
+        discord_id: int,
+        discord_username: str,
+        dotabuff_url: str | None = None,
+        initial_mmr: int | None = None,
+        preferred_roles: list[str] | None = None,
+        main_role: str | None = None,
+        glicko_rating: float | None = None,
+        glicko_rd: float | None = None,
+        glicko_volatility: float | None = None,
+    ) -> None:
         """
         Add a new player to the database.
-        
+
         Raises:
             ValueError: If player with this discord_id already exists
         """
         with self.connection() as conn:
             cursor = conn.cursor()
-            
+
             # Check if player already exists
             cursor.execute("SELECT discord_id FROM players WHERE discord_id = ?", (discord_id,))
             if cursor.fetchone():
                 raise ValueError(f"Player with Discord ID {discord_id} already exists.")
-            
+
             roles_json = json.dumps(preferred_roles) if preferred_roles else None
-            
-            cursor.execute("""
-                INSERT INTO players 
-                (discord_id, discord_username, dotabuff_url, initial_mmr, current_mmr, 
+
+            cursor.execute(
+                """
+                INSERT INTO players
+                (discord_id, discord_username, dotabuff_url, initial_mmr, current_mmr,
                  preferred_roles, main_role, glicko_rating, glicko_rd, glicko_volatility, jopacoin_balance, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 3, CURRENT_TIMESTAMP)
-            """, (discord_id, discord_username, dotabuff_url, initial_mmr, initial_mmr,
-                  roles_json, main_role, glicko_rating, glicko_rd, glicko_volatility))
-    
-    def get_by_id(self, discord_id: int) -> Optional[Player]:
+            """,
+                (
+                    discord_id,
+                    discord_username,
+                    dotabuff_url,
+                    initial_mmr,
+                    initial_mmr,
+                    roles_json,
+                    main_role,
+                    glicko_rating,
+                    glicko_rd,
+                    glicko_volatility,
+                ),
+            )
+
+    def get_by_id(self, discord_id: int) -> Player | None:
         """
         Get player by Discord ID.
-        
+
         Returns:
             Player object or None if not found
         """
@@ -69,37 +83,39 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM players WHERE discord_id = ?", (discord_id,))
             row = cursor.fetchone()
-            
+
             if not row:
                 return None
-            
+
             return self._row_to_player(row)
-    
-    def get_by_ids(self, discord_ids: List[int]) -> List[Player]:
+
+    def get_by_ids(self, discord_ids: list[int]) -> list[Player]:
         """
         Get multiple players by Discord IDs.
-        
+
         IMPORTANT: Returns players in the SAME ORDER as the input discord_ids.
         """
         if not discord_ids:
             return []
-        
+
         with self.connection() as conn:
             cursor = conn.cursor()
-            
-            placeholders = ','.join('?' * len(discord_ids))
-            cursor.execute(f"SELECT * FROM players WHERE discord_id IN ({placeholders})", discord_ids)
+
+            placeholders = ",".join("?" * len(discord_ids))
+            cursor.execute(
+                f"SELECT * FROM players WHERE discord_id IN ({placeholders})", discord_ids
+            )
             rows = cursor.fetchall()
-            
+
             # Create mapping for order preservation
             id_to_row = {}
             for row in rows:
-                discord_id = row['discord_id']
+                discord_id = row["discord_id"]
                 if discord_id in id_to_row:
                     logger.warning(f"Duplicate player entry: discord_id={discord_id}")
                     continue
                 id_to_row[discord_id] = row
-            
+
             # Return in same order as input
             players = []
             for discord_id in discord_ids:
@@ -107,16 +123,16 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                     logger.warning(f"Player not found: discord_id={discord_id}")
                     continue
                 players.append(self._row_to_player(id_to_row[discord_id]))
-            
+
             return players
 
-    def get_by_username(self, username: str) -> List[Dict]:
+    def get_by_username(self, username: str) -> list[dict]:
         """
         Find players whose Discord username matches the provided value (case-insensitive, partial match).
-        
+
         Args:
             username: Full or partial Discord username (e.g., 'user#1234' or just 'user').
-        
+
         Returns:
             List of dicts containing discord_id and discord_username for each match.
         """
@@ -139,105 +155,124 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 {"discord_id": row["discord_id"], "discord_username": row["discord_username"]}
                 for row in rows
             ]
-    
-    def get_all(self) -> List[Player]:
+
+    def get_all(self) -> list[Player]:
         """Get all players from database."""
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM players")
             rows = cursor.fetchall()
             return [self._row_to_player(row) for row in rows]
-    
+
     def exists(self, discord_id: int) -> bool:
         """Check if a player exists."""
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT 1 FROM players WHERE discord_id = ?", (discord_id,))
             return cursor.fetchone() is not None
-    
-    def update_roles(self, discord_id: int, roles: List[str]) -> None:
+
+    def update_roles(self, discord_id: int, roles: list[str]) -> None:
         """Update player's preferred roles."""
         with self.connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("""
+            cursor.execute(
+                """
                 UPDATE players
                 SET preferred_roles = ?, updated_at = CURRENT_TIMESTAMP
                 WHERE discord_id = ?
-            """, (json.dumps(roles), discord_id))
-    
-    def update_glicko_rating(self,
-                             discord_id: int,
-                             rating: float,
-                             rd: float,
-                             volatility: float) -> None:
+            """,
+                (json.dumps(roles), discord_id),
+            )
+
+    def update_glicko_rating(
+        self, discord_id: int, rating: float, rd: float, volatility: float
+    ) -> None:
         """Update player's Glicko-2 rating."""
         with self.connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("""
-                UPDATE players 
-                SET glicko_rating = ?, glicko_rd = ?, glicko_volatility = ?, 
+            cursor.execute(
+                """
+                UPDATE players
+                SET glicko_rating = ?, glicko_rd = ?, glicko_volatility = ?,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE discord_id = ?
-            """, (rating, rd, volatility, discord_id))
-    
-    def get_glicko_rating(self, discord_id: int) -> Optional[Tuple[float, float, float]]:
+            """,
+                (rating, rd, volatility, discord_id),
+            )
+
+    def get_glicko_rating(self, discord_id: int) -> tuple[float, float, float] | None:
         """
         Get player's Glicko-2 rating data.
-        
+
         Returns:
             Tuple of (rating, rd, volatility) or None if not found
         """
         with self.connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("""
-                SELECT glicko_rating, glicko_rd, glicko_volatility 
+            cursor.execute(
+                """
+                SELECT glicko_rating, glicko_rd, glicko_volatility
                 FROM players WHERE discord_id = ?
-            """, (discord_id,))
-            
+            """,
+                (discord_id,),
+            )
+
             row = cursor.fetchone()
             if row and row[0] is not None:
                 return (row[0], row[1], row[2])
             return None
-    
+
     def update_mmr(self, discord_id: int, new_mmr: float) -> None:
         """Update player's current MMR."""
         with self.connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("""
-                UPDATE players 
+            cursor.execute(
+                """
+                UPDATE players
                 SET current_mmr = ?, updated_at = CURRENT_TIMESTAMP
                 WHERE discord_id = ?
-            """, (new_mmr, discord_id))
-    
+            """,
+                (new_mmr, discord_id),
+            )
+
     def get_balance(self, discord_id: int) -> int:
         """Get a player's jopacoin balance."""
         with self.connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT COALESCE(jopacoin_balance, 0) as balance FROM players WHERE discord_id = ?", (discord_id,))
+            cursor.execute(
+                "SELECT COALESCE(jopacoin_balance, 0) as balance FROM players WHERE discord_id = ?",
+                (discord_id,),
+            )
             row = cursor.fetchone()
-            return int(row['balance']) if row else 0
+            return int(row["balance"]) if row else 0
 
     def update_balance(self, discord_id: int, amount: int) -> None:
         """Set a player's jopacoin balance to a specific amount."""
         with self.connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("""
+            cursor.execute(
+                """
                 UPDATE players
                 SET jopacoin_balance = ?, updated_at = CURRENT_TIMESTAMP
                 WHERE discord_id = ?
-            """, (amount, discord_id))
+            """,
+                (amount, discord_id),
+            )
 
     def add_balance(self, discord_id: int, amount: int) -> None:
         """Add or subtract from a player's jopacoin balance."""
         with self.connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("""
+            cursor.execute(
+                """
                 UPDATE players
                 SET jopacoin_balance = COALESCE(jopacoin_balance, 0) + ?, updated_at = CURRENT_TIMESTAMP
                 WHERE discord_id = ?
-            """, (amount, discord_id))
+            """,
+                (amount, discord_id),
+            )
 
-    def add_balance_many(self, deltas_by_discord_id: Dict[int, int]) -> None:
+    def add_balance_many(self, deltas_by_discord_id: dict[int, int]) -> None:
         """
         Apply multiple balance deltas in a single transaction.
         """
@@ -256,7 +291,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
 
     def add_balance_with_garnishment(
         self, discord_id: int, amount: int, garnishment_rate: float
-    ) -> Dict[str, int]:
+    ) -> dict[str, int]:
         """
         Add income with garnishment applied if player has debt.
 
@@ -317,7 +352,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
 
     def pay_debt_atomic(
         self, from_discord_id: int, to_discord_id: int, amount: int
-    ) -> Dict[str, int]:
+    ) -> dict[str, int]:
         """
         Atomically transfer jopacoin from one player to pay down another's debt.
 
@@ -395,7 +430,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 "to_new_balance": to_balance + actual_amount,
             }
 
-    def get_players_with_negative_balance(self) -> List[Dict]:
+    def get_players_with_negative_balance(self) -> list[dict]:
         """
         Get all players with negative balance for interest application.
 
@@ -412,7 +447,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 for row in cursor.fetchall()
             ]
 
-    def apply_interest_bulk(self, updates: List[Tuple[int, int]]) -> int:
+    def apply_interest_bulk(self, updates: list[tuple[int, int]]) -> int:
         """
         Apply interest charges to multiple players in a single transaction.
 
@@ -442,21 +477,27 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         """Increment player's win count."""
         with self.connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("""
+            cursor.execute(
+                """
                 UPDATE players SET wins = wins + 1, updated_at = CURRENT_TIMESTAMP
                 WHERE discord_id = ?
-            """, (discord_id,))
-    
+            """,
+                (discord_id,),
+            )
+
     def increment_losses(self, discord_id: int) -> None:
         """Increment player's loss count."""
         with self.connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("""
+            cursor.execute(
+                """
                 UPDATE players SET losses = losses + 1, updated_at = CURRENT_TIMESTAMP
                 WHERE discord_id = ?
-            """, (discord_id,))
+            """,
+                (discord_id,),
+            )
 
-    def apply_match_outcome(self, winning_ids: List[int], losing_ids: List[int]) -> None:
+    def apply_match_outcome(self, winning_ids: list[int], losing_ids: list[int]) -> None:
         """
         Apply win/loss increments for a match in a single transaction.
         """
@@ -481,7 +522,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                     [(pid,) for pid in losing_ids],
                 )
 
-    def update_glicko_ratings_bulk(self, updates: List[Tuple[int, float, float, float]]) -> int:
+    def update_glicko_ratings_bulk(self, updates: list[tuple[int, float, float, float]]) -> int:
         """
         Bulk update Glicko ratings in a single transaction.
 
@@ -501,85 +542,91 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 [(rating, rd, vol, pid) for pid, rating, rd, vol in updates],
             )
             return cursor.rowcount
-    
-    def get_exclusion_counts(self, discord_ids: List[int]) -> Dict[int, int]:
+
+    def get_exclusion_counts(self, discord_ids: list[int]) -> dict[int, int]:
         """Get exclusion counts for multiple players."""
         if not discord_ids:
             return {}
-        
+
         with self.connection() as conn:
             cursor = conn.cursor()
-            placeholders = ','.join('?' * len(discord_ids))
+            placeholders = ",".join("?" * len(discord_ids))
             cursor.execute(
                 f"SELECT discord_id, COALESCE(exclusion_count, 0) as exclusion_count "
                 f"FROM players WHERE discord_id IN ({placeholders})",
-                discord_ids
+                discord_ids,
             )
             rows = cursor.fetchall()
-            return {row['discord_id']: row['exclusion_count'] for row in rows}
-    
+            return {row["discord_id"]: row["exclusion_count"] for row in rows}
+
     def increment_exclusion_count(self, discord_id: int) -> None:
         """Increment player's exclusion count."""
         with self.connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("""
-                UPDATE players 
-                SET exclusion_count = COALESCE(exclusion_count, 0) + 1, 
+            cursor.execute(
+                """
+                UPDATE players
+                SET exclusion_count = COALESCE(exclusion_count, 0) + 1,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE discord_id = ?
-            """, (discord_id,))
-    
+            """,
+                (discord_id,),
+            )
+
     def decay_exclusion_count(self, discord_id: int) -> None:
         """Decay player's exclusion count by halving it."""
         with self.connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("""
-                UPDATE players 
-                SET exclusion_count = COALESCE(exclusion_count, 0) / 2, 
+            cursor.execute(
+                """
+                UPDATE players
+                SET exclusion_count = COALESCE(exclusion_count, 0) / 2,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE discord_id = ?
-            """, (discord_id,))
-    
+            """,
+                (discord_id,),
+            )
+
     def delete(self, discord_id: int) -> bool:
         """
         Delete a player from the database.
-        
+
         Returns:
             True if deleted, False if player didn't exist
         """
         with self.connection() as conn:
             cursor = conn.cursor()
-            
+
             cursor.execute("SELECT discord_id FROM players WHERE discord_id = ?", (discord_id,))
             if not cursor.fetchone():
                 return False
-            
+
             cursor.execute("DELETE FROM players WHERE discord_id = ?", (discord_id,))
             cursor.execute("DELETE FROM match_participants WHERE discord_id = ?", (discord_id,))
             cursor.execute("DELETE FROM rating_history WHERE discord_id = ?", (discord_id,))
-            
+
             return True
-    
+
     def delete_all(self) -> int:
         """
         Delete all players (for testing).
-        
+
         Returns:
             Number of players deleted
         """
         with self.connection() as conn:
             cursor = conn.cursor()
-            
+
             cursor.execute("SELECT COUNT(*) FROM players")
             count = cursor.fetchone()[0]
-            
+
             cursor.execute("DELETE FROM players")
             cursor.execute("DELETE FROM match_participants")
             cursor.execute("DELETE FROM rating_history")
-            
+
             return count
-    
-    def get_by_steam_id(self, steam_id: int) -> Optional[Player]:
+
+    def get_by_steam_id(self, steam_id: int) -> Player | None:
         """
         Get player by Steam ID (32-bit account_id).
 
@@ -599,7 +646,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
 
             return self._row_to_player(row)
 
-    def get_steam_id(self, discord_id: int) -> Optional[int]:
+    def get_steam_id(self, discord_id: int) -> int | None:
         """
         Get a player's Steam ID.
 
@@ -631,7 +678,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 (steam_id, discord_id),
             )
 
-    def get_all_with_dotabuff_no_steam_id(self) -> List[Dict]:
+    def get_all_with_dotabuff_no_steam_id(self) -> list[dict]:
         """
         Get all players who have a dotabuff_url but no steam_id set.
         Used for backfilling steam_id from dotabuff URLs.
@@ -664,35 +711,34 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         """
         with self.connection() as conn:
             cursor = conn.cursor()
-            
+
             cursor.execute("SELECT COUNT(*) FROM players WHERE discord_id < 0")
             count = cursor.fetchone()[0]
             if count == 0:
                 return 0
-            
+
             # Remove related records first to avoid orphan rows if FK cascades aren't enforced
             cursor.execute("DELETE FROM match_participants WHERE discord_id < 0")
             cursor.execute("DELETE FROM rating_history WHERE discord_id < 0")
             cursor.execute("DELETE FROM bets WHERE discord_id < 0")
             cursor.execute("DELETE FROM players WHERE discord_id < 0")
-            
+
             return count
-    
+
     def _row_to_player(self, row) -> Player:
         """Convert database row to Player object."""
-        preferred_roles = json.loads(row['preferred_roles']) if row['preferred_roles'] else None
-        
-        return Player(
-            name=row['discord_username'],
-            mmr=int(row['current_mmr']) if row['current_mmr'] else None,
-            wins=row['wins'],
-            losses=row['losses'],
-            preferred_roles=preferred_roles,
-            main_role=row['main_role'],
-            glicko_rating=row['glicko_rating'],
-            glicko_rd=row['glicko_rd'],
-            glicko_volatility=row['glicko_volatility'],
-            discord_id=row['discord_id'],
-            jopacoin_balance=row['jopacoin_balance'] if row['jopacoin_balance'] else 0,
-        )
+        preferred_roles = json.loads(row["preferred_roles"]) if row["preferred_roles"] else None
 
+        return Player(
+            name=row["discord_username"],
+            mmr=int(row["current_mmr"]) if row["current_mmr"] else None,
+            wins=row["wins"],
+            losses=row["losses"],
+            preferred_roles=preferred_roles,
+            main_role=row["main_role"],
+            glicko_rating=row["glicko_rating"],
+            glicko_rd=row["glicko_rd"],
+            glicko_volatility=row["glicko_volatility"],
+            discord_id=row["discord_id"],
+            jopacoin_balance=row["jopacoin_balance"] if row["jopacoin_balance"] else 0,
+        )

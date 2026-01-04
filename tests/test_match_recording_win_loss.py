@@ -121,8 +121,14 @@ def test_existing_wins_losses_are_incremented(test_db, player_ids):
     # Seed some prior stats
     with test_db.connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("UPDATE players SET wins = 2, losses = 3 WHERE discord_id IN (%s)" % ",".join("?" * len(radiant)), radiant)
-        cursor.execute("UPDATE players SET wins = 1, losses = 4 WHERE discord_id IN (%s)" % ",".join("?" * len(dire)), dire)
+        cursor.execute(
+            "UPDATE players SET wins = 2, losses = 3 WHERE discord_id IN ({})".format(",".join("?" * len(radiant))),
+            radiant,
+        )
+        cursor.execute(
+            "UPDATE players SET wins = 1, losses = 4 WHERE discord_id IN ({})".format(",".join("?" * len(dire))),
+            dire,
+        )
 
     test_db.record_match(radiant_team_ids=radiant, dire_team_ids=dire, winning_team="dire")
 
@@ -167,4 +173,3 @@ def test_participants_table_has_correct_side_and_won_flags(test_db, player_ids):
     assert all(row["team_number"] == 2 for row in dire_rows)
     assert all(row["side"] == "dire" for row in dire_rows)
     assert all(row["won"] == 0 for row in dire_rows)
-

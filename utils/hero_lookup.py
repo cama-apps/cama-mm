@@ -4,10 +4,9 @@ Hero ID to name lookup utility.
 
 import json
 import os
-from typing import Dict, Optional
 
 # Load hero data from JSON file
-_HEROES: Dict[str, str] = {}
+_HEROES: dict[str, str] = {}
 _HEROES_LOADED = False
 
 
@@ -19,7 +18,7 @@ def _load_heroes():
 
     hero_file = os.path.join(os.path.dirname(__file__), "heroes.json")
     try:
-        with open(hero_file, "r") as f:
+        with open(hero_file) as f:
             _HEROES = json.load(f)
         _HEROES_LOADED = True
     except FileNotFoundError:
@@ -116,7 +115,7 @@ def get_hero_short_name(hero_id: int) -> str:
     return name
 
 
-def get_all_heroes() -> Dict[str, str]:
+def get_all_heroes() -> dict[str, str]:
     """Get all heroes as a dict mapping hero_id (str) to name."""
     _load_heroes()
     return _HEROES.copy()

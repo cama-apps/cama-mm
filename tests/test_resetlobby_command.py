@@ -2,9 +2,10 @@
 Tests for the /resetlobby command in LobbyCommands.
 """
 
-import pytest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+
+import pytest
 
 from commands.lobby import LobbyCommands
 from database import Database
@@ -37,7 +38,12 @@ class FakeFollowup:
 
     async def send(self, content=None, ephemeral=None, embed=None, allowed_mentions=None):
         self.messages.append(
-            {"content": content, "ephemeral": ephemeral, "embed": embed, "allowed_mentions": allowed_mentions}
+            {
+                "content": content,
+                "ephemeral": ephemeral,
+                "embed": embed,
+                "allowed_mentions": allowed_mentions,
+            }
         )
 
 
@@ -119,7 +125,9 @@ async def test_resetlobby_blocks_pending_match(monkeypatch):
     monkeypatch.setattr("commands.lobby.safe_defer", AsyncMock(return_value=True))
     monkeypatch.setattr("commands.lobby.has_admin_permission", lambda _interaction: True)
 
-    cog = LobbyCommands(make_bot(match_service=PendingMatchService()), lobby_service, FakePlayerService())
+    cog = LobbyCommands(
+        make_bot(match_service=PendingMatchService()), lobby_service, FakePlayerService()
+    )
     await invoke_reset(cog, interaction)
 
     assert lobby_service.get_lobby() is not None, "Should not reset when a match is pending"
@@ -143,5 +151,3 @@ async def test_resetlobby_denies_non_admin_non_creator(monkeypatch):
     assert lobby_service.get_lobby() is not None, "Lobby should remain when permission denied"
     assert interaction.followup.messages
     assert "Permission denied" in interaction.followup.messages[0]["content"]
-
-

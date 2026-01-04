@@ -2,9 +2,7 @@
 Tests for hero lookup utility.
 """
 
-import pytest
-
-from utils.hero_lookup import get_hero_name, get_hero_short_name, get_all_heroes
+from utils.hero_lookup import get_all_heroes, get_hero_name, get_hero_short_name
 
 
 class TestHeroLookup:
@@ -57,7 +55,7 @@ class TestHeroData:
     def test_all_hero_ids_are_strings(self):
         """Hero IDs in JSON are strings."""
         heroes = get_all_heroes()
-        for key in heroes.keys():
+        for key in heroes:
             assert isinstance(key, str)
             assert key.isdigit()
 

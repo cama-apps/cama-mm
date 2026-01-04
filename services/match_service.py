@@ -5,16 +5,16 @@ Match orchestration: shuffling and recording.
 import random
 import threading
 import time
-from typing import Any, Dict, List, Optional, Set, Tuple, TYPE_CHECKING
+from typing import Any
 
 from config import BET_LOCK_SECONDS
-from rating_system import CamaRatingSystem
-from shuffler import BalancedShuffler
-from domain.models.team import Team
 from domain.models.player import Player
+from domain.models.team import Team
 from domain.services.team_balancing_service import TeamBalancingService
-from repositories.interfaces import IPlayerRepository, IMatchRepository, IPairingsRepository
+from rating_system import CamaRatingSystem
+from repositories.interfaces import IMatchRepository, IPairingsRepository, IPlayerRepository
 from services.betting_service import BettingService
+from shuffler import BalancedShuffler
 
 
 class MatchService:
@@ -28,8 +28,8 @@ class MatchService:
         match_repo: IMatchRepository,
         *,
         use_glicko: bool = True,
-        betting_service: Optional[BettingService] = None,
-        pairings_repo: Optional[IPairingsRepository] = None,
+        betting_service: BettingService | None = None,
+        pairings_repo: IPairingsRepository | None = None,
     ):
         """
         Initialize MatchService with required repository dependencies.
@@ -52,25 +52,25 @@ class MatchService:
             off_role_flat_penalty=self.shuffler.off_role_flat_penalty,
             role_matchup_delta_weight=self.shuffler.role_matchup_delta_weight,
         )
-        self._last_shuffle_by_guild: Dict[int, Dict] = {}
+        self._last_shuffle_by_guild: dict[int, dict] = {}
         self.betting_service = betting_service
         self.pairings_repo = pairings_repo
         # Guard against concurrent finalizations per guild
         self._recording_lock = threading.Lock()
-        self._recording_in_progress: Set[int] = set()
+        self._recording_in_progress: set[int] = set()
 
-    def _map_player_ids(self, player_ids: List[int], players: List[Player]) -> Dict[int, int]:
+    def _map_player_ids(self, player_ids: list[int], players: list[Player]) -> dict[int, int]:
         """Map Player object identity (id()) to Discord ID for stable lookups."""
         return {id(pl): pid for pid, pl in zip(player_ids, players)}
 
-    def _resolve_team_ids(self, team: Team, player_id_map: Dict[int, int]) -> List[int]:
+    def _resolve_team_ids(self, team: Team, player_id_map: dict[int, int]) -> list[int]:
         """Resolve Team players to Discord IDs using object identity."""
         return [player_id_map[id(p)] for p in team.players]
 
-    def _normalize_guild_id(self, guild_id: Optional[int]) -> int:
+    def _normalize_guild_id(self, guild_id: int | None) -> int:
         return guild_id if guild_id is not None else 0
 
-    def get_last_shuffle(self, guild_id: Optional[int] = None) -> Optional[Dict]:
+    def get_last_shuffle(self, guild_id: int | None = None) -> dict | None:
         normalized = self._normalize_guild_id(guild_id)
         state = self._last_shuffle_by_guild.get(normalized)
         if state:
@@ -81,10 +81,10 @@ class MatchService:
             return persisted
         return None
 
-    def set_last_shuffle(self, guild_id: Optional[int], payload: Dict) -> None:
+    def set_last_shuffle(self, guild_id: int | None, payload: dict) -> None:
         self._last_shuffle_by_guild[self._normalize_guild_id(guild_id)] = payload
 
-    def set_shuffle_message_url(self, guild_id: Optional[int], jump_url: str) -> None:
+    def set_shuffle_message_url(self, guild_id: int | None, jump_url: str) -> None:
         """
         Store the message link for the current pending shuffle so other commands can link to it.
 
@@ -94,10 +94,10 @@ class MatchService:
 
     def set_shuffle_message_info(
         self,
-        guild_id: Optional[int],
-        message_id: Optional[int],
-        channel_id: Optional[int],
-        jump_url: Optional[str] = None,
+        guild_id: int | None,
+        message_id: int | None,
+        channel_id: int | None,
+        jump_url: str | None = None,
     ) -> None:
         """
         Store message metadata (id, channel, jump_url) for the pending shuffle.
@@ -113,7 +113,7 @@ class MatchService:
             state["shuffle_message_jump_url"] = jump_url
         self._persist_match_state(guild_id, state)
 
-    def get_shuffle_message_info(self, guild_id: Optional[int]) -> Dict[str, Optional[int]]:
+    def get_shuffle_message_info(self, guild_id: int | None) -> dict[str, int | None]:
         """
         Return message metadata for the pending shuffle, if present.
         """
@@ -124,22 +124,22 @@ class MatchService:
             "jump_url": state.get("shuffle_message_jump_url"),
         }
 
-    def clear_last_shuffle(self, guild_id: Optional[int]) -> None:
+    def clear_last_shuffle(self, guild_id: int | None) -> None:
         self._last_shuffle_by_guild.pop(self._normalize_guild_id(guild_id), None)
         self.match_repo.clear_pending_match(guild_id)
 
-    def _ensure_pending_state(self, guild_id: Optional[int]) -> Dict:
+    def _ensure_pending_state(self, guild_id: int | None) -> dict:
         state = self.get_last_shuffle(guild_id)
         if not state:
             raise ValueError("No recent shuffle found.")
         return state
 
-    def _ensure_record_submissions(self, state: Dict) -> Dict[int, Dict[str, Any]]:
+    def _ensure_record_submissions(self, state: dict) -> dict[int, dict[str, Any]]:
         if "record_submissions" not in state:
             state["record_submissions"] = {}
         return state["record_submissions"]
 
-    def _build_pending_match_payload(self, state: Dict) -> Dict:
+    def _build_pending_match_payload(self, state: dict) -> dict:
         return {
             "radiant_team_ids": state["radiant_team_ids"],
             "dire_team_ids": state["dire_team_ids"],
@@ -159,13 +159,13 @@ class MatchService:
             "betting_mode": state.get("betting_mode", "house"),
         }
 
-    def _persist_match_state(self, guild_id: Optional[int], state: Dict) -> None:
+    def _persist_match_state(self, guild_id: int | None, state: dict) -> None:
         payload = self._build_pending_match_payload(state)
         self.match_repo.save_pending_match(guild_id, payload)
         # Update in-memory cache to keep it in sync
         self.set_last_shuffle(guild_id, state)
 
-    def has_admin_submission(self, guild_id: Optional[int]) -> bool:
+    def has_admin_submission(self, guild_id: int | None) -> bool:
         state = self.get_last_shuffle(guild_id)
         if not state:
             return False
@@ -175,7 +175,7 @@ class MatchService:
             for sub in submissions.values()
         )
 
-    def has_admin_abort_submission(self, guild_id: Optional[int]) -> bool:
+    def has_admin_abort_submission(self, guild_id: int | None) -> bool:
         state = self.get_last_shuffle(guild_id)
         if not state:
             return False
@@ -185,8 +185,8 @@ class MatchService:
         )
 
     def add_record_submission(
-        self, guild_id: Optional[int], user_id: int, result: str, is_admin: bool
-    ) -> Dict[str, Any]:
+        self, guild_id: int | None, user_id: int, result: str, is_admin: bool
+    ) -> dict[str, Any]:
         if result not in ("radiant", "dire"):
             raise ValueError("Result must be 'radiant' or 'dire'.")
         state = self._ensure_pending_state(guild_id)
@@ -206,7 +206,7 @@ class MatchService:
             "vote_counts": vote_counts,
         }
 
-    def get_non_admin_submission_count(self, guild_id: Optional[int]) -> int:
+    def get_non_admin_submission_count(self, guild_id: int | None) -> int:
         state = self.get_last_shuffle(guild_id)
         if not state:
             return 0
@@ -217,7 +217,7 @@ class MatchService:
             if not sub.get("is_admin") and sub.get("result") in ("radiant", "dire")
         )
 
-    def get_abort_submission_count(self, guild_id: Optional[int]) -> int:
+    def get_abort_submission_count(self, guild_id: int | None) -> int:
         state = self.get_last_shuffle(guild_id)
         if not state:
             return 0
@@ -228,12 +228,14 @@ class MatchService:
             if not sub.get("is_admin") and sub.get("result") == "abort"
         )
 
-    def can_abort_match(self, guild_id: Optional[int]) -> bool:
+    def can_abort_match(self, guild_id: int | None) -> bool:
         if self.has_admin_abort_submission(guild_id):
             return True
         return self.get_abort_submission_count(guild_id) >= self.MIN_NON_ADMIN_SUBMISSIONS
 
-    def add_abort_submission(self, guild_id: Optional[int], user_id: int, is_admin: bool) -> Dict[str, Any]:
+    def add_abort_submission(
+        self, guild_id: int | None, user_id: int, is_admin: bool
+    ) -> dict[str, Any]:
         state = self._ensure_pending_state(guild_id)
         submissions = self._ensure_record_submissions(state)
         existing = submissions.get(user_id)
@@ -247,7 +249,7 @@ class MatchService:
             "is_ready": self.can_abort_match(guild_id),
         }
 
-    def get_vote_counts(self, guild_id: Optional[int]) -> Dict[str, int]:
+    def get_vote_counts(self, guild_id: int | None) -> dict[str, int]:
         """Get vote counts for radiant and dire (non-admin only)."""
         state = self.get_last_shuffle(guild_id)
         if not state:
@@ -261,10 +263,10 @@ class MatchService:
                     counts[result] += 1
         return counts
 
-    def get_pending_record_result(self, guild_id: Optional[int]) -> Optional[str]:
+    def get_pending_record_result(self, guild_id: int | None) -> str | None:
         """
         Get the result to record.
-        
+
         For admin submissions: returns the admin's vote.
         For non-admin: returns the first result to reach MIN_NON_ADMIN_SUBMISSIONS votes.
         """
@@ -272,13 +274,13 @@ class MatchService:
         if not state:
             return None
         submissions = state.get("record_submissions", {})
-        
+
         # If there's an admin submission (radiant/dire), use that result
         for sub in submissions.values():
             result = sub.get("result")
             if sub.get("is_admin") and result in ("radiant", "dire"):
                 return result
-        
+
         # For non-admin: requires MIN_NON_ADMIN_SUBMISSIONS matching submissions to determine the result
         vote_counts = self.get_vote_counts(guild_id)
         if vote_counts["radiant"] >= self.MIN_NON_ADMIN_SUBMISSIONS:
@@ -287,15 +289,15 @@ class MatchService:
             return "dire"
         return None
 
-    def can_record_match(self, guild_id: Optional[int]) -> bool:
+    def can_record_match(self, guild_id: int | None) -> bool:
         if self.has_admin_submission(guild_id):
             return True
         # Requires MIN_NON_ADMIN_SUBMISSIONS matching submissions before a non-admin result can finalize
         return self.get_pending_record_result(guild_id) is not None
 
     def shuffle_players(
-        self, player_ids: List[int], guild_id: Optional[int] = None, betting_mode: str = "house"
-    ) -> Dict:
+        self, player_ids: list[int], guild_id: int | None = None, betting_mode: str = "house"
+    ) -> dict:
         """
         Shuffle players into balanced teams.
 
@@ -310,7 +312,9 @@ class MatchService:
             raise ValueError("betting_mode must be 'house' or 'pool'")
         players = self.player_repo.get_by_ids(player_ids)
         if len(players) != len(player_ids):
-            raise ValueError(f"Could not load all players: expected {len(player_ids)}, got {len(players)}")
+            raise ValueError(
+                f"Could not load all players: expected {len(player_ids)}, got {len(players)}"
+            )
 
         if len(players) < 10:
             raise ValueError("Need at least 10 players to shuffle.")
@@ -322,10 +326,14 @@ class MatchService:
 
         exclusion_counts_by_id = self.player_repo.get_exclusion_counts(player_ids)
         # Shuffler expects name->count mapping; this is internal to shuffler only
-        exclusion_counts = {pl.name: exclusion_counts_by_id.get(pid, 0) for pid, pl in zip(player_ids, players)}
+        exclusion_counts = {
+            pl.name: exclusion_counts_by_id.get(pid, 0) for pid, pl in zip(player_ids, players)
+        }
 
         if len(players) > 10:
-            team1, team2, excluded_players = self.shuffler.shuffle_from_pool(players, exclusion_counts)
+            team1, team2, excluded_players = self.shuffler.shuffle_from_pool(
+                players, exclusion_counts
+            )
         else:
             team1, team2 = self.shuffler.shuffle(players)
             excluded_players = []
@@ -339,10 +347,16 @@ class MatchService:
         team2_off_roles = team2.get_off_role_count()
         off_role_penalty = (team1_off_roles + team2_off_roles) * self.shuffler.off_role_flat_penalty
         role_matchup_delta = self.team_balancing_service.calculate_role_matchup_delta(team1, team2)
-        weighted_role_matchup_delta = role_matchup_delta * self.team_balancing_service.role_matchup_delta_weight
+        weighted_role_matchup_delta = (
+            role_matchup_delta * self.team_balancing_service.role_matchup_delta_weight
+        )
 
-        team1_roles = team1.role_assignments if team1.role_assignments else team1._assign_roles_optimally()
-        team2_roles = team2.role_assignments if team2.role_assignments else team2._assign_roles_optimally()
+        team1_roles = (
+            team1.role_assignments if team1.role_assignments else team1._assign_roles_optimally()
+        )
+        team2_roles = (
+            team2.role_assignments if team2.role_assignments else team2._assign_roles_optimally()
+        )
 
         # Randomly assign Radiant/Dire
         if random.random() < 0.5:
@@ -368,7 +382,9 @@ class MatchService:
 
         excluded_ids = []
         if excluded_players:
-            excluded_ids = [player_id_map[id(p)] for p in excluded_players if id(p) in player_id_map]
+            excluded_ids = [
+                player_id_map[id(p)] for p in excluded_players if id(p) in player_id_map
+            ]
 
         excluded_penalty = 0.0
         if excluded_players:
@@ -376,7 +392,9 @@ class MatchService:
             exclusion_sum = sum(exclusion_counts.get(name, 0) for name in excluded_names)
             excluded_penalty = exclusion_sum * self.shuffler.exclusion_penalty_weight
 
-        goodness_score = value_diff + off_role_penalty + weighted_role_matchup_delta + excluded_penalty
+        goodness_score = (
+            value_diff + off_role_penalty + weighted_role_matchup_delta + excluded_penalty
+        )
 
         # Update exclusion counts
         included_player_ids = set(radiant_team_ids + dire_team_ids)
@@ -423,7 +441,7 @@ class MatchService:
             "excluded_ids": excluded_ids,
         }
 
-    def _load_glicko_player(self, player_id: int) -> Tuple[Player, int]:
+    def _load_glicko_player(self, player_id: int) -> tuple[Player, int]:
         rating_data = self.player_repo.get_glicko_rating(player_id)
         if rating_data:
             rating, rd, vol = rating_data
@@ -440,24 +458,24 @@ class MatchService:
     def record_match(
         self,
         winning_team: str,
-        guild_id: Optional[int] = None,
-        dotabuff_match_id: Optional[str] = None,
-    ) -> Dict:
+        guild_id: int | None = None,
+        dotabuff_match_id: str | None = None,
+    ) -> dict:
         """
         Record a match result and update ratings.
 
         winning_team: 'radiant' or 'dire'
-        
+
         Thread-safe: prevents concurrent finalization for the same guild.
         """
         normalized_gid = self._normalize_guild_id(guild_id)
-        
+
         # Acquire exclusive recording right for this guild
         with self._recording_lock:
             if normalized_gid in self._recording_in_progress:
                 raise ValueError("Match recording already in progress for this guild.")
             self._recording_in_progress.add(normalized_gid)
-        
+
         try:
             last_shuffle = self.get_last_shuffle(guild_id)
             if not last_shuffle:
@@ -518,12 +536,16 @@ class MatchService:
                     dire_glicko, radiant_glicko, 1
                 )
 
-            updated_player_ids = {pid for _, _, _, pid in team1_updated + team2_updated}
+            {pid for _, _, _, pid in team1_updated + team2_updated}
             expected_ids = set(radiant_team_ids + dire_team_ids)
             # Even if mismatch, continue but skip unknown IDs when writing
 
             updated_count = 0
-            updates = [(pid, rating, rd, vol) for rating, rd, vol, pid in team1_updated + team2_updated if pid in expected_ids]
+            updates = [
+                (pid, rating, rd, vol)
+                for rating, rd, vol, pid in team1_updated + team2_updated
+                if pid in expected_ids
+            ]
             if hasattr(self.player_repo, "update_glicko_ratings_bulk"):
                 updated_count = self.player_repo.update_glicko_ratings_bulk(updates)  # type: ignore[attr-defined]
             else:
@@ -554,4 +576,3 @@ class MatchService:
         finally:
             with self._recording_lock:
                 self._recording_in_progress.discard(normalized_gid)
-

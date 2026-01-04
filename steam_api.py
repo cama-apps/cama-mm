@@ -3,14 +3,14 @@ Valve Steam Web API integration for fetching Dota 2 match data.
 API Documentation: https://wiki.teamfortress.com/wiki/WebAPI#Dota_2
 """
 
-import os
-import time
-import threading
-import requests
-from typing import Optional, Dict, List
 import logging
+import os
+import threading
+import time
 
-logger = logging.getLogger('cama_bot.steam_api')
+import requests
+
+logger = logging.getLogger("cama_bot.steam_api")
 
 
 class SteamAPIRateLimiter:
@@ -46,7 +46,7 @@ class SteamAPI:
     _rate_limiter = None
     _rate_limiter_lock = threading.Lock()
 
-    def __init__(self, api_key: Optional[str] = None):
+    def __init__(self, api_key: str | None = None):
         """
         Initialize Steam API client.
 
@@ -54,7 +54,7 @@ class SteamAPI:
             api_key: Steam Web API key (required for all endpoints)
         """
         self.session = requests.Session()
-        self.api_key = api_key or os.getenv('STEAM_API_KEY')
+        self.api_key = api_key or os.getenv("STEAM_API_KEY")
 
         if not self.api_key:
             logger.warning("No STEAM_API_KEY configured - Valve API calls will fail")
@@ -65,7 +65,7 @@ class SteamAPI:
                 SteamAPI._rate_limiter = SteamAPIRateLimiter(requests_per_second=1.0)
                 logger.info("Steam API rate limiter initialized: 1 request/second")
 
-    def _make_request(self, endpoint: str, params: Optional[Dict] = None) -> Optional[Dict]:
+    def _make_request(self, endpoint: str, params: dict | None = None) -> dict | None:
         """
         Make a rate-limited request to the Steam API.
 
@@ -85,7 +85,7 @@ class SteamAPI:
 
         url = f"{self.BASE_URL}/{endpoint}"
         params = params or {}
-        params['key'] = self.api_key
+        params["key"] = self.api_key
 
         try:
             response = self.session.get(url, params=params, timeout=30)
@@ -95,7 +95,7 @@ class SteamAPI:
             logger.error(f"Steam API request failed: {e}")
             return None
 
-    def get_match_details(self, match_id: int) -> Optional[Dict]:
+    def get_match_details(self, match_id: int) -> dict | None:
         """
         Get detailed information about a specific match.
 
@@ -126,11 +126,11 @@ class SteamAPI:
 
     def get_match_history(
         self,
-        league_id: Optional[int] = None,
-        account_id: Optional[int] = None,
+        league_id: int | None = None,
+        account_id: int | None = None,
         matches_requested: int = 25,
-        start_at_match_id: Optional[int] = None,
-    ) -> Optional[Dict]:
+        start_at_match_id: int | None = None,
+    ) -> dict | None:
         """
         Get match history, optionally filtered by league or player.
 
@@ -160,7 +160,7 @@ class SteamAPI:
 
         return result.get("result")
 
-    def get_league_listing(self) -> Optional[List[Dict]]:
+    def get_league_listing(self) -> list[dict] | None:
         """
         Get list of all leagues.
 
@@ -224,10 +224,12 @@ def test_steam_api():
         print(f"Radiant Win: {match_data.get('radiant_win')}")
         print(f"Players: {len(match_data.get('players', []))}")
 
-        for player in match_data.get('players', [])[:2]:
-            team, pos = SteamAPI.decode_player_slot(player['player_slot'])
-            print(f"  - Hero {player['hero_id']} ({team} pos {pos}): "
-                  f"{player['kills']}/{player['deaths']}/{player['assists']}")
+        for player in match_data.get("players", [])[:2]:
+            team, pos = SteamAPI.decode_player_slot(player["player_slot"])
+            print(
+                f"  - Hero {player['hero_id']} ({team} pos {pos}): "
+                f"{player['kills']}/{player['deaths']}/{player['assists']}"
+            )
     else:
         print("Could not fetch match data")
 

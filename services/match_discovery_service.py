@@ -9,7 +9,6 @@ Uses OpenDota API to find matches by correlating:
 import logging
 import time
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple
 
 from opendota_integration import OpenDotaAPI
 
@@ -31,12 +30,12 @@ class MatchDiscoveryService:
     player match histories from OpenDota.
     """
 
-    def __init__(self, match_repo, player_repo, opendota_api: Optional[OpenDotaAPI] = None):
+    def __init__(self, match_repo, player_repo, opendota_api: OpenDotaAPI | None = None):
         self.match_repo = match_repo
         self.player_repo = player_repo
         self.opendota_api = opendota_api or OpenDotaAPI()
 
-    def discover_all_matches(self, dry_run: bool = False) -> Dict:
+    def discover_all_matches(self, dry_run: bool = False) -> dict:
         """
         Discover Dota 2 match IDs for all unenriched internal matches.
 
@@ -80,11 +79,13 @@ class MatchDiscoveryService:
             except Exception as e:
                 logger.error(f"Error discovering match {match_id}: {e}")
                 results["errors"] += 1
-                results["details"].append({
-                    "match_id": match_id,
-                    "status": "error",
-                    "error": str(e),
-                })
+                results["details"].append(
+                    {
+                        "match_id": match_id,
+                        "status": "error",
+                        "error": str(e),
+                    }
+                )
 
             # Small delay to be nice to OpenDota API
             time.sleep(0.5)
@@ -98,7 +99,7 @@ class MatchDiscoveryService:
 
         return results
 
-    def _discover_single_match(self, match_id: int, dry_run: bool) -> Dict:
+    def _discover_single_match(self, match_id: int, dry_run: bool) -> dict:
         """
         Attempt to discover the Dota 2 match ID for a single internal match.
 
@@ -182,6 +183,7 @@ class MatchDiscoveryService:
             if not dry_run:
                 # Enrich the match with source='auto'
                 from services.match_enrichment_service import MatchEnrichmentService
+
                 enrichment_service = MatchEnrichmentService(
                     self.match_repo, self.player_repo, self.opendota_api
                 )
@@ -214,7 +216,7 @@ class MatchDiscoveryService:
                 "total_players": len(steam_ids),
             }
 
-    def discover_match(self, match_id: int) -> Dict:
+    def discover_match(self, match_id: int) -> dict:
         """
         Public method to discover and enrich a single match.
 
@@ -227,7 +229,7 @@ class MatchDiscoveryService:
         logger.info(f"Auto-discovery triggered for match {match_id}")
         return self._discover_single_match(match_id, dry_run=False)
 
-    def _parse_match_time(self, match_date) -> Optional[int]:
+    def _parse_match_time(self, match_date) -> int | None:
         """Parse match_date to Unix timestamp."""
         if not match_date:
             return None

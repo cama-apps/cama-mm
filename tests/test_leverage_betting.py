@@ -2,13 +2,15 @@
 Tests for leverage betting, negative balances, and garnishment.
 """
 
-import pytest
 import time
+
+import pytest
+
+from infrastructure.schema_manager import SchemaManager
 from repositories.bet_repository import BetRepository
 from repositories.player_repository import PlayerRepository
 from services.betting_service import BettingService
 from services.garnishment_service import GarnishmentService
-from infrastructure.schema_manager import SchemaManager
 
 
 @pytest.fixture
@@ -414,7 +416,7 @@ class TestLeverageIntegration:
     def test_leverage_pool_mode_multiple_winners(self, bet_repo, player_repo):
         """Pool mode splits proportionally among multiple winners with different leverage."""
         # Setup three players
-        for i, (pid, name) in enumerate([(5001, "Low"), (5002, "High"), (5003, "Loser")]):
+        for _i, (pid, name) in enumerate([(5001, "Low"), (5002, "High"), (5003, "Loser")]):
             player_repo.add(
                 discord_id=pid,
                 discord_username=name,
