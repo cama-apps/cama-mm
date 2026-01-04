@@ -125,6 +125,11 @@ class MatchEnrichmentService:
                 last_hits=player_data.get("last_hits", 0),
                 denies=player_data.get("denies", 0),
                 net_worth=player_data.get("net_worth", player_data.get("total_gold", 0)),
+                hero_healing=player_data.get("hero_healing", 0),
+                lane_role=player_data.get(
+                    "lane_role"
+                ),  # 1=Safe, 2=Mid, 3=Off, 4=Jungle (parsed only)
+                lane_efficiency=player_data.get("lane_efficiency_pct"),  # 0-100 (parsed only)
             )
             players_enriched += 1
 

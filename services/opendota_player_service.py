@@ -13,6 +13,18 @@ logger = logging.getLogger("cama_bot.services.opendota_player")
 # Cache TTL in seconds (1 hour)
 CACHE_TTL_SECONDS = 3600
 
+# Lane role mapping from OpenDota
+LANE_ROLE_NAMES = {
+    1: "Safe Lane",
+    2: "Mid",
+    3: "Off Lane",
+    4: "Jungle",
+}
+
+# Hero primary attribute mapping (from OpenDota)
+# Will be fetched once and cached
+_HERO_ATTRIBUTES_CACHE: dict[int, str] | None = None
+
 
 class OpenDotaPlayerService:
     """
@@ -283,3 +295,316 @@ class OpenDotaPlayerService:
             "footer": f"Data from OpenDota | Steam ID: {profile['steam_id']}",
             "last_match_id": profile.get("last_match_id"),
         }
+
+    def get_full_stats(self, discord_id: int, match_limit: int = 100) -> dict | None:
+        """
+        Get comprehensive player statistics including hero and lane distributions.
+
+        Args:
+            discord_id: Player's Discord ID
+            match_limit: Number of recent matches to analyze (default 100)
+
+        Returns:
+            Full stats dict with:
+            - Basic stats (W/L, KDA, GPM/XPM)
+            - Hero attribute distribution (STR/AGI/INT/Universal %)
+            - Lane distribution (Safe/Mid/Off/Jungle %)
+            - Top heroes
+            - Recent performance
+        """
+        steam_id = self.player_repo.get_steam_id(discord_id)
+        if not steam_id:
+            logger.warning(f"No steam_id for discord {discord_id}")
+            return None
+
+        try:
+            # Get basic profile first
+            profile = self.get_player_profile(discord_id)
+            if not profile:
+                return None
+
+            # Fetch matches with lane_role projection for distribution analysis
+            matches = self._fetch_matches_for_stats(steam_id, limit=match_limit)
+
+            # Calculate distributions
+            attr_dist = self._calc_attribute_distribution(matches)
+            lane_dist = self._calc_lane_distribution(matches)
+
+            # Calculate recent performance (last 20 matches)
+            recent_matches = matches[:20] if matches else []
+            recent_wins = sum(1 for m in recent_matches if self._did_win(m))
+            recent_losses = len(recent_matches) - recent_wins
+            recent_winrate = self._calc_win_rate(recent_wins, recent_losses)
+
+            return {
+                # Basic stats from profile
+                "steam_id": steam_id,
+                "persona_name": profile.get("persona_name", "Unknown"),
+                "rank_tier": profile.get("rank_tier"),
+                "mmr_estimate": profile.get("mmr_estimate"),
+                "total_wins": profile.get("wins", 0),
+                "total_losses": profile.get("losses", 0),
+                "total_winrate": profile.get("win_rate", 0),
+                "avg_kills": profile.get("avg_kills", 0),
+                "avg_deaths": profile.get("avg_deaths", 0),
+                "avg_assists": profile.get("avg_assists", 0),
+                "avg_gpm": profile.get("avg_gpm", 0),
+                "avg_xpm": profile.get("avg_xpm", 0),
+                "avg_last_hits": profile.get("avg_last_hits", 0),
+                # Distributions
+                "attribute_distribution": attr_dist,
+                "lane_distribution": lane_dist,
+                # Top heroes
+                "top_heroes": profile.get("top_heroes", []),
+                # Recent performance
+                "recent_wins": recent_wins,
+                "recent_losses": recent_losses,
+                "recent_winrate": recent_winrate,
+                "matches_analyzed": len(matches) if matches else 0,
+            }
+        except Exception as e:
+            logger.error(f"Error getting full stats for discord {discord_id}: {e}")
+            return None
+
+    def _fetch_matches_for_stats(self, steam_id: int, limit: int = 100) -> list[dict]:
+        """Fetch recent matches with projections for stats analysis."""
+        try:
+            response = self.api._make_request(
+                f"{self.api.BASE_URL}/players/{steam_id}/matches",
+                params={
+                    "limit": limit,
+                    "project": [
+                        "hero_id",
+                        "lane_role",
+                        "player_slot",
+                        "radiant_win",
+                        "kills",
+                        "deaths",
+                        "assists",
+                    ],
+                },
+            )
+            if response and response.status_code == 200:
+                return response.json()
+        except Exception as e:
+            logger.error(f"Error fetching matches for stats: {e}")
+        return []
+
+    def _get_hero_attributes(self) -> dict[int, str]:
+        """Get hero ID -> primary attribute mapping from OpenDota."""
+        global _HERO_ATTRIBUTES_CACHE
+
+        if _HERO_ATTRIBUTES_CACHE is not None:
+            return _HERO_ATTRIBUTES_CACHE
+
+        try:
+            response = self.api._make_request(f"{self.api.BASE_URL}/heroes")
+            if response and response.status_code == 200:
+                heroes_data = response.json()
+                _HERO_ATTRIBUTES_CACHE = {
+                    h["id"]: h.get("primary_attr", "all")  # "agi", "str", "int", "all" (universal)
+                    for h in heroes_data
+                }
+                logger.info(f"Cached hero attributes for {len(_HERO_ATTRIBUTES_CACHE)} heroes")
+                return _HERO_ATTRIBUTES_CACHE
+        except Exception as e:
+            logger.error(f"Error fetching hero attributes: {e}")
+
+        return {}
+
+    def _calc_attribute_distribution(self, matches: list[dict]) -> dict[str, float]:
+        """
+        Calculate hero attribute distribution from matches.
+
+        Returns dict like {"str": 25.0, "agi": 35.0, "int": 30.0, "all": 10.0}
+        """
+        if not matches:
+            return {"str": 0, "agi": 0, "int": 0, "all": 0}
+
+        hero_attrs = self._get_hero_attributes()
+        counts = {"str": 0, "agi": 0, "int": 0, "all": 0}
+        total = 0
+
+        for match in matches:
+            hero_id = match.get("hero_id")
+            if hero_id and hero_id in hero_attrs:
+                attr = hero_attrs[hero_id]
+                if attr in counts:
+                    counts[attr] += 1
+                    total += 1
+
+        if total == 0:
+            return {"str": 0, "agi": 0, "int": 0, "all": 0}
+
+        return {attr: round((count / total) * 100, 1) for attr, count in counts.items()}
+
+    def _calc_lane_distribution(self, matches: list[dict]) -> dict[str, float]:
+        """
+        Calculate lane role distribution from matches.
+
+        Returns dict like {"Safe Lane": 40.0, "Mid": 20.0, "Off Lane": 30.0, "Jungle": 10.0}
+        """
+        if not matches:
+            return dict.fromkeys(LANE_ROLE_NAMES.values(), 0)
+
+        counts = dict.fromkeys(LANE_ROLE_NAMES.values(), 0)
+        total = 0
+
+        for match in matches:
+            lane_role = match.get("lane_role")
+            if lane_role and lane_role in LANE_ROLE_NAMES:
+                counts[LANE_ROLE_NAMES[lane_role]] += 1
+                total += 1
+
+        if total == 0:
+            return dict.fromkeys(LANE_ROLE_NAMES.values(), 0)
+
+        return {lane: round((count / total) * 100, 1) for lane, count in counts.items()}
+
+    def get_recent_matches_detailed(self, discord_id: int, limit: int = 10) -> list[dict] | None:
+        """
+        Get recent matches with details for image generation.
+
+        Args:
+            discord_id: Player's Discord ID
+            limit: Number of matches to fetch (default 10)
+
+        Returns:
+            List of match dicts with: hero_id, hero_name, kills, deaths, assists,
+            won, duration, match_id, start_time
+        """
+        steam_id = self.player_repo.get_steam_id(discord_id)
+        if not steam_id:
+            return None
+
+        try:
+            response = self.api._make_request(
+                f"{self.api.BASE_URL}/players/{steam_id}/matches",
+                params={
+                    "limit": limit,
+                    "project": [
+                        "hero_id",
+                        "kills",
+                        "deaths",
+                        "assists",
+                        "duration",
+                        "player_slot",
+                        "radiant_win",
+                        "start_time",
+                        "match_id",
+                    ],
+                },
+            )
+            if response and response.status_code == 200:
+                matches = response.json()
+                return [
+                    {
+                        "hero_id": m.get("hero_id"),
+                        "hero_name": get_hero_name(m.get("hero_id", 0)),
+                        "kills": m.get("kills", 0),
+                        "deaths": m.get("deaths", 0),
+                        "assists": m.get("assists", 0),
+                        "won": self._did_win(m),
+                        "duration": m.get("duration", 0),
+                        "match_id": m.get("match_id"),
+                        "start_time": m.get("start_time", 0),
+                    }
+                    for m in matches
+                ]
+        except Exception as e:
+            logger.error(f"Error fetching recent matches for discord {discord_id}: {e}")
+
+        return None
+
+    def get_hero_role_distribution(
+        self, discord_id: int, match_limit: int = 50
+    ) -> dict[str, float] | None:
+        """
+        Calculate hero role distribution based on heroes played.
+
+        Uses dotabase to map hero_id to roles, then aggregates across matches.
+
+        Args:
+            discord_id: Player's Discord ID
+            match_limit: Number of matches to analyze
+
+        Returns:
+            Dict mapping role name to percentage (0-100)
+        """
+        steam_id = self.player_repo.get_steam_id(discord_id)
+        if not steam_id:
+            return None
+
+        try:
+            # Fetch matches
+            matches = self._fetch_matches_for_stats(steam_id, limit=match_limit)
+            if not matches:
+                return None
+
+            # Get hero roles from dotabase
+            hero_roles = self._get_hero_roles()
+            if not hero_roles:
+                return None
+
+            # Count role occurrences (weighted by games)
+            role_counts: dict[str, float] = {}
+            total = 0
+
+            for match in matches:
+                hero_id = match.get("hero_id")
+                if hero_id and hero_id in hero_roles:
+                    roles = hero_roles[hero_id]
+                    # Each role gets weighted contribution
+                    for role, weight in roles.items():
+                        role_counts[role] = role_counts.get(role, 0) + weight
+                        total += weight
+
+            if total == 0:
+                return None
+
+            # Normalize to percentages
+            return {
+                role: round((count / total) * 100, 1)
+                for role, count in sorted(role_counts.items(), key=lambda x: x[1], reverse=True)
+            }
+        except Exception as e:
+            logger.error(f"Error calculating role distribution: {e}")
+            return None
+
+    def _get_hero_roles(self) -> dict[int, dict[str, float]]:
+        """
+        Get hero ID -> role weights mapping from dotabase.
+
+        Returns dict like {1: {"Carry": 3, "Escape": 3, "Nuker": 1}, ...}
+        Weights come from dotabase role_levels (e.g., "3|3|1" -> weights)
+        """
+        try:
+            from dotabase import Hero, dotabase_session
+
+            session = dotabase_session()
+            heroes = session.query(Hero).all()
+
+            result = {}
+            for hero in heroes:
+                if not hero.roles or not hero.role_levels:
+                    continue
+
+                roles = hero.roles.split("|")
+                levels = hero.role_levels.split("|")
+
+                role_weights = {}
+                for role, level in zip(roles, levels):
+                    try:
+                        role_weights[role] = int(level)
+                    except ValueError:
+                        role_weights[role] = 1
+
+                result[hero.id] = role_weights
+
+            return result
+        except ImportError:
+            logger.warning("dotabase not available for role lookup")
+            return {}
+        except Exception as e:
+            logger.error(f"Error loading hero roles from dotabase: {e}")
+            return {}

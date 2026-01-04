@@ -122,11 +122,15 @@ def test_existing_wins_losses_are_incremented(test_db, player_ids):
     with test_db.connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "UPDATE players SET wins = 2, losses = 3 WHERE discord_id IN ({})".format(",".join("?" * len(radiant))),
+            "UPDATE players SET wins = 2, losses = 3 WHERE discord_id IN ({})".format(
+                ",".join("?" * len(radiant))
+            ),
             radiant,
         )
         cursor.execute(
-            "UPDATE players SET wins = 1, losses = 4 WHERE discord_id IN ({})".format(",".join("?" * len(dire))),
+            "UPDATE players SET wins = 1, losses = 4 WHERE discord_id IN ({})".format(
+                ",".join("?" * len(dire))
+            ),
             dire,
         )
 

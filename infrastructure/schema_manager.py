@@ -154,6 +154,8 @@ class SchemaManager:
             ("add_enrichment_source_columns", self._migration_add_enrichment_source_columns),
             ("create_bankruptcy_table", self._migration_create_bankruptcy_table),
             ("add_lobby_message_columns", self._migration_add_lobby_message_columns),
+            ("add_participant_healing_lane_columns", self._migration_add_participant_healing_lane),
+            ("add_lane_efficiency_column", self._migration_add_lane_efficiency),
         ]
 
     # --- Migrations ---
@@ -375,3 +377,12 @@ class SchemaManager:
         """Add message_id and channel_id columns to lobby_state for persistence across restarts."""
         self._add_column_if_not_exists(cursor, "lobby_state", "message_id", "INTEGER")
         self._add_column_if_not_exists(cursor, "lobby_state", "channel_id", "INTEGER")
+
+    def _migration_add_participant_healing_lane(self, cursor) -> None:
+        """Add hero_healing and lane_role columns for enhanced match stats."""
+        self._add_column_if_not_exists(cursor, "match_participants", "hero_healing", "INTEGER")
+        self._add_column_if_not_exists(cursor, "match_participants", "lane_role", "INTEGER")
+
+    def _migration_add_lane_efficiency(self, cursor) -> None:
+        """Add lane_efficiency column for laning phase performance (0-100)."""
+        self._add_column_if_not_exists(cursor, "match_participants", "lane_efficiency", "INTEGER")
