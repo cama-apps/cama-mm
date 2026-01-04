@@ -9,6 +9,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 from dotabase import Ability, Hero, dotabase_session
+from sqlalchemy.orm import joinedload
 
 from utils.hero_lookup import get_hero_image_url
 from utils.interaction_safety import safe_defer, safe_followup
@@ -55,11 +56,22 @@ def _get_all_abilities() -> list[tuple[str, int]]:
 def _get_hero_by_name(name: str) -> Hero | None:
     """Find a hero by localized name (case-insensitive)."""
     session = dotabase_session()
-    hero = session.query(Hero).filter(Hero.localized_name.ilike(name)).first()
+    # Eagerly load relationships to avoid DetachedInstanceError
+    hero = (
+        session.query(Hero)
+        .options(joinedload(Hero.abilities), joinedload(Hero.talents), joinedload(Hero.facets))
+        .filter(Hero.localized_name.ilike(name))
+        .first()
+    )
     if hero:
         return hero
-    # Try alias search
-    for h in session.query(Hero).all():
+    # Try alias search - also eagerly load
+    heroes = (
+        session.query(Hero)
+        .options(joinedload(Hero.abilities), joinedload(Hero.talents), joinedload(Hero.facets))
+        .all()
+    )
+    for h in heroes:
         if h.aliases and name.lower() in h.aliases.lower():
             return h
     return None
