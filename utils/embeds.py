@@ -5,15 +5,21 @@ Reusable Discord embed builders.
 import discord
 
 from rating_system import CamaRatingSystem
-from utils.formatting import ROLE_EMOJIS
+from utils.formatting import ROLE_EMOJIS, TOMBSTONE_EMOJI
 from utils.hero_lookup import get_hero_image_url, get_hero_name
 
 
-def format_player_list(players, player_ids):
+def format_player_list(players, player_ids, bankruptcy_repo=None):
     """
     Build a formatted lobby player list with ratings and role emojis.
 
     Deduplicates by Discord ID to avoid double-counting the same user.
+    Adds tombstone emoji for players with active bankruptcy penalties.
+
+    Args:
+        players: List of Player objects
+        player_ids: List of Discord IDs
+        bankruptcy_repo: BankruptcyRepository instance (optional)
     """
     if not players:
         return "No players yet", 0
@@ -47,7 +53,18 @@ def format_player_list(players, player_ids):
     for idx, (rating, player, pid) in enumerate(players_with_ratings, 1):
         # Use Discord mention when we have a real Discord ID; fall back to name for fakes/unknown
         is_real_user = pid is not None and pid >= 0
-        display = f"<@{pid}>" if is_real_user else player.name
+
+        # Add tombstone if player has active bankruptcy penalty
+        tombstone = ""
+        if bankruptcy_repo and is_real_user:
+            try:
+                penalty_games = bankruptcy_repo.get_penalty_games(pid)
+                if penalty_games > 0:
+                    tombstone = f"{TOMBSTONE_EMOJI} "
+            except Exception:
+                pass
+
+        display = f"{tombstone}<@{pid}>" if is_real_user else player.name
         name = f"{idx}. {display}"
         if player.glicko_rating is not None:
             cama_rating = rating_system.rating_to_display(player.glicko_rating)
@@ -61,7 +78,9 @@ def format_player_list(players, player_ids):
     return "\n".join(items), len(unique_players)
 
 
-def create_lobby_embed(lobby, players, player_ids, ready_threshold: int = 10):
+def create_lobby_embed(
+    lobby, players, player_ids, ready_threshold: int = 10, bankruptcy_repo=None
+):
     """Create the lobby embed with player list and status."""
     player_count = lobby.get_player_count()
 
@@ -76,7 +95,7 @@ def create_lobby_embed(lobby, players, player_ids, ready_threshold: int = 10):
         color=discord.Color.green() if player_count >= ready_threshold else discord.Color.blue(),
     )
 
-    player_list, unique_count = format_player_list(players, player_ids)
+    player_list, unique_count = format_player_list(players, player_ids, bankruptcy_repo)
 
     embed.add_field(
         name=f"Players ({player_count}/12)",
@@ -221,6 +240,7 @@ def create_enriched_match_embed(
     radiant_participants: list[dict],
     dire_participants: list[dict],
     show_mvp: bool = True,
+    bankruptcy_repo=None,
 ) -> discord.Embed:
     """
     Create a rich embed displaying enriched match statistics.
@@ -316,8 +336,18 @@ def create_enriched_match_embed(
             else:
                 lane_str = ""
 
+            # Add tombstone if player has active bankruptcy penalty
+            tombstone = ""
+            if bankruptcy_repo and discord_id and discord_id > 0:
+                try:
+                    penalty_games = bankruptcy_repo.get_penalty_games(discord_id)
+                    if penalty_games > 0:
+                        tombstone = f"{TOMBSTONE_EMOJI} "
+                except Exception:
+                    pass
+
             # Format: <@id> **Hero** `K/D/A` | stats
-            player_ref = f"<@{discord_id}>" if discord_id and discord_id > 0 else "?"
+            player_ref = f"{tombstone}<@{discord_id}>" if discord_id and discord_id > 0 else "?"
             stats_parts = [f"`{kda}`"]
             if dmg != "—":
                 stats_parts.append(f"`{dmg} dmg`")
@@ -362,6 +392,7 @@ def create_match_summary_embed(
     radiant_participants: list[dict],
     dire_participants: list[dict],
     valve_match_id: int | None = None,
+    bankruptcy_repo=None,
 ) -> discord.Embed:
     """
     Create a simpler match summary embed for non-enriched matches.
@@ -382,12 +413,24 @@ def create_match_summary_embed(
         lines = []
         for p in participants:
             hero_id = p.get("hero_id")
+            discord_id = p.get("discord_id", 0)
+
+            # Add tombstone if player has active bankruptcy penalty
+            tombstone = ""
+            if bankruptcy_repo and discord_id and discord_id > 0:
+                try:
+                    penalty_games = bankruptcy_repo.get_penalty_games(discord_id)
+                    if penalty_games > 0:
+                        tombstone = f"{TOMBSTONE_EMOJI} "
+                except Exception:
+                    pass
+
             if hero_id:
                 hero = get_hero_name(hero_id)
                 kda = f"{p.get('kills', 0)}/{p.get('deaths', 0)}/{p.get('assists', 0)}"
-                lines.append(f"**{hero}** ({kda})")
+                lines.append(f"{tombstone}**{hero}** ({kda})")
             else:
-                lines.append(f"<@{p.get('discord_id', 0)}>")
+                lines.append(f"{tombstone}<@{discord_id}>")
 
         return "\n".join(lines) if lines else "No data"
 

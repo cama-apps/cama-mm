@@ -16,11 +16,13 @@ class LobbyService:
         player_repo: IPlayerRepository,
         ready_threshold: int = 10,
         max_players: int = 12,
+        bankruptcy_repo=None,
     ):
         self.player_repo = player_repo
         self.lobby_manager = lobby_manager
         self.ready_threshold = ready_threshold
         self.max_players = max_players
+        self.bankruptcy_repo = bankruptcy_repo
 
     def get_or_create_lobby(self, creator_id: int | None = None) -> Lobby:
         return self.lobby_manager.get_or_create_lobby(creator_id=creator_id)
@@ -66,7 +68,9 @@ class LobbyService:
         if not lobby:
             return None
         player_ids, players = self.get_lobby_players(lobby)
-        return create_lobby_embed(lobby, players, player_ids, ready_threshold=self.ready_threshold)
+        return create_lobby_embed(
+            lobby, players, player_ids, ready_threshold=self.ready_threshold, bankruptcy_repo=self.bankruptcy_repo
+        )
 
     def is_ready(self, lobby: Lobby) -> bool:
         return lobby.get_player_count() >= self.ready_threshold

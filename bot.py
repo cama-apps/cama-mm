@@ -285,6 +285,7 @@ def _init_services():
         player_repo,
         ready_threshold=LOBBY_READY_THRESHOLD,
         max_players=LOBBY_MAX_PLAYERS,
+        bankruptcy_repo=bankruptcy_repo,
     )
 
     # Create match service
@@ -307,6 +308,7 @@ def _init_services():
     bot.match_repo = match_repo
     bot.pairings_repo = pairings_repo
     bot.guild_config_repo = guild_config_repo
+    bot.bankruptcy_repo = bankruptcy_repo
     bot.role_emojis = ROLE_EMOJIS
     bot.role_names = ROLE_NAMES
     bot.format_role_display = format_role_display

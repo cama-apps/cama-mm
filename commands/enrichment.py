@@ -30,6 +30,7 @@ class EnrichmentCommands(commands.Cog):
         guild_config_repo,
         enrichment_service: MatchEnrichmentService,
         opendota_player_service: OpenDotaPlayerService,
+        bankruptcy_repo=None,
     ):
         self.bot = bot
         self.match_repo = match_repo
@@ -37,6 +38,7 @@ class EnrichmentCommands(commands.Cog):
         self.guild_config_repo = guild_config_repo
         self.enrichment_service = enrichment_service
         self.opendota_player_service = opendota_player_service
+        self.bankruptcy_repo = bankruptcy_repo
 
     @app_commands.command(
         name="setleague", description="Set the Valve league ID for this server (Admin)"
@@ -177,6 +179,7 @@ class EnrichmentCommands(commands.Cog):
                 winning_team=match_data.get("winning_team", 1),
                 radiant_participants=radiant,
                 dire_participants=dire,
+                bankruptcy_repo=self.bankruptcy_repo,
             )
 
             # Add summary note
@@ -538,6 +541,7 @@ class EnrichmentCommands(commands.Cog):
                 winning_team=match_data.get("winning_team", 1),
                 radiant_participants=radiant,
                 dire_participants=dire,
+                bankruptcy_repo=self.bankruptcy_repo,
             )
 
             # Generate and attach stats image
@@ -567,6 +571,7 @@ class EnrichmentCommands(commands.Cog):
                 radiant_participants=radiant,
                 dire_participants=dire,
                 valve_match_id=match_data.get("valve_match_id"),
+                bankruptcy_repo=self.bankruptcy_repo,
             )
             note = (
                 "ℹ️ This match has not been enriched yet. Use `/enrichmatch` to add detailed stats."
@@ -1085,6 +1090,7 @@ async def setup(bot: commands.Bot):
     match_repo = getattr(bot, "match_repo", None)
     player_repo = getattr(bot, "player_repo", None)
     guild_config_repo = getattr(bot, "guild_config_repo", None)
+    bankruptcy_repo = getattr(bot, "bankruptcy_repo", None)
 
     if not all([match_repo, player_repo, guild_config_repo]):
         logger.warning("enrichment cog: required repos not available, skipping")
@@ -1101,5 +1107,6 @@ async def setup(bot: commands.Bot):
             guild_config_repo,
             enrichment_service,
             opendota_player_service,
+            bankruptcy_repo,
         )
     )
