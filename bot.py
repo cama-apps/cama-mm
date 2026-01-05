@@ -288,6 +288,7 @@ def _init_services():
         use_glicko=USE_GLICKO,
         betting_service=betting_service,
         pairings_repo=pairings_repo,
+        loan_service=loan_service,
     )
 
     # Expose on bot for cogs

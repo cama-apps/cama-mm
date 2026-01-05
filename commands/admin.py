@@ -24,10 +24,12 @@ _processed_interactions = set()
 class AdminCommands(commands.Cog):
     """Admin-only slash commands."""
 
-    def __init__(self, bot: commands.Bot, lobby_service, player_repo):
+    def __init__(self, bot: commands.Bot, lobby_service, player_repo, loan_service=None, bankruptcy_service=None):
         self.bot = bot
         self.lobby_service = lobby_service
         self.player_repo = player_repo
+        self.loan_service = loan_service
+        self.bankruptcy_service = bankruptcy_service
 
     @app_commands.command(
         name="addfake", description="Add fake users to lobby for testing (Admin only)"
@@ -269,22 +271,170 @@ class AdminCommands(commands.Cog):
                 ephemeral=True,
             )
 
+    @app_commands.command(
+        name="givecoin", description="Give jopacoin to a user (Admin only)"
+    )
+    @app_commands.describe(
+        user="The user to give coins to",
+        amount="Amount to give (can be negative to take)",
+    )
+    async def givecoin(
+        self, interaction: discord.Interaction, user: discord.Member, amount: int
+    ):
+        """Admin command to give or take jopacoin from a user."""
+        if not has_admin_permission(interaction):
+            await interaction.response.send_message(
+                "❌ Admin only! You need Administrator or Manage Server permissions.",
+                ephemeral=True,
+            )
+            return
+
+        player = self.player_repo.get_by_id(user.id)
+        if not player:
+            await interaction.response.send_message(
+                f"⚠️ {user.mention} is not registered.",
+                ephemeral=True,
+            )
+            return
+
+        old_balance = self.player_repo.get_balance(user.id)
+        self.player_repo.add_balance(user.id, amount)
+        new_balance = self.player_repo.get_balance(user.id)
+
+        action = "gave" if amount >= 0 else "took"
+        abs_amount = abs(amount)
+
+        await interaction.response.send_message(
+            f"✅ {action.title()} **{abs_amount}** jopacoin {'to' if amount >= 0 else 'from'} {user.mention}\n"
+            f"Balance: {old_balance} → {new_balance}",
+            ephemeral=True,
+        )
+        logger.info(
+            f"Admin {interaction.user.id} ({interaction.user}) {action} {abs_amount} jopacoin "
+            f"{'to' if amount >= 0 else 'from'} {user.id} ({user}). Balance: {old_balance} → {new_balance}"
+        )
+
+    @app_commands.command(
+        name="resetloancooldown", description="Reset a user's loan cooldown (Admin only)"
+    )
+    @app_commands.describe(user="The user whose loan cooldown to reset")
+    async def resetloancooldown(
+        self, interaction: discord.Interaction, user: discord.Member
+    ):
+        """Admin command to reset a user's loan cooldown."""
+        if not has_admin_permission(interaction):
+            await interaction.response.send_message(
+                "❌ Admin only! You need Administrator or Manage Server permissions.",
+                ephemeral=True,
+            )
+            return
+
+        if not self.loan_service:
+            await interaction.response.send_message(
+                "❌ Loan service not available.",
+                ephemeral=True,
+            )
+            return
+
+        player = self.player_repo.get_by_id(user.id)
+        if not player:
+            await interaction.response.send_message(
+                f"⚠️ {user.mention} is not registered.",
+                ephemeral=True,
+            )
+            return
+
+        # Get current state
+        state = self.loan_service.get_state(user.id)
+
+        # Reset the cooldown by setting last_loan_at to None
+        self.loan_service.loan_repo.upsert_state(
+            discord_id=user.id,
+            last_loan_at=None,
+            total_loans_taken=state.total_loans_taken,
+            total_fees_paid=state.total_fees_paid,
+            negative_loans_taken=state.negative_loans_taken,
+            outstanding_principal=state.outstanding_principal,
+            outstanding_fee=state.outstanding_fee,
+        )
+
+        await interaction.response.send_message(
+            f"✅ Reset loan cooldown for {user.mention}. They can now take a new loan.",
+            ephemeral=True,
+        )
+        logger.info(
+            f"Admin {interaction.user.id} ({interaction.user}) reset loan cooldown for "
+            f"{user.id} ({user})"
+        )
+
+    @app_commands.command(
+        name="resetbankruptcycooldown", description="Reset a user's bankruptcy cooldown (Admin only)"
+    )
+    @app_commands.describe(user="The user whose bankruptcy cooldown to reset")
+    async def resetbankruptcycooldown(
+        self, interaction: discord.Interaction, user: discord.Member
+    ):
+        """Admin command to reset a user's bankruptcy cooldown."""
+        if not has_admin_permission(interaction):
+            await interaction.response.send_message(
+                "❌ Admin only! You need Administrator or Manage Server permissions.",
+                ephemeral=True,
+            )
+            return
+
+        if not self.bankruptcy_service:
+            await interaction.response.send_message(
+                "❌ Bankruptcy service not available.",
+                ephemeral=True,
+            )
+            return
+
+        player = self.player_repo.get_by_id(user.id)
+        if not player:
+            await interaction.response.send_message(
+                f"⚠️ {user.mention} is not registered.",
+                ephemeral=True,
+            )
+            return
+
+        # Get current state and reset the cooldown
+        state = self.bankruptcy_service.bankruptcy_repo.get_state(user.id)
+        penalty_games = state["penalty_games_remaining"] if state else 0
+
+        # Reset the cooldown by setting last_bankruptcy_at to None (or 0)
+        self.bankruptcy_service.bankruptcy_repo.upsert_state(
+            discord_id=user.id,
+            last_bankruptcy_at=0,  # Far in the past = no cooldown
+            penalty_games_remaining=penalty_games,
+        )
+
+        await interaction.response.send_message(
+            f"✅ Reset bankruptcy cooldown for {user.mention}. They can now declare bankruptcy again.",
+            ephemeral=True,
+        )
+        logger.info(
+            f"Admin {interaction.user.id} ({interaction.user}) reset bankruptcy cooldown for "
+            f"{user.id} ({user})"
+        )
+
 
 async def setup(bot: commands.Bot):
     lobby_service = getattr(bot, "lobby_service", None)
     # Use player_repo directly from bot for admin operations
     player_repo = getattr(bot, "player_repo", None)
+    loan_service = getattr(bot, "loan_service", None)
+    bankruptcy_service = getattr(bot, "bankruptcy_service", None)
 
     # Check if cog is already loaded
     if "AdminCommands" in [cog.__class__.__name__ for cog in bot.cogs.values()]:
         logger.warning("AdminCommands cog is already loaded, skipping duplicate registration")
         return
 
-    await bot.add_cog(AdminCommands(bot, lobby_service, player_repo))
+    await bot.add_cog(AdminCommands(bot, lobby_service, player_repo, loan_service, bankruptcy_service))
 
     # Log command registration
     admin_commands = [
-        cmd.name for cmd in bot.tree.walk_commands() if cmd.name in ["addfake", "resetuser", "sync"]
+        cmd.name for cmd in bot.tree.walk_commands() if cmd.name in ["addfake", "resetuser", "sync", "givecoin", "resetloancooldown", "resetbankruptcycooldown"]
     ]
     logger.info(
         f"AdminCommands cog loaded. Registered commands: {admin_commands}. "

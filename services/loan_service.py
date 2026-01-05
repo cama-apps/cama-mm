@@ -24,6 +24,18 @@ class LoanState:
     negative_loans_taken: int  # Loans taken while already in debt (peak degen)
     is_on_cooldown: bool
     cooldown_ends_at: int | None  # Unix timestamp
+    outstanding_principal: int = 0  # Amount borrowed, not yet repaid
+    outstanding_fee: int = 0  # Fee owed, not yet paid
+
+    @property
+    def has_outstanding_loan(self) -> bool:
+        """Check if player has an outstanding loan to repay."""
+        return self.outstanding_principal > 0
+
+    @property
+    def outstanding_total(self) -> int:
+        """Total amount owed (principal + fee)."""
+        return self.outstanding_principal + self.outstanding_fee
 
 
 class LoanRepository(BaseRepository):
@@ -36,7 +48,9 @@ class LoanRepository(BaseRepository):
             cursor.execute(
                 """
                 SELECT discord_id, last_loan_at, total_loans_taken, total_fees_paid,
-                       COALESCE(negative_loans_taken, 0) as negative_loans_taken
+                       COALESCE(negative_loans_taken, 0) as negative_loans_taken,
+                       COALESCE(outstanding_principal, 0) as outstanding_principal,
+                       COALESCE(outstanding_fee, 0) as outstanding_fee
                 FROM loan_state
                 WHERE discord_id = ?
                 """,
@@ -51,15 +65,19 @@ class LoanRepository(BaseRepository):
                 "total_loans_taken": row["total_loans_taken"],
                 "total_fees_paid": row["total_fees_paid"],
                 "negative_loans_taken": row["negative_loans_taken"],
+                "outstanding_principal": row["outstanding_principal"],
+                "outstanding_fee": row["outstanding_fee"],
             }
 
     def upsert_state(
         self,
         discord_id: int,
-        last_loan_at: int,
-        total_loans_taken: int,
-        total_fees_paid: int,
-        negative_loans_taken: int = 0,
+        last_loan_at: int | None = None,
+        total_loans_taken: int | None = None,
+        total_fees_paid: int | None = None,
+        negative_loans_taken: int | None = None,
+        outstanding_principal: int | None = None,
+        outstanding_fee: int | None = None,
     ) -> None:
         """Create or update loan state."""
         with self.connection() as conn:
@@ -67,16 +85,33 @@ class LoanRepository(BaseRepository):
             cursor.execute(
                 """
                 INSERT INTO loan_state (discord_id, last_loan_at, total_loans_taken, total_fees_paid,
-                                        negative_loans_taken, updated_at)
-                VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                                        negative_loans_taken, outstanding_principal, outstanding_fee,
+                                        updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                 ON CONFLICT(discord_id) DO UPDATE SET
-                    last_loan_at = excluded.last_loan_at,
-                    total_loans_taken = excluded.total_loans_taken,
-                    total_fees_paid = excluded.total_fees_paid,
-                    negative_loans_taken = excluded.negative_loans_taken,
+                    last_loan_at = COALESCE(excluded.last_loan_at, loan_state.last_loan_at),
+                    total_loans_taken = COALESCE(excluded.total_loans_taken, loan_state.total_loans_taken),
+                    total_fees_paid = COALESCE(excluded.total_fees_paid, loan_state.total_fees_paid),
+                    negative_loans_taken = COALESCE(excluded.negative_loans_taken, loan_state.negative_loans_taken),
+                    outstanding_principal = COALESCE(excluded.outstanding_principal, loan_state.outstanding_principal),
+                    outstanding_fee = COALESCE(excluded.outstanding_fee, loan_state.outstanding_fee),
                     updated_at = CURRENT_TIMESTAMP
                 """,
-                (discord_id, last_loan_at, total_loans_taken, total_fees_paid, negative_loans_taken),
+                (discord_id, last_loan_at, total_loans_taken, total_fees_paid,
+                 negative_loans_taken, outstanding_principal, outstanding_fee),
+            )
+
+    def clear_outstanding_loan(self, discord_id: int) -> None:
+        """Clear the outstanding loan (set principal and fee to 0)."""
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE loan_state
+                SET outstanding_principal = 0, outstanding_fee = 0, updated_at = CURRENT_TIMESTAMP
+                WHERE discord_id = ?
+                """,
+                (discord_id,),
             )
 
     def get_nonprofit_fund(self, guild_id: int | None) -> int:
@@ -160,6 +195,8 @@ class LoanService:
                 negative_loans_taken=0,
                 is_on_cooldown=False,
                 cooldown_ends_at=None,
+                outstanding_principal=0,
+                outstanding_fee=0,
             )
 
         last_loan = state["last_loan_at"]
@@ -174,6 +211,8 @@ class LoanService:
             negative_loans_taken=state["negative_loans_taken"],
             is_on_cooldown=is_on_cooldown,
             cooldown_ends_at=cooldown_ends if is_on_cooldown else None,
+            outstanding_principal=state["outstanding_principal"],
+            outstanding_fee=state["outstanding_fee"],
         )
 
     def can_take_loan(self, discord_id: int, amount: int) -> dict:
@@ -185,6 +224,16 @@ class LoanService:
         """
         state = self.get_state(discord_id)
         balance = self.player_repo.get_balance(discord_id)
+
+        # Check if player already has an outstanding loan
+        if state.has_outstanding_loan:
+            return {
+                "allowed": False,
+                "reason": "has_outstanding_loan",
+                "outstanding_principal": state.outstanding_principal,
+                "outstanding_fee": state.outstanding_fee,
+                "outstanding_total": state.outstanding_total,
+            }
 
         if state.is_on_cooldown:
             return {
@@ -206,18 +255,10 @@ class LoanService:
                 "max_amount": self.max_amount,
             }
 
-        # Calculate fee and check if total debt would exceed limit
+        # Calculate fee - with deferred repayment, we only add the amount now
         fee = int(amount * self.fee_rate)
         total_owed = amount + fee
-        new_balance = balance + amount - total_owed  # net change is -fee
-
-        if new_balance < -self.max_debt:
-            return {
-                "allowed": False,
-                "reason": "exceeds_debt_limit",
-                "current_balance": balance,
-                "max_debt": self.max_debt,
-            }
+        new_balance = balance + amount  # They receive the full loan amount
 
         return {
             "allowed": True,
@@ -229,13 +270,13 @@ class LoanService:
 
     def take_loan(self, discord_id: int, amount: int, guild_id: int | None = None) -> dict:
         """
-        Take out a loan.
+        Take out a loan with deferred repayment.
 
-        The player receives the full amount, then owes amount + fee.
-        Fee goes to the nonprofit fund.
+        The player receives the full loan amount immediately.
+        Repayment (principal + fee) happens when they play in a recorded match.
 
         Returns:
-            Dict with 'success', 'amount', 'fee', 'new_balance', 'nonprofit_total'
+            Dict with 'success', 'amount', 'fee', 'total_owed', 'new_balance'
             Also 'was_negative_loan' if they took a loan while already in debt (peak degen)
         """
         check = self.can_take_loan(discord_id, amount)
@@ -253,22 +294,20 @@ class LoanService:
         # Get current state for updating totals
         state = self.get_state(discord_id)
 
-        # Credit the loan amount, then debit the total owed
-        # Net effect: balance decreases by fee amount
-        self.player_repo.add_balance(discord_id, amount)  # Receive loan
-        self.player_repo.add_balance(discord_id, -total_owed)  # Owe amount + fee
+        # Credit the full loan amount - NO immediate debit
+        # Repayment happens when they play in a recorded match
+        self.player_repo.add_balance(discord_id, amount)
 
-        # Add fee to nonprofit fund
-        nonprofit_total = self.loan_repo.add_to_nonprofit_fund(guild_id, fee)
-
-        # Update loan state (increment negative_loans if applicable)
+        # Update loan state with outstanding amounts (fee goes to nonprofit on repayment)
         new_negative_loans = state.negative_loans_taken + (1 if was_negative_loan else 0)
         self.loan_repo.upsert_state(
             discord_id=discord_id,
             last_loan_at=now,
             total_loans_taken=state.total_loans_taken + 1,
-            total_fees_paid=state.total_fees_paid + fee,
+            total_fees_paid=state.total_fees_paid,  # Don't add fee yet - deferred
             negative_loans_taken=new_negative_loans,
+            outstanding_principal=amount,
+            outstanding_fee=fee,
         )
 
         new_balance = self.player_repo.get_balance(discord_id)
@@ -279,9 +318,55 @@ class LoanService:
             "fee": fee,
             "total_owed": total_owed,
             "new_balance": new_balance,
-            "nonprofit_total": nonprofit_total,
             "total_loans_taken": state.total_loans_taken + 1,
             "was_negative_loan": was_negative_loan,
+        }
+
+    def repay_loan(self, discord_id: int, guild_id: int | None = None) -> dict:
+        """
+        Repay an outstanding loan.
+
+        Called when a player participates in a recorded match.
+        Deducts principal + fee from balance, adds fee to nonprofit fund.
+
+        Returns:
+            Dict with repayment details or None if no outstanding loan.
+        """
+        state = self.get_state(discord_id)
+
+        if not state.has_outstanding_loan:
+            return {"success": False, "reason": "no_outstanding_loan"}
+
+        principal = state.outstanding_principal
+        fee = state.outstanding_fee
+        total_owed = principal + fee
+
+        balance_before = self.player_repo.get_balance(discord_id)
+
+        # Deduct the total owed from balance (can push into debt)
+        self.player_repo.add_balance(discord_id, -total_owed)
+
+        # Add fee to nonprofit fund
+        nonprofit_total = self.loan_repo.add_to_nonprofit_fund(guild_id, fee)
+
+        # Update loan state: clear outstanding, add fee to total_fees_paid
+        self.loan_repo.upsert_state(
+            discord_id=discord_id,
+            total_fees_paid=state.total_fees_paid + fee,
+            outstanding_principal=0,
+            outstanding_fee=0,
+        )
+
+        new_balance = self.player_repo.get_balance(discord_id)
+
+        return {
+            "success": True,
+            "principal": principal,
+            "fee": fee,
+            "total_repaid": total_owed,
+            "balance_before": balance_before,
+            "new_balance": new_balance,
+            "nonprofit_total": nonprofit_total,
         }
 
     def get_nonprofit_fund(self, guild_id: int | None) -> int:

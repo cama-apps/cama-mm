@@ -30,6 +30,7 @@ class MatchService:
         use_glicko: bool = True,
         betting_service: BettingService | None = None,
         pairings_repo: IPairingsRepository | None = None,
+        loan_service=None,
     ):
         """
         Initialize MatchService with required repository dependencies.
@@ -40,6 +41,7 @@ class MatchService:
             use_glicko: Whether to use Glicko rating system
             betting_service: Optional betting service for wager handling
             pairings_repo: Optional repository for pairwise player statistics
+            loan_service: Optional loan service for deferred repayment
         """
         self.player_repo = player_repo
         self.match_repo = match_repo
@@ -55,6 +57,7 @@ class MatchService:
         self._last_shuffle_by_guild: dict[int, dict] = {}
         self.betting_service = betting_service
         self.pairings_repo = pairings_repo
+        self.loan_service = loan_service
         # Guard against concurrent finalizations per guild
         self._recording_lock = threading.Lock()
         self._recording_in_progress: set[int] = set()
@@ -523,6 +526,20 @@ class MatchService:
                 if excluded_player_ids:
                     self.betting_service.award_exclusion_bonus(excluded_player_ids)
 
+            # Repay outstanding loans for all participants
+            loan_repayments = []
+            if self.loan_service:
+                all_participant_ids = winning_ids + losing_ids
+                for player_id in all_participant_ids:
+                    state = self.loan_service.get_state(player_id)
+                    if state.has_outstanding_loan:
+                        result = self.loan_service.repay_loan(player_id, guild_id)
+                        if result.get("success"):
+                            loan_repayments.append({
+                                "player_id": player_id,
+                                **result,
+                            })
+
             # Build Glicko players
             radiant_glicko = [self._load_glicko_player(pid) for pid in radiant_team_ids]
             dire_glicko = [self._load_glicko_player(pid) for pid in dire_team_ids]
@@ -572,6 +589,7 @@ class MatchService:
                 "winning_player_ids": winning_ids,
                 "losing_player_ids": losing_ids,
                 "bet_distributions": distributions,
+                "loan_repayments": loan_repayments,
             }
         finally:
             with self._recording_lock:

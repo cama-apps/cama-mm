@@ -469,8 +469,14 @@ class BettingCommands(commands.Cog):
         loan_info = ""
         if self.loan_service:
             loan_state = self.loan_service.get_state(user_id)
+            # Show outstanding loan prominently
+            if loan_state.has_outstanding_loan:
+                loan_info = (
+                    f"\n⚠️ **Outstanding loan:** {loan_state.outstanding_total} {JOPACOIN_EMOTE} "
+                    f"(repaid after next match)"
+                )
             if loan_state.total_loans_taken > 0:
-                loan_info = f"\n**Loans taken:** {loan_state.total_loans_taken} (fees paid: {loan_state.total_fees_paid})"
+                loan_info += f"\n**Loans taken:** {loan_state.total_loans_taken} (fees paid: {loan_state.total_fees_paid})"
             if loan_state.is_on_cooldown and loan_state.cooldown_ends_at:
                 import time
                 remaining = loan_state.cooldown_ends_at - int(time.time())
@@ -771,13 +777,16 @@ class BettingCommands(commands.Cog):
         # Loan stats if available
         if self.loan_service:
             loan_state = self.loan_service.get_state(target_user.id)
-            if loan_state.total_loans_taken > 0:
+            if loan_state.total_loans_taken > 0 or loan_state.has_outstanding_loan:
+                loan_lines = [
+                    f"**Taken:** {loan_state.total_loans_taken}",
+                    f"**Fees Paid:** {loan_state.total_fees_paid} {JOPACOIN_EMOTE}",
+                ]
+                if loan_state.has_outstanding_loan:
+                    loan_lines.append(f"⚠️ **Owed:** {loan_state.outstanding_total} {JOPACOIN_EMOTE}")
                 embed.add_field(
                     name="🏦 Loans",
-                    value=(
-                        f"**Taken:** {loan_state.total_loans_taken}\n"
-                        f"**Fees Paid:** {loan_state.total_fees_paid} {JOPACOIN_EMOTE}"
-                    ),
+                    value="\n".join(loan_lines),
                     inline=True,
                 )
 
@@ -989,7 +998,14 @@ class BettingCommands(commands.Cog):
         check = self.loan_service.can_take_loan(user_id, amount)
 
         if not check["allowed"]:
-            if check["reason"] == "on_cooldown":
+            if check["reason"] == "has_outstanding_loan":
+                await interaction.response.send_message(
+                    f"You already have an outstanding loan of **{check['outstanding_total']}** {JOPACOIN_EMOTE} "
+                    f"(principal: {check['outstanding_principal']}, fee: {check['outstanding_fee']}).\n\n"
+                    "Repay it by playing in a match first!",
+                )
+                return
+            elif check["reason"] == "on_cooldown":
                 remaining = check["cooldown_ends_at"] - int(__import__("time").time())
                 hours = remaining // 3600
                 minutes = (remaining % 3600) // 60
@@ -1042,13 +1058,18 @@ class BettingCommands(commands.Cog):
                 value=(
                     f"Borrowed: **{result['amount']}** {JOPACOIN_EMOTE}\n"
                     f"Fee ({fee_pct}%): **{result['fee']}** {JOPACOIN_EMOTE}\n"
-                    f"Net Result: **You're still broke**\n"
+                    f"Total Owed: **{result['total_owed']}** {JOPACOIN_EMOTE}\n"
                     f"New Balance: **{result['new_balance']}** {JOPACOIN_EMOTE}"
                 ),
                 inline=False,
             )
+            embed.add_field(
+                name="⚠️ Repayment",
+                value="You will repay the full amount **after your next match**.",
+                inline=False,
+            )
             embed.set_footer(
-                text="Loan #{} | You can't even bet with this".format(
+                text="Loan #{} | Go bet it all, you beautiful degen".format(
                     result["total_loans_taken"]
                 )
             )
@@ -1072,6 +1093,11 @@ class BettingCommands(commands.Cog):
                     f"Total Owed: **{result['total_owed']}** {JOPACOIN_EMOTE}\n"
                     f"New Balance: **{result['new_balance']}** {JOPACOIN_EMOTE}"
                 ),
+                inline=False,
+            )
+            embed.add_field(
+                name="📅 Repayment",
+                value="You will repay the full amount **after your next match**.",
                 inline=False,
             )
             embed.set_footer(

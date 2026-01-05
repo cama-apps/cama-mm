@@ -159,6 +159,7 @@ class SchemaManager:
             ("add_bet_payout_column", self._migration_add_bet_payout_column),
             ("create_loan_system", self._migration_create_loan_system),
             ("add_negative_loans_column", self._migration_add_negative_loans_column),
+            ("add_outstanding_loan_columns", self._migration_add_outstanding_loan_columns),
         ]
 
     # --- Migrations ---
@@ -446,4 +447,13 @@ class SchemaManager:
         """Track loans taken while already in debt (peak degen behavior)."""
         self._add_column_if_not_exists(
             cursor, "loan_state", "negative_loans_taken", "INTEGER DEFAULT 0"
+        )
+
+    def _migration_add_outstanding_loan_columns(self, cursor) -> None:
+        """Track outstanding loan principal and fee for deferred repayment."""
+        self._add_column_if_not_exists(
+            cursor, "loan_state", "outstanding_principal", "INTEGER DEFAULT 0"
+        )
+        self._add_column_if_not_exists(
+            cursor, "loan_state", "outstanding_fee", "INTEGER DEFAULT 0"
         )

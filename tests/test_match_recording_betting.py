@@ -298,5 +298,363 @@ class TestBettingEndToEnd:
         assert totals["dire"] == 10, f"Should show 10 jopacoin on Dire (4+6), got {totals['dire']}"
 
 
+class TestLoanRepaymentOnMatchRecord:
+    """End-to-end tests for loan repayment when matches are recorded."""
+
+    @pytest.fixture
+    def test_db(self):
+        """Create a temporary test database."""
+        fd, db_path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        db = Database(db_path)
+        yield db
+        try:
+            import sqlite3
+
+            sqlite3.connect(db_path).close()
+        except Exception:
+            pass
+        time.sleep(0.1)
+        try:
+            os.unlink(db_path)
+        except PermissionError:
+            time.sleep(0.2)
+            try:
+                os.unlink(db_path)
+            except Exception:
+                pass
+
+    @pytest.fixture
+    def services(self, test_db):
+        """Create all required services with loan integration."""
+        from services.loan_service import LoanRepository, LoanService
+
+        player_repo = PlayerRepository(test_db.db_path)
+        bet_repo = BetRepository(test_db.db_path)
+        match_repo = MatchRepository(test_db.db_path)
+        loan_repo = LoanRepository(test_db.db_path)
+
+        betting_service = BettingService(bet_repo, player_repo)
+        loan_service = LoanService(
+            loan_repo=loan_repo,
+            player_repo=player_repo,
+        )
+        match_service = MatchService(
+            player_repo=player_repo,
+            match_repo=match_repo,
+            use_glicko=False,
+            betting_service=betting_service,
+            loan_service=loan_service,
+        )
+
+        return {
+            "player_repo": player_repo,
+            "bet_repo": bet_repo,
+            "match_repo": match_repo,
+            "loan_repo": loan_repo,
+            "betting_service": betting_service,
+            "loan_service": loan_service,
+            "match_service": match_service,
+            "db": test_db,
+        }
+
+    @pytest.fixture
+    def test_players(self, services):
+        """Create 10 test players."""
+        db = services["db"]
+        player_ids = [3001, 3002, 3003, 3004, 3005, 3006, 3007, 3008, 3009, 3010]
+        for pid in player_ids:
+            db.add_player(
+                discord_id=pid,
+                discord_username=f"Player{pid}",
+                initial_mmr=1500,
+                glicko_rating=1500.0,
+                glicko_rd=350.0,
+                glicko_volatility=0.06,
+            )
+        return player_ids
+
+    def test_loan_repaid_when_borrower_wins(self, services, test_players):
+        """Loan is repaid when borrower participates in a match (winning team)."""
+        player_repo = services["player_repo"]
+        loan_service = services["loan_service"]
+        match_service = services["match_service"]
+
+        # Borrower starts with 0 balance (after default 3)
+        borrower_id = test_players[0]
+        player_repo.update_balance(borrower_id, 0)
+
+        # Take a loan of 50 (fee = 10, total owed = 60)
+        result = loan_service.take_loan(borrower_id, 50)
+        assert result["success"]
+        assert player_repo.get_balance(borrower_id) == 50  # Got full loan amount
+
+        # Verify outstanding loan exists
+        state = loan_service.get_state(borrower_id)
+        assert state.has_outstanding_loan
+        assert state.outstanding_principal == 50
+        assert state.outstanding_fee == 10
+
+        # Shuffle and record match (borrower is on radiant, radiant wins)
+        match_service.shuffle_players(test_players, guild_id=1)
+        pending = match_service.get_last_shuffle(1)
+
+        # Make sure borrower is on radiant for predictable test
+        if borrower_id not in pending["radiant_team_ids"]:
+            # Swap teams so borrower is on winning side
+            pending["radiant_team_ids"], pending["dire_team_ids"] = (
+                pending["dire_team_ids"],
+                pending["radiant_team_ids"],
+            )
+
+        # Record radiant win
+        result = match_service.record_match("radiant", guild_id=1)
+
+        # Loan should be repaid
+        state = loan_service.get_state(borrower_id)
+        assert not state.has_outstanding_loan
+        assert state.outstanding_principal == 0
+        assert state.outstanding_fee == 0
+
+        # Balance: started 0, +50 loan, -60 repayment, +win_reward = -10 + win_reward
+        expected = 50 - 60 + JOPACOIN_WIN_REWARD
+        assert player_repo.get_balance(borrower_id) == expected
+
+    def test_loan_repaid_when_borrower_loses(self, services, test_players):
+        """Loan is repaid even when borrower loses the match."""
+        player_repo = services["player_repo"]
+        loan_service = services["loan_service"]
+        match_service = services["match_service"]
+
+        borrower_id = test_players[0]
+        player_repo.update_balance(borrower_id, 0)
+
+        # Take loan of 50
+        loan_service.take_loan(borrower_id, 50)
+        assert player_repo.get_balance(borrower_id) == 50
+
+        # Shuffle match
+        match_service.shuffle_players(test_players, guild_id=1)
+        pending = match_service.get_last_shuffle(1)
+
+        # Make sure borrower is on dire (losing side)
+        if borrower_id not in pending["dire_team_ids"]:
+            pending["radiant_team_ids"], pending["dire_team_ids"] = (
+                pending["dire_team_ids"],
+                pending["radiant_team_ids"],
+            )
+
+        # Radiant wins (borrower loses)
+        match_service.record_match("radiant", guild_id=1)
+
+        # Loan still repaid
+        state = loan_service.get_state(borrower_id)
+        assert not state.has_outstanding_loan
+
+        # Balance: 0 + 50 loan - 60 repayment + 1 participation = -9 (debt)
+        assert player_repo.get_balance(borrower_id) == -9
+
+    def test_loan_not_repaid_if_not_participant(self, services, test_players):
+        """Loan is NOT repaid if borrower doesn't participate in the match."""
+        player_repo = services["player_repo"]
+        loan_service = services["loan_service"]
+        match_service = services["match_service"]
+        db = services["db"]
+
+        # Create a non-participant who takes a loan
+        spectator_id = 9999
+        db.add_player(
+            discord_id=spectator_id,
+            discord_username="Spectator",
+            initial_mmr=1500,
+            glicko_rating=1500.0,
+            glicko_rd=350.0,
+            glicko_volatility=0.06,
+        )
+        player_repo.update_balance(spectator_id, 0)
+
+        # Spectator takes loan
+        loan_service.take_loan(spectator_id, 50)
+        assert player_repo.get_balance(spectator_id) == 50
+
+        # Match is played by different players
+        match_service.shuffle_players(test_players, guild_id=1)
+        match_service.record_match("radiant", guild_id=1)
+
+        # Spectator's loan should NOT be repaid
+        state = loan_service.get_state(spectator_id)
+        assert state.has_outstanding_loan
+        assert state.outstanding_principal == 50
+        assert player_repo.get_balance(spectator_id) == 50  # Unchanged
+
+    def test_loan_with_spectator_bet(self, services, test_players):
+        """Spectator with loan bets on the match and loan repaid next game."""
+        player_repo = services["player_repo"]
+        loan_service = services["loan_service"]
+        betting_service = services["betting_service"]
+        match_service = services["match_service"]
+        db = services["db"]
+
+        # Create a spectator who takes a loan
+        spectator_id = 9998
+        db.add_player(
+            discord_id=spectator_id,
+            discord_username="Spectator",
+            initial_mmr=1500,
+            glicko_rating=1500.0,
+            glicko_rd=350.0,
+            glicko_volatility=0.06,
+        )
+        player_repo.update_balance(spectator_id, 0)
+
+        # Spectator takes loan of 100 (fee = 20)
+        loan_service.take_loan(spectator_id, 100)
+        assert player_repo.get_balance(spectator_id) == 100
+
+        # Match 1: spectator bets but doesn't play
+        match_service.shuffle_players(test_players, guild_id=1)
+        pending = match_service.get_last_shuffle(1)
+
+        # Spectator bets 30 on radiant
+        betting_service.place_bet(1, spectator_id, "radiant", 30, pending)
+        assert player_repo.get_balance(spectator_id) == 70  # 100 - 30
+
+        # Record radiant win
+        match_service.record_match("radiant", guild_id=1)
+
+        # Spectator won the bet: +30 back + 30 winnings = +60
+        # But loan NOT repaid (spectator didn't participate)
+        state = loan_service.get_state(spectator_id)
+        assert state.has_outstanding_loan
+        assert player_repo.get_balance(spectator_id) == 130  # 70 + 60
+
+        # Match 2: Now spectator plays and loan is repaid
+        new_players = test_players[:9] + [spectator_id]  # Replace one player with spectator
+        match_service.shuffle_players(new_players, guild_id=1)
+        match_service.record_match("radiant", guild_id=1)
+
+        # Loan repaid now
+        state = loan_service.get_state(spectator_id)
+        assert not state.has_outstanding_loan
+
+        # Balance: 130 - 120 repayment + (1 if lost, 2 if won)
+        balance = player_repo.get_balance(spectator_id)
+        # Winners get +2 (win bonus), losers get +1 (participation)
+        assert balance in [11, 12]  # 130 - 120 + 1 = 11, or 130 - 120 + 2 = 12
+
+    def test_loan_repayment_pushes_into_debt(self, services, test_players):
+        """Loan repayment can push player into debt when they've spent the money."""
+        player_repo = services["player_repo"]
+        loan_service = services["loan_service"]
+        match_service = services["match_service"]
+
+        borrower_id = test_players[0]
+        player_repo.update_balance(borrower_id, 0)
+
+        # Take max loan of 100 (fee = 20, total owed = 120)
+        loan_service.take_loan(borrower_id, 100)
+        assert player_repo.get_balance(borrower_id) == 100
+
+        # "Spend" the loan money (set balance to 0)
+        player_repo.update_balance(borrower_id, 0)
+
+        # Play a match
+        match_service.shuffle_players(test_players, guild_id=1)
+        match_service.record_match("radiant", guild_id=1)
+
+        # Loan repaid, player in debt
+        state = loan_service.get_state(borrower_id)
+        assert not state.has_outstanding_loan
+
+        # Balance: 0 - 120 + (1 if lost, 2 if won)
+        balance = player_repo.get_balance(borrower_id)
+        assert balance in [-119, -118]  # Lost: -119, Won: -118
+
+    def test_multiple_players_with_loans(self, services, test_players):
+        """Multiple players have loans, all repaid after match."""
+        player_repo = services["player_repo"]
+        loan_service = services["loan_service"]
+        match_service = services["match_service"]
+
+        # Two players take loans
+        borrower1 = test_players[0]
+        borrower2 = test_players[5]
+
+        player_repo.update_balance(borrower1, 0)
+        player_repo.update_balance(borrower2, 0)
+
+        loan_service.take_loan(borrower1, 50)  # owes 60
+        loan_service.take_loan(borrower2, 100)  # owes 120
+
+        # Shuffle and record
+        match_service.shuffle_players(test_players, guild_id=1)
+        match_service.record_match("radiant", guild_id=1)
+
+        # Both loans repaid
+        assert not loan_service.get_state(borrower1).has_outstanding_loan
+        assert not loan_service.get_state(borrower2).has_outstanding_loan
+
+        # Balances: loan - repayment + reward
+        # Winners get +2 (JOPACOIN_WIN_REWARD), losers get +1 (participation)
+        # Borrower1: 50 - 60 + (2 if won, 1 if lost)
+        # Borrower2: 100 - 120 + (2 if won, 1 if lost)
+        b1_balance = player_repo.get_balance(borrower1)
+        b2_balance = player_repo.get_balance(borrower2)
+
+        # If won: loan - repayment + win_reward
+        # If lost: loan - repayment + participation
+        assert b1_balance in [-9, -8]  # 50 - 60 + 1 = -9, or 50 - 60 + 2 = -8
+        assert b2_balance in [-19, -18]  # 100 - 120 + 1 = -19, or 100 - 120 + 2 = -18
+
+    def test_loan_repayment_fee_goes_to_nonprofit(self, services, test_players):
+        """Verify the loan fee is added to nonprofit fund on repayment."""
+        player_repo = services["player_repo"]
+        loan_service = services["loan_service"]
+        loan_repo = services["loan_repo"]
+        match_service = services["match_service"]
+
+        borrower_id = test_players[0]
+        player_repo.update_balance(borrower_id, 0)
+
+        # Get nonprofit fund before
+        nonprofit_before = loan_repo.get_nonprofit_fund(1)
+
+        # Take loan of 100 (fee = 20)
+        loan_service.take_loan(borrower_id, 100)
+
+        # Fee not added yet (deferred)
+        assert loan_repo.get_nonprofit_fund(1) == nonprofit_before
+
+        # Play and record match
+        match_service.shuffle_players(test_players, guild_id=1)
+        match_service.record_match("radiant", guild_id=1)
+
+        # Now fee should be in nonprofit fund
+        nonprofit_after = loan_repo.get_nonprofit_fund(1)
+        assert nonprofit_after == nonprofit_before + 20
+
+    def test_loan_repayment_result_in_match_record(self, services, test_players):
+        """Verify loan repayments are reported in match record result."""
+        player_repo = services["player_repo"]
+        loan_service = services["loan_service"]
+        match_service = services["match_service"]
+
+        borrower_id = test_players[0]
+        player_repo.update_balance(borrower_id, 0)
+        loan_service.take_loan(borrower_id, 75)  # owes 90
+
+        match_service.shuffle_players(test_players, guild_id=1)
+        result = match_service.record_match("radiant", guild_id=1)
+
+        # Check loan_repayments in result
+        assert "loan_repayments" in result
+        repayments = result["loan_repayments"]
+        assert len(repayments) == 1
+        assert repayments[0]["player_id"] == borrower_id
+        assert repayments[0]["principal"] == 75
+        assert repayments[0]["fee"] == 15
+        assert repayments[0]["total_repaid"] == 90
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
