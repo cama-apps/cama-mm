@@ -156,6 +156,7 @@ class SchemaManager:
             ("add_lobby_message_columns", self._migration_add_lobby_message_columns),
             ("add_participant_healing_lane_columns", self._migration_add_participant_healing_lane),
             ("add_lane_efficiency_column", self._migration_add_lane_efficiency),
+            ("add_bet_payout_column", self._migration_add_bet_payout_column),
         ]
 
     # --- Migrations ---
@@ -386,3 +387,25 @@ class SchemaManager:
     def _migration_add_lane_efficiency(self, cursor) -> None:
         """Add lane_efficiency column for laning phase performance (0-100)."""
         self._add_column_if_not_exists(cursor, "match_participants", "lane_efficiency", "INTEGER")
+
+    def _migration_add_bet_payout_column(self, cursor) -> None:
+        """Add payout column to bets and backfill historical data assuming house mode."""
+        self._add_column_if_not_exists(cursor, "bets", "payout", "INTEGER")
+
+        # Backfill historical settled bets with payout values
+        # Winners get: amount * leverage * 2 (stake returned + equal profit in house mode)
+        # Losers keep payout as NULL
+        cursor.execute(
+            """
+            UPDATE bets
+            SET payout = amount * COALESCE(leverage, 1) * 2
+            WHERE match_id IS NOT NULL
+            AND payout IS NULL
+            AND bet_id IN (
+                SELECT b.bet_id FROM bets b
+                JOIN matches m ON b.match_id = m.match_id
+                WHERE (m.winning_team = 1 AND b.team_bet_on = 'radiant')
+                   OR (m.winning_team = 2 AND b.team_bet_on = 'dire')
+            )
+            """
+        )
