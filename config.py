@@ -100,5 +100,13 @@ LOAN_COOLDOWN_SECONDS = _parse_int("LOAN_COOLDOWN_SECONDS", 259200)  # 3 days
 LOAN_MAX_AMOUNT = _parse_int("LOAN_MAX_AMOUNT", 100)  # Max loan amount
 LOAN_FEE_RATE = _parse_float("LOAN_FEE_RATE", 0.20)  # 20% flat fee
 
+# Disbursement configuration
+DISBURSE_MIN_FUND = _parse_int("DISBURSE_MIN_FUND", 250)  # Min fund to propose disbursement
+DISBURSE_QUORUM_PERCENTAGE = _parse_float("DISBURSE_QUORUM_PERCENTAGE", 0.40)  # 40% of players
+
+# Shop pricing
+SHOP_ANNOUNCE_COST = _parse_int("SHOP_ANNOUNCE_COST", 10)
+SHOP_ANNOUNCE_TARGET_COST = _parse_int("SHOP_ANNOUNCE_TARGET_COST", 100)
+
 # Steam/Valve API
 STEAM_API_KEY = os.getenv("STEAM_API_KEY")

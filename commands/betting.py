@@ -15,8 +15,10 @@ from config import (
     JOPACOIN_MIN_BET,
     LOAN_FEE_RATE,
 )
+from config import DISBURSE_MIN_FUND
 from services.bankruptcy_service import BankruptcyService
 from services.betting_service import BettingService
+from services.disburse_service import DisburseService
 from services.gambling_stats_service import GamblingStatsService
 from services.loan_service import LoanService
 from services.match_service import MatchService
@@ -111,6 +113,7 @@ class BettingCommands(commands.Cog):
         bankruptcy_service: BankruptcyService | None = None,
         gambling_stats_service: GamblingStatsService | None = None,
         loan_service: LoanService | None = None,
+        disburse_service: DisburseService | None = None,
     ):
         self.bot = bot
         self.betting_service = betting_service
@@ -119,6 +122,7 @@ class BettingCommands(commands.Cog):
         self.bankruptcy_service = bankruptcy_service
         self.gambling_stats_service = gambling_stats_service
         self.loan_service = loan_service
+        self.disburse_service = disburse_service
 
     async def _update_shuffle_message_wagers(self, guild_id: int | None) -> None:
         """
@@ -1119,29 +1123,412 @@ class BettingCommands(commands.Cog):
         embed = discord.Embed(
             title="💝 Jopacoin Nonprofit for Gambling Addiction",
             description=(
-                "All loan fees are donated to help those who have declared bankruptcy.\n\n"
+                "All loan fees are donated to help those with negative balance.\n\n"
                 "*\"We're here to help... by taking a cut of every loan.\"*"
             ),
             color=0xE91E63,  # Pink
         )
         embed.add_field(
-            name="Total Collected",
+            name="Available Funds",
             value=f"**{total}** {JOPACOIN_EMOTE}",
             inline=False,
         )
-        embed.add_field(
-            name="Beneficiaries",
-            value="Those who have filed for bankruptcy",
-            inline=True,
-        )
+
+        # Show status based on fund level
+        if total >= DISBURSE_MIN_FUND:
+            status_value = f"Ready for disbursement! (min: {DISBURSE_MIN_FUND})"
+        else:
+            status_value = f"Collecting... ({total}/{DISBURSE_MIN_FUND} needed)"
+
         embed.add_field(
             name="Status",
-            value="Funds pending distribution",
+            value=status_value,
             inline=True,
         )
-        embed.set_footer(text="Thank you for your generous (involuntary) donations!")
+
+        # Show last disbursement info if available
+        if self.disburse_service:
+            last_disburse = self.disburse_service.get_last_disbursement(guild_id)
+            if last_disburse:
+                import datetime
+
+                dt = datetime.datetime.fromtimestamp(
+                    last_disburse["disbursed_at"], tz=datetime.timezone.utc
+                )
+                time_str = f"<t:{last_disburse['disbursed_at']}:R>"
+
+                # Format recipients
+                recipients = last_disburse["recipients"]
+                if recipients:
+                    # Show up to 3 recipients
+                    recipient_strs = []
+                    for discord_id, amount in recipients[:3]:
+                        recipient_strs.append(f"<@{discord_id}>: +{amount}")
+                    if len(recipients) > 3:
+                        recipient_strs.append(f"+{len(recipients) - 3} more")
+                    recipients_text = "\n".join(recipient_strs)
+                else:
+                    recipients_text = "No recipients"
+
+                method_labels = {
+                    "even": "Even Split",
+                    "proportional": "Proportional",
+                    "neediest": "Neediest First",
+                }
+                method_label = method_labels.get(
+                    last_disburse["method"], last_disburse["method"]
+                )
+
+                embed.add_field(
+                    name="Last Disbursement",
+                    value=(
+                        f"**{last_disburse['total_amount']}** {JOPACOIN_EMOTE} "
+                        f"via {method_label}\n{time_str}\n{recipients_text}"
+                    ),
+                    inline=False,
+                )
+
+        embed.set_footer(text="Use /disburse propose to start a distribution vote!")
 
         await interaction.response.send_message(embed=embed)
+
+    @app_commands.command(
+        name="disburse", description="Propose or manage nonprofit fund distribution"
+    )
+    @app_commands.describe(action="Action to perform")
+    @app_commands.choices(
+        action=[
+            app_commands.Choice(name="propose", value="propose"),
+            app_commands.Choice(name="status", value="status"),
+            app_commands.Choice(name="reset", value="reset"),
+        ]
+    )
+    async def disburse(
+        self,
+        interaction: discord.Interaction,
+        action: app_commands.Choice[str] | None = None,
+    ):
+        """Propose, view, or reset nonprofit fund distribution voting."""
+        if not self.disburse_service:
+            await interaction.response.send_message(
+                "Disbursement service is not available.", ephemeral=True
+            )
+            return
+
+        guild_id = interaction.guild.id if interaction.guild else None
+        action_value = action.value if action else "status"
+
+        if action_value == "propose":
+            await self._disburse_propose(interaction, guild_id)
+        elif action_value == "status":
+            await self._disburse_status(interaction, guild_id)
+        elif action_value == "reset":
+            await self._disburse_reset(interaction, guild_id)
+
+    async def _disburse_propose(
+        self, interaction: discord.Interaction, guild_id: int | None
+    ):
+        """Create a new disbursement proposal."""
+        can, reason = self.disburse_service.can_propose(guild_id)
+        if not can:
+            if reason == "active_proposal_exists":
+                await interaction.response.send_message(
+                    "A disbursement vote is already active. Use `/disburse status` to see it.",
+                    ephemeral=True,
+                )
+            elif reason.startswith("insufficient_fund:"):
+                parts = reason.split(":")
+                current = int(parts[1])
+                needed = int(parts[2])
+                await interaction.response.send_message(
+                    f"Insufficient funds. Current: **{current}** {JOPACOIN_EMOTE}, "
+                    f"minimum required: **{needed}** {JOPACOIN_EMOTE}",
+                    ephemeral=True,
+                )
+            elif reason == "no_debtors":
+                await interaction.response.send_message(
+                    "No players with negative balance to receive funds.", ephemeral=True
+                )
+            else:
+                await interaction.response.send_message(
+                    f"Cannot create proposal: {reason}", ephemeral=True
+                )
+            return
+
+        try:
+            proposal = self.disburse_service.create_proposal(guild_id)
+        except ValueError as e:
+            await interaction.response.send_message(str(e), ephemeral=True)
+            return
+
+        # Create embed and view
+        embed = self._create_disburse_embed(proposal)
+        view = DisburseVoteView(self.disburse_service, self)
+
+        await interaction.response.send_message(embed=embed, view=view)
+
+        # Store message ID for updates
+        msg = await interaction.original_response()
+        self.disburse_service.set_proposal_message(
+            guild_id, msg.id, interaction.channel_id
+        )
+
+    async def _disburse_status(
+        self, interaction: discord.Interaction, guild_id: int | None
+    ):
+        """Show current proposal status."""
+        proposal = self.disburse_service.get_proposal(guild_id)
+        if not proposal:
+            await interaction.response.send_message(
+                "No active disbursement proposal. Use `/disburse propose` to create one.",
+                ephemeral=True,
+            )
+            return
+
+        embed = self._create_disburse_embed(proposal)
+        await interaction.response.send_message(embed=embed)
+
+    async def _disburse_reset(
+        self, interaction: discord.Interaction, guild_id: int | None
+    ):
+        """Reset (cancel) the active proposal. Admin only."""
+        # Check admin
+        if interaction.user.id not in self.bot.ADMIN_USER_IDS:
+            await interaction.response.send_message(
+                "Only admins can reset disbursement proposals.", ephemeral=True
+            )
+            return
+
+        success = self.disburse_service.reset_proposal(guild_id)
+        if success:
+            await interaction.response.send_message(
+                "Disbursement proposal has been reset.", ephemeral=False
+            )
+        else:
+            await interaction.response.send_message(
+                "No active proposal to reset.", ephemeral=True
+            )
+
+    def _create_disburse_embed(self, proposal) -> discord.Embed:
+        """Create embed for disbursement proposal."""
+        votes = proposal.votes
+        total_votes = proposal.total_votes
+        quorum = proposal.quorum_required
+        progress = proposal.quorum_progress
+
+        embed = discord.Embed(
+            title="💝 Nonprofit Fund Disbursement Vote",
+            description=(
+                f"Vote on how to distribute **{proposal.fund_amount}** {JOPACOIN_EMOTE} "
+                "to players with negative balance.\n\n"
+                "Click a button below to vote!"
+            ),
+            color=0xE91E63,  # Pink
+        )
+
+        # Voting options with counts
+        embed.add_field(
+            name="📊 Even Split",
+            value=f"Split equally (capped at debt)\n**{votes['even']}** votes",
+            inline=True,
+        )
+        embed.add_field(
+            name="📈 Proportional",
+            value=f"More debt = more funds\n**{votes['proportional']}** votes",
+            inline=True,
+        )
+        embed.add_field(
+            name="🎯 Neediest First",
+            value=f"All to most indebted\n**{votes['neediest']}** votes",
+            inline=True,
+        )
+
+        # Progress bar
+        bar_length = 20
+        filled = int(progress * bar_length)
+        bar = "█" * filled + "░" * (bar_length - filled)
+        embed.add_field(
+            name="Quorum Progress",
+            value=f"`{bar}` {total_votes}/{quorum} ({int(progress * 100)}%)",
+            inline=False,
+        )
+
+        if proposal.quorum_reached:
+            embed.add_field(
+                name="✅ Quorum Reached!",
+                value="The next vote will trigger automatic disbursement.",
+                inline=False,
+            )
+
+        embed.set_footer(text="Ties are broken in favor of Even Split")
+
+        return embed
+
+    async def update_disburse_message(self, guild_id: int | None):
+        """Update the disbursement proposal message with current vote counts."""
+        proposal = self.disburse_service.get_proposal(guild_id)
+        if not proposal or not proposal.message_id or not proposal.channel_id:
+            return
+
+        try:
+            channel = self.bot.get_channel(proposal.channel_id)
+            if not channel:
+                return
+
+            message = await channel.fetch_message(proposal.message_id)
+            if not message:
+                return
+
+            embed = self._create_disburse_embed(proposal)
+            await message.edit(embed=embed)
+        except discord.errors.NotFound:
+            pass
+        except Exception as e:
+            logger.warning(f"Failed to update disburse message: {e}")
+
+
+class DisburseVoteView(discord.ui.View):
+    """Persistent view for disbursement voting."""
+
+    def __init__(self, disburse_service: DisburseService, cog: "BettingCommands"):
+        super().__init__(timeout=None)  # Persistent - no timeout
+        self.disburse_service = disburse_service
+        self.cog = cog
+
+    async def _handle_vote(
+        self, interaction: discord.Interaction, method: str, label: str
+    ):
+        """Handle a vote button press."""
+        guild_id = interaction.guild.id if interaction.guild else None
+
+        # Check if user is registered
+        player = self.cog.player_service.get_player(interaction.user.id)
+        if not player:
+            await interaction.response.send_message(
+                "You must be registered to vote. Use `/register` first.",
+                ephemeral=True,
+            )
+            return
+
+        # Check for active proposal
+        proposal = self.disburse_service.get_proposal(guild_id)
+        if not proposal:
+            await interaction.response.send_message(
+                "This vote has ended or been reset.", ephemeral=True
+            )
+            return
+
+        try:
+            result = self.disburse_service.add_vote(
+                guild_id, interaction.user.id, method
+            )
+        except ValueError as e:
+            await interaction.response.send_message(str(e), ephemeral=True)
+            return
+
+        # Check if quorum reached and execute
+        if result["quorum_reached"]:
+            # Execute disbursement
+            try:
+                disbursement = self.disburse_service.execute_disbursement(guild_id)
+
+                # Build result message
+                if disbursement["total_disbursed"] == 0:
+                    result_msg = disbursement.get(
+                        "message", "No funds were distributed."
+                    )
+                else:
+                    recipients = disbursement["distributions"]
+                    recipient_lines = []
+                    for discord_id, amount in recipients[:10]:
+                        recipient_lines.append(f"<@{discord_id}>: +{amount}")
+                    if len(recipients) > 10:
+                        recipient_lines.append(f"...and {len(recipients) - 10} more")
+
+                    result_msg = (
+                        f"**{disbursement['total_disbursed']}** {JOPACOIN_EMOTE} "
+                        f"distributed via **{disbursement['method_label']}** to "
+                        f"{disbursement['recipient_count']} player(s):\n"
+                        + "\n".join(recipient_lines)
+                    )
+
+                # Send result as new message
+                embed = discord.Embed(
+                    title="💝 Disbursement Complete!",
+                    description=result_msg,
+                    color=0x00FF00,  # Green
+                )
+                await interaction.response.send_message(embed=embed)
+
+                # Disable buttons on the original message
+                try:
+                    if proposal.message_id and proposal.channel_id:
+                        channel = self.cog.bot.get_channel(proposal.channel_id)
+                        if channel:
+                            msg = await channel.fetch_message(proposal.message_id)
+                            # Create disabled view
+                            disabled_view = discord.ui.View(timeout=None)
+                            for item in self.children:
+                                if isinstance(item, discord.ui.Button):
+                                    new_btn = discord.ui.Button(
+                                        label=item.label,
+                                        emoji=item.emoji,
+                                        style=discord.ButtonStyle.secondary,
+                                        disabled=True,
+                                        custom_id=item.custom_id,
+                                    )
+                                    disabled_view.add_item(new_btn)
+                            await msg.edit(view=disabled_view)
+                except Exception as e:
+                    logger.warning(f"Failed to disable vote buttons: {e}")
+
+            except ValueError as e:
+                await interaction.response.send_message(
+                    f"Disbursement failed: {e}", ephemeral=True
+                )
+        else:
+            # Just acknowledge the vote
+            await interaction.response.send_message(
+                f"Your vote for **{label}** has been recorded! "
+                f"({result['total_votes']}/{result['quorum_required']} for quorum)",
+                ephemeral=True,
+            )
+
+            # Update the embed
+            await self.cog.update_disburse_message(guild_id)
+
+    @discord.ui.button(
+        label="Even Split",
+        emoji="📊",
+        style=discord.ButtonStyle.primary,
+        custom_id="disburse:even",
+    )
+    async def vote_even(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        await self._handle_vote(interaction, "even", "Even Split")
+
+    @discord.ui.button(
+        label="Proportional",
+        emoji="📈",
+        style=discord.ButtonStyle.primary,
+        custom_id="disburse:proportional",
+    )
+    async def vote_proportional(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        await self._handle_vote(interaction, "proportional", "Proportional")
+
+    @discord.ui.button(
+        label="Neediest First",
+        emoji="🎯",
+        style=discord.ButtonStyle.primary,
+        custom_id="disburse:neediest",
+    )
+    async def vote_neediest(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        await self._handle_vote(interaction, "neediest", "Neediest First")
 
 
 async def setup(bot: commands.Bot):
@@ -1157,16 +1544,21 @@ async def setup(bot: commands.Bot):
     bankruptcy_service = getattr(bot, "bankruptcy_service", None)
     gambling_stats_service = getattr(bot, "gambling_stats_service", None)
     loan_service = getattr(bot, "loan_service", None)
-    # bankruptcy_service, gambling_stats_service, and loan_service are optional
+    disburse_service = getattr(bot, "disburse_service", None)
+    # bankruptcy_service, gambling_stats_service, loan_service, disburse_service are optional
 
-    await bot.add_cog(
-        BettingCommands(
-            bot,
-            betting_service,
-            match_service,
-            player_service,
-            bankruptcy_service,
-            gambling_stats_service,
-            loan_service,
-        )
+    cog = BettingCommands(
+        bot,
+        betting_service,
+        match_service,
+        player_service,
+        bankruptcy_service,
+        gambling_stats_service,
+        loan_service,
+        disburse_service,
     )
+    await bot.add_cog(cog)
+
+    # Register persistent view for disbursement voting
+    if disburse_service:
+        bot.add_view(DisburseVoteView(disburse_service, cog))

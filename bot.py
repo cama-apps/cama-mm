@@ -72,8 +72,10 @@ from services.bankruptcy_service import BankruptcyRepository, BankruptcyService
 from services.betting_service import BettingService
 from services.gambling_stats_service import GamblingStatsService
 from services.garnishment_service import GarnishmentService
+from services.disburse_service import DisburseService
 from services.loan_service import LoanRepository, LoanService
 from services.lobby_service import LobbyService
+from repositories.disburse_repository import DisburseRepository
 from services.match_service import MatchService
 from services.permissions import has_admin_permission  # noqa: F401 - used by tests
 from services.player_service import PlayerService
@@ -263,6 +265,10 @@ def _init_services():
     loan_repo = LoanRepository(DB_PATH)
     loan_service = LoanService(loan_repo, player_repo)
 
+    # Create disburse service for nonprofit fund distribution
+    disburse_repo = DisburseRepository(DB_PATH)
+    disburse_service = DisburseService(disburse_repo, player_repo, loan_repo)
+
     # Create betting service with garnishment and bankruptcy support
     betting_service = BettingService(
         bet_repo,
@@ -308,6 +314,7 @@ def _init_services():
     bot.betting_service = betting_service
     bot.bankruptcy_service = bankruptcy_service
     bot.loan_service = loan_service
+    bot.disburse_service = disburse_service
 
     # Create gambling stats service for degen score and leaderboards
     gambling_stats_service = GamblingStatsService(
@@ -338,6 +345,7 @@ EXTENSIONS = [
     "commands.advstats",
     "commands.enrichment",
     "commands.dota_info",
+    "commands.shop",
 ]
 
 

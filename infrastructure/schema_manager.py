@@ -160,6 +160,7 @@ class SchemaManager:
             ("create_loan_system", self._migration_create_loan_system),
             ("add_negative_loans_column", self._migration_add_negative_loans_column),
             ("add_outstanding_loan_columns", self._migration_add_outstanding_loan_columns),
+            ("create_disburse_system", self._migration_create_disburse_system),
         ]
 
     # --- Migrations ---
@@ -456,4 +457,52 @@ class SchemaManager:
         )
         self._add_column_if_not_exists(
             cursor, "loan_state", "outstanding_fee", "INTEGER DEFAULT 0"
+        )
+
+    def _migration_create_disburse_system(self, cursor) -> None:
+        """Create tables for nonprofit fund disbursement voting system."""
+        # Active proposal per guild
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS disburse_proposals (
+                guild_id INTEGER PRIMARY KEY,
+                proposal_id INTEGER NOT NULL,
+                message_id INTEGER,
+                channel_id INTEGER,
+                fund_amount INTEGER NOT NULL,
+                quorum_required INTEGER NOT NULL,
+                status TEXT DEFAULT 'active',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+
+        # Vote tracking
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS disburse_votes (
+                guild_id INTEGER NOT NULL,
+                proposal_id INTEGER NOT NULL,
+                discord_id INTEGER NOT NULL,
+                vote_method TEXT NOT NULL,
+                voted_at INTEGER NOT NULL,
+                PRIMARY KEY (guild_id, proposal_id, discord_id)
+            )
+            """
+        )
+
+        # Disbursement history (for /nonprofit command)
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS disburse_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                disbursed_at INTEGER NOT NULL,
+                total_amount INTEGER NOT NULL,
+                method TEXT NOT NULL,
+                recipient_count INTEGER NOT NULL,
+                recipients TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
         )

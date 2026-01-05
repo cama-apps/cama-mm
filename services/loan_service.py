@@ -152,6 +152,68 @@ class LoanRepository(BaseRepository):
             row = cursor.fetchone()
             return row["total_collected"] if row else amount
 
+    def disburse_fund_atomic(
+        self,
+        guild_id: int | None,
+        distributions: list[tuple[int, int]],
+    ) -> int:
+        """
+        Atomically deduct total from nonprofit fund and credit players.
+
+        Args:
+            guild_id: Guild ID
+            distributions: List of (discord_id, amount) tuples
+
+        Returns:
+            Total amount distributed
+
+        Raises:
+            ValueError if insufficient funds in nonprofit
+        """
+        if not distributions:
+            return 0
+
+        normalized_guild_id = guild_id if guild_id is not None else 0
+        total = sum(amount for _, amount in distributions)
+
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("BEGIN IMMEDIATE")
+
+            # Verify sufficient funds
+            cursor.execute(
+                "SELECT total_collected FROM nonprofit_fund WHERE guild_id = ?",
+                (normalized_guild_id,),
+            )
+            row = cursor.fetchone()
+            if not row or row["total_collected"] < total:
+                available = row["total_collected"] if row else 0
+                raise ValueError(
+                    f"Insufficient funds in nonprofit. Available: {available}, needed: {total}"
+                )
+
+            # Deduct from nonprofit
+            cursor.execute(
+                """
+                UPDATE nonprofit_fund
+                SET total_collected = total_collected - ?, updated_at = CURRENT_TIMESTAMP
+                WHERE guild_id = ?
+                """,
+                (total, normalized_guild_id),
+            )
+
+            # Credit players
+            cursor.executemany(
+                """
+                UPDATE players
+                SET jopacoin_balance = jopacoin_balance + ?, updated_at = CURRENT_TIMESTAMP
+                WHERE discord_id = ?
+                """,
+                [(amount, discord_id) for discord_id, amount in distributions],
+            )
+
+            return total
+
 
 class LoanService:
     """
