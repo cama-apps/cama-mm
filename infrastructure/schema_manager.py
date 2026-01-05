@@ -157,6 +157,7 @@ class SchemaManager:
             ("add_participant_healing_lane_columns", self._migration_add_participant_healing_lane),
             ("add_lane_efficiency_column", self._migration_add_lane_efficiency),
             ("add_bet_payout_column", self._migration_add_bet_payout_column),
+            ("create_loan_system", self._migration_create_loan_system),
         ]
 
     # --- Migrations ---
@@ -409,3 +410,33 @@ class SchemaManager:
             )
             """
         )
+
+    def _migration_create_loan_system(self, cursor) -> None:
+        """Create tables for loan system and lowest balance tracking."""
+        # Loan state table (similar to bankruptcy_state)
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS loan_state (
+                discord_id INTEGER PRIMARY KEY,
+                last_loan_at INTEGER,
+                total_loans_taken INTEGER DEFAULT 0,
+                total_fees_paid INTEGER DEFAULT 0,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (discord_id) REFERENCES players(discord_id)
+            )
+            """
+        )
+
+        # Nonprofit fund for gambling addiction (collects loan fees)
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS nonprofit_fund (
+                guild_id INTEGER PRIMARY KEY DEFAULT 0,
+                total_collected INTEGER DEFAULT 0,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+
+        # Add lowest_balance_ever to players for credit/degen scoring
+        self._add_column_if_not_exists(cursor, "players", "lowest_balance_ever", "INTEGER")

@@ -13,9 +13,13 @@ from config import (
     BANKRUPTCY_PENALTY_RATE,
     GARNISHMENT_PERCENTAGE,
     JOPACOIN_MIN_BET,
+    LOAN_COOLDOWN_SECONDS,
+    LOAN_FEE_RATE,
+    LOAN_MAX_AMOUNT,
 )
 from services.bankruptcy_service import BankruptcyService
 from services.betting_service import BettingService
+from services.loan_service import LoanService
 from services.gambling_stats_service import GamblingStatsService
 from services.match_service import MatchService
 from services.player_service import PlayerService
@@ -60,6 +64,28 @@ BANKRUPTCY_SUCCESS_MESSAGES = [
     "Your debt of {debt} jopacoin has been forgiven. You're now starting from nothing. Again.",
 ]
 
+LOAN_SUCCESS_MESSAGES = [
+    "The bank approves your request. {amount} {emote} deposited. You now owe {owed}. Good luck.",
+    "Money acquired. Dignity sacrificed. {amount} {emote} in, {owed} to repay. The cycle continues.",
+    "Loan approved. {amount} {emote} hits your account. Don't spend it all in one bet. (You will.)",
+    "The Jopacoin Lending Co. smiles upon you. {amount} {emote} granted. {fee} {emote} goes to charity.",
+    "Fresh jopacoin, fresh start, same gambling addiction. {amount} {emote} received.",
+]
+
+LOAN_DENIED_COOLDOWN_MESSAGES = [
+    "You just took a loan! The bank needs time to process your crippling debt.",
+    "One loan every 3 days. We have to pretend we're responsible lenders.",
+    "Your loan application is on cooldown. Maybe reflect on your choices.",
+    "The Jopacoin Bank says: 'Come back later, we're still counting your last loan's fees.'",
+]
+
+LOAN_DENIED_DEBT_MESSAGES = [
+    "You're already too deep in debt. Even we have standards.",
+    "Loan denied. Your credit is worse than your gambling decisions.",
+    "The bank has reviewed your finances and respectfully declined to make things worse.",
+    "ERROR: Maximum debt capacity reached. Try bankruptcy first.",
+]
+
 
 class BettingCommands(commands.Cog):
     """Slash commands to place and view wagers."""
@@ -72,6 +98,7 @@ class BettingCommands(commands.Cog):
         player_service: PlayerService,
         bankruptcy_service: BankruptcyService | None = None,
         gambling_stats_service: GamblingStatsService | None = None,
+        loan_service: LoanService | None = None,
     ):
         self.bot = bot
         self.betting_service = betting_service
@@ -79,6 +106,7 @@ class BettingCommands(commands.Cog):
         self.player_service = player_service
         self.bankruptcy_service = bankruptcy_service
         self.gambling_stats_service = gambling_stats_service
+        self.loan_service = loan_service
 
     async def _update_shuffle_message_wagers(self, guild_id: int | None) -> None:
         """
@@ -423,9 +451,22 @@ class BettingCommands(commands.Cog):
                     f"for {state.penalty_games_remaining} more game(s)"
                 )
 
+        # Check for loan info
+        loan_info = ""
+        if self.loan_service:
+            loan_state = self.loan_service.get_state(user_id)
+            if loan_state.total_loans_taken > 0:
+                loan_info = f"\n**Loans taken:** {loan_state.total_loans_taken} (fees paid: {loan_state.total_fees_paid})"
+            if loan_state.is_on_cooldown and loan_state.cooldown_ends_at:
+                import time
+                remaining = loan_state.cooldown_ends_at - int(time.time())
+                hours = remaining // 3600
+                minutes = (remaining % 3600) // 60
+                loan_info += f"\n**Loan cooldown:** {hours}h {minutes}m remaining"
+
         if balance >= 0:
             await interaction.followup.send(
-                f"{interaction.user.mention} has {balance} {JOPACOIN_EMOTE}.{penalty_info}",
+                f"{interaction.user.mention} has {balance} {JOPACOIN_EMOTE}.{penalty_info}{loan_info}",
                 ephemeral=True,
             )
         else:
@@ -434,8 +475,9 @@ class BettingCommands(commands.Cog):
 
             await interaction.followup.send(
                 f"{interaction.user.mention} has **{balance}** {JOPACOIN_EMOTE} (in debt)\n"
-                f"Garnishment: {garnishment_pct}% of winnings go to debt repayment{penalty_info}\n\n"
-                f"Use `/bankruptcy` to clear your debt (with penalties).",
+                f"Garnishment: {garnishment_pct}% of winnings go to debt repayment{penalty_info}{loan_info}\n\n"
+                f"Use `/bankruptcy` to clear your debt (with penalties).\n"
+                f"Use `/loan` to borrow more jopacoin (with a fee).",
                 ephemeral=True,
             )
 
@@ -699,17 +741,31 @@ class BettingCommands(commands.Cog):
             inline=True,
         )
 
-        # Paper hands
+        # Paper hands - now highlighted since removed from degen score
         if stats.matches_played > 0:
             paper_rate = stats.paper_hands_count / stats.matches_played * 100
+            paper_emoji = "📄" if paper_rate >= 30 else "🤔" if paper_rate >= 10 else "💎"
             embed.add_field(
-                name="Paper Hands",
+                name=f"{paper_emoji} Paper Hands",
                 value=(
                     f"Played: {stats.matches_played} matches\n"
                     f"No self-bet: {stats.paper_hands_count} ({paper_rate:.0f}%)"
                 ),
                 inline=True,
             )
+
+        # Loan stats if available
+        if self.loan_service:
+            loan_state = self.loan_service.get_state(target_user.id)
+            if loan_state.total_loans_taken > 0:
+                embed.add_field(
+                    name="🏦 Loans",
+                    value=(
+                        f"**Taken:** {loan_state.total_loans_taken}\n"
+                        f"**Fees Paid:** {loan_state.total_fees_paid} {JOPACOIN_EMOTE}"
+                    ),
+                    inline=True,
+                )
 
         await interaction.followup.send(embed=embed)
 
@@ -891,6 +947,140 @@ class BettingCommands(commands.Cog):
 
         await interaction.followup.send(embed=embed)
 
+    @app_commands.command(name="loan", description="Borrow jopacoin (with a fee)")
+    @app_commands.describe(amount="Amount to borrow (max 100)")
+    async def loan(
+        self,
+        interaction: discord.Interaction,
+        amount: int,
+    ):
+        """Take out a loan. You receive the full amount but owe amount + fee."""
+        if not self.loan_service:
+            await interaction.response.send_message(
+                "Loan service is not available.", ephemeral=True
+            )
+            return
+
+        user_id = interaction.user.id
+        guild_id = interaction.guild.id if interaction.guild else None
+
+        # Check if registered
+        if not self.player_service.is_registered(user_id):
+            await interaction.response.send_message(
+                "You need to `/register` before taking loans.", ephemeral=True
+            )
+            return
+
+        # Check eligibility
+        check = self.loan_service.can_take_loan(user_id, amount)
+
+        if not check["allowed"]:
+            if check["reason"] == "on_cooldown":
+                remaining = check["cooldown_ends_at"] - int(__import__("time").time())
+                hours = remaining // 3600
+                minutes = (remaining % 3600) // 60
+                msg = random.choice(LOAN_DENIED_COOLDOWN_MESSAGES)
+                await interaction.response.send_message(
+                    f"{msg}\n\n⏳ Cooldown ends in **{hours}h {minutes}m**.",
+                    ephemeral=True,
+                )
+                return
+            elif check["reason"] == "exceeds_debt_limit":
+                msg = random.choice(LOAN_DENIED_DEBT_MESSAGES)
+                await interaction.response.send_message(
+                    f"{msg}\n\nCurrent balance: **{check['current_balance']}** {JOPACOIN_EMOTE}",
+                    ephemeral=True,
+                )
+                return
+            elif check["reason"] == "exceeds_max":
+                await interaction.response.send_message(
+                    f"Maximum loan amount is **{check['max_amount']}** {JOPACOIN_EMOTE}.",
+                    ephemeral=True,
+                )
+                return
+            elif check["reason"] == "invalid_amount":
+                await interaction.response.send_message(
+                    "Loan amount must be positive.", ephemeral=True
+                )
+                return
+
+        # Take the loan
+        result = self.loan_service.take_loan(user_id, amount, guild_id)
+
+        if not result["success"]:
+            await interaction.response.send_message(
+                "Failed to process loan. Please try again.", ephemeral=True
+            )
+            return
+
+        msg = random.choice(LOAN_SUCCESS_MESSAGES).format(
+            amount=result["amount"],
+            owed=result["total_owed"],
+            fee=result["fee"],
+            emote=JOPACOIN_EMOTE,
+        )
+
+        fee_pct = int(LOAN_FEE_RATE * 100)
+        embed = discord.Embed(
+            title="🏦 Loan Approved",
+            description=msg,
+            color=0x2ECC71,  # Green
+        )
+        embed.add_field(
+            name="Details",
+            value=(
+                f"Borrowed: **{result['amount']}** {JOPACOIN_EMOTE}\n"
+                f"Fee ({fee_pct}%): **{result['fee']}** {JOPACOIN_EMOTE}\n"
+                f"Total Owed: **{result['total_owed']}** {JOPACOIN_EMOTE}\n"
+                f"New Balance: **{result['new_balance']}** {JOPACOIN_EMOTE}"
+            ),
+            inline=False,
+        )
+        embed.set_footer(
+            text=f"Loan #{result['total_loans_taken']} | Fee donated to Gambling Addiction Nonprofit"
+        )
+
+        await interaction.response.send_message(embed=embed)
+
+    @app_commands.command(name="nonprofit", description="View the Gambling Addiction Nonprofit fund")
+    async def nonprofit(self, interaction: discord.Interaction):
+        """View how much has been collected for the nonprofit."""
+        if not self.loan_service:
+            await interaction.response.send_message(
+                "Loan service is not available.", ephemeral=True
+            )
+            return
+
+        guild_id = interaction.guild.id if interaction.guild else None
+        total = self.loan_service.get_nonprofit_fund(guild_id)
+
+        embed = discord.Embed(
+            title="💝 Jopacoin Nonprofit for Gambling Addiction",
+            description=(
+                "All loan fees are donated to help those who have declared bankruptcy.\n\n"
+                "*\"We're here to help... by taking a cut of every loan.\"*"
+            ),
+            color=0xE91E63,  # Pink
+        )
+        embed.add_field(
+            name="Total Collected",
+            value=f"**{total}** {JOPACOIN_EMOTE}",
+            inline=False,
+        )
+        embed.add_field(
+            name="Beneficiaries",
+            value="Those who have filed for bankruptcy",
+            inline=True,
+        )
+        embed.add_field(
+            name="Status",
+            value="Funds pending distribution",
+            inline=True,
+        )
+        embed.set_footer(text="Thank you for your generous (involuntary) donations!")
+
+        await interaction.response.send_message(embed=embed)
+
 
 async def setup(bot: commands.Bot):
     betting_service = getattr(bot, "betting_service", None)
@@ -904,7 +1094,8 @@ async def setup(bot: commands.Bot):
         raise RuntimeError("Player service not registered on bot.")
     bankruptcy_service = getattr(bot, "bankruptcy_service", None)
     gambling_stats_service = getattr(bot, "gambling_stats_service", None)
-    # bankruptcy_service and gambling_stats_service are optional
+    loan_service = getattr(bot, "loan_service", None)
+    # bankruptcy_service, gambling_stats_service, and loan_service are optional
 
     await bot.add_cog(
         BettingCommands(
@@ -914,5 +1105,6 @@ async def setup(bot: commands.Bot):
             player_service,
             bankruptcy_service,
             gambling_stats_service,
+            loan_service,
         )
     )

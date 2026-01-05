@@ -12,12 +12,16 @@ if TYPE_CHECKING:
     from services.bankruptcy_service import BankruptcyService
 
 
-# Degen score weights
-LEVERAGE_WEIGHT = 40
-FREQUENCY_WEIGHT = 20
-BANKRUPTCY_WEIGHT = 20
-LOSS_CHASE_WEIGHT = 10
-PAPER_HANDS_WEIGHT = 10
+# Degen score weights (total = 100)
+MAX_LEVERAGE_WEIGHT = 25  # % of bets at 5x leverage
+BET_SIZE_WEIGHT = 25  # Avg bet size vs typical income
+DEBT_DEPTH_WEIGHT = 20  # How deep into debt (lowest_balance_ever)
+BANKRUPTCY_WEIGHT = 15  # Bankruptcy count
+FREQUENCY_WEIGHT = 10  # % of matches bet on
+LOSS_CHASE_WEIGHT = 5  # Rate of increasing bet after loss
+
+# Typical income per match for bet size calculation (participation + avg win bonus)
+TYPICAL_INCOME_PER_MATCH = 3
 
 # Degen tiers
 DEGEN_TIERS = [
@@ -38,11 +42,12 @@ class DegenScoreBreakdown:
     title: str
     emoji: str
     tagline: str
-    leverage_score: int
-    frequency_score: int
+    max_leverage_score: int  # % of bets at 5x
+    bet_size_score: int  # Avg bet vs income
+    debt_depth_score: int  # Lowest balance reached
     bankruptcy_score: int
+    frequency_score: int
     loss_chase_score: int
-    paper_hands_score: int
     flavor_texts: list[str]
 
 
@@ -180,34 +185,64 @@ class GamblingStatsService:
         """Calculate the degen score with component breakdown."""
         history = self.bet_repo.get_player_bet_history(discord_id)
         leverage_dist = self.bet_repo.get_player_leverage_distribution(discord_id)
-        paper_hands_data = self.bet_repo.get_player_matches_without_self_bet(discord_id)
         loss_chase_data = self.bet_repo.count_player_loss_chasing(discord_id)
 
         flavor_texts = []
-
-        # 1. Leverage addiction (0-40)
         total_bets = sum(leverage_dist.values())
+
+        # 1. Max leverage addiction (0-25) - % of bets at 5x
         if total_bets > 0:
-            weighted_leverage = sum(lev * count for lev, count in leverage_dist.items()) / total_bets
-            # Scale: 1x = 0, 5x = 40
-            leverage_score = min(int((weighted_leverage - 1) / 4 * LEVERAGE_WEIGHT), LEVERAGE_WEIGHT)
+            pct_5x = leverage_dist.get(5, 0) / total_bets
+            max_leverage_score = min(int(pct_5x * MAX_LEVERAGE_WEIGHT), MAX_LEVERAGE_WEIGHT)
 
-            # Flavor text
-            if leverage_dist.get(5, 0) > 0:
-                pct_5x = leverage_dist.get(5, 0) / total_bets * 100
-                if pct_5x >= 20:
-                    flavor_texts.append("5x addict")
-                elif pct_5x >= 5:
-                    flavor_texts.append("5x enthusiast")
-            if weighted_leverage >= 3:
-                flavor_texts.append("leverage junkie")
+            if pct_5x >= 0.5:
+                flavor_texts.append("5x addict")
+            elif pct_5x >= 0.2:
+                flavor_texts.append("5x enthusiast")
         else:
-            leverage_score = 0
+            max_leverage_score = 0
 
-        # 2. Bet frequency (0-20)
-        # Count distinct matches bet on vs total matches that happened
+        # 2. Bet size (0-25) - avg effective bet vs typical income
+        if history:
+            total_wagered = sum(b["effective_bet"] for b in history)
+            avg_bet = total_wagered / len(history)
+            # Ratio: 1:1 = 0pts, 10:1+ = 25pts (linear scale)
+            bet_ratio = avg_bet / TYPICAL_INCOME_PER_MATCH
+            bet_size_score = min(int((bet_ratio - 1) / 9 * BET_SIZE_WEIGHT), BET_SIZE_WEIGHT)
+            bet_size_score = max(0, bet_size_score)  # Floor at 0
+
+            if bet_ratio >= 10:
+                flavor_texts.append("high roller")
+            elif bet_ratio >= 5:
+                flavor_texts.append("big bets")
+        else:
+            bet_size_score = 0
+
+        # 3. Debt depth (0-20) - lowest balance ever reached
+        lowest_balance = self.player_repo.get_lowest_balance(discord_id)
+        if lowest_balance is not None and lowest_balance < 0:
+            # Scale: 0 = 0pts, -500 = 20pts
+            from config import MAX_DEBT
+            debt_ratio = min(abs(lowest_balance) / MAX_DEBT, 1.0)
+            debt_depth_score = int(debt_ratio * DEBT_DEPTH_WEIGHT)
+
+            if lowest_balance <= -400:
+                flavor_texts.append("debt lord")
+            elif lowest_balance <= -200:
+                flavor_texts.append("deep in debt")
+        else:
+            debt_depth_score = 0
+
+        # 4. Bankruptcy count (0-15) - each = 5pts, max 15
+        bankruptcy_count = self.bet_repo.get_player_bankruptcy_count(discord_id)
+        bankruptcy_score = min(bankruptcy_count * 5, BANKRUPTCY_WEIGHT)
+        if bankruptcy_count >= 3:
+            flavor_texts.append(f"{bankruptcy_count} bankruptcies")
+        elif bankruptcy_count > 0:
+            flavor_texts.append(f"{bankruptcy_count} bankruptcy")
+
+        # 5. Bet frequency (0-10) - % of matches bet on
         matches_bet_on = len(set(b["match_id"] for b in history))
-        # Get total match count from match_repo
         with self.match_repo.connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT COUNT(*) as count FROM matches WHERE winning_team IS NOT NULL")
@@ -217,44 +252,25 @@ class GamblingStatsService:
             frequency_rate = matches_bet_on / total_matches
             frequency_score = min(int(frequency_rate * FREQUENCY_WEIGHT), FREQUENCY_WEIGHT)
             if frequency_rate >= 0.8:
-                flavor_texts.append("never misses a match")
-            elif frequency_rate >= 0.5:
-                flavor_texts.append("frequent bettor")
+                flavor_texts.append("never misses")
         else:
             frequency_score = 0
 
-        # 3. Bankruptcy count (0-20)
-        bankruptcy_count = self.bet_repo.get_player_bankruptcy_count(discord_id)
-        # Each bankruptcy adds 7 points, capped at 20
-        bankruptcy_score = min(bankruptcy_count * 7, BANKRUPTCY_WEIGHT)
-        if bankruptcy_count >= 3:
-            flavor_texts.append(f"{bankruptcy_count} bankruptcies")
-        elif bankruptcy_count > 0:
-            flavor_texts.append(f"{bankruptcy_count} bankruptcy")
-
-        # 4. Loss chasing (0-10)
+        # 6. Loss chasing (0-5)
         loss_chase_rate = loss_chase_data["loss_chase_rate"]
         loss_chase_score = min(int(loss_chase_rate * LOSS_CHASE_WEIGHT), LOSS_CHASE_WEIGHT)
         if loss_chase_rate >= 0.5:
             flavor_texts.append("loss chaser")
-        elif loss_chase_rate >= 0.3:
-            flavor_texts.append("doubles down")
-
-        # 5. Paper hands (0-10)
-        matches_played = paper_hands_data["matches_played"]
-        paper_hands_count = paper_hands_data["paper_hands_count"]
-        if matches_played > 0:
-            paper_hands_rate = paper_hands_count / matches_played
-            paper_hands_score = min(int(paper_hands_rate * PAPER_HANDS_WEIGHT), PAPER_HANDS_WEIGHT)
-            if paper_hands_rate >= 0.3:
-                flavor_texts.append("paper hands")
-            elif paper_hands_rate >= 0.1:
-                flavor_texts.append("self-doubt")
-        else:
-            paper_hands_score = 0
 
         # Total score
-        total = leverage_score + frequency_score + bankruptcy_score + loss_chase_score + paper_hands_score
+        total = (
+            max_leverage_score
+            + bet_size_score
+            + debt_depth_score
+            + bankruptcy_score
+            + frequency_score
+            + loss_chase_score
+        )
 
         # Get tier
         title, tagline, emoji = self._get_degen_tier(total)
@@ -264,11 +280,12 @@ class GamblingStatsService:
             title=title,
             emoji=emoji,
             tagline=tagline,
-            leverage_score=leverage_score,
-            frequency_score=frequency_score,
+            max_leverage_score=max_leverage_score,
+            bet_size_score=bet_size_score,
+            debt_depth_score=debt_depth_score,
             bankruptcy_score=bankruptcy_score,
+            frequency_score=frequency_score,
             loss_chase_score=loss_chase_score,
-            paper_hands_score=paper_hands_score,
             flavor_texts=flavor_texts[:3],  # Limit to 3 flavor texts
         )
 
