@@ -258,3 +258,77 @@ async def test_mybets_leverage_uses_discord_timestamp_format():
     # Verify Discord timestamp format and leverage info
     assert f"<t:{bet_time}:t>" in message, f"Expected Discord timestamp in: {message}"
     assert "3x" in message  # Leverage is shown in format "at 3x"
+
+
+@pytest.mark.asyncio
+async def test_loan_rejects_unregistered_user():
+    """Verify /loan rejects users who haven't registered."""
+    bot = MagicMock()
+    betting_service = MagicMock()
+    match_service = MagicMock()
+    player_service = MagicMock()
+    loan_service = MagicMock()
+
+    # User is NOT registered
+    player_service.get_player.return_value = None
+
+    interaction = MagicMock()
+    interaction.guild.id = 123
+    interaction.user.id = 456
+    interaction.response.send_message = AsyncMock()
+
+    commands = BettingCommands(
+        bot, betting_service, match_service, player_service, loan_service=loan_service
+    )
+    await commands.loan.callback(commands, interaction, amount=50)
+
+    # Should reject with registration message
+    interaction.response.send_message.assert_awaited_once()
+    call_kwargs = interaction.response.send_message.call_args.kwargs
+    assert "register" in call_kwargs.get("content", interaction.response.send_message.call_args.args[0]).lower()
+    assert call_kwargs.get("ephemeral") is True
+
+    # Loan service should NOT be called
+    loan_service.can_take_loan.assert_not_called()
+    loan_service.take_loan.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_loan_checks_eligibility_for_registered_user():
+    """Verify /loan checks eligibility for registered users."""
+    bot = MagicMock()
+    betting_service = MagicMock()
+    match_service = MagicMock()
+    player_service = MagicMock()
+    loan_service = MagicMock()
+
+    # User IS registered
+    player_service.get_player.return_value = MagicMock(name="TestPlayer")
+
+    # Loan is allowed
+    loan_service.can_take_loan.return_value = {"allowed": True}
+    loan_service.take_loan.return_value = {
+        "success": True,
+        "amount": 50,
+        "fee": 10,
+        "total_owed": 60,
+        "new_balance": 40,
+        "nonprofit_total": 10,
+        "total_loans_taken": 1,
+        "was_negative_loan": False,
+    }
+
+    interaction = MagicMock()
+    interaction.guild.id = 123
+    interaction.user.id = 456
+    interaction.response.send_message = AsyncMock()
+
+    commands = BettingCommands(
+        bot, betting_service, match_service, player_service, loan_service=loan_service
+    )
+    await commands.loan.callback(commands, interaction, amount=50)
+
+    # Should check eligibility
+    loan_service.can_take_loan.assert_called_once_with(456, 50)
+    # Should take the loan
+    loan_service.take_loan.assert_called_once_with(456, 50, 123)
