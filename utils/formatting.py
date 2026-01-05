@@ -24,6 +24,9 @@ ROLE_NAMES = {
 # Custom jopacoin emote used across embeds/messages
 JOPACOIN_EMOTE = "<:jopacoin:954159801049440297>"
 
+# Tombstone emoji for bankrupted players
+TOMBSTONE_EMOJI = "🪦"
+
 
 def format_role_display(role: str) -> str:
     """Return role string with emoji and name (e.g., '⚔️ Carry')."""
@@ -98,23 +101,46 @@ def format_betting_display(
         return "💰 House Betting (1:1)", totals_text
 
 
-def get_player_display_name(player, discord_id: int | None = None, guild=None) -> str:
+def get_player_display_name(
+    player, discord_id: int | None = None, guild=None, bankruptcy_repo=None
+) -> str:
     """
     Get a player's display name, preferring Discord nickname when available.
 
     Fake users (negative IDs) skip guild lookups to avoid API calls.
+    Adds tombstone emoji for players with active bankruptcy penalties.
+
+    Args:
+        player: Player object or name
+        discord_id: Discord user ID (optional)
+        guild: Discord guild object (optional)
+        bankruptcy_repo: BankruptcyRepository instance for checking bankruptcy status (optional)
     """
     # Skip guild lookup for fake users
     if discord_id and discord_id < 0:
         return player.name if hasattr(player, "name") else str(player)
 
+    base_name = None
     if guild and discord_id:
         try:
             member = guild.get_member(discord_id)
             if member:
-                return member.display_name
+                base_name = member.display_name
         except Exception:
             # If Discord lookup fails, fall back to stored name
             pass
 
-    return player.name if hasattr(player, "name") else str(player)
+    if base_name is None:
+        base_name = player.name if hasattr(player, "name") else str(player)
+
+    # Add tombstone emoji if player has active bankruptcy penalty
+    if bankruptcy_repo and discord_id and discord_id > 0:
+        try:
+            penalty_games = bankruptcy_repo.get_penalty_games(discord_id)
+            if penalty_games > 0:
+                return f"{TOMBSTONE_EMOJI} {base_name}"
+        except Exception:
+            # If bankruptcy check fails, just return the base name
+            pass
+
+    return base_name

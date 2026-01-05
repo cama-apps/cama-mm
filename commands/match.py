@@ -42,6 +42,7 @@ class MatchCommands(commands.Cog):
         guild_config_repo=None,
         player_repo=None,
         match_repo=None,
+        bankruptcy_repo=None,
     ):
         self.bot = bot
         self.lobby_service = lobby_service
@@ -50,6 +51,7 @@ class MatchCommands(commands.Cog):
         self.guild_config_repo = guild_config_repo
         self.player_repo = player_repo
         self.match_repo = match_repo
+        self.bankruptcy_repo = bankruptcy_repo
         # Track scheduled betting reminder tasks per guild for cleanup
         self._betting_tasks_by_guild = {}
 
@@ -579,6 +581,7 @@ class MatchCommands(commands.Cog):
                                 winning_team=match_data.get("winning_team", 1),
                                 radiant_participants=radiant,
                                 dire_participants=dire,
+                                bankruptcy_repo=self.bankruptcy_repo,
                             )
                             await channel.send(
                                 f"📊 Match #{match_id} auto-enriched ({confidence:.0%} confidence)",
@@ -729,6 +732,7 @@ async def setup(bot: commands.Bot):
     guild_config_repo = getattr(bot, "guild_config_repo", None)
     player_repo = getattr(bot, "player_repo", None)
     match_repo = getattr(bot, "match_repo", None)
+    bankruptcy_repo = getattr(bot, "bankruptcy_repo", None)
     await bot.add_cog(
         MatchCommands(
             bot,
@@ -738,5 +742,6 @@ async def setup(bot: commands.Bot):
             guild_config_repo=guild_config_repo,
             player_repo=player_repo,
             match_repo=match_repo,
+            bankruptcy_repo=bankruptcy_repo,
         )
     )
