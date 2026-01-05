@@ -284,7 +284,7 @@ class TestDegenScore:
         degen1 = gambling_stats_service.calculate_degen_score(discord_id1)
         degen2 = gambling_stats_service.calculate_degen_score(discord_id2)
 
-        assert degen2.leverage_score > degen1.leverage_score
+        assert degen2.max_leverage_score > degen1.max_leverage_score
         assert degen2.total > degen1.total
 
 

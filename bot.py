@@ -70,6 +70,7 @@ from repositories.pairings_repository import PairingsRepository
 from repositories.player_repository import PlayerRepository
 from services.bankruptcy_service import BankruptcyRepository, BankruptcyService
 from services.betting_service import BettingService
+from services.loan_service import LoanRepository, LoanService
 from services.gambling_stats_service import GamblingStatsService
 from services.garnishment_service import GarnishmentService
 from services.lobby_service import LobbyService
@@ -258,6 +259,10 @@ def _init_services():
     bankruptcy_repo = BankruptcyRepository(DB_PATH)
     bankruptcy_service = BankruptcyService(bankruptcy_repo, player_repo)
 
+    # Create loan service for borrowing jopacoin
+    loan_repo = LoanRepository(DB_PATH)
+    loan_service = LoanService(loan_repo, player_repo)
+
     # Create betting service with garnishment and bankruptcy support
     betting_service = BettingService(
         bet_repo,
@@ -301,6 +306,7 @@ def _init_services():
     bot.ADMIN_USER_IDS = ADMIN_USER_IDS
     bot.betting_service = betting_service
     bot.bankruptcy_service = bankruptcy_service
+    bot.loan_service = loan_service
 
     # Create gambling stats service for degen score and leaderboards
     gambling_stats_service = GamblingStatsService(

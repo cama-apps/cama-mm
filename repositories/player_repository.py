@@ -258,6 +258,16 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             """,
                 (amount, discord_id),
             )
+            # Track lowest balance
+            cursor.execute(
+                """
+                UPDATE players
+                SET lowest_balance_ever = ?
+                WHERE discord_id = ?
+                AND (lowest_balance_ever IS NULL OR ? < lowest_balance_ever)
+                """,
+                (amount, discord_id, amount),
+            )
 
     def add_balance(self, discord_id: int, amount: int) -> None:
         """Add or subtract from a player's jopacoin balance."""
@@ -271,6 +281,17 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             """,
                 (amount, discord_id),
             )
+            # Track lowest balance if this was a decrease
+            if amount < 0:
+                cursor.execute(
+                    """
+                    UPDATE players
+                    SET lowest_balance_ever = jopacoin_balance
+                    WHERE discord_id = ?
+                    AND (lowest_balance_ever IS NULL OR jopacoin_balance < lowest_balance_ever)
+                    """,
+                    (discord_id,),
+                )
 
     def add_balance_many(self, deltas_by_discord_id: dict[int, int]) -> None:
         """
@@ -288,6 +309,19 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 """,
                 [(delta, discord_id) for discord_id, delta in deltas_by_discord_id.items()],
             )
+            # Track lowest balance for players who had negative deltas
+            negative_ids = [did for did, delta in deltas_by_discord_id.items() if delta < 0]
+            if negative_ids:
+                placeholders = ",".join("?" * len(negative_ids))
+                cursor.execute(
+                    f"""
+                    UPDATE players
+                    SET lowest_balance_ever = jopacoin_balance
+                    WHERE discord_id IN ({placeholders})
+                    AND (lowest_balance_ever IS NULL OR jopacoin_balance < lowest_balance_ever)
+                    """,
+                    negative_ids,
+                )
 
     def add_balance_with_garnishment(
         self, discord_id: int, amount: int, garnishment_rate: float
@@ -724,6 +758,37 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             cursor.execute("DELETE FROM players WHERE discord_id < 0")
 
             return count
+
+    def get_lowest_balance(self, discord_id: int) -> int | None:
+        """Get a player's lowest balance ever recorded."""
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT lowest_balance_ever FROM players WHERE discord_id = ?",
+                (discord_id,),
+            )
+            row = cursor.fetchone()
+            return row["lowest_balance_ever"] if row and row["lowest_balance_ever"] is not None else None
+
+    def update_lowest_balance_if_lower(self, discord_id: int, new_balance: int) -> bool:
+        """
+        Update lowest_balance_ever if new_balance is lower than current record.
+
+        Returns True if the record was updated, False otherwise.
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE players
+                SET lowest_balance_ever = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE discord_id = ?
+                AND (lowest_balance_ever IS NULL OR lowest_balance_ever > ?)
+                """,
+                (new_balance, discord_id, new_balance),
+            )
+            return cursor.rowcount > 0
 
     def _row_to_player(self, row) -> Player:
         """Convert database row to Player object."""
