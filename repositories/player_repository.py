@@ -790,6 +790,18 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             )
             return cursor.rowcount > 0
 
+    def get_registered_player_count(self) -> int:
+        """
+        Get total count of registered players.
+
+        Used for quorum calculation in disbursement voting.
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) as count FROM players")
+            row = cursor.fetchone()
+            return row["count"] if row else 0
+
     def _row_to_player(self, row) -> Player:
         """Convert database row to Player object."""
         preferred_roles = json.loads(row["preferred_roles"]) if row["preferred_roles"] else None
