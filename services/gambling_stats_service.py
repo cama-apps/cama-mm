@@ -10,6 +10,7 @@ if TYPE_CHECKING:
     from repositories.match_repository import MatchRepository
     from repositories.player_repository import PlayerRepository
     from services.bankruptcy_service import BankruptcyService
+    from services.loan_service import LoanService
 
 
 # Degen score weights (total = 100)
@@ -19,6 +20,9 @@ DEBT_DEPTH_WEIGHT = 20  # How deep into debt (lowest_balance_ever)
 BANKRUPTCY_WEIGHT = 15  # Bankruptcy count
 FREQUENCY_WEIGHT = 10  # % of matches bet on
 LOSS_CHASE_WEIGHT = 5  # Rate of increasing bet after loss
+
+# Bonus for peak degen behavior (can exceed 100)
+NEGATIVE_LOAN_BONUS = 25  # Taking a loan while already in debt
 
 # Typical income per match for bet size calculation (participation + avg win bonus)
 TYPICAL_INCOME_PER_MATCH = 3
@@ -48,6 +52,7 @@ class DegenScoreBreakdown:
     bankruptcy_score: int
     frequency_score: int
     loss_chase_score: int
+    negative_loan_bonus: int  # +25 per loan taken while in debt
     flavor_texts: list[str]
 
 
@@ -114,11 +119,13 @@ class GamblingStatsService:
         player_repo: "PlayerRepository",
         match_repo: "MatchRepository",
         bankruptcy_service: "BankruptcyService | None" = None,
+        loan_service: "LoanService | None" = None,
     ):
         self.bet_repo = bet_repo
         self.player_repo = player_repo
         self.match_repo = match_repo
         self.bankruptcy_service = bankruptcy_service
+        self.loan_service = loan_service
 
     def get_player_stats(self, discord_id: int) -> GambaStats | None:
         """Get complete gambling statistics for a player."""
@@ -262,7 +269,16 @@ class GamblingStatsService:
         if loss_chase_rate >= 0.5:
             flavor_texts.append("loss chaser")
 
-        # Total score
+        # 7. Negative loan bonus (+25 each, can exceed 100)
+        negative_loan_bonus = 0
+        if self.loan_service:
+            loan_state = self.loan_service.get_state(discord_id)
+            negative_loans = loan_state.negative_loans_taken
+            negative_loan_bonus = negative_loans * NEGATIVE_LOAN_BONUS
+            if negative_loans >= 1:
+                flavor_texts.insert(0, f"borrowed while broke x{negative_loans}")
+
+        # Total score (can exceed 100 with negative loan bonus)
         total = (
             max_leverage_score
             + bet_size_score
@@ -270,10 +286,11 @@ class GamblingStatsService:
             + bankruptcy_score
             + frequency_score
             + loss_chase_score
+            + negative_loan_bonus
         )
 
-        # Get tier
-        title, tagline, emoji = self._get_degen_tier(total)
+        # Get tier (capped at 100 for tier lookup)
+        title, tagline, emoji = self._get_degen_tier(min(total, 100))
 
         return DegenScoreBreakdown(
             total=total,
@@ -286,6 +303,7 @@ class GamblingStatsService:
             bankruptcy_score=bankruptcy_score,
             frequency_score=frequency_score,
             loss_chase_score=loss_chase_score,
+            negative_loan_bonus=negative_loan_bonus,
             flavor_texts=flavor_texts[:3],  # Limit to 3 flavor texts
         )
 

@@ -314,6 +314,7 @@ def _init_services():
         player_repo=player_repo,
         match_repo=match_repo,
         bankruptcy_service=bankruptcy_service,
+        loan_service=loan_service,
     )
     bot.gambling_stats_service = gambling_stats_service
 

@@ -309,3 +309,101 @@ class TestLoanState:
         assert state.total_fees_paid == 10
         assert state.is_on_cooldown is True
         assert state.last_loan_at is not None
+
+    def test_get_state_negative_loans_default(self, db_and_repos, loan_service):
+        """Getting state shows negative_loans_taken defaults to 0."""
+        player_repo = db_and_repos["player_repo"]
+        pid = create_test_player(player_repo, 6003)
+
+        state = loan_service.get_state(pid)
+        assert state.negative_loans_taken == 0
+
+
+class TestNegativeLoans:
+    """Tests for peak degen behavior: taking loans while already in debt."""
+
+    def test_loan_while_negative_flagged(self, db_and_repos):
+        """Taking a loan while negative balance is flagged."""
+        player_repo = db_and_repos["player_repo"]
+        loan_repo = db_and_repos["loan_repo"]
+
+        loan_service = LoanService(
+            loan_repo=loan_repo,
+            player_repo=player_repo,
+            cooldown_seconds=0,
+            max_amount=100,
+            fee_rate=0.20,
+            max_debt=500,
+        )
+
+        # Start with negative balance
+        pid = create_test_player(player_repo, 7001, balance=-100)
+
+        result = loan_service.take_loan(pid, 50)
+        assert result["success"] is True
+        assert result["was_negative_loan"] is True
+
+    def test_loan_while_positive_not_flagged(self, db_and_repos, loan_service):
+        """Taking a loan with positive balance is not flagged as negative loan."""
+        player_repo = db_and_repos["player_repo"]
+        pid = create_test_player(player_repo, 7002, balance=100)
+
+        result = loan_service.take_loan(pid, 50)
+        assert result["success"] is True
+        assert result["was_negative_loan"] is False
+
+    def test_negative_loans_counted(self, db_and_repos):
+        """Negative loans are counted in state."""
+        player_repo = db_and_repos["player_repo"]
+        loan_repo = db_and_repos["loan_repo"]
+
+        loan_service = LoanService(
+            loan_repo=loan_repo,
+            player_repo=player_repo,
+            cooldown_seconds=0,
+            max_amount=100,
+            fee_rate=0.20,
+            max_debt=500,
+        )
+
+        # Take loans while negative
+        pid = create_test_player(player_repo, 7003, balance=-50)
+
+        loan_service.take_loan(pid, 20)  # Still negative after
+        loan_service.take_loan(pid, 20)  # Still negative after
+
+        state = loan_service.get_state(pid)
+        assert state.negative_loans_taken == 2
+        assert state.total_loans_taken == 2
+
+    def test_mixed_loans_counted_correctly(self, db_and_repos):
+        """Mix of positive and negative loans counted correctly."""
+        player_repo = db_and_repos["player_repo"]
+        loan_repo = db_and_repos["loan_repo"]
+
+        loan_service = LoanService(
+            loan_repo=loan_repo,
+            player_repo=player_repo,
+            cooldown_seconds=0,
+            max_amount=100,
+            fee_rate=0.20,
+            max_debt=500,
+        )
+
+        pid = create_test_player(player_repo, 7004, balance=50)
+
+        # First loan: positive balance (not negative loan)
+        result1 = loan_service.take_loan(pid, 50)
+        assert result1["was_negative_loan"] is False
+        # Balance: 50 + 50 - 60 = 40
+
+        # Set balance to negative
+        player_repo.update_balance(pid, -100)
+
+        # Second loan: negative balance (is negative loan)
+        result2 = loan_service.take_loan(pid, 20)
+        assert result2["was_negative_loan"] is True
+
+        state = loan_service.get_state(pid)
+        assert state.total_loans_taken == 2
+        assert state.negative_loans_taken == 1

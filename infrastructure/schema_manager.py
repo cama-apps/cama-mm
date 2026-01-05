@@ -158,6 +158,7 @@ class SchemaManager:
             ("add_lane_efficiency_column", self._migration_add_lane_efficiency),
             ("add_bet_payout_column", self._migration_add_bet_payout_column),
             ("create_loan_system", self._migration_create_loan_system),
+            ("add_negative_loans_column", self._migration_add_negative_loans_column),
         ]
 
     # --- Migrations ---
@@ -440,3 +441,9 @@ class SchemaManager:
 
         # Add lowest_balance_ever to players for credit/degen scoring
         self._add_column_if_not_exists(cursor, "players", "lowest_balance_ever", "INTEGER")
+
+    def _migration_add_negative_loans_column(self, cursor) -> None:
+        """Track loans taken while already in debt (peak degen behavior)."""
+        self._add_column_if_not_exists(
+            cursor, "loan_state", "negative_loans_taken", "INTEGER DEFAULT 0"
+        )

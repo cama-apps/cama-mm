@@ -86,6 +86,20 @@ LOAN_DENIED_DEBT_MESSAGES = [
     "ERROR: Maximum debt capacity reached. Try bankruptcy first.",
 ]
 
+# Special messages for peak degen behavior: taking a loan while already in debt
+NEGATIVE_LOAN_MESSAGES = [
+    "You... you took out a loan while already in debt. The money went straight to your creditors. "
+    "You're now even MORE in debt. Congratulations, you absolute degenerate.",
+    "LEGENDARY MOVE: Borrowing money just to owe MORE money. "
+    "Your financial advisor has left the country. True degen behavior.",
+    "The loan was approved and immediately garnished. You gained nothing but more debt and our respect. "
+    "This is galaxy-brain degeneracy.",
+    "You borrowed {amount} {emote} while broke. Net result: deeper in the hole. "
+    "The degen energy radiating from this decision is immeasurable.",
+    "This is advanced degeneracy. You can't even gamble with this money because you're still negative. "
+    "But you did it anyway. We're impressed and horrified.",
+]
+
 
 class BettingCommands(commands.Cog):
     """Slash commands to place and view wagers."""
@@ -965,7 +979,7 @@ class BettingCommands(commands.Cog):
         guild_id = interaction.guild.id if interaction.guild else None
 
         # Check if registered
-        if not self.player_service.is_registered(user_id):
+        if not self.player_repo.get_by_id(user_id):
             await interaction.response.send_message(
                 "You need to `/register` before taking loans.", ephemeral=True
             )
@@ -982,25 +996,22 @@ class BettingCommands(commands.Cog):
                 msg = random.choice(LOAN_DENIED_COOLDOWN_MESSAGES)
                 await interaction.response.send_message(
                     f"{msg}\n\n⏳ Cooldown ends in **{hours}h {minutes}m**.",
-                    ephemeral=True,
                 )
                 return
             elif check["reason"] == "exceeds_debt_limit":
                 msg = random.choice(LOAN_DENIED_DEBT_MESSAGES)
                 await interaction.response.send_message(
                     f"{msg}\n\nCurrent balance: **{check['current_balance']}** {JOPACOIN_EMOTE}",
-                    ephemeral=True,
                 )
                 return
             elif check["reason"] == "exceeds_max":
                 await interaction.response.send_message(
                     f"Maximum loan amount is **{check['max_amount']}** {JOPACOIN_EMOTE}.",
-                    ephemeral=True,
                 )
                 return
             elif check["reason"] == "invalid_amount":
                 await interaction.response.send_message(
-                    "Loan amount must be positive.", ephemeral=True
+                    "Loan amount must be positive.",
                 )
                 return
 
@@ -1013,32 +1024,59 @@ class BettingCommands(commands.Cog):
             )
             return
 
-        msg = random.choice(LOAN_SUCCESS_MESSAGES).format(
-            amount=result["amount"],
-            owed=result["total_owed"],
-            fee=result["fee"],
-            emote=JOPACOIN_EMOTE,
-        )
-
         fee_pct = int(LOAN_FEE_RATE * 100)
-        embed = discord.Embed(
-            title="🏦 Loan Approved",
-            description=msg,
-            color=0x2ECC71,  # Green
-        )
-        embed.add_field(
-            name="Details",
-            value=(
-                f"Borrowed: **{result['amount']}** {JOPACOIN_EMOTE}\n"
-                f"Fee ({fee_pct}%): **{result['fee']}** {JOPACOIN_EMOTE}\n"
-                f"Total Owed: **{result['total_owed']}** {JOPACOIN_EMOTE}\n"
-                f"New Balance: **{result['new_balance']}** {JOPACOIN_EMOTE}"
-            ),
-            inline=False,
-        )
-        embed.set_footer(
-            text=f"Loan #{result['total_loans_taken']} | Fee donated to Gambling Addiction Nonprofit"
-        )
+
+        # Check if this was a negative loan (peak degen behavior)
+        if result.get("was_negative_loan"):
+            msg = random.choice(NEGATIVE_LOAN_MESSAGES).format(
+                amount=result["amount"],
+                emote=JOPACOIN_EMOTE,
+            )
+            embed = discord.Embed(
+                title="🎪 LEGENDARY DEGEN MOVE 🎪",
+                description=msg,
+                color=0x9B59B6,  # Purple for peak degen
+            )
+            embed.add_field(
+                name="The Damage",
+                value=(
+                    f"Borrowed: **{result['amount']}** {JOPACOIN_EMOTE}\n"
+                    f"Fee ({fee_pct}%): **{result['fee']}** {JOPACOIN_EMOTE}\n"
+                    f"Net Result: **You're still broke**\n"
+                    f"New Balance: **{result['new_balance']}** {JOPACOIN_EMOTE}"
+                ),
+                inline=False,
+            )
+            embed.set_footer(
+                text="Loan #{} | You can't even bet with this".format(
+                    result["total_loans_taken"]
+                )
+            )
+        else:
+            msg = random.choice(LOAN_SUCCESS_MESSAGES).format(
+                amount=result["amount"],
+                owed=result["total_owed"],
+                fee=result["fee"],
+                emote=JOPACOIN_EMOTE,
+            )
+            embed = discord.Embed(
+                title="🏦 Loan Approved",
+                description=msg,
+                color=0x2ECC71,  # Green
+            )
+            embed.add_field(
+                name="Details",
+                value=(
+                    f"Borrowed: **{result['amount']}** {JOPACOIN_EMOTE}\n"
+                    f"Fee ({fee_pct}%): **{result['fee']}** {JOPACOIN_EMOTE}\n"
+                    f"Total Owed: **{result['total_owed']}** {JOPACOIN_EMOTE}\n"
+                    f"New Balance: **{result['new_balance']}** {JOPACOIN_EMOTE}"
+                ),
+                inline=False,
+            )
+            embed.set_footer(
+                text=f"Loan #{result['total_loans_taken']} | Fee donated to Gambling Addiction Nonprofit"
+            )
 
         await interaction.response.send_message(embed=embed)
 
