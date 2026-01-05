@@ -70,6 +70,7 @@ from repositories.pairings_repository import PairingsRepository
 from repositories.player_repository import PlayerRepository
 from services.bankruptcy_service import BankruptcyRepository, BankruptcyService
 from services.betting_service import BettingService
+from services.gambling_stats_service import GamblingStatsService
 from services.garnishment_service import GarnishmentService
 from services.lobby_service import LobbyService
 from services.match_service import MatchService
@@ -300,6 +301,15 @@ def _init_services():
     bot.ADMIN_USER_IDS = ADMIN_USER_IDS
     bot.betting_service = betting_service
     bot.bankruptcy_service = bankruptcy_service
+
+    # Create gambling stats service for degen score and leaderboards
+    gambling_stats_service = GamblingStatsService(
+        bet_repo=bet_repo,
+        player_repo=player_repo,
+        match_repo=match_repo,
+        bankruptcy_service=bankruptcy_service,
+    )
+    bot.gambling_stats_service = gambling_stats_service
 
     _services_initialized = True
 

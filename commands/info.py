@@ -118,6 +118,17 @@ class InfoCommands(commands.Cog):
             inline=False,
         )
 
+        # Gamba Stats
+        embed.add_field(
+            name="📈 Gamba Stats",
+            value=(
+                "`/gambastats` - View gambling stats and Degen Score™\n"
+                "`/gambachart` - View P&L history as a chart\n"
+                "`/gambaleaderboard` - Server gambling rankings & Hall of Degen"
+            ),
+            inline=False,
+        )
+
         # Leaderboard
         embed.add_field(
             name="🏆 Leaderboard",

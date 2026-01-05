@@ -16,8 +16,10 @@ from config import (
 )
 from services.bankruptcy_service import BankruptcyService
 from services.betting_service import BettingService
+from services.gambling_stats_service import GamblingStatsService
 from services.match_service import MatchService
 from services.player_service import PlayerService
+from utils.drawing import draw_gamba_chart
 from utils.formatting import JOPACOIN_EMOTE, format_betting_display
 from utils.interaction_safety import safe_defer
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
@@ -69,12 +71,14 @@ class BettingCommands(commands.Cog):
         match_service: MatchService,
         player_service: PlayerService,
         bankruptcy_service: BankruptcyService | None = None,
+        gambling_stats_service: GamblingStatsService | None = None,
     ):
         self.bot = bot
         self.betting_service = betting_service
         self.match_service = match_service
         self.player_service = player_service
         self.bankruptcy_service = bankruptcy_service
+        self.gambling_stats_service = gambling_stats_service
 
     async def _update_shuffle_message_wagers(self, guild_id: int | None) -> None:
         """
@@ -574,6 +578,319 @@ class BettingCommands(commands.Cog):
             ephemeral=False,
         )
 
+    @app_commands.command(name="gambastats", description="View your gambling statistics and degen score")
+    @app_commands.describe(user="Player to view stats for (defaults to yourself)")
+    async def gambastats(
+        self,
+        interaction: discord.Interaction,
+        user: discord.Member | None = None,
+    ):
+        guild = interaction.guild if interaction.guild else None
+        rl_gid = guild.id if guild else 0
+        rl = GLOBAL_RATE_LIMITER.check(
+            scope="gambastats",
+            guild_id=rl_gid,
+            user_id=interaction.user.id,
+            limit=3,
+            per_seconds=15,
+        )
+        if not rl.allowed:
+            await interaction.response.send_message(
+                f"⏳ Please wait {rl.retry_after_seconds}s before using `/gambastats` again.",
+                ephemeral=True,
+            )
+            return
+
+        if not await safe_defer(interaction, ephemeral=False):
+            return
+
+        if not self.gambling_stats_service:
+            await interaction.followup.send("Gambling stats service is not available.", ephemeral=True)
+            return
+
+        target_user = user or interaction.user
+        stats = self.gambling_stats_service.get_player_stats(target_user.id)
+
+        if not stats:
+            await interaction.followup.send(
+                f"{target_user.display_name} has no betting history yet.",
+                ephemeral=True,
+            )
+            return
+
+        # Build embed
+        degen = stats.degen_score
+        pnl_color = 0x57F287 if stats.net_pnl >= 0 else 0xED4245  # Green or red
+
+        embed = discord.Embed(
+            title=f"Gamba Stats for {target_user.display_name}",
+            color=pnl_color,
+        )
+
+        # Degen score header
+        flavor_text = " • ".join(degen.flavor_texts) if degen.flavor_texts else degen.tagline
+        embed.description = (
+            f"**Degen Score: {degen.total}** {degen.emoji} {degen.title}\n"
+            f"*{flavor_text}*"
+        )
+
+        # Core stats
+        pnl_str = f"+{stats.net_pnl}" if stats.net_pnl >= 0 else str(stats.net_pnl)
+        roi_str = f"+{stats.roi:.1%}" if stats.roi >= 0 else f"{stats.roi:.1%}"
+
+        embed.add_field(
+            name="Performance",
+            value=(
+                f"**Net P&L:** {pnl_str} {JOPACOIN_EMOTE}\n"
+                f"**ROI:** {roi_str}\n"
+                f"**Record:** {stats.wins}W-{stats.losses}L ({stats.win_rate:.0%})"
+            ),
+            inline=True,
+        )
+
+        embed.add_field(
+            name="Volume",
+            value=(
+                f"**Total Bets:** {stats.total_bets}\n"
+                f"**Wagered:** {stats.total_wagered} {JOPACOIN_EMOTE}\n"
+                f"**Avg Bet:** {stats.avg_bet_size:.1f} {JOPACOIN_EMOTE}"
+            ),
+            inline=True,
+        )
+
+        # Leverage distribution
+        lev_parts = []
+        for lev in [1, 2, 3, 5]:
+            count = stats.leverage_distribution.get(lev, 0)
+            if count > 0:
+                pct = count / stats.total_bets * 100
+                lev_parts.append(f"{lev}×({pct:.0f}%)")
+        lev_str = " ".join(lev_parts) if lev_parts else "None"
+
+        # Streaks
+        streak_emoji = "🔥" if stats.current_streak > 0 else "💀" if stats.current_streak < 0 else "➖"
+        streak_val = abs(stats.current_streak)
+        streak_type = "W" if stats.current_streak >= 0 else "L"
+
+        embed.add_field(
+            name="Risk Profile",
+            value=(
+                f"**Leverage:** {lev_str}\n"
+                f"**Streak:** {streak_emoji} {streak_type}{streak_val}\n"
+                f"**Best/Worst:** W{stats.best_streak} / L{abs(stats.worst_streak)}"
+            ),
+            inline=True,
+        )
+
+        # Extremes
+        peak_str = f"+{stats.peak_pnl}" if stats.peak_pnl > 0 else str(stats.peak_pnl)
+        trough_str = str(stats.trough_pnl)
+        biggest_win_str = f"+{stats.biggest_win}" if stats.biggest_win > 0 else "None"
+        biggest_loss_str = str(stats.biggest_loss) if stats.biggest_loss < 0 else "None"
+
+        embed.add_field(
+            name="Extremes",
+            value=(
+                f"**Peak:** {peak_str} {JOPACOIN_EMOTE}\n"
+                f"**Trough:** {trough_str} {JOPACOIN_EMOTE}\n"
+                f"**Best Win:** {biggest_win_str} {JOPACOIN_EMOTE}\n"
+                f"**Worst Loss:** {biggest_loss_str} {JOPACOIN_EMOTE}"
+            ),
+            inline=True,
+        )
+
+        # Paper hands
+        if stats.matches_played > 0:
+            paper_rate = stats.paper_hands_count / stats.matches_played * 100
+            embed.add_field(
+                name="Paper Hands",
+                value=(
+                    f"Played: {stats.matches_played} matches\n"
+                    f"No self-bet: {stats.paper_hands_count} ({paper_rate:.0f}%)"
+                ),
+                inline=True,
+            )
+
+        await interaction.followup.send(embed=embed)
+
+    @app_commands.command(name="gambachart", description="View your gambling history as a chart")
+    @app_commands.describe(user="Player to view chart for (defaults to yourself)")
+    async def gambachart(
+        self,
+        interaction: discord.Interaction,
+        user: discord.Member | None = None,
+    ):
+        guild = interaction.guild if interaction.guild else None
+        rl_gid = guild.id if guild else 0
+        rl = GLOBAL_RATE_LIMITER.check(
+            scope="gambachart",
+            guild_id=rl_gid,
+            user_id=interaction.user.id,
+            limit=2,
+            per_seconds=20,
+        )
+        if not rl.allowed:
+            await interaction.response.send_message(
+                f"⏳ Please wait {rl.retry_after_seconds}s before using `/gambachart` again.",
+                ephemeral=True,
+            )
+            return
+
+        if not await safe_defer(interaction, ephemeral=False):
+            return
+
+        if not self.gambling_stats_service:
+            await interaction.followup.send("Gambling stats service is not available.", ephemeral=True)
+            return
+
+        target_user = user or interaction.user
+        stats = self.gambling_stats_service.get_player_stats(target_user.id)
+
+        if not stats:
+            await interaction.followup.send(
+                f"{target_user.display_name} has no betting history yet.",
+                ephemeral=True,
+            )
+            return
+
+        # Get P&L series for chart
+        pnl_series = self.gambling_stats_service.get_cumulative_pnl_series(target_user.id)
+
+        # Generate chart
+        degen = stats.degen_score
+        chart_image = draw_gamba_chart(
+            username=target_user.display_name,
+            degen_score=degen.total,
+            degen_title=degen.title,
+            degen_emoji=degen.emoji,
+            pnl_series=pnl_series,
+            stats={
+                "total_bets": stats.total_bets,
+                "win_rate": stats.win_rate,
+                "net_pnl": stats.net_pnl,
+                "roi": stats.roi,
+            },
+        )
+
+        file = discord.File(chart_image, filename="gamba_chart.png")
+        await interaction.followup.send(file=file)
+
+    @app_commands.command(name="gambaleaderboard", description="View server gambling leaderboard")
+    @app_commands.describe(limit="Number of entries per section (default 5)")
+    async def gambaleaderboard(
+        self,
+        interaction: discord.Interaction,
+        limit: int = 5,
+    ):
+        guild = interaction.guild if interaction.guild else None
+        rl_gid = guild.id if guild else 0
+        rl = GLOBAL_RATE_LIMITER.check(
+            scope="gambaleaderboard",
+            guild_id=rl_gid,
+            user_id=interaction.user.id,
+            limit=2,
+            per_seconds=30,
+        )
+        if not rl.allowed:
+            await interaction.response.send_message(
+                f"⏳ Please wait {rl.retry_after_seconds}s before using `/gambaleaderboard` again.",
+                ephemeral=True,
+            )
+            return
+
+        if not await safe_defer(interaction, ephemeral=False):
+            return
+
+        if not self.gambling_stats_service:
+            await interaction.followup.send("Gambling stats service is not available.", ephemeral=True)
+            return
+
+        guild_id = interaction.guild.id if interaction.guild else None
+        limit = max(1, min(limit, 10))  # Clamp between 1 and 10
+
+        leaderboard = self.gambling_stats_service.get_leaderboard(guild_id, limit=limit)
+
+        if not leaderboard.top_earners and not leaderboard.hall_of_degen:
+            await interaction.followup.send(
+                "No gambling data yet! Players need at least 3 settled bets to appear.",
+                ephemeral=True,
+            )
+            return
+
+        embed = discord.Embed(
+            title="🏆 GAMBA LEADERBOARD",
+            color=0xFFD700,  # Gold
+        )
+
+        # Helper to get username
+        async def get_name(discord_id: int) -> str:
+            try:
+                member = interaction.guild.get_member(discord_id) if interaction.guild else None
+                if member:
+                    return member.display_name
+                user = await self.bot.fetch_user(discord_id)
+                return user.display_name if user else f"User {discord_id}"
+            except Exception:
+                return f"User {discord_id}"
+
+        # Top earners
+        if leaderboard.top_earners:
+            lines = []
+            for i, entry in enumerate(leaderboard.top_earners, 1):
+                name = await get_name(entry.discord_id)
+                pnl_str = f"+{entry.net_pnl}" if entry.net_pnl >= 0 else str(entry.net_pnl)
+                lines.append(f"{i}. **{name}** {pnl_str} {JOPACOIN_EMOTE} ({entry.win_rate:.0%} WR)")
+            embed.add_field(
+                name="💰 Top Earners",
+                value="\n".join(lines),
+                inline=False,
+            )
+
+        # Down bad
+        if leaderboard.down_bad:
+            lines = []
+            for i, entry in enumerate(leaderboard.down_bad, 1):
+                name = await get_name(entry.discord_id)
+                lines.append(f"{i}. **{name}** {entry.net_pnl} {JOPACOIN_EMOTE} ({entry.win_rate:.0%} WR)")
+            embed.add_field(
+                name="📉 Down Bad",
+                value="\n".join(lines),
+                inline=False,
+            )
+
+        # Hall of degen
+        if leaderboard.hall_of_degen:
+            lines = []
+            degen_emojis = ["🥱", "🎰", "🔥", "💀", "🎪", "👑"]
+            for i, entry in enumerate(leaderboard.hall_of_degen, 1):
+                name = await get_name(entry.discord_id)
+                # Get emoji based on score
+                score = entry.degen_score or 0
+                emoji_idx = min(score // 20, 5)
+                emoji = degen_emojis[emoji_idx]
+                title = entry.degen_title or "Unknown"
+                lines.append(f"{i}. **{name}** {score} {emoji} {title}")
+            embed.add_field(
+                name="👑 Hall of Degen",
+                value="\n".join(lines),
+                inline=False,
+            )
+
+        # Server totals
+        avg_degen_str = f"{leaderboard.avg_degen_score:.0f}" if leaderboard.avg_degen_score else "N/A"
+        embed.add_field(
+            name="📊 Server Totals",
+            value=(
+                f"Total Wagered: {leaderboard.total_wagered} {JOPACOIN_EMOTE} | "
+                f"Bets: {leaderboard.total_bets} | "
+                f"Avg Degen: {avg_degen_str} | "
+                f"Bankruptcies: {leaderboard.total_bankruptcies}"
+            ),
+            inline=False,
+        )
+
+        await interaction.followup.send(embed=embed)
+
 
 async def setup(bot: commands.Bot):
     betting_service = getattr(bot, "betting_service", None)
@@ -586,8 +903,16 @@ async def setup(bot: commands.Bot):
     if player_service is None:
         raise RuntimeError("Player service not registered on bot.")
     bankruptcy_service = getattr(bot, "bankruptcy_service", None)
-    # bankruptcy_service is optional
+    gambling_stats_service = getattr(bot, "gambling_stats_service", None)
+    # bankruptcy_service and gambling_stats_service are optional
 
     await bot.add_cog(
-        BettingCommands(bot, betting_service, match_service, player_service, bankruptcy_service)
+        BettingCommands(
+            bot,
+            betting_service,
+            match_service,
+            player_service,
+            bankruptcy_service,
+            gambling_stats_service,
+        )
     )

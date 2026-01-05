@@ -449,9 +449,11 @@ class BetRepository(BaseRepository, IBetRepository):
                 return distributions
 
             if betting_mode == "pool":
-                distributions, balance_deltas = self._calculate_pool_payouts(rows, winning_team)
+                distributions, balance_deltas, payout_updates = self._calculate_pool_payouts(
+                    rows, winning_team
+                )
             else:
-                distributions, balance_deltas = self._calculate_house_payouts(
+                distributions, balance_deltas, payout_updates = self._calculate_house_payouts(
                     rows, winning_team, house_payout_multiplier
                 )
 
@@ -463,6 +465,13 @@ class BetRepository(BaseRepository, IBetRepository):
                     WHERE discord_id = ?
                     """,
                     [(delta, discord_id) for discord_id, delta in balance_deltas.items()],
+                )
+
+            # Store payout for winning bets
+            if payout_updates:
+                cursor.executemany(
+                    "UPDATE bets SET payout = ? WHERE bet_id = ?",
+                    payout_updates,
                 )
 
             cursor.execute(
@@ -482,6 +491,7 @@ class BetRepository(BaseRepository, IBetRepository):
         """Calculate house mode payouts (1:1) with leverage support."""
         distributions: dict[str, list[dict]] = {"winners": [], "losers": []}
         balance_deltas: dict[int, int] = {}
+        payout_updates: list[tuple[int, int]] = []  # (payout, bet_id)
 
         for row in rows:
             bet = dict(row)
@@ -489,6 +499,7 @@ class BetRepository(BaseRepository, IBetRepository):
             effective_bet = bet["amount"] * leverage
 
             entry = {
+                "bet_id": bet["bet_id"],
                 "discord_id": bet["discord_id"],
                 "amount": bet["amount"],
                 "leverage": leverage,
@@ -503,15 +514,17 @@ class BetRepository(BaseRepository, IBetRepository):
             # Payout based on effective bet (amount * leverage)
             payout = int(effective_bet * (1 + house_payout_multiplier))
             balance_deltas[bet["discord_id"]] = balance_deltas.get(bet["discord_id"], 0) + payout
+            payout_updates.append((payout, bet["bet_id"]))
             entry["payout"] = payout
             distributions["winners"].append(entry)
 
-        return distributions, balance_deltas
+        return distributions, balance_deltas, payout_updates
 
     def _calculate_pool_payouts(self, rows: list, winning_team: str) -> tuple:
         """Calculate pool mode payouts (proportional from total pool) with leverage support."""
         distributions: dict[str, list[dict]] = {"winners": [], "losers": []}
         balance_deltas: dict[int, int] = {}
+        payout_updates: list[tuple[int, int]] = []  # (payout, bet_id)
 
         # Convert rows to dicts for .get() support
         rows = [dict(row) for row in rows]
@@ -535,6 +548,7 @@ class BetRepository(BaseRepository, IBetRepository):
                 )
                 distributions["losers"].append(
                     {
+                        "bet_id": bet["bet_id"],
                         "discord_id": bet["discord_id"],
                         "amount": bet["amount"],
                         "leverage": leverage,
@@ -543,7 +557,7 @@ class BetRepository(BaseRepository, IBetRepository):
                         "refunded": True,
                     }
                 )
-            return distributions, balance_deltas
+            return distributions, balance_deltas, payout_updates
 
         multiplier = total_pool / winner_pool
 
@@ -553,6 +567,7 @@ class BetRepository(BaseRepository, IBetRepository):
             effective_bet = bet["amount"] * leverage
 
             entry = {
+                "bet_id": bet["bet_id"],
                 "discord_id": bet["discord_id"],
                 "amount": bet["amount"],
                 "leverage": leverage,
@@ -568,11 +583,12 @@ class BetRepository(BaseRepository, IBetRepository):
             # Round up to ensure winners never lose fractional coins
             payout = math.ceil((effective_bet / winner_pool) * total_pool)
             balance_deltas[bet["discord_id"]] = balance_deltas.get(bet["discord_id"], 0) + payout
+            payout_updates.append((payout, bet["bet_id"]))
             entry["payout"] = payout
             entry["multiplier"] = multiplier
             distributions["winners"].append(entry)
 
-        return distributions, balance_deltas
+        return distributions, balance_deltas, payout_updates
 
     def refund_pending_bets_atomic(self, *, guild_id: int | None, since_ts: int) -> int:
         """
@@ -618,3 +634,228 @@ class BetRepository(BaseRepository, IBetRepository):
                 (normalized_guild, since_ts),
             )
             return cursor.rowcount
+
+    def get_player_bet_history(self, discord_id: int) -> list[dict]:
+        """
+        Get all settled bets for a player with outcome derived from match result.
+
+        Returns list of dicts with: bet_id, amount, leverage, effective_bet, team_bet_on,
+        bet_time, match_id, payout, outcome ('won'/'lost'), profit (net P&L for this bet)
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT
+                    b.bet_id,
+                    b.amount,
+                    COALESCE(b.leverage, 1) as leverage,
+                    b.amount * COALESCE(b.leverage, 1) as effective_bet,
+                    b.team_bet_on,
+                    b.bet_time,
+                    b.match_id,
+                    b.payout,
+                    CASE
+                        WHEN m.winning_team = 1 AND b.team_bet_on = 'radiant' THEN 'won'
+                        WHEN m.winning_team = 2 AND b.team_bet_on = 'dire' THEN 'won'
+                        ELSE 'lost'
+                    END as outcome
+                FROM bets b
+                JOIN matches m ON b.match_id = m.match_id
+                WHERE b.discord_id = ? AND b.match_id IS NOT NULL
+                ORDER BY b.bet_time ASC
+                """,
+                (discord_id,),
+            )
+            rows = cursor.fetchall()
+            results = []
+            for row in rows:
+                bet = dict(row)
+                effective_bet = bet["effective_bet"]
+                # Calculate profit: won = payout - effective_bet, lost = -effective_bet
+                if bet["outcome"] == "won":
+                    # If payout stored, use it; otherwise assume house mode (2x)
+                    payout = bet["payout"] if bet["payout"] else effective_bet * 2
+                    bet["profit"] = payout - effective_bet
+                else:
+                    bet["profit"] = -effective_bet
+                results.append(bet)
+            return results
+
+    def get_guild_gambling_summary(
+        self, guild_id: int | None, min_bets: int = 3
+    ) -> list[dict]:
+        """
+        Get aggregated gambling stats for all players in a guild.
+
+        Returns list of dicts with: discord_id, total_bets, wins, losses, win_rate,
+        net_pnl, total_wagered, roi, avg_leverage
+        """
+        normalized_guild = self._normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT
+                    b.discord_id,
+                    COUNT(*) as total_bets,
+                    SUM(CASE
+                        WHEN (m.winning_team = 1 AND b.team_bet_on = 'radiant')
+                          OR (m.winning_team = 2 AND b.team_bet_on = 'dire')
+                        THEN 1 ELSE 0
+                    END) as wins,
+                    SUM(CASE
+                        WHEN (m.winning_team = 1 AND b.team_bet_on = 'radiant')
+                          OR (m.winning_team = 2 AND b.team_bet_on = 'dire')
+                        THEN 0 ELSE 1
+                    END) as losses,
+                    SUM(b.amount * COALESCE(b.leverage, 1)) as total_wagered,
+                    AVG(COALESCE(b.leverage, 1)) as avg_leverage,
+                    SUM(CASE
+                        WHEN (m.winning_team = 1 AND b.team_bet_on = 'radiant')
+                          OR (m.winning_team = 2 AND b.team_bet_on = 'dire')
+                        THEN COALESCE(b.payout, b.amount * COALESCE(b.leverage, 1) * 2)
+                             - (b.amount * COALESCE(b.leverage, 1))
+                        ELSE -(b.amount * COALESCE(b.leverage, 1))
+                    END) as net_pnl
+                FROM bets b
+                JOIN matches m ON b.match_id = m.match_id
+                WHERE b.guild_id = ? AND b.match_id IS NOT NULL
+                GROUP BY b.discord_id
+                HAVING COUNT(*) >= ?
+                ORDER BY net_pnl DESC
+                """,
+                (normalized_guild, min_bets),
+            )
+            rows = cursor.fetchall()
+            results = []
+            for row in rows:
+                data = dict(row)
+                data["win_rate"] = data["wins"] / data["total_bets"] if data["total_bets"] > 0 else 0
+                data["roi"] = data["net_pnl"] / data["total_wagered"] if data["total_wagered"] > 0 else 0
+                results.append(data)
+            return results
+
+    def get_player_matches_without_self_bet(self, discord_id: int) -> dict:
+        """
+        Count matches where player participated but didn't bet on themselves.
+
+        Returns dict with: matches_played, matches_bet_on_self, paper_hands_count
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            # Get all matches the player participated in
+            cursor.execute(
+                """
+                SELECT
+                    mp.match_id,
+                    mp.team_number,
+                    CASE WHEN mp.team_number = 1 THEN 'radiant' ELSE 'dire' END as player_team
+                FROM match_participants mp
+                WHERE mp.discord_id = ?
+                """,
+                (discord_id,),
+            )
+            player_matches = {row["match_id"]: row["player_team"] for row in cursor.fetchall()}
+
+            if not player_matches:
+                return {"matches_played": 0, "matches_bet_on_self": 0, "paper_hands_count": 0}
+
+            # Get bets this player made on those matches
+            placeholders = ",".join("?" * len(player_matches))
+            cursor.execute(
+                f"""
+                SELECT match_id, team_bet_on
+                FROM bets
+                WHERE discord_id = ? AND match_id IN ({placeholders})
+                """,
+                (discord_id, *player_matches.keys()),
+            )
+            bets_by_match = {row["match_id"]: row["team_bet_on"] for row in cursor.fetchall()}
+
+            matches_played = len(player_matches)
+            matches_bet_on_self = sum(
+                1 for match_id, team in player_matches.items()
+                if bets_by_match.get(match_id) == team
+            )
+            # Paper hands = played but either didn't bet or bet against self (shouldn't be possible)
+            paper_hands_count = matches_played - matches_bet_on_self
+
+            return {
+                "matches_played": matches_played,
+                "matches_bet_on_self": matches_bet_on_self,
+                "paper_hands_count": paper_hands_count,
+            }
+
+    def get_player_leverage_distribution(self, discord_id: int) -> dict[int, int]:
+        """Get count of bets at each leverage level for a player."""
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT COALESCE(leverage, 1) as leverage, COUNT(*) as count
+                FROM bets
+                WHERE discord_id = ? AND match_id IS NOT NULL
+                GROUP BY COALESCE(leverage, 1)
+                """,
+                (discord_id,),
+            )
+            return {row["leverage"]: row["count"] for row in cursor.fetchall()}
+
+    def get_player_bankruptcy_count(self, discord_id: int) -> int:
+        """Get the number of times a player has declared bankruptcy."""
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT COUNT(*) as count
+                FROM bankruptcy_state
+                WHERE discord_id = ? AND last_bankruptcy_at IS NOT NULL
+                """,
+                (discord_id,),
+            )
+            row = cursor.fetchone()
+            # bankruptcy_state only has one row per player, check if they've ever bankrupted
+            if row and row["count"] > 0:
+                # Count actual bankruptcies - need to check penalty_games as proxy
+                cursor.execute(
+                    """
+                    SELECT last_bankruptcy_at
+                    FROM bankruptcy_state
+                    WHERE discord_id = ?
+                    """,
+                    (discord_id,),
+                )
+                state = cursor.fetchone()
+                return 1 if state and state["last_bankruptcy_at"] else 0
+            return 0
+
+    def count_player_loss_chasing(self, discord_id: int) -> dict:
+        """
+        Analyze loss chasing behavior: how often does player increase bet after a loss?
+
+        Returns dict with: sequences_analyzed, times_increased_after_loss, loss_chase_rate
+        """
+        history = self.get_player_bet_history(discord_id)
+        if len(history) < 2:
+            return {"sequences_analyzed": 0, "times_increased_after_loss": 0, "loss_chase_rate": 0.0}
+
+        times_increased_after_loss = 0
+        loss_sequences = 0
+
+        for i in range(1, len(history)):
+            prev_bet = history[i - 1]
+            curr_bet = history[i]
+
+            if prev_bet["outcome"] == "lost":
+                loss_sequences += 1
+                if curr_bet["effective_bet"] > prev_bet["effective_bet"]:
+                    times_increased_after_loss += 1
+
+        loss_chase_rate = times_increased_after_loss / loss_sequences if loss_sequences > 0 else 0.0
+
+        return {
+            "sequences_analyzed": loss_sequences,
+            "times_increased_after_loss": times_increased_after_loss,
+            "loss_chase_rate": loss_chase_rate,
+        }

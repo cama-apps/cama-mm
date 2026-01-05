@@ -48,7 +48,8 @@ commands/                 # Discord slash commands (9 cog modules)
 ├── match.py              # /shuffle, /record
 ├── registration.py       # /register, /setroles, /stats
 ├── lobby.py              # /lobby, /kick, /resetlobby
-├── betting.py            # /bet, /mybets, /balance, /paydebt, /bankruptcy
+├── betting.py            # /bet, /mybets, /balance, /paydebt, /bankruptcy,
+│                         # /gambastats, /gambachart, /gambaleaderboard
 ├── info.py               # /help, /leaderboard
 ├── advstats.py           # /pairwise, /matchup, /rebuildpairings
 ├── enrichment.py         # /enrichmatch, /profile, /matchhistory, /viewmatch,
@@ -69,6 +70,7 @@ services/                 # Application services (orchestrate repos + domain)
 ├── match_service.py      # Core: shuffle, record, voting, rating updates
 ├── player_service.py     # Registration, role management, stats
 ├── betting_service.py    # Bet placement, settlement, rewards
+├── gambling_stats_service.py # Degen score, gamba stats, leaderboards
 ├── lobby_service.py      # Lobby management, embed generation
 ├── garnishment_service.py    # Debt repayment from winnings
 ├── bankruptcy_service.py     # Bankruptcy declaration and penalties
@@ -89,7 +91,7 @@ repositories/             # Data access layer
 └── guild_config_repository.py    # Per-guild configuration
 
 infrastructure/
-└── schema_manager.py     # SQLite schema creation and 18 migrations
+└── schema_manager.py     # SQLite schema creation and 19 migrations
 
 utils/
 ├── embeds.py             # Discord embed builders (lobby, match, enriched stats)
@@ -268,6 +270,7 @@ team_bet_on TEXT  -- 'radiant' or 'dire'
 amount INTEGER
 leverage INTEGER DEFAULT 1  -- 2x, 3x, 5x multipliers
 bet_time INTEGER  -- Unix timestamp (indexed)
+payout INTEGER    -- NULL for pending/lost, value for won (for stats)
 ```
 
 ### player_pairings
@@ -292,6 +295,9 @@ PRIMARY KEY (player1_id, player2_id)
 | `/balance` | Check balance/debt | - |
 | `/bankruptcy` | Clear debt (1wk cooldown) | - |
 | `/leaderboard` | Rankings by jopacoin | `limit`: default 20 |
+| `/gambastats` | Gambling stats + degen score | `user`: optional |
+| `/gambachart` | P&L history chart | `user`: optional |
+| `/gambaleaderboard` | Server gambling rankings | `limit`: default 5 |
 | `/pairwise` | Teammate/opponent stats | `user`, `min_games` |
 | `/profile` | OpenDota profile | `user`: optional |
 | `/matchhistory` | Recent matches with stats | `user`, `limit` |
@@ -413,6 +419,7 @@ def test_full_match_workflow(test_db, mock_lobby_manager):
 - **Voting Threshold**: 2 non-admin votes OR 1 admin vote to record match
 - **Leverage**: Multiplies effective bet; losses can cause debt up to MAX_DEBT
 - **Garnishment**: 100% of winnings go to debt repayment until balance >= 0
+- **Degen Score**: 0-100 score based on leverage addiction (40%), bet frequency (20%), bankruptcies (20%), loss chasing (10%), paper hands (10%)
 - **Pairings Storage**: Canonical pairs with player1_id < player2_id to avoid duplicates
 - **Lane Outcomes**: W/L/D determined by comparing avg lane_efficiency (parsed matches only)
 - **Lane Matchups**: Safe vs Off, Mid vs Mid - 5% threshold for win determination

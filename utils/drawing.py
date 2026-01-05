@@ -534,3 +534,268 @@ def draw_attribute_distribution(attr_values: dict[str, float]) -> BytesIO:
     img.save(fp, format="PNG")
     fp.seek(0)
     return fp
+
+
+def draw_gamba_chart(
+    username: str,
+    degen_score: int,
+    degen_title: str,
+    degen_emoji: str,
+    pnl_series: list[tuple[int, int, dict]],
+    stats: dict,
+) -> BytesIO:
+    """
+    Generate a cumulative P&L chart with bet markers.
+
+    Args:
+        username: Player's display name
+        degen_score: Degen score (0-100)
+        degen_title: Degen tier title
+        degen_emoji: Degen tier emoji
+        pnl_series: List of (bet_number, cumulative_pnl, bet_info) tuples
+        stats: Dict with total_bets, win_rate, net_pnl, roi
+
+    Returns:
+        BytesIO containing the PNG image
+    """
+    # Image dimensions
+    width = 700
+    height = 400
+    padding = 60
+    header_height = 50
+    footer_height = 40
+    chart_width = width - padding * 2
+    chart_height = height - header_height - footer_height - padding
+
+    # Create image
+    img = Image.new("RGBA", (width, height), DISCORD_BG)
+    draw = ImageDraw.Draw(img)
+
+    # Fonts
+    title_font = _get_font(18)
+    subtitle_font = _get_font(14)
+    label_font = _get_font(12)
+    value_font = _get_font(11)
+
+    # Draw header
+    title = f"{username}'s Gamba Journey"
+    draw.text((padding, 12), title, fill=DISCORD_WHITE, font=title_font)
+
+    subtitle = f"Degen Score: {degen_score} {degen_emoji} \"{degen_title}\""
+    draw.text((padding, 35), subtitle, fill=DISCORD_GREY, font=subtitle_font)
+
+    # Handle empty data
+    if not pnl_series:
+        draw.text(
+            (width // 2 - 60, height // 2),
+            "No betting history",
+            fill=DISCORD_GREY,
+            font=title_font,
+        )
+        fp = BytesIO()
+        img.save(fp, format="PNG")
+        fp.seek(0)
+        return fp
+
+    # Extract data
+    bet_nums = [p[0] for p in pnl_series]
+    pnl_values = [p[1] for p in pnl_series]
+    bet_infos = [p[2] for p in pnl_series]
+
+    # Calculate chart bounds
+    min_pnl = min(min(pnl_values), 0)
+    max_pnl = max(max(pnl_values), 0)
+    pnl_range = max(abs(max_pnl - min_pnl), 1)
+
+    # Add 10% padding to range
+    min_pnl -= pnl_range * 0.1
+    max_pnl += pnl_range * 0.1
+    pnl_range = max_pnl - min_pnl
+
+    # Chart origin
+    chart_x = padding
+    chart_y = header_height + 20
+
+    # Helper to convert data to pixel coordinates
+    def to_pixel(bet_num: int, pnl: int) -> tuple[int, int]:
+        x = chart_x + int((bet_num - 1) / max(len(bet_nums) - 1, 1) * chart_width)
+        y = chart_y + int((max_pnl - pnl) / pnl_range * chart_height)
+        return (x, y)
+
+    # Draw zero line
+    zero_y = chart_y + int((max_pnl - 0) / pnl_range * chart_height)
+    draw.line(
+        [(chart_x, zero_y), (chart_x + chart_width, zero_y)],
+        fill=DISCORD_GREY,
+        width=1,
+    )
+    draw.text((chart_x - 25, zero_y - 6), "0", fill=DISCORD_GREY, font=value_font)
+
+    # Draw Y-axis labels
+    y_steps = 5
+    for i in range(y_steps + 1):
+        pnl_val = int(min_pnl + (pnl_range * i / y_steps))
+        y_pos = chart_y + int((max_pnl - pnl_val) / pnl_range * chart_height)
+        if abs(pnl_val) > 0:  # Skip if near zero (already drawn)
+            label = f"{pnl_val:+d}" if pnl_val != 0 else "0"
+            text_w = _get_text_size(value_font, label)[0]
+            draw.text((chart_x - text_w - 8, y_pos - 6), label, fill=DISCORD_GREY, font=value_font)
+
+    # Draw X-axis labels (bet numbers)
+    x_step = max(len(bet_nums) // 5, 1)
+    for i in range(0, len(bet_nums), x_step):
+        x_pos, _ = to_pixel(bet_nums[i], 0)
+        label = str(bet_nums[i])
+        text_w = _get_text_size(value_font, label)[0]
+        draw.text(
+            (x_pos - text_w // 2, chart_y + chart_height + 5),
+            label,
+            fill=DISCORD_GREY,
+            font=value_font,
+        )
+
+    # Draw filled area under/over the line
+    # Create overlay for transparency
+    overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    overlay_draw = ImageDraw.Draw(overlay)
+
+    # Build polygon points for fill
+    if len(pnl_series) > 1:
+        # Positive area (above zero)
+        pos_points = [(chart_x, zero_y)]
+        for bet_num, pnl, _ in pnl_series:
+            px, py = to_pixel(bet_num, pnl)
+            if pnl >= 0:
+                pos_points.append((px, py))
+            else:
+                pos_points.append((px, zero_y))
+        pos_points.append((chart_x + chart_width, zero_y))
+        if len(pos_points) > 2:
+            overlay_draw.polygon(pos_points, fill=(87, 242, 135, 60))  # Green with alpha
+
+        # Negative area (below zero)
+        neg_points = [(chart_x, zero_y)]
+        for bet_num, pnl, _ in pnl_series:
+            px, py = to_pixel(bet_num, pnl)
+            if pnl <= 0:
+                neg_points.append((px, py))
+            else:
+                neg_points.append((px, zero_y))
+        neg_points.append((chart_x + chart_width, zero_y))
+        if len(neg_points) > 2:
+            overlay_draw.polygon(neg_points, fill=(237, 66, 69, 60))  # Red with alpha
+
+        img = Image.alpha_composite(img, overlay)
+        draw = ImageDraw.Draw(img)
+
+    # Draw the P&L line
+    if len(pnl_series) > 1:
+        line_points = [to_pixel(p[0], p[1]) for p in pnl_series]
+        for i in range(len(line_points) - 1):
+            # Color based on direction
+            if pnl_values[i + 1] >= pnl_values[i]:
+                color = DISCORD_GREEN
+            else:
+                color = DISCORD_RED
+            draw.line([line_points[i], line_points[i + 1]], fill=color, width=2)
+
+    # Draw bet markers
+    max_bet_size = max(b["effective_bet"] for b in bet_infos) if bet_infos else 1
+    for bet_num, pnl, info in pnl_series:
+        px, py = to_pixel(bet_num, pnl)
+
+        # Size based on bet amount (3-8 pixels)
+        size = 3 + int((info["effective_bet"] / max_bet_size) * 5)
+
+        # Color based on outcome
+        if info["outcome"] == "won":
+            color = DISCORD_GREEN
+        else:
+            color = DISCORD_RED
+
+        # Diamond shape for leveraged bets, circle for normal
+        if info["leverage"] > 1:
+            # Diamond
+            points = [
+                (px, py - size),
+                (px + size, py),
+                (px, py + size),
+                (px - size, py),
+            ]
+            draw.polygon(points, fill=color, outline=DISCORD_WHITE)
+        else:
+            # Circle
+            draw.ellipse(
+                [(px - size, py - size), (px + size, py + size)],
+                fill=color,
+            )
+
+    # Annotate peak and trough
+    peak_idx = pnl_values.index(max(pnl_values))
+    trough_idx = pnl_values.index(min(pnl_values))
+
+    peak_x, peak_y = to_pixel(bet_nums[peak_idx], pnl_values[peak_idx])
+    trough_x, trough_y = to_pixel(bet_nums[trough_idx], pnl_values[trough_idx])
+
+    # Peak annotation
+    if pnl_values[peak_idx] > 0:
+        peak_text = f"Peak: +{pnl_values[peak_idx]}"
+        draw.text((peak_x + 5, peak_y - 15), peak_text, fill=DISCORD_GREEN, font=value_font)
+
+    # Trough annotation
+    if pnl_values[trough_idx] < 0:
+        trough_text = f"Trough: {pnl_values[trough_idx]}"
+        draw.text((trough_x + 5, trough_y + 5), trough_text, fill=DISCORD_RED, font=value_font)
+
+    # Current position annotation
+    curr_x, curr_y = to_pixel(bet_nums[-1], pnl_values[-1])
+    curr_color = DISCORD_GREEN if pnl_values[-1] >= 0 else DISCORD_RED
+    curr_text = f"Now: {pnl_values[-1]:+d}"
+    draw.text((curr_x - 40, curr_y - 20), curr_text, fill=curr_color, font=label_font)
+
+    # Draw legend
+    legend_y = chart_y + chart_height + 25
+    legend_font = _get_font(10)
+
+    # Win marker
+    draw.ellipse([(padding, legend_y), (padding + 8, legend_y + 8)], fill=DISCORD_GREEN)
+    draw.text((padding + 12, legend_y - 1), "Win", fill=DISCORD_GREY, font=legend_font)
+
+    # Loss marker
+    draw.ellipse([(padding + 50, legend_y), (padding + 58, legend_y + 8)], fill=DISCORD_RED)
+    draw.text((padding + 62, legend_y - 1), "Loss", fill=DISCORD_GREY, font=legend_font)
+
+    # Leveraged marker (diamond)
+    lx = padding + 110
+    draw.polygon(
+        [(lx + 4, legend_y), (lx + 8, legend_y + 4), (lx + 4, legend_y + 8), (lx, legend_y + 4)],
+        fill=DISCORD_ACCENT,
+        outline=DISCORD_WHITE,
+    )
+    draw.text((lx + 14, legend_y - 1), "Leveraged", fill=DISCORD_GREY, font=legend_font)
+
+    # Draw footer stats
+    footer_y = height - footer_height + 5
+    stat_font = _get_font(13)
+
+    net_pnl = stats.get("net_pnl", 0)
+    pnl_color = DISCORD_GREEN if net_pnl >= 0 else DISCORD_RED
+    pnl_text = f"{net_pnl:+d}" if net_pnl != 0 else "0"
+
+    footer_parts = [
+        f"{stats.get('total_bets', 0)} bets",
+        f"{stats.get('win_rate', 0):.0%} WR",
+        f"{pnl_text} {'profit' if net_pnl >= 0 else 'loss'}",
+        f"ROI {stats.get('roi', 0):+.1%}",
+    ]
+
+    # Draw footer stats centered
+    footer_text = "  |  ".join(footer_parts)
+    text_w = _get_text_size(stat_font, footer_text)[0]
+    draw.text(((width - text_w) // 2, footer_y), footer_text, fill=DISCORD_WHITE, font=stat_font)
+
+    # Save to BytesIO
+    fp = BytesIO()
+    img.save(fp, format="PNG")
+    fp.seek(0)
+    return fp
