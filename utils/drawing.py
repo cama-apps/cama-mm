@@ -92,8 +92,8 @@ def draw_matches_table(
         return fp
 
     # Fonts
-    header_font = _get_font(16)
-    cell_font = _get_font(14)
+    header_font = _get_font(20)
+    cell_font = _get_font(16)
 
     # Column definitions: (header, width, align)
     columns = [
@@ -235,9 +235,9 @@ def draw_role_graph(
     draw = ImageDraw.Draw(img)
 
     # Draw title
-    title_font = _get_font(18)
+    title_font = _get_font(22)
     title_w = _get_text_size(title_font, title)[0]
-    draw.text(((size - title_w) // 2, 10), title, fill=DISCORD_WHITE, font=title_font)
+    draw.text(((size - title_w) // 2, 8), title, fill=DISCORD_WHITE, font=title_font)
 
     # Use fixed role order for consistent positioning across graphs
     # Always include all roles for visual consistency (0 value for missing roles)
@@ -282,7 +282,7 @@ def draw_role_graph(
         return points
 
     # Draw grid circles (at 25%, 50%, 75%, 100% of scale_max)
-    scale_font = _get_font(10)
+    scale_font = _get_font(12)
     for pct in [0.25, 0.5, 0.75, 1.0]:
         grid_points = get_points(radius, pct)
         draw.polygon(grid_points, outline=DISCORD_DARKER)
@@ -327,8 +327,8 @@ def draw_role_graph(
         )
 
     # Draw labels
-    label_font = _get_font(12)
-    label_offset = 20
+    label_font = _get_font(14)
+    label_offset = 22
     for i, role in enumerate(roles):
         angle = (2 * math.pi * i / n) - (math.pi / 2)
         lx = center[0] + (radius + label_offset) * math.cos(angle)
@@ -385,7 +385,7 @@ def draw_lane_distribution(lane_values: dict[str, float]) -> BytesIO:
     draw = ImageDraw.Draw(img)
 
     # Draw title
-    title_font = _get_font(16)
+    title_font = _get_font(20)
     draw.text((padding, padding), "Lane Distribution", fill=DISCORD_WHITE, font=title_font)
 
     # Lane colors
@@ -397,10 +397,10 @@ def draw_lane_distribution(lane_values: dict[str, float]) -> BytesIO:
         "Roaming": "#E91E63",  # Pink for roaming/support
     }
 
-    label_font = _get_font(13)
-    value_font = _get_font(12)
+    label_font = _get_font(16)
+    value_font = _get_font(14)
 
-    y = padding + 35
+    y = padding + 40
     bar_width = width - padding * 2 - label_width - 50
 
     for lane in lanes:
@@ -462,7 +462,7 @@ def draw_attribute_distribution(attr_values: dict[str, float]) -> BytesIO:
     draw = ImageDraw.Draw(img)
 
     # Draw title
-    title_font = _get_font(16)
+    title_font = _get_font(20)
     title = "Hero Attributes"
     title_w = _get_text_size(title_font, title)[0]
     draw.text(((size - title_w) // 2, 10), title, fill=DISCORD_WHITE, font=title_font)
@@ -505,10 +505,10 @@ def draw_attribute_distribution(attr_values: dict[str, float]) -> BytesIO:
         start_angle = end_angle
 
     # Draw legend
-    legend_font = _get_font(12)
+    legend_font = _get_font(14)
     legend_y = size - 60
     legend_x = 20
-    box_size = 12
+    box_size = 14
 
     for attr in ["str", "agi", "int", "all"]:
         value = attr_values.get(attr, 0)
@@ -572,17 +572,17 @@ def draw_gamba_chart(
     draw = ImageDraw.Draw(img)
 
     # Fonts
-    title_font = _get_font(18)
-    subtitle_font = _get_font(14)
-    label_font = _get_font(12)
-    value_font = _get_font(11)
+    title_font = _get_font(22)
+    subtitle_font = _get_font(16)
+    label_font = _get_font(14)
+    value_font = _get_font(13)
 
     # Draw header
     title = f"{username}'s Gamba Journey"
     draw.text((padding, 12), title, fill=DISCORD_WHITE, font=title_font)
 
     subtitle = f"Degen Score: {degen_score} {degen_emoji} \"{degen_title}\""
-    draw.text((padding, 35), subtitle, fill=DISCORD_GREY, font=subtitle_font)
+    draw.text((padding, 38), subtitle, fill=DISCORD_GREY, font=subtitle_font)
 
     # Handle empty data
     if not pnl_series:
@@ -602,28 +602,45 @@ def draw_gamba_chart(
     pnl_values = [p[1] for p in pnl_series]
     bet_infos = [p[2] for p in pnl_series]
 
-    # Calculate chart bounds
-    min_pnl = min(min(pnl_values), 0)
-    max_pnl = max(max(pnl_values), 0)
-    pnl_range = max(abs(max_pnl - min_pnl), 1)
+    # Signed log scale: sign(x) * log(1 + |x|) for better visualization of large swings
+    def signed_log(x: float) -> float:
+        """Apply signed log transformation to compress large values while preserving sign."""
+        if x == 0:
+            return 0.0
+        sign = 1 if x > 0 else -1
+        return sign * math.log1p(abs(x))
+
+    def signed_log_inverse(y: float) -> float:
+        """Inverse of signed_log for label generation."""
+        if y == 0:
+            return 0.0
+        sign = 1 if y > 0 else -1
+        return sign * (math.exp(abs(y)) - 1)
+
+    # Transform P&L values to log scale for chart bounds
+    log_pnl_values = [signed_log(p) for p in pnl_values]
+    min_log_pnl = min(min(log_pnl_values), 0)
+    max_log_pnl = max(max(log_pnl_values), 0)
+    log_pnl_range = max(abs(max_log_pnl - min_log_pnl), 0.1)
 
     # Add 10% padding to range
-    min_pnl -= pnl_range * 0.1
-    max_pnl += pnl_range * 0.1
-    pnl_range = max_pnl - min_pnl
+    min_log_pnl -= log_pnl_range * 0.1
+    max_log_pnl += log_pnl_range * 0.1
+    log_pnl_range = max_log_pnl - min_log_pnl
 
     # Chart origin
     chart_x = padding
     chart_y = header_height + 20
 
-    # Helper to convert data to pixel coordinates
+    # Helper to convert data to pixel coordinates (using log scale for Y)
     def to_pixel(bet_num: int, pnl: int) -> tuple[int, int]:
         x = chart_x + int((bet_num - 1) / max(len(bet_nums) - 1, 1) * chart_width)
-        y = chart_y + int((max_pnl - pnl) / pnl_range * chart_height)
+        log_pnl = signed_log(pnl)
+        y = chart_y + int((max_log_pnl - log_pnl) / log_pnl_range * chart_height)
         return (x, y)
 
-    # Draw zero line
-    zero_y = chart_y + int((max_pnl - 0) / pnl_range * chart_height)
+    # Draw zero line (using log scale position)
+    zero_y = chart_y + int((max_log_pnl - 0) / log_pnl_range * chart_height)
     draw.line(
         [(chart_x, zero_y), (chart_x + chart_width, zero_y)],
         fill=DISCORD_GREY,
@@ -631,15 +648,30 @@ def draw_gamba_chart(
     )
     draw.text((chart_x - 25, zero_y - 6), "0", fill=DISCORD_GREY, font=value_font)
 
-    # Draw Y-axis labels
-    y_steps = 5
-    for i in range(y_steps + 1):
-        pnl_val = int(min_pnl + (pnl_range * i / y_steps))
-        y_pos = chart_y + int((max_pnl - pnl_val) / pnl_range * chart_height)
-        if abs(pnl_val) > 0:  # Skip if near zero (already drawn)
-            label = f"{pnl_val:+d}" if pnl_val != 0 else "0"
-            text_w = _get_text_size(value_font, label)[0]
-            draw.text((chart_x - text_w - 8, y_pos - 6), label, fill=DISCORD_GREY, font=value_font)
+    # Draw Y-axis labels at log-spaced positions
+    # Generate nice round values that span the actual data range
+    actual_min = min(pnl_values)
+    actual_max = max(pnl_values)
+
+    # Generate label values at key points (powers of 10, nice round numbers)
+    label_values = [0]
+    for magnitude in [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000]:
+        if magnitude <= abs(actual_max) * 1.2:
+            label_values.append(magnitude)
+        if -magnitude >= actual_min * 1.2:
+            label_values.append(-magnitude)
+
+    for pnl_val in sorted(set(label_values)):
+        log_val = signed_log(pnl_val)
+        # Skip if outside the visible range
+        if log_val < min_log_pnl or log_val > max_log_pnl:
+            continue
+        y_pos = chart_y + int((max_log_pnl - log_val) / log_pnl_range * chart_height)
+        if pnl_val == 0:
+            continue  # Already drawn zero line
+        label = f"{pnl_val:+d}"
+        text_w = _get_text_size(value_font, label)[0]
+        draw.text((chart_x - text_w - 8, y_pos - 6), label, fill=DISCORD_GREY, font=value_font)
 
     # Draw X-axis labels (bet numbers)
     x_step = max(len(bet_nums) // 5, 1)
@@ -754,29 +786,43 @@ def draw_gamba_chart(
     draw.text((curr_x - 40, curr_y - 20), curr_text, fill=curr_color, font=label_font)
 
     # Draw legend
-    legend_y = chart_y + chart_height + 25
-    legend_font = _get_font(10)
+    legend_y = chart_y + chart_height + 22
+    legend_font = _get_font(14)
+    marker_size = 12
 
     # Win marker
-    draw.ellipse([(padding, legend_y), (padding + 8, legend_y + 8)], fill=DISCORD_GREEN)
-    draw.text((padding + 12, legend_y - 1), "Win", fill=DISCORD_GREY, font=legend_font)
+    draw.ellipse(
+        [(padding, legend_y), (padding + marker_size, legend_y + marker_size)],
+        fill=DISCORD_GREEN,
+    )
+    draw.text((padding + marker_size + 5, legend_y - 1), "Win", fill=DISCORD_GREY, font=legend_font)
 
     # Loss marker
-    draw.ellipse([(padding + 50, legend_y), (padding + 58, legend_y + 8)], fill=DISCORD_RED)
-    draw.text((padding + 62, legend_y - 1), "Loss", fill=DISCORD_GREY, font=legend_font)
+    lx_loss = padding + 70
+    draw.ellipse(
+        [(lx_loss, legend_y), (lx_loss + marker_size, legend_y + marker_size)],
+        fill=DISCORD_RED,
+    )
+    draw.text((lx_loss + marker_size + 5, legend_y - 1), "Loss", fill=DISCORD_GREY, font=legend_font)
 
     # Leveraged marker (diamond)
-    lx = padding + 110
+    lx = padding + 150
+    half = marker_size // 2
     draw.polygon(
-        [(lx + 4, legend_y), (lx + 8, legend_y + 4), (lx + 4, legend_y + 8), (lx, legend_y + 4)],
+        [
+            (lx + half, legend_y),
+            (lx + marker_size, legend_y + half),
+            (lx + half, legend_y + marker_size),
+            (lx, legend_y + half),
+        ],
         fill=DISCORD_ACCENT,
         outline=DISCORD_WHITE,
     )
-    draw.text((lx + 14, legend_y - 1), "Leveraged", fill=DISCORD_GREY, font=legend_font)
+    draw.text((lx + marker_size + 5, legend_y - 1), "Leveraged", fill=DISCORD_GREY, font=legend_font)
 
     # Draw footer stats
     footer_y = height - footer_height + 5
-    stat_font = _get_font(13)
+    stat_font = _get_font(15)
 
     net_pnl = stats.get("net_pnl", 0)
     pnl_color = DISCORD_GREEN if net_pnl >= 0 else DISCORD_RED
