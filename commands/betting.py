@@ -979,7 +979,7 @@ class BettingCommands(commands.Cog):
         guild_id = interaction.guild.id if interaction.guild else None
 
         # Check if registered
-        if not self.player_repo.get_by_id(user_id):
+        if not self.player_service.get_player(user_id):
             await interaction.response.send_message(
                 "You need to `/register` before taking loans.", ephemeral=True
             )
