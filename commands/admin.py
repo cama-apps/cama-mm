@@ -398,23 +398,29 @@ class AdminCommands(commands.Cog):
             )
             return
 
-        # Get current state and reset the cooldown
+        # Get current state
         state = self.bankruptcy_service.bankruptcy_repo.get_state(user.id)
-        penalty_games = state["penalty_games_remaining"] if state else 0
 
-        # Reset the cooldown by setting last_bankruptcy_at to None (or 0)
+        if not state:
+            await interaction.response.send_message(
+                f"ℹ️ {user.mention} has no bankruptcy history to reset.",
+                ephemeral=True,
+            )
+            return
+
+        # Reset cooldown AND clear penalty games
         self.bankruptcy_service.bankruptcy_repo.upsert_state(
             discord_id=user.id,
             last_bankruptcy_at=0,  # Far in the past = no cooldown
-            penalty_games_remaining=penalty_games,
+            penalty_games_remaining=0,  # Clear penalty games
         )
 
         await interaction.response.send_message(
-            f"✅ Reset bankruptcy cooldown for {user.mention}. They can now declare bankruptcy again.",
+            f"✅ Reset bankruptcy for {user.mention}. Cooldown and penalty games cleared.",
             ephemeral=True,
         )
         logger.info(
-            f"Admin {interaction.user.id} ({interaction.user}) reset bankruptcy cooldown for "
+            f"Admin {interaction.user.id} ({interaction.user}) reset bankruptcy (cooldown + penalty) for "
             f"{user.id} ({user})"
         )
 

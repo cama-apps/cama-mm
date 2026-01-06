@@ -8,7 +8,8 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from utils.formatting import JOPACOIN_EMOTE, format_role_display
+from config import BANKRUPTCY_PENALTY_RATE
+from utils.formatting import JOPACOIN_EMOTE, TOMBSTONE_EMOJI, format_role_display
 from utils.interaction_safety import safe_defer, safe_followup
 
 logger = logging.getLogger("cama_bot.commands.registration")
@@ -17,12 +18,21 @@ logger = logging.getLogger("cama_bot.commands.registration")
 class RegistrationCommands(commands.Cog):
     """Commands for player registration and profile management."""
 
-    def __init__(self, bot: commands.Bot, db, player_service, role_emojis: dict, role_names: dict):
+    def __init__(
+        self,
+        bot: commands.Bot,
+        db,
+        player_service,
+        role_emojis: dict,
+        role_names: dict,
+        bankruptcy_service=None,
+    ):
         self.bot = bot
         self.db = db
         self.player_service = player_service
         self.role_emojis = role_emojis
         self.role_names = role_names
+        self.bankruptcy_service = bankruptcy_service
 
     @app_commands.command(name="register", description="Register yourself as a player")
     @app_commands.describe(steam_id="Steam32 ID (found in your Dotabuff URL)")
@@ -124,7 +134,18 @@ class RegistrationCommands(commands.Cog):
         try:
             stats = self.player_service.get_stats(target_discord_id)
             player = stats["player"]
-            embed = discord.Embed(title=f"📊 Stats for {player.name}", color=discord.Color.green())
+
+            # Check for bankruptcy penalty
+            penalty_games = 0
+            if self.bankruptcy_service:
+                state = self.bankruptcy_service.get_state(target_discord_id)
+                penalty_games = state.penalty_games_remaining
+
+            # Add tombstone to title if player has active bankruptcy penalty
+            title_prefix = f"{TOMBSTONE_EMOJI} " if penalty_games > 0 else ""
+            embed = discord.Embed(
+                title=f"📊 Stats for {title_prefix}{player.name}", color=discord.Color.green()
+            )
 
             if stats["cama_rating"] is not None:
                 embed.add_field(
@@ -186,6 +207,15 @@ class RegistrationCommands(commands.Cog):
                     # Hero stats are optional, don't fail the whole command
                     logger.debug(f"Could not fetch hero stats: {e}")
 
+            # Show bankruptcy penalty info if active
+            if penalty_games > 0:
+                penalty_rate_pct = int(BANKRUPTCY_PENALTY_RATE * 100)
+                embed.add_field(
+                    name=f"{TOMBSTONE_EMOJI} Bankruptcy Penalty",
+                    value=f"{penalty_rate_pct}% win bonus for {penalty_games} more game(s)",
+                    inline=False,
+                )
+
             await interaction.followup.send(embed=embed)
 
         except ValueError as e:
@@ -204,5 +234,10 @@ async def setup(bot: commands.Bot):
     player_service = getattr(bot, "player_service", None)
     role_emojis = getattr(bot, "role_emojis", {})
     role_names = getattr(bot, "role_names", {})
+    bankruptcy_service = getattr(bot, "bankruptcy_service", None)
 
-    await bot.add_cog(RegistrationCommands(bot, db, player_service, role_emojis, role_names))
+    await bot.add_cog(
+        RegistrationCommands(
+            bot, db, player_service, role_emojis, role_names, bankruptcy_service
+        )
+    )
