@@ -326,6 +326,7 @@ class Database:
         return Player(
             name=row["discord_username"],
             mmr=int(row["current_mmr"]) if row["current_mmr"] else None,
+            initial_mmr=int(row["initial_mmr"]) if row["initial_mmr"] else None,
             wins=row["wins"],
             losses=row["losses"],
             preferred_roles=preferred_roles,
@@ -652,6 +653,7 @@ class Database:
             cursor.execute("DELETE FROM players")
             cursor.execute("DELETE FROM match_participants")
             cursor.execute("DELETE FROM rating_history")
+            cursor.execute("DELETE FROM match_predictions")
             cursor.execute("DELETE FROM matches")
 
             return count

@@ -94,9 +94,33 @@ class SchemaManager:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 discord_id INTEGER,
                 rating REAL,
+                rating_before REAL,
+                rd_before REAL,
+                rd_after REAL,
+                volatility_before REAL,
+                volatility_after REAL,
+                expected_team_win_prob REAL,
+                team_number INTEGER,
+                won BOOLEAN,
                 match_id INTEGER,
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (discord_id) REFERENCES players(discord_id),
+                FOREIGN KEY (match_id) REFERENCES matches(match_id)
+            )
+            """
+        )
+
+        # Match prediction snapshots (pre-match)
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS match_predictions (
+                match_id INTEGER PRIMARY KEY,
+                radiant_rating REAL,
+                dire_rating REAL,
+                radiant_rd REAL,
+                dire_rd REAL,
+                expected_radiant_win_prob REAL,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (match_id) REFERENCES matches(match_id)
             )
             """
@@ -161,6 +185,8 @@ class SchemaManager:
             ("add_negative_loans_column", self._migration_add_negative_loans_column),
             ("add_outstanding_loan_columns", self._migration_add_outstanding_loan_columns),
             ("create_disburse_system", self._migration_create_disburse_system),
+            ("add_rating_history_details", self._migration_add_rating_history_details),
+            ("create_match_predictions_table", self._migration_create_match_predictions_table),
         ]
 
     # --- Migrations ---
@@ -503,6 +529,32 @@ class SchemaManager:
                 recipient_count INTEGER NOT NULL,
                 recipients TEXT NOT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+
+    def _migration_add_rating_history_details(self, cursor) -> None:
+        self._add_column_if_not_exists(cursor, "rating_history", "rating_before", "REAL")
+        self._add_column_if_not_exists(cursor, "rating_history", "rd_before", "REAL")
+        self._add_column_if_not_exists(cursor, "rating_history", "rd_after", "REAL")
+        self._add_column_if_not_exists(cursor, "rating_history", "volatility_before", "REAL")
+        self._add_column_if_not_exists(cursor, "rating_history", "volatility_after", "REAL")
+        self._add_column_if_not_exists(cursor, "rating_history", "expected_team_win_prob", "REAL")
+        self._add_column_if_not_exists(cursor, "rating_history", "team_number", "INTEGER")
+        self._add_column_if_not_exists(cursor, "rating_history", "won", "BOOLEAN")
+
+    def _migration_create_match_predictions_table(self, cursor) -> None:
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS match_predictions (
+                match_id INTEGER PRIMARY KEY,
+                radiant_rating REAL,
+                dire_rating REAL,
+                radiant_rd REAL,
+                dire_rd REAL,
+                expected_radiant_win_prob REAL,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (match_id) REFERENCES matches(match_id)
             )
             """
         )

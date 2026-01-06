@@ -9,11 +9,13 @@ from discord import app_commands
 from discord.ext import commands
 
 from config import LEVERAGE_TIERS
+from rating_system import CamaRatingSystem
 from services.permissions import has_admin_permission
 from utils.debug_logging import debug_log as _dbg_log
 from utils.formatting import JOPACOIN_EMOTE
 from utils.interaction_safety import safe_defer, safe_followup
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
+from utils.rating_insights import compute_calibration_stats
 
 logger = logging.getLogger("cama_bot.commands.info")
 
@@ -21,9 +23,12 @@ logger = logging.getLogger("cama_bot.commands.info")
 class InfoCommands(commands.Cog):
     """Commands for viewing information and leaderboards."""
 
-    def __init__(self, bot: commands.Bot, player_repo, role_emojis: dict, role_names: dict):
+    def __init__(
+        self, bot: commands.Bot, player_repo, match_repo, role_emojis: dict, role_names: dict
+    ):
         self.bot = bot
         self.player_repo = player_repo
+        self.match_repo = match_repo
         self.role_emojis = role_emojis
         self.role_names = role_names
 
@@ -130,7 +135,8 @@ class InfoCommands(commands.Cog):
         # Leaderboard
         embed.add_field(
             name="🏆 Leaderboard",
-            value=("`/leaderboard` - View leaderboard sorted by jopacoin"),
+            value=("`/leaderboard` - View leaderboard sorted by jopacoin\n"
+                   "`/calibration` - Rating system health & calibration stats"),
             inline=False,
         )
 
@@ -196,8 +202,6 @@ class InfoCommands(commands.Cog):
             return
 
         try:
-            from rating_system import CamaRatingSystem
-
             rating_system = CamaRatingSystem()
 
             all_players = self.player_repo.get_all()
@@ -398,12 +402,233 @@ class InfoCommands(commands.Cog):
             except Exception:
                 logger.error("Failed to send error message for leaderboard command")
 
+    @app_commands.command(
+        name="calibration", description="View server rating system health and calibration stats"
+    )
+    async def calibration(self, interaction: discord.Interaction):
+        """Show rating system health and calibration stats."""
+        logger.info(f"Calibration command: User {interaction.user.id} ({interaction.user})")
+        guild = interaction.guild if hasattr(interaction, "guild") else None
+        rl_gid = guild.id if guild else 0
+        rl = GLOBAL_RATE_LIMITER.check(
+            scope="calibration",
+            guild_id=rl_gid,
+            user_id=interaction.user.id,
+            limit=2,
+            per_seconds=30,
+        )
+        if not rl.allowed:
+            await interaction.response.send_message(
+                f"⏳ Please wait {rl.retry_after_seconds}s before using `/calibration` again.",
+                ephemeral=True,
+            )
+            return
+
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+
+        try:
+            rating_system = CamaRatingSystem()
+            players = self.player_repo.get_all() if self.player_repo else []
+            match_count = self.match_repo.get_match_count() if self.match_repo else 0
+            match_predictions = (
+                self.match_repo.get_recent_match_predictions(limit=200)
+                if self.match_repo
+                else []
+            )
+            rating_history_entries = (
+                self.match_repo.get_recent_rating_history(limit=500) if self.match_repo else []
+            )
+
+            stats = compute_calibration_stats(
+                players=players,
+                rating_system=rating_system,
+                match_count=match_count,
+                match_predictions=match_predictions,
+                rating_history_entries=rating_history_entries,
+            )
+
+            def display_name(player) -> str:
+                if player.discord_id and player.discord_id > 0:
+                    return f"<@{player.discord_id}>"
+                return player.name
+
+            def format_ranked(players_list, value_fn, value_fmt: str) -> str:
+                lines = []
+                for idx, player in enumerate(players_list[:3], 1):
+                    value = value_fn(player)
+                    lines.append(f"{idx}. {display_name(player)} ({value_fmt.format(value)})")
+                return "\n".join(lines) if lines else "n/a"
+
+            def format_drift(entries) -> str:
+                if not entries:
+                    return "n/a"
+                parts = []
+                for player, drift in entries[:3]:
+                    parts.append(f"{display_name(player)} ({drift:+.0f})")
+                return ", ".join(parts)
+
+            buckets = stats["rating_buckets"]
+            avg_rating_text = (
+                f"{stats['avg_rating']:.0f}" if stats["avg_rating"] is not None else "n/a"
+            )
+            median_rating_text = (
+                f"{stats['median_rating']:.0f}" if stats["median_rating"] is not None else "n/a"
+            )
+            rating_distribution = (
+                f"Immortal (1355+): {buckets['Immortal']} | Divine (1155-1354): {buckets['Divine']}\n"
+                f"Ancient (962-1154): {buckets['Ancient']} | Legend (770-961): {buckets['Legend']}\n"
+                f"Archon (578-769): {buckets['Archon']} | Crusader (385-577): {buckets['Crusader']}\n"
+                f"Guardian (192-384): {buckets['Guardian']} | Herald (0-191): {buckets['Herald']}\n"
+                f"Avg: {avg_rating_text} | Median: {median_rating_text}"
+            )
+
+            rd_tiers = stats["rd_tiers"]
+            avg_uncertainty_text = (
+                f"{stats['avg_uncertainty']:.1f}%"
+                if stats["avg_uncertainty"] is not None
+                else "n/a"
+            )
+            calibration_progress = (
+                f"Locked In (≤75): {rd_tiers['Locked In']} | Settling (76-150): {rd_tiers['Settling']}\n"
+                f"Developing (151-250): {rd_tiers['Developing']} | Fresh (251+): {rd_tiers['Fresh']}\n"
+                f"Avg Uncertainty: {avg_uncertainty_text}"
+            )
+
+            prediction_quality = stats["prediction_quality"]
+            if prediction_quality["count"]:
+                upset_rate = (
+                    f"{prediction_quality['upset_rate']:.0%}"
+                    if prediction_quality["upset_rate"] is not None
+                    else "n/a"
+                )
+                # Brier score: 0 = perfect, 0.25 = coin flip, lower is better
+                brier = prediction_quality["brier"]
+                brier_quality = "excellent" if brier < 0.15 else "good" if brier < 0.20 else "fair" if brier < 0.25 else "poor"
+                prediction_text = (
+                    f"Matches Analyzed: {prediction_quality['count']}\n"
+                    f"Brier: {brier:.3f} ({brier_quality}) | Pick Accuracy: {prediction_quality['accuracy']:.0%}\n"
+                    f"Balance Rate (45-55%): {prediction_quality['balance_rate']:.0%} | Upset Rate (60%+): {upset_rate}"
+                )
+            else:
+                prediction_text = "No prediction data yet."
+
+            rating_movement = stats["rating_movement"]
+            if rating_movement["count"]:
+                movement_text = (
+                    f"Entries: {rating_movement['count']} | Avg Δ: {rating_movement['avg_delta']:.1f}\n"
+                    f"Median Δ: {rating_movement['median_delta']:.1f}"
+                )
+            else:
+                movement_text = "No rating history yet."
+
+            if stats["avg_drift"] is not None and stats["median_drift"] is not None:
+                drift_text = (
+                    f"Avg Drift: {stats['avg_drift']:+.0f} | Median Drift: {stats['median_drift']:+.0f}\n"
+                    f"📈 Biggest Gainers: {format_drift(stats['biggest_gainers'])}\n"
+                    f"📉 Biggest Drops: {format_drift(stats['biggest_drops'])}"
+                )
+            else:
+                drift_text = "No seed MMR data yet."
+
+            embed = discord.Embed(title="Rating System Health", color=discord.Color.blue())
+            avg_games_text = f"{stats['avg_games']:.1f}" if stats["avg_games"] is not None else "n/a"
+            embed.add_field(
+                name="System Overview",
+                value=(
+                    f"Total Players: {stats['total_players']} | Matches Recorded: {stats['match_count']}\n"
+                    f"Players with Ratings: {stats['rated_players']} | Avg Games/Player: {avg_games_text}"
+                ),
+                inline=False,
+            )
+            embed.add_field(name="Rating Distribution", value=rating_distribution, inline=False)
+            embed.add_field(name="Calibration Progress", value=calibration_progress, inline=False)
+            embed.add_field(name="Prediction Quality", value=prediction_text, inline=False)
+            embed.add_field(name="Rating Movement", value=movement_text, inline=False)
+            embed.add_field(name="Rating Drift", value=drift_text, inline=False)
+
+            embed.add_field(
+                name="Highest Rated",
+                value=format_ranked(
+                    stats["top_rated"],
+                    lambda p: rating_system.rating_to_display(p.glicko_rating or 0),
+                    "{:.0f}",
+                ),
+                inline=True,
+            )
+            embed.add_field(
+                name="Most Calibrated",
+                value=format_ranked(
+                    stats["most_calibrated"],
+                    lambda p: rating_system.get_rating_uncertainty_percentage(
+                        p.glicko_rd if p.glicko_rd is not None else 350
+                    ),
+                    "{:.1f}%",
+                ),
+                inline=True,
+            )
+            embed.add_field(
+                name="Most Volatile",
+                value=format_ranked(
+                    stats["highest_volatility"],
+                    lambda p: p.glicko_volatility or 0.0,
+                    "{:.3f}",
+                ),
+                inline=True,
+            )
+            embed.add_field(
+                name="Lowest Rated",
+                value=format_ranked(
+                    stats["lowest_rated"],
+                    lambda p: rating_system.rating_to_display(p.glicko_rating or 0),
+                    "{:.0f}",
+                ),
+                inline=True,
+            )
+            embed.add_field(
+                name="Least Calibrated",
+                value=format_ranked(
+                    stats["least_calibrated"],
+                    lambda p: rating_system.get_rating_uncertainty_percentage(
+                        p.glicko_rd if p.glicko_rd is not None else 350
+                    ),
+                    "{:.1f}%",
+                ),
+                inline=True,
+            )
+            embed.add_field(
+                name="Most Experienced",
+                value=format_ranked(
+                    stats["most_experienced"],
+                    lambda p: p.wins + p.losses,
+                    "{:.0f} games",
+                ),
+                inline=True,
+            )
+
+            embed.set_footer(text="RD = Rating Deviation | Drift = Current - Seed | Brier: 0=perfect, 0.25=coin flip")
+
+            await safe_followup(
+                interaction,
+                embed=embed,
+                ephemeral=True,
+                allowed_mentions=discord.AllowedMentions(users=True),
+            )
+        except Exception as e:
+            logger.error(f"Error in calibration command: {str(e)}", exc_info=True)
+            await safe_followup(
+                interaction,
+                content=f"❌ Error: {str(e)}",
+                ephemeral=True,
+            )
+
 
 async def setup(bot: commands.Bot):
     """Setup function called when loading the cog."""
     # Get player_repo and config from bot
     player_repo = getattr(bot, "player_repo", None)
+    match_repo = getattr(bot, "match_repo", None)
     role_emojis = getattr(bot, "role_emojis", {})
     role_names = getattr(bot, "role_names", {})
 
-    await bot.add_cog(InfoCommands(bot, player_repo, role_emojis, role_names))
+    await bot.add_cog(InfoCommands(bot, player_repo, match_repo, role_emojis, role_names))

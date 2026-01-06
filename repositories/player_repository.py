@@ -809,6 +809,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         return Player(
             name=row["discord_username"],
             mmr=int(row["current_mmr"]) if row["current_mmr"] else None,
+            initial_mmr=int(row["initial_mmr"]) if row["initial_mmr"] else None,
             wins=row["wins"],
             losses=row["losses"],
             preferred_roles=preferred_roles,

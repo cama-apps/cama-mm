@@ -22,6 +22,7 @@ def test_schema_manager_initializes_tables():
             "matches",
             "match_participants",
             "rating_history",
+            "match_predictions",
             "bets",
             "pending_matches",
             "lobby_state",

@@ -153,7 +153,18 @@ class IMatchRepository(ABC):
 
     @abstractmethod
     def add_rating_history(
-        self, discord_id: int, rating: float, match_id: int | None = None
+        self,
+        discord_id: int,
+        rating: float,
+        match_id: int | None = None,
+        rating_before: float | None = None,
+        rd_before: float | None = None,
+        rd_after: float | None = None,
+        volatility_before: float | None = None,
+        volatility_after: float | None = None,
+        expected_team_win_prob: float | None = None,
+        team_number: int | None = None,
+        won: bool | None = None,
     ) -> None: ...
 
     @abstractmethod
@@ -164,6 +175,26 @@ class IMatchRepository(ABC):
 
     @abstractmethod
     def get_rating_history(self, discord_id: int, limit: int = 20): ...
+
+    @abstractmethod
+    def get_recent_rating_history(self, limit: int = 200): ...
+
+    @abstractmethod
+    def get_match_count(self) -> int: ...
+
+    @abstractmethod
+    def add_match_prediction(
+        self,
+        match_id: int,
+        radiant_rating: float,
+        dire_rating: float,
+        radiant_rd: float,
+        dire_rd: float,
+        expected_radiant_win_prob: float,
+    ) -> None: ...
+
+    @abstractmethod
+    def get_recent_match_predictions(self, limit: int = 200): ...
 
     @abstractmethod
     def delete_all_matches(self) -> int: ...
