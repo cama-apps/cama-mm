@@ -76,7 +76,9 @@ from services.disburse_service import DisburseService
 from services.loan_service import LoanRepository, LoanService
 from services.lobby_service import LobbyService
 from repositories.disburse_repository import DisburseRepository
+from repositories.prediction_repository import PredictionRepository
 from services.match_service import MatchService
+from services.prediction_service import PredictionService
 from services.permissions import has_admin_permission  # noqa: F401 - used by tests
 from services.player_service import PlayerService
 from utils.formatting import ROLE_EMOJIS, ROLE_NAMES, format_role_display
@@ -328,6 +330,16 @@ def _init_services():
     )
     bot.gambling_stats_service = gambling_stats_service
 
+    # Create prediction service for prediction markets
+    prediction_repo = PredictionRepository(DB_PATH)
+    prediction_service = PredictionService(
+        prediction_repo=prediction_repo,
+        player_repo=player_repo,
+        admin_user_ids=ADMIN_USER_IDS,
+    )
+    bot.prediction_service = prediction_service
+    bot.prediction_repo = prediction_repo
+
     _services_initialized = True
 
 
@@ -348,6 +360,7 @@ EXTENSIONS = [
     "commands.enrichment",
     "commands.dota_info",
     "commands.shop",
+    "commands.predictions",
 ]
 
 
