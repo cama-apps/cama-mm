@@ -271,6 +271,38 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 for row in rows
             ]
 
+    def get_player_rating_history_detailed(self, discord_id: int, limit: int = 50) -> list[dict]:
+        """Get detailed rating history for a player including prediction data."""
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT *
+                FROM rating_history
+                WHERE discord_id = ?
+                ORDER BY timestamp DESC
+                LIMIT ?
+            """,
+                (discord_id, limit),
+            )
+            rows = cursor.fetchall()
+            return [
+                {
+                    "rating": row["rating"],
+                    "rating_before": row["rating_before"],
+                    "rd_before": row["rd_before"],
+                    "rd_after": row["rd_after"],
+                    "volatility_before": row["volatility_before"],
+                    "volatility_after": row["volatility_after"],
+                    "expected_team_win_prob": row["expected_team_win_prob"],
+                    "team_number": row["team_number"],
+                    "won": row["won"],
+                    "match_id": row["match_id"],
+                    "timestamp": row["timestamp"],
+                }
+                for row in rows
+            ]
+
     def get_recent_rating_history(self, limit: int = 200) -> list[dict]:
         """Get recent rating history entries for all players."""
         with self.connection() as conn:

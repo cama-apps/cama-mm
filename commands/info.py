@@ -403,11 +403,15 @@ class InfoCommands(commands.Cog):
                 logger.error("Failed to send error message for leaderboard command")
 
     @app_commands.command(
-        name="calibration", description="View server rating system health and calibration stats"
+        name="calibration", description="View rating system stats (server-wide or individual)"
     )
-    async def calibration(self, interaction: discord.Interaction):
+    @app_commands.describe(user="Optional: View detailed stats for a specific player")
+    async def calibration(
+        self, interaction: discord.Interaction, user: discord.Member | None = None
+    ):
         """Show rating system health and calibration stats."""
-        logger.info(f"Calibration command: User {interaction.user.id} ({interaction.user})")
+        target_user = user or interaction.user
+        logger.info(f"Calibration command: User {interaction.user.id}, target={target_user.id}")
         guild = interaction.guild if hasattr(interaction, "guild") else None
         rl_gid = guild.id if guild else 0
         rl = GLOBAL_RATE_LIMITER.check(
@@ -429,6 +433,13 @@ class InfoCommands(commands.Cog):
 
         try:
             rating_system = CamaRatingSystem()
+
+            # If user specified, show individual stats
+            if user is not None:
+                await self._show_individual_calibration(interaction, user, rating_system)
+                return
+
+            # Otherwise show server-wide stats
             players = self.player_repo.get_all() if self.player_repo else []
             match_count = self.match_repo.get_match_count() if self.match_repo else 0
             match_predictions = (
@@ -683,6 +694,198 @@ class InfoCommands(commands.Cog):
                 content=f"❌ Error: {str(e)}",
                 ephemeral=True,
             )
+
+    async def _show_individual_calibration(
+        self,
+        interaction: discord.Interaction,
+        user: discord.Member,
+        rating_system: CamaRatingSystem,
+    ):
+        """Show detailed calibration stats for an individual player."""
+        # Get player data
+        player = self.player_repo.get_by_id(user.id) if self.player_repo else None
+        if not player:
+            await safe_followup(
+                interaction,
+                content=f"❌ {user.mention} is not registered.",
+                ephemeral=True,
+            )
+            return
+
+        # Get detailed rating history with predictions
+        history = (
+            self.match_repo.get_player_rating_history_detailed(user.id, limit=50)
+            if self.match_repo
+            else []
+        )
+
+        # Get all players for percentile calculation
+        all_players = self.player_repo.get_all() if self.player_repo else []
+        rated_players = [p for p in all_players if p.glicko_rating is not None]
+
+        # Calculate percentile
+        if player.glicko_rating and rated_players:
+            lower_count = sum(1 for p in rated_players if (p.glicko_rating or 0) < player.glicko_rating)
+            percentile = (lower_count / len(rated_players)) * 100
+        else:
+            percentile = None
+
+        # Calculate calibration tier
+        rd = player.glicko_rd or 350
+        if rd <= 75:
+            calibration_tier = "Locked In"
+        elif rd <= 150:
+            calibration_tier = "Settling"
+        elif rd <= 250:
+            calibration_tier = "Developing"
+        else:
+            calibration_tier = "Fresh"
+
+        # Calculate drift
+        drift = None
+        if player.initial_mmr and player.glicko_rating:
+            seed_rating = rating_system.mmr_to_rating(player.initial_mmr)
+            drift = player.glicko_rating - seed_rating
+
+        # Analyze match history
+        matches_with_predictions = [h for h in history if h.get("expected_team_win_prob") is not None]
+
+        actual_wins = sum(1 for h in matches_with_predictions if h.get("won"))
+        expected_wins = sum(h.get("expected_team_win_prob", 0) for h in matches_with_predictions)
+        overperformance = actual_wins - expected_wins if matches_with_predictions else None
+
+        # Win rate when favored vs underdog
+        favored_matches = [h for h in matches_with_predictions if (h.get("expected_team_win_prob") or 0) >= 0.55]
+        underdog_matches = [h for h in matches_with_predictions if (h.get("expected_team_win_prob") or 0) <= 0.45]
+        favored_wins = sum(1 for h in favored_matches if h.get("won"))
+        underdog_wins = sum(1 for h in underdog_matches if h.get("won"))
+
+        # Rating trend (last 5 games)
+        if len(history) >= 2:
+            recent_delta = (history[0].get("rating") or 0) - (history[-1].get("rating") or 0)
+            if len(history) > 5:
+                last_5_delta = (history[0].get("rating") or 0) - (history[4].get("rating") or 0)
+            else:
+                last_5_delta = recent_delta
+        else:
+            recent_delta = None
+            last_5_delta = None
+
+        # Recent matches (last 5)
+        recent_matches = []
+        for h in matches_with_predictions[:5]:
+            prob = h.get("expected_team_win_prob", 0.5)
+            won = h.get("won")
+            expected_win = prob >= 0.5
+            if won:
+                emoji = "✅" if expected_win else "🔥"  # expected win or upset
+            else:
+                emoji = "❌" if expected_win else "💀"  # expected loss or choke
+            recent_matches.append(f"{emoji} {prob:.0%} → {'W' if won else 'L'}")
+
+        # Find biggest upset (win as underdog) and biggest choke (loss as favorite)
+        upsets = [(h, h.get("expected_team_win_prob", 0.5)) for h in matches_with_predictions
+                  if h.get("won") and (h.get("expected_team_win_prob") or 0.5) < 0.45]
+        chokes = [(h, h.get("expected_team_win_prob", 0.5)) for h in matches_with_predictions
+                  if not h.get("won") and (h.get("expected_team_win_prob") or 0.5) > 0.55]
+        upsets.sort(key=lambda x: x[1])  # lowest prob first
+        chokes.sort(key=lambda x: x[1], reverse=True)  # highest prob first
+
+        # Current streak
+        streak = 0
+        streak_type = None
+        for h in matches_with_predictions:
+            won = h.get("won")
+            if streak_type is None:
+                streak_type = "W" if won else "L"
+                streak = 1
+            elif (won and streak_type == "W") or (not won and streak_type == "L"):
+                streak += 1
+            else:
+                break
+
+        # Build embed
+        embed = discord.Embed(
+            title=f"Calibration Stats: {user.display_name}",
+            color=discord.Color.blue(),
+        )
+
+        # Rating profile
+        rating_display = rating_system.rating_to_display(player.glicko_rating) if player.glicko_rating else "N/A"
+        uncertainty = rating_system.get_rating_uncertainty_percentage(rd)
+        percentile_text = f"Top {100 - percentile:.0f}%" if percentile else "N/A"
+
+        profile_text = (
+            f"**Rating:** {rating_display} (±{uncertainty:.1f}% uncertainty)\n"
+            f"**Tier:** {calibration_tier} | **Percentile:** {percentile_text}\n"
+            f"**Volatility:** {player.glicko_volatility:.3f}" if player.glicko_volatility else f"**Rating:** {rating_display} (±{uncertainty:.1f}% uncertainty)\n**Tier:** {calibration_tier} | **Percentile:** {percentile_text}"
+        )
+        embed.add_field(name="📊 Rating Profile", value=profile_text, inline=False)
+
+        # Drift
+        if drift is not None:
+            drift_emoji = "📈" if drift > 0 else "📉" if drift < 0 else "➡️"
+            drift_text = f"{drift_emoji} **{drift:+.0f}** rating vs initial seed ({player.initial_mmr} MMR)"
+            embed.add_field(name="🎯 Rating Drift", value=drift_text, inline=False)
+
+        # Performance vs expectations
+        if matches_with_predictions:
+            perf_text = f"**Actual Wins:** {actual_wins} | **Expected:** {expected_wins:.1f}\n"
+            if overperformance is not None:
+                over_emoji = "🔥" if overperformance > 0 else "💀" if overperformance < 0 else "➡️"
+                perf_text += f"**Over/Under:** {over_emoji} {overperformance:+.1f} wins"
+            embed.add_field(name="📈 Performance", value=perf_text, inline=True)
+
+            # Win rates
+            winrate_text = ""
+            if favored_matches:
+                winrate_text += f"**When Favored (55%+):** {favored_wins}/{len(favored_matches)} ({favored_wins/len(favored_matches):.0%})\n"
+            if underdog_matches:
+                winrate_text += f"**As Underdog (45%-):** {underdog_wins}/{len(underdog_matches)} ({underdog_wins/len(underdog_matches):.0%})"
+            if winrate_text:
+                embed.add_field(name="🎲 Situational", value=winrate_text, inline=True)
+
+        # Trend
+        if last_5_delta is not None:
+            trend_emoji = "📈" if last_5_delta > 0 else "📉" if last_5_delta < 0 else "➡️"
+            trend_text = f"{trend_emoji} **{last_5_delta:+.0f}** over last {min(5, len(history))} games"
+            if streak and streak_type:
+                trend_text += f"\n🔥 Current: **{streak}{streak_type}** streak"
+            embed.add_field(name="📉 Trend", value=trend_text, inline=True)
+
+        # Recent matches
+        if recent_matches:
+            embed.add_field(
+                name=f"🕐 Recent ({len(recent_matches)} games)",
+                value="\n".join(recent_matches),
+                inline=True,
+            )
+
+        # Biggest upset and choke
+        highlights = []
+        if upsets:
+            best_upset = upsets[0]
+            highlights.append(f"🔥 **Best Upset:** Won with {best_upset[1]:.0%} chance (Match #{best_upset[0].get('match_id')})")
+        if chokes:
+            worst_choke = chokes[0]
+            highlights.append(f"💀 **Worst Choke:** Lost with {worst_choke[1]:.0%} chance (Match #{worst_choke[0].get('match_id')})")
+        if highlights:
+            embed.add_field(name="⚡ Highlights", value="\n".join(highlights), inline=False)
+
+        # Record
+        record_text = f"**W-L:** {player.wins}-{player.losses}"
+        if player.wins + player.losses > 0:
+            record_text += f" ({player.wins / (player.wins + player.losses):.0%})"
+        embed.add_field(name="📋 Record", value=record_text, inline=True)
+
+        embed.set_footer(text="✅=expected W | 🔥=upset W | ❌=expected L | 💀=choke L")
+
+        await safe_followup(
+            interaction,
+            embed=embed,
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions(users=True),
+        )
 
 
 async def setup(bot: commands.Bot):
