@@ -739,3 +739,83 @@ class MatchRepository(BaseRepository, IMatchRepository):
             cursor = conn.cursor()
             cursor.execute("SELECT COUNT(*) as count FROM matches WHERE enrichment_source = 'auto'")
             return cursor.fetchone()["count"]
+
+    def get_biggest_upsets(self, limit: int = 5) -> list[dict]:
+        """Get matches where the underdog won, sorted by upset magnitude."""
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT
+                    mp.match_id,
+                    mp.expected_radiant_win_prob,
+                    mp.radiant_rating,
+                    mp.dire_rating,
+                    m.winning_team,
+                    m.match_date,
+                    m.team1_players,
+                    m.team2_players
+                FROM match_predictions mp
+                JOIN matches m ON m.match_id = mp.match_id
+                WHERE m.winning_team IS NOT NULL
+                  AND (
+                    (m.winning_team = 1 AND mp.expected_radiant_win_prob < 0.5)
+                    OR (m.winning_team = 2 AND mp.expected_radiant_win_prob > 0.5)
+                  )
+                ORDER BY
+                    CASE
+                        WHEN m.winning_team = 1 THEN mp.expected_radiant_win_prob
+                        ELSE 1.0 - mp.expected_radiant_win_prob
+                    END ASC
+                LIMIT ?
+            """,
+                (limit,),
+            )
+            rows = cursor.fetchall()
+            results = []
+            for row in rows:
+                win_prob = row["expected_radiant_win_prob"]
+                winning_team = row["winning_team"]
+                # Calculate underdog's win probability
+                underdog_prob = win_prob if winning_team == 1 else 1.0 - win_prob
+                results.append({
+                    "match_id": row["match_id"],
+                    "underdog_win_prob": underdog_prob,
+                    "radiant_rating": row["radiant_rating"],
+                    "dire_rating": row["dire_rating"],
+                    "winning_team": winning_team,
+                    "match_date": row["match_date"],
+                    "team1_players": json.loads(row["team1_players"]) if row["team1_players"] else [],
+                    "team2_players": json.loads(row["team2_players"]) if row["team2_players"] else [],
+                })
+            return results
+
+    def get_player_performance_stats(self) -> list[dict]:
+        """Get player expected vs actual win stats from rating history."""
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT
+                    discord_id,
+                    COUNT(*) as total_matches,
+                    SUM(CASE WHEN won = 1 THEN 1 ELSE 0 END) as actual_wins,
+                    SUM(expected_team_win_prob) as expected_wins
+                FROM rating_history
+                WHERE expected_team_win_prob IS NOT NULL
+                GROUP BY discord_id
+                HAVING COUNT(*) >= 5
+                ORDER BY (SUM(CASE WHEN won = 1 THEN 1 ELSE 0 END) - SUM(expected_team_win_prob)) DESC
+            """
+            )
+            rows = cursor.fetchall()
+            return [
+                {
+                    "discord_id": row["discord_id"],
+                    "total_matches": row["total_matches"],
+                    "actual_wins": row["actual_wins"],
+                    "expected_wins": row["expected_wins"],
+                    "overperformance": row["actual_wins"] - row["expected_wins"],
+                }
+                for row in rows
+            ]

@@ -439,6 +439,12 @@ class InfoCommands(commands.Cog):
             rating_history_entries = (
                 self.match_repo.get_recent_rating_history(limit=500) if self.match_repo else []
             )
+            biggest_upsets = (
+                self.match_repo.get_biggest_upsets(limit=5) if self.match_repo else []
+            )
+            player_performance = (
+                self.match_repo.get_player_performance_stats() if self.match_repo else []
+            )
 
             stats = compute_calibration_stats(
                 players=players,
@@ -605,6 +611,62 @@ class InfoCommands(commands.Cog):
                 ),
                 inline=True,
             )
+
+            # Last match prediction vs result
+            if match_predictions:
+                last_match = match_predictions[0]
+                prob = last_match["expected_radiant_win_prob"]
+                winner = last_match["winning_team"]
+                if winner == 1:
+                    result_text = f"Radiant won (had {prob:.0%} chance)"
+                    outcome = "expected" if prob >= 0.5 else "upset"
+                elif winner == 2:
+                    result_text = f"Dire won (had {1-prob:.0%} chance)"
+                    outcome = "expected" if prob <= 0.5 else "upset"
+                else:
+                    result_text = "Pending..."
+                    outcome = ""
+                outcome_emoji = "✅" if outcome == "expected" else "🔥" if outcome == "upset" else ""
+                embed.add_field(
+                    name="Last Match",
+                    value=f"{outcome_emoji} {result_text}",
+                    inline=False,
+                )
+
+            # Top 5 biggest upsets
+            if biggest_upsets:
+                upset_lines = []
+                for upset in biggest_upsets[:5]:
+                    prob = upset["underdog_win_prob"]
+                    match_id = upset["match_id"]
+                    winner = "Radiant" if upset["winning_team"] == 1 else "Dire"
+                    upset_lines.append(f"Match #{match_id}: {winner} won ({prob:.0%} chance)")
+                embed.add_field(
+                    name="🔥 Biggest Upsets",
+                    value="\n".join(upset_lines) if upset_lines else "No upsets yet",
+                    inline=False,
+                )
+
+            # Top 3 outperformers
+            if player_performance:
+                outperformer_lines = []
+                # Create a lookup for player names
+                player_lookup = {p.discord_id: p for p in players}
+                for perf in player_performance[:3]:
+                    discord_id = perf["discord_id"]
+                    over = perf["overperformance"]
+                    matches = perf["total_matches"]
+                    if discord_id in player_lookup:
+                        name = f"<@{discord_id}>"
+                    else:
+                        name = f"ID:{discord_id}"
+                    outperformer_lines.append(f"{name}: +{over:.1f} wins over expected ({matches} games)")
+                if outperformer_lines:
+                    embed.add_field(
+                        name="🎯 Top Outperformers",
+                        value="\n".join(outperformer_lines),
+                        inline=False,
+                    )
 
             embed.set_footer(text="RD = Rating Deviation | Drift = Current - Seed | Brier: 0=perfect, 0.25=coin flip")
 
