@@ -377,7 +377,7 @@ class MatchService:
             radiant_value = team2_value
             dire_value = team1_value
 
-        first_pick_team = "Radiant" if random.random() < 0.5 else "Dire"
+        first_pick_team = random.choice(["Radiant", "Dire"])
 
         player_id_map = self._map_player_ids(player_ids, players)
         radiant_team_ids = self._resolve_team_ids(radiant_team, player_id_map)
