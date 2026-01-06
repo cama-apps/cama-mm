@@ -187,6 +187,8 @@ class SchemaManager:
             ("create_disburse_system", self._migration_create_disburse_system),
             ("add_rating_history_details", self._migration_add_rating_history_details),
             ("create_match_predictions_table", self._migration_create_match_predictions_table),
+            ("create_predictions_system", self._migration_create_predictions_system),
+            ("add_prediction_channel_message_id", self._migration_add_prediction_channel_message_id),
         ]
 
     # --- Migrations ---
@@ -557,4 +559,69 @@ class SchemaManager:
                 FOREIGN KEY (match_id) REFERENCES matches(match_id)
             )
             """
+        )
+
+    def _migration_create_predictions_system(self, cursor) -> None:
+        """Create tables for prediction market system (Polymarket-style betting)."""
+        # Predictions table
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS predictions (
+                prediction_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL DEFAULT 0,
+                creator_id INTEGER NOT NULL,
+                question TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'open',
+                outcome TEXT,
+                channel_id INTEGER,
+                thread_id INTEGER,
+                embed_message_id INTEGER,
+                resolution_votes TEXT,
+                created_at INTEGER NOT NULL,
+                closes_at INTEGER NOT NULL,
+                resolved_at INTEGER,
+                resolved_by INTEGER,
+                FOREIGN KEY (creator_id) REFERENCES players(discord_id)
+            )
+            """
+        )
+
+        # Prediction bets table
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS prediction_bets (
+                bet_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                prediction_id INTEGER NOT NULL,
+                discord_id INTEGER NOT NULL,
+                position TEXT NOT NULL,
+                amount INTEGER NOT NULL,
+                bet_time INTEGER NOT NULL,
+                payout INTEGER,
+                FOREIGN KEY (prediction_id) REFERENCES predictions(prediction_id),
+                FOREIGN KEY (discord_id) REFERENCES players(discord_id)
+            )
+            """
+        )
+
+        # Indexes for efficient queries
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_predictions_guild_status "
+            "ON predictions(guild_id, status)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_prediction_bets_prediction "
+            "ON prediction_bets(prediction_id)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_prediction_bets_user "
+            "ON prediction_bets(discord_id)"
+        )
+
+    def _migration_add_prediction_channel_message_id(self, cursor) -> None:
+        """Add channel_message_id column to predictions table."""
+        self._add_column_if_not_exists(
+            cursor, "predictions", "channel_message_id", "INTEGER"
+        )
+        self._add_column_if_not_exists(
+            cursor, "predictions", "close_message_id", "INTEGER"
         )
