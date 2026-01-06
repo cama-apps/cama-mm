@@ -140,7 +140,7 @@ def test_settle_bets_pays_out_on_house(services):
             glicko_rd=350.0,
             glicko_volatility=0.06,
         )
-    match_service.shuffle_players(player_ids, guild_id=1)
+    match_service.shuffle_players(player_ids, guild_id=1, betting_mode="house")
     pending = match_service.get_last_shuffle(1)
     participant = pending["radiant_team_ids"][0]
     player_repo.add_balance(participant, 20)
@@ -553,7 +553,7 @@ class TestPoolBetting:
         assert player_repo.get_balance(spectator2) == 53
 
     def test_house_mode_still_works(self, services):
-        """House mode (default) should still work as before."""
+        """House mode should still work when explicitly set."""
         match_service = services["match_service"]
         betting_service = services["betting_service"]
         player_repo = services["player_repo"]
@@ -578,8 +578,8 @@ class TestPoolBetting:
         )
         player_repo.add_balance(spectator, 50)
 
-        # Shuffle with house mode (default)
-        match_service.shuffle_players(player_ids, guild_id=1)
+        # Shuffle with house mode explicitly
+        match_service.shuffle_players(player_ids, guild_id=1, betting_mode="house")
         pending = match_service.get_last_shuffle(1)
         assert pending["betting_mode"] == "house"
 
@@ -797,7 +797,7 @@ class TestMultipleBets:
         )
         player_repo.add_balance(spectator, 100)
 
-        match_service.shuffle_players(player_ids, guild_id=1)
+        match_service.shuffle_players(player_ids, guild_id=1, betting_mode="house")
         pending = match_service.get_last_shuffle(1)
         pending["bet_lock_until"] = int(time.time()) + 600
 

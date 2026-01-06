@@ -42,7 +42,7 @@ def test_betting_flow_with_repos():
         all_ids = radiant_ids + dire_ids
         _seed_players(player_repo, all_ids)
 
-        pending = match_service.shuffle_players(all_ids, guild_id=42)
+        pending = match_service.shuffle_players(all_ids, guild_id=42, betting_mode="house")
         assert pending["radiant_team"]
 
         shuffle_state = match_service.get_last_shuffle(42)

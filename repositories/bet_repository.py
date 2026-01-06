@@ -421,7 +421,7 @@ class BetRepository(BaseRepository, IBetRepository):
         since_ts: int,
         winning_team: str,
         house_payout_multiplier: float,
-        betting_mode: str = "house",
+        betting_mode: str = "pool",
     ) -> dict[str, list[dict]]:
         """
         Atomically settle bets for the current match window:
@@ -429,7 +429,7 @@ class BetRepository(BaseRepository, IBetRepository):
         - tag all pending bets with match_id
 
         Args:
-            betting_mode: "house" for 1:1 payouts, "pool" for parimutuel betting
+            betting_mode: "pool" for parimutuel betting, "house" for 1:1 payouts
         """
         normalized_guild = self._normalize_guild_id(guild_id)
         distributions: dict[str, list[dict]] = {"winners": [], "losers": []}

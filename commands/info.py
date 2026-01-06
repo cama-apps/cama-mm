@@ -94,9 +94,7 @@ class InfoCommands(commands.Cog):
         embed.add_field(
             name="⚔️ Match Management",
             value=(
-                "`/shuffle` - Create balanced teams from lobby\n"
-                "  • `betting_mode:house` - 1:1 fixed odds (default)\n"
-                "  • `betting_mode:pool` - Parimutuel odds based on bet distribution\n"
+                "`/shuffle` - Create balanced teams from lobby (pool betting)\n"
                 "`/record` - Record a match result"
             ),
             inline=False,

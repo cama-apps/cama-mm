@@ -159,7 +159,7 @@ class MatchService:
             "shuffle_message_jump_url": state.get("shuffle_message_jump_url"),
             "shuffle_message_id": state.get("shuffle_message_id"),
             "shuffle_channel_id": state.get("shuffle_channel_id"),
-            "betting_mode": state.get("betting_mode", "house"),
+            "betting_mode": state.get("betting_mode", "pool"),
         }
 
     def _persist_match_state(self, guild_id: int | None, state: dict) -> None:
@@ -299,7 +299,7 @@ class MatchService:
         return self.get_pending_record_result(guild_id) is not None
 
     def shuffle_players(
-        self, player_ids: list[int], guild_id: int | None = None, betting_mode: str = "house"
+        self, player_ids: list[int], guild_id: int | None = None, betting_mode: str = "pool"
     ) -> dict:
         """
         Shuffle players into balanced teams.
@@ -307,7 +307,7 @@ class MatchService:
         Args:
             player_ids: List of Discord user IDs to shuffle
             guild_id: Guild ID for multi-guild support
-            betting_mode: "house" for 1:1 payouts, "pool" for parimutuel betting
+            betting_mode: "pool" for parimutuel betting, "house" for 1:1 payouts
 
         Returns a payload containing teams, role assignments, and Radiant/Dire mapping.
         """

@@ -98,19 +98,19 @@ class MatchCommands(commands.Cog):
         return lines
 
     @app_commands.command(name="shuffle", description="Create balanced teams from lobby")
-    @app_commands.describe(
-        betting_mode="Betting mode: House (1:1 fixed odds) or Pool (user-determined odds)",
-    )
-    @app_commands.choices(
-        betting_mode=[
-            app_commands.Choice(name="House (1:1)", value="house"),
-            app_commands.Choice(name="Pool (user odds)", value="pool"),
-        ]
-    )
+    # @app_commands.describe(
+    #     betting_mode="Betting mode: Pool (user-determined odds) or House (1:1 fixed odds)",
+    # )
+    # @app_commands.choices(
+    #     betting_mode=[
+    #         app_commands.Choice(name="Pool (user odds)", value="pool"),
+    #         app_commands.Choice(name="House (1:1)", value="house"),
+    #     ]
+    # )
     async def shuffle(
         self,
         interaction: discord.Interaction,
-        betting_mode: app_commands.Choice[str] = None,
+        # betting_mode: app_commands.Choice[str] = None,
     ):
         logger.info(f"Shuffle command: User {interaction.user.id} ({interaction.user})")
         guild = interaction.guild if hasattr(interaction, "guild") else None
@@ -161,7 +161,7 @@ class MatchCommands(commands.Cog):
 
         player_ids, players = self.lobby_service.get_lobby_players(lobby)
         # `guild` and `guild_id` already computed before the match check
-        mode = betting_mode.value if betting_mode else "house"
+        mode = "pool"  # betting_mode.value if betting_mode else "pool"
         try:
             result = self.match_service.shuffle_players(
                 player_ids, guild_id=guild_id, betting_mode=mode

@@ -152,7 +152,7 @@ class BettingCommands(commands.Cog):
             embed = message.embeds[0]
             totals = self.betting_service.get_pot_odds(guild_id, pending_state=pending_state)
             lock_until = pending_state.get("bet_lock_until")
-            betting_mode = pending_state.get("betting_mode", "house")
+            betting_mode = pending_state.get("betting_mode", "pool")
 
             field_name, field_value = format_betting_display(
                 totals["radiant"], totals["dire"], betting_mode, lock_until
@@ -223,7 +223,7 @@ class BettingCommands(commands.Cog):
                 return
 
             totals = self.betting_service.get_pot_odds(guild_id, pending_state=pending_state)
-            betting_mode = pending_state.get("betting_mode", "house")
+            betting_mode = pending_state.get("betting_mode", "pool")
 
             # Format bets with odds for pool mode
             _, totals_text = format_betting_display(
@@ -322,7 +322,7 @@ class BettingCommands(commands.Cog):
         await self._update_shuffle_message_wagers(guild_id)
 
         # Build response message
-        betting_mode = pending_state.get("betting_mode", "house") if pending_state else "house"
+        betting_mode = pending_state.get("betting_mode", "pool") if pending_state else "pool"
         pool_warning = ""
         if betting_mode == "pool":
             pool_warning = "\n⚠️ Pool mode: odds may shift as more bets come in. Use `/mybets` to check current EV."
@@ -407,7 +407,7 @@ class BettingCommands(commands.Cog):
         base_msg = header + "\n" + "\n".join(bet_lines)
 
         # Add EV info for pool mode
-        betting_mode = pending_state.get("betting_mode", "house") if pending_state else "house"
+        betting_mode = pending_state.get("betting_mode", "pool") if pending_state else "pool"
         if betting_mode == "pool":
             totals = self.betting_service.get_pot_odds(guild_id, pending_state=pending_state)
             total_pool = totals["radiant"] + totals["dire"]
