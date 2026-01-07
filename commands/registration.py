@@ -8,7 +8,11 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from config import BANKRUPTCY_PENALTY_RATE
+from config import (
+    BANKRUPTCY_PENALTY_RATE,
+    MMR_MODAL_RETRY_LIMIT,
+    MMR_MODAL_TIMEOUT_MINUTES,
+)
 from utils.formatting import JOPACOIN_EMOTE, TOMBSTONE_EMOJI, format_role_display
 from utils.interaction_safety import safe_defer, safe_followup
 
@@ -46,19 +50,28 @@ class RegistrationCommands(commands.Cog):
         if not await safe_defer(interaction, ephemeral=True):
             return
 
-        try:
+        async def _finalize_register(mmr_override: int | None = None):
             result = self.player_service.register_player(
                 discord_id=interaction.user.id,
                 discord_username=str(interaction.user),
                 steam_id=steam_id,
+                mmr_override=mmr_override,
             )
             await interaction.followup.send(
                 f"✅ Registered {interaction.user.mention}!\n"
                 f"Cama Rating: {result['cama_rating']} (±{result['uncertainty']:.0f}% uncertainty)\n"
                 f"Use `/setroles` to set your preferred roles."
             )
+
+        try:
+            await _finalize_register()
+            return
         except ValueError as e:
-            await interaction.followup.send(f"❌ {str(e)}", ephemeral=True)
+            error_msg = str(e)
+            if "MMR not available" not in error_msg:
+                await interaction.followup.send(f"❌ {error_msg}", ephemeral=True)
+                return
+            # Otherwise prompt for MMR below
         except Exception as e:
             logger.error(
                 f"Error in register command for user {interaction.user.id}: {str(e)}", exc_info=True
@@ -66,6 +79,90 @@ class RegistrationCommands(commands.Cog):
             await interaction.followup.send(
                 "❌ Unexpected error registering you. Try again later.", ephemeral=True
             )
+            return
+
+        # Prompt for MMR via a button -> modal flow.
+        # Modals can't be shown from a deferred interaction response directly, so we attach a view with a button.
+        class MMRModal(discord.ui.Modal):
+            def __init__(self, retries_remaining: int):
+                super().__init__(title="Enter MMR", timeout=MMR_MODAL_TIMEOUT_MINUTES * 60)
+                self.retries_remaining = retries_remaining
+                self.mmr_input = discord.ui.TextInput(
+                    label="Enter your MMR",
+                    placeholder=None,
+                    required=False,
+                    style=discord.TextStyle.short,
+                )
+                self.add_item(self.mmr_input)
+                self.value: int | None = None
+                self.error: str | None = None
+
+            async def on_submit(self, interaction_modal: discord.Interaction):
+                raw = self.mmr_input.value.strip() if self.mmr_input.value else ""
+                if not raw:
+                    self.error = "Invalid MMR"
+                    await interaction_modal.response.send_message("❌ Invalid MMR", ephemeral=True)
+                    return
+                try:
+                    mmr_val = int(raw)
+                except ValueError:
+                    self.error = "Invalid MMR"
+                    await interaction_modal.response.send_message("❌ Invalid MMR", ephemeral=True)
+                    return
+                if mmr_val < 0 or mmr_val > 12000:
+                    self.error = "Invalid MMR"
+                    await interaction_modal.response.send_message("❌ Invalid MMR", ephemeral=True)
+                    return
+                self.value = mmr_val
+                await interaction_modal.response.send_message("✅ MMR received", ephemeral=True)
+
+        class MMRPromptView(discord.ui.View):
+            def __init__(self):
+                super().__init__(timeout=MMR_MODAL_TIMEOUT_MINUTES * 60)
+                self.attempts_left = MMR_MODAL_RETRY_LIMIT
+
+            @discord.ui.button(label="Enter MMR", style=discord.ButtonStyle.primary)
+            async def enter_mmr(  # type: ignore[override]
+                self, button: discord.ui.Button, interaction_btn: discord.Interaction
+            ):
+                if self.attempts_left <= 0:
+                    await interaction_btn.response.send_message("❌ Invalid MMR", ephemeral=True)
+                    return
+
+                modal = MMRModal(retries_remaining=self.attempts_left)
+                await interaction_btn.response.send_modal(modal)
+                await modal.wait()
+
+                if modal.value is None:
+                    # cancelled/invalid/timeout treated as invalid attempt (per our "require user input" flow)
+                    self.attempts_left -= 1
+                    if self.attempts_left <= 0:
+                        button.disabled = True
+                        await interaction_btn.followup.send("❌ Invalid MMR", ephemeral=True)
+                    return
+
+                try:
+                    await _finalize_register(mmr_override=modal.value)
+                except Exception as e:
+                    logger.error(
+                        f"Error finalizing register after modal for user {interaction.user.id}: {e}",
+                        exc_info=True,
+                    )
+                    await interaction_btn.followup.send(
+                        "❌ Error finalizing registration. Try again later.", ephemeral=True
+                    )
+                    return
+
+                # Success -> disable button
+                button.disabled = True
+                self.stop()
+
+        await interaction.followup.send(
+            "⚠️ OpenDota could not find your MMR. Click **Enter MMR** to finish registering.",
+            ephemeral=True,
+            view=MMRPromptView(),
+        )
+        return
 
     @app_commands.command(name="setroles", description="Set your preferred roles")
     @app_commands.describe(roles="Roles (1-5, e.g., '123' or '1,2,3' for carry, mid, offlane)")

@@ -22,7 +22,14 @@ class PlayerService:
         if steam_id <= 0 or steam_id > 2147483647:
             raise ValueError("Invalid Steam ID. Must be Steam32 (positive, 32-bit).")
 
-    def register_player(self, discord_id: int, discord_username: str, steam_id: int) -> dict:
+    def register_player(
+        self,
+        discord_id: int,
+        discord_username: str,
+        steam_id: int,
+        *,
+        mmr_override: int | None = None,
+    ) -> dict:
         """
         Register a new player and seed their rating.
 
@@ -34,12 +41,34 @@ class PlayerService:
         if existing:
             raise ValueError("Player already registered.")
 
-        api = OpenDotaAPI()
-        player_data = api.get_player_data(steam_id)
-        if not player_data:
-            raise ValueError("Could not fetch player data from OpenDota.")
+        mmr: int | None = None
+        if mmr_override is not None:
+            mmr = mmr_override
+        else:
+            api = OpenDotaAPI()
+            player_data = api.get_player_data(steam_id)
+            if not player_data:
+                raise ValueError("Could not fetch player data from OpenDota.")
 
-        mmr = api.get_player_mmr(steam_id)
+            # Primary MMR
+            mmr = api.get_player_mmr(steam_id)
+
+            # Fallback: use current_mmr estimate if present and mmr was not returned.
+            # NOTE: CamaRatingSystem.mmr_to_rating() already maps 0-12000 -> 0-3000 (effectively /4),
+            # so we must NOT divide by 4 here.
+            if mmr is None:
+                current_mmr = player_data.get("mmr_estimate", {}).get("estimate")
+                if current_mmr is None:
+                    current_mmr = player_data.get("solo_competitive_rank")
+                try:
+                    current_mmr_int = int(current_mmr) if current_mmr is not None else None
+                except (TypeError, ValueError):
+                    current_mmr_int = None
+                if current_mmr_int and current_mmr_int > 0:
+                    mmr = current_mmr_int
+
+        if mmr is None or mmr <= 0:
+            raise ValueError("MMR not available; please provide your MMR.")
         glicko_player = self.rating_system.create_player_from_mmr(mmr)
 
         steam_id64 = steam_id + STEAM_ID64_OFFSET
