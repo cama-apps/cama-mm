@@ -9,6 +9,8 @@ Cama Balanced Shuffle is a Discord bot for Dota 2 inhouse leagues. It implements
 - **Player registration** with OpenDota MMR integration
 - **Match recording** with rating updates and pairwise statistics
 - **Jopacoin betting system** with house/pool modes, leverage (2x-5x), debt, and bankruptcy
+- **Prediction markets** for yes/no outcomes with resolution voting and payouts
+- **Jopacoin economy extensions** with loans, nonprofit disbursements, and shop purchases
 - **Match enrichment** via OpenDota API for detailed stats (K/D/A, heroes, GPM, lane outcomes)
 - **Dota 2 reference** commands for hero/ability lookup (via dotabase)
 - **Stats visualization** with image generation (radar graphs, bar charts, match tables)
@@ -46,22 +48,31 @@ tail -f /tmp/bot.log
 ```
 bot.py                    # Entry point, Discord event handlers, service initialization
 config.py                 # Environment configuration (all settings centralized here)
+database.py               # SQLite wrapper + schema initialization
 shuffler.py               # BalancedShuffler - team balancing algorithm
 rating_system.py          # CamaRatingSystem - Glicko-2 rating management
 opendota_integration.py   # OpenDotaAPI - rate-limited external API client
+steam_api.py              # Valve Web API client + rate limiter
+player_queue.py           # In-memory queue helper (not wired into commands yet)
+remove_fake_users.py      # CLI script to delete fake users
 
-commands/                 # Discord slash commands (9 cog modules)
+commands/                 # Discord slash commands (11 cog modules)
 ├── match.py              # /shuffle, /record
 ├── registration.py       # /register, /setroles, /stats
 ├── lobby.py              # /lobby, /kick, /resetlobby
-├── betting.py            # /bet, /mybets, /balance, /paydebt, /bankruptcy,
-│                         # /gambastats, /gambachart, /gambaleaderboard
-├── info.py               # /help, /leaderboard
+├── betting.py            # /bet, /mybets, /balance, /paydebt, /bankruptcy, /loan,
+│                         # /nonprofit, /disburse, /gambastats, /gambachart, /gambaleaderboard
+├── info.py               # /help, /leaderboard, /calibration
 ├── advstats.py           # /pairwise, /matchup, /rebuildpairings
-├── enrichment.py         # /enrichmatch, /profile, /matchhistory, /viewmatch,
-│                         # /dotastats, /recent, /rolesgraph, /lanegraph, /autodiscover
+├── enrichment.py         # /setleague, /showconfig, /backfillsteamid, /enrichmatch,
+│                         # /matchhistory, /viewmatch, /dotastats, /recent, /rolesgraph,
+│                         # /lanegraph, /autodiscover
 ├── dota_info.py          # /hero, /ability (dotabase reference commands)
-└── admin.py              # /addfake, /resetuser, /sync
+├── predictions.py        # /prediction, /predictions, /mypredictions, /predictionresolve,
+│                         # /predictioncancel, /predictionclose, /predictionstats, /predictionleaderboard
+├── shop.py               # /shop
+└── admin.py              # /addfake, /resetuser, /givecoin, /resetloancooldown,
+                          # /resetbankruptcycooldown, /setinitialrating, /sync
 
 domain/
 ├── models/               # Pure domain models (no DB dependencies)
@@ -76,7 +87,10 @@ services/                 # Application services (orchestrate repos + domain)
 ├── match_service.py      # Core: shuffle, record, voting, rating updates
 ├── player_service.py     # Registration, role management, stats
 ├── betting_service.py    # Bet placement, settlement, rewards
+├── loan_service.py       # Loans + nonprofit fund tracking
+├── disburse_service.py   # Nonprofit disbursement voting + payouts
 ├── gambling_stats_service.py # Degen score, gamba stats, leaderboards
+├── prediction_service.py # Prediction markets and payouts
 ├── lobby_service.py      # Lobby management, embed generation
 ├── garnishment_service.py    # Debt repayment from winnings
 ├── bankruptcy_service.py     # Bankruptcy declaration and penalties
@@ -92,8 +106,10 @@ repositories/             # Data access layer
 ├── player_repository.py  # Player CRUD, balance, ratings, steam_id
 ├── match_repository.py   # Match recording, enrichment, participants
 ├── bet_repository.py     # Bet placement, settlement (atomic operations)
+├── disburse_repository.py    # Nonprofit disbursement proposals/votes/history
 ├── lobby_repository.py   # Lobby state persistence
 ├── pairings_repository.py    # Pairwise teammate/opponent stats
+├── prediction_repository.py   # Prediction markets data access
 └── guild_config_repository.py    # Per-guild configuration
 
 infrastructure/
@@ -107,6 +123,8 @@ utils/
 ├── drawing.py            # Image generation (Pillow): match tables, radar graphs, bar charts
 ├── interaction_safety.py # Safe defer/followup for Discord interactions
 └── debug_logging.py      # JSONL debug tracing (optional)
+
+docs/                     # Deep-dive docs (server setup, stats, ratings insights)
 
 tests/                    # Test files organized by type
 ├── conftest.py           # Shared fixtures (temp_db_path, repositories)
@@ -239,6 +257,36 @@ award_participation(player_ids) -> dict  # 1 jopacoin per game
 award_win_bonus(winning_ids) -> dict     # JOPACOIN_WIN_REWARD per win
 ```
 
+### LoanService (`services/loan_service.py`)
+Handles loans, cooldowns, and nonprofit fund accounting.
+
+```python
+can_take_loan(discord_id, amount) -> dict
+take_loan(discord_id, amount, guild_id=None) -> dict
+repay_loan(discord_id, guild_id=None) -> dict
+get_state(discord_id) -> LoanState
+```
+
+### DisburseService (`services/disburse_service.py`)
+Manages nonprofit disbursement proposals and voting.
+
+```python
+can_propose(guild_id) -> tuple[bool, str]
+create_proposal(guild_id) -> DisburseProposal
+add_vote(guild_id, user_id, method) -> dict
+execute_disbursement(guild_id) -> dict
+```
+
+### PredictionService (`services/prediction_service.py`)
+Prediction market lifecycle, voting, and settlement.
+
+```python
+create_prediction(guild_id, creator_id, question, closes_at, channel_id=None) -> dict
+place_bet(prediction_id, discord_id, position, amount) -> dict
+add_resolution_vote(prediction_id, user_id, outcome, is_admin=None) -> dict
+resolve(prediction_id, outcome, resolved_by) -> dict
+```
+
 ### PlayerService (`services/player_service.py`)
 ```python
 register_player(discord_id, username, steam_id) -> dict  # Fetches MMR from OpenDota
@@ -287,34 +335,117 @@ games_against INTEGER, player1_wins_against INTEGER
 PRIMARY KEY (player1_id, player2_id)
 ```
 
+### guild_config
+```sql
+guild_id INTEGER PRIMARY KEY
+league_id INTEGER
+auto_enrich_matches INTEGER DEFAULT 1
+```
+
+### loan_state
+```sql
+discord_id INTEGER PRIMARY KEY
+last_loan_at INTEGER
+total_loans_taken INTEGER
+total_fees_paid INTEGER
+outstanding_principal INTEGER
+outstanding_fee INTEGER
+```
+
+### nonprofit_fund
+```sql
+guild_id INTEGER PRIMARY KEY
+total_collected INTEGER
+```
+
+### disburse_proposals
+```sql
+guild_id INTEGER
+proposal_id INTEGER PRIMARY KEY
+fund_amount INTEGER
+quorum_required INTEGER
+status TEXT
+```
+
+### predictions
+```sql
+prediction_id INTEGER PRIMARY KEY AUTOINCREMENT
+guild_id INTEGER NOT NULL DEFAULT 0
+question TEXT NOT NULL
+status TEXT NOT NULL DEFAULT 'open'
+outcome TEXT
+closes_at INTEGER
+```
+
+### prediction_bets
+```sql
+prediction_id INTEGER NOT NULL
+discord_id INTEGER NOT NULL
+position TEXT NOT NULL
+amount INTEGER NOT NULL
+bet_time INTEGER NOT NULL
+payout INTEGER
+```
+
 ## Slash Commands Quick Reference
 
 | Command | Purpose | Key Parameters |
 |---------|---------|----------------|
+| `/help` | List all available commands | - |
+| `/lobby` | Create/view lobby | - |
+| `/kick` | Remove a user from lobby | `user` |
+| `/resetlobby` | Reset lobby state | Admin only |
 | `/shuffle` | Create balanced teams | `betting_mode`: house/pool |
 | `/record` | Record match result | `result`: Radiant/Dire/Abort |
 | `/register` | Register player | `steam_id`: Steam32 ID |
 | `/setroles` | Set role preferences | `roles`: "1,2,3" or "123" |
 | `/stats` | View player stats | `user`: optional target |
-| `/lobby` | Create/view lobby | - |
-| `/bet` | Place jopacoin bet | `team`, `amount`, `leverage` |
-| `/balance` | Check balance/debt | - |
-| `/bankruptcy` | Clear debt (1wk cooldown) | - |
+| `/calibration` | Rating system stats | `user`: optional target |
 | `/leaderboard` | Rankings by jopacoin | `limit`: default 20 |
+| `/bet` | Place jopacoin bet | `team`, `amount`, `leverage` |
+| `/mybets` | Show active bets | - |
+| `/balance` | Check balance/debt | - |
+| `/paydebt` | Help another player pay debt | `user`, `amount` |
+| `/bankruptcy` | Clear debt (1wk cooldown) | - |
+| `/loan` | Borrow jopacoin (with fee) | `amount` |
+| `/nonprofit` | View nonprofit fund | - |
+| `/disburse` | Propose/manage fund distribution | `action`: propose/status/reset |
 | `/gambastats` | Gambling stats + degen score | `user`: optional |
 | `/gambachart` | P&L history chart | `user`: optional |
 | `/gambaleaderboard` | Server gambling rankings | `limit`: default 5 |
+| `/shop` | Spend jopacoin in the shop | `item`, `target` |
+| `/prediction` | Create prediction market | `question`, `closes_in` |
+| `/predictions` | List active predictions | - |
+| `/mypredictions` | View prediction positions | - |
+| `/predictionresolve` | Vote to resolve prediction | `prediction_id`, `outcome` |
+| `/predictionclose` | Close prediction betting early | Admin only |
+| `/predictioncancel` | Cancel a prediction | Admin only |
+| `/predictionstats` | Prediction betting stats | `user`: optional |
+| `/predictionleaderboard` | Prediction leaderboard | `limit` |
 | `/pairwise` | Teammate/opponent stats | `user`, `min_games` |
-| `/profile` | OpenDota profile | `user`: optional |
+| `/matchup` | Head-to-head stats | `user1`, `user2` |
+| `/rebuildpairings` | Rebuild pairings table | Admin only |
+| `/setleague` | Set Valve league ID | `league_id` |
+| `/showconfig` | Show server configuration | - |
+| `/backfillsteamid` | Backfill steam_id from dotabuff URLs | Admin only |
+| `/enrichmatch` | Enrich with Valve data | Admin only |
+| `/autodiscover` | Auto-discover matches for league | Admin only |
 | `/matchhistory` | Recent matches with stats | `user`, `limit` |
 | `/viewmatch` | Detailed match embed | `match_id`, `user` |
-| `/dotastats` | Comprehensive stats | `user`: optional |
+| `/dotastats` | Comprehensive OpenDota stats | `user`: optional |
 | `/recent` | Match table as image | `user`, `limit` |
 | `/rolesgraph` | Hero role radar graph | `user`, `matches` |
 | `/lanegraph` | Lane distribution chart | `user`, `matches` |
 | `/hero` | Hero reference lookup | `hero_name` (autocomplete) |
 | `/ability` | Ability reference lookup | `ability_name` (autocomplete) |
-| `/enrichmatch` | Enrich with Valve data | Admin only |
+| `/addfake` | Add fake users to lobby | `count` |
+| `/resetuser` | Reset a user's account | `user` |
+| `/givecoin` | Give or take jopacoin | `user`, `amount` |
+| `/resetloancooldown` | Reset loan cooldown | `user` |
+| `/resetbankruptcycooldown` | Reset bankruptcy cooldown | `user` |
+| `/setinitialrating` | Set initial rating | `user`, `rating` |
+| `/extendbetting` | Extend betting window | `minutes`: 1-60 |
+| `/sync` | Force sync commands | Admin only |
 
 ## Testing
 
@@ -368,6 +499,17 @@ def test_full_match_workflow(test_db, mock_lobby_manager):
 - Mock external APIs (OpenDota, Discord) in integration tests
 - Use `time.sleep(0.1)` before cleanup on Windows (file locking)
 
+## Coverage Gaps (keep updated)
+
+**Tests**
+- `commands/predictions.py` slash-command flows are not directly tested (service/repo only).
+- `commands/enrichment.py` admin config commands (`/setleague`, `/showconfig`, `/backfillsteamid`) are untested.
+- `commands/info.py` `/help` and `/calibration` formatting lacks direct command tests.
+- `remove_fake_users.py` CLI wrapper is not smoke-tested.
+
+**Docs**
+- Prediction markets and disbursement voting flows lack dedicated docs under `docs/`.
+
 ## Configuration
 
 **Required:** `DISCORD_BOT_TOKEN`
@@ -378,6 +520,8 @@ def test_full_match_workflow(test_db, mock_lobby_manager):
 | `ADMIN_USER_IDS` | [] | Comma-separated Discord IDs for admin commands |
 | `DB_PATH` | cama_shuffle.db | Database file path |
 | `OPENDOTA_API_KEY` | None | Higher rate limits (60→1200 req/min) |
+| `STEAM_API_KEY` | None | Valve API key for match history/enrichment |
+| `DEBUG_LOG_PATH` | None | Enable JSONL debug logging when set |
 | `LOBBY_READY_THRESHOLD` | 10 | Min players to shuffle |
 | `LOBBY_MAX_PLAYERS` | 12 | Max players in lobby |
 | `OFF_ROLE_MULTIPLIER` | 0.95 | Rating effectiveness off-role |
@@ -386,6 +530,22 @@ def test_full_match_workflow(test_db, mock_lobby_manager):
 | `MAX_DEBT` | 500 | Maximum negative balance |
 | `GARNISHMENT_PERCENTAGE` | 1.0 | Portion of winnings to debt (100%) |
 | `BANKRUPTCY_COOLDOWN_SECONDS` | 604800 | 1 week between declarations |
+| `BANKRUPTCY_PENALTY_GAMES` | 5 | Win reward penalty games after bankruptcy |
+| `BANKRUPTCY_PENALTY_RATE` | 0.5 | Win reward reduction during penalty |
+| `LOAN_COOLDOWN_SECONDS` | 259200 | Loan cooldown (seconds) |
+| `LOAN_MAX_AMOUNT` | 100 | Max loan amount |
+| `LOAN_FEE_RATE` | 0.20 | Loan fee rate (flat) |
+| `DISBURSE_MIN_FUND` | 250 | Min nonprofit fund to propose disbursement |
+| `DISBURSE_QUORUM_PERCENTAGE` | 0.40 | Vote quorum for disbursement proposals |
+| `SHOP_ANNOUNCE_COST` | 10 | Shop cost for balance announcement |
+| `SHOP_ANNOUNCE_TARGET_COST` | 100 | Shop cost for targeted announcement |
+| `ADMIN_RATING_ADJUSTMENT_MAX_GAMES` | 5 | Max games allowed for /setinitialrating |
+| `RD_DECAY_CONSTANT` | 50 | Glicko-2 RD decay constant |
+| `RD_DECAY_GRACE_PERIOD_WEEKS` | 2 | No RD decay for this grace period |
+| `MMR_MODAL_TIMEOUT_MINUTES` | 5 | Timeout for MMR input modal |
+| `MMR_MODAL_RETRY_LIMIT` | 3 | Max retries for invalid MMR input |
+
+See `config.py` for the full list and defaults.
 
 ## Common Modification Patterns
 
@@ -421,10 +581,13 @@ def test_full_match_workflow(test_db, mock_lobby_manager):
 - **Rating System**: Glicko-2, not simple MMR. Initial RD=350.0, volatility=0.06
 - **5 Roles**: 1=Carry, 2=Mid, 3=Offlane, 4=Soft Support, 5=Hard Support (stored as strings)
 - **Team Convention**: team1=Radiant, team2=Dire, winning_team: 1 or 2
-- **Betting Window**: 15 minutes (BET_LOCK_SECONDS=900) after shuffle
+- **Betting Window**: 15 minutes (BET_LOCK_SECONDS=900) after shuffle; admins can extend via `/extendbetting`
 - **Voting Threshold**: 2 non-admin votes OR 1 admin vote to record match
 - **Leverage**: Multiplies effective bet; losses can cause debt up to MAX_DEBT
 - **Garnishment**: 100% of winnings go to debt repayment until balance >= 0
+- **Loans**: One outstanding loan at a time; repayment (principal + fee) runs on match record; fees fund nonprofit
+- **Disbursement**: Requires quorum; methods are even/proportional/neediest among debtors
+- **Predictions**: Resolution threshold is 3 matching votes or 1 admin vote (yes/no outcomes)
 - **Degen Score**: 0-100 score based on leverage addiction (40%), bet frequency (20%), bankruptcies (20%), loss chasing (10%), paper hands (10%)
 - **Pairings Storage**: Canonical pairs with player1_id < player2_id to avoid duplicates
 - **Lane Outcomes**: W/L/D determined by comparing avg lane_efficiency (parsed matches only)
