@@ -522,28 +522,41 @@ class InfoCommands(commands.Cog):
                 # Brier score: 0 = perfect, 0.25 = coin flip, lower is better
                 brier = prediction_quality["brier"]
                 brier_quality = "excellent" if brier < 0.15 else "good" if brier < 0.20 else "fair" if brier < 0.25 else "poor"
+                balance_rate = prediction_quality["balance_rate"]
+                balance_desc = "very balanced" if balance_rate >= 0.8 else "balanced" if balance_rate >= 0.5 else "unbalanced"
                 prediction_text = (
-                    f"Matches Analyzed: {prediction_quality['count']}\n"
-                    f"Brier: {brier:.3f} ({brier_quality}) | Pick Accuracy: {prediction_quality['accuracy']:.0%}\n"
-                    f"Balance Rate (45-55%): {prediction_quality['balance_rate']:.0%} | Upset Rate (60%+): {upset_rate}"
+                    f"**{prediction_quality['count']}** matches analyzed\n"
+                    f"Brier Score: **{brier:.3f}** ({brier_quality})\n"
+                    f"Pick Accuracy: **{prediction_quality['accuracy']:.0%}** of favorites won\n"
+                    f"Balance Rate: **{balance_rate:.0%}** were close games ({balance_desc})\n"
+                    f"Upset Rate: **{upset_rate}** underdogs won"
                 )
             else:
                 prediction_text = "No prediction data yet."
 
             rating_movement = stats["rating_movement"]
             if rating_movement["count"]:
+                avg_delta = rating_movement["avg_delta"]
+                median_delta = rating_movement["median_delta"]
                 movement_text = (
-                    f"Entries: {rating_movement['count']} | Avg Δ: {rating_movement['avg_delta']:.1f}\n"
-                    f"Median Δ: {rating_movement['median_delta']:.1f}"
+                    f"**{rating_movement['count']}** rating changes recorded\n"
+                    f"Avg change per game: **±{avg_delta:.1f}** points\n"
+                    f"Median change: **±{median_delta:.1f}** points\n"
+                    f"*Higher = more volatile matches*"
                 )
             else:
                 movement_text = "No rating history yet."
 
             if stats["avg_drift"] is not None and stats["median_drift"] is not None:
+                avg_drift = stats["avg_drift"]
+                median_drift = stats["median_drift"]
+                drift_direction = "outperforming" if avg_drift > 0 else "underperforming" if avg_drift < 0 else "matching"
                 drift_text = (
-                    f"Avg Drift: {stats['avg_drift']:+.0f} | Median Drift: {stats['median_drift']:+.0f}\n"
-                    f"📈 Biggest Gainers: {format_drift(stats['biggest_gainers'])}\n"
-                    f"📉 Biggest Drops: {format_drift(stats['biggest_drops'])}"
+                    f"*Current rating vs initial MMR seed*\n"
+                    f"Avg: **{avg_drift:+.0f}** | Median: **{median_drift:+.0f}**\n"
+                    f"Players are {drift_direction} their pub MMR\n"
+                    f"📈 Gainers: {format_drift(stats['biggest_gainers'])}\n"
+                    f"📉 Drops: {format_drift(stats['biggest_drops'])}"
                 )
             else:
                 drift_text = "No seed MMR data yet."
@@ -560,9 +573,9 @@ class InfoCommands(commands.Cog):
             )
             embed.add_field(name="Rating Distribution", value=rating_distribution, inline=False)
             embed.add_field(name="Calibration Progress", value=calibration_progress, inline=False)
-            embed.add_field(name="Prediction Quality", value=prediction_text, inline=False)
-            embed.add_field(name="Rating Movement", value=movement_text, inline=False)
-            embed.add_field(name="Rating Drift", value=drift_text, inline=False)
+            embed.add_field(name="🎯 Prediction Quality", value=prediction_text, inline=False)
+            embed.add_field(name="📊 Rating Movement", value=movement_text, inline=False)
+            embed.add_field(name="🔄 Rating Drift (Seed vs Current)", value=drift_text, inline=False)
 
             embed.add_field(
                 name="Highest Rated",
