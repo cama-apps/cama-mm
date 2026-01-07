@@ -5,6 +5,7 @@ Match orchestration: shuffling and recording.
 import random
 import threading
 import time
+from datetime import datetime, timezone
 from typing import Any
 
 from config import BET_LOCK_SECONDS
@@ -446,17 +447,43 @@ class MatchService:
 
     def _load_glicko_player(self, player_id: int) -> tuple[Player, int]:
         rating_data = self.player_repo.get_glicko_rating(player_id)
+        last_dates = self.player_repo.get_last_match_date(player_id)
+        last_match_dt = None
+        created_at_dt = None
+
+        def _parse_dt(value):
+            if not value:
+                return None
+            try:
+                return datetime.fromisoformat(value)
+            except Exception:
+                return None
+
+        if last_dates:
+            last_match_dt = _parse_dt(last_dates[0])
+            created_at_dt = _parse_dt(last_dates[1])
+
+        base_player: Player
         if rating_data:
             rating, rd, vol = rating_data
-            player = self.rating_system.create_player_from_rating(rating, rd, vol)
-            return player, player_id
-
-        player_obj = self.player_repo.get_by_id(player_id)
-        if player_obj and player_obj.mmr is not None:
-            glicko_player = self.rating_system.create_player_from_mmr(player_obj.mmr)
+            base_player = self.rating_system.create_player_from_rating(rating, rd, vol)
         else:
-            glicko_player = self.rating_system.create_player_from_mmr(None)
-        return glicko_player, player_id
+            player_obj = self.player_repo.get_by_id(player_id)
+            if player_obj and player_obj.mmr is not None:
+                base_player = self.rating_system.create_player_from_mmr(player_obj.mmr)
+            else:
+                base_player = self.rating_system.create_player_from_mmr(None)
+
+        # Apply RD decay if applicable
+        reference_dt = last_match_dt or created_at_dt
+        if reference_dt:
+            now = datetime.now(timezone.utc)
+            if reference_dt.tzinfo is None:
+                reference_dt = reference_dt.replace(tzinfo=timezone.utc)
+            days_since = (now - reference_dt).days
+            base_player.rd = self.rating_system.apply_rd_decay(base_player.rd, days_since)
+
+        return base_player, player_id
 
     def record_match(
         self,
@@ -602,6 +629,11 @@ class MatchService:
                 for pid, rating, rd, vol in updates:
                     self.player_repo.update_glicko_rating(pid, rating, rd, vol)
                     updated_count += 1
+
+            # Update last_match_date for participants
+            now_iso = datetime.now(timezone.utc).isoformat()
+            for pid in expected_ids:
+                self.player_repo.update_last_match_date(pid, now_iso)
 
             # Store match prediction snapshot (pre-match)
             if hasattr(self.match_repo, "add_match_prediction"):
