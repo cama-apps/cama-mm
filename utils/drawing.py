@@ -878,16 +878,17 @@ def draw_rating_distribution(
         count = sum(1 for r in ratings if low <= r < high)
         bucket_counts.append((label, count))
 
-    # Image dimensions
-    padding = 20
+    # Image dimensions - 520px matches Discord embed max width
+    width = 520
+    padding = 25
     title_height = 50
     chart_height = 180
     label_height = 45
     footer_height = 30
-    bar_width = 45
-    bar_gap = 8
 
-    width = padding * 2 + len(buckets) * (bar_width + bar_gap)
+    # Calculate bar dimensions to fill width
+    bar_gap = 10
+    bar_width = (width - padding * 2 - bar_gap * (len(buckets) - 1)) // len(buckets)
     height = padding + title_height + chart_height + label_height + footer_height
 
     # Create image
