@@ -4,6 +4,7 @@ Admin commands: maintenance helpers and testing utilities.
 
 import logging
 import random
+import time
 
 import discord
 from discord import app_commands
@@ -11,7 +12,7 @@ from discord.ext import commands
 
 from config import ADMIN_RATING_ADJUSTMENT_MAX_GAMES
 from services.permissions import has_admin_permission
-from utils.formatting import ROLE_EMOJIS
+from utils.formatting import ROLE_EMOJIS, format_betting_display
 from utils.interaction_safety import safe_defer, safe_followup
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
 
@@ -488,6 +489,131 @@ class AdminCommands(commands.Cog):
             f"{user.id} ({user}) to {rating} with RD={rd_reset}"
         )
 
+    @app_commands.command(
+        name="extendbetting", description="Extend the betting window for the current match (Admin only)"
+    )
+    @app_commands.describe(minutes="Number of minutes to extend betting (1-60)")
+    async def extendbetting(self, interaction: discord.Interaction, minutes: int):
+        """Admin command to extend the betting window for an active match."""
+        if not has_admin_permission(interaction):
+            await interaction.response.send_message(
+                "❌ Admin only! You need Administrator or Manage Server permissions.",
+                ephemeral=True,
+            )
+            return
+
+        if minutes < 1 or minutes > 60:
+            await interaction.response.send_message(
+                "❌ Extension must be between 1 and 60 minutes.",
+                ephemeral=True,
+            )
+            return
+
+        # Get match_service from bot
+        match_service = getattr(self.bot, "match_service", None)
+        if not match_service:
+            await interaction.response.send_message(
+                "❌ Match service not available.",
+                ephemeral=True,
+            )
+            return
+
+        guild_id = interaction.guild.id if interaction.guild else None
+
+        # Check for pending match
+        pending_state = match_service.get_last_shuffle(guild_id)
+        if not pending_state:
+            await interaction.response.send_message(
+                "❌ No active match to extend betting for.",
+                ephemeral=True,
+            )
+            return
+
+        current_lock = pending_state.get("bet_lock_until")
+        if not current_lock:
+            await interaction.response.send_message(
+                "❌ No betting window found for the current match.",
+                ephemeral=True,
+            )
+            return
+
+        # Calculate new lock time: extend from max(current_lock, now)
+        now_ts = int(time.time())
+        base_time = max(current_lock, now_ts)
+        new_lock_until = base_time + (minutes * 60)
+
+        # Update state
+        pending_state["bet_lock_until"] = new_lock_until
+        match_service.set_last_shuffle(guild_id, pending_state)
+        match_service._persist_match_state(guild_id, pending_state)
+
+        # Cancel existing and reschedule betting reminder tasks
+        match_cog = self.bot.get_cog("MatchCommands")
+        if match_cog:
+            match_cog._cancel_betting_tasks(guild_id)
+            # Schedule new reminders with the updated lock time
+            await match_cog._schedule_betting_reminders(guild_id, new_lock_until)
+
+        # Update the shuffle embed if we can find it
+        message_id = pending_state.get("shuffle_message_id")
+        channel_id = pending_state.get("shuffle_channel_id")
+        embed_updated = False
+
+        if message_id and channel_id:
+            try:
+                channel = self.bot.get_channel(channel_id)
+                if channel:
+                    message = await channel.fetch_message(message_id)
+                    if message and message.embeds:
+                        embed = message.embeds[0].copy()
+
+                        # Find and update the betting field
+                        betting_service = getattr(self.bot, "betting_service", None)
+                        totals = {"radiant": 0, "dire": 0}
+                        betting_mode = pending_state.get("betting_mode", "pool")
+
+                        if betting_service:
+                            totals = betting_service.get_pot_odds(guild_id, pending_state=pending_state)
+
+                        new_field_name, new_field_value = format_betting_display(
+                            totals["radiant"], totals["dire"], betting_mode, new_lock_until
+                        )
+
+                        # Find and replace the betting field (usually the last field or has "Wagers" in name)
+                        new_fields = []
+                        for field in embed.fields:
+                            if "Wagers" in field.name or "Current Wagers" in field.name or "Pool" in field.name:
+                                new_fields.append(
+                                    discord.EmbedField(name=new_field_name, value=new_field_value, inline=False)
+                                )
+                            else:
+                                new_fields.append(field)
+
+                        embed.clear_fields()
+                        for field in new_fields:
+                            embed.add_field(name=field.name, value=field.value, inline=field.inline)
+
+                        await message.edit(embed=embed)
+                        embed_updated = True
+            except Exception as exc:
+                logger.warning(f"Failed to update shuffle embed after extending betting: {exc}")
+
+        # Send public announcement
+        jump_url = pending_state.get("shuffle_message_jump_url", "")
+        jump_link = f" [View match]({jump_url})" if jump_url else ""
+
+        await interaction.response.send_message(
+            f"⏰ **Betting window extended by {minutes} minute(s)!** "
+            f"Closes <t:{new_lock_until}:R>.{jump_link}"
+        )
+
+        status_note = " (embed updated)" if embed_updated else ""
+        logger.info(
+            f"Admin {interaction.user.id} ({interaction.user}) extended betting by {minutes} min "
+            f"for guild {guild_id}. New lock: {new_lock_until}{status_note}"
+        )
+
+
 async def setup(bot: commands.Bot):
     lobby_service = getattr(bot, "lobby_service", None)
     # Use player_repo directly from bot for admin operations
@@ -504,7 +630,7 @@ async def setup(bot: commands.Bot):
 
     # Log command registration
     admin_commands = [
-        cmd.name for cmd in bot.tree.walk_commands() if cmd.name in ["addfake", "resetuser", "sync", "givecoin", "resetloancooldown", "resetbankruptcycooldown"]
+        cmd.name for cmd in bot.tree.walk_commands() if cmd.name in ["addfake", "resetuser", "sync", "givecoin", "resetloancooldown", "resetbankruptcycooldown", "setinitialrating", "extendbetting"]
     ]
     logger.info(
         f"AdminCommands cog loaded. Registered commands: {admin_commands}. "
