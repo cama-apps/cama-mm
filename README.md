@@ -44,9 +44,8 @@ The bot uses a **Glicko-2 rating system** for team balancing. Players are matche
 
 4. **Configure Bot Permissions:**
    - In the OAuth2 > URL Generator section, select:
-     - `bot` scope
-     - `applications.commands` scope
-     - Permissions: Send Messages, Use Slash Commands, Read Message History
+     - Scopes: `bot`, `applications.commands`
+     - Permissions: View Channels, Send Messages, Create Public Threads, Send Messages in Threads, Pin Messages, Manage Threads, Embed Links, Read Message History, Use External Emojis, Use External Stickers, Add Reactions
 
 5. **Set up environment variables:**
    - Create a file named `.env` in the project root (same folder as `bot.py`)
@@ -66,7 +65,7 @@ The bot uses a **Glicko-2 rating system** for team balancing. Players are matche
 6. **Invite bot to your server:**
    - In Discord Developer Portal, go to OAuth2 > URL Generator
    - Select scopes: `bot` and `applications.commands`
-   - Select bot permissions: `Send Messages`, `Read Message History`, `Add Reactions`, `Use External Emojis`
+   - Select bot permissions as listed in step 4
    - Copy the generated URL and open it in your browser to invite the bot
 
 ## Running the Bot

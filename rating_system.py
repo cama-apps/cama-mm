@@ -19,6 +19,7 @@ class CamaRatingSystem:
 
     # Glicko-2 constants
     TAU = 0.5  # Volatility constraint (default 0.5)
+    GLICKO2_SCALE = 173.7178  # Rating scale conversion constant
 
     # MMR to Glicko-2 rating mapping
     # Maps full MMR range to full Glicko-2 range
@@ -43,6 +44,34 @@ class CamaRatingSystem:
         """
         self.initial_rd = initial_rd
         self.initial_volatility = initial_volatility
+
+    def aggregate_team_stats(self, players: list[Player]) -> tuple[float, float, float]:
+        """
+        Aggregate a team into rating, RD, and volatility snapshots.
+
+        Uses mean rating and RMS RD to represent overall uncertainty.
+        """
+        if not players:
+            return 0.0, 350.0, self.initial_volatility
+        mean_rating = sum(p.rating for p in players) / len(players)
+        rms_rd = math.sqrt(sum(p.rd**2 for p in players) / len(players))
+        mean_vol = sum(p.vol for p in players) / len(players)
+        return mean_rating, rms_rd, mean_vol
+
+    @classmethod
+    def expected_outcome(
+        cls, rating: float, rd: float, opponent_rating: float, opponent_rd: float
+    ) -> float:
+        """
+        Estimate win probability given two ratings and opponent RD.
+        """
+        g = 1.0 / math.sqrt(
+            1.0 + (3.0 * (opponent_rd / cls.GLICKO2_SCALE) ** 2) / (math.pi**2)
+        )
+        expectation = 1.0 / (
+            1.0 + math.exp(-g * (rating - opponent_rating) / cls.GLICKO2_SCALE)
+        )
+        return min(1.0, max(0.0, expectation))
 
     def mmr_to_rating(self, mmr: int) -> float:
         """
@@ -131,29 +160,20 @@ class CamaRatingSystem:
             Each rating is (rating, rd, volatility, discord_id)
         """
 
-        def _aggregate_team(opponents: list[Player]) -> tuple[float, float, float]:
-            """
-            Represent a full team as a single Glicko-2 opponent by averaging
-            ratings, using RMS of RDs (captures overall uncertainty), and
-            averaging volatility.
-            """
-            if not opponents:
-                return 0.0, 350.0, 0.06
-            mean_rating = sum(p.rating for p in opponents) / len(opponents)
-            rms_rd = math.sqrt(sum(p.rd**2 for p in opponents) / len(opponents))
-            mean_vol = sum(p.vol for p in opponents) / len(opponents)
-            return mean_rating, rms_rd, mean_vol
-
         # Aggregated team views (for opponent strength)
-        team1_rating, team1_rd, _ = _aggregate_team([p for p, _ in team1_players])
-        team2_rating, team2_rd, _ = _aggregate_team([p for p, _ in team2_players])
+        team1_rating, team1_rd, team1_vol = self.aggregate_team_stats(
+            [p for p, _ in team1_players]
+        )
+        team2_rating, team2_rd, team2_vol = self.aggregate_team_stats(
+            [p for p, _ in team2_players]
+        )
 
         team1_result = 1.0 if winning_team == 1 else 0.0
         team2_result = 1.0 if winning_team == 2 else 0.0
 
         # Team-level synthetic players to compute shared rating deltas
-        team1_synthetic = Player(rating=team1_rating, rd=team1_rd, vol=self.initial_volatility)
-        team2_synthetic = Player(rating=team2_rating, rd=team2_rd, vol=self.initial_volatility)
+        team1_synthetic = Player(rating=team1_rating, rd=team1_rd, vol=team1_vol)
+        team2_synthetic = Player(rating=team2_rating, rd=team2_rd, vol=team2_vol)
         team1_synthetic.update_player([team2_rating], [team2_rd], [team1_result])
         team2_synthetic.update_player([team1_rating], [team1_rd], [team2_result])
 

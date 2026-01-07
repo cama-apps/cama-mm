@@ -24,7 +24,7 @@ from services.loan_service import LoanService
 from services.match_service import MatchService
 from services.player_service import PlayerService
 from utils.drawing import draw_gamba_chart
-from utils.formatting import JOPACOIN_EMOTE, format_betting_display
+from utils.formatting import JOPACOIN_EMOTE, TOMBSTONE_EMOJI, format_betting_display
 from utils.interaction_safety import safe_defer
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
 
@@ -152,7 +152,7 @@ class BettingCommands(commands.Cog):
             embed = message.embeds[0]
             totals = self.betting_service.get_pot_odds(guild_id, pending_state=pending_state)
             lock_until = pending_state.get("bet_lock_until")
-            betting_mode = pending_state.get("betting_mode", "house")
+            betting_mode = pending_state.get("betting_mode", "pool")
 
             field_name, field_value = format_betting_display(
                 totals["radiant"], totals["dire"], betting_mode, lock_until
@@ -223,7 +223,7 @@ class BettingCommands(commands.Cog):
                 return
 
             totals = self.betting_service.get_pot_odds(guild_id, pending_state=pending_state)
-            betting_mode = pending_state.get("betting_mode", "house")
+            betting_mode = pending_state.get("betting_mode", "pool")
 
             # Format bets with odds for pool mode
             _, totals_text = format_betting_display(
@@ -322,7 +322,7 @@ class BettingCommands(commands.Cog):
         await self._update_shuffle_message_wagers(guild_id)
 
         # Build response message
-        betting_mode = pending_state.get("betting_mode", "house") if pending_state else "house"
+        betting_mode = pending_state.get("betting_mode", "pool") if pending_state else "pool"
         pool_warning = ""
         if betting_mode == "pool":
             pool_warning = "\n⚠️ Pool mode: odds may shift as more bets come in. Use `/mybets` to check current EV."
@@ -407,7 +407,7 @@ class BettingCommands(commands.Cog):
         base_msg = header + "\n" + "\n".join(bet_lines)
 
         # Add EV info for pool mode
-        betting_mode = pending_state.get("betting_mode", "house") if pending_state else "house"
+        betting_mode = pending_state.get("betting_mode", "pool") if pending_state else "pool"
         if betting_mode == "pool":
             totals = self.betting_service.get_pot_odds(guild_id, pending_state=pending_state)
             total_pool = totals["radiant"] + totals["dire"]
@@ -792,6 +792,17 @@ class BettingCommands(commands.Cog):
                     inline=True,
                 )
 
+        # Bankruptcy penalty if active
+        if self.bankruptcy_service:
+            bankruptcy_state = self.bankruptcy_service.get_state(target_user.id)
+            if bankruptcy_state.penalty_games_remaining > 0:
+                penalty_rate_pct = int(BANKRUPTCY_PENALTY_RATE * 100)
+                embed.add_field(
+                    name=f"{TOMBSTONE_EMOJI} Bankruptcy Penalty",
+                    value=f"{penalty_rate_pct}% win bonus for {bankruptcy_state.penalty_games_remaining} more game(s)",
+                    inline=True,
+                )
+
         await interaction.followup.send(embed=embed)
 
     @app_commands.command(name="gambachart", description="View your gambling history as a chart")
@@ -903,16 +914,24 @@ class BettingCommands(commands.Cog):
             color=0xFFD700,  # Gold
         )
 
-        # Helper to get username
+        # Helper to get username with tombstone if bankrupt
         async def get_name(discord_id: int) -> str:
             try:
                 member = interaction.guild.get_member(discord_id) if interaction.guild else None
                 if member:
-                    return member.display_name
-                user = await self.bot.fetch_user(discord_id)
-                return user.display_name if user else f"User {discord_id}"
+                    name = member.display_name
+                else:
+                    user = await self.bot.fetch_user(discord_id)
+                    name = user.display_name if user else f"User {discord_id}"
             except Exception:
-                return f"User {discord_id}"
+                name = f"User {discord_id}"
+
+            # Add tombstone if player has active bankruptcy penalty
+            if self.bankruptcy_service:
+                state = self.bankruptcy_service.get_state(discord_id)
+                if state.penalty_games_remaining > 0:
+                    return f"{TOMBSTONE_EMOJI} {name}"
+            return name
 
         # Top earners
         if leaderboard.top_earners:

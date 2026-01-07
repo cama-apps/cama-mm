@@ -159,7 +159,7 @@ class MatchService:
             "shuffle_message_jump_url": state.get("shuffle_message_jump_url"),
             "shuffle_message_id": state.get("shuffle_message_id"),
             "shuffle_channel_id": state.get("shuffle_channel_id"),
-            "betting_mode": state.get("betting_mode", "house"),
+            "betting_mode": state.get("betting_mode", "pool"),
         }
 
     def _persist_match_state(self, guild_id: int | None, state: dict) -> None:
@@ -299,7 +299,7 @@ class MatchService:
         return self.get_pending_record_result(guild_id) is not None
 
     def shuffle_players(
-        self, player_ids: list[int], guild_id: int | None = None, betting_mode: str = "house"
+        self, player_ids: list[int], guild_id: int | None = None, betting_mode: str = "pool"
     ) -> dict:
         """
         Shuffle players into balanced teams.
@@ -307,7 +307,7 @@ class MatchService:
         Args:
             player_ids: List of Discord user IDs to shuffle
             guild_id: Guild ID for multi-guild support
-            betting_mode: "house" for 1:1 payouts, "pool" for parimutuel betting
+            betting_mode: "pool" for parimutuel betting, "house" for 1:1 payouts
 
         Returns a payload containing teams, role assignments, and Radiant/Dire mapping.
         """
@@ -544,6 +544,39 @@ class MatchService:
             radiant_glicko = [self._load_glicko_player(pid) for pid in radiant_team_ids]
             dire_glicko = [self._load_glicko_player(pid) for pid in dire_team_ids]
 
+            # Snapshot pre-match ratings for history + prediction stats
+            pre_match = {}
+            for player, pid in radiant_glicko:
+                pre_match[pid] = {
+                    "rating_before": player.rating,
+                    "rd_before": player.rd,
+                    "volatility_before": player.vol,
+                    "team_number": 1,
+                    "won": winning_team == "radiant",
+                }
+            for player, pid in dire_glicko:
+                pre_match[pid] = {
+                    "rating_before": player.rating,
+                    "rd_before": player.rd,
+                    "volatility_before": player.vol,
+                    "team_number": 2,
+                    "won": winning_team == "dire",
+                }
+
+            radiant_rating, radiant_rd, _ = self.rating_system.aggregate_team_stats(
+                [p for p, _ in radiant_glicko]
+            )
+            dire_rating, dire_rd, _ = self.rating_system.aggregate_team_stats(
+                [p for p, _ in dire_glicko]
+            )
+            expected_radiant_win_prob = self.rating_system.expected_outcome(
+                radiant_rating, radiant_rd, dire_rating, dire_rd
+            )
+            expected_team_win_prob = {
+                1: expected_radiant_win_prob,
+                2: 1.0 - expected_radiant_win_prob,
+            }
+
             if winning_team == "radiant":
                 team1_updated, team2_updated = self.rating_system.update_ratings_after_match(
                     radiant_glicko, dire_glicko, 1
@@ -569,6 +602,36 @@ class MatchService:
                 for pid, rating, rd, vol in updates:
                     self.player_repo.update_glicko_rating(pid, rating, rd, vol)
                     updated_count += 1
+
+            # Store match prediction snapshot (pre-match)
+            if hasattr(self.match_repo, "add_match_prediction"):
+                self.match_repo.add_match_prediction(
+                    match_id=match_id,
+                    radiant_rating=radiant_rating,
+                    dire_rating=dire_rating,
+                    radiant_rd=radiant_rd,
+                    dire_rd=dire_rd,
+                    expected_radiant_win_prob=expected_radiant_win_prob,
+                )
+
+            # Record rating history snapshots per player
+            for pid, rating, rd, vol in updates:
+                pre = pre_match.get(pid)
+                if not pre:
+                    continue
+                self.match_repo.add_rating_history(
+                    discord_id=pid,
+                    rating=rating,
+                    match_id=match_id,
+                    rating_before=pre["rating_before"],
+                    rd_before=pre["rd_before"],
+                    rd_after=rd,
+                    volatility_before=pre["volatility_before"],
+                    volatility_after=vol,
+                    expected_team_win_prob=expected_team_win_prob.get(pre["team_number"]),
+                    team_number=pre["team_number"],
+                    won=pre["won"],
+                )
 
             # Update pairwise player statistics
             if self.pairings_repo:

@@ -177,7 +177,7 @@ class BettingService:
             # If no pending state, treat as no bets to avoid pulling stale wagers.
             return {"winners": [], "losers": []}
 
-        betting_mode = pending_state.get("betting_mode", "house")
+        betting_mode = pending_state.get("betting_mode", "pool")
 
         # Prefer atomic settlement (payouts + bet tagging in one DB transaction)
         if hasattr(self.bet_repo, "settle_pending_bets_atomic"):

@@ -94,17 +94,52 @@ class MatchRepository(BaseRepository, IMatchRepository):
             return match_id
 
     def add_rating_history(
-        self, discord_id: int, rating: float, match_id: int | None = None
+        self,
+        discord_id: int,
+        rating: float,
+        match_id: int | None = None,
+        rating_before: float | None = None,
+        rd_before: float | None = None,
+        rd_after: float | None = None,
+        volatility_before: float | None = None,
+        volatility_after: float | None = None,
+        expected_team_win_prob: float | None = None,
+        team_number: int | None = None,
+        won: bool | None = None,
     ) -> None:
         """Record a rating change in history."""
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                INSERT INTO rating_history (discord_id, rating, match_id)
-                VALUES (?, ?, ?)
+                INSERT INTO rating_history (
+                    discord_id,
+                    rating,
+                    rating_before,
+                    rd_before,
+                    rd_after,
+                    volatility_before,
+                    volatility_after,
+                    expected_team_win_prob,
+                    team_number,
+                    won,
+                    match_id
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-                (discord_id, rating, match_id),
+                (
+                    discord_id,
+                    rating,
+                    rating_before,
+                    rd_before,
+                    rd_after,
+                    volatility_before,
+                    volatility_after,
+                    expected_team_win_prob,
+                    team_number,
+                    won,
+                    match_id,
+                ),
             )
 
     def _normalize_guild_id(self, guild_id: int | None) -> int:
@@ -236,6 +271,70 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 for row in rows
             ]
 
+    def get_player_rating_history_detailed(self, discord_id: int, limit: int = 50) -> list[dict]:
+        """Get detailed rating history for a player including prediction data."""
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT *
+                FROM rating_history
+                WHERE discord_id = ?
+                ORDER BY timestamp DESC
+                LIMIT ?
+            """,
+                (discord_id, limit),
+            )
+            rows = cursor.fetchall()
+            return [
+                {
+                    "rating": row["rating"],
+                    "rating_before": row["rating_before"],
+                    "rd_before": row["rd_before"],
+                    "rd_after": row["rd_after"],
+                    "volatility_before": row["volatility_before"],
+                    "volatility_after": row["volatility_after"],
+                    "expected_team_win_prob": row["expected_team_win_prob"],
+                    "team_number": row["team_number"],
+                    "won": row["won"],
+                    "match_id": row["match_id"],
+                    "timestamp": row["timestamp"],
+                }
+                for row in rows
+            ]
+
+    def get_recent_rating_history(self, limit: int = 200) -> list[dict]:
+        """Get recent rating history entries for all players."""
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT *
+                FROM rating_history
+                ORDER BY timestamp DESC
+                LIMIT ?
+            """,
+                (limit,),
+            )
+            rows = cursor.fetchall()
+            return [
+                {
+                    "discord_id": row["discord_id"],
+                    "rating": row["rating"],
+                    "rating_before": row["rating_before"],
+                    "rd_before": row["rd_before"],
+                    "rd_after": row["rd_after"],
+                    "volatility_before": row["volatility_before"],
+                    "volatility_after": row["volatility_after"],
+                    "expected_team_win_prob": row["expected_team_win_prob"],
+                    "team_number": row["team_number"],
+                    "won": row["won"],
+                    "match_id": row["match_id"],
+                    "timestamp": row["timestamp"],
+                }
+                for row in rows
+            ]
+
     def delete_all_matches(self) -> int:
         """
         Delete all matches (for testing).
@@ -249,11 +348,98 @@ class MatchRepository(BaseRepository, IMatchRepository):
             cursor.execute("SELECT COUNT(*) FROM matches")
             count = cursor.fetchone()[0]
 
+            cursor.execute("DELETE FROM match_predictions")
             cursor.execute("DELETE FROM matches")
             cursor.execute("DELETE FROM match_participants")
             cursor.execute("DELETE FROM rating_history")
 
             return count
+
+    def get_match_count(self) -> int:
+        """Get total match count."""
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) as count FROM matches")
+            row = cursor.fetchone()
+            return row["count"] if row else 0
+
+    def add_match_prediction(
+        self,
+        match_id: int,
+        radiant_rating: float,
+        dire_rating: float,
+        radiant_rd: float,
+        dire_rd: float,
+        expected_radiant_win_prob: float,
+    ) -> None:
+        """Store pre-match expected win probability and team stats."""
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO match_predictions (
+                    match_id,
+                    radiant_rating,
+                    dire_rating,
+                    radiant_rd,
+                    dire_rd,
+                    expected_radiant_win_prob
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(match_id) DO UPDATE SET
+                    radiant_rating = excluded.radiant_rating,
+                    dire_rating = excluded.dire_rating,
+                    radiant_rd = excluded.radiant_rd,
+                    dire_rd = excluded.dire_rd,
+                    expected_radiant_win_prob = excluded.expected_radiant_win_prob,
+                    timestamp = CURRENT_TIMESTAMP
+            """,
+                (
+                    match_id,
+                    radiant_rating,
+                    dire_rating,
+                    radiant_rd,
+                    dire_rd,
+                    expected_radiant_win_prob,
+                ),
+            )
+
+    def get_recent_match_predictions(self, limit: int = 200) -> list[dict]:
+        """Get recent match predictions with outcomes."""
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT
+                    mp.match_id,
+                    mp.expected_radiant_win_prob,
+                    mp.radiant_rating,
+                    mp.dire_rating,
+                    mp.radiant_rd,
+                    mp.dire_rd,
+                    m.winning_team,
+                    m.match_date
+                FROM match_predictions mp
+                JOIN matches m ON m.match_id = mp.match_id
+                ORDER BY m.match_date DESC
+                LIMIT ?
+            """,
+                (limit,),
+            )
+            rows = cursor.fetchall()
+            return [
+                {
+                    "match_id": row["match_id"],
+                    "expected_radiant_win_prob": row["expected_radiant_win_prob"],
+                    "radiant_rating": row["radiant_rating"],
+                    "dire_rating": row["dire_rating"],
+                    "radiant_rd": row["radiant_rd"],
+                    "dire_rd": row["dire_rd"],
+                    "winning_team": row["winning_team"],
+                    "match_date": row["match_date"],
+                }
+                for row in rows
+            ]
 
     def get_most_recent_match(self) -> dict | None:
         """Get the most recently recorded match."""
@@ -585,3 +771,83 @@ class MatchRepository(BaseRepository, IMatchRepository):
             cursor = conn.cursor()
             cursor.execute("SELECT COUNT(*) as count FROM matches WHERE enrichment_source = 'auto'")
             return cursor.fetchone()["count"]
+
+    def get_biggest_upsets(self, limit: int = 5) -> list[dict]:
+        """Get matches where the underdog won, sorted by upset magnitude."""
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT
+                    mp.match_id,
+                    mp.expected_radiant_win_prob,
+                    mp.radiant_rating,
+                    mp.dire_rating,
+                    m.winning_team,
+                    m.match_date,
+                    m.team1_players,
+                    m.team2_players
+                FROM match_predictions mp
+                JOIN matches m ON m.match_id = mp.match_id
+                WHERE m.winning_team IS NOT NULL
+                  AND (
+                    (m.winning_team = 1 AND mp.expected_radiant_win_prob < 0.5)
+                    OR (m.winning_team = 2 AND mp.expected_radiant_win_prob > 0.5)
+                  )
+                ORDER BY
+                    CASE
+                        WHEN m.winning_team = 1 THEN mp.expected_radiant_win_prob
+                        ELSE 1.0 - mp.expected_radiant_win_prob
+                    END ASC
+                LIMIT ?
+            """,
+                (limit,),
+            )
+            rows = cursor.fetchall()
+            results = []
+            for row in rows:
+                win_prob = row["expected_radiant_win_prob"]
+                winning_team = row["winning_team"]
+                # Calculate underdog's win probability
+                underdog_prob = win_prob if winning_team == 1 else 1.0 - win_prob
+                results.append({
+                    "match_id": row["match_id"],
+                    "underdog_win_prob": underdog_prob,
+                    "radiant_rating": row["radiant_rating"],
+                    "dire_rating": row["dire_rating"],
+                    "winning_team": winning_team,
+                    "match_date": row["match_date"],
+                    "team1_players": json.loads(row["team1_players"]) if row["team1_players"] else [],
+                    "team2_players": json.loads(row["team2_players"]) if row["team2_players"] else [],
+                })
+            return results
+
+    def get_player_performance_stats(self) -> list[dict]:
+        """Get player expected vs actual win stats from rating history."""
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT
+                    discord_id,
+                    COUNT(*) as total_matches,
+                    SUM(CASE WHEN won = 1 THEN 1 ELSE 0 END) as actual_wins,
+                    SUM(expected_team_win_prob) as expected_wins
+                FROM rating_history
+                WHERE expected_team_win_prob IS NOT NULL
+                GROUP BY discord_id
+                HAVING COUNT(*) >= 5
+                ORDER BY (SUM(CASE WHEN won = 1 THEN 1 ELSE 0 END) - SUM(expected_team_win_prob)) DESC
+            """
+            )
+            rows = cursor.fetchall()
+            return [
+                {
+                    "discord_id": row["discord_id"],
+                    "total_matches": row["total_matches"],
+                    "actual_wins": row["actual_wins"],
+                    "expected_wins": row["expected_wins"],
+                    "overperformance": row["actual_wins"] - row["expected_wins"],
+                }
+                for row in rows
+            ]

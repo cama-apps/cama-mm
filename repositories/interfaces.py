@@ -153,7 +153,18 @@ class IMatchRepository(ABC):
 
     @abstractmethod
     def add_rating_history(
-        self, discord_id: int, rating: float, match_id: int | None = None
+        self,
+        discord_id: int,
+        rating: float,
+        match_id: int | None = None,
+        rating_before: float | None = None,
+        rd_before: float | None = None,
+        rd_after: float | None = None,
+        volatility_before: float | None = None,
+        volatility_after: float | None = None,
+        expected_team_win_prob: float | None = None,
+        team_number: int | None = None,
+        won: bool | None = None,
     ) -> None: ...
 
     @abstractmethod
@@ -164,6 +175,32 @@ class IMatchRepository(ABC):
 
     @abstractmethod
     def get_rating_history(self, discord_id: int, limit: int = 20): ...
+
+    @abstractmethod
+    def get_recent_rating_history(self, limit: int = 200): ...
+
+    @abstractmethod
+    def get_match_count(self) -> int: ...
+
+    @abstractmethod
+    def add_match_prediction(
+        self,
+        match_id: int,
+        radiant_rating: float,
+        dire_rating: float,
+        radiant_rd: float,
+        dire_rd: float,
+        expected_radiant_win_prob: float,
+    ) -> None: ...
+
+    @abstractmethod
+    def get_recent_match_predictions(self, limit: int = 200): ...
+
+    @abstractmethod
+    def get_biggest_upsets(self, limit: int = 5): ...
+
+    @abstractmethod
+    def get_player_performance_stats(self): ...
 
     @abstractmethod
     def delete_all_matches(self) -> int: ...
@@ -303,4 +340,117 @@ class IGuildConfigRepository(ABC):
     @abstractmethod
     def get_league_id(self, guild_id: int) -> int | None:
         """Get the league ID for a guild."""
+        ...
+
+
+class IPredictionRepository(ABC):
+    """Repository for prediction market data access."""
+
+    @abstractmethod
+    def create_prediction(
+        self,
+        guild_id: int,
+        creator_id: int,
+        question: str,
+        closes_at: int,
+        channel_id: int | None = None,
+        thread_id: int | None = None,
+        embed_message_id: int | None = None,
+    ) -> int:
+        """Create a new prediction and return its ID."""
+        ...
+
+    @abstractmethod
+    def get_prediction(self, prediction_id: int) -> dict | None:
+        """Get a prediction by ID."""
+        ...
+
+    @abstractmethod
+    def get_active_predictions(self, guild_id: int) -> list[dict]:
+        """Get all open/locked predictions for a guild."""
+        ...
+
+    @abstractmethod
+    def get_predictions_by_status(self, guild_id: int, status: str) -> list[dict]:
+        """Get predictions filtered by status."""
+        ...
+
+    @abstractmethod
+    def update_prediction_status(self, prediction_id: int, status: str) -> None:
+        """Update prediction status (open -> locked -> resolved/cancelled)."""
+        ...
+
+    @abstractmethod
+    def update_prediction_discord_ids(
+        self,
+        prediction_id: int,
+        thread_id: int | None = None,
+        embed_message_id: int | None = None,
+    ) -> None:
+        """Update Discord IDs for a prediction (thread, embed message)."""
+        ...
+
+    @abstractmethod
+    def add_resolution_vote(
+        self, prediction_id: int, user_id: int, outcome: str, is_admin: bool
+    ) -> dict:
+        """Add a resolution vote. Returns vote counts."""
+        ...
+
+    @abstractmethod
+    def get_resolution_votes(self, prediction_id: int) -> dict:
+        """Get current resolution vote counts: {"yes": n, "no": m}."""
+        ...
+
+    @abstractmethod
+    def resolve_prediction(
+        self, prediction_id: int, outcome: str, resolved_by: int
+    ) -> None:
+        """Mark prediction as resolved with outcome."""
+        ...
+
+    @abstractmethod
+    def cancel_prediction(self, prediction_id: int) -> None:
+        """Cancel a prediction (status -> cancelled)."""
+        ...
+
+    @abstractmethod
+    def place_bet_atomic(
+        self, prediction_id: int, discord_id: int, position: str, amount: int
+    ) -> dict:
+        """Place a bet atomically (debit balance, insert bet). Returns bet info."""
+        ...
+
+    @abstractmethod
+    def get_prediction_bets(self, prediction_id: int) -> list[dict]:
+        """Get all bets for a prediction."""
+        ...
+
+    @abstractmethod
+    def get_user_bet_on_prediction(
+        self, prediction_id: int, discord_id: int
+    ) -> dict | None:
+        """Get user's bet on a specific prediction."""
+        ...
+
+    @abstractmethod
+    def get_user_active_positions(self, discord_id: int) -> list[dict]:
+        """Get all active (unresolved) positions for a user."""
+        ...
+
+    @abstractmethod
+    def get_prediction_totals(self, prediction_id: int) -> dict:
+        """Get bet totals: {"yes_total": n, "no_total": m, "yes_count": x, "no_count": y}."""
+        ...
+
+    @abstractmethod
+    def settle_prediction_bets(
+        self, prediction_id: int, winning_position: str
+    ) -> dict:
+        """Settle all bets for a resolved prediction. Returns payout summary."""
+        ...
+
+    @abstractmethod
+    def refund_prediction_bets(self, prediction_id: int) -> dict:
+        """Refund all bets for a cancelled prediction. Returns refund summary."""
         ...

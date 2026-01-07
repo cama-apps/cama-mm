@@ -15,6 +15,7 @@ class Player:
 
     name: str
     mmr: int | None = None
+    initial_mmr: int | None = None
     wins: int = 0
     losses: int = 0
     preferred_roles: list[str] | None = None  # e.g., ["1", "2", "3", "4", "5"]

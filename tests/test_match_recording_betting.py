@@ -511,8 +511,8 @@ class TestLoanRepaymentOnMatchRecord:
         loan_service.take_loan(spectator_id, 100)
         assert player_repo.get_balance(spectator_id) == 100
 
-        # Match 1: spectator bets but doesn't play
-        match_service.shuffle_players(test_players, guild_id=1)
+        # Match 1: spectator bets but doesn't play (house mode for 1:1 payout)
+        match_service.shuffle_players(test_players, guild_id=1, betting_mode="house")
         pending = match_service.get_last_shuffle(1)
 
         # Spectator bets 30 on radiant
@@ -530,7 +530,7 @@ class TestLoanRepaymentOnMatchRecord:
 
         # Match 2: Now spectator plays and loan is repaid
         new_players = test_players[:9] + [spectator_id]  # Replace one player with spectator
-        match_service.shuffle_players(new_players, guild_id=1)
+        match_service.shuffle_players(new_players, guild_id=1, betting_mode="house")
         match_service.record_match("radiant", guild_id=1)
 
         # Loan repaid now

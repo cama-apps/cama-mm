@@ -181,3 +181,5 @@ desktop.ini
 fix_wins_losses.py
 scripts/
 docs/stats.md
+docs/
+!docs/server-setup.md

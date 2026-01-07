@@ -31,6 +31,12 @@ uv run pytest tests/test_e2e_workflow.py -v
 
 # Run single test
 uv run pytest tests/test_betting_service.py::TestBettingService::test_place_bet -v
+
+# Restart the bot (IMPORTANT: always remove .bot.lock first!)
+pkill -9 -f "python.*bot" 2>/dev/null; rm -f .bot.lock; uv run python bot.py > /tmp/bot.log 2>&1 &
+
+# Check bot logs
+tail -f /tmp/bot.log
 ```
 
 ## Architecture
