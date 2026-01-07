@@ -9,6 +9,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from config import ADMIN_RATING_ADJUSTMENT_MAX_GAMES
 from services.permissions import has_admin_permission
 from utils.formatting import ROLE_EMOJIS
 from utils.interaction_safety import safe_defer, safe_followup
@@ -424,6 +425,68 @@ class AdminCommands(commands.Cog):
             f"{user.id} ({user})"
         )
 
+    @app_commands.command(
+        name="setinitialrating", description="Set initial rating for a player"
+    )
+    @app_commands.describe(
+        user="Player to adjust (must have few games)",
+        rating="Initial rating (0-3000)",
+    )
+    async def setinitialrating(
+        self, interaction: discord.Interaction, user: discord.Member, rating: float
+    ):
+        """Admin command to set initial rating for low-game players."""
+        if not has_admin_permission(interaction):
+            await interaction.response.send_message(
+                "❌ Admin only! You need Administrator or Manage Server permissions.",
+                ephemeral=True,
+            )
+            return
+
+        if rating < 0 or rating > 3000:
+            await interaction.response.send_message(
+                "❌ Rating must be between 0 and 3000.",
+                ephemeral=True,
+            )
+            return
+
+        player = self.player_repo.get_by_id(user.id)
+        if not player:
+            await interaction.response.send_message(
+                f"⚠️ {user.mention} is not registered.",
+                ephemeral=True,
+            )
+            return
+
+        games = 0
+        if hasattr(self.player_repo, "get_game_count"):
+            games = self.player_repo.get_game_count(user.id)
+        if games >= ADMIN_RATING_ADJUSTMENT_MAX_GAMES:
+            await interaction.response.send_message(
+                "❌ Player has too many games for initial rating adjustment.",
+                ephemeral=True,
+            )
+            return
+
+        # Keep existing volatility if available
+        vol = 0.06
+        rating_data = self.player_repo.get_glicko_rating(user.id)
+        if rating_data:
+            _current_rating, _current_rd, current_vol = rating_data
+            if current_vol is not None:
+                vol = current_vol
+
+        rd_reset = 300.0
+        self.player_repo.update_glicko_rating(user.id, rating, rd_reset, vol)
+
+        await interaction.response.send_message(
+            f"✅ Set initial rating for {user.mention} to {rating} (RD reset to {rd_reset}).",
+            ephemeral=True,
+        )
+        logger.info(
+            f"Admin {interaction.user.id} ({interaction.user}) set initial rating for "
+            f"{user.id} ({user}) to {rating} with RD={rd_reset}"
+        )
 
 async def setup(bot: commands.Bot):
     lobby_service = getattr(bot, "lobby_service", None)
