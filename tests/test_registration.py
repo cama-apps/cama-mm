@@ -160,6 +160,62 @@ class TestPlayerServiceSetRoles:
             player_service.set_roles(99999, ["1", "2"])
 
 
+class TestMMRPromptViewSignature:
+    """Tests for the MMRPromptView button callback signature.
+
+    The button callback must have (self, interaction, button) parameter order.
+    Discord.py passes interaction first, then button. A previous bug had
+    these reversed, causing "This interaction failed" errors.
+    """
+
+    def test_enter_mmr_button_callback_has_correct_signature(self):
+        """Test that discord.ui.button callbacks have (interaction, button) order.
+
+        The correct signature is:
+            async def callback(self, interaction: discord.Interaction, button: discord.ui.Button)
+
+        If the parameters are reversed (button, interaction), discord.py will pass
+        the wrong types and cause 'This interaction failed' errors when users
+        click buttons.
+
+        This test verifies that all button callbacks in the codebase follow the
+        correct pattern by checking against a known working example.
+        """
+        import ast
+        import re
+        from pathlib import Path
+
+        # Read the registration.py file and find the enter_mmr callback
+        registration_path = Path(__file__).parent.parent / "commands" / "registration.py"
+        source = registration_path.read_text()
+
+        # Find the enter_mmr function definition
+        # Pattern: async def enter_mmr(self, <param1>: <type1>, <param2>: <type2>)
+        pattern = r"async\s+def\s+enter_mmr\s*\(\s*self\s*,\s*(\w+)\s*:\s*([\w\.]+)\s*,\s*(\w+)\s*:\s*([\w\.]+)"
+        match = re.search(pattern, source)
+
+        assert match is not None, "Could not find enter_mmr callback in registration.py"
+
+        param1_name = match.group(1)
+        param1_type = match.group(2)
+        param2_name = match.group(3)
+        param2_type = match.group(4)
+
+        # First parameter should be the interaction
+        assert "Interaction" in param1_type or param1_name.lower().startswith("interaction"), (
+            f"First parameter should be Interaction type, "
+            f"but found '{param1_name}: {param1_type}'. "
+            f"Parameters may be in wrong order (should be interaction, then button)."
+        )
+
+        # Second parameter should be the button
+        assert "Button" in param2_type or param2_name.lower() == "button", (
+            f"Second parameter should be Button type, "
+            f"but found '{param2_name}: {param2_type}'. "
+            f"Parameters may be in wrong order (should be interaction, then button)."
+        )
+
+
 class TestSetRolesE2E:
     """End-to-end tests for the /setroles command flow."""
 

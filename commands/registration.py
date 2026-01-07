@@ -122,8 +122,8 @@ class RegistrationCommands(commands.Cog):
                 self.attempts_left = MMR_MODAL_RETRY_LIMIT
 
             @discord.ui.button(label="Enter MMR", style=discord.ButtonStyle.primary)
-            async def enter_mmr(  # type: ignore[override]
-                self, button: discord.ui.Button, interaction_btn: discord.Interaction
+            async def enter_mmr(
+                self, interaction_btn: discord.Interaction, button: discord.ui.Button
             ):
                 if self.attempts_left <= 0:
                     await interaction_btn.response.send_message("❌ Invalid MMR", ephemeral=True)
