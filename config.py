@@ -110,3 +110,11 @@ SHOP_ANNOUNCE_TARGET_COST = _parse_int("SHOP_ANNOUNCE_TARGET_COST", 100)
 
 # Steam/Valve API
 STEAM_API_KEY = os.getenv("STEAM_API_KEY")
+
+# Glicko-2 rating system configuration
+CALIBRATION_RD_THRESHOLD = _parse_float("CALIBRATION_RD_THRESHOLD", 100.0)  # Players with RD <= this are considered calibrated
+ADMIN_RATING_ADJUSTMENT_MAX_GAMES = _parse_int("ADMIN_RATING_ADJUSTMENT_MAX_GAMES", 5)  # Max games for allowing admin rating adjustments
+RD_DECAY_CONSTANT = _parse_float("RD_DECAY_CONSTANT", 50.0)  # Constant for Glicko-2 RD decay formula (c value)
+RD_DECAY_GRACE_PERIOD_WEEKS = _parse_int("RD_DECAY_GRACE_PERIOD_WEEKS", 2)  # No decay for first N weeks after last match
+MMR_MODAL_TIMEOUT_MINUTES = _parse_int("MMR_MODAL_TIMEOUT_MINUTES", 5)  # Timeout for MMR input modal
+MMR_MODAL_RETRY_LIMIT = _parse_int("MMR_MODAL_RETRY_LIMIT", 3)  # Maximum retries for invalid MMR input

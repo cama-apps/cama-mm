@@ -222,6 +222,77 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 return (row[0], row[1], row[2])
             return None
 
+    def get_last_match_date(self, discord_id: int) -> tuple | None:
+        """
+        Get the last_match_date and created_at for a player.
+
+        Returns:
+            Tuple (last_match_date, created_at) or None if player not found.
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT last_match_date, created_at
+                FROM players
+                WHERE discord_id = ?
+                """,
+                (discord_id,),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return None
+            return (row["last_match_date"], row["created_at"])
+
+    def get_game_count(self, discord_id: int) -> int:
+        """Return total games played (wins + losses)."""
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT wins, losses
+                FROM players
+                WHERE discord_id = ?
+                """,
+                (discord_id,),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return 0
+            wins = row["wins"] or 0
+            losses = row["losses"] or 0
+            return int(wins) + int(losses)
+
+    def update_last_match_date(self, discord_id: int, timestamp: str | None = None) -> None:
+        """
+        Update last_match_date for a player.
+
+        Args:
+            discord_id: Player ID
+            timestamp: ISO timestamp string; if None, uses CURRENT_TIMESTAMP.
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            if timestamp is None:
+                cursor.execute(
+                    """
+                    UPDATE players
+                    SET last_match_date = CURRENT_TIMESTAMP,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE discord_id = ?
+                    """,
+                    (discord_id,),
+                )
+            else:
+                cursor.execute(
+                    """
+                    UPDATE players
+                    SET last_match_date = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE discord_id = ?
+                    """,
+                    (timestamp, discord_id),
+                )
+
     def update_mmr(self, discord_id: int, new_mmr: float) -> None:
         """Update player's current MMR."""
         with self.connection() as conn:

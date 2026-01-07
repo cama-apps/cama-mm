@@ -189,6 +189,7 @@ class SchemaManager:
             ("create_match_predictions_table", self._migration_create_match_predictions_table),
             ("create_predictions_system", self._migration_create_predictions_system),
             ("add_prediction_channel_message_id", self._migration_add_prediction_channel_message_id),
+            ("add_last_match_date_to_players", self._migration_add_last_match_date_to_players),
         ]
 
     # --- Migrations ---
@@ -624,4 +625,20 @@ class SchemaManager:
         )
         self._add_column_if_not_exists(
             cursor, "predictions", "close_message_id", "INTEGER"
+        )
+
+    def _migration_add_last_match_date_to_players(self, cursor) -> None:
+        """
+        Add last_match_date to players to track most recent played match.
+
+        Backfill existing players with created_at to avoid NULL where possible.
+        """
+        self._add_column_if_not_exists(cursor, "players", "last_match_date", "TIMESTAMP")
+        # Backfill: if created_at exists, use it; otherwise leave NULL
+        cursor.execute(
+            """
+            UPDATE players
+            SET last_match_date = COALESCE(last_match_date, created_at)
+            WHERE last_match_date IS NULL
+            """
         )

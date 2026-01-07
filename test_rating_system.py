@@ -5,6 +5,7 @@ Tests for rating system edge cases and error handling.
 import pytest
 
 from rating_system import CamaRatingSystem
+from config import CALIBRATION_RD_THRESHOLD, RD_DECAY_CONSTANT, RD_DECAY_GRACE_PERIOD_WEEKS
 
 
 class TestRatingSystemEdgeCases:
@@ -334,6 +335,37 @@ class TestRatingSystemBoundaryConditions:
         rating_change = abs(player.rating - initial_rating)
         assert rating_change > 0, "Rating should change"
         assert rating_change < 100, "Rating change should be small with very low RD"
+
+
+class TestRatingSystemCalibrationAndDecay:
+    """Tests for calibration status and RD decay behavior."""
+
+    def test_is_calibrated_threshold(self):
+        assert CamaRatingSystem.is_calibrated(CALIBRATION_RD_THRESHOLD)
+        assert not CamaRatingSystem.is_calibrated(CALIBRATION_RD_THRESHOLD + 0.1)
+
+    def test_rd_decay_grace_and_floor_weeks(self):
+        # Grace period: no decay when below grace period (14 days default)
+        rd_start = 150.0
+        rd_after_13_days = CamaRatingSystem.apply_rd_decay(rd_start, RD_DECAY_GRACE_PERIOD_WEEKS * 7 - 1)
+        assert rd_after_13_days == rd_start, "No decay should apply during grace period"
+
+        # After grace: use floor weeks; 21 days => 3 weeks
+        days = RD_DECAY_GRACE_PERIOD_WEEKS * 7 + 7  # 21 days if grace is 14
+        rd_after_21_days = CamaRatingSystem.apply_rd_decay(rd_start, days)
+        expected_weeks = days // 7
+        expected_rd = min(350.0, (rd_start * rd_start + (RD_DECAY_CONSTANT * RD_DECAY_CONSTANT) * expected_weeks) ** 0.5)
+        assert rd_after_21_days == expected_rd
+        assert rd_after_21_days > rd_start, "RD should increase after inactivity past grace period"
+
+    def test_rd_decay_cap_and_already_max(self):
+        # Already at cap stays at cap
+        assert CamaRatingSystem.apply_rd_decay(350.0, 100) == 350.0
+
+        # Large gap should cap at 350
+        rd_start = 340.0
+        rd_after_long_break = CamaRatingSystem.apply_rd_decay(rd_start, 70)  # 10 weeks
+        assert rd_after_long_break == 350.0, "RD decay should not exceed 350"
 
 
 if __name__ == "__main__":

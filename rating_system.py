@@ -3,6 +3,7 @@ Glicko-2 rating system implementation for Cama matchmaking.
 """
 
 import math
+from config import CALIBRATION_RD_THRESHOLD, RD_DECAY_CONSTANT, RD_DECAY_GRACE_PERIOD_WEEKS
 
 from glicko2 import Player
 
@@ -57,6 +58,34 @@ class CamaRatingSystem:
         rms_rd = math.sqrt(sum(p.rd**2 for p in players) / len(players))
         mean_vol = sum(p.vol for p in players) / len(players)
         return mean_rating, rms_rd, mean_vol
+
+    @staticmethod
+    def is_calibrated(rd: float) -> bool:
+        """Return True if the player's RD is at or below the calibration threshold."""
+        return rd <= CALIBRATION_RD_THRESHOLD
+
+    @staticmethod
+    def apply_rd_decay(rd: float, days_since_last_match: int) -> float:
+        """
+        Apply Glicko-2 style RD decay over time.
+
+        - Uses c (RD_DECAY_CONSTANT) and time periods in weeks (rounded down).
+        - Grace period: no decay for the first RD_DECAY_GRACE_PERIOD_WEEKS.
+        - RD is capped at 350.
+        - If RD is already 350, return as-is.
+        """
+        if rd >= 350.0:
+            return 350.0
+
+        if days_since_last_match < RD_DECAY_GRACE_PERIOD_WEEKS * 7:
+            return rd
+
+        weeks = max(0, days_since_last_match // 7)
+        if weeks == 0:
+            return rd
+
+        new_rd = math.sqrt(rd * rd + (RD_DECAY_CONSTANT * RD_DECAY_CONSTANT) * weeks)
+        return min(350.0, new_rd)
 
     @classmethod
     def expected_outcome(

@@ -32,13 +32,20 @@ def has_admin_permission(interaction: discord.Interaction) -> bool:
         return True
 
     # Check Discord permissions (Administrator or Manage Server)
-    # Need to get member from guild for accurate permissions
+    # Prefer guild member lookup, but fall back gracefully for mocks / partial objects.
     if interaction.guild:
-        member = interaction.guild.get_member(interaction.user.id)
-        if member and member.guild_permissions:
-            return (
-                member.guild_permissions.administrator
-                or member.guild_permissions.manage_guild
-            )
+        get_member = getattr(interaction.guild, "get_member", None)
+        if callable(get_member):
+            member = get_member(interaction.user.id)
+            if member and getattr(member, "guild_permissions", None):
+                return (
+                    member.guild_permissions.administrator
+                    or member.guild_permissions.manage_guild
+                )
+
+    # Fallback: interaction.user may already be a Member-like object with guild_permissions
+    perms = getattr(interaction.user, "guild_permissions", None)
+    if perms:
+        return bool(getattr(perms, "administrator", False) or getattr(perms, "manage_guild", False))
 
     return False
