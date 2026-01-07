@@ -400,7 +400,7 @@ class TestShuffler:
         """Test that exclusion_penalty_weight parameter is stored correctly."""
         # Test default value
         shuffler1 = BalancedShuffler()
-        assert shuffler1.exclusion_penalty_weight == 5.0
+        assert shuffler1.exclusion_penalty_weight == 50.0
 
         # Test custom value
         shuffler2 = BalancedShuffler(exclusion_penalty_weight=10.0)

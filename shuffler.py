@@ -43,7 +43,7 @@ class BalancedShuffler:
             off_role_multiplier: Multiplier for MMR when playing off-role (default 0.95 = 95% effectiveness)
             off_role_flat_penalty: Flat penalty per off-role player added to team value difference (default 100)
             role_matchup_delta_weight: Weight applied to lane matchup delta when scoring teams
-            exclusion_penalty_weight: Penalty per exclusion count for excluded players (default 5.0)
+            exclusion_penalty_weight: Penalty per exclusion count for excluded players (default 50.0)
         """
         self.use_glicko = use_glicko
         self.consider_roles = consider_roles
