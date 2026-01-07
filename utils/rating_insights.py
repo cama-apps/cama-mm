@@ -22,6 +22,7 @@ RATING_BUCKETS = [
 ]
 
 
+
 def _mean(values: Iterable[float]) -> float | None:
     values = list(values)
     if not values:
@@ -38,7 +39,6 @@ def _median(values: Iterable[float]) -> float | None:
 
 def compute_calibration_stats(
     players: list[Player],
-    rating_system: CamaRatingSystem,
     match_count: int = 0,
     match_predictions: list[dict] | None = None,
     rating_history_entries: list[dict] | None = None,
@@ -70,11 +70,6 @@ def compute_calibration_stats(
         else:
             rd_tiers["Fresh"] += 1
 
-    avg_rd = _mean(rd_values)
-    avg_uncertainty = (
-        rating_system.get_rating_uncertainty_percentage(avg_rd) if avg_rd is not None else None
-    )
-
     total_games = [p.wins + p.losses for p in players]
     avg_games = _mean(total_games)
 
@@ -99,7 +94,7 @@ def compute_calibration_stats(
     for player in rated_players:
         if player.initial_mmr is None or player.glicko_rating is None:
             continue
-        seed_rating = rating_system.mmr_to_rating(player.initial_mmr)
+        seed_rating = CamaRatingSystem().mmr_to_rating(player.initial_mmr)
         drift = player.glicko_rating - seed_rating
         drifts.append((player, drift))
     drift_values = [drift for _, drift in drifts]
@@ -107,6 +102,12 @@ def compute_calibration_stats(
 
     prediction_quality = _compute_prediction_quality(match_predictions or [])
     rating_movement = _compute_rating_movement(rating_history_entries or [])
+    side_balance = _compute_side_balance(match_predictions or [])
+    rating_stability = _compute_rating_stability(rating_history_entries or [])
+
+    # Calculate average certainty (inverse of uncertainty)
+    avg_rd = _mean(rd_values)
+    avg_certainty = rd_to_certainty(avg_rd) if avg_rd is not None else None
 
     return {
         "total_players": len(players),
@@ -117,7 +118,6 @@ def compute_calibration_stats(
         "avg_rating": _mean(rating_values),
         "median_rating": _median(rating_values),
         "rd_tiers": rd_tiers,
-        "avg_uncertainty": avg_uncertainty,
         "top_rated": top_rated,
         "lowest_rated": lowest_rated,
         "most_calibrated": most_calibrated,
@@ -130,6 +130,10 @@ def compute_calibration_stats(
         "biggest_drops": list(reversed(drifts_sorted[-3:])),
         "prediction_quality": prediction_quality,
         "rating_movement": rating_movement,
+        "side_balance": side_balance,
+        "rating_stability": rating_stability,
+        "avg_certainty": avg_certainty,
+        "avg_rd": avg_rd,
     }
 
 
@@ -180,4 +184,93 @@ def _compute_rating_movement(rating_history_entries: list[dict]) -> dict:
         "count": len(deltas),
         "avg_delta": _mean(deltas),
         "median_delta": _median(deltas),
+    }
+
+
+def _compute_side_balance(match_predictions: list[dict]) -> dict:
+    """Compute Radiant vs Dire win statistics."""
+    radiant_wins = 0
+    dire_wins = 0
+
+    for entry in match_predictions:
+        winning_team = entry.get("winning_team")
+        if winning_team == 1:
+            radiant_wins += 1
+        elif winning_team == 2:
+            dire_wins += 1
+
+    total = radiant_wins + dire_wins
+    return {
+        "radiant_wins": radiant_wins,
+        "dire_wins": dire_wins,
+        "total": total,
+        "radiant_rate": (radiant_wins / total) if total else None,
+        "dire_rate": (dire_wins / total) if total else None,
+    }
+
+
+def rd_to_certainty(rd: float) -> float:
+    """Convert RD to certainty percentage. Higher = more certain."""
+    # RD 350 = 0% certain, RD 0 = 100% certain
+    uncertainty = min(100, (rd / 350.0) * 100)
+    return 100 - uncertainty
+
+
+def get_rd_tier_name(rd: float) -> str:
+    """Get calibration tier name from RD value."""
+    if rd <= 75:
+        return "Locked In"
+    elif rd <= 150:
+        return "Settling"
+    elif rd <= 250:
+        return "Developing"
+    else:
+        return "Fresh"
+
+
+def _compute_rating_stability(rating_history_entries: list[dict]) -> dict:
+    """
+    Compare rating changes between calibrated vs uncalibrated players.
+
+    Uses RD at time of match:
+    - Calibrated: RD ≤150 (Locked In + Settling, 57%+ certain)
+    - Uncalibrated: RD >150 (Developing + Fresh, <57% certain)
+
+    Calibrated players should have smaller rating swings if system is working.
+    """
+    calibrated_deltas = []  # RD ≤150
+    uncalibrated_deltas = []  # RD >150
+
+    for entry in rating_history_entries:
+        before = entry.get("rating_before")
+        after = entry.get("rating")
+        rd_before = entry.get("rd_before")
+
+        if before is None or after is None or rd_before is None:
+            continue
+
+        delta = abs(after - before)
+
+        if rd_before <= 150:
+            calibrated_deltas.append(delta)
+        else:
+            uncalibrated_deltas.append(delta)
+
+    calibrated_avg = _mean(calibrated_deltas)
+    uncalibrated_avg = _mean(uncalibrated_deltas)
+
+    # Stability ratio: calibrated should swing less than uncalibrated
+    # ratio < 1 = good (calibrated players are more stable)
+    # ratio > 1 = bad (calibrated players still swinging a lot)
+    if calibrated_avg is not None and uncalibrated_avg is not None and uncalibrated_avg > 0:
+        stability_ratio = calibrated_avg / uncalibrated_avg
+    else:
+        stability_ratio = None
+
+    return {
+        "calibrated_avg_delta": calibrated_avg,
+        "calibrated_count": len(calibrated_deltas),
+        "uncalibrated_avg_delta": uncalibrated_avg,
+        "uncalibrated_count": len(uncalibrated_deltas),
+        "stability_ratio": stability_ratio,
     }

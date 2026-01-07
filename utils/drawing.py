@@ -845,3 +845,151 @@ def draw_gamba_chart(
     img.save(fp, format="PNG")
     fp.seek(0)
     return fp
+
+
+def draw_rating_distribution(
+    ratings: list[float], avg_rating: float | None = None, median_rating: float | None = None
+) -> BytesIO:
+    """
+    Generate a vertical histogram showing player rating distribution.
+
+    Args:
+        ratings: List of player ratings
+        avg_rating: Optional average rating to display
+        median_rating: Optional median rating to display
+
+    Returns:
+        BytesIO containing the PNG image
+    """
+    # Define rating buckets (250 point ranges from 0 to 2000+)
+    buckets = [
+        ("0-499", 0, 500),
+        ("500-749", 500, 750),
+        ("750-999", 750, 1000),
+        ("1000-1249", 1000, 1250),
+        ("1250-1499", 1250, 1500),
+        ("1500-1749", 1500, 1750),
+        ("1750+", 1750, float("inf")),
+    ]
+
+    # Count players in each bucket
+    bucket_counts = []
+    for label, low, high in buckets:
+        count = sum(1 for r in ratings if low <= r < high)
+        bucket_counts.append((label, count))
+
+    # Image dimensions
+    padding = 20
+    title_height = 50
+    chart_height = 180
+    label_height = 45
+    footer_height = 30
+    bar_width = 45
+    bar_gap = 8
+
+    width = padding * 2 + len(buckets) * (bar_width + bar_gap)
+    height = padding + title_height + chart_height + label_height + footer_height
+
+    # Create image
+    img = Image.new("RGBA", (width, height), DISCORD_BG)
+    draw = ImageDraw.Draw(img)
+
+    # Draw title
+    title_font = _get_font(16)
+    draw.text((padding, padding), "Rating Distribution", fill=DISCORD_WHITE, font=title_font)
+
+    # Subtitle with player count
+    subtitle_font = _get_font(11)
+    draw.text(
+        (padding, padding + 20),
+        f"{len(ratings)} players",
+        fill=DISCORD_GREY,
+        font=subtitle_font,
+    )
+
+    # Color gradient from red (low) to blue (high)
+    bucket_colors = [
+        "#ED4245",  # 0-499 (red)
+        "#F47B67",  # 500-749
+        "#FEE75C",  # 750-999 (yellow)
+        "#A3D977",  # 1000-1249
+        "#57F287",  # 1250-1499 (green)
+        "#43B581",  # 1500-1749
+        "#5865F2",  # 1750+ (discord blue)
+    ]
+
+    label_font = _get_font(10)
+    count_font = _get_font(11)
+
+    chart_top = padding + title_height
+    chart_bottom = chart_top + chart_height
+    max_count = max(c for _, c in bucket_counts) if bucket_counts else 1
+
+    # Draw bars
+    x = padding
+    for i, (label, count) in enumerate(bucket_counts):
+        color = bucket_colors[i]
+
+        # Calculate bar height (proportional to max count)
+        if count > 0 and max_count > 0:
+            bar_h = int(chart_height * count / max_count)
+        else:
+            bar_h = 0
+
+        bar_top = chart_bottom - bar_h
+
+        # Draw bar background
+        draw.rectangle(
+            [(x, chart_top), (x + bar_width, chart_bottom)],
+            fill=DISCORD_DARKER,
+        )
+
+        # Draw bar fill
+        if bar_h > 0:
+            draw.rectangle(
+                [(x, bar_top), (x + bar_width, chart_bottom)],
+                fill=color,
+            )
+
+            # Draw count above bar
+            count_text = str(count)
+            tw = _get_text_size(count_font, count_text)[0]
+            draw.text(
+                (x + (bar_width - tw) // 2, bar_top - 18),
+                count_text,
+                fill=DISCORD_WHITE,
+                font=count_font,
+            )
+
+        # Draw label below bar (rotated text simulation - just shorter labels)
+        short_label = label.split("-")[0]  # "0", "500", "750", etc.
+        if "+" in label:
+            short_label = label  # Keep "1750+"
+        lw = _get_text_size(label_font, short_label)[0]
+        draw.text(
+            (x + (bar_width - lw) // 2, chart_bottom + 8),
+            short_label,
+            fill=DISCORD_GREY,
+            font=label_font,
+        )
+
+        x += bar_width + bar_gap
+
+    # Draw footer with avg/median
+    if avg_rating is not None or median_rating is not None:
+        footer_y = height - footer_height
+        footer_font = _get_font(12)
+        footer_parts = []
+        if avg_rating is not None:
+            footer_parts.append(f"Avg: {avg_rating:.0f}")
+        if median_rating is not None:
+            footer_parts.append(f"Median: {median_rating:.0f}")
+        footer_text = "  |  ".join(footer_parts)
+        text_w = _get_text_size(footer_font, footer_text)[0]
+        draw.text(((width - text_w) // 2, footer_y), footer_text, fill=DISCORD_GREY, font=footer_font)
+
+    # Save to BytesIO
+    fp = BytesIO()
+    img.save(fp, format="PNG")
+    fp.seek(0)
+    return fp

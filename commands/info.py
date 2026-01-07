@@ -12,10 +12,11 @@ from config import LEVERAGE_TIERS
 from rating_system import CamaRatingSystem
 from services.permissions import has_admin_permission
 from utils.debug_logging import debug_log as _dbg_log
+from utils.drawing import draw_rating_distribution
 from utils.formatting import JOPACOIN_EMOTE
 from utils.interaction_safety import safe_defer, safe_followup
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
-from utils.rating_insights import compute_calibration_stats
+from utils.rating_insights import compute_calibration_stats, rd_to_certainty
 
 logger = logging.getLogger("cama_bot.commands.info")
 
@@ -459,7 +460,6 @@ class InfoCommands(commands.Cog):
 
             stats = compute_calibration_stats(
                 players=players,
-                rating_system=rating_system,
                 match_count=match_count,
                 match_predictions=match_predictions,
                 rating_history_entries=rating_history_entries,
@@ -501,15 +501,18 @@ class InfoCommands(commands.Cog):
             )
 
             rd_tiers = stats["rd_tiers"]
-            avg_uncertainty_text = (
-                f"{stats['avg_uncertainty']:.1f}%"
-                if stats["avg_uncertainty"] is not None
+            avg_certainty_text = (
+                f"{stats['avg_certainty']:.0f}%"
+                if stats["avg_certainty"] is not None
                 else "n/a"
             )
+            avg_rd_text = f"{stats['avg_rd']:.0f}" if stats["avg_rd"] is not None else "n/a"
             calibration_progress = (
-                f"Locked In (≤75): {rd_tiers['Locked In']} | Settling (76-150): {rd_tiers['Settling']}\n"
-                f"Developing (151-250): {rd_tiers['Developing']} | Fresh (251+): {rd_tiers['Fresh']}\n"
-                f"Avg Uncertainty: {avg_uncertainty_text}"
+                f"**Locked In** (RD ≤75, 79-100% certain): {rd_tiers['Locked In']}\n"
+                f"**Settling** (RD 76-150, 57-79% certain): {rd_tiers['Settling']}\n"
+                f"**Developing** (RD 151-250, 29-57% certain): {rd_tiers['Developing']}\n"
+                f"**Fresh** (RD 251+, 0-29% certain): {rd_tiers['Fresh']}\n"
+                f"\nAvg: RD {avg_rd_text} ({avg_certainty_text} certain)"
             )
 
             prediction_quality = stats["prediction_quality"]
@@ -561,6 +564,55 @@ class InfoCommands(commands.Cog):
             else:
                 drift_text = "No seed MMR data yet."
 
+            # Side balance (Radiant vs Dire)
+            side_balance = stats["side_balance"]
+            if side_balance["total"]:
+                radiant_rate = side_balance["radiant_rate"]
+                dire_rate = side_balance["dire_rate"]
+                balance_status = (
+                    "perfectly balanced" if abs(radiant_rate - 0.5) < 0.05
+                    else "slightly favored" if abs(radiant_rate - 0.5) < 0.1
+                    else "noticeably favored"
+                )
+                favored_side = "Radiant" if radiant_rate > 0.5 else "Dire" if radiant_rate < 0.5 else "Neither"
+                side_text = (
+                    f"**Radiant**: {side_balance['radiant_wins']}W ({radiant_rate:.0%})\n"
+                    f"**Dire**: {side_balance['dire_wins']}W ({dire_rate:.0%})\n"
+                    f"*{favored_side} {balance_status}*" if favored_side != "Neither" else f"*{balance_status}*"
+                )
+            else:
+                side_text = "No match data yet."
+
+            # Rating stability (calibrated vs uncalibrated)
+            stability = stats["rating_stability"]
+            if stability["calibrated_count"] and stability["uncalibrated_count"]:
+                cal_avg = stability["calibrated_avg_delta"]
+                uncal_avg = stability["uncalibrated_avg_delta"]
+                ratio = stability["stability_ratio"]
+                # Describe the stability
+                if ratio < 0.7:
+                    stability_desc = "excellent - ratings converging well"
+                elif ratio < 0.9:
+                    stability_desc = "good - system stabilizing"
+                elif ratio < 1.1:
+                    stability_desc = "fair - similar volatility across players"
+                else:
+                    stability_desc = "poor - calibrated players still volatile"
+                stability_text = (
+                    f"**Calibrated** (57%+ certain): ±{cal_avg:.1f} avg swing ({stability['calibrated_count']} games)\n"
+                    f"**Uncalibrated** (<57% certain): ±{uncal_avg:.1f} avg swing ({stability['uncalibrated_count']} games)\n"
+                    f"Stability: **{ratio:.2f}x** ({stability_desc})\n"
+                    f"*<1.0 = calibrated swing less (good)*"
+                )
+            elif stability["calibrated_count"] or stability["uncalibrated_count"]:
+                # Only one category has data
+                if stability["calibrated_count"]:
+                    stability_text = f"Only calibrated data: ±{stability['calibrated_avg_delta']:.1f} avg swing"
+                else:
+                    stability_text = f"Only uncalibrated data: ±{stability['uncalibrated_avg_delta']:.1f} avg swing"
+            else:
+                stability_text = "No rating history with RD data yet."
+
             embed = discord.Embed(title="Rating System Health", color=discord.Color.blue())
             avg_games_text = f"{stats['avg_games']:.1f}" if stats["avg_games"] is not None else "n/a"
             embed.add_field(
@@ -572,10 +624,12 @@ class InfoCommands(commands.Cog):
                 inline=False,
             )
             embed.add_field(name="Rating Distribution", value=rating_distribution, inline=False)
-            embed.add_field(name="Calibration Progress", value=calibration_progress, inline=False)
-            embed.add_field(name="🎯 Prediction Quality", value=prediction_text, inline=False)
+            embed.add_field(name="📈 Calibration Progress", value=calibration_progress, inline=False)
+            embed.add_field(name="⚔️ Side Balance", value=side_text, inline=True)
+            embed.add_field(name="🎯 Prediction Quality", value=prediction_text, inline=True)
             embed.add_field(name="📊 Rating Movement", value=movement_text, inline=False)
             embed.add_field(name="🔄 Rating Drift (Seed vs Current)", value=drift_text, inline=False)
+            embed.add_field(name="⚖️ Rating Stability", value=stability_text, inline=False)
 
             embed.add_field(
                 name="Highest Rated",
@@ -586,15 +640,18 @@ class InfoCommands(commands.Cog):
                 ),
                 inline=True,
             )
+            # Custom formatter for calibration showing both RD and certainty
+            def format_calibration(players_list, most_calibrated: bool = True) -> str:
+                lines = []
+                for idx, player in enumerate(players_list[:3], 1):
+                    rd = player.glicko_rd if player.glicko_rd is not None else 350
+                    certainty = rd_to_certainty(rd)
+                    lines.append(f"{idx}. {display_name(player)} (RD {rd:.0f}, {certainty:.0f}%)")
+                return "\n".join(lines) if lines else "n/a"
+
             embed.add_field(
                 name="Most Calibrated",
-                value=format_ranked(
-                    stats["most_calibrated"],
-                    lambda p: rating_system.get_rating_uncertainty_percentage(
-                        p.glicko_rd if p.glicko_rd is not None else 350
-                    ),
-                    "{:.1f}%",
-                ),
+                value=format_calibration(stats["most_calibrated"]),
                 inline=True,
             )
             embed.add_field(
@@ -617,13 +674,7 @@ class InfoCommands(commands.Cog):
             )
             embed.add_field(
                 name="Least Calibrated",
-                value=format_ranked(
-                    stats["least_calibrated"],
-                    lambda p: rating_system.get_rating_uncertainty_percentage(
-                        p.glicko_rd if p.glicko_rd is not None else 350
-                    ),
-                    "{:.1f}%",
-                ),
+                value=format_calibration(stats["least_calibrated"]),
                 inline=True,
             )
             embed.add_field(
@@ -694,9 +745,22 @@ class InfoCommands(commands.Cog):
 
             embed.set_footer(text="RD = Rating Deviation | Drift = Current - Seed | Brier: 0=perfect, 0.25=coin flip")
 
+            # Generate rating distribution chart
+            rating_values = [p.glicko_rating for p in players if p.glicko_rating is not None]
+            chart_file = None
+            if rating_values:
+                chart_buffer = draw_rating_distribution(
+                    rating_values,
+                    avg_rating=stats["avg_rating"],
+                    median_rating=stats["median_rating"],
+                )
+                chart_file = discord.File(chart_buffer, filename="rating_distribution.png")
+                embed.set_image(url="attachment://rating_distribution.png")
+
             await safe_followup(
                 interaction,
                 embed=embed,
+                file=chart_file,
                 ephemeral=True,
                 allowed_mentions=discord.AllowedMentions(users=True),
             )

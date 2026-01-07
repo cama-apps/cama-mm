@@ -1,12 +1,10 @@
 import pytest
 
 from domain.models.player import Player
-from rating_system import CamaRatingSystem
 from utils.rating_insights import compute_calibration_stats
 
 
 def test_compute_calibration_stats_with_predictions_and_drift():
-    rating_system = CamaRatingSystem()
     players = [
         Player(
             name="Immortal",
@@ -48,7 +46,6 @@ def test_compute_calibration_stats_with_predictions_and_drift():
 
     stats = compute_calibration_stats(
         players=players,
-        rating_system=rating_system,
         match_count=12,
         match_predictions=match_predictions,
         rating_history_entries=rating_history_entries,
@@ -62,7 +59,7 @@ def test_compute_calibration_stats_with_predictions_and_drift():
     assert stats["rd_tiers"]["Developing"] == 1
     assert stats["rd_tiers"]["Fresh"] == 1
 
-    assert stats["avg_uncertainty"] == pytest.approx(52.4, rel=1e-2)
+    assert stats["avg_certainty"] == pytest.approx(47.6, rel=1e-2)
     assert stats["avg_drift"] == pytest.approx(-47.5, rel=1e-3)
     assert stats["median_drift"] == pytest.approx(-47.5, rel=1e-3)
 
