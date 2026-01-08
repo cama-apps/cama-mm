@@ -323,10 +323,10 @@ class MatchService:
         if len(players) < 10:
             raise ValueError("Need at least 10 players to shuffle.")
 
-        # Cap to 12 for performance (mirrors prior behavior)
-        if len(players) > 12:
-            players = players[:12]
-            player_ids = player_ids[:12]
+        # Cap to 14 for performance (C(14,10)=1001 stays within sampling limit)
+        if len(players) > 14:
+            players = players[:14]
+            player_ids = player_ids[:14]
 
         exclusion_counts_by_id = self.player_repo.get_exclusion_counts(player_ids)
         # Shuffler expects name->count mapping; this is internal to shuffler only
