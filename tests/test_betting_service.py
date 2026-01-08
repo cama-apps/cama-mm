@@ -1549,3 +1549,98 @@ class TestBlindBets:
         manual_bets = [b for b in all_bets if not b.get("is_blind")]
         assert len(blind_bets) == 10
         assert len(manual_bets) == 1
+
+    def test_shuffle_result_vs_pending_state_keys(self, services):
+        """Verify shuffle_players return vs pending state have different keys.
+
+        This test documents that shuffle_players() return value does NOT contain
+        radiant_team_ids/dire_team_ids/shuffle_timestamp - those are only in the
+        pending state. Commands must use get_last_shuffle() to access these keys.
+
+        Regression test for KeyError bug in commands/match.py blind bet creation.
+        """
+        match_service = services["match_service"]
+        player_repo = services["player_repo"]
+
+        player_ids = list(range(13100, 13110))
+        for pid in player_ids:
+            player_repo.add(
+                discord_id=pid,
+                discord_username=f"Player{pid}",
+                dotabuff_url=f"https://dotabuff.com/players/{pid}",
+                initial_mmr=1500,
+                glicko_rating=1500.0,
+                glicko_rd=350.0,
+                glicko_volatility=0.06,
+            )
+
+        # shuffle_players returns a dict with team objects, not IDs
+        result = match_service.shuffle_players(player_ids, guild_id=1, betting_mode="pool")
+
+        # These keys are NOT in the return value (they're Team objects instead)
+        assert "radiant_team_ids" not in result, "shuffle_players should not return radiant_team_ids"
+        assert "dire_team_ids" not in result, "shuffle_players should not return dire_team_ids"
+        assert "shuffle_timestamp" not in result, "shuffle_players should not return shuffle_timestamp"
+
+        # The return value has Team objects
+        assert "radiant_team" in result
+        assert "dire_team" in result
+
+        # The pending state (from get_last_shuffle) HAS the IDs and timestamp
+        pending = match_service.get_last_shuffle(1)
+        assert "radiant_team_ids" in pending, "pending state must have radiant_team_ids"
+        assert "dire_team_ids" in pending, "pending state must have dire_team_ids"
+        assert "shuffle_timestamp" in pending, "pending state must have shuffle_timestamp"
+
+        # Verify they're actually lists of ints
+        assert isinstance(pending["radiant_team_ids"], list)
+        assert isinstance(pending["dire_team_ids"], list)
+        assert len(pending["radiant_team_ids"]) == 5
+        assert len(pending["dire_team_ids"]) == 5
+        assert all(isinstance(x, int) for x in pending["radiant_team_ids"])
+
+    def test_blind_bets_integration_like_shuffle_command(self, services):
+        """Integration test that mimics commands/match.py shuffle flow.
+
+        This test follows the exact pattern that the /shuffle command uses
+        to create blind bets, ensuring the integration works correctly.
+        """
+        match_service = services["match_service"]
+        betting_service = services["betting_service"]
+        player_repo = services["player_repo"]
+
+        player_ids = list(range(13200, 13210))
+        for pid in player_ids:
+            player_repo.add(
+                discord_id=pid,
+                discord_username=f"Player{pid}",
+                dotabuff_url=f"https://dotabuff.com/players/{pid}",
+                initial_mmr=1500,
+                glicko_rating=1500.0,
+                glicko_rd=350.0,
+                glicko_volatility=0.06,
+            )
+            player_repo.add_balance(pid, 97)  # 100 total
+
+        guild_id = 1
+        mode = "pool"
+
+        # Step 1: Shuffle (like commands/match.py line 168)
+        result = match_service.shuffle_players(player_ids, guild_id=guild_id, betting_mode=mode)
+
+        # Step 2: Get pending state for blind bets (like commands/match.py line 205)
+        # This is the CORRECT way - must use get_last_shuffle, not result
+        pending_state = match_service.get_last_shuffle(guild_id)
+
+        # Step 3: Create blind bets (like commands/match.py line 206-211)
+        blind_bets_result = betting_service.create_auto_blind_bets(
+            guild_id=guild_id,
+            radiant_ids=pending_state["radiant_team_ids"],
+            dire_ids=pending_state["dire_team_ids"],
+            shuffle_timestamp=pending_state["shuffle_timestamp"],
+        )
+
+        # Verify blind bets were created successfully
+        assert blind_bets_result["created"] == 10
+        assert blind_bets_result["total_radiant"] == 25  # 5 players * 5 coins
+        assert blind_bets_result["total_dire"] == 25

@@ -201,11 +201,13 @@ class MatchCommands(commands.Cog):
             betting_service = getattr(self.bot, "betting_service", None)
             if betting_service:
                 try:
+                    # Get IDs and timestamp from the saved pending state
+                    pending_state = self.match_service.get_last_shuffle(guild_id)
                     blind_bets_result = betting_service.create_auto_blind_bets(
                         guild_id=guild_id,
-                        radiant_ids=result["radiant_team_ids"],
-                        dire_ids=result["dire_team_ids"],
-                        shuffle_timestamp=result["shuffle_timestamp"],
+                        radiant_ids=pending_state["radiant_team_ids"],
+                        dire_ids=pending_state["dire_team_ids"],
+                        shuffle_timestamp=pending_state["shuffle_timestamp"],
                     )
                     if blind_bets_result["created"] > 0:
                         logger.info(
