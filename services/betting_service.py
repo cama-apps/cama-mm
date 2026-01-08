@@ -7,6 +7,9 @@ import time
 from typing import TYPE_CHECKING, Any, Optional
 
 from config import (
+    AUTO_BLIND_ENABLED,
+    AUTO_BLIND_PERCENTAGE,
+    AUTO_BLIND_THRESHOLD,
     HOUSE_PAYOUT_MULTIPLIER,
     JOPACOIN_EXCLUSION_REWARD,
     JOPACOIN_WIN_REWARD,
@@ -79,6 +82,12 @@ class BettingService:
             valid_tiers = ", ".join(str(t) for t in self.leverage_tiers)
             raise ValueError(f"Invalid leverage. Valid tiers: 1 (none), {valid_tiers}")
 
+        # Calculate odds at placement
+        current_totals = self.bet_repo.get_total_bets_by_guild(guild_id, since_ts=int(since_ts))
+        total_pool = current_totals["radiant"] + current_totals["dire"]
+        team_total = current_totals[team]
+        odds_at_placement = total_pool / team_total if team_total > 0 and total_pool > 0 else None
+
         # Prefer atomic placement using DB pending match payload (also enforces lock + team restriction).
         if hasattr(self.bet_repo, "place_bet_against_pending_match_atomic"):
             self.bet_repo.place_bet_against_pending_match_atomic(
@@ -89,6 +98,7 @@ class BettingService:
                 bet_time=now_ts,
                 leverage=leverage,
                 max_debt=self.max_debt,
+                odds_at_placement=odds_at_placement,
             )
             return
 
@@ -106,6 +116,7 @@ class BettingService:
                 since_ts=int(since_ts),
                 leverage=leverage,
                 max_debt=self.max_debt,
+                odds_at_placement=odds_at_placement,
             )
             return
 
@@ -405,3 +416,133 @@ class BettingService:
             raise ValueError("Participants on Radiant can only bet on Radiant.")
         if discord_id in dire and team != "dire":
             raise ValueError("Participants on Dire can only bet on Dire.")
+
+    def create_auto_blind_bets(
+        self,
+        guild_id: int | None,
+        radiant_ids: list[int],
+        dire_ids: list[int],
+        shuffle_timestamp: int,
+    ) -> dict[str, Any]:
+        """
+        Create auto-liquidity blind bets for all eligible players after shuffle.
+
+        Eligible players are those with balance >= AUTO_BLIND_THRESHOLD.
+        Each eligible player bets 5% of their balance (rounded to nearest int)
+        on their own team with 1x leverage.
+
+        Args:
+            guild_id: The guild ID (or None for DMs)
+            radiant_ids: List of Discord IDs on Radiant team
+            dire_ids: List of Discord IDs on Dire team
+            shuffle_timestamp: The shuffle timestamp for bet timing
+
+        Returns:
+            {
+                "created": int,
+                "total_radiant": int,
+                "total_dire": int,
+                "bets": [{"discord_id": int, "team": str, "amount": int}, ...],
+                "skipped": [{"discord_id": int, "reason": str}, ...]
+            }
+        """
+        if not AUTO_BLIND_ENABLED:
+            return {
+                "created": 0,
+                "total_radiant": 0,
+                "total_dire": 0,
+                "bets": [],
+                "skipped": [],
+            }
+
+        result: dict[str, Any] = {
+            "created": 0,
+            "total_radiant": 0,
+            "total_dire": 0,
+            "bets": [],
+            "skipped": [],
+        }
+
+        # Process each team
+        for team, player_ids in [("radiant", radiant_ids), ("dire", dire_ids)]:
+            for discord_id in player_ids:
+                try:
+                    balance = self.player_repo.get_balance(discord_id)
+
+                    # Skip players below threshold
+                    if balance < AUTO_BLIND_THRESHOLD:
+                        result["skipped"].append({
+                            "discord_id": discord_id,
+                            "reason": f"balance {balance} < threshold {AUTO_BLIND_THRESHOLD}",
+                        })
+                        continue
+
+                    # Calculate blind amount (round to nearest integer)
+                    blind_amount = round(balance * AUTO_BLIND_PERCENTAGE)
+
+                    # Skip if rounded amount is less than 1
+                    if blind_amount < 1:
+                        result["skipped"].append({
+                            "discord_id": discord_id,
+                            "reason": f"blind amount {blind_amount} < 1",
+                        })
+                        continue
+
+                    # Calculate current odds for this team before placing bet
+                    current_totals = self.bet_repo.get_total_bets_by_guild(
+                        guild_id, since_ts=shuffle_timestamp
+                    )
+                    total_pool = current_totals["radiant"] + current_totals["dire"]
+                    team_total = current_totals[team]
+
+                    # Odds at placement: what multiplier you'd get if you win
+                    # If no bets yet, odds are undefined (will be calculated when more bets come in)
+                    if team_total > 0:
+                        # After this bet, total_pool increases and team_total increases
+                        # Show the odds that existed before this bet
+                        odds_at_placement = total_pool / team_total if total_pool > 0 else None
+                    else:
+                        # First bet on this team - no meaningful odds yet
+                        odds_at_placement = None
+
+                    # Place the blind bet
+                    self.bet_repo.place_bet_atomic(
+                        guild_id=guild_id,
+                        discord_id=discord_id,
+                        team=team,
+                        amount=blind_amount,
+                        bet_time=shuffle_timestamp,
+                        since_ts=shuffle_timestamp,
+                        leverage=1,
+                        max_debt=self.max_debt,
+                        is_blind=True,
+                        odds_at_placement=odds_at_placement,
+                    )
+
+                    result["created"] += 1
+                    result["bets"].append({
+                        "discord_id": discord_id,
+                        "team": team,
+                        "amount": blind_amount,
+                    })
+                    if team == "radiant":
+                        result["total_radiant"] += blind_amount
+                    else:
+                        result["total_dire"] += blind_amount
+
+                except ValueError as e:
+                    result["skipped"].append({
+                        "discord_id": discord_id,
+                        "reason": str(e),
+                    })
+
+        return result
+
+    def get_all_pending_bets(
+        self, guild_id: int | None, pending_state: dict[str, Any] | None = None
+    ) -> list[dict]:
+        """Get all pending bets for a guild (for /bets command)."""
+        since_ts = self._since_ts(pending_state)
+        if pending_state is None or since_ts is None:
+            return []
+        return self.bet_repo.get_bets_for_pending_match(guild_id, since_ts=since_ts)

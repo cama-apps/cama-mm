@@ -195,6 +195,27 @@ class MatchCommands(commands.Cog):
         first_pick_team = result["first_pick_team"]
         excluded_ids = result["excluded_ids"]
 
+        # Create auto-liquidity blind bets for pool mode
+        blind_bets_result = None
+        if mode == "pool":
+            betting_service = getattr(self.bot, "betting_service", None)
+            if betting_service:
+                try:
+                    blind_bets_result = betting_service.create_auto_blind_bets(
+                        guild_id=guild_id,
+                        radiant_ids=result["radiant_team_ids"],
+                        dire_ids=result["dire_team_ids"],
+                        shuffle_timestamp=result["shuffle_timestamp"],
+                    )
+                    if blind_bets_result["created"] > 0:
+                        logger.info(
+                            f"Created {blind_bets_result['created']} blind bets: "
+                            f"Radiant={blind_bets_result['total_radiant']}, "
+                            f"Dire={blind_bets_result['total_dire']}"
+                        )
+                except Exception as exc:
+                    logger.warning(f"Failed to create blind bets: {exc}", exc_info=True)
+
         radiant_lines = self._format_team_lines(
             radiant_team, radiant_roles, player_ids, players, guild
         )
@@ -249,6 +270,15 @@ class MatchCommands(commands.Cog):
                 "1:1 payouts."
             )
         embed.add_field(name="📝 How to Bet", value=betting_note, inline=False)
+
+        # Show blind bet summary if any were created
+        if blind_bets_result and blind_bets_result["created"] > 0:
+            blind_note = (
+                f"**Auto-liquidity:** {blind_bets_result['created']} players contributed blind bets\n"
+                f"🟢 Radiant: {blind_bets_result['total_radiant']} {JOPACOIN_EMOTE} | "
+                f"🔴 Dire: {blind_bets_result['total_dire']} {JOPACOIN_EMOTE}"
+            )
+            embed.add_field(name="🎲 Blind Bets", value=blind_note, inline=False)
 
         # Current wagers display
         betting_service = getattr(self.bot, "betting_service", None)

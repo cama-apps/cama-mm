@@ -22,6 +22,7 @@ from services.disburse_service import DisburseService
 from services.gambling_stats_service import GamblingStatsService
 from services.loan_service import LoanService
 from services.match_service import MatchService
+from services.permissions import has_admin_permission
 from services.player_service import PlayerService
 from utils.drawing import draw_gamba_chart
 from utils.formatting import JOPACOIN_EMOTE, TOMBSTONE_EMOJI, format_betting_display
@@ -380,13 +381,15 @@ class BettingCommands(commands.Cog):
             leverage = bet.get("leverage", 1) or 1
             effective = bet["amount"] * leverage
             time_str = f"<t:{int(bet['bet_time'])}:t>"
+            is_blind = bet.get("is_blind", 0)
+            auto_tag = " (auto)" if is_blind else ""
             if leverage > 1:
                 bet_lines.append(
                     f"{i}. {bet['amount']} {JOPACOIN_EMOTE} at {leverage}x "
-                    f"(effective: {effective} {JOPACOIN_EMOTE}) — {time_str}"
+                    f"(effective: {effective} {JOPACOIN_EMOTE}){auto_tag} — {time_str}"
                 )
             else:
-                bet_lines.append(f"{i}. {bet['amount']} {JOPACOIN_EMOTE} — {time_str}")
+                bet_lines.append(f"{i}. {bet['amount']} {JOPACOIN_EMOTE}{auto_tag} — {time_str}")
 
         # Header with totals
         if len(bets) == 1:
@@ -431,6 +434,133 @@ class BettingCommands(commands.Cog):
             base_msg += f"\n\nIf you win: {potential_payout} {JOPACOIN_EMOTE} (1:1 odds)"
 
         await interaction.followup.send(base_msg, ephemeral=True)
+
+    @app_commands.command(name="bets", description="Show all bets in the current pool (admin only)")
+    async def bets(self, interaction: discord.Interaction):
+        """Admin-only command to view all bets in the current pool."""
+        if not has_admin_permission(interaction):
+            await interaction.response.send_message(
+                "❌ This command is admin-only.", ephemeral=True
+            )
+            return
+
+        guild = interaction.guild if interaction.guild else None
+        rl_gid = guild.id if guild else 0
+        rl = GLOBAL_RATE_LIMITER.check(
+            scope="bets",
+            guild_id=rl_gid,
+            user_id=interaction.user.id,
+            limit=3,
+            per_seconds=15,
+        )
+        if not rl.allowed:
+            await interaction.response.send_message(
+                f"⏳ Please wait {rl.retry_after_seconds}s before using `/bets` again.",
+                ephemeral=True,
+            )
+            return
+
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+
+        guild_id = interaction.guild.id if interaction.guild else None
+        pending_state = self.match_service.get_last_shuffle(guild_id)
+        if not pending_state:
+            await interaction.followup.send("No active match to show bets for.", ephemeral=True)
+            return
+
+        all_bets = self.betting_service.get_all_pending_bets(guild_id, pending_state=pending_state)
+        if not all_bets:
+            await interaction.followup.send("No bets placed yet.", ephemeral=True)
+            return
+
+        # Get current odds
+        totals = self.betting_service.get_pot_odds(guild_id, pending_state=pending_state)
+        total_pool = totals["radiant"] + totals["dire"]
+        radiant_mult = total_pool / totals["radiant"] if totals["radiant"] > 0 else None
+        dire_mult = total_pool / totals["dire"] if totals["dire"] > 0 else None
+
+        # Build embed
+        embed = discord.Embed(
+            title=f"📊 Pool Bets ({len(all_bets)} bets)",
+            color=discord.Color.gold(),
+        )
+
+        # Current odds header
+        lock_until = pending_state.get("bet_lock_until")
+        radiant_odds_str = f"{radiant_mult:.2f}x" if radiant_mult else "—"
+        dire_odds_str = f"{dire_mult:.2f}x" if dire_mult else "—"
+        odds_text = (
+            f"🟢 Radiant: {totals['radiant']} {JOPACOIN_EMOTE} ({radiant_odds_str}) | "
+            f"🔴 Dire: {totals['dire']} {JOPACOIN_EMOTE} ({dire_odds_str})"
+        )
+        if lock_until:
+            odds_text += f"\nBetting closes <t:{lock_until}:R>"
+        embed.add_field(name="Current Odds", value=odds_text, inline=False)
+
+        # Group bets by team
+        radiant_bets = [b for b in all_bets if b["team_bet_on"] == "radiant"]
+        dire_bets = [b for b in all_bets if b["team_bet_on"] == "dire"]
+
+        # Format bet line helper
+        def format_bet_line(bet: dict) -> str:
+            leverage = bet.get("leverage", 1) or 1
+            is_blind = bet.get("is_blind", 0)
+            odds_at_placement = bet.get("odds_at_placement")
+
+            # Base amount
+            line = f"<@{bet['discord_id']}> • {bet['amount']}"
+
+            # Auto tag
+            if is_blind:
+                line += " (auto)"
+
+            # Leverage notation
+            if leverage > 1:
+                effective = bet["amount"] * leverage
+                line += f" at {leverage}x → {effective} eff"
+
+            # Odds at placement
+            if odds_at_placement:
+                line += f" • {odds_at_placement:.2f}x"
+
+            return line
+
+        # Radiant bets section
+        if radiant_bets:
+            radiant_lines = [format_bet_line(b) for b in radiant_bets]
+            # Truncate if too long
+            radiant_text = "\n".join(radiant_lines[:15])
+            if len(radiant_bets) > 15:
+                radiant_text += f"\n... +{len(radiant_bets) - 15} more"
+            embed.add_field(
+                name=f"🟢 Radiant Bets ({len(radiant_bets)})",
+                value=radiant_text or "None",
+                inline=False,
+            )
+
+        # Dire bets section
+        if dire_bets:
+            dire_lines = [format_bet_line(b) for b in dire_bets]
+            dire_text = "\n".join(dire_lines[:15])
+            if len(dire_bets) > 15:
+                dire_text += f"\n... +{len(dire_bets) - 15} more"
+            embed.add_field(
+                name=f"🔴 Dire Bets ({len(dire_bets)})",
+                value=dire_text or "None",
+                inline=False,
+            )
+
+        # Pool summary
+        radiant_pct = (totals["radiant"] / total_pool * 100) if total_pool > 0 else 0
+        dire_pct = (totals["dire"] / total_pool * 100) if total_pool > 0 else 0
+        summary_text = (
+            f"**Total:** {total_pool} {JOPACOIN_EMOTE} effective\n"
+            f"Radiant: {totals['radiant']} ({radiant_pct:.0f}%) | Dire: {totals['dire']} ({dire_pct:.0f}%)"
+        )
+        embed.add_field(name="Pool Summary", value=summary_text, inline=False)
+
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
     @app_commands.command(name="balance", description="Check your jopacoin balance")
     async def balance(self, interaction: discord.Interaction):
