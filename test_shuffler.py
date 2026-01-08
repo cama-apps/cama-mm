@@ -398,9 +398,9 @@ class TestShuffler:
 
     def test_exclusion_penalty_weight_parameter(self):
         """Test that exclusion_penalty_weight parameter is stored correctly."""
-        # Test default value
+        # Test default value (75.0 per PRD lobby-size-exclusion)
         shuffler1 = BalancedShuffler()
-        assert shuffler1.exclusion_penalty_weight == 50.0
+        assert shuffler1.exclusion_penalty_weight == 75.0
 
         # Test custom value
         shuffler2 = BalancedShuffler(exclusion_penalty_weight=10.0)
@@ -554,6 +554,214 @@ class TestRoleMatchupDelta:
         # role delta = max(|2000-1900|, |1400-1000|, |1500-1500|) = 400
         assert score_full == pytest.approx(700)  # 300 + 400
         assert score_half == pytest.approx(500)  # 300 + (400 * 0.5)
+
+
+class TestShuffler14Players:
+    """Tests for 14-player pool shuffling (new max lobby size)."""
+
+    def test_14_player_pool_basic_shuffle(self):
+        """
+        Test that 14-player pool shuffles correctly:
+        - 10 players selected for match
+        - 4 players excluded
+        """
+        players = [
+            Player(name=f"Player{i}", mmr=1500 + i * 50, glicko_rating=1500.0 + i * 25)
+            for i in range(14)
+        ]
+        shuffler = BalancedShuffler(use_glicko=True, off_role_flat_penalty=100.0)
+
+        exclusion_counts = {pl.name: 0 for pl in players}
+        team1, team2, excluded = shuffler.shuffle_from_pool(players, exclusion_counts)
+
+        assert len(team1.players) == 5
+        assert len(team2.players) == 5
+        assert len(excluded) == 4
+
+        all_players = team1.players + team2.players + excluded
+        assert len(all_players) == 14
+
+        # Verify no duplicates
+        all_names = [p.name for p in all_players]
+        assert len(set(all_names)) == 14
+
+    def test_14_player_pool_deterministic(self):
+        """
+        Test that 14-player shuffles are deterministic.
+        Same input should produce same output (full enumeration, no sampling).
+        C(14,10) = 1001 < 2500 sampling limit.
+        """
+        players = [
+            Player(name=f"Player{i}", mmr=1500 + i * 50, glicko_rating=1500.0 + i * 25)
+            for i in range(14)
+        ]
+        shuffler = BalancedShuffler(use_glicko=True, off_role_flat_penalty=100.0)
+
+        exclusion_counts = {pl.name: 0 for pl in players}
+
+        # Run shuffle multiple times
+        results = []
+        for _ in range(3):
+            team1, team2, excluded = shuffler.shuffle_from_pool(players, exclusion_counts)
+            result = (
+                frozenset(p.name for p in team1.players),
+                frozenset(p.name for p in team2.players),
+                frozenset(p.name for p in excluded),
+            )
+            results.append(result)
+
+        # All results should be identical (deterministic)
+        assert results[0] == results[1] == results[2]
+
+    def test_14_player_pool_exclusion_penalty(self):
+        """
+        Test that exclusion penalty affects player selection in 14-player pool.
+        Players with high exclusion counts should be included over those with 0.
+        """
+        players = [
+            Player(name=f"Player{i}", mmr=1500, glicko_rating=1500.0)
+            for i in range(14)
+        ]
+
+        # Give first 4 players high exclusion counts
+        exclusion_counts = {}
+        for i, pl in enumerate(players):
+            if i < 4:
+                exclusion_counts[pl.name] = 10  # High exclusion count
+            else:
+                exclusion_counts[pl.name] = 0
+
+        # Use high exclusion penalty weight (new default from PRD)
+        shuffler = BalancedShuffler(
+            use_glicko=True,
+            off_role_flat_penalty=100.0,
+            exclusion_penalty_weight=75.0,
+        )
+
+        team1, team2, excluded = shuffler.shuffle_from_pool(players, exclusion_counts)
+
+        # Get names of included players
+        included_names = {p.name for p in team1.players + team2.players}
+        excluded_names = {p.name for p in excluded}
+
+        # High-exclusion players should be included (not excluded)
+        high_exclusion_names = {players[i].name for i in range(4)}
+
+        # With penalty weight 75 and count 10, excluding costs 750 points each
+        # Algorithm should strongly prefer including them
+        included_high_exclusion = high_exclusion_names & included_names
+        excluded_high_exclusion = high_exclusion_names & excluded_names
+
+        # At least 3 of the 4 high-exclusion players should be included
+        assert len(included_high_exclusion) >= 3, (
+            f"Expected at least 3 high-exclusion players included, "
+            f"got {len(included_high_exclusion)}: {included_high_exclusion}"
+        )
+
+    def test_14_player_pool_with_role_preferences(self):
+        """
+        Test 14-player pool with varied role preferences.
+        """
+        roles_by_player = [
+            ["1"], ["1"],  # Carry specialists
+            ["2"], ["2"],  # Mid specialists
+            ["3"], ["3"],  # Offlane specialists
+            ["4"], ["4"],  # Soft support specialists
+            ["5"], ["5"],  # Hard support specialists
+            ["1", "2", "3"],  # Flex core
+            ["4", "5"],  # Flex support
+            ["1", "2", "3", "4", "5"],  # All roles
+            ["1", "2", "3", "4", "5"],  # All roles
+        ]
+
+        players = [
+            Player(
+                name=f"Player{i}",
+                mmr=1500 + i * 30,
+                glicko_rating=1500.0 + i * 15,
+                preferred_roles=roles_by_player[i],
+            )
+            for i in range(14)
+        ]
+
+        shuffler = BalancedShuffler(
+            use_glicko=True,
+            off_role_flat_penalty=100.0,
+            exclusion_penalty_weight=75.0,
+        )
+
+        exclusion_counts = {pl.name: 0 for pl in players}
+        team1, team2, excluded = shuffler.shuffle_from_pool(players, exclusion_counts)
+
+        assert len(team1.players) == 5
+        assert len(team2.players) == 5
+        assert len(excluded) == 4
+
+        # Verify role assignments exist
+        assert team1.role_assignments is not None
+        assert team2.role_assignments is not None
+        assert len(team1.role_assignments) == 5
+        assert len(team2.role_assignments) == 5
+
+    def test_13_player_pool(self):
+        """Test 13-player pool (edge case between 12 and 14)."""
+        players = [
+            Player(name=f"Player{i}", mmr=1500 + i * 50, glicko_rating=1500.0 + i * 25)
+            for i in range(13)
+        ]
+        shuffler = BalancedShuffler(use_glicko=True, off_role_flat_penalty=100.0)
+
+        exclusion_counts = {pl.name: 0 for pl in players}
+        team1, team2, excluded = shuffler.shuffle_from_pool(players, exclusion_counts)
+
+        assert len(team1.players) == 5
+        assert len(team2.players) == 5
+        assert len(excluded) == 3
+
+
+class TestExclusionPenaltyWeight75:
+    """Tests for the new exclusion penalty weight (75.0)."""
+
+    def test_default_weight_is_75(self):
+        """Test that default exclusion penalty weight is now 75."""
+        from config import SHUFFLER_SETTINGS
+        assert SHUFFLER_SETTINGS["exclusion_penalty_weight"] == 75.0
+
+    def test_higher_weight_prevents_repeat_exclusions(self):
+        """
+        Test that higher exclusion penalty weight (75) prevents repeated exclusions.
+        """
+        players = [
+            Player(name=f"Player{i}", mmr=1500, glicko_rating=1500.0)
+            for i in range(14)
+        ]
+
+        # Scenario: first 4 players have been excluded twice each
+        exclusion_counts = {}
+        for i, pl in enumerate(players):
+            if i < 4:
+                exclusion_counts[pl.name] = 2  # Previously excluded twice
+            else:
+                exclusion_counts[pl.name] = 0
+
+        shuffler = BalancedShuffler(
+            use_glicko=True,
+            off_role_flat_penalty=100.0,
+            exclusion_penalty_weight=75.0,
+        )
+
+        team1, team2, excluded = shuffler.shuffle_from_pool(players, exclusion_counts)
+
+        high_exclusion_names = {players[i].name for i in range(4)}
+        excluded_names = {p.name for p in excluded}
+
+        # With weight 75 and count 2, penalty is 150 per excluded high-count player
+        # Algorithm should avoid excluding them
+        excluded_high = high_exclusion_names & excluded_names
+        assert len(excluded_high) <= 1, (
+            f"With weight 75, at most 1 high-exclusion player should be excluded, "
+            f"got {len(excluded_high)}: {excluded_high}"
+        )
 
 
 if __name__ == "__main__":

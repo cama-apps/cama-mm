@@ -61,7 +61,7 @@ if _admin_env:
         ADMIN_USER_IDS = []
 
 LOBBY_READY_THRESHOLD = _parse_int("LOBBY_READY_THRESHOLD", 10)
-LOBBY_MAX_PLAYERS = _parse_int("LOBBY_MAX_PLAYERS", 12)
+LOBBY_MAX_PLAYERS = _parse_int("LOBBY_MAX_PLAYERS", 14)
 # Legacy: Not used in current balancing algorithm (replaced by Glicko-2 ratings)
 WIN_LOSS_MULTIPLIER = _parse_int("WIN_LOSS_MULTIPLIER", 200)
 # Legacy: Not used in current balancing algorithm
@@ -73,7 +73,7 @@ SHUFFLER_SETTINGS: dict[str, Any] = {
     "off_role_multiplier": _parse_float("OFF_ROLE_MULTIPLIER", 0.95),
     "off_role_flat_penalty": _parse_float("OFF_ROLE_FLAT_PENALTY", 100.0),
     "role_matchup_delta_weight": _parse_float("ROLE_MATCHUP_DELTA_WEIGHT", 0.3),
-    "exclusion_penalty_weight": _parse_float("EXCLUSION_PENALTY_WEIGHT", 50.0),
+    "exclusion_penalty_weight": _parse_float("EXCLUSION_PENALTY_WEIGHT", 75.0),
 }
 
 JOPACOIN_PER_GAME = _parse_int("JOPACOIN_PER_GAME", 1)
