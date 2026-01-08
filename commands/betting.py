@@ -382,7 +382,11 @@ class BettingCommands(commands.Cog):
             effective = bet["amount"] * leverage
             time_str = f"<t:{int(bet['bet_time'])}:t>"
             is_blind = bet.get("is_blind", 0)
-            auto_tag = " (auto)" if is_blind else ""
+            is_reduced_rate = bet.get("is_reduced_rate", 0)
+            if is_blind:
+                auto_tag = " (auto, reduced)" if is_reduced_rate else " (auto)"
+            else:
+                auto_tag = ""
             if leverage > 1:
                 bet_lines.append(
                     f"{i}. {bet['amount']} {JOPACOIN_EMOTE} at {leverage}x "
@@ -506,6 +510,7 @@ class BettingCommands(commands.Cog):
         def format_bet_line(bet: dict) -> str:
             leverage = bet.get("leverage", 1) or 1
             is_blind = bet.get("is_blind", 0)
+            is_reduced_rate = bet.get("is_reduced_rate", 0)
             odds_at_placement = bet.get("odds_at_placement")
 
             # Base amount
@@ -513,7 +518,10 @@ class BettingCommands(commands.Cog):
 
             # Auto tag
             if is_blind:
-                line += " (auto)"
+                if is_reduced_rate:
+                    line += " (auto, reduced)"
+                else:
+                    line += " (auto)"
 
             # Leverage notation
             if leverage > 1:
@@ -671,11 +679,35 @@ class BettingCommands(commands.Cog):
                 amount=amount,
             )
 
-            await interaction.followup.send(
+            # Build base message
+            msg = (
                 f"{interaction.user.mention} paid {result['amount_paid']} {JOPACOIN_EMOTE} "
-                f"toward {player.mention}'s debt!",
-                ephemeral=False,
+                f"toward {player.mention}'s debt!"
             )
+
+            # Check for charity bonus
+            charity_service = getattr(self.bot, "charity_service", None)
+            if charity_service:
+                charity_check = charity_service.check_paydebt_qualifies(
+                    from_id=interaction.user.id,
+                    to_id=player.id,
+                    amount_paid=result["amount_paid"],
+                    target_debt_before=result["target_debt_before"],
+                    target_games_played=result["target_games_played"],
+                )
+                if charity_check["qualifies"]:
+                    charity_service.grant_charity_reward(
+                        discord_id=interaction.user.id,
+                        amount=result["amount_paid"],
+                    )
+                    from config import CHARITY_GAMES_DURATION, CHARITY_REDUCED_RATE
+                    rate_pct = int(CHARITY_REDUCED_RATE * 100)
+                    msg += (
+                        f"\n🎗️ **Charity bonus:** You've earned {CHARITY_GAMES_DURATION} games "
+                        f"of reduced blind rate ({rate_pct}%)!"
+                    )
+
+            await interaction.followup.send(msg, ephemeral=False)
         except ValueError as exc:
             await interaction.followup.send(f"{exc}", ephemeral=True)
 

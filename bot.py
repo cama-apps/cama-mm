@@ -70,6 +70,8 @@ from repositories.pairings_repository import PairingsRepository
 from repositories.player_repository import PlayerRepository
 from services.bankruptcy_service import BankruptcyRepository, BankruptcyService
 from services.betting_service import BettingService
+from services.charity_service import CharityService
+from repositories.charity_repository import CharityRepository
 from services.gambling_stats_service import GamblingStatsService
 from services.garnishment_service import GarnishmentService
 from services.disburse_service import DisburseService
@@ -271,7 +273,11 @@ def _init_services():
     disburse_repo = DisburseRepository(DB_PATH)
     disburse_service = DisburseService(disburse_repo, player_repo, loan_repo)
 
-    # Create betting service with garnishment and bankruptcy support
+    # Create charity service for reduced blind rates
+    charity_repo = CharityRepository(DB_PATH)
+    charity_service = CharityService(charity_repo)
+
+    # Create betting service with garnishment, bankruptcy, and charity support
     betting_service = BettingService(
         bet_repo,
         player_repo,
@@ -279,6 +285,7 @@ def _init_services():
         leverage_tiers=LEVERAGE_TIERS,
         max_debt=MAX_DEBT,
         bankruptcy_service=bankruptcy_service,
+        charity_service=charity_service,
     )
 
     player_service = PlayerService(player_repo)
@@ -319,6 +326,7 @@ def _init_services():
     bot.bankruptcy_service = bankruptcy_service
     bot.loan_service = loan_service
     bot.disburse_service = disburse_service
+    bot.charity_service = charity_service
 
     # Create gambling stats service for degen score and leaderboards
     gambling_stats_service = GamblingStatsService(

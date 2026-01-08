@@ -52,6 +52,7 @@ class BetRepository(BaseRepository, IBetRepository):
         leverage: int = 1,
         max_debt: int = 500,
         is_blind: bool = False,
+        is_reduced_rate: bool = False,
         odds_at_placement: float | None = None,
     ) -> int:
         """
@@ -63,6 +64,7 @@ class BetRepository(BaseRepository, IBetRepository):
 
         Args:
             is_blind: True if this is an auto-liquidity blind bet
+            is_reduced_rate: True if this blind bet used the reduced charity rate
             odds_at_placement: The odds multiplier at time of bet placement (for /bets display)
 
         This prevents race conditions where concurrent calls could double-spend.
@@ -138,10 +140,10 @@ class BetRepository(BaseRepository, IBetRepository):
 
             cursor.execute(
                 """
-                INSERT INTO bets (guild_id, match_id, discord_id, team_bet_on, amount, bet_time, leverage, is_blind, odds_at_placement)
-                VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO bets (guild_id, match_id, discord_id, team_bet_on, amount, bet_time, leverage, is_blind, is_reduced_rate, odds_at_placement)
+                VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (normalized_guild, discord_id, team, amount, bet_time, leverage, 1 if is_blind else 0, odds_at_placement),
+                (normalized_guild, discord_id, team, amount, bet_time, leverage, 1 if is_blind else 0, 1 if is_reduced_rate else 0, odds_at_placement),
             )
             return cursor.lastrowid
 
@@ -156,6 +158,7 @@ class BetRepository(BaseRepository, IBetRepository):
         leverage: int = 1,
         max_debt: int = 500,
         is_blind: bool = False,
+        is_reduced_rate: bool = False,
         odds_at_placement: float | None = None,
     ) -> int:
         """
@@ -265,10 +268,10 @@ class BetRepository(BaseRepository, IBetRepository):
             )
             cursor.execute(
                 """
-                INSERT INTO bets (guild_id, match_id, discord_id, team_bet_on, amount, bet_time, leverage, is_blind, odds_at_placement)
-                VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO bets (guild_id, match_id, discord_id, team_bet_on, amount, bet_time, leverage, is_blind, is_reduced_rate, odds_at_placement)
+                VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (normalized_guild, discord_id, team, amount, bet_time, leverage, 1 if is_blind else 0, odds_at_placement),
+                (normalized_guild, discord_id, team, amount, bet_time, leverage, 1 if is_blind else 0, 1 if is_reduced_rate else 0, odds_at_placement),
             )
             return cursor.lastrowid
 
@@ -292,6 +295,7 @@ class BetRepository(BaseRepository, IBetRepository):
                 SELECT bet_id, guild_id, match_id, discord_id, team_bet_on, amount, bet_time, created_at,
                        COALESCE(leverage, 1) as leverage,
                        COALESCE(is_blind, 0) as is_blind,
+                       COALESCE(is_reduced_rate, 0) as is_reduced_rate,
                        odds_at_placement
                 FROM bets
                 WHERE guild_id = ? AND discord_id = ? AND match_id IS NULL
@@ -324,6 +328,7 @@ class BetRepository(BaseRepository, IBetRepository):
                 SELECT bet_id, guild_id, match_id, discord_id, team_bet_on, amount, bet_time, created_at,
                        COALESCE(leverage, 1) as leverage,
                        COALESCE(is_blind, 0) as is_blind,
+                       COALESCE(is_reduced_rate, 0) as is_reduced_rate,
                        odds_at_placement
                 FROM bets
                 WHERE guild_id = ? AND discord_id = ? AND match_id IS NULL
@@ -350,6 +355,7 @@ class BetRepository(BaseRepository, IBetRepository):
                 SELECT bet_id, guild_id, match_id, discord_id, team_bet_on, amount, bet_time, created_at,
                        COALESCE(leverage, 1) as leverage,
                        COALESCE(is_blind, 0) as is_blind,
+                       COALESCE(is_reduced_rate, 0) as is_reduced_rate,
                        odds_at_placement
                 FROM bets
                 WHERE guild_id = ? AND match_id IS NULL
