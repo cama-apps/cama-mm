@@ -1644,3 +1644,118 @@ class TestBlindBets:
         assert blind_bets_result["created"] == 10
         assert blind_bets_result["total_radiant"] == 25  # 5 players * 5 coins
         assert blind_bets_result["total_dire"] == 25
+
+    def test_blind_bets_refunded_on_abort(self, services):
+        """Blind bets are properly refunded when a match is aborted.
+
+        Regression test: ensures blind bet coins are returned to players
+        when the shuffle is aborted before the match is recorded.
+        """
+        match_service = services["match_service"]
+        betting_service = services["betting_service"]
+        player_repo = services["player_repo"]
+
+        player_ids = list(range(13300, 13310))
+        for pid in player_ids:
+            player_repo.add(
+                discord_id=pid,
+                discord_username=f"Player{pid}",
+                dotabuff_url=f"https://dotabuff.com/players/{pid}",
+                initial_mmr=1500,
+                glicko_rating=1500.0,
+                glicko_rd=350.0,
+                glicko_volatility=0.06,
+            )
+            player_repo.add_balance(pid, 97)  # 100 total
+
+        # Record initial balances
+        initial_balances = {pid: player_repo.get_balance(pid) for pid in player_ids}
+        assert all(b == 100 for b in initial_balances.values())
+
+        # Shuffle and create blind bets
+        match_service.shuffle_players(player_ids, guild_id=1, betting_mode="pool")
+        pending_state = match_service.get_last_shuffle(1)
+
+        blind_result = betting_service.create_auto_blind_bets(
+            guild_id=1,
+            radiant_ids=pending_state["radiant_team_ids"],
+            dire_ids=pending_state["dire_team_ids"],
+            shuffle_timestamp=pending_state["shuffle_timestamp"],
+        )
+        assert blind_result["created"] == 10
+
+        # Verify balances decreased by 5% (5 jopacoin each)
+        for pid in player_ids:
+            assert player_repo.get_balance(pid) == 95, f"Player {pid} should have 95 after blind bet"
+
+        # Simulate abort: refund all pending bets
+        refunded = betting_service.refund_pending_bets(1, pending_state)
+        assert refunded == 10, "All 10 blind bets should be refunded"
+
+        # Verify all balances restored
+        for pid in player_ids:
+            assert player_repo.get_balance(pid) == 100, f"Player {pid} should have 100 after refund"
+
+        # Verify no pending bets remain
+        for pid in player_ids:
+            bets = betting_service.get_pending_bets(1, pid, pending_state=pending_state)
+            assert len(bets) == 0, f"Player {pid} should have no pending bets"
+
+    def test_mixed_blind_and_manual_bets_refunded_on_abort(self, services):
+        """Both blind bets and manual bets are refunded on abort."""
+        match_service = services["match_service"]
+        betting_service = services["betting_service"]
+        player_repo = services["player_repo"]
+
+        player_ids = list(range(13400, 13410))
+        for pid in player_ids:
+            player_repo.add(
+                discord_id=pid,
+                discord_username=f"Player{pid}",
+                dotabuff_url=f"https://dotabuff.com/players/{pid}",
+                initial_mmr=1500,
+                glicko_rating=1500.0,
+                glicko_rd=350.0,
+                glicko_volatility=0.06,
+            )
+            player_repo.add_balance(pid, 97)  # 100 total
+
+        # Add spectator who will place manual bet
+        spectator = 13500
+        player_repo.add(
+            discord_id=spectator,
+            discord_username="AbortSpectator",
+            dotabuff_url="https://dotabuff.com/players/13500",
+        )
+        player_repo.add_balance(spectator, 47)  # 50 total
+
+        # Shuffle and create blind bets
+        match_service.shuffle_players(player_ids, guild_id=1, betting_mode="pool")
+        pending_state = match_service.get_last_shuffle(1)
+        pending_state["bet_lock_until"] = int(time.time()) + 600
+
+        betting_service.create_auto_blind_bets(
+            guild_id=1,
+            radiant_ids=pending_state["radiant_team_ids"],
+            dire_ids=pending_state["dire_team_ids"],
+            shuffle_timestamp=pending_state["shuffle_timestamp"],
+        )
+
+        # Spectator places manual bet
+        betting_service.place_bet(1, spectator, "radiant", 20, pending_state)
+        assert player_repo.get_balance(spectator) == 30  # 50 - 20
+
+        # Count total pending bets: 10 blind + 1 manual = 11
+        all_bets = betting_service.get_all_pending_bets(1, pending_state)
+        assert len(all_bets) == 11
+
+        # Abort and refund
+        refunded = betting_service.refund_pending_bets(1, pending_state)
+        assert refunded == 11
+
+        # Verify spectator balance restored
+        assert player_repo.get_balance(spectator) == 50
+
+        # Verify player balances restored
+        for pid in player_ids:
+            assert player_repo.get_balance(pid) == 100
