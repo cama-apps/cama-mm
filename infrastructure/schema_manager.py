@@ -190,6 +190,8 @@ class SchemaManager:
             ("create_predictions_system", self._migration_create_predictions_system),
             ("add_prediction_channel_message_id", self._migration_add_prediction_channel_message_id),
             ("add_last_match_date_to_players", self._migration_add_last_match_date_to_players),
+            ("add_bet_is_blind_column", self._migration_add_bet_is_blind_column),
+            ("add_bet_odds_at_placement_column", self._migration_add_bet_odds_at_placement_column),
         ]
 
     # --- Migrations ---
@@ -642,3 +644,11 @@ class SchemaManager:
             WHERE last_match_date IS NULL
             """
         )
+
+    def _migration_add_bet_is_blind_column(self, cursor) -> None:
+        """Add is_blind column to bets table for auto-liquidity blind bets."""
+        self._add_column_if_not_exists(cursor, "bets", "is_blind", "INTEGER DEFAULT 0")
+
+    def _migration_add_bet_odds_at_placement_column(self, cursor) -> None:
+        """Add odds_at_placement column to bets table for historical odds tracking."""
+        self._add_column_if_not_exists(cursor, "bets", "odds_at_placement", "REAL")

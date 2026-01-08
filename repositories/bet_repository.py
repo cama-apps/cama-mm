@@ -51,6 +51,8 @@ class BetRepository(BaseRepository, IBetRepository):
         since_ts: int,
         leverage: int = 1,
         max_debt: int = 500,
+        is_blind: bool = False,
+        odds_at_placement: float | None = None,
     ) -> int:
         """
         Atomically place a bet with optional leverage:
@@ -58,6 +60,10 @@ class BetRepository(BaseRepository, IBetRepository):
         - ensure player has sufficient balance (or won't exceed max debt with leverage)
         - debit effective bet amount (amount * leverage)
         - insert bet row with leverage
+
+        Args:
+            is_blind: True if this is an auto-liquidity blind bet
+            odds_at_placement: The odds multiplier at time of bet placement (for /bets display)
 
         This prevents race conditions where concurrent calls could double-spend.
         """
@@ -132,10 +138,10 @@ class BetRepository(BaseRepository, IBetRepository):
 
             cursor.execute(
                 """
-                INSERT INTO bets (guild_id, match_id, discord_id, team_bet_on, amount, bet_time, leverage)
-                VALUES (?, NULL, ?, ?, ?, ?, ?)
+                INSERT INTO bets (guild_id, match_id, discord_id, team_bet_on, amount, bet_time, leverage, is_blind, odds_at_placement)
+                VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (normalized_guild, discord_id, team, amount, bet_time, leverage),
+                (normalized_guild, discord_id, team, amount, bet_time, leverage, 1 if is_blind else 0, odds_at_placement),
             )
             return cursor.lastrowid
 
@@ -149,6 +155,8 @@ class BetRepository(BaseRepository, IBetRepository):
         bet_time: int,
         leverage: int = 1,
         max_debt: int = 500,
+        is_blind: bool = False,
+        odds_at_placement: float | None = None,
     ) -> int:
         """
         Atomically place a bet with optional leverage using the DB as the source of truth.
@@ -257,10 +265,10 @@ class BetRepository(BaseRepository, IBetRepository):
             )
             cursor.execute(
                 """
-                INSERT INTO bets (guild_id, match_id, discord_id, team_bet_on, amount, bet_time, leverage)
-                VALUES (?, NULL, ?, ?, ?, ?, ?)
+                INSERT INTO bets (guild_id, match_id, discord_id, team_bet_on, amount, bet_time, leverage, is_blind, odds_at_placement)
+                VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (normalized_guild, discord_id, team, amount, bet_time, leverage),
+                (normalized_guild, discord_id, team, amount, bet_time, leverage, 1 if is_blind else 0, odds_at_placement),
             )
             return cursor.lastrowid
 
@@ -282,7 +290,9 @@ class BetRepository(BaseRepository, IBetRepository):
             cursor.execute(
                 f"""
                 SELECT bet_id, guild_id, match_id, discord_id, team_bet_on, amount, bet_time, created_at,
-                       COALESCE(leverage, 1) as leverage
+                       COALESCE(leverage, 1) as leverage,
+                       COALESCE(is_blind, 0) as is_blind,
+                       odds_at_placement
                 FROM bets
                 WHERE guild_id = ? AND discord_id = ? AND match_id IS NULL
                 {ts_filter}
@@ -312,7 +322,9 @@ class BetRepository(BaseRepository, IBetRepository):
             cursor.execute(
                 f"""
                 SELECT bet_id, guild_id, match_id, discord_id, team_bet_on, amount, bet_time, created_at,
-                       COALESCE(leverage, 1) as leverage
+                       COALESCE(leverage, 1) as leverage,
+                       COALESCE(is_blind, 0) as is_blind,
+                       odds_at_placement
                 FROM bets
                 WHERE guild_id = ? AND discord_id = ? AND match_id IS NULL
                 {ts_filter}
@@ -335,10 +347,14 @@ class BetRepository(BaseRepository, IBetRepository):
             cursor = conn.cursor()
             cursor.execute(
                 f"""
-                SELECT bet_id, guild_id, match_id, discord_id, team_bet_on, amount, bet_time, created_at
+                SELECT bet_id, guild_id, match_id, discord_id, team_bet_on, amount, bet_time, created_at,
+                       COALESCE(leverage, 1) as leverage,
+                       COALESCE(is_blind, 0) as is_blind,
+                       odds_at_placement
                 FROM bets
                 WHERE guild_id = ? AND match_id IS NULL
                 {ts_filter}
+                ORDER BY bet_time ASC
                 """,
                 params,
             )

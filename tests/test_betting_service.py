@@ -1212,3 +1212,340 @@ class TestMultipleBets:
         # Cannot switch to radiant
         with pytest.raises(ValueError, match="already have bets on Dire"):
             betting_service.place_bet(1, spectator, "radiant", 5, pending)
+
+
+class TestBlindBets:
+    """Tests for auto-liquidity blind bets functionality."""
+
+    def test_create_auto_blind_bets_basic(self, services):
+        """Blind bets are created for all eligible players."""
+        match_service = services["match_service"]
+        betting_service = services["betting_service"]
+        player_repo = services["player_repo"]
+
+        player_ids = list(range(12300, 12310))
+        for pid in player_ids:
+            player_repo.add(
+                discord_id=pid,
+                discord_username=f"Player{pid}",
+                dotabuff_url=f"https://dotabuff.com/players/{pid}",
+                initial_mmr=1500,
+                glicko_rating=1500.0,
+                glicko_rd=350.0,
+                glicko_volatility=0.06,
+            )
+            # Give all players 100 jopacoin (above threshold of 50)
+            player_repo.add_balance(pid, 97)  # 3 starting + 97 = 100
+
+        match_service.shuffle_players(player_ids, guild_id=1, betting_mode="pool")
+        pending = match_service.get_last_shuffle(1)
+
+        result = betting_service.create_auto_blind_bets(
+            guild_id=1,
+            radiant_ids=pending["radiant_team_ids"],
+            dire_ids=pending["dire_team_ids"],
+            shuffle_timestamp=pending["shuffle_timestamp"],
+        )
+
+        # All 10 players should have blind bets
+        assert result["created"] == 10
+        assert len(result["bets"]) == 10
+        assert len(result["skipped"]) == 0
+
+        # Each bet should be 5% of 100 = 5 jopacoin
+        for bet in result["bets"]:
+            assert bet["amount"] == 5
+
+        # Totals should be even (5 players * 5 coins = 25 each side)
+        assert result["total_radiant"] == 25
+        assert result["total_dire"] == 25
+
+    def test_create_auto_blind_bets_threshold(self, services):
+        """Players below threshold are skipped."""
+        match_service = services["match_service"]
+        betting_service = services["betting_service"]
+        player_repo = services["player_repo"]
+
+        player_ids = list(range(12400, 12410))
+        for i, pid in enumerate(player_ids):
+            player_repo.add(
+                discord_id=pid,
+                discord_username=f"Player{pid}",
+                dotabuff_url=f"https://dotabuff.com/players/{pid}",
+                initial_mmr=1500,
+                glicko_rating=1500.0,
+                glicko_rd=350.0,
+                glicko_volatility=0.06,
+            )
+            # Alternate: some have 100, some have only 30 (below 50 threshold)
+            if i % 2 == 0:
+                player_repo.add_balance(pid, 97)  # 100 total
+            else:
+                player_repo.add_balance(pid, 27)  # 30 total (below threshold)
+
+        match_service.shuffle_players(player_ids, guild_id=1, betting_mode="pool")
+        pending = match_service.get_last_shuffle(1)
+
+        result = betting_service.create_auto_blind_bets(
+            guild_id=1,
+            radiant_ids=pending["radiant_team_ids"],
+            dire_ids=pending["dire_team_ids"],
+            shuffle_timestamp=pending["shuffle_timestamp"],
+        )
+
+        # Only 5 players (those with 100) should have blind bets
+        assert result["created"] == 5
+        assert len(result["skipped"]) == 5
+
+        # Check skipped reasons
+        for skip in result["skipped"]:
+            assert "threshold" in skip["reason"]
+
+    def test_create_auto_blind_bets_rounding(self, services):
+        """Verify round() behavior for 5% calculation."""
+        match_service = services["match_service"]
+        betting_service = services["betting_service"]
+        player_repo = services["player_repo"]
+
+        player_ids = list(range(12500, 12510))
+        for i, pid in enumerate(player_ids):
+            player_repo.add(
+                discord_id=pid,
+                discord_username=f"Player{pid}",
+                dotabuff_url=f"https://dotabuff.com/players/{pid}",
+                initial_mmr=1500,
+                glicko_rating=1500.0,
+                glicko_rd=350.0,
+                glicko_volatility=0.06,
+            )
+            # Test various balances
+            # 51: 5% = 2.55 -> rounds to 3
+            # 50: 5% = 2.5 -> rounds to 2 (banker's rounding)
+            # 54: 5% = 2.7 -> rounds to 3
+            if i < 3:
+                player_repo.add_balance(pid, 48)  # 51 total
+            elif i < 6:
+                player_repo.add_balance(pid, 47)  # 50 total
+            else:
+                player_repo.add_balance(pid, 51)  # 54 total
+
+        match_service.shuffle_players(player_ids, guild_id=1, betting_mode="pool")
+        pending = match_service.get_last_shuffle(1)
+
+        result = betting_service.create_auto_blind_bets(
+            guild_id=1,
+            radiant_ids=pending["radiant_team_ids"],
+            dire_ids=pending["dire_team_ids"],
+            shuffle_timestamp=pending["shuffle_timestamp"],
+        )
+
+        # All should have blind bets (all >= 50)
+        assert result["created"] == 10
+
+        # Verify amounts based on rounding
+        amounts = [b["amount"] for b in result["bets"]]
+        # 51*0.05 = 2.55 -> 3 (3 players)
+        # 50*0.05 = 2.5 -> 2 (3 players)
+        # 54*0.05 = 2.7 -> 3 (4 players)
+        assert amounts.count(3) == 7  # 3 + 4 players
+        assert amounts.count(2) == 3  # 3 players with 50
+
+    def test_create_auto_blind_bets_in_debt(self, services):
+        """Players in debt are skipped."""
+        match_service = services["match_service"]
+        betting_service = services["betting_service"]
+        player_repo = services["player_repo"]
+
+        player_ids = list(range(12600, 12610))
+        for i, pid in enumerate(player_ids):
+            player_repo.add(
+                discord_id=pid,
+                discord_username=f"Player{pid}",
+                dotabuff_url=f"https://dotabuff.com/players/{pid}",
+                initial_mmr=1500,
+                glicko_rating=1500.0,
+                glicko_rd=350.0,
+                glicko_volatility=0.06,
+            )
+            if i < 5:
+                player_repo.add_balance(pid, 97)  # 100 total
+            else:
+                # Put in debt
+                player_repo.add_balance(pid, -103)  # -100 balance
+
+        match_service.shuffle_players(player_ids, guild_id=1, betting_mode="pool")
+        pending = match_service.get_last_shuffle(1)
+
+        result = betting_service.create_auto_blind_bets(
+            guild_id=1,
+            radiant_ids=pending["radiant_team_ids"],
+            dire_ids=pending["dire_team_ids"],
+            shuffle_timestamp=pending["shuffle_timestamp"],
+        )
+
+        # Only 5 non-debt players should have blind bets
+        assert result["created"] == 5
+        assert len(result["skipped"]) == 5
+
+    def test_blind_bet_is_blind_flag(self, services):
+        """Blind bets have is_blind flag set."""
+        match_service = services["match_service"]
+        betting_service = services["betting_service"]
+        player_repo = services["player_repo"]
+
+        player_ids = list(range(12700, 12710))
+        for pid in player_ids:
+            player_repo.add(
+                discord_id=pid,
+                discord_username=f"Player{pid}",
+                dotabuff_url=f"https://dotabuff.com/players/{pid}",
+                initial_mmr=1500,
+                glicko_rating=1500.0,
+                glicko_rd=350.0,
+                glicko_volatility=0.06,
+            )
+            player_repo.add_balance(pid, 97)
+
+        match_service.shuffle_players(player_ids, guild_id=1, betting_mode="pool")
+        pending = match_service.get_last_shuffle(1)
+        pending["bet_lock_until"] = int(time.time()) + 600
+
+        # Create blind bets
+        betting_service.create_auto_blind_bets(
+            guild_id=1,
+            radiant_ids=pending["radiant_team_ids"],
+            dire_ids=pending["dire_team_ids"],
+            shuffle_timestamp=pending["shuffle_timestamp"],
+        )
+
+        # Check that bets are marked as blind
+        radiant_player = pending["radiant_team_ids"][0]
+        bets = betting_service.get_pending_bets(1, radiant_player, pending_state=pending)
+        assert len(bets) == 1
+        assert bets[0]["is_blind"] == 1
+
+        # Now add a manual bet
+        betting_service.place_bet(1, radiant_player, "radiant", 10, pending)
+
+        # Check both bets
+        bets = betting_service.get_pending_bets(1, radiant_player, pending_state=pending)
+        assert len(bets) == 2
+        assert bets[0]["is_blind"] == 1  # First was blind
+        assert bets[1]["is_blind"] == 0  # Second was manual
+
+    def test_blind_bet_settlement(self, services):
+        """Blind bets settle correctly with manual bets."""
+        match_service = services["match_service"]
+        betting_service = services["betting_service"]
+        player_repo = services["player_repo"]
+
+        player_ids = list(range(12800, 12810))
+        for pid in player_ids:
+            player_repo.add(
+                discord_id=pid,
+                discord_username=f"Player{pid}",
+                dotabuff_url=f"https://dotabuff.com/players/{pid}",
+                initial_mmr=1500,
+                glicko_rating=1500.0,
+                glicko_rd=350.0,
+                glicko_volatility=0.06,
+            )
+            player_repo.add_balance(pid, 97)  # 100 total
+
+        match_service.shuffle_players(player_ids, guild_id=1, betting_mode="pool")
+        pending = match_service.get_last_shuffle(1)
+        pending["bet_lock_until"] = int(time.time()) + 600
+
+        # Record initial balances (after blind bets)
+        radiant_player = pending["radiant_team_ids"][0]
+        dire_player = pending["dire_team_ids"][0]
+        initial_radiant_balance = player_repo.get_balance(radiant_player)
+
+        # Create blind bets (5 jopacoin each, 25 per team)
+        blind_result = betting_service.create_auto_blind_bets(
+            guild_id=1,
+            radiant_ids=pending["radiant_team_ids"],
+            dire_ids=pending["dire_team_ids"],
+            shuffle_timestamp=pending["shuffle_timestamp"],
+        )
+        assert blind_result["total_radiant"] == 25
+        assert blind_result["total_dire"] == 25
+
+        # Check balance after blind bet (should be 95 = 100 - 5)
+        assert player_repo.get_balance(radiant_player) == 95
+
+        # Add a manual bet from radiant player (10 jopacoin)
+        betting_service.place_bet(1, radiant_player, "radiant", 10, pending)
+        assert player_repo.get_balance(radiant_player) == 85
+
+        # Settle - radiant wins
+        # Total pool = 25 + 25 + 10 = 60
+        # Radiant pool = 35 (25 blind + 10 manual)
+        # Multiplier = 60/35 = 1.71
+        distributions = betting_service.settle_bets(500, 1, "radiant", pending_state=pending)
+
+        # 5 radiant winners (blind) + 1 radiant winner (manual from same player who has 2 bets)
+        assert len(distributions["winners"]) == 6  # 5 blind + 1 manual
+        assert len(distributions["losers"]) == 5  # 5 dire blind bets
+
+        # Check that radiant player got paid for both bets
+        radiant_player_payouts = [
+            w["payout"] for w in distributions["winners"]
+            if w["discord_id"] == radiant_player
+        ]
+        assert len(radiant_player_payouts) == 2  # blind + manual
+
+    def test_get_all_pending_bets(self, services):
+        """get_all_pending_bets returns all bets for /bets command."""
+        match_service = services["match_service"]
+        betting_service = services["betting_service"]
+        player_repo = services["player_repo"]
+
+        player_ids = list(range(12900, 12910))
+        for pid in player_ids:
+            player_repo.add(
+                discord_id=pid,
+                discord_username=f"Player{pid}",
+                dotabuff_url=f"https://dotabuff.com/players/{pid}",
+                initial_mmr=1500,
+                glicko_rating=1500.0,
+                glicko_rd=350.0,
+                glicko_volatility=0.06,
+            )
+            player_repo.add_balance(pid, 97)
+
+        # Add a spectator
+        spectator = 13000
+        player_repo.add(
+            discord_id=spectator,
+            discord_username="Spectator",
+            dotabuff_url="https://dotabuff.com/players/13000",
+        )
+        player_repo.add_balance(spectator, 100)
+
+        match_service.shuffle_players(player_ids, guild_id=1, betting_mode="pool")
+        pending = match_service.get_last_shuffle(1)
+        pending["bet_lock_until"] = int(time.time()) + 600
+
+        # Create blind bets
+        betting_service.create_auto_blind_bets(
+            guild_id=1,
+            radiant_ids=pending["radiant_team_ids"],
+            dire_ids=pending["dire_team_ids"],
+            shuffle_timestamp=pending["shuffle_timestamp"],
+        )
+
+        # Add spectator bet
+        betting_service.place_bet(1, spectator, "radiant", 20, pending)
+
+        # Get all pending bets
+        all_bets = betting_service.get_all_pending_bets(1, pending_state=pending)
+
+        # Should have 10 blind + 1 manual = 11 bets
+        assert len(all_bets) == 11
+
+        # Verify is_blind flag is present
+        blind_bets = [b for b in all_bets if b.get("is_blind")]
+        manual_bets = [b for b in all_bets if not b.get("is_blind")]
+        assert len(blind_bets) == 10
+        assert len(manual_bets) == 1
