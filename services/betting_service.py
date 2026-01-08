@@ -21,6 +21,7 @@ from repositories.player_repository import PlayerRepository
 
 if TYPE_CHECKING:
     from services.bankruptcy_service import BankruptcyService
+    from services.charity_service import CharityService
     from services.garnishment_service import GarnishmentService
 
 
@@ -35,6 +36,7 @@ class BettingService:
         leverage_tiers: list[int] | None = None,
         max_debt: int | None = None,
         bankruptcy_service: Optional["BankruptcyService"] = None,
+        charity_service: Optional["CharityService"] = None,
     ):
         self.bet_repo = bet_repo
         self.player_repo = player_repo
@@ -42,6 +44,7 @@ class BettingService:
         self.leverage_tiers = leverage_tiers if leverage_tiers is not None else LEVERAGE_TIERS
         self.max_debt = max_debt if max_debt is not None else MAX_DEBT
         self.bankruptcy_service = bankruptcy_service
+        self.charity_service = charity_service
 
     def _since_ts(self, pending_state: dict[str, Any] | None) -> int | None:
         """Derive the start timestamp for the current pending match window."""
@@ -428,8 +431,12 @@ class BettingService:
         Create auto-liquidity blind bets for all eligible players after shuffle.
 
         Eligible players are those with balance >= AUTO_BLIND_THRESHOLD.
-        Each eligible player bets 5% of their balance (rounded to nearest int)
+        Each eligible player bets a percentage of their balance (rounded to nearest int)
         on their own team with 1x leverage.
+
+        The percentage is normally AUTO_BLIND_PERCENTAGE (5%), but can be reduced
+        to CHARITY_REDUCED_RATE (1%) for players who have earned the charity bonus
+        by helping others pay off their debt.
 
         Args:
             guild_id: The guild ID (or None for DMs)
@@ -442,7 +449,7 @@ class BettingService:
                 "created": int,
                 "total_radiant": int,
                 "total_dire": int,
-                "bets": [{"discord_id": int, "team": str, "amount": int}, ...],
+                "bets": [{"discord_id": int, "team": str, "amount": int, "is_reduced_rate": bool}, ...],
                 "skipped": [{"discord_id": int, "reason": str}, ...]
             }
         """
@@ -477,8 +484,16 @@ class BettingService:
                         })
                         continue
 
+                    # Get the blind rate for this player (reduced if they have charity bonus)
+                    if self.charity_service:
+                        blind_rate = self.charity_service.get_blind_rate_for_player(discord_id)
+                        is_reduced_rate = self.charity_service.has_reduced_rate(discord_id)
+                    else:
+                        blind_rate = AUTO_BLIND_PERCENTAGE
+                        is_reduced_rate = False
+
                     # Calculate blind amount (round to nearest integer)
-                    blind_amount = round(balance * AUTO_BLIND_PERCENTAGE)
+                    blind_amount = round(balance * blind_rate)
 
                     # Skip if rounded amount is less than 1
                     if blind_amount < 1:
@@ -516,14 +531,20 @@ class BettingService:
                         leverage=1,
                         max_debt=self.max_debt,
                         is_blind=True,
+                        is_reduced_rate=is_reduced_rate,
                         odds_at_placement=odds_at_placement,
                     )
+
+                    # Decrement charity games remaining after blind bet created
+                    if is_reduced_rate and self.charity_service:
+                        self.charity_service.on_blind_bet_created(discord_id)
 
                     result["created"] += 1
                     result["bets"].append({
                         "discord_id": discord_id,
                         "team": team,
                         "amount": blind_amount,
+                        "is_reduced_rate": is_reduced_rate,
                     })
                     if team == "radiant":
                         result["total_radiant"] += blind_amount

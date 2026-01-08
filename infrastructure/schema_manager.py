@@ -192,6 +192,8 @@ class SchemaManager:
             ("add_last_match_date_to_players", self._migration_add_last_match_date_to_players),
             ("add_bet_is_blind_column", self._migration_add_bet_is_blind_column),
             ("add_bet_odds_at_placement_column", self._migration_add_bet_odds_at_placement_column),
+            ("create_charity_tracker_table", self._migration_create_charity_tracker_table),
+            ("add_bet_is_reduced_rate_column", self._migration_add_bet_is_reduced_rate_column),
         ]
 
     # --- Migrations ---
@@ -652,3 +654,22 @@ class SchemaManager:
     def _migration_add_bet_odds_at_placement_column(self, cursor) -> None:
         """Add odds_at_placement column to bets table for historical odds tracking."""
         self._add_column_if_not_exists(cursor, "bets", "odds_at_placement", "REAL")
+
+    def _migration_create_charity_tracker_table(self, cursor) -> None:
+        """Create table for tracking charity contributions and reduced blind rates."""
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS charity_tracker (
+                discord_id INTEGER PRIMARY KEY,
+                reduced_rate_games_remaining INTEGER DEFAULT 0,
+                last_charity_at INTEGER,
+                total_charity_given INTEGER DEFAULT 0,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (discord_id) REFERENCES players(discord_id)
+            )
+            """
+        )
+
+    def _migration_add_bet_is_reduced_rate_column(self, cursor) -> None:
+        """Add is_reduced_rate column to bets table for charity reduced blind bets."""
+        self._add_column_if_not_exists(cursor, "bets", "is_reduced_rate", "INTEGER DEFAULT 0")

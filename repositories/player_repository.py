@@ -467,7 +467,12 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             amount: Amount to transfer
 
         Returns:
-            Dict with 'amount_paid', 'from_new_balance', 'to_new_balance'
+            Dict with:
+            - amount_paid: Actual amount transferred (capped at debt)
+            - from_new_balance: Sender's new balance
+            - to_new_balance: Recipient's new balance
+            - target_debt_before: Recipient's debt before payment (positive number)
+            - target_games_played: Number of games recipient has played
 
         Raises:
             ValueError if insufficient funds, player not found, or recipient has no debt
@@ -492,9 +497,13 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             if from_balance < amount:
                 raise ValueError(f"Insufficient balance. You have {from_balance} jopacoin.")
 
-            # Get recipient balance
+            # Get recipient balance and games played
             cursor.execute(
-                "SELECT COALESCE(jopacoin_balance, 0) as balance FROM players WHERE discord_id = ?",
+                """
+                SELECT COALESCE(jopacoin_balance, 0) as balance,
+                       COALESCE(wins, 0) + COALESCE(losses, 0) as games_played
+                FROM players WHERE discord_id = ?
+                """,
                 (to_discord_id,),
             )
             to_row = cursor.fetchone()
@@ -502,6 +511,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 raise ValueError("Recipient not found.")
 
             to_balance = int(to_row["balance"])
+            target_games_played = int(to_row["games_played"])
             if to_balance >= 0:
                 raise ValueError("Recipient has no debt to pay off.")
 
@@ -533,6 +543,8 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 "amount_paid": actual_amount,
                 "from_new_balance": from_balance - actual_amount,
                 "to_new_balance": to_balance + actual_amount,
+                "target_debt_before": debt,
+                "target_games_played": target_games_played,
             }
 
     def get_players_with_negative_balance(self) -> list[dict]:

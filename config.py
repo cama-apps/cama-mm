@@ -88,6 +88,13 @@ AUTO_BLIND_ENABLED = _parse_bool("AUTO_BLIND_ENABLED", True)  # Enable auto-blin
 AUTO_BLIND_THRESHOLD = _parse_int("AUTO_BLIND_THRESHOLD", 50)  # Min balance to trigger blind (inclusive)
 AUTO_BLIND_PERCENTAGE = _parse_float("AUTO_BLIND_PERCENTAGE", 0.05)  # 5% of balance
 
+# Charity tracking configuration (reduced blind rate for /paydebt contributors)
+CHARITY_REDUCED_RATE = _parse_float("CHARITY_REDUCED_RATE", 0.01)  # 1% blind rate for charitable players
+CHARITY_GAMES_DURATION = _parse_int("CHARITY_GAMES_DURATION", 2)  # Games with reduced rate
+CHARITY_MIN_TARGET_DEBT = _parse_int("CHARITY_MIN_TARGET_DEBT", 50)  # Min debt to qualify for charity
+CHARITY_MIN_TARGET_GAMES = _parse_int("CHARITY_MIN_TARGET_GAMES", 3)  # Min games target must have played
+CHARITY_CONTRIBUTION_CAP = _parse_int("CHARITY_CONTRIBUTION_CAP", 100)  # Max threshold for charity
+
 # Leverage betting configuration
 LEVERAGE_TIERS = _parse_int_list("LEVERAGE_TIERS", [2, 3, 5])
 
