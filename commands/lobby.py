@@ -21,161 +21,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger("cama_bot.commands.lobby")
 
 
-class LockedLobbyView(discord.ui.View):
-    """View with disabled buttons shown after shuffle."""
-
-    def __init__(self):
-        super().__init__(timeout=None)
-        # Add disabled buttons
-        join_btn = discord.ui.Button(
-            label="Join",
-            emoji="✅",
-            style=discord.ButtonStyle.secondary,
-            disabled=True,
-            custom_id="lobby:join:disabled",
-        )
-        leave_btn = discord.ui.Button(
-            label="Leave",
-            emoji="🚪",
-            style=discord.ButtonStyle.secondary,
-            disabled=True,
-            custom_id="lobby:leave:disabled",
-        )
-        self.add_item(join_btn)
-        self.add_item(leave_btn)
-
-
-class PersistentLobbyView(discord.ui.View):
-    """
-    Persistent view that handles lobby join/leave button interactions.
-
-    Registered once on bot startup and handles buttons by custom_id.
-    """
-
-    def __init__(self, cog: "LobbyCommands"):
-        super().__init__(timeout=None)
-        self.cog = cog
-
-    @discord.ui.button(
-        label="Join",
-        emoji="✅",
-        style=discord.ButtonStyle.success,
-        custom_id="lobby:join",
-    )
-    async def join_button(
-        self, interaction: discord.Interaction, button: discord.ui.Button
-    ):
-        await self._handle_join(interaction)
-
-    @discord.ui.button(
-        label="Leave",
-        emoji="🚪",
-        style=discord.ButtonStyle.danger,
-        custom_id="lobby:leave",
-    )
-    async def leave_button(
-        self, interaction: discord.Interaction, button: discord.ui.Button
-    ):
-        await self._handle_leave(interaction)
-
-    async def _handle_join(self, interaction: discord.Interaction):
-        """Handle join button press inside thread."""
-        # Defer first to avoid timeout - ignore errors if already timed out
-        try:
-            await interaction.response.defer(ephemeral=True)
-        except discord.NotFound:
-            pass  # Interaction timed out, continue anyway
-
-        # Check for pending match - no joining after shuffle
-        match_service = getattr(self.cog.bot, "match_service", None)
-        guild_id = interaction.guild.id if interaction.guild else None
-        if match_service and match_service.get_last_shuffle(guild_id):
-            try:
-                await interaction.followup.send(
-                    "❌ Teams have been shuffled! Cannot join now.",
-                    ephemeral=True,
-                )
-            except Exception:
-                pass
-            return
-
-        player = self.cog.player_service.get_player(interaction.user.id)
-        if not player:
-            try:
-                await interaction.followup.send(
-                    "❌ You're not registered! Use `/register` first.",
-                    ephemeral=True,
-                )
-            except Exception:
-                pass
-            return
-
-        if not player.preferred_roles:
-            try:
-                await interaction.followup.send(
-                    "❌ Set your preferred roles first! Use `/setroles`.",
-                    ephemeral=True,
-                )
-            except Exception:
-                pass
-            return
-
-        success, reason = self.cog.lobby_service.join_lobby(interaction.user.id)
-        if not success:
-            try:
-                await interaction.followup.send(f"❌ {reason}", ephemeral=True)
-            except Exception:
-                pass
-            return
-
-        lobby = self.cog.lobby_service.get_lobby()
-        if lobby:
-            # Update thread embed and channel message
-            await self.cog._sync_lobby_displays(lobby)
-
-            # Post activity message in thread (mentions user to subscribe them)
-            thread_id = self.cog.lobby_service.get_lobby_thread_id()
-            if thread_id:
-                await self.cog._post_join_activity(thread_id, interaction.user)
-
-    async def _handle_leave(self, interaction: discord.Interaction):
-        """Handle leave button press inside thread."""
-        # Defer first to avoid timeout - ignore errors if already timed out
-        try:
-            await interaction.response.defer(ephemeral=True)
-        except discord.NotFound:
-            pass  # Interaction timed out, continue anyway
-
-        # Check for pending match - no leaving after shuffle
-        match_service = getattr(self.cog.bot, "match_service", None)
-        guild_id = interaction.guild.id if interaction.guild else None
-        if match_service and match_service.get_last_shuffle(guild_id):
-            try:
-                await interaction.followup.send(
-                    "❌ Teams have been shuffled! Cannot leave now.",
-                    ephemeral=True,
-                )
-            except Exception:
-                pass
-            return
-
-        if self.cog.lobby_service.leave_lobby(interaction.user.id):
-            lobby = self.cog.lobby_service.get_lobby()
-            if lobby:
-                await self.cog._sync_lobby_displays(lobby)
-
-                thread_id = self.cog.lobby_service.get_lobby_thread_id()
-                if thread_id:
-                    await self.cog._post_leave_activity(thread_id, interaction.user)
-        else:
-            try:
-                await interaction.followup.send(
-                    "❌ You're not in the lobby.", ephemeral=True
-                )
-            except Exception:
-                pass
-
-
 class LobbyCommands(commands.Cog):
     """Slash commands for lobby management."""
 
@@ -211,6 +56,24 @@ class LobbyCommands(commands.Cog):
             logger.warning("Cannot unpin lobby message: missing Manage Messages permission.")
         except Exception as exc:
             logger.warning(f"Failed to unpin lobby message: {exc}")
+
+    async def _remove_user_sword_reaction(self, user: discord.User | discord.Member) -> None:
+        """Remove a user's sword reaction from the channel lobby message."""
+        message_id = self.lobby_service.get_lobby_message_id()
+        channel_id = self.lobby_service.get_lobby_channel_id()
+        if not message_id or not channel_id:
+            return
+
+        try:
+            channel = self.bot.get_channel(channel_id)
+            if not channel:
+                channel = await self.bot.fetch_channel(channel_id)
+            message = await channel.fetch_message(message_id)
+            await message.remove_reaction("⚔️", user)
+        except discord.Forbidden:
+            logger.warning("Cannot remove reaction: missing Manage Messages permission.")
+        except Exception as exc:
+            logger.warning(f"Failed to remove user sword reaction: {exc}")
 
     async def _update_lobby_message(self, interaction: discord.Interaction, lobby) -> None:
         message_id = self.lobby_service.get_lobby_message_id()
@@ -341,10 +204,6 @@ class LobbyCommands(commands.Cog):
         except Exception as exc:
             logger.warning(f"Failed to archive lobby thread: {exc}")
 
-    def _create_lobby_view(self) -> PersistentLobbyView:
-        """Create a persistent lobby view for buttons."""
-        return PersistentLobbyView(self)
-
     @app_commands.command(name="lobby", description="Create or view the matchmaking lobby")
     async def lobby(self, interaction: discord.Interaction):
         logger.info(f"Lobby command: User {interaction.user.id} ({interaction.user})")
@@ -397,14 +256,19 @@ class LobbyCommands(commands.Cog):
         # Send channel message with embed (same as thread, but no buttons)
         channel_msg = await interaction.channel.send(embed=embed)
 
+        # Pin the lobby message for visibility
+        await self._safe_pin(channel_msg)
+
+        # Add sword emoji for reaction-based joining
+        try:
+            await channel_msg.add_reaction("⚔️")
+        except Exception:
+            pass
+
         # Create thread from message (static name to avoid rate limits)
         try:
             thread_name = "🎮 Matchmaking Lobby"
             thread = await channel_msg.create_thread(name=thread_name)
-
-            # Send only buttons in thread (channel message already has embed as thread starter)
-            view = self._create_lobby_view()
-            button_msg = await thread.send("**Join or leave using the buttons below:**", view=view)
 
             # Store all IDs (embed is on channel_msg, which is also the thread starter)
             self.lobby_service.set_lobby_message_id(
@@ -481,6 +345,9 @@ class LobbyCommands(commands.Cog):
 
             # Update both channel message and thread embed
             await self._sync_lobby_displays(lobby)
+
+            # Remove kicked player's sword reaction
+            await self._remove_user_sword_reaction(player)
 
             # Post kick activity in thread
             thread_id = self.lobby_service.get_lobby_thread_id()
@@ -563,6 +430,3 @@ async def setup(bot: commands.Bot):
     player_service = getattr(bot, "player_service", None)
     cog = LobbyCommands(bot, lobby_service, player_service)
     await bot.add_cog(cog)
-
-    # Register persistent view for lobby buttons
-    bot.add_view(PersistentLobbyView(cog))

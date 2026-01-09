@@ -45,7 +45,7 @@ The bot uses a **Glicko-2 rating system** for team balancing. Players are matche
 4. **Configure Bot Permissions:**
    - In the OAuth2 > URL Generator section, select:
      - Scopes: `bot`, `applications.commands`
-     - Permissions: View Channels, Send Messages, Create Public Threads, Send Messages in Threads, Pin Messages, Manage Threads, Embed Links, Read Message History, Use External Emojis, Use External Stickers, Add Reactions
+     - Permissions: View Channels, Send Messages, Manage Messages, Create Public Threads, Send Messages in Threads, Pin Messages, Manage Threads, Embed Links, Read Message History, Use External Emojis, Use External Stickers, Add Reactions
 
 5. **Set up environment variables:**
    - Create a file named `.env` in the project root (same folder as `bot.py`)

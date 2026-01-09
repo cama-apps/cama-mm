@@ -446,12 +446,13 @@ def get_existing_command_names():
 
 
 async def update_lobby_message(message, lobby):
-    """Refresh lobby embed on the pinned lobby message."""
+    """Refresh lobby embed on the pinned lobby message (also updates thread since msg is thread starter)."""
     _init_services()  # Ensure services are initialized
     try:
         embed = lobby_service.build_lobby_embed(lobby)
         if embed:
             await message.edit(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+            logger.info(f"Updated lobby embed: {lobby.get_player_count()} players")
     except Exception as exc:
         logger.error(f"Error updating lobby message: {exc}", exc_info=True)
 
@@ -608,6 +609,18 @@ async def on_raw_reaction_add(payload):
             return
 
         await update_lobby_message(message, lobby)
+
+        # Mention user in thread to subscribe them
+        thread_id = lobby_service.get_lobby_thread_id()
+        if thread_id:
+            try:
+                thread = bot.get_channel(thread_id)
+                if not thread:
+                    thread = await bot.fetch_channel(thread_id)
+                await thread.send(f"✅ {user.mention} joined the lobby!")
+            except Exception as exc:
+                logger.warning(f"Failed to post join activity in thread: {exc}")
+
         if lobby_service.is_ready(lobby):
             await notify_lobby_ready(channel, lobby)
     except Exception as exc:
@@ -638,6 +651,20 @@ async def on_raw_reaction_remove(payload):
 
         if lobby_service.leave_lobby(payload.user_id):
             await update_lobby_message(message, lobby)
+
+            # Post leave message in thread
+            thread_id = lobby_service.get_lobby_thread_id()
+            if thread_id:
+                try:
+                    thread = bot.get_channel(thread_id)
+                    if not thread:
+                        thread = await bot.fetch_channel(thread_id)
+                    user = bot.get_user(payload.user_id)
+                    if not user:
+                        user = await bot.fetch_user(payload.user_id)
+                    await thread.send(f"🚪 {user.display_name} left the lobby.")
+                except Exception as exc:
+                    logger.warning(f"Failed to post leave activity in thread: {exc}")
     except Exception as exc:
         logger.error(f"Error handling reaction remove: {exc}", exc_info=True)
 
