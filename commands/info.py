@@ -90,7 +90,7 @@ class InfoCommands(commands.Cog):
                 "`/lobby` - Create or view the matchmaking lobby\n"
                 "`/kick` - Kick a player (Admin or lobby creator only)\n"
                 "`/resetlobby` - Reset the current lobby (Admin or lobby creator only)\n"
-                "React with ⚔️ to join/leave the lobby"
+                "Use buttons in the thread to join/leave"
             ),
             inline=False,
         )

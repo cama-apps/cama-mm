@@ -52,8 +52,8 @@ class FakeMessage:
         self.edits = []
         self.removed_reactions = []
 
-    async def edit(self, embed=None, allowed_mentions=None):
-        self.edits.append({"embed": embed, "allowed_mentions": allowed_mentions})
+    async def edit(self, embed=None, allowed_mentions=None, content=None):
+        self.edits.append({"embed": embed, "allowed_mentions": allowed_mentions, "content": content})
 
     async def remove_reaction(self, emoji, user):
         self.removed_reactions.append((emoji, user))
@@ -83,8 +83,11 @@ def make_lobby_service():
     return lobby_manager, LobbyService(lobby_manager, player_repo)
 
 
-def make_bot():
-    return SimpleNamespace()
+def make_bot(channel=None):
+    """Create a fake bot with get_channel support."""
+    bot = SimpleNamespace()
+    bot.get_channel = lambda cid: channel
+    return bot
 
 
 @pytest.mark.asyncio
@@ -92,20 +95,19 @@ async def test_kick_removes_reaction_and_updates_message(monkeypatch):
     lobby_manager, lobby_service = make_lobby_service()
     lobby = lobby_service.get_or_create_lobby(creator_id=99)
     lobby.add_player(42)
-    lobby_service.set_lobby_message_id(message_id=12345)
+    lobby_service.set_lobby_message_id(message_id=12345, channel_id=100)
 
     fake_message = FakeMessage()
+    fake_channel = FakeChannel(fake_message)
     interaction = FakeInteraction(user_id=1, message=fake_message)
-    kicked_player = SimpleNamespace(id=42, mention="<@42>")
+    kicked_player = SimpleNamespace(id=42, mention="<@42>", display_name="TestPlayer")
 
     monkeypatch.setattr("commands.lobby.safe_defer", AsyncMock(return_value=True))
     monkeypatch.setattr("commands.lobby.has_admin_permission", lambda _interaction: True)
 
-    cog = LobbyCommands(make_bot(), lobby_service, FakePlayerService())
+    cog = LobbyCommands(make_bot(channel=fake_channel), lobby_service, FakePlayerService())
     await invoke_kick(cog, interaction, kicked_player)
 
-    # Reaction should be removed for the kicked player
-    assert fake_message.removed_reactions == [("⚔️", kicked_player)]
     # Lobby message should be edited to reflect updated embed
     assert fake_message.edits, "Lobby embed should be refreshed after kick"
     # Confirmation message should be sent to the admin

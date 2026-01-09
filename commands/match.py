@@ -10,6 +10,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from commands.lobby import LockedLobbyView
 from config import JOPACOIN_MIN_BET
 from services.lobby_service import LobbyService
 from services.match_discovery_service import MatchDiscoveryService
@@ -73,6 +74,139 @@ class MatchCommands(commands.Cog):
             logger.warning("Cannot unpin lobby message: missing Manage Messages permission.")
         except Exception as exc:
             logger.warning(f"Failed to unpin lobby message: {exc}")
+
+    async def _lock_lobby_thread(
+        self,
+        guild_id: int | None,
+        shuffle_embed: discord.Embed = None,
+        included_player_ids: list[int] | None = None,
+    ) -> None:
+        """Lock the lobby thread when shuffle occurs and post shuffle results."""
+        thread_id = self.lobby_service.get_lobby_thread_id()
+        if not thread_id:
+            return
+
+        thread_shuffle_msg = None
+        try:
+            thread = self.bot.get_channel(thread_id)
+            if not thread:
+                thread = await self.bot.fetch_channel(thread_id)
+
+            # Update thread name to show shuffled state
+            try:
+                await thread.edit(name="🔒 Shuffled - Awaiting Results")
+            except discord.HTTPException:
+                pass  # Rate limit on thread name changes
+
+            # Post shuffle embed to thread (same as main channel)
+            if shuffle_embed:
+                thread_shuffle_msg = await thread.send(embed=shuffle_embed)
+            else:
+                thread_shuffle_msg = await thread.send(
+                    "🔀 **Teams have been shuffled!**\n"
+                    "Use `/record` to record the match result."
+                )
+
+            # Ping included players in thread (subscribes them to thread notifications)
+            if included_player_ids:
+                # Filter out fake users (negative IDs)
+                real_player_ids = [pid for pid in included_player_ids if pid > 0]
+                if real_player_ids:
+                    mentions = " ".join(f"<@{pid}>" for pid in real_player_ids)
+                    await thread.send(f"{mentions}\nPlayers, take your starting positions")
+
+            # Lock the thread so users can't post or use buttons
+            try:
+                await thread.edit(locked=True)
+            except discord.Forbidden:
+                pass
+        except Exception as exc:
+            logger.warning(f"Failed to lock lobby thread: {exc}")
+
+        # Store thread shuffle message ID for betting updates
+        if thread_shuffle_msg:
+            self.match_service.set_shuffle_message_info(
+                guild_id,
+                message_id=None,
+                channel_id=None,
+                thread_message_id=thread_shuffle_msg.id,
+                thread_id=thread_id,
+            )
+
+        # Update channel message (thread starter) with disabled buttons
+        message_id = self.lobby_service.get_lobby_message_id()
+        channel_id = self.lobby_service.get_lobby_channel_id()
+        if message_id and channel_id:
+            try:
+                channel = self.bot.get_channel(channel_id)
+                if not channel:
+                    channel = await self.bot.fetch_channel(channel_id)
+                message = await channel.fetch_message(message_id)
+                # Update with disabled buttons to show lobby is closed
+                await message.edit(view=LockedLobbyView())
+            except Exception as exc:
+                logger.warning(f"Failed to disable lobby buttons: {exc}")
+
+    async def _finalize_lobby_thread(
+        self, guild_id: int | None, winning_result: str, *, thread_id: int | None = None
+    ) -> None:
+        """Post results to lobby thread and archive it."""
+        # Use provided thread_id, or try to get from pending state / lobby_service
+        if not thread_id:
+            pending_state = self.match_service.get_last_shuffle(guild_id)
+            thread_id = pending_state.get("thread_shuffle_thread_id") if pending_state else None
+        if not thread_id:
+            # Fallback to lobby_service in case it's still available
+            thread_id = self.lobby_service.get_lobby_thread_id()
+        if not thread_id:
+            return
+
+        try:
+            thread = self.bot.get_channel(thread_id)
+            if not thread:
+                thread = await self.bot.fetch_channel(thread_id)
+
+            # Post result summary
+            winner = "Radiant" if winning_result == "radiant" else "Dire"
+            await thread.send(f"🏆 **Match Complete - {winner} Victory!**")
+
+            # Wait before archiving so players can see the result
+            await asyncio.sleep(15)
+
+            # Update thread name and archive
+            try:
+                await thread.edit(name=f"✅ Match Complete - {winner} Won", archived=True)
+            except discord.Forbidden:
+                await thread.edit(archived=True)
+        except Exception as exc:
+            logger.warning(f"Failed to finalize lobby thread: {exc}")
+
+    async def _abort_lobby_thread(self, guild_id: int | None) -> None:
+        """Archive the lobby thread when match is aborted."""
+        # Get thread_id from pending state (must be called before clear_last_shuffle)
+        pending_state = self.match_service.get_last_shuffle(guild_id)
+        thread_id = pending_state.get("thread_shuffle_thread_id") if pending_state else None
+        if not thread_id:
+            thread_id = self.lobby_service.get_lobby_thread_id()
+        if not thread_id:
+            return
+
+        try:
+            thread = self.bot.get_channel(thread_id)
+            if not thread:
+                thread = await self.bot.fetch_channel(thread_id)
+
+            await thread.send("🚫 **Match Aborted** - All bets have been refunded.")
+
+            # Wait before archiving so players can see the message
+            await asyncio.sleep(15)
+
+            try:
+                await thread.edit(name="🚫 Match Aborted", archived=True)
+            except discord.Forbidden:
+                await thread.edit(archived=True)
+        except Exception as exc:
+            logger.warning(f"Failed to abort lobby thread: {exc}")
 
     def _format_team_lines(self, team, roles, player_ids, players, guild):
         """Return formatted lines with roles and ratings for a team."""
@@ -316,7 +450,13 @@ class MatchCommands(commands.Cog):
         bet_lock_until = pending_state.get("bet_lock_until") if pending_state else None
         await self._schedule_betting_reminders(guild_id, bet_lock_until)
 
-        # Reset lobby after shuffle
+        # Lock lobby thread and post shuffle results there too
+        included_ids = []
+        if pending_state:
+            included_ids = pending_state.get("radiant_team_ids", []) + pending_state.get(
+                "dire_team_ids", []
+            )
+        await self._lock_lobby_thread(guild_id, shuffle_embed=embed, included_player_ids=included_ids)
         await self._safe_unpin(interaction.channel, self.lobby_service.get_lobby_message_id())
         self.lobby_service.reset_lobby()
 
@@ -410,6 +550,11 @@ class MatchCommands(commands.Cog):
             return
 
         winning_result = submission["result"]
+
+        # Save thread_id before record_match clears the pending state
+        pending_state = self.match_service.get_last_shuffle(guild_id)
+        thread_id_for_finalize = pending_state.get("thread_shuffle_thread_id") if pending_state else None
+
         try:
             record_result = self.match_service.record_match(
                 winning_result, guild_id=guild_id, dotabuff_match_id=dotabuff_match_id
@@ -546,6 +691,9 @@ class MatchCommands(commands.Cog):
         message = f"✅ Match recorded — {winning_team_name}{confirmations_text}.{distribution_text}"
         await interaction.followup.send(message, ephemeral=False)
 
+        # Finalize lobby thread with results (use saved thread_id since pending state is cleared)
+        await self._finalize_lobby_thread(guild_id, winning_result, thread_id=thread_id_for_finalize)
+
         # Trigger auto-discovery in background if enabled
         match_id = record_result.get("match_id")
         if match_id:
@@ -648,6 +796,10 @@ class MatchCommands(commands.Cog):
                 logger.error(f"Error refunding pending bets on abort: {exc}", exc_info=True)
         # Cancel any pending betting reminders
         self._cancel_betting_tasks(guild_id)
+
+        # Archive lobby thread with abort message (must be before clear_last_shuffle)
+        await self._abort_lobby_thread(guild_id)
+
         self.match_service.clear_last_shuffle(guild_id)
         await self._safe_unpin(interaction.channel, self.lobby_service.get_lobby_message_id())
         self.lobby_service.reset_lobby()

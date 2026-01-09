@@ -103,7 +103,7 @@ Displays: Cama Rating (Glicko-2), wins, losses, win rate, jopacoin balance, pref
 ### Lobby Management
 
 #### `/lobby`
-Create or view the matchmaking lobby. React with ⚔️ to join/leave. Requires 10+ players to shuffle.
+Create or view the matchmaking lobby. Use buttons in the thread to join/leave. Requires 10+ players to shuffle.
 
 #### `/kick`
 Kick a player from the lobby.

@@ -49,15 +49,29 @@ class LobbyService:
     def reset_lobby(self):
         self.lobby_manager.reset_lobby()
 
-    def set_lobby_message_id(self, message_id: int | None, channel_id: int | None = None):
-        """Set the lobby message ID and optionally channel ID, persisting to database."""
-        self.lobby_manager.set_lobby_message(message_id, channel_id)
+    def set_lobby_message_id(
+        self,
+        message_id: int | None,
+        channel_id: int | None = None,
+        thread_id: int | None = None,
+        embed_message_id: int | None = None,
+    ):
+        """Set the lobby message ID and optionally channel/thread IDs, persisting to database."""
+        self.lobby_manager.set_lobby_message(
+            message_id, channel_id, thread_id, embed_message_id
+        )
 
     def get_lobby_message_id(self) -> int | None:
         return self.lobby_manager.lobby_message_id
 
     def get_lobby_channel_id(self) -> int | None:
         return self.lobby_manager.lobby_channel_id
+
+    def get_lobby_thread_id(self) -> int | None:
+        return self.lobby_manager.lobby_thread_id
+
+    def get_lobby_embed_message_id(self) -> int | None:
+        return self.lobby_manager.lobby_embed_message_id
 
     def get_lobby_players(self, lobby: Lobby) -> tuple[list[int], list]:
         player_ids = list(lobby.players)
@@ -69,7 +83,10 @@ class LobbyService:
             return None
         player_ids, players = self.get_lobby_players(lobby)
         return create_lobby_embed(
-            lobby, players, player_ids, ready_threshold=self.ready_threshold, bankruptcy_repo=self.bankruptcy_repo
+            lobby, players, player_ids,
+            ready_threshold=self.ready_threshold,
+            max_players=self.max_players,
+            bankruptcy_repo=self.bankruptcy_repo,
         )
 
     def is_ready(self, lobby: Lobby) -> bool:

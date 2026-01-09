@@ -81,6 +81,8 @@ class LobbyManager:
         self.lobby_repo = lobby_repo
         self.lobby_message_id: int | None = None
         self.lobby_channel_id: int | None = None
+        self.lobby_thread_id: int | None = None
+        self.lobby_embed_message_id: int | None = None
         self.lobby: Lobby | None = None
         self._load_state()
 
@@ -114,20 +116,36 @@ class LobbyManager:
             self._persist_lobby()
         return success
 
-    def set_lobby_message(self, message_id: int | None, channel_id: int | None) -> None:
-        """Set the lobby message and channel IDs, persisting to database."""
+    def set_lobby_message(
+        self,
+        message_id: int | None,
+        channel_id: int | None,
+        thread_id: int | None = None,
+        embed_message_id: int | None = None,
+    ) -> None:
+        """Set the lobby message, channel, and thread IDs, persisting to database."""
         self.lobby_message_id = message_id
         self.lobby_channel_id = channel_id
+        if thread_id is not None:
+            self.lobby_thread_id = thread_id
+        if embed_message_id is not None:
+            self.lobby_embed_message_id = embed_message_id
         if self.lobby:
             self._persist_lobby()
 
     def reset_lobby(self) -> None:
+        import logging
+        logger = logging.getLogger("cama_bot.domain.lobby")
+        logger.info(f"reset_lobby called. Current lobby: {self.lobby}")
         if self.lobby:
             self.lobby.status = "closed"
         self.lobby = None
         self.lobby_message_id = None
         self.lobby_channel_id = None
+        self.lobby_thread_id = None
+        self.lobby_embed_message_id = None
         self._clear_persistent_lobby()
+        logger.info("reset_lobby completed - cleared persistent lobby")
 
     def _persist_lobby(self) -> None:
         if not self.lobby:
@@ -140,6 +158,8 @@ class LobbyManager:
             created_at=self.lobby.created_at.isoformat(),
             message_id=self.lobby_message_id,
             channel_id=self.lobby_channel_id,
+            thread_id=self.lobby_thread_id,
+            embed_message_id=self.lobby_embed_message_id,
         )
 
     def _clear_persistent_lobby(self) -> None:
@@ -152,3 +172,5 @@ class LobbyManager:
         self.lobby = Lobby.from_dict(data)
         self.lobby_message_id = data.get("message_id")
         self.lobby_channel_id = data.get("channel_id")
+        self.lobby_thread_id = data.get("thread_id")
+        self.lobby_embed_message_id = data.get("embed_message_id")
