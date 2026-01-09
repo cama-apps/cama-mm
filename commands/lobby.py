@@ -288,6 +288,29 @@ class LobbyCommands(commands.Cog):
             logger.warning(f"Failed to post leave activity: {exc}")
 
 
+    async def _update_channel_message_closed(self, reason: str = "Lobby Closed") -> None:
+        """Update the channel message embed to show lobby is closed."""
+        message_id = self.lobby_service.get_lobby_message_id()
+        channel_id = self.lobby_service.get_lobby_channel_id()
+        if not message_id or not channel_id:
+            return
+
+        try:
+            channel = self.bot.get_channel(channel_id)
+            if not channel:
+                channel = await self.bot.fetch_channel(channel_id)
+            message = await channel.fetch_message(message_id)
+
+            # Create a closed embed
+            embed = discord.Embed(
+                title=f"🚫 {reason}",
+                description="This lobby has been closed.",
+                color=discord.Color.dark_grey(),
+            )
+            await message.edit(embed=embed, view=None)
+        except Exception as exc:
+            logger.warning(f"Failed to update channel message as closed: {exc}")
+
     async def _archive_lobby_thread(self, reason: str = "Lobby Reset") -> None:
         """Lock and archive the lobby thread with a status message."""
         thread_id = self.lobby_service.get_lobby_thread_id()
@@ -522,7 +545,8 @@ class LobbyCommands(commands.Cog):
                 )
             return
 
-        # Archive the lobby thread before resetting
+        # Update channel message to show closed and archive thread
+        await self._update_channel_message_closed("Lobby Reset")
         await self._archive_lobby_thread("Lobby Reset")
 
         await self._safe_unpin(interaction.channel, self.lobby_service.get_lobby_message_id())

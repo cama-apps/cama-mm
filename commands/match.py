@@ -75,6 +75,28 @@ class MatchCommands(commands.Cog):
         except Exception as exc:
             logger.warning(f"Failed to unpin lobby message: {exc}")
 
+    async def _update_channel_message_closed(self, reason: str = "Match Aborted") -> None:
+        """Update the channel message embed to show lobby/match is closed."""
+        message_id = self.lobby_service.get_lobby_message_id()
+        channel_id = self.lobby_service.get_lobby_channel_id()
+        if not message_id or not channel_id:
+            return
+
+        try:
+            channel = self.bot.get_channel(channel_id)
+            if not channel:
+                channel = await self.bot.fetch_channel(channel_id)
+            message = await channel.fetch_message(message_id)
+
+            embed = discord.Embed(
+                title=f"🚫 {reason}",
+                description="This lobby has been closed.",
+                color=discord.Color.dark_grey(),
+            )
+            await message.edit(embed=embed, view=None)
+        except Exception as exc:
+            logger.warning(f"Failed to update channel message as closed: {exc}")
+
     async def _lock_lobby_thread(
         self,
         guild_id: int | None,
@@ -797,7 +819,8 @@ class MatchCommands(commands.Cog):
         # Cancel any pending betting reminders
         self._cancel_betting_tasks(guild_id)
 
-        # Archive lobby thread with abort message (must be before clear_last_shuffle)
+        # Update channel message to show closed and archive thread
+        await self._update_channel_message_closed("Match Aborted")
         await self._abort_lobby_thread(guild_id)
 
         self.match_service.clear_last_shuffle(guild_id)
