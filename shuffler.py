@@ -119,6 +119,121 @@ class BalancedShuffler:
         # Return the maximum delta
         return max(carry_vs_offlane_1, carry_vs_offlane_2, mid_vs_mid)
 
+    def _greedy_shuffle(
+        self, players: list[Player], exclusion_counts: dict[str, int] | None = None
+    ) -> tuple[Team, Team, list[Player], float]:
+        """
+        Greedy snake-draft shuffle for initial upper bound in branch and bound.
+
+        Alternates picking highest-rated players to balance team values.
+
+        Args:
+            players: List of players (10-14)
+            exclusion_counts: Optional dict mapping player names to exclusion counts
+
+        Returns:
+            Tuple of (team1, team2, excluded_players, score)
+        """
+        exclusion_counts = exclusion_counts or {}
+
+        # Sort by rating descending
+        sorted_players = sorted(players, key=lambda p: p.get_value(self.use_glicko), reverse=True)
+
+        # For >10 players, exclude those with lowest exclusion counts first (greedily)
+        if len(players) > 10:
+            # Sort excluded candidates by exclusion count (prefer excluding those with low counts)
+            excluded_candidates = sorted(
+                sorted_players[10:],
+                key=lambda p: exclusion_counts.get(p.name, 0),
+            )
+            selected = sorted_players[:10]
+            excluded = list(excluded_candidates[: len(players) - 10])
+            # Re-sort selected by rating
+            selected = sorted(selected, key=lambda p: p.get_value(self.use_glicko), reverse=True)
+        else:
+            selected = sorted_players
+            excluded = []
+
+        # Snake draft: alternate picks to balance teams
+        team1_players: list[Player] = []
+        team2_players: list[Player] = []
+        for i, player in enumerate(selected):
+            # Snake pattern: 0->T1, 1->T2, 2->T2, 3->T1, 4->T1, 5->T2, ...
+            round_num = i // 2
+            if round_num % 2 == 0:
+                # Even rounds: T1, T2
+                if i % 2 == 0:
+                    team1_players.append(player)
+                else:
+                    team2_players.append(player)
+            else:
+                # Odd rounds: T2, T1
+                if i % 2 == 0:
+                    team2_players.append(player)
+                else:
+                    team1_players.append(player)
+
+        # Optimize role assignments for the greedy teams
+        team1, team2, base_score = self._optimize_role_assignments_for_matchup(
+            team1_players, team2_players, max_assignments_per_team=3
+        )
+
+        # Add exclusion penalty
+        exclusion_penalty = (
+            sum(exclusion_counts.get(p.name, 0) for p in excluded)
+            * self.exclusion_penalty_weight
+        )
+        total_score = base_score + exclusion_penalty
+
+        return team1, team2, excluded, total_score
+
+    def _compute_value_diff_lower_bound(
+        self,
+        team1_sum: float,
+        team2_sum: float,
+        remaining_values: list[float],
+        need_t1: int,
+        need_t2: int,
+    ) -> float:
+        """
+        Compute lower bound on achievable value difference.
+
+        Given partial team sums and remaining player values to assign,
+        compute the minimum possible final value difference.
+
+        Args:
+            team1_sum: Current sum of team1 values
+            team2_sum: Current sum of team2 values
+            remaining_values: Sorted (descending) values of unassigned players
+            need_t1: Number of players still needed for team1
+            need_t2: Number of players still needed for team2
+
+        Returns:
+            Lower bound on value difference
+        """
+        if not remaining_values:
+            return abs(team1_sum - team2_sum)
+
+        # Greedy optimal assignment: always give to the team that's behind
+        t1, t2 = team1_sum, team2_sum
+        n1, n2 = need_t1, need_t2
+
+        for val in remaining_values:
+            if n1 == 0:
+                t2 += val
+                n2 -= 1
+            elif n2 == 0:
+                t1 += val
+                n1 -= 1
+            elif t1 <= t2:
+                t1 += val
+                n1 -= 1
+            else:
+                t2 += val
+                n2 -= 1
+
+        return abs(t1 - t2)
+
     def _optimize_role_assignments_for_matchup(
         self,
         team1_players: list[Player],
@@ -336,6 +451,10 @@ class BalancedShuffler:
             # Just use the regular shuffle
             team1, team2 = self.shuffle(players)
             return team1, team2, []
+
+        if len(players) == 14:
+            # Use branch and bound for 14 players (optimized pruning)
+            return self.shuffle_branch_bound(players, exclusion_counts)
 
         # ---- Performance knobs (kept internal to preserve current public API) ----
         # Pool shuffles are far more expensive than 10-player shuffles. We therefore
@@ -577,6 +696,126 @@ class BalancedShuffler:
             raise RuntimeError("Failed to compute teams from pool shuffle (no matchups evaluated)")
 
         return best_teams[0], best_teams[1], best_excluded
+
+    def shuffle_branch_bound(
+        self, players: list[Player], exclusion_counts: dict[str, int] | None = None
+    ) -> tuple[Team, Team, list[Player]]:
+        """
+        Branch and bound shuffle optimized for 14 players.
+
+        Uses pruning to avoid evaluating team combinations that cannot beat
+        the current best score. Provides significant speedup for large player pools.
+
+        Args:
+            players: List of exactly 14 players
+            exclusion_counts: Optional dict mapping player names to exclusion counts
+
+        Returns:
+            Tuple of (Team1, Team2, excluded_players)
+        """
+        if len(players) != 14:
+            raise ValueError(f"Branch and bound shuffle requires exactly 14 players, got {len(players)}")
+
+        exclusion_counts = exclusion_counts or {}
+
+        # Step 1: Get greedy initial upper bound
+        greedy_t1, greedy_t2, greedy_excluded, best_score = self._greedy_shuffle(
+            players, exclusion_counts
+        )
+        best_result: tuple[Team, Team, list[Player]] = (greedy_t1, greedy_t2, greedy_excluded)
+
+        logger.info(f"Branch & bound: greedy upper bound = {best_score:.1f}")
+
+        # Precompute player values for fast lower bound calculations
+        player_values = {p.name: p.get_value(self.use_glicko) for p in players}
+
+        # Track pruning statistics
+        pruned_player_selections = 0
+        pruned_team_splits = 0
+        evaluated_matchups = 0
+
+        # Step 2: Iterate through all ways to select 10 players from 14
+        # C(14,10) = C(14,4) = 1001 combinations
+        for selected_indices in itertools.combinations(range(14), 10):
+            selected_players = [players[i] for i in selected_indices]
+            excluded_players = [players[i] for i in range(14) if i not in selected_indices]
+            excluded_names = [p.name for p in excluded_players]
+
+            # Compute exclusion penalty for this selection
+            exclusion_penalty = (
+                sum(exclusion_counts.get(name, 0) for name in excluded_names)
+                * self.exclusion_penalty_weight
+            )
+
+            # Quick pruning: if exclusion penalty alone exceeds best score, skip
+            if exclusion_penalty >= best_score:
+                pruned_player_selections += 1
+                continue
+
+            # Precompute selected player values (sorted descending for lower bound calc)
+            selected_values = sorted(
+                [player_values[p.name] for p in selected_players], reverse=True
+            )
+
+            # Step 3: Iterate through team splits with pruning
+            # We use combinations to avoid duplicates (T1={A,B,C,D,E} vs T2={F,G,H,I,J}
+            # is same as T1={F,G,H,I,J} vs T2={A,B,C,D,E})
+            seen_splits = set()
+
+            for team1_indices in itertools.combinations(range(10), 5):
+                team1_players = [selected_players[i] for i in team1_indices]
+                team2_indices = [i for i in range(10) if i not in team1_indices]
+                team2_players = [selected_players[i] for i in team2_indices]
+
+                # Canonical key to avoid duplicate splits
+                t1_key = frozenset(p.name for p in team1_players)
+                t2_key = frozenset(p.name for p in team2_players)
+                split_key = frozenset([t1_key, t2_key])
+                if split_key in seen_splits:
+                    continue
+                seen_splits.add(split_key)
+
+                # Compute value difference lower bound (before role optimization)
+                t1_sum = sum(player_values[p.name] for p in team1_players)
+                t2_sum = sum(player_values[p.name] for p in team2_players)
+                value_diff_lb = abs(t1_sum - t2_sum)
+
+                # Quick lower bound: value_diff + exclusion_penalty (ignore role penalties)
+                lower_bound = value_diff_lb + exclusion_penalty
+
+                # Prune if lower bound >= best score
+                if lower_bound >= best_score:
+                    pruned_team_splits += 1
+                    continue
+
+                # Step 4: Full role optimization (only for promising splits)
+                evaluated_matchups += 1
+                team1, team2, base_score = self._optimize_role_assignments_for_matchup(
+                    team1_players, team2_players, max_assignments_per_team=3
+                )
+
+                total_score = base_score + exclusion_penalty
+
+                if total_score < best_score:
+                    best_score = total_score
+                    best_result = (team1, team2, excluded_players)
+
+                    # Early termination on perfect match
+                    if best_score <= 0:
+                        logger.info("Branch & bound: perfect match found, early termination")
+                        break
+
+            # Check for early termination after inner loop
+            if best_score <= 0:
+                break
+
+        logger.info(
+            f"Branch & bound stats: pruned {pruned_player_selections} player selections, "
+            f"{pruned_team_splits} team splits, evaluated {evaluated_matchups} matchups"
+        )
+        logger.info(f"Branch & bound: final score = {best_score:.1f}")
+
+        return best_result
 
     def shuffle_monte_carlo(self, players: list[Player], top_n: int = 3) -> tuple[Team, Team]:
         """

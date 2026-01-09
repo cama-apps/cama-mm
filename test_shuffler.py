@@ -556,6 +556,20 @@ class TestRoleMatchupDelta:
         assert score_half == pytest.approx(500)  # 300 + (400 * 0.5)
 
 
+def _create_players_with_roles(count: int, base_mmr: int = 1500, spread: int = 50) -> list[Player]:
+    """Create test players with realistic role preferences for efficient B&B pruning."""
+    roles_cycle = [["1"], ["2"], ["3"], ["4"], ["5"], ["1", "2"], ["3", "4"], ["4", "5"]]
+    return [
+        Player(
+            name=f"Player{i}",
+            mmr=base_mmr + i * spread,
+            glicko_rating=float(base_mmr + i * spread // 2),
+            preferred_roles=roles_cycle[i % len(roles_cycle)],
+        )
+        for i in range(count)
+    ]
+
+
 class TestShuffler14Players:
     """Tests for 14-player pool shuffling (new max lobby size)."""
 
@@ -565,10 +579,7 @@ class TestShuffler14Players:
         - 10 players selected for match
         - 4 players excluded
         """
-        players = [
-            Player(name=f"Player{i}", mmr=1500 + i * 50, glicko_rating=1500.0 + i * 25)
-            for i in range(14)
-        ]
+        players = _create_players_with_roles(14)
         shuffler = BalancedShuffler(use_glicko=True, off_role_flat_penalty=100.0)
 
         exclusion_counts = {pl.name: 0 for pl in players}
@@ -591,10 +602,7 @@ class TestShuffler14Players:
         Same input should produce same output (full enumeration, no sampling).
         C(14,10) = 1001 < 2500 sampling limit.
         """
-        players = [
-            Player(name=f"Player{i}", mmr=1500 + i * 50, glicko_rating=1500.0 + i * 25)
-            for i in range(14)
-        ]
+        players = _create_players_with_roles(14)
         shuffler = BalancedShuffler(use_glicko=True, off_role_flat_penalty=100.0)
 
         exclusion_counts = {pl.name: 0 for pl in players}
@@ -618,10 +626,7 @@ class TestShuffler14Players:
         Test that exclusion penalty affects player selection in 14-player pool.
         Players with high exclusion counts should be included over those with 0.
         """
-        players = [
-            Player(name=f"Player{i}", mmr=1500, glicko_rating=1500.0)
-            for i in range(14)
-        ]
+        players = _create_players_with_roles(14, base_mmr=1500, spread=0)
 
         # Give first 4 players high exclusion counts
         exclusion_counts = {}
@@ -705,10 +710,7 @@ class TestShuffler14Players:
 
     def test_13_player_pool(self):
         """Test 13-player pool (edge case between 12 and 14)."""
-        players = [
-            Player(name=f"Player{i}", mmr=1500 + i * 50, glicko_rating=1500.0 + i * 25)
-            for i in range(13)
-        ]
+        players = _create_players_with_roles(13)
         shuffler = BalancedShuffler(use_glicko=True, off_role_flat_penalty=100.0)
 
         exclusion_counts = {pl.name: 0 for pl in players}
@@ -731,10 +733,7 @@ class TestExclusionPenaltyWeight75:
         """
         Test that higher exclusion penalty weight (75) prevents repeated exclusions.
         """
-        players = [
-            Player(name=f"Player{i}", mmr=1500, glicko_rating=1500.0)
-            for i in range(14)
-        ]
+        players = _create_players_with_roles(14, base_mmr=1500, spread=0)
 
         # Scenario: first 4 players have been excluded twice each
         exclusion_counts = {}
