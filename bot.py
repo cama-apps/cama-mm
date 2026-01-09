@@ -452,11 +452,6 @@ async def update_lobby_message(message, lobby):
         embed = lobby_service.build_lobby_embed(lobby)
         if embed:
             await message.edit(embed=embed, allowed_mentions=discord.AllowedMentions.none())
-            if lobby.get_player_count() < lobby_service.ready_threshold:
-                try:
-                    await message.add_reaction("⚔️")
-                except Exception:
-                    pass
     except Exception as exc:
         logger.error(f"Error updating lobby message: {exc}", exc_info=True)
 
