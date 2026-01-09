@@ -398,9 +398,9 @@ class TestShuffler:
 
     def test_exclusion_penalty_weight_parameter(self):
         """Test that exclusion_penalty_weight parameter is stored correctly."""
-        # Test default value (75.0 per PRD lobby-size-exclusion)
+        # Test default value
         shuffler1 = BalancedShuffler()
-        assert shuffler1.exclusion_penalty_weight == 75.0
+        assert shuffler1.exclusion_penalty_weight == 50.0
 
         # Test custom value
         shuffler2 = BalancedShuffler(exclusion_penalty_weight=10.0)
@@ -721,17 +721,17 @@ class TestShuffler14Players:
         assert len(excluded) == 3
 
 
-class TestExclusionPenaltyWeight75:
-    """Tests for the new exclusion penalty weight (75.0)."""
+class TestExclusionPenaltyWeightDefault:
+    """Tests for the default exclusion penalty weight."""
 
-    def test_default_weight_is_75(self):
-        """Test that default exclusion penalty weight is now 75."""
+    def test_default_weight_is_50(self):
+        """Test that default exclusion penalty weight is 50."""
         from config import SHUFFLER_SETTINGS
-        assert SHUFFLER_SETTINGS["exclusion_penalty_weight"] == 75.0
+        assert SHUFFLER_SETTINGS["exclusion_penalty_weight"] == 50.0
 
     def test_higher_weight_prevents_repeat_exclusions(self):
         """
-        Test that higher exclusion penalty weight (75) prevents repeated exclusions.
+        Test that a higher exclusion penalty weight prevents repeated exclusions.
         """
         players = _create_players_with_roles(14, base_mmr=1500, spread=0)
 

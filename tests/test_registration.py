@@ -187,7 +187,9 @@ class TestMMRPromptViewSignature:
 
         # Read the registration.py file and find the enter_mmr callback
         registration_path = Path(__file__).parent.parent / "commands" / "registration.py"
-        source = registration_path.read_text()
+        # Be explicit about encoding for Windows compatibility (Path.read_text() defaults
+        # to the locale encoding, which may choke on UTF-8 byte sequences).
+        source = registration_path.read_text(encoding="utf-8")
 
         # Find the enter_mmr function definition
         # Pattern: async def enter_mmr(self, <param1>: <type1>, <param2>: <type2>)

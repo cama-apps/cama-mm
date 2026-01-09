@@ -256,31 +256,41 @@ class TestDatabase:
         player_id = 11101
         test_db.add_player(discord_id=player_id, discord_username="TestPlayer", initial_mmr=1500)
 
-        # Increment exclusion count
+        # Increment exclusion count twice (4 per exclusion)
         test_db.increment_exclusion_count(player_id)
 
-        # Verify count increased
+        # Verify count increased by 4
         exclusion_counts = test_db.get_exclusion_counts([player_id])
-        assert exclusion_counts[player_id] == 1
+        assert exclusion_counts[player_id] == 4
 
         # Increment again
         test_db.increment_exclusion_count(player_id)
         exclusion_counts = test_db.get_exclusion_counts([player_id])
-        assert exclusion_counts[player_id] == 2
+        assert exclusion_counts[player_id] == 8
 
     def test_decay_exclusion_count(self, test_db):
         """Test decaying a player's exclusion count (halves it)."""
         player_id = 11201
         test_db.add_player(discord_id=player_id, discord_username="TestPlayer", initial_mmr=1500)
 
-        # Set exclusion count to 10
+        # Set exclusion count to 10 exclusions (count becomes 40)
         for _ in range(10):
             test_db.increment_exclusion_count(player_id)
 
         exclusion_counts = test_db.get_exclusion_counts([player_id])
+        assert exclusion_counts[player_id] == 40
+
+        # Decay (should become 20)
+        test_db.decay_exclusion_count(player_id)
+        exclusion_counts = test_db.get_exclusion_counts([player_id])
+        assert exclusion_counts[player_id] == 20
+
+        # Decay again (should become 10)
+        test_db.decay_exclusion_count(player_id)
+        exclusion_counts = test_db.get_exclusion_counts([player_id])
         assert exclusion_counts[player_id] == 10
 
-        # Decay (should become 5)
+        # Decay again (should become 5)
         test_db.decay_exclusion_count(player_id)
         exclusion_counts = test_db.get_exclusion_counts([player_id])
         assert exclusion_counts[player_id] == 5
@@ -305,17 +315,17 @@ class TestDatabase:
         player_id = 11301
         test_db.add_player(discord_id=player_id, discord_username="TestPlayer", initial_mmr=1500)
 
-        # Set count to 7
+        # Set count to 7 exclusions (28 total)
         for _ in range(7):
             test_db.increment_exclusion_count(player_id)
 
         exclusion_counts = test_db.get_exclusion_counts([player_id])
-        assert exclusion_counts[player_id] == 7
+        assert exclusion_counts[player_id] == 28
 
-        # Decay: 7 / 2 = 3 (rounded down)
+        # Decay: 28 / 2 = 14
         test_db.decay_exclusion_count(player_id)
         exclusion_counts = test_db.get_exclusion_counts([player_id])
-        assert exclusion_counts[player_id] == 3
+        assert exclusion_counts[player_id] == 14
 
 
 if __name__ == "__main__":

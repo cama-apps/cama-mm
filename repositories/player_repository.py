@@ -665,13 +665,13 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             return {row["discord_id"]: row["exclusion_count"] for row in rows}
 
     def increment_exclusion_count(self, discord_id: int) -> None:
-        """Increment player's exclusion count."""
+        """Increment player's exclusion count by 4."""
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
                 UPDATE players
-                SET exclusion_count = COALESCE(exclusion_count, 0) + 1,
+                SET exclusion_count = COALESCE(exclusion_count, 0) + 4,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE discord_id = ?
             """,
