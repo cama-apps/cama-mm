@@ -110,16 +110,16 @@ class TestPlayerRepository:
         counts = player_repository.get_exclusion_counts([12345])
         assert counts[12345] == 0
 
-        # Increment
+        # Increment twice (4 per exclusion)
         player_repository.increment_exclusion_count(12345)
         player_repository.increment_exclusion_count(12345)
         counts = player_repository.get_exclusion_counts([12345])
-        assert counts[12345] == 2
+        assert counts[12345] == 8
 
         # Decay (halves the count)
         player_repository.decay_exclusion_count(12345)
         counts = player_repository.get_exclusion_counts([12345])
-        assert counts[12345] == 1
+        assert counts[12345] == 4
 
     def test_delete_player(self, player_repository):
         """Test deleting a player."""

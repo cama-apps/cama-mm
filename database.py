@@ -545,7 +545,7 @@ class Database:
 
     def increment_exclusion_count(self, discord_id: int):
         """
-        Increment a player's exclusion count by 1.
+        Increment a player's exclusion count by 4.
         Called when a player is excluded from a match.
 
         Args:
@@ -557,7 +557,7 @@ class Database:
             cursor.execute(
                 """
                 UPDATE players
-                SET exclusion_count = COALESCE(exclusion_count, 0) + 1, updated_at = CURRENT_TIMESTAMP
+                SET exclusion_count = COALESCE(exclusion_count, 0) + 4, updated_at = CURRENT_TIMESTAMP
                 WHERE discord_id = ?
             """,
                 (discord_id,),
