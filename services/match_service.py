@@ -133,6 +133,8 @@ class MatchService:
             "message_id": state.get("shuffle_message_id"),
             "channel_id": state.get("shuffle_channel_id"),
             "jump_url": state.get("shuffle_message_jump_url"),
+            "thread_message_id": state.get("thread_shuffle_message_id"),
+            "thread_id": state.get("thread_shuffle_thread_id"),
         }
 
     def clear_last_shuffle(self, guild_id: int | None) -> None:

@@ -221,49 +221,60 @@ class BettingCommands(commands.Cog):
         message_info = self.match_service.get_shuffle_message_info(guild_id)
         message_id = message_info.get("message_id") if message_info else None
         channel_id = message_info.get("channel_id") if message_info else None
-        if not message_id or not channel_id:
+        thread_message_id = message_info.get("thread_message_id") if message_info else None
+        thread_id = message_info.get("thread_id") if message_info else None
+
+        totals = self.betting_service.get_pot_odds(guild_id, pending_state=pending_state)
+        betting_mode = pending_state.get("betting_mode", "pool")
+
+        # Format bets with odds for pool mode
+        _, totals_text = format_betting_display(
+            totals["radiant"], totals["dire"], betting_mode, lock_until=None
+        )
+        mode_label = "Pool" if betting_mode == "pool" else "House (1:1)"
+
+        if reminder_type == "warning":
+            if not lock_until:
+                return
+            content = (
+                f"⏰ **5 minutes remaining until betting closes!** (<t:{int(lock_until)}:R>)\n"
+                f"Mode: {mode_label}\n\n"
+                f"Current bets:\n{totals_text}"
+            )
+        elif reminder_type == "closed":
+            content = (
+                f"🔒 **Betting is now closed!**\n"
+                f"Mode: {mode_label}\n\n"
+                f"Final bets:\n{totals_text}"
+            )
+        else:
             return
 
-        try:
-            channel = self.bot.get_channel(channel_id)
-            if channel is None:
-                channel = await self.bot.fetch_channel(channel_id)
-            if channel is None:
-                return
+        # Post to channel
+        if message_id and channel_id:
+            try:
+                channel = self.bot.get_channel(channel_id)
+                if channel is None:
+                    channel = await self.bot.fetch_channel(channel_id)
+                if channel:
+                    message = await channel.fetch_message(message_id)
+                    if message:
+                        await message.reply(content, allowed_mentions=discord.AllowedMentions.none())
+            except Exception as exc:
+                logger.warning(f"Failed to send betting reminder to channel: {exc}", exc_info=True)
 
-            message = await channel.fetch_message(message_id)
-            if not message:
-                return
-
-            totals = self.betting_service.get_pot_odds(guild_id, pending_state=pending_state)
-            betting_mode = pending_state.get("betting_mode", "pool")
-
-            # Format bets with odds for pool mode
-            _, totals_text = format_betting_display(
-                totals["radiant"], totals["dire"], betting_mode, lock_until=None
-            )
-            mode_label = "Pool" if betting_mode == "pool" else "House (1:1)"
-
-            if reminder_type == "warning":
-                if not lock_until:
-                    return
-                content = (
-                    f"⏰ **5 minutes remaining until betting closes!** (<t:{int(lock_until)}:R>)\n"
-                    f"Mode: {mode_label}\n\n"
-                    f"Current bets:\n{totals_text}"
-                )
-            elif reminder_type == "closed":
-                content = (
-                    f"🔒 **Betting is now closed!**\n"
-                    f"Mode: {mode_label}\n\n"
-                    f"Final bets:\n{totals_text}"
-                )
-            else:
-                return
-
-            await message.reply(content, allowed_mentions=discord.AllowedMentions.none())
-        except Exception as exc:
-            logger.warning(f"Failed to send betting reminder: {exc}", exc_info=True)
+        # Post to thread
+        if thread_message_id and thread_id:
+            try:
+                thread = self.bot.get_channel(thread_id)
+                if thread is None:
+                    thread = await self.bot.fetch_channel(thread_id)
+                if thread:
+                    thread_message = await thread.fetch_message(thread_message_id)
+                    if thread_message:
+                        await thread_message.reply(content, allowed_mentions=discord.AllowedMentions.none())
+            except Exception as exc:
+                logger.warning(f"Failed to send betting reminder to thread: {exc}", exc_info=True)
 
     @app_commands.command(
         name="bet",

@@ -10,7 +10,6 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from commands.lobby import LockedLobbyView
 from config import JOPACOIN_MIN_BET
 from services.lobby_service import LobbyService
 from services.match_discovery_service import MatchDiscoveryService
@@ -120,7 +119,7 @@ class MatchCommands(commands.Cog):
             except discord.HTTPException:
                 pass  # Rate limit on thread name changes
 
-            # Post shuffle embed to thread (same as main channel)
+            # Post shuffle embed to thread
             if shuffle_embed:
                 thread_shuffle_msg = await thread.send(embed=shuffle_embed)
             else:
@@ -154,20 +153,6 @@ class MatchCommands(commands.Cog):
                 thread_message_id=thread_shuffle_msg.id,
                 thread_id=thread_id,
             )
-
-        # Update channel message (thread starter) with disabled buttons
-        message_id = self.lobby_service.get_lobby_message_id()
-        channel_id = self.lobby_service.get_lobby_channel_id()
-        if message_id and channel_id:
-            try:
-                channel = self.bot.get_channel(channel_id)
-                if not channel:
-                    channel = await self.bot.fetch_channel(channel_id)
-                message = await channel.fetch_message(message_id)
-                # Update with disabled buttons to show lobby is closed
-                await message.edit(view=LockedLobbyView())
-            except Exception as exc:
-                logger.warning(f"Failed to disable lobby buttons: {exc}")
 
     async def _finalize_lobby_thread(
         self, guild_id: int | None, winning_result: str, *, thread_id: int | None = None
@@ -452,7 +437,20 @@ class MatchCommands(commands.Cog):
         )
         embed.add_field(name=wager_field_name, value=wager_field_value, inline=False)
 
-        message = await interaction.followup.send(embed=embed)
+        # Always post shuffle embed to the lobby channel (not as followup)
+        channel_id = self.lobby_service.get_lobby_channel_id()
+        message = None
+        if channel_id:
+            try:
+                channel = self.bot.get_channel(channel_id)
+                if not channel:
+                    channel = await self.bot.fetch_channel(channel_id)
+                message = await channel.send(embed=embed)
+            except Exception as exc:
+                logger.warning(f"Failed to post shuffle to channel: {exc}")
+
+        # Send ephemeral confirmation to user
+        await interaction.followup.send("✅ Teams shuffled!", ephemeral=True)
 
         # Save the shuffle message link so pending-match prompts can point to it
         try:
@@ -478,7 +476,11 @@ class MatchCommands(commands.Cog):
             included_ids = pending_state.get("radiant_team_ids", []) + pending_state.get(
                 "dire_team_ids", []
             )
-        await self._lock_lobby_thread(guild_id, shuffle_embed=embed, included_player_ids=included_ids)
+        await self._lock_lobby_thread(
+            guild_id,
+            shuffle_embed=embed,
+            included_player_ids=included_ids,
+        )
         await self._safe_unpin(interaction.channel, self.lobby_service.get_lobby_message_id())
         self.lobby_service.reset_lobby()
 
