@@ -128,17 +128,37 @@ class BettingCommands(commands.Cog):
     async def _update_shuffle_message_wagers(self, guild_id: int | None) -> None:
         """
         Refresh the shuffle message's wager field with current totals.
+        Updates both the main channel message and the thread copy.
         """
         pending_state = self.match_service.get_last_shuffle(guild_id)
         if not pending_state:
             return
 
+        # Get betting display info
+        totals = self.betting_service.get_pot_odds(guild_id, pending_state=pending_state)
+        lock_until = pending_state.get("bet_lock_until")
+        betting_mode = pending_state.get("betting_mode", "pool")
+        field_name, field_value = format_betting_display(
+            totals["radiant"], totals["dire"], betting_mode, lock_until
+        )
+
+        # Update main channel message
         message_info = self.match_service.get_shuffle_message_info(guild_id)
         message_id = message_info.get("message_id") if message_info else None
         channel_id = message_info.get("channel_id") if message_info else None
-        if not message_id or not channel_id:
-            return
+        if message_id and channel_id:
+            await self._update_embed_betting_field(channel_id, message_id, field_name, field_value)
 
+        # Update thread message if it exists
+        thread_message_id = pending_state.get("thread_shuffle_message_id")
+        thread_id = pending_state.get("thread_shuffle_thread_id")
+        if thread_message_id and thread_id:
+            await self._update_embed_betting_field(thread_id, thread_message_id, field_name, field_value)
+
+    async def _update_embed_betting_field(
+        self, channel_id: int, message_id: int, field_name: str, field_value: str
+    ) -> None:
+        """Helper to update the betting field in an embed message."""
         try:
             channel = self.bot.get_channel(channel_id)
             if channel is None:
@@ -151,14 +171,6 @@ class BettingCommands(commands.Cog):
                 return
 
             embed = message.embeds[0]
-            totals = self.betting_service.get_pot_odds(guild_id, pending_state=pending_state)
-            lock_until = pending_state.get("bet_lock_until")
-            betting_mode = pending_state.get("betting_mode", "pool")
-
-            field_name, field_value = format_betting_display(
-                totals["radiant"], totals["dire"], betting_mode, lock_until
-            )
-
             embed_dict = embed.to_dict()
             fields = embed_dict.get("fields", [])
 

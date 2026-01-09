@@ -234,6 +234,8 @@ class ILobbyRepository(ABC):
         created_at: str,
         message_id: int | None = None,
         channel_id: int | None = None,
+        thread_id: int | None = None,
+        embed_message_id: int | None = None,
     ) -> None: ...
 
     @abstractmethod

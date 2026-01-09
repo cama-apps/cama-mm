@@ -79,7 +79,7 @@ def format_player_list(players, player_ids, bankruptcy_repo=None):
 
 
 def create_lobby_embed(
-    lobby, players, player_ids, ready_threshold: int = 10, bankruptcy_repo=None
+    lobby, players, player_ids, ready_threshold: int = 10, max_players: int = 14, bankruptcy_repo=None
 ):
     """Create the lobby embed with player list and status."""
     player_count = lobby.get_player_count()
@@ -98,7 +98,7 @@ def create_lobby_embed(
     player_list, unique_count = format_player_list(players, player_ids, bankruptcy_repo)
 
     embed.add_field(
-        name=f"Players ({player_count}/12)",
+        name=f"Players ({player_count}/{max_players})",
         value=player_list if players else "No players yet",
         inline=False,
     )
@@ -112,7 +112,7 @@ def create_lobby_embed(
     else:
         embed.add_field(
             name="Status",
-            value="🟢 Open - React with ⚔️ to join!",
+            value="🟢 Open - Click the thread to join!",
             inline=False,
         )
 

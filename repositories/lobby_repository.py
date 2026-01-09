@@ -22,14 +22,17 @@ class LobbyRepository(BaseRepository, ILobbyRepository):
         created_at: str,
         message_id: int | None = None,
         channel_id: int | None = None,
+        thread_id: int | None = None,
+        embed_message_id: int | None = None,
     ) -> None:
         payload = json.dumps(players)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                INSERT INTO lobby_state (lobby_id, players, status, created_by, created_at, message_id, channel_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO lobby_state (lobby_id, players, status, created_by, created_at,
+                                         message_id, channel_id, thread_id, embed_message_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(lobby_id) DO UPDATE SET
                     players = excluded.players,
                     status = excluded.status,
@@ -37,9 +40,12 @@ class LobbyRepository(BaseRepository, ILobbyRepository):
                     created_at = excluded.created_at,
                     message_id = excluded.message_id,
                     channel_id = excluded.channel_id,
+                    thread_id = excluded.thread_id,
+                    embed_message_id = excluded.embed_message_id,
                     updated_at = CURRENT_TIMESTAMP
                 """,
-                (lobby_id, payload, status, created_by, created_at, message_id, channel_id),
+                (lobby_id, payload, status, created_by, created_at, message_id, channel_id,
+                 thread_id, embed_message_id),
             )
 
     def load_lobby_state(self, lobby_id: int) -> dict | None:
@@ -58,9 +64,14 @@ class LobbyRepository(BaseRepository, ILobbyRepository):
                 "created_at": row_dict["created_at"],
                 "message_id": row_dict.get("message_id"),
                 "channel_id": row_dict.get("channel_id"),
+                "thread_id": row_dict.get("thread_id"),
+                "embed_message_id": row_dict.get("embed_message_id"),
             }
 
     def clear_lobby_state(self, lobby_id: int) -> None:
+        import logging
+        logger = logging.getLogger("cama_bot.repositories.lobby")
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM lobby_state WHERE lobby_id = ?", (lobby_id,))
+            logger.info(f"Cleared lobby state for lobby_id={lobby_id}, rows affected={cursor.rowcount}")

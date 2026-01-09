@@ -151,3 +151,32 @@ async def test_resetlobby_denies_non_admin_non_creator(monkeypatch):
     assert lobby_service.get_lobby() is not None, "Lobby should remain when permission denied"
     assert interaction.followup.messages
     assert "Permission denied" in interaction.followup.messages[0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_resetlobby_new_lobby_is_empty(monkeypatch):
+    """After reset, creating a new lobby should have zero players."""
+    lobby_manager, lobby_service = make_lobby_service()
+
+    # Create lobby and add players
+    lobby = lobby_service.get_or_create_lobby(creator_id=99)
+    lobby_service.join_lobby(1)
+    lobby_service.join_lobby(2)
+    lobby_service.join_lobby(3)
+    assert lobby.get_player_count() == 3
+
+    interaction = FakeInteraction(user_id=99)
+    monkeypatch.setattr("commands.lobby.safe_defer", AsyncMock(return_value=True))
+    monkeypatch.setattr("commands.lobby.has_admin_permission", lambda _interaction: True)
+
+    cog = LobbyCommands(make_bot(match_service=None), lobby_service, FakePlayerService())
+    await invoke_reset(cog, interaction)
+
+    # After reset, get_lobby should be None
+    assert lobby_service.get_lobby() is None
+
+    # Create a new lobby
+    new_lobby = lobby_service.get_or_create_lobby(creator_id=99)
+
+    # New lobby should have 0 players, not the old 3
+    assert new_lobby.get_player_count() == 0, "New lobby should be empty after reset"

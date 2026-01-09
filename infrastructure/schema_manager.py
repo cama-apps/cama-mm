@@ -192,6 +192,7 @@ class SchemaManager:
             ("add_last_match_date_to_players", self._migration_add_last_match_date_to_players),
             ("add_bet_is_blind_column", self._migration_add_bet_is_blind_column),
             ("add_bet_odds_at_placement_column", self._migration_add_bet_odds_at_placement_column),
+            ("add_lobby_thread_columns", self._migration_add_lobby_thread_columns),
         ]
 
     # --- Migrations ---
@@ -652,3 +653,8 @@ class SchemaManager:
     def _migration_add_bet_odds_at_placement_column(self, cursor) -> None:
         """Add odds_at_placement column to bets table for historical odds tracking."""
         self._add_column_if_not_exists(cursor, "bets", "odds_at_placement", "REAL")
+
+    def _migration_add_lobby_thread_columns(self, cursor) -> None:
+        """Add thread_id and embed_message_id columns to lobby_state for thread support."""
+        self._add_column_if_not_exists(cursor, "lobby_state", "thread_id", "INTEGER")
+        self._add_column_if_not_exists(cursor, "lobby_state", "embed_message_id", "INTEGER")

@@ -77,47 +77,48 @@ class AdminCommands(commands.Cog):
             f"with count={count}"
         )
 
-        # Check if defer succeeds - if False, another handler already processed this
-        defer_success = await safe_defer(interaction, ephemeral=True)
-        if not defer_success:
-            logger.warning(
-                f"addfake: Failed to defer interaction {interaction.id} - "
-                f"likely already processed by another handler"
-            )
-            return
+        # Track if we can respond - continue processing even if defer fails
+        can_respond = await safe_defer(interaction, ephemeral=True)
 
         if not has_admin_permission(interaction):
-            await safe_followup(
-                interaction,
-                content="❌ Admin only! You need Administrator or Manage Server permissions.",
-                ephemeral=True,
-            )
+            if can_respond:
+                await safe_followup(
+                    interaction,
+                    content="❌ Admin only! You need Administrator or Manage Server permissions.",
+                    ephemeral=True,
+                )
             return
 
         if count < 1 or count > 10:
-            await safe_followup(
-                interaction,
-                content="❌ Count must be between 1 and 10.",
-                ephemeral=True,
-            )
+            if can_respond:
+                await safe_followup(
+                    interaction,
+                    content="❌ Count must be between 1 and 10.",
+                    ephemeral=True,
+                )
             return
 
         lobby = self.lobby_service.get_or_create_lobby()
         current = lobby.get_player_count()
         if current + count > self.lobby_service.max_players:
-            await safe_followup(
-                interaction,
-                content=(
-                    f"❌ Adding {count} users would exceed {self.lobby_service.max_players} players. "
-                    f"Currently {current}/{self.lobby_service.max_players}."
-                ),
-                ephemeral=True,
-            )
+            if can_respond:
+                await safe_followup(
+                    interaction,
+                    content=(
+                        f"❌ Adding {count} users would exceed {self.lobby_service.max_players} players. "
+                        f"Currently {current}/{self.lobby_service.max_players}."
+                    ),
+                    ephemeral=True,
+                )
             return
 
         fake_users_added = []
         role_choices = list(ROLE_EMOJIS.keys())
-        next_index = 1
+
+        # Find highest existing fake user index to continue from there
+        lobby = self.lobby_service.get_lobby()
+        existing_fake_ids = [pid for pid in lobby.players if pid < 0]
+        next_index = max([-pid for pid in existing_fake_ids], default=0) + 1
 
         for _ in range(count):
             fake_id = -next_index
@@ -144,14 +145,19 @@ class AdminCommands(commands.Cog):
                 except ValueError:
                     pass
 
-            lobby.add_player(fake_id)
-            fake_users_added.append(fake_name)
+            success, _ = self.lobby_service.join_lobby(fake_id)
+            if success:
+                fake_users_added.append(fake_name)
 
         # Update lobby message if it exists
+        lobby = self.lobby_service.get_lobby()  # Get fresh lobby state
         message_id = self.lobby_service.get_lobby_message_id()
-        if message_id:
+        channel_id = self.lobby_service.get_lobby_channel_id()
+        if message_id and channel_id and lobby:
             try:
-                channel = interaction.channel
+                channel = self.bot.get_channel(channel_id)
+                if not channel:
+                    channel = await self.bot.fetch_channel(channel_id)
                 message = await channel.fetch_message(message_id)
                 embed = self.lobby_service.build_lobby_embed(lobby)
                 if embed:
@@ -159,13 +165,15 @@ class AdminCommands(commands.Cog):
             except Exception as exc:
                 logger.warning(f"Failed to refresh lobby message after addfake: {exc}")
 
-        await safe_followup(
-            interaction,
-            content=(
-                f"✅ Added {len(fake_users_added)} fake user(s): " + ", ".join(fake_users_added)
-            ),
-            ephemeral=True,
-        )
+        if can_respond:
+            await safe_followup(
+                interaction,
+                content=(
+                    f"✅ Added {len(fake_users_added)} fake user(s): " + ", ".join(fake_users_added)
+                ),
+                ephemeral=True,
+            )
+        logger.info(f"addfake completed: added {len(fake_users_added)} fake users")
 
     @app_commands.command(
         name="resetuser", description="Reset a specific user's account (Admin only)"

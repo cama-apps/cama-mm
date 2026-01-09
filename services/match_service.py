@@ -102,9 +102,12 @@ class MatchService:
         message_id: int | None,
         channel_id: int | None,
         jump_url: str | None = None,
+        thread_message_id: int | None = None,
+        thread_id: int | None = None,
     ) -> None:
         """
         Store message metadata (id, channel, jump_url) for the pending shuffle.
+        Also stores thread message info for updating betting display in thread.
         """
         state = self.get_last_shuffle(guild_id)
         if not state:
@@ -115,6 +118,10 @@ class MatchService:
             state["shuffle_channel_id"] = channel_id
         if jump_url is not None:
             state["shuffle_message_jump_url"] = jump_url
+        if thread_message_id is not None:
+            state["thread_shuffle_message_id"] = thread_message_id
+        if thread_id is not None:
+            state["thread_shuffle_thread_id"] = thread_id
         self._persist_match_state(guild_id, state)
 
     def get_shuffle_message_info(self, guild_id: int | None) -> dict[str, int | None]:

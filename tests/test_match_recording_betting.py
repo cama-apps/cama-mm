@@ -145,6 +145,61 @@ class TestBettingEndToEnd:
         for pid in included_ids:
             assert player_repo.get_balance(pid) != JOPACOIN_EXCLUSION_REWARD
 
+    def test_max_lobby_14_players_4_excluded(self, test_db):
+        """
+        Test max lobby scenario: 14 players with 4 excluded.
+
+        This tests the maximum lobby size to ensure all excluded players
+        are correctly tracked and receive exclusion bonuses.
+        """
+        player_repo = PlayerRepository(test_db.db_path)
+        match_repo = MatchRepository(test_db.db_path)
+        match_service = MatchService(
+            player_repo=player_repo,
+            match_repo=match_repo,
+            use_glicko=True,
+        )
+
+        # Mix of positive IDs (real users) and negative IDs (fake users)
+        real_ids = [6001, 6002, 6003, 6004]
+        fake_ids = list(range(-1, -11, -1))  # -1 through -10
+        player_ids = real_ids + fake_ids  # 14 total
+
+        for pid in player_ids:
+            test_db.add_player(
+                discord_id=pid,
+                discord_username=f"Player{abs(pid)}",
+                initial_mmr=1500,
+                glicko_rating=1500.0,
+                glicko_rd=350.0,
+                glicko_volatility=0.06,
+                preferred_roles=["1", "2", "3", "4", "5"],
+            )
+
+        result = match_service.shuffle_players(player_ids, guild_id=1)
+        excluded_ids = result["excluded_ids"]
+
+        # With 14 players and 10 selected, exactly 4 must be excluded
+        assert len(excluded_ids) == 4, f"Expected 4 excluded, got {len(excluded_ids)}"
+
+        # All excluded IDs must be valid player IDs
+        for pid in excluded_ids:
+            assert pid in player_ids, f"Excluded ID {pid} not in player_ids"
+            player = player_repo.get_by_id(pid)
+            assert player is not None, f"Player {pid} not found in repo"
+
+        # Verify exclusion IDs are stored in pending state
+        pending = match_service.get_last_shuffle(1)
+        assert pending["excluded_player_ids"] == excluded_ids
+
+        # Verify radiant + dire + excluded = all players
+        all_in_match = set(pending["radiant_team_ids"] + pending["dire_team_ids"])
+        all_excluded = set(excluded_ids)
+        assert len(all_in_match) == 10
+        assert len(all_excluded) == 4
+        assert all_in_match.isdisjoint(all_excluded), "Excluded player found in match teams"
+        assert all_in_match | all_excluded == set(player_ids)
+
     def test_betting_totals_display_correctly_after_previous_match(self, test_db, test_players):
         """
         E2E test for the betting totals display bug fix.
