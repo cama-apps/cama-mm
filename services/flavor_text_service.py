@@ -297,6 +297,7 @@ class FlavorTextService:
         """
         # Get examples for this event type (used for AI context and fallback)
         examples = EVENT_EXAMPLES.get(event, [])
+        logger.info(f"generate_event_flavor called: event={event.value}, guild={guild_id}, user={discord_id}")
 
         # Check if AI is enabled - fall back to examples if disabled
         ai_enabled = True
@@ -304,7 +305,7 @@ class FlavorTextService:
             ai_enabled = self.guild_config_repo.get_ai_enabled(guild_id)
 
         if not ai_enabled:
-            logger.debug(f"AI disabled for guild {guild_id}, using fallback flavor")
+            logger.info(f"AI disabled for guild {guild_id}, using fallback flavor")
             return self._get_fallback_flavor(event)
 
         # Build player context
@@ -318,6 +319,7 @@ class FlavorTextService:
 
         if not context:
             # Can't build context, use fallback
+            logger.warning(f"Could not build player context for {discord_id}, using fallback")
             return self._get_fallback_flavor(event)
 
         # Generate flavor text with full context
@@ -339,6 +341,7 @@ class FlavorTextService:
                 "lowest_balance": context.lowest_balance,
             }
 
+            logger.info(f"Calling AI service for {event.value}")
             result = await self.ai_service.generate_flavor(
                 event_type=event.value,
                 player_context=player_context_dict,
@@ -351,6 +354,7 @@ class FlavorTextService:
                 logger.warning("AI returned None for flavor, using fallback")
                 return self._get_fallback_flavor(event)
 
+            logger.info(f"AI generated flavor: {result[:50]}..." if len(result) > 50 else f"AI generated flavor: {result}")
             return result
         except Exception as e:
             logger.error(f"Failed to generate flavor text: {e}, using fallback")

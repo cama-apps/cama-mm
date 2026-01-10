@@ -123,6 +123,7 @@ AI_TIMEOUT_SECONDS = _parse_float("AI_TIMEOUT_SECONDS", 30.0)
 AI_MAX_TOKENS = _parse_int("AI_MAX_TOKENS", 500)
 AI_RATE_LIMIT_REQUESTS = _parse_int("AI_RATE_LIMIT_REQUESTS", 10)  # Requests per window
 AI_RATE_LIMIT_WINDOW = _parse_int("AI_RATE_LIMIT_WINDOW", 60)  # Window in seconds
+AI_FEATURES_ENABLED = _parse_bool("AI_FEATURES_ENABLED", False)  # Global default for AI flavor text
 
 # Glicko-2 rating system configuration
 CALIBRATION_RD_THRESHOLD = _parse_float("CALIBRATION_RD_THRESHOLD", 100.0)  # Players with RD <= this are considered calibrated

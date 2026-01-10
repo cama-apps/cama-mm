@@ -2,6 +2,7 @@
 Repository for managing per-guild configuration.
 """
 
+from config import AI_FEATURES_ENABLED
 from repositories.base_repository import BaseRepository
 from repositories.interfaces import IGuildConfigRepository
 
@@ -94,7 +95,7 @@ class GuildConfigRepository(BaseRepository, IGuildConfigRepository):
             )
 
     def get_ai_enabled(self, guild_id: int) -> bool:
-        """Get whether AI features are enabled for a guild. Defaults to True."""
+        """Get whether AI features are enabled for a guild. Defaults to AI_FEATURES_ENABLED config."""
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -102,9 +103,9 @@ class GuildConfigRepository(BaseRepository, IGuildConfigRepository):
                 (guild_id,),
             )
             row = cursor.fetchone()
-            # Default to True when no config exists or column is NULL
+            # Default to config value when no config exists or column is NULL
             if row is None:
-                return True
+                return AI_FEATURES_ENABLED
             if row["ai_features_enabled"] is None:
-                return True
+                return AI_FEATURES_ENABLED
             return bool(row["ai_features_enabled"])
