@@ -77,13 +77,17 @@ async def test_handle_announce_insufficient_balance():
 async def test_handle_announce_success_deducts_balance(monkeypatch):
     bot = MagicMock()
     player_service = MagicMock()
-    player_service.get_player.return_value = object()
+    # Mock player with required attributes for _get_flex_stats
+    mock_player = SimpleNamespace(
+        wins=10, losses=5, jopacoin_balance=500, glicko_rating=1500.0
+    )
+    player_service.get_player.return_value = mock_player
     player_service.get_balance.return_value = SHOP_ANNOUNCE_TARGET_COST + 10
     player_service.player_repo = MagicMock()
 
     commands = ShopCommands(bot, player_service)
     interaction = _make_interaction()
-    target = SimpleNamespace(mention="<@2002>")
+    target = SimpleNamespace(id=2002, mention="<@2002>", display_name="TargetPlayer")
 
     monkeypatch.setattr("commands.shop.random.choice", lambda _items: "Test message")
     monkeypatch.setattr("commands.shop.get_hero_color", lambda _hero_id: None)

@@ -2,18 +2,27 @@
 Betting commands for jopacoin wagers.
 """
 
+from __future__ import annotations
+
 import logging
 import random
+from typing import TYPE_CHECKING
 
 import discord
 from discord import app_commands
 from discord.ext import commands
+
+if TYPE_CHECKING:
+    from services.flavor_text_service import FlavorTextService
+
+from services.flavor_text_service import FlavorEvent
 
 from config import (
     BANKRUPTCY_PENALTY_RATE,
     GARNISHMENT_PERCENTAGE,
     JOPACOIN_MIN_BET,
     LOAN_FEE_RATE,
+    MAX_DEBT,
 )
 from config import DISBURSE_MIN_FUND
 from services.bankruptcy_service import BankruptcyService
@@ -115,12 +124,14 @@ class BettingCommands(commands.Cog):
         gambling_stats_service: GamblingStatsService | None = None,
         loan_service: LoanService | None = None,
         disburse_service: DisburseService | None = None,
+        flavor_text_service: FlavorTextService | None = None,
     ):
         self.bot = bot
         self.betting_service = betting_service
         self.match_service = match_service
         self.player_service = player_service
         self.bankruptcy_service = bankruptcy_service
+        self.flavor_text_service = flavor_text_service
         self.gambling_stats_service = gambling_stats_service
         self.loan_service = loan_service
         self.disburse_service = disburse_service
@@ -784,10 +795,29 @@ class BettingCommands(commands.Cog):
             rate=int(result["penalty_rate"] * 100),
         )
 
+        # Try to get AI-generated flavor text
+        ai_flavor = None
+        if self.flavor_text_service:
+            guild_id = interaction.guild.id if interaction.guild else None
+            try:
+                ai_flavor = await self.flavor_text_service.generate_event_flavor(
+                    guild_id=guild_id,
+                    event=FlavorEvent.BANKRUPTCY_DECLARED,
+                    discord_id=user_id,
+                    event_details={
+                        "debt_cleared": result["debt_cleared"],
+                        "penalty_games": result["penalty_games"],
+                        "penalty_rate": result["penalty_rate"],
+                    },
+                )
+            except Exception as e:
+                logger.warning(f"Failed to generate AI flavor for bankruptcy: {e}")
+
         penalty_rate_pct = int(result["penalty_rate"] * 100)
+        flavor_line = f"\n\n*{ai_flavor}*" if ai_flavor else ""
         await interaction.followup.send(
             f"**{interaction.user.mention} HAS DECLARED BANKRUPTCY**\n\n"
-            f"{message}\n\n"
+            f"{message}{flavor_line}\n\n"
             f"**Details:**\n"
             f"Debt cleared: {result['debt_cleared']} {JOPACOIN_EMOTE}\n"
             f"Penalty: {penalty_rate_pct}% win bonus for the next {result['penalty_games']} games\n"
@@ -1183,13 +1213,47 @@ class BettingCommands(commands.Cog):
                 remaining = check["cooldown_ends_at"] - int(__import__("time").time())
                 hours = remaining // 3600
                 minutes = (remaining % 3600) // 60
-                msg = random.choice(LOAN_DENIED_COOLDOWN_MESSAGES)
+                # Try AI flavor, fallback to static message
+                msg = None
+                if self.flavor_text_service:
+                    try:
+                        msg = await self.flavor_text_service.generate_event_flavor(
+                            guild_id=guild_id,
+                            event=FlavorEvent.LOAN_COOLDOWN,
+                            discord_id=user_id,
+                            event_details={
+                                "cooldown_remaining_hours": hours,
+                                "cooldown_remaining_minutes": minutes,
+                                "requested_amount": amount,
+                            },
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to generate AI flavor for loan cooldown: {e}")
+                if not msg:
+                    msg = random.choice(LOAN_DENIED_COOLDOWN_MESSAGES)
                 await interaction.response.send_message(
                     f"{msg}\n\n⏳ Cooldown ends in **{hours}h {minutes}m**.",
                 )
                 return
             elif check["reason"] == "exceeds_debt_limit":
-                msg = random.choice(LOAN_DENIED_DEBT_MESSAGES)
+                # Try AI flavor, fallback to static message
+                msg = None
+                if self.flavor_text_service:
+                    try:
+                        msg = await self.flavor_text_service.generate_event_flavor(
+                            guild_id=guild_id,
+                            event=FlavorEvent.LOAN_DENIED_DEBT,
+                            discord_id=user_id,
+                            event_details={
+                                "current_balance": check["current_balance"],
+                                "requested_amount": amount,
+                                "max_debt": MAX_DEBT,
+                            },
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to generate AI flavor for loan denied: {e}")
+                if not msg:
+                    msg = random.choice(LOAN_DENIED_DEBT_MESSAGES)
                 await interaction.response.send_message(
                     f"{msg}\n\nCurrent balance: **{check['current_balance']}** {JOPACOIN_EMOTE}",
                 )
@@ -1216,12 +1280,41 @@ class BettingCommands(commands.Cog):
 
         fee_pct = int(LOAN_FEE_RATE * 100)
 
+        # Try to get AI-generated flavor text
+        ai_flavor = None
+        if self.flavor_text_service:
+            event_type = (
+                FlavorEvent.NEGATIVE_LOAN
+                if result.get("was_negative_loan")
+                else FlavorEvent.LOAN_TAKEN
+            )
+            try:
+                ai_flavor = await self.flavor_text_service.generate_event_flavor(
+                    guild_id=guild_id,
+                    event=event_type,
+                    discord_id=user_id,
+                    event_details={
+                        "amount": result["amount"],
+                        "fee": result["fee"],
+                        "total_owed": result["total_owed"],
+                        "new_balance": result["new_balance"],
+                        "total_loans_taken": result["total_loans_taken"],
+                        "was_negative_loan": result.get("was_negative_loan", False),
+                    },
+                )
+            except Exception as e:
+                logger.warning(f"Failed to generate AI flavor for loan: {e}")
+
         # Check if this was a negative loan (peak degen behavior)
         if result.get("was_negative_loan"):
-            msg = random.choice(NEGATIVE_LOAN_MESSAGES).format(
-                amount=result["amount"],
-                emote=JOPACOIN_EMOTE,
-            )
+            # Use AI flavor as main message if available, otherwise fallback to static
+            if ai_flavor:
+                msg = ai_flavor
+            else:
+                msg = random.choice(NEGATIVE_LOAN_MESSAGES).format(
+                    amount=result["amount"],
+                    emote=JOPACOIN_EMOTE,
+                )
             embed = discord.Embed(
                 title="🎪 LEGENDARY DEGEN MOVE 🎪",
                 description=msg,
@@ -1248,12 +1341,16 @@ class BettingCommands(commands.Cog):
                 )
             )
         else:
-            msg = random.choice(LOAN_SUCCESS_MESSAGES).format(
-                amount=result["amount"],
-                owed=result["total_owed"],
-                fee=result["fee"],
-                emote=JOPACOIN_EMOTE,
-            )
+            # Use AI flavor as main message if available, otherwise fallback to static
+            if ai_flavor:
+                msg = ai_flavor
+            else:
+                msg = random.choice(LOAN_SUCCESS_MESSAGES).format(
+                    amount=result["amount"],
+                    owed=result["total_owed"],
+                    fee=result["fee"],
+                    emote=JOPACOIN_EMOTE,
+                )
             embed = discord.Embed(
                 title="🏦 Loan Approved",
                 description=msg,
@@ -1717,7 +1814,8 @@ async def setup(bot: commands.Bot):
     gambling_stats_service = getattr(bot, "gambling_stats_service", None)
     loan_service = getattr(bot, "loan_service", None)
     disburse_service = getattr(bot, "disburse_service", None)
-    # bankruptcy_service, gambling_stats_service, loan_service, disburse_service are optional
+    flavor_text_service = getattr(bot, "flavor_text_service", None)
+    # bankruptcy_service, gambling_stats_service, loan_service, disburse_service, flavor_text_service are optional
 
     cog = BettingCommands(
         bot,
@@ -1728,6 +1826,7 @@ async def setup(bot: commands.Bot):
         gambling_stats_service,
         loan_service,
         disburse_service,
+        flavor_text_service,
     )
     await bot.add_cog(cog)
 

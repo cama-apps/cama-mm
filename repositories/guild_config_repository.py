@@ -77,3 +77,34 @@ class GuildConfigRepository(BaseRepository, IGuildConfigRepository):
             )
             row = cursor.fetchone()
             return bool(row["auto_enrich_matches"]) if row else True
+
+    def set_ai_enabled(self, guild_id: int, enabled: bool) -> None:
+        """Set whether AI features are enabled for a guild."""
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO guild_config (guild_id, ai_features_enabled)
+                VALUES (?, ?)
+                ON CONFLICT(guild_id) DO UPDATE SET
+                    ai_features_enabled = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (guild_id, 1 if enabled else 0, 1 if enabled else 0),
+            )
+
+    def get_ai_enabled(self, guild_id: int) -> bool:
+        """Get whether AI features are enabled for a guild. Defaults to True."""
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT ai_features_enabled FROM guild_config WHERE guild_id = ?",
+                (guild_id,),
+            )
+            row = cursor.fetchone()
+            # Default to True when no config exists or column is NULL
+            if row is None:
+                return True
+            if row["ai_features_enabled"] is None:
+                return True
+            return bool(row["ai_features_enabled"])

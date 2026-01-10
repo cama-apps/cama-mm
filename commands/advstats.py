@@ -18,10 +18,20 @@ logger = logging.getLogger("cama_bot.commands.advstats")
 class AdvancedStatsCommands(commands.Cog):
     """Commands for viewing pairwise player statistics."""
 
-    def __init__(self, bot: commands.Bot, pairings_repo: IPairingsRepository, player_repo):
+    def __init__(
+        self,
+        bot: commands.Bot,
+        pairings_repo: IPairingsRepository,
+        player_repo,
+        *,
+        flavor_text_service=None,
+        guild_config_repo=None,
+    ):
         self.bot = bot
         self.pairings_repo = pairings_repo
         self.player_repo = player_repo
+        self.flavor_text_service = flavor_text_service
+        self.guild_config_repo = guild_config_repo
 
     @app_commands.command(name="pairwise", description="View pairwise statistics")
     @app_commands.describe(
@@ -237,6 +247,9 @@ class AdvancedStatsCommands(commands.Cog):
                 f"{counts['unique_teammates']} teammates, {counts['unique_opponents']} opponents tracked"
             )
         embed.set_footer(text=" | ".join(footer_parts))
+
+        # AI insight for pairwise stats - disabled
+
         await interaction.followup.send(embed=embed)
 
     def _get_player_mention(self, discord_id: int) -> str:
@@ -246,6 +259,11 @@ class AdvancedStatsCommands(commands.Cog):
         # Fallback to stored username
         player = self.player_repo.get_by_id(discord_id)
         return player.name if player else f"Unknown ({discord_id})"
+
+    def _get_player_name(self, discord_id: int) -> str:
+        """Get a player's username (not mention) for AI context."""
+        player = self.player_repo.get_by_id(discord_id)
+        return player.name if player else f"Player {discord_id}"
 
     @app_commands.command(name="matchup", description="View head-to-head stats between two players")
     @app_commands.describe(
@@ -322,6 +340,8 @@ class AdvancedStatsCommands(commands.Cog):
 
         # Against stats
         games_against = h2h["games_against"]
+        p1_wins = 0
+        p2_wins = 0
         if games_against > 0:
             # Determine who is player1 in canonical order
             p1_canonical = h2h["player1_id"]
@@ -345,6 +365,8 @@ class AdvancedStatsCommands(commands.Cog):
             embed.add_field(
                 name="As Opponents", value="Never played against each other", inline=False
             )
+
+        # AI insight for matchup - disabled
 
         await interaction.followup.send(embed=embed)
 
@@ -391,9 +413,19 @@ async def setup(bot: commands.Bot):
     """Setup function called when loading the cog."""
     pairings_repo = getattr(bot, "pairings_repo", None)
     player_repo = getattr(bot, "player_repo", None)
+    flavor_text_service = getattr(bot, "flavor_text_service", None)
+    guild_config_repo = getattr(bot, "guild_config_repo", None)
 
     if pairings_repo is None or player_repo is None:
         logger.warning("advstats cog: pairings_repo or player_repo not available, skipping")
         return
 
-    await bot.add_cog(AdvancedStatsCommands(bot, pairings_repo, player_repo))
+    await bot.add_cog(
+        AdvancedStatsCommands(
+            bot,
+            pairings_repo,
+            player_repo,
+            flavor_text_service=flavor_text_service,
+            guild_config_repo=guild_config_repo,
+        )
+    )

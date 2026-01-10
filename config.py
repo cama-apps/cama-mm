@@ -116,6 +116,14 @@ SHOP_ANNOUNCE_TARGET_COST = _parse_int("SHOP_ANNOUNCE_TARGET_COST", 100)
 # Steam/Valve API
 STEAM_API_KEY = os.getenv("STEAM_API_KEY")
 
+# AI/LLM Configuration (Cerebras via LiteLLM)
+CEREBRAS_API_KEY = os.getenv("CEREBRAS_API_KEY")
+AI_MODEL = os.getenv("AI_MODEL", "cerebras/zai-glm-4.7")
+AI_TIMEOUT_SECONDS = _parse_float("AI_TIMEOUT_SECONDS", 30.0)
+AI_MAX_TOKENS = _parse_int("AI_MAX_TOKENS", 500)
+AI_RATE_LIMIT_REQUESTS = _parse_int("AI_RATE_LIMIT_REQUESTS", 10)  # Requests per window
+AI_RATE_LIMIT_WINDOW = _parse_int("AI_RATE_LIMIT_WINDOW", 60)  # Window in seconds
+
 # Glicko-2 rating system configuration
 CALIBRATION_RD_THRESHOLD = _parse_float("CALIBRATION_RD_THRESHOLD", 100.0)  # Players with RD <= this are considered calibrated
 ADMIN_RATING_ADJUSTMENT_MAX_GAMES = _parse_int("ADMIN_RATING_ADJUSTMENT_MAX_GAMES", 5)  # Max games for allowing admin rating adjustments

@@ -193,6 +193,7 @@ class SchemaManager:
             ("add_bet_is_blind_column", self._migration_add_bet_is_blind_column),
             ("add_bet_odds_at_placement_column", self._migration_add_bet_odds_at_placement_column),
             ("add_lobby_thread_columns", self._migration_add_lobby_thread_columns),
+            ("add_ai_features_enabled", self._migration_add_ai_features_enabled),
         ]
 
     # --- Migrations ---
@@ -658,3 +659,7 @@ class SchemaManager:
         """Add thread_id and embed_message_id columns to lobby_state for thread support."""
         self._add_column_if_not_exists(cursor, "lobby_state", "thread_id", "INTEGER")
         self._add_column_if_not_exists(cursor, "lobby_state", "embed_message_id", "INTEGER")
+
+    def _migration_add_ai_features_enabled(self, cursor) -> None:
+        """Add ai_features_enabled column to guild_config for AI feature toggle."""
+        self._add_column_if_not_exists(cursor, "guild_config", "ai_features_enabled", "INTEGER DEFAULT 0")
