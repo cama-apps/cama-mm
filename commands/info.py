@@ -396,30 +396,30 @@ class InfoCommands(commands.Cog):
                     inline=False,
                 )
 
-            # Generate AI insight for leaderboard
-            guild_id = guild.id if guild else None
-            if self.flavor_text_service and players_with_stats:
-                try:
-                    leaderboard_data = {
-                        "top_players": [
-                            {"name": p["username"], "balance": p["jopacoin_balance"], "win_rate": p["win_rate"]}
-                            for p in players_with_stats[:5]
-                        ],
-                        "bottom_players": [
-                            {"name": p["username"], "balance": p["jopacoin_balance"]}
-                            for p in debtors[:3]
-                        ] if debtors else [],
-                        "total_players": len(players_with_stats),
-                    }
-                    ai_insight = await self.flavor_text_service.generate_data_insight(
-                        guild_id=guild_id,
-                        data_type="leaderboard",
-                        data=leaderboard_data,
-                    )
-                    if ai_insight:
-                        embed.add_field(name="💬 AI Insight", value=ai_insight, inline=False)
-                except Exception as e:
-                    logger.warning(f"Failed to generate AI insight for leaderboard: {e}")
+            # AI insight for leaderboard - disabled
+            # guild_id = guild.id if guild else None
+            # if self.flavor_text_service and players_with_stats:
+            #     try:
+            #         leaderboard_data = {
+            #             "top_players": [
+            #                 {"name": p["username"], "balance": p["jopacoin_balance"], "win_rate": p["win_rate"]}
+            #                 for p in players_with_stats[:5]
+            #             ],
+            #             "bottom_players": [
+            #                 {"name": p["username"], "balance": p["jopacoin_balance"]}
+            #                 for p in debtors[:3]
+            #             ] if debtors else [],
+            #             "total_players": len(players_with_stats),
+            #         }
+            #         ai_insight = await self.flavor_text_service.generate_data_insight(
+            #             guild_id=guild_id,
+            #             data_type="leaderboard",
+            #             data=leaderboard_data,
+            #         )
+            #         if ai_insight:
+            #             embed.add_field(name="💬 AI Insight", value=ai_insight, inline=False)
+            #     except Exception as e:
+            #         logger.warning(f"Failed to generate AI insight for leaderboard: {e}")
 
             await safe_followup(
                 interaction,
@@ -892,7 +892,7 @@ class InfoCommands(commands.Cog):
             if won:
                 emoji = "✅" if expected_win else "🔥"  # expected win or upset
             else:
-                emoji = "❌" if expected_win else "💀"  # expected loss or choke
+                emoji = "💀" if expected_win else "❌"  # choke (favored) or expected loss
             recent_matches.append(f"{emoji} {prob:.0%} → {'W' if won else 'L'}")
 
         # Find biggest upset (win as underdog) and biggest choke (loss as favorite)
@@ -928,9 +928,9 @@ class InfoCommands(commands.Cog):
         percentile_text = f"Top {100 - percentile:.0f}%" if percentile else "N/A"
 
         profile_text = (
-            f"**Rating:** {rating_display} (±{uncertainty:.1f}% uncertainty)\n"
+            f"**Rating:** {rating_display} ({uncertainty:.1f}% uncertainty)\n"
             f"**Tier:** {calibration_tier} | **Percentile:** {percentile_text}\n"
-            f"**Volatility:** {player.glicko_volatility:.3f}" if player.glicko_volatility else f"**Rating:** {rating_display} (±{uncertainty:.1f}% uncertainty)\n**Tier:** {calibration_tier} | **Percentile:** {percentile_text}"
+            f"**Volatility:** {player.glicko_volatility:.3f}" if player.glicko_volatility else f"**Rating:** {rating_display} ({uncertainty:.1f}% uncertainty)\n**Tier:** {calibration_tier} | **Percentile:** {percentile_text}"
         )
         embed.add_field(name="📊 Rating Profile", value=profile_text, inline=False)
 

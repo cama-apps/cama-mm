@@ -885,9 +885,14 @@ class BettingCommands(commands.Cog):
         pnl_str = f"+{stats.net_pnl}" if stats.net_pnl >= 0 else str(stats.net_pnl)
         roi_str = f"+{stats.roi:.1%}" if stats.roi >= 0 else f"{stats.roi:.1%}"
 
+        # Get current balance
+        player = self.player_service.get_player(target_user.id)
+        balance = player.jopacoin_balance if player else 0
+
         embed.add_field(
             name="Performance",
             value=(
+                f"**Balance:** {balance} {JOPACOIN_EMOTE}\n"
                 f"**Net P&L:** {pnl_str} {JOPACOIN_EMOTE}\n"
                 f"**ROI:** {roi_str}\n"
                 f"**Record:** {stats.wins}W-{stats.losses}L ({stats.win_rate:.0%})"
