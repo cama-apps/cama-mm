@@ -15,6 +15,7 @@ dependencies = [
     "dotabase>=7.8.0",
     "sqlalchemy-utils>=0.41.0",
     "pillow>=10.0.0",
+    "litellm>=1.0.0",
 ]
 
 [dependency-groups]

@@ -303,6 +303,34 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 for row in rows
             ]
 
+    def get_rating_history_for_match(self, match_id: int) -> list[dict]:
+        """
+        Get all rating history entries for a specific match.
+
+        Used for picking notable winners for flavor text.
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT discord_id, rating, rating_before, expected_team_win_prob, won
+                FROM rating_history
+                WHERE match_id = ?
+            """,
+                (match_id,),
+            )
+            rows = cursor.fetchall()
+            return [
+                {
+                    "discord_id": row["discord_id"],
+                    "rating": row["rating"],
+                    "rating_before": row["rating_before"],
+                    "expected_team_win_prob": row["expected_team_win_prob"],
+                    "won": row["won"],
+                }
+                for row in rows
+            ]
+
     def get_recent_rating_history(self, limit: int = 200) -> list[dict]:
         """Get recent rating history entries for all players."""
         with self.connection() as conn:

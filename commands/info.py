@@ -25,13 +25,23 @@ class InfoCommands(commands.Cog):
     """Commands for viewing information and leaderboards."""
 
     def __init__(
-        self, bot: commands.Bot, player_repo, match_repo, role_emojis: dict, role_names: dict
+        self,
+        bot: commands.Bot,
+        player_repo,
+        match_repo,
+        role_emojis: dict,
+        role_names: dict,
+        *,
+        flavor_text_service=None,
+        guild_config_repo=None,
     ):
         self.bot = bot
         self.player_repo = player_repo
         self.match_repo = match_repo
         self.role_emojis = role_emojis
         self.role_names = role_names
+        self.flavor_text_service = flavor_text_service
+        self.guild_config_repo = guild_config_repo
 
     @app_commands.command(name="help", description="List all available commands")
     async def help_command(self, interaction: discord.Interaction):
@@ -385,6 +395,31 @@ class InfoCommands(commands.Cog):
                     value=shame_text,
                     inline=False,
                 )
+
+            # Generate AI insight for leaderboard
+            guild_id = guild.id if guild else None
+            if self.flavor_text_service and players_with_stats:
+                try:
+                    leaderboard_data = {
+                        "top_players": [
+                            {"name": p["username"], "balance": p["jopacoin_balance"], "win_rate": p["win_rate"]}
+                            for p in players_with_stats[:5]
+                        ],
+                        "bottom_players": [
+                            {"name": p["username"], "balance": p["jopacoin_balance"]}
+                            for p in debtors[:3]
+                        ] if debtors else [],
+                        "total_players": len(players_with_stats),
+                    }
+                    ai_insight = await self.flavor_text_service.generate_data_insight(
+                        guild_id=guild_id,
+                        data_type="leaderboard",
+                        data=leaderboard_data,
+                    )
+                    if ai_insight:
+                        embed.add_field(name="💬 AI Insight", value=ai_insight, inline=False)
+                except Exception as e:
+                    logger.warning(f"Failed to generate AI insight for leaderboard: {e}")
 
             await safe_followup(
                 interaction,
@@ -972,5 +1007,17 @@ async def setup(bot: commands.Bot):
     match_repo = getattr(bot, "match_repo", None)
     role_emojis = getattr(bot, "role_emojis", {})
     role_names = getattr(bot, "role_names", {})
+    flavor_text_service = getattr(bot, "flavor_text_service", None)
+    guild_config_repo = getattr(bot, "guild_config_repo", None)
 
-    await bot.add_cog(InfoCommands(bot, player_repo, match_repo, role_emojis, role_names))
+    await bot.add_cog(
+        InfoCommands(
+            bot,
+            player_repo,
+            match_repo,
+            role_emojis,
+            role_names,
+            flavor_text_service=flavor_text_service,
+            guild_config_repo=guild_config_repo,
+        )
+    )

@@ -621,7 +621,6 @@ class AdminCommands(commands.Cog):
             f"for guild {guild_id}. New lock: {new_lock_until}{status_note}"
         )
 
-
 async def setup(bot: commands.Bot):
     lobby_service = getattr(bot, "lobby_service", None)
     # Use player_repo directly from bot for admin operations

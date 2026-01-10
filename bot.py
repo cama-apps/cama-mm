@@ -3,21 +3,10 @@ Main Discord bot entry for Cama Balanced Shuffle.
 """
 
 import asyncio
-import atexit
 import logging
 import os
 
 from utils.debug_logging import debug_log as _debug_log
-
-try:
-    import msvcrt  # Windows-only
-except Exception:  # pragma: no cover
-    msvcrt = None
-
-try:
-    import fcntl  # Unix-only
-except Exception:  # pragma: no cover
-    fcntl = None
 
 # Configure logging BEFORE importing discord to prevent duplicate handlers
 logging.basicConfig(
@@ -52,6 +41,10 @@ _discord_logger.setLevel(logging.INFO)  # Ensure it logs at INFO level
 
 from config import (
     ADMIN_USER_IDS,
+    AI_MODEL,
+    AI_TIMEOUT_SECONDS,
+    AI_MAX_TOKENS,
+    CEREBRAS_API_KEY,
     DB_PATH,
     GARNISHMENT_PERCENTAGE,
     LEVERAGE_TIERS,
@@ -84,133 +77,6 @@ from services.player_service import PlayerService
 from utils.formatting import ROLE_EMOJIS, ROLE_NAMES, format_role_display
 
 # Bot setup
-_instance_lock_handle = None
-_instance_lock_method = None
-_instance_lock_path = os.path.join(os.path.dirname(__file__), ".bot.lock")
-
-
-def _pid_is_running(pid: int) -> bool:
-    """Return True if a process with the given PID is running."""
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except OSError:
-        return False
-    else:
-        return True
-
-
-def _cleanup_stale_lock(lock_path: str) -> None:
-    """Remove the lock file if it belongs to a dead process."""
-    try:
-        if not os.path.exists(lock_path):
-            return
-        with open(lock_path, encoding="utf-8") as lock_file:
-            content = lock_file.read().strip()
-        try:
-            pid = int(content) if content else -1
-        except ValueError:
-            pid = -1
-        if pid == -1 or not _pid_is_running(pid):
-            os.remove(lock_path)
-    except Exception:
-        # Swallow cleanup errors; we'll attempt locking regardless
-        pass
-
-
-def _acquire_single_instance_lock() -> bool:
-    """
-    Prevent multiple bot.py processes from running at the same time.
-    This avoids duplicated slash command handling (multiple processes receive the same interaction).
-    """
-    global _instance_lock_handle, _instance_lock_method
-    try:
-        _cleanup_stale_lock(_instance_lock_path)
-        _instance_lock_handle = open(_instance_lock_path, "a+", encoding="utf-8")
-        if msvcrt is not None:
-            msvcrt.locking(_instance_lock_handle.fileno(), msvcrt.LK_NBLCK, 1)
-            _instance_lock_method = "msvcrt"
-        elif fcntl is not None:
-            fcntl.flock(_instance_lock_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            _instance_lock_method = "fcntl"
-        else:  # pragma: no cover
-            logger.warning(
-                "No platform lock mechanism available; continuing without single-instance protection."
-            )
-            return True
-
-        _instance_lock_handle.seek(0)
-        _instance_lock_handle.truncate()
-        _instance_lock_handle.write(str(os.getpid()))
-        _instance_lock_handle.flush()
-        try:
-            os.fsync(_instance_lock_handle.fileno())
-        except Exception:
-            pass
-
-        # region agent log
-        _debug_log(
-            "H1",
-            "bot.py:_acquire_single_instance_lock",
-            "single-instance lock acquired",
-            {"pid": os.getpid(), "lock_path": _instance_lock_path},
-            run_id="pre-fix",
-        )
-        # endregion agent log
-        return True
-    except Exception as exc:
-        # region agent log
-        _debug_log(
-            "H1",
-            "bot.py:_acquire_single_instance_lock",
-            "failed to acquire single-instance lock",
-            {"pid": os.getpid(), "error": str(exc)},
-            run_id="pre-fix",
-        )
-        # endregion agent log
-        try:
-            if _instance_lock_handle:
-                _instance_lock_handle.close()
-        except Exception:
-            pass
-        _instance_lock_handle = None
-        _instance_lock_method = None
-        logger.error(
-            "Another bot instance appears to be running. "
-            "Stop other 'python bot.py' processes/terminals and retry."
-        )
-        return False
-
-
-def _release_single_instance_lock() -> None:
-    """Release and remove the single-instance lock file."""
-    global _instance_lock_handle, _instance_lock_method
-    try:
-        if _instance_lock_handle:
-            try:
-                if _instance_lock_method == "msvcrt" and msvcrt is not None:
-                    msvcrt.locking(_instance_lock_handle.fileno(), msvcrt.LK_UNLCK, 1)
-                elif _instance_lock_method == "fcntl" and fcntl is not None:
-                    fcntl.flock(_instance_lock_handle, fcntl.LOCK_UN)
-            except Exception:
-                pass
-            try:
-                _instance_lock_handle.close()
-            except Exception:
-                pass
-        _instance_lock_handle = None
-        _instance_lock_method = None
-        try:
-            if os.path.exists(_instance_lock_path):
-                os.remove(_instance_lock_path)
-        except Exception:
-            pass
-    except Exception:
-        pass
-
-
-atexit.register(_release_single_instance_lock)
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -340,6 +206,54 @@ def _init_services():
     bot.prediction_service = prediction_service
     bot.prediction_repo = prediction_repo
 
+    # Create AI services (optional - only if CEREBRAS_API_KEY is set)
+    ai_service = None
+    sql_query_service = None
+    flavor_text_service = None
+
+    if CEREBRAS_API_KEY:
+        try:
+            from services.ai_service import AIService
+            from services.sql_query_service import SQLQueryService
+            from services.flavor_text_service import FlavorTextService
+            from repositories.ai_query_repository import AIQueryRepository
+
+            ai_service = AIService(
+                model=AI_MODEL,
+                api_key=CEREBRAS_API_KEY,
+                timeout=AI_TIMEOUT_SECONDS,
+                max_tokens=AI_MAX_TOKENS,
+            )
+
+            ai_query_repo = AIQueryRepository(DB_PATH)
+            sql_query_service = SQLQueryService(
+                ai_service=ai_service,
+                ai_query_repo=ai_query_repo,
+                guild_config_repo=guild_config_repo,
+            )
+
+            flavor_text_service = FlavorTextService(
+                ai_service=ai_service,
+                player_repo=player_repo,
+                bankruptcy_service=bankruptcy_service,
+                loan_service=loan_service,
+                gambling_stats_service=gambling_stats_service,
+                guild_config_repo=guild_config_repo,
+            )
+
+            logger.info(f"AI services initialized with model: {AI_MODEL}")
+        except Exception as e:
+            logger.warning(f"Failed to initialize AI services: {e}")
+            ai_service = None
+            sql_query_service = None
+            flavor_text_service = None
+    else:
+        logger.info("AI services not initialized (CEREBRAS_API_KEY not set)")
+
+    bot.ai_service = ai_service
+    bot.sql_query_service = sql_query_service
+    bot.flavor_text_service = flavor_text_service
+
     _services_initialized = True
 
 
@@ -361,6 +275,7 @@ EXTENSIONS = [
     "commands.dota_info",
     "commands.shop",
     "commands.predictions",
+    "commands.ask",
 ]
 
 
@@ -478,8 +393,6 @@ async def notify_lobby_ready(channel, lobby):
 @bot.event
 async def setup_hook():
     """Load command cogs."""
-    if not _acquire_single_instance_lock():
-        raise SystemExit(2)
     # Initialize database and services before loading extensions
     _init_services()
     await _load_extensions()

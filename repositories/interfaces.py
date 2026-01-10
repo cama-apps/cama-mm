@@ -344,6 +344,16 @@ class IGuildConfigRepository(ABC):
         """Get the league ID for a guild."""
         ...
 
+    @abstractmethod
+    def set_ai_enabled(self, guild_id: int, enabled: bool) -> None:
+        """Set whether AI features are enabled for a guild."""
+        ...
+
+    @abstractmethod
+    def get_ai_enabled(self, guild_id: int) -> bool:
+        """Get whether AI features are enabled for a guild. Defaults to False."""
+        ...
+
 
 class IPredictionRepository(ABC):
     """Repository for prediction market data access."""

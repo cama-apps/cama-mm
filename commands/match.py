@@ -4,6 +4,7 @@ Match commands: /shuffle and /record.
 
 import asyncio
 import logging
+import random
 import time
 
 import discord
@@ -11,6 +12,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from config import JOPACOIN_MIN_BET
+from services.flavor_text_service import FlavorEvent
 from services.lobby_service import LobbyService
 from services.match_discovery_service import MatchDiscoveryService
 from services.match_service import MatchService
@@ -43,6 +45,7 @@ class MatchCommands(commands.Cog):
         player_repo=None,
         match_repo=None,
         bankruptcy_repo=None,
+        flavor_text_service=None,
     ):
         self.bot = bot
         self.lobby_service = lobby_service
@@ -52,6 +55,7 @@ class MatchCommands(commands.Cog):
         self.player_repo = player_repo
         self.match_repo = match_repo
         self.bankruptcy_repo = bankruptcy_repo
+        self.flavor_text_service = flavor_text_service
         # Track scheduled betting reminder tasks per guild for cleanup
         self._betting_tasks_by_guild = {}
 
@@ -239,6 +243,69 @@ class MatchCommands(commands.Cog):
             warn = "" if is_on_role else " ⚠️"
             lines.append(f"{role_emoji} {name_part} ({role_name}) [{rating}]{warn}")
         return lines
+
+    def _get_notable_winner(
+        self,
+        match_id: int,
+        winning_ids: list[int],
+        exclude_id: int | None = None,
+    ) -> tuple[int | None, dict]:
+        """
+        Pick the most notable winner for PMA flavor text.
+
+        Args:
+            match_id: The match ID to look up
+            winning_ids: List of winning player discord IDs
+            exclude_id: Optional discord_id to exclude (e.g., already mentioned in bet flavor)
+
+        Returns: (discord_id, event_details) or (None, {})
+
+        Priority:
+        1. Underdog hero (won with <45% expected prob)
+        2. Biggest rating gainer
+        3. Random winner (fallback)
+        """
+        if not self.match_repo or not winning_ids:
+            return None, {}
+
+        # Filter out excluded player if specified
+        available_winners = [w for w in winning_ids if w != exclude_id] if exclude_id else winning_ids
+        if not available_winners:
+            return None, {}  # All winners excluded
+
+        # Get rating history for this match
+        rating_data = self.match_repo.get_rating_history_for_match(match_id)
+        winner_data = [r for r in rating_data if r["discord_id"] in available_winners]
+
+        if not winner_data:
+            # Fallback: random winner, no details
+            return random.choice(available_winners), {}
+
+        # Check for underdog (lowest expected win probability who won)
+        underdog = min(
+            winner_data,
+            key=lambda x: x.get("expected_team_win_prob") or 0.5,
+        )
+        underdog_prob = underdog.get("expected_team_win_prob") or 0.5
+        if underdog_prob < 0.45:
+            rating_change = (underdog.get("rating") or 0) - (underdog.get("rating_before") or 0)
+            return underdog["discord_id"], {
+                "rating_change": rating_change,
+                "expected_win_prob": underdog_prob,
+                "is_underdog": True,
+            }
+
+        # Otherwise: biggest rating gainer
+        best_gainer = max(
+            winner_data,
+            key=lambda x: (x.get("rating") or 0) - (x.get("rating_before") or 0),
+        )
+        rating_change = (best_gainer.get("rating") or 0) - (best_gainer.get("rating_before") or 0)
+        return best_gainer["discord_id"], {
+            "rating_change": rating_change,
+            "expected_win_prob": best_gainer.get("expected_team_win_prob"),
+            "is_big_gainer": True,
+        }
 
     @app_commands.command(name="shuffle", description="Create balanced teams from lobby")
     # @app_commands.describe(
@@ -701,6 +768,90 @@ class MatchCommands(commands.Cog):
         if distribution_lines:
             distribution_text = "\n" + "\n".join(distribution_lines)
 
+        # Generate AI flavor text for a notable bettor
+        ai_flavor = None
+        notable_bettor = None  # Track for exclusion from match flavor
+        if self.flavor_text_service and (winners or losers):
+            try:
+                # Pick the most notable bet result for flavor
+                notable_bettor = None
+                flavor_event = None
+                event_details = {}
+
+                # Prioritize biggest leveraged loss, then biggest winner
+                leveraged_losers = [
+                    entry for entry in losers
+                    if (entry.get("leverage", 1) or 1) > 1 and not entry.get("refunded")
+                ]
+                if leveraged_losers:
+                    # Pick the biggest effective loss (leverage * amount)
+                    notable_bettor = max(
+                        leveraged_losers,
+                        key=lambda e: e.get("effective_bet", e["amount"])
+                    )
+                    flavor_event = FlavorEvent.LEVERAGE_LOSS
+                    event_details = {
+                        "amount": notable_bettor["amount"],
+                        "leverage": notable_bettor.get("leverage", 1),
+                        "effective_loss": notable_bettor.get("effective_bet", notable_bettor["amount"]),
+                        "team": notable_bettor.get("team", "unknown"),
+                    }
+                elif winners:
+                    # Pick the biggest winner by payout
+                    notable_bettor = max(winners, key=lambda e: e.get("payout", 0))
+                    flavor_event = FlavorEvent.BET_WON
+                    event_details = {
+                        "amount": notable_bettor["amount"],
+                        "payout": notable_bettor.get("payout", 0),
+                        "leverage": notable_bettor.get("leverage", 1),
+                        "team": notable_bettor.get("team", "unknown"),
+                        "multiplier": notable_bettor.get("multiplier"),
+                    }
+
+                if notable_bettor and flavor_event:
+                    ai_flavor = await self.flavor_text_service.generate_event_flavor(
+                        guild_id=guild_id,
+                        event=flavor_event,
+                        discord_id=notable_bettor["discord_id"],
+                        event_details=event_details,
+                    )
+                    # Prepend @ mention to the notable bettor
+                    if ai_flavor:
+                        notable_id = notable_bettor["discord_id"]
+                        ai_flavor = f"<@{notable_id}> {ai_flavor}"
+            except Exception as e:
+                logger.warning(f"Failed to generate AI flavor for bet result: {e}")
+
+        if ai_flavor:
+            distribution_text += f"\n\n💬 {ai_flavor}"
+
+        # Generate MATCH_WIN flavor (PMA - always celebrate a winner!)
+        # Exclude the notable bettor to avoid mentioning the same player twice
+        match_flavor = None
+        bettor_id = notable_bettor["discord_id"] if notable_bettor else None
+        if self.flavor_text_service and record_result.get("winning_player_ids"):
+            try:
+                notable_winner, match_details = self._get_notable_winner(
+                    match_id=record_result["match_id"],
+                    winning_ids=record_result["winning_player_ids"],
+                    exclude_id=bettor_id,
+                )
+
+                if notable_winner:
+                    match_flavor = await self.flavor_text_service.generate_event_flavor(
+                        guild_id=guild_id,
+                        event=FlavorEvent.MATCH_WIN,
+                        discord_id=notable_winner,
+                        event_details=match_details,
+                    )
+                    if match_flavor:
+                        match_flavor = f"<@{notable_winner}> {match_flavor}"
+            except Exception as e:
+                logger.warning(f"Failed to generate match flavor: {e}")
+
+        if match_flavor:
+            distribution_text += f"\n\n🎮 {match_flavor}"
+
         admin_override = (
             is_admin
             and submission["non_admin_count"] < self.match_service.MIN_NON_ADMIN_SUBMISSIONS
@@ -942,6 +1093,7 @@ async def setup(bot: commands.Bot):
     player_repo = getattr(bot, "player_repo", None)
     match_repo = getattr(bot, "match_repo", None)
     bankruptcy_repo = getattr(bot, "bankruptcy_repo", None)
+    flavor_text_service = getattr(bot, "flavor_text_service", None)
     await bot.add_cog(
         MatchCommands(
             bot,
@@ -952,5 +1104,6 @@ async def setup(bot: commands.Bot):
             player_repo=player_repo,
             match_repo=match_repo,
             bankruptcy_repo=bankruptcy_repo,
+            flavor_text_service=flavor_text_service,
         )
     )
