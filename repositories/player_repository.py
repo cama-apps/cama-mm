@@ -5,6 +5,7 @@ Repository for player data access.
 import json
 import logging
 
+from config import NEW_PLAYER_EXCLUSION_BOOST
 from domain.models.player import Player
 from repositories.base_repository import BaseRepository
 from repositories.interfaces import IPlayerRepository
@@ -55,8 +56,9 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 """
                 INSERT INTO players
                 (discord_id, discord_username, dotabuff_url, initial_mmr, current_mmr,
-                 preferred_roles, main_role, glicko_rating, glicko_rd, glicko_volatility, jopacoin_balance, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 3, CURRENT_TIMESTAMP)
+                 preferred_roles, main_role, glicko_rating, glicko_rd, glicko_volatility,
+                 exclusion_count, jopacoin_balance, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 3, CURRENT_TIMESTAMP)
             """,
                 (
                     discord_id,
@@ -69,6 +71,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                     glicko_rating,
                     glicko_rd,
                     glicko_volatility,
+                    NEW_PLAYER_EXCLUSION_BOOST,
                 ),
             )
 

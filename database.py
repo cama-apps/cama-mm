@@ -11,6 +11,7 @@ import uuid
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Optional
 
+from config import NEW_PLAYER_EXCLUSION_BOOST
 from infrastructure.schema_manager import SchemaManager
 from utils.debug_logging import debug_log as _database_debug_log
 
@@ -162,8 +163,9 @@ class Database:
                 """
                 INSERT INTO players
                 (discord_id, discord_username, dotabuff_url, initial_mmr, current_mmr,
-                 preferred_roles, main_role, glicko_rating, glicko_rd, glicko_volatility, jopacoin_balance, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 3, CURRENT_TIMESTAMP)
+                 preferred_roles, main_role, glicko_rating, glicko_rd, glicko_volatility,
+                 exclusion_count, jopacoin_balance, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 3, CURRENT_TIMESTAMP)
             """,
                 (
                     discord_id,
@@ -176,6 +178,7 @@ class Database:
                     glicko_rating,
                     glicko_rd,
                     glicko_volatility,
+                    NEW_PLAYER_EXCLUSION_BOOST,
                 ),
             )
 
