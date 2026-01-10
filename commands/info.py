@@ -924,13 +924,13 @@ class InfoCommands(commands.Cog):
 
         # Rating profile
         rating_display = rating_system.rating_to_display(player.glicko_rating) if player.glicko_rating else "N/A"
-        uncertainty = rating_system.get_rating_uncertainty_percentage(rd)
+        certainty = 100 - rating_system.get_rating_uncertainty_percentage(rd)
         percentile_text = f"Top {100 - percentile:.0f}%" if percentile else "N/A"
 
         profile_text = (
-            f"**Rating:** {rating_display} ({uncertainty:.1f}% uncertainty)\n"
+            f"**Rating:** {rating_display} ({certainty:.0f}% certain)\n"
             f"**Tier:** {calibration_tier} | **Percentile:** {percentile_text}\n"
-            f"**Volatility:** {player.glicko_volatility:.3f}" if player.glicko_volatility else f"**Rating:** {rating_display} ({uncertainty:.1f}% uncertainty)\n**Tier:** {calibration_tier} | **Percentile:** {percentile_text}"
+            f"**Volatility:** {player.glicko_volatility:.3f}" if player.glicko_volatility else f"**Rating:** {rating_display} ({certainty:.0f}% certain)\n**Tier:** {calibration_tier} | **Percentile:** {percentile_text}"
         )
         embed.add_field(name="📊 Rating Profile", value=profile_text, inline=False)
 

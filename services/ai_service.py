@@ -212,17 +212,37 @@ class AIService:
                 content=None,
             )
 
-    async def generate_sql(self, question: str, schema_context: str) -> dict[str, Any]:
+    async def generate_sql(
+        self,
+        question: str,
+        schema_context: str,
+        asker_discord_id: int | None = None,
+        asker_username: str | None = None,
+    ) -> dict[str, Any]:
         """
         Generate SQL query for a natural language question.
 
         Args:
             question: User's question in natural language
             schema_context: Database schema description for context
+            asker_discord_id: Discord ID of the person asking (for "my" queries)
+            asker_username: Username of the person asking
 
         Returns:
             Dict with "sql" and "explanation" keys, or "error" on failure
         """
+        # Build asker context for self-referential queries
+        asker_context = ""
+        if asker_discord_id:
+            asker_context = f"""
+The person asking this question:
+- discord_id: {asker_discord_id}
+- discord_username: {asker_username or 'Unknown'}
+
+When they say "me", "my", "I", or "myself", use their discord_id in WHERE clauses.
+Example: "what's my win rate?" → WHERE discord_id = {asker_discord_id}
+"""
+
         messages = [
             {
                 "role": "system",
@@ -230,7 +250,7 @@ class AIService:
 
 Database schema:
 {schema_context}
-
+{asker_context}
 Rules:
 - Select ONLY the columns needed to answer the question (1-3 max)
 - Always include discord_username for player queries

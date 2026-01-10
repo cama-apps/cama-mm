@@ -20,135 +20,60 @@ if TYPE_CHECKING:
 logger = logging.getLogger("cama_bot.services.sql_query")
 
 
-# Schema whitelist - only these tables and columns can be queried
-ALLOWED_TABLES: dict[str, list[str]] = {
-    "players": [
-        "discord_username",
-        "glicko_rating",
-        "glicko_rd",
-        "glicko_volatility",
-        "wins",
-        "losses",
-        "jopacoin_balance",
-        "exclusion_count",
-        "preferred_roles",
-        "main_role",
-        "initial_mmr",
-        "current_mmr",
-        "lowest_balance_ever",
-    ],
-    "matches": [
-        "match_id",
-        "team1_players",
-        "team2_players",
-        "winning_team",
-        "match_date",
-        "duration_seconds",
-        "radiant_score",
-        "dire_score",
-        "game_mode",
-        "valve_match_id",
-    ],
-    "match_participants": [
-        "match_id",
-        "team_number",
-        "won",
-        "side",
-        "hero_id",
-        "kills",
-        "deaths",
-        "assists",
-        "last_hits",
-        "denies",
-        "gpm",
-        "xpm",
-        "hero_damage",
-        "tower_damage",
-        "net_worth",
-        "hero_healing",
-        "lane_role",
-        "lane_efficiency",
-    ],
-    "rating_history": [
-        "match_id",
-        "rating",
-        "rating_before",
-        "rd_before",
-        "rd_after",
-        "expected_team_win_prob",
-        "team_number",
-        "won",
-    ],
-    "bets": [
-        "match_id",
-        "team_bet_on",
-        "amount",
-        "leverage",
-        "payout",
-        "is_blind",
-        "odds_at_placement",
-    ],
-    "player_pairings": [
-        "player1_id",
-        "player2_id",
-        "games_together",
-        "wins_together",
-        "games_against",
-        "player1_wins_against",
-    ],
-    "loan_state": [
-        "total_loans_taken",
-        "total_fees_paid",
-        "outstanding_principal",
-        "outstanding_fee",
-        "negative_loans_taken",
-    ],
-    "bankruptcy_state": [
-        "penalty_games_remaining",
-        "last_bankruptcy_at",
-    ],
-    "predictions": [
-        "prediction_id",
-        "question",
-        "status",
-        "outcome",
-        "closes_at",
-        "resolved_at",
-    ],
-    "prediction_bets": [
-        "prediction_id",
-        "position",
-        "amount",
-        "payout",
-        "bet_time",
-    ],
-    "match_predictions": [
-        "match_id",
-        "radiant_rating",
-        "dire_rating",
-        "expected_radiant_win_prob",
-    ],
+# Blocklist approach - block sensitive tables/columns, allow everything else
+
+# Tables that should never be queried (internal/transient/sensitive)
+BLOCKED_TABLES: set[str] = {
+    # SQLite internals
+    "sqlite_sequence",
+    "sqlite_master",
+    # Schema management
+    "schema_migrations",
+    # Transient state
+    "pending_matches",
+    "lobby_state",
+    # Server config
+    "guild_config",
+    # Internal voting/proposals
+    "nonprofit_fund",
+    "disburse_proposals",
+    "disburse_votes",
 }
 
-# Columns that should never be exposed
+# Columns that should never appear in SELECT results (PII/internal)
 BLOCKED_COLUMNS: set[str] = {
+    # PII - can identify real people
     "discord_id",
     "steam_id",
     "dotabuff_url",
-    "created_at",
-    "updated_at",
+    # Internal routing/references
+    "guild_id",
     "creator_id",
     "resolved_by",
+    # Discord internal IDs
     "channel_id",
     "thread_id",
     "message_id",
     "embed_message_id",
     "channel_message_id",
     "close_message_id",
-    "resolution_votes",
+    # Internal timestamps
+    "created_at",
+    "updated_at",
+    "timestamp",
+    "applied_at",
+    # Internal data blobs
     "enrichment_data",
     "payload",
-    "api_key",
+    "resolution_votes",
+    "recipients",
+    "notes",
+    # Internal metadata
+    "enrichment_source",
+    "enrichment_confidence",
+    # Redundant/internal IDs
+    "dotabuff_match_id",
+    "id",  # Generic auto-increment IDs (use specific IDs like match_id instead)
 }
 
 # SQL keywords that indicate write operations
@@ -306,11 +231,13 @@ class SQLQueryService:
         self.ai_service = ai_service
         self.ai_query_repo = ai_query_repo
         self.guild_config_repo = guild_config_repo
+        self._schema_cache: str | None = None
 
     async def query(
         self,
         guild_id: int | None,
         question: str,
+        asker_discord_id: int | None = None,
     ) -> QueryResult:
         """
         Translate a natural language question to SQL and execute it.
@@ -318,6 +245,7 @@ class SQLQueryService:
         Args:
             guild_id: Guild ID to check AI enabled (None = always enabled)
             question: User's question in natural language
+            asker_discord_id: Discord ID of the user asking (for "my stats" context)
 
         Returns:
             QueryResult with success status, SQL, and results
@@ -333,9 +261,25 @@ class SQLQueryService:
         # 2. Build schema context for the AI
         schema_ctx = self._build_schema_context()
 
-        # 3. Generate SQL via AI
+        # 3. Look up asker's username for self-referential queries
+        asker_username = None
+        if asker_discord_id:
+            try:
+                row = self.ai_query_repo.execute_readonly(
+                    "SELECT discord_username FROM players WHERE discord_id = ?",
+                    params=(asker_discord_id,),
+                    max_rows=1,
+                )
+                if row:
+                    asker_username = row[0].get("discord_username")
+            except Exception as e:
+                logger.debug(f"Could not look up asker username: {e}")
+
+        # 4. Generate SQL via AI
         logger.info(f"Generating SQL for question: {question[:100]}...")
-        result = await self.ai_service.generate_sql(question, schema_ctx)
+        result = await self.ai_service.generate_sql(
+            question, schema_ctx, asker_discord_id=asker_discord_id, asker_username=asker_username
+        )
 
         if "error" in result:
             return QueryResult(success=False, error=result["error"])
@@ -374,28 +318,76 @@ class SQLQueryService:
 
     def _build_schema_context(self) -> str:
         """
-        Build schema description for AI context.
+        Build schema description from actual database structure.
+
+        Uses blocklist approach - includes all tables/columns except blocked ones.
+        Caches the result for performance.
 
         Returns:
-            String describing available tables and columns
+            String describing available tables and columns with types
         """
-        lines = []
-        for table, columns in ALLOWED_TABLES.items():
-            col_list = ", ".join(columns)
-            lines.append(f"- {table}: {col_list}")
+        if self._schema_cache is not None:
+            return self._schema_cache
 
-        # Add join hints
-        lines.append("")
-        lines.append("Table relationships (use discord_id for joins, but don't SELECT it):")
-        lines.append("- players.discord_id = loan_state.discord_id")
-        lines.append("- players.discord_id = bankruptcy_state.discord_id")
-        lines.append("- players.discord_id = bets.discord_id")
-        lines.append("- players.discord_id = prediction_bets.discord_id")
-        lines.append("- matches.match_id = match_participants.match_id")
-        lines.append("- matches.match_id = bets.match_id")
-        lines.append("- predictions.prediction_id = prediction_bets.prediction_id")
+        lines = ["## Available Tables\n"]
 
-        return "\n".join(lines)
+        # Get all tables from DB, filter out blocked ones
+        try:
+            all_tables = self.ai_query_repo.get_all_tables()
+        except Exception as e:
+            logger.error(f"Failed to get tables: {e}")
+            all_tables = []
+
+        allowed_tables = [t for t in all_tables if t.lower() not in {b.lower() for b in BLOCKED_TABLES}]
+
+        for table_name in sorted(allowed_tables):
+            try:
+                schema_info = self.ai_query_repo.get_table_schema(table_name)
+                if not schema_info:
+                    continue
+
+                lines.append(f"### {table_name}")
+
+                col_lines = []
+                for col in schema_info:
+                    col_name = col["name"]
+                    # Skip blocked columns
+                    if col_name.lower() in {b.lower() for b in BLOCKED_COLUMNS}:
+                        continue
+
+                    col_type = col["type"] or "ANY"
+                    nullable = "" if col["notnull"] else " (nullable)"
+                    pk = " PK" if col["pk"] else ""
+                    col_lines.append(f"  - {col_name}: {col_type}{pk}{nullable}")
+
+                if col_lines:
+                    lines.extend(col_lines)
+                    lines.append("")
+
+            except Exception as e:
+                logger.warning(f"Failed to get schema for {table_name}: {e}")
+
+        # Introspect foreign key relationships
+        lines.append("## Relationships (use for JOINs, don't SELECT these ID columns)")
+        fk_relationships = set()
+        for table_name in allowed_tables:
+            try:
+                fks = self.ai_query_repo.get_foreign_keys(table_name)
+                for fk in fks:
+                    ref_table = fk["table"]
+                    from_col = fk["from"]
+                    to_col = fk["to"]
+                    # Only include if referenced table is also allowed
+                    if ref_table.lower() not in {b.lower() for b in BLOCKED_TABLES}:
+                        fk_relationships.add(f"- {table_name}.{from_col} = {ref_table}.{to_col}")
+            except Exception as e:
+                logger.debug(f"Failed to get FKs for {table_name}: {e}")
+
+        if fk_relationships:
+            lines.extend(sorted(fk_relationships))
+
+        self._schema_cache = "\n".join(lines)
+        return self._schema_cache
 
     def _validate_sql(self, sql: str) -> tuple[bool, str]:
         """
@@ -404,8 +396,8 @@ class SQLQueryService:
         Validates:
         1. Query starts with SELECT
         2. No dangerous keywords (INSERT, UPDATE, etc.)
-        3. All tables are in whitelist
-        4. No blocked columns are referenced
+        3. No blocked tables are referenced
+        4. No blocked columns in SELECT clause
 
         Args:
             sql: SQL query to validate
@@ -434,13 +426,14 @@ class SQLQueryService:
         if len(statements) > 1:
             return False, "Multiple statements not allowed"
 
-        # 4. Extract and validate table names
+        # 4. Extract and validate table names against blocklist
         tables = self._extract_tables(sql)
+        blocked_tables_lower = {t.lower() for t in BLOCKED_TABLES}
         for table in tables:
-            if table.lower() not in {t.lower() for t in ALLOWED_TABLES}:
+            if table.lower() in blocked_tables_lower:
                 return False, f"Table not allowed: {table}"
 
-        # 5. Extract and check for blocked columns
+        # 5. Extract and check for blocked columns in SELECT
         # This is a best-effort check - complex queries may bypass it
         blocked = self._check_blocked_columns(sql)
         if blocked:

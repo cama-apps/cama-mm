@@ -59,7 +59,7 @@ class RegistrationCommands(commands.Cog):
             )
             await interaction.followup.send(
                 f"✅ Registered {interaction.user.mention}!\n"
-                f"Cama Rating: {result['cama_rating']} (±{result['uncertainty']:.0f}% uncertainty)\n"
+                f"Cama Rating: {result['cama_rating']} ({result['uncertainty']:.0f}% uncertainty)\n"
                 f"Use `/setroles` to set your preferred roles."
             )
 
@@ -245,9 +245,10 @@ class RegistrationCommands(commands.Cog):
             )
 
             if stats["cama_rating"] is not None:
+                certainty = 100 - stats["uncertainty"]
                 embed.add_field(
                     name="Cama Rating",
-                    value=f"{stats['cama_rating']} (±{stats['uncertainty']:.0f}%)",
+                    value=f"{stats['cama_rating']} ({certainty:.0f}% certain)",
                     inline=True,
                 )
             else:

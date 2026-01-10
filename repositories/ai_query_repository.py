@@ -98,3 +98,18 @@ class AIQueryRepository(BaseRepository):
                 "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
             )
             return [row["name"] for row in cursor.fetchall()]
+
+    def get_foreign_keys(self, table_name: str) -> list[dict]:
+        """
+        Get foreign key relationships for a table.
+
+        Args:
+            table_name: Name of the table
+
+        Returns:
+            List of FK info dicts with id, seq, table, from, to, on_update, on_delete, match
+        """
+        with self.readonly_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(f"PRAGMA foreign_key_list({table_name})")
+            return [dict(row) for row in cursor.fetchall()]

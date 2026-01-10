@@ -101,7 +101,9 @@ class AskCommands(commands.Cog):
 
         # Execute query
         logger.info(f"User {interaction.user.id} asked: {question[:100]}")
-        result = await self.sql_query_service.query(guild_id, question)
+        result = await self.sql_query_service.query(
+            guild_id, question, asker_discord_id=interaction.user.id
+        )
 
         # Build response embed
         embed = discord.Embed(

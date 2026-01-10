@@ -7,7 +7,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from services.ai_service import AIService, SQL_TOOL, FLAVOR_TOOL
-from services.sql_query_service import SQLQueryService, ALLOWED_TABLES, BLOCKED_COLUMNS
+from services.sql_query_service import SQLQueryService, BLOCKED_TABLES, BLOCKED_COLUMNS
 from services.flavor_text_service import FlavorTextService, FlavorEvent, PlayerContext
 from repositories.ai_query_repository import AIQueryRepository
 
@@ -162,12 +162,12 @@ class TestSQLQueryService:
             is_valid, error = service._validate_sql(query)
             assert is_valid, f"Should allow: {query}, got error: {error}"
 
-    def test_allowed_tables_whitelist(self):
-        """Test that the allowed tables whitelist is properly defined."""
-        assert "players" in ALLOWED_TABLES
-        assert "matches" in ALLOWED_TABLES
-        assert "bets" in ALLOWED_TABLES
-        assert "rating_history" in ALLOWED_TABLES
+    def test_blocked_tables_blocklist(self):
+        """Test that sensitive tables are in the blocklist."""
+        assert "sqlite_sequence" in BLOCKED_TABLES
+        assert "schema_migrations" in BLOCKED_TABLES
+        assert "pending_matches" in BLOCKED_TABLES
+        assert "guild_config" in BLOCKED_TABLES
 
     def test_blocked_columns_blocklist(self):
         """Test that sensitive columns are in the blocklist."""
