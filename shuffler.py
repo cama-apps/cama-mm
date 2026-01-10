@@ -9,7 +9,7 @@ import math
 import random
 from collections.abc import Iterable
 
-from config import SHUFFLER_SETTINGS
+from config import RD_PRIORITY_WEIGHT, SHUFFLER_SETTINGS
 from domain.models.player import Player
 from domain.models.team import Team
 
@@ -32,6 +32,7 @@ class BalancedShuffler:
         off_role_flat_penalty: float | None = None,
         role_matchup_delta_weight: float | None = None,
         exclusion_penalty_weight: float | None = None,
+        rd_priority_weight: float | None = None,
     ):
         """
         Initialize the shuffler.
@@ -72,6 +73,11 @@ class BalancedShuffler:
             exclusion_penalty_weight
             if exclusion_penalty_weight is not None
             else settings["exclusion_penalty_weight"]
+        )
+        self.rd_priority_weight = (
+            rd_priority_weight
+            if rd_priority_weight is not None
+            else RD_PRIORITY_WEIGHT
         )
 
     def _calculate_role_matchup_delta(self, team1: Team, team2: Team) -> float:
@@ -118,6 +124,13 @@ class BalancedShuffler:
 
         # Return the maximum delta
         return max(carry_vs_offlane_1, carry_vs_offlane_2, mid_vs_mid)
+
+    def _calculate_rd_priority(self, players: Iterable[Player]) -> float:
+        """Compute the RD-based bonus for a group of players."""
+        if self.rd_priority_weight <= 0:
+            return 0.0
+        rd_total = sum(p.glicko_rd or 0.0 for p in players)
+        return rd_total * self.rd_priority_weight
 
     def _greedy_shuffle(
         self, players: list[Player], exclusion_counts: dict[str, int] | None = None
@@ -282,7 +295,8 @@ class BalancedShuffler:
                 role_matchup_delta = self._calculate_role_matchup_delta(team1, team2)
 
                 weighted_role_delta = role_matchup_delta * self.role_matchup_delta_weight
-                total_score = value_diff + off_role_penalty + weighted_role_delta
+                rd_priority = self._calculate_rd_priority(team1_players + team2_players)
+                total_score = value_diff + off_role_penalty + weighted_role_delta - rd_priority
 
                 if total_score < best_score:
                     best_score = total_score

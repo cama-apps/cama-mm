@@ -4,7 +4,12 @@ End-to-end tests for exclusion count tracking feature.
 
 import pytest
 
+from config import NEW_PLAYER_EXCLUSION_BOOST
 from shuffler import BalancedShuffler
+
+
+def _expected_after_exclusions(exclusions: int) -> int:
+    return NEW_PLAYER_EXCLUSION_BOOST + exclusions * 4
 
 
 class TestExclusionTracking:
@@ -33,10 +38,12 @@ class TestExclusionTracking:
                 glicko_volatility=0.06,
             )
 
-        # Step 2: Get initial exclusion counts (all should be 0)
+        # Step 2: Get initial exclusion counts (all should equal the boost value)
         initial_counts = test_db_memory.get_exclusion_counts(player_ids)
         for pid in player_ids:
-            assert initial_counts[pid] == 0, f"Player {pid} should start with 0 exclusion count"
+            assert (
+                initial_counts[pid] == NEW_PLAYER_EXCLUSION_BOOST
+            ), f"Player {pid} should start with {NEW_PLAYER_EXCLUSION_BOOST} exclusion count"
 
         # Step 3: Shuffle from pool (simulate first shuffle)
         players = test_db_memory.get_players_by_ids(player_ids)
@@ -74,11 +81,16 @@ class TestExclusionTracking:
         # Step 6: Verify counts changed correctly
         updated_counts = test_db_memory.get_exclusion_counts(player_ids)
 
+        expected_after_first = _expected_after_exclusions(1)
         for pid in excluded_player_ids:
-            assert updated_counts[pid] == 4, f"Excluded player {pid} should have count 4"
+            assert (
+                updated_counts[pid] == expected_after_first
+            ), f"Excluded player {pid} should have count {expected_after_first}"
 
         for pid in included_player_ids:
-            assert updated_counts[pid] == 0, f"Included player {pid} should have count 0 (0/2 = 0)"
+            assert (
+                updated_counts[pid] < NEW_PLAYER_EXCLUSION_BOOST
+            ), f"Included player {pid} should have decayed below {NEW_PLAYER_EXCLUSION_BOOST}"
 
         # Step 7: Shuffle again - excluded players should be more likely to be included
         # First, increment the same excluded players again to make the effect more obvious
@@ -87,10 +99,13 @@ class TestExclusionTracking:
             test_db_memory.increment_exclusion_count(pid)
             test_db_memory.increment_exclusion_count(pid)
 
-        # Now excluded players have count=16, others have count=0
+        # Now excluded players have count=_expected_after_exclusions(4), others have lower counts
         second_counts = test_db_memory.get_exclusion_counts(player_ids)
+        expected_after_second = _expected_after_exclusions(4)
         for pid in excluded_player_ids:
-            assert second_counts[pid] == 16, f"Excluded player {pid} should have count 16"
+            assert (
+                second_counts[pid] == expected_after_second
+            ), f"Excluded player {pid} should have count {expected_after_second}"
 
         # Shuffle again with updated counts
         players = test_db_memory.get_players_by_ids(player_ids)
@@ -195,47 +210,55 @@ class TestExclusionTracking:
 
         # Artificially set one player to have high exclusion count
         unlucky_player_id = player_ids[0]
-        for _ in range(16):  # Start with count of 64 (16 * 4 per exclusion)
+        for _ in range(16):  # Start with count of boost + 64 (16 * 4 per exclusion)
             test_db_memory.increment_exclusion_count(unlucky_player_id)
 
         initial_counts = test_db_memory.get_exclusion_counts(player_ids)
-        assert initial_counts[unlucky_player_id] == 64
+        value = _expected_after_exclusions(16)
+        assert initial_counts[unlucky_player_id] == value
 
         # Simulate: Player gets included in next match (decay should happen)
         test_db_memory.decay_exclusion_count(unlucky_player_id)
 
         after_decay = test_db_memory.get_exclusion_counts([unlucky_player_id])
-        assert after_decay[unlucky_player_id] == 32, "64 / 2 = 32"
+        value //= 2
+        assert after_decay[unlucky_player_id] == value, "value / 2"
 
         # Include again
         test_db_memory.decay_exclusion_count(unlucky_player_id)
         after_decay = test_db_memory.get_exclusion_counts([unlucky_player_id])
-        assert after_decay[unlucky_player_id] == 16, "32 / 2 = 16"
+        value //= 2
+        assert after_decay[unlucky_player_id] == value, "value / 2"
 
         # Include again
         test_db_memory.decay_exclusion_count(unlucky_player_id)
         after_decay = test_db_memory.get_exclusion_counts([unlucky_player_id])
-        assert after_decay[unlucky_player_id] == 8, "16 / 2 = 8"
+        value //= 2
+        assert after_decay[unlucky_player_id] == value, "value / 2"
 
         # Include again
         test_db_memory.decay_exclusion_count(unlucky_player_id)
         after_decay = test_db_memory.get_exclusion_counts([unlucky_player_id])
-        assert after_decay[unlucky_player_id] == 4, "8 / 2 = 4"
+        value //= 2
+        assert after_decay[unlucky_player_id] == value, "value / 2"
 
         # Include again
         test_db_memory.decay_exclusion_count(unlucky_player_id)
         after_decay = test_db_memory.get_exclusion_counts([unlucky_player_id])
-        assert after_decay[unlucky_player_id] == 2, "4 / 2 = 2"
+        value //= 2
+        assert after_decay[unlucky_player_id] == value, "value / 2"
 
         # Include again
         test_db_memory.decay_exclusion_count(unlucky_player_id)
         after_decay = test_db_memory.get_exclusion_counts([unlucky_player_id])
-        assert after_decay[unlucky_player_id] == 1, "2 / 2 = 1"
+        value //= 2
+        assert after_decay[unlucky_player_id] == value, "value / 2"
 
         # Include again
         test_db_memory.decay_exclusion_count(unlucky_player_id)
         after_decay = test_db_memory.get_exclusion_counts([unlucky_player_id])
-        assert after_decay[unlucky_player_id] == 0, "1 / 2 = 0"
+        value //= 2
+        assert after_decay[unlucky_player_id] == value, "value / 2"
 
         # Decay prevents unbounded growth - after 7 inclusions, count goes from 64 to 0
 
@@ -257,8 +280,8 @@ class TestExclusionTracking:
             )
 
         # Set Player1 and Player2 to have high exclusion counts
-        test_db_memory.increment_exclusion_count(player_ids[0])  # Player1: count = 4
-        test_db_memory.increment_exclusion_count(player_ids[1])  # Player2: count = 4
+        test_db_memory.increment_exclusion_count(player_ids[0])  # Player1: count = boost + 4
+        test_db_memory.increment_exclusion_count(player_ids[1])  # Player2: count = boost + 4
 
         for _ in range(9):  # Add 9 more exclusions to Player1 (total = 10 * 4 = 40)
             test_db_memory.increment_exclusion_count(player_ids[0])
@@ -268,8 +291,8 @@ class TestExclusionTracking:
 
         # Verify counts
         counts = test_db_memory.get_exclusion_counts(player_ids[:2])
-        assert counts[player_ids[0]] == 40
-        assert counts[player_ids[1]] == 40
+        assert counts[player_ids[0]] == _expected_after_exclusions(10)
+        assert counts[player_ids[1]] == _expected_after_exclusions(10)
 
         # Shuffle with exclusion penalty enabled
         players = test_db_memory.get_players_by_ids(player_ids)

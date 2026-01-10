@@ -2,6 +2,12 @@
 Tests for the repository layer.
 """
 
+from config import NEW_PLAYER_EXCLUSION_BOOST
+
+
+def _expected_after_exclusions(exclusions: int) -> int:
+    return NEW_PLAYER_EXCLUSION_BOOST + exclusions * 4
+
 
 class TestPlayerRepository:
     """Tests for PlayerRepository."""
@@ -106,20 +112,22 @@ class TestPlayerRepository:
             discord_username="TestPlayer",
         )
 
-        # Initial count should be 0
+        # Initial count should match the configured boost
         counts = player_repository.get_exclusion_counts([12345])
-        assert counts[12345] == 0
+        assert counts[12345] == NEW_PLAYER_EXCLUSION_BOOST
 
         # Increment twice (4 per exclusion)
         player_repository.increment_exclusion_count(12345)
         player_repository.increment_exclusion_count(12345)
         counts = player_repository.get_exclusion_counts([12345])
-        assert counts[12345] == 8
+        expected = _expected_after_exclusions(2)
+        assert counts[12345] == expected
 
         # Decay (halves the count)
         player_repository.decay_exclusion_count(12345)
         counts = player_repository.get_exclusion_counts([12345])
-        assert counts[12345] == 4
+        expected //= 2
+        assert counts[12345] == expected
 
     def test_delete_player(self, player_repository):
         """Test deleting a player."""

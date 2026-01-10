@@ -76,6 +76,9 @@ SHUFFLER_SETTINGS: dict[str, Any] = {
     "exclusion_penalty_weight": _parse_float("EXCLUSION_PENALTY_WEIGHT", 50.0),
 }
 
+NEW_PLAYER_EXCLUSION_BOOST = _parse_int("NEW_PLAYER_EXCLUSION_BOOST", 4)
+RD_PRIORITY_WEIGHT = _parse_float("RD_PRIORITY_WEIGHT", 0.1)
+
 JOPACOIN_PER_GAME = _parse_int("JOPACOIN_PER_GAME", 1)
 JOPACOIN_MIN_BET = _parse_int("JOPACOIN_MIN_BET", 1)
 JOPACOIN_WIN_REWARD = _parse_int("JOPACOIN_WIN_REWARD", 2)

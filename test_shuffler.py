@@ -159,6 +159,18 @@ class TestShuffler:
         player_names = {p.name for p in players}
         assert all_player_names == player_names
 
+    def test_rd_priority_bonus_scales_with_sum(self):
+        """RD bonus should reflect the sum of player RD values times the weight."""
+        players = [
+            Player(name="HighRD", mmr=1500, glicko_rd=200.0),
+            Player(name="MidRD", mmr=1500, glicko_rd=50.0),
+        ]
+        weight = 0.1
+        shuffler = BalancedShuffler(rd_priority_weight=weight)
+
+        bonus = shuffler._calculate_rd_priority(players)
+        assert bonus == pytest.approx((200.0 + 50.0) * weight)
+
     def test_shuffle_wrong_number_of_players(self):
         """Test that shuffling fails with wrong number of players."""
         players = [Player(name=f"Player{i}", mmr=1500) for i in range(9)]
