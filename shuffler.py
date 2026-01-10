@@ -572,12 +572,17 @@ class BalancedShuffler:
                 seen_matchups.add(matchup_key)
 
                 # Optimize role assignments for this matchup
-                team1, team2, _base_score = self._optimize_role_assignments_for_matchup(
+                team1, team2, base_score = self._optimize_role_assignments_for_matchup(
                     team1_players,
                     team2_players,
                     max_assignments_per_team=pool_max_assignments_per_team,
                 )
 
+                # base_score includes: value_diff + off_role_penalty + role_matchup_delta - rd_priority
+                # We need to add exclusion_penalty and extract components for logging
+                total_score = base_score + exclusion_penalty
+
+                # Extract components for logging
                 team1_value = team1.get_team_value(self.use_glicko, self.off_role_multiplier)
                 team2_value = team2.get_team_value(self.use_glicko, self.off_role_multiplier)
                 value_diff = abs(team1_value - team2_value)
@@ -585,10 +590,6 @@ class BalancedShuffler:
                 team2_off_roles = team2.get_off_role_count()
                 off_role_penalty = (team1_off_roles + team2_off_roles) * self.off_role_flat_penalty
                 role_matchup_delta = self._calculate_role_matchup_delta(team1, team2)
-                weighted_role_delta = role_matchup_delta * self.role_matchup_delta_weight
-                total_score = (
-                    value_diff + off_role_penalty + weighted_role_delta + exclusion_penalty
-                )
                 total_off_roles = team1_off_roles + team2_off_roles
 
                 # Track top-K only (avoid storing all matchups).

@@ -171,6 +171,30 @@ class TestShuffler:
         bonus = shuffler._calculate_rd_priority(players)
         assert bonus == pytest.approx((200.0 + 50.0) * weight)
 
+    def test_rd_priority_favors_high_rd_players_in_pool(self):
+        """With high RD weight, high-RD players should be favored for inclusion."""
+        # 11 players: 10 active (low RD) and 1 inactive/new (high RD)
+        # All equal skill, so the only differentiator is RD priority
+        players = [
+            Player(name=f"Active{i}", mmr=1500, glicko_rating=1500.0, glicko_rd=50.0)
+            for i in range(10)
+        ]
+        high_rd_player = Player(name="HighRD", mmr=1500, glicko_rating=1500.0, glicko_rd=350.0)
+        players.append(high_rd_player)
+
+        # With high RD weight, the high-RD player should be included
+        # RD difference: 350 vs 50 = 300 extra per player
+        # With weight=1.0, that's 300 bonus for including high-RD player
+        shuffler = BalancedShuffler(rd_priority_weight=1.0)
+        team1, team2, excluded = shuffler.shuffle_from_pool(players)
+
+        included_names = {p.name for p in team1.players + team2.players}
+        excluded_names = {p.name for p in excluded}
+
+        # High RD player should be included (not excluded)
+        assert "HighRD" in included_names, "High RD player should be favored for inclusion"
+        assert "HighRD" not in excluded_names
+
     def test_shuffle_wrong_number_of_players(self):
         """Test that shuffling fails with wrong number of players."""
         players = [Player(name=f"Player{i}", mmr=1500) for i in range(9)]
