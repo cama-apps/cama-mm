@@ -1171,8 +1171,9 @@ class BettingCommands(commands.Cog):
             value=(
                 f"Total Wagered: {leaderboard.total_wagered} {JOPACOIN_EMOTE} | "
                 f"Bets: {leaderboard.total_bets} | "
-                f"Avg Degen: {avg_degen_str} | "
-                f"Bankruptcies: {leaderboard.total_bankruptcies}"
+                f"Avg Degen: {avg_degen_str}\n"
+                f"Bankruptcies: {leaderboard.total_bankruptcies} | "
+                f"Loans: {leaderboard.total_loans}"
             ),
             inline=False,
         )

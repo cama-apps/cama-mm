@@ -108,6 +108,7 @@ class Leaderboard:
     total_bets: int
     avg_degen_score: float
     total_bankruptcies: int
+    total_loans: int
 
 
 class GamblingStatsService:
@@ -357,6 +358,20 @@ class GamblingStatsService:
             for s in summaries
         )
 
+        # Count total loans taken
+        total_loans = 0
+        with self.bet_repo.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT COALESCE(SUM(total_loans_taken), 0) as total
+                FROM loan_state
+                """
+            )
+            row = cursor.fetchone()
+            if row:
+                total_loans = row["total"]
+
         return Leaderboard(
             top_earners=top_earners,
             down_bad=down_bad,
@@ -365,6 +380,7 @@ class GamblingStatsService:
             total_bets=total_bets,
             avg_degen_score=avg_degen,
             total_bankruptcies=total_bankruptcies,
+            total_loans=total_loans,
         )
 
     def get_cumulative_pnl_series(self, discord_id: int) -> list[tuple[int, int, dict]]:

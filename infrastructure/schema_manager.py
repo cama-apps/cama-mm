@@ -194,6 +194,7 @@ class SchemaManager:
             ("add_bet_odds_at_placement_column", self._migration_add_bet_odds_at_placement_column),
             ("add_lobby_thread_columns", self._migration_add_lobby_thread_columns),
             ("add_ai_features_enabled", self._migration_add_ai_features_enabled),
+            ("add_bankruptcy_count_column", self._migration_add_bankruptcy_count_column),
         ]
 
     # --- Migrations ---
@@ -663,3 +664,15 @@ class SchemaManager:
     def _migration_add_ai_features_enabled(self, cursor) -> None:
         """Add ai_features_enabled column to guild_config for AI feature toggle."""
         self._add_column_if_not_exists(cursor, "guild_config", "ai_features_enabled", "INTEGER DEFAULT 0")
+
+    def _migration_add_bankruptcy_count_column(self, cursor) -> None:
+        """Add bankruptcy_count column to bankruptcy_state to track total bankruptcies."""
+        self._add_column_if_not_exists(cursor, "bankruptcy_state", "bankruptcy_count", "INTEGER DEFAULT 0")
+        # Backfill: if last_bankruptcy_at is set but bankruptcy_count is 0, set to 1
+        cursor.execute(
+            """
+            UPDATE bankruptcy_state
+            SET bankruptcy_count = 1
+            WHERE last_bankruptcy_at IS NOT NULL AND (bankruptcy_count IS NULL OR bankruptcy_count = 0)
+            """
+        )

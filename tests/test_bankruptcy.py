@@ -156,7 +156,7 @@ class TestBankruptcyDeclaration:
     """Tests for successful bankruptcy declaration."""
 
     def test_bankruptcy_clears_debt(self, db_and_repos, bankruptcy_service):
-        """Declaring bankruptcy sets balance to 0."""
+        """Declaring bankruptcy clears debt and gives fresh start balance of 3."""
         player_repo = db_and_repos["player_repo"]
         pid = create_test_player(player_repo, 1001, balance=-300)
 
@@ -164,7 +164,7 @@ class TestBankruptcyDeclaration:
 
         assert result["success"] is True
         assert result["debt_cleared"] == 300
-        assert player_repo.get_balance(pid) == 0
+        assert player_repo.get_balance(pid) == 3
 
     def test_bankruptcy_sets_penalty_games(self, db_and_repos, bankruptcy_service):
         """Declaring bankruptcy sets penalty games."""

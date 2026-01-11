@@ -824,27 +824,14 @@ class BetRepository(BaseRepository, IBetRepository):
             cursor = conn.cursor()
             cursor.execute(
                 """
-                SELECT COUNT(*) as count
+                SELECT COALESCE(bankruptcy_count, 0) as count
                 FROM bankruptcy_state
-                WHERE discord_id = ? AND last_bankruptcy_at IS NOT NULL
+                WHERE discord_id = ?
                 """,
                 (discord_id,),
             )
             row = cursor.fetchone()
-            # bankruptcy_state only has one row per player, check if they've ever bankrupted
-            if row and row["count"] > 0:
-                # Count actual bankruptcies - need to check penalty_games as proxy
-                cursor.execute(
-                    """
-                    SELECT last_bankruptcy_at
-                    FROM bankruptcy_state
-                    WHERE discord_id = ?
-                    """,
-                    (discord_id,),
-                )
-                state = cursor.fetchone()
-                return 1 if state and state["last_bankruptcy_at"] else 0
-            return 0
+            return row["count"] if row else 0
 
     def count_player_loss_chasing(self, discord_id: int) -> dict:
         """

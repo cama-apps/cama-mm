@@ -33,7 +33,8 @@ class BankruptcyRepository(BaseRepository):
             cursor = conn.cursor()
             cursor.execute(
                 """
-                SELECT discord_id, last_bankruptcy_at, penalty_games_remaining
+                SELECT discord_id, last_bankruptcy_at, penalty_games_remaining,
+                       COALESCE(bankruptcy_count, 0) as bankruptcy_count
                 FROM bankruptcy_state
                 WHERE discord_id = ?
                 """,
@@ -46,21 +47,23 @@ class BankruptcyRepository(BaseRepository):
                 "discord_id": row["discord_id"],
                 "last_bankruptcy_at": row["last_bankruptcy_at"],
                 "penalty_games_remaining": row["penalty_games_remaining"],
+                "bankruptcy_count": row["bankruptcy_count"],
             }
 
     def upsert_state(
         self, discord_id: int, last_bankruptcy_at: int, penalty_games_remaining: int
     ) -> None:
-        """Create or update bankruptcy state."""
+        """Create or update bankruptcy state, incrementing bankruptcy_count."""
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                INSERT INTO bankruptcy_state (discord_id, last_bankruptcy_at, penalty_games_remaining, updated_at)
-                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                INSERT INTO bankruptcy_state (discord_id, last_bankruptcy_at, penalty_games_remaining, bankruptcy_count, updated_at)
+                VALUES (?, ?, ?, 1, CURRENT_TIMESTAMP)
                 ON CONFLICT(discord_id) DO UPDATE SET
                     last_bankruptcy_at = excluded.last_bankruptcy_at,
                     penalty_games_remaining = excluded.penalty_games_remaining,
+                    bankruptcy_count = COALESCE(bankruptcy_state.bankruptcy_count, 0) + 1,
                     updated_at = CURRENT_TIMESTAMP
                 """,
                 (discord_id, last_bankruptcy_at, penalty_games_remaining),
@@ -198,8 +201,8 @@ class BankruptcyService:
         debt_cleared = check["debt"]
         now = int(time.time())
 
-        # Clear debt (set balance to 0)
-        self.player_repo.update_balance(discord_id, 0)
+        # Clear debt and give fresh start balance
+        self.player_repo.update_balance(discord_id, 3)
 
         # Record bankruptcy and set penalty
         self.bankruptcy_repo.upsert_state(
