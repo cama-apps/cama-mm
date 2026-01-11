@@ -8,7 +8,12 @@ but at the cost of reduced winnings for the next several games.
 import time
 from dataclasses import dataclass
 
-from config import BANKRUPTCY_COOLDOWN_SECONDS, BANKRUPTCY_PENALTY_GAMES, BANKRUPTCY_PENALTY_RATE
+from config import (
+    BANKRUPTCY_COOLDOWN_SECONDS,
+    BANKRUPTCY_FRESH_START_BALANCE,
+    BANKRUPTCY_PENALTY_GAMES,
+    BANKRUPTCY_PENALTY_RATE,
+)
 from repositories.base_repository import BaseRepository
 from repositories.player_repository import PlayerRepository
 
@@ -67,6 +72,23 @@ class BankruptcyRepository(BaseRepository):
                     updated_at = CURRENT_TIMESTAMP
                 """,
                 (discord_id, last_bankruptcy_at, penalty_games_remaining),
+            )
+
+    def reset_cooldown_only(
+        self, discord_id: int, last_bankruptcy_at: int, penalty_games_remaining: int
+    ) -> None:
+        """Reset cooldown and penalty without incrementing bankruptcy_count."""
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE bankruptcy_state
+                SET last_bankruptcy_at = ?,
+                    penalty_games_remaining = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE discord_id = ?
+                """,
+                (last_bankruptcy_at, penalty_games_remaining, discord_id),
             )
 
     def decrement_penalty_games(self, discord_id: int) -> int:
@@ -202,7 +224,7 @@ class BankruptcyService:
         now = int(time.time())
 
         # Clear debt and give fresh start balance
-        self.player_repo.update_balance(discord_id, 3)
+        self.player_repo.update_balance(discord_id, BANKRUPTCY_FRESH_START_BALANCE)
 
         # Record bankruptcy and set penalty
         self.bankruptcy_repo.upsert_state(

@@ -71,7 +71,7 @@ BANKRUPTCY_SUCCESS_MESSAGES = [
     "The Jopacoin Federal Reserve takes note of another fallen gambler. Debt erased.",
     "Your bankruptcy filing has been accepted. The house always wins, but at least you don't owe it anymore.",
     "Financial rock bottom achieved. Welcome to the Bankruptcy Hall of Shame.",
-    "Your debt of {debt} jopacoin has been forgiven. You're now starting from nothing. Again.",
+    "Your debt of {debt} jopacoin has been forgiven. You're now starting from almost nothing. Again.",
 ]
 
 LOAN_SUCCESS_MESSAGES = [

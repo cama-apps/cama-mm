@@ -16,6 +16,7 @@ from services.gambling_stats_service import (
     GamblingStatsService,
     Leaderboard,
 )
+from services.loan_service import LoanRepository
 
 
 @pytest.fixture
@@ -35,6 +36,7 @@ def repositories(db_path):
         "bet_repo": BetRepository(db_path),
         "match_repo": MatchRepository(db_path),
         "bankruptcy_repo": BankruptcyRepository(db_path),
+        "loan_repo": LoanRepository(db_path),
     }
 
 
@@ -347,6 +349,41 @@ class TestLeaderboard:
         # Loser should be in down bad
         assert any(e.discord_id == loser_id for e in leaderboard.down_bad)
         assert leaderboard.down_bad[0].net_pnl < 0
+
+    def test_leaderboard_total_loans(self, gambling_stats_service, repositories):
+        """Test that total_loans is a server-wide aggregate stat."""
+        bet_repo = repositories["bet_repo"]
+        player_repo = repositories["player_repo"]
+        match_repo = repositories["match_repo"]
+        loan_repo = repositories["loan_repo"]
+
+        # Player 1 with 5 loans and 3 bets
+        player1 = _setup_player(player_repo, discord_id=1001, balance=100)
+        loan_repo.upsert_state(discord_id=player1, total_loans_taken=5)
+        for _ in range(3):
+            _place_and_settle_bet(bet_repo, match_repo, player_repo, player1, 10, "radiant", "radiant")
+
+        # Player 2 with 3 loans and 3 bets
+        player2 = _setup_player(player_repo, discord_id=1002, balance=100)
+        loan_repo.upsert_state(discord_id=player2, total_loans_taken=3)
+        for _ in range(3):
+            _place_and_settle_bet(bet_repo, match_repo, player_repo, player2, 10, "radiant", "dire")
+
+        # Player 3 with 10 loans but only 2 bets (below min_bets but still counts for server stats)
+        player3 = _setup_player(player_repo, discord_id=1003, balance=100)
+        loan_repo.upsert_state(discord_id=player3, total_loans_taken=10)
+        for _ in range(2):
+            _place_and_settle_bet(bet_repo, match_repo, player_repo, player3, 10, "radiant", "radiant")
+
+        leaderboard = gambling_stats_service.get_leaderboard(guild_id=0, min_bets=3)
+
+        # Server-wide stat: counts ALL loans (5 + 3 + 10 = 18)
+        assert leaderboard.total_loans == 18
+
+    def test_leaderboard_total_loans_empty(self, gambling_stats_service, repositories):
+        """Test that total_loans is 0 when no players have bets."""
+        leaderboard = gambling_stats_service.get_leaderboard(guild_id=0)
+        assert leaderboard.total_loans == 0
 
 
 class TestPnlSeries:

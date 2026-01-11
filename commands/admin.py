@@ -418,8 +418,8 @@ class AdminCommands(commands.Cog):
             )
             return
 
-        # Reset cooldown AND clear penalty games
-        self.bankruptcy_service.bankruptcy_repo.upsert_state(
+        # Reset cooldown AND clear penalty games (without incrementing bankruptcy count)
+        self.bankruptcy_service.bankruptcy_repo.reset_cooldown_only(
             discord_id=user.id,
             last_bankruptcy_at=0,  # Far in the past = no cooldown
             penalty_games_remaining=0,  # Clear penalty games

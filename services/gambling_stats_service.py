@@ -358,7 +358,7 @@ class GamblingStatsService:
             for s in summaries
         )
 
-        # Count total loans taken
+        # Count total loans taken (server-wide aggregate stat)
         total_loans = 0
         with self.bet_repo.connection() as conn:
             cursor = conn.cursor()

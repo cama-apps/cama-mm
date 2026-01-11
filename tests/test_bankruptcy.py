@@ -337,3 +337,79 @@ class TestBankruptcyState:
         assert state.penalty_games_remaining == 5
         assert state.is_on_cooldown is True
         assert state.cooldown_ends_at is not None
+
+
+class TestBankruptcyCount:
+    """Tests for bankruptcy count tracking."""
+
+    def test_first_bankruptcy_sets_count_to_one(self, db_and_repos, bankruptcy_service):
+        """First bankruptcy sets count to 1."""
+        player_repo = db_and_repos["player_repo"]
+        bet_repo = db_and_repos["bet_repo"]
+        pid = create_test_player(player_repo, 1001, balance=-200)
+
+        bankruptcy_service.declare_bankruptcy(pid)
+
+        count = bet_repo.get_player_bankruptcy_count(pid)
+        assert count == 1
+
+    def test_multiple_bankruptcies_increment_count(self, db_and_repos):
+        """Multiple bankruptcies increment the count correctly."""
+        player_repo = db_and_repos["player_repo"]
+        bankruptcy_repo = db_and_repos["bankruptcy_repo"]
+        bet_repo = db_and_repos["bet_repo"]
+
+        # Use very short cooldown for testing
+        service = BankruptcyService(
+            bankruptcy_repo=bankruptcy_repo,
+            player_repo=player_repo,
+            cooldown_seconds=0,  # No cooldown for testing
+            penalty_games=5,
+            penalty_rate=0.5,
+        )
+
+        pid = create_test_player(player_repo, 1001, balance=-200)
+
+        # First bankruptcy
+        service.declare_bankruptcy(pid)
+        assert bet_repo.get_player_bankruptcy_count(pid) == 1
+
+        # Put back in debt and declare again
+        player_repo.update_balance(pid, -100)
+        service.declare_bankruptcy(pid)
+        assert bet_repo.get_player_bankruptcy_count(pid) == 2
+
+        # Third bankruptcy
+        player_repo.update_balance(pid, -50)
+        service.declare_bankruptcy(pid)
+        assert bet_repo.get_player_bankruptcy_count(pid) == 3
+
+    def test_reset_cooldown_does_not_increment_count(self, db_and_repos, bankruptcy_service):
+        """Admin reset of cooldown should not increment bankruptcy count."""
+        player_repo = db_and_repos["player_repo"]
+        bankruptcy_repo = db_and_repos["bankruptcy_repo"]
+        bet_repo = db_and_repos["bet_repo"]
+        pid = create_test_player(player_repo, 1001, balance=-200)
+
+        # Declare bankruptcy
+        bankruptcy_service.declare_bankruptcy(pid)
+        assert bet_repo.get_player_bankruptcy_count(pid) == 1
+
+        # Admin resets cooldown using reset_cooldown_only (not upsert_state)
+        bankruptcy_repo.reset_cooldown_only(
+            discord_id=pid,
+            last_bankruptcy_at=0,
+            penalty_games_remaining=0,
+        )
+
+        # Count should still be 1
+        assert bet_repo.get_player_bankruptcy_count(pid) == 1
+
+    def test_player_with_no_bankruptcy_has_zero_count(self, db_and_repos, bankruptcy_service):
+        """Players who never declared bankruptcy have count of 0."""
+        player_repo = db_and_repos["player_repo"]
+        bet_repo = db_and_repos["bet_repo"]
+        pid = create_test_player(player_repo, 1001, balance=100)
+
+        count = bet_repo.get_player_bankruptcy_count(pid)
+        assert count == 0
