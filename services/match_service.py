@@ -329,6 +329,23 @@ class MatchService:
                 f"Could not load all players: expected {len(player_ids)}, got {len(players)}"
             )
 
+        # Apply RD decay for shuffle priority calculation (not persisted)
+        # This ensures returning players get appropriate priority boost
+        last_match_dates = self.player_repo.get_last_match_dates(player_ids)
+        now = datetime.now(timezone.utc)
+        for player in players:
+            if player.discord_id and player.glicko_rd is not None:
+                last_match_str = last_match_dates.get(player.discord_id)
+                if last_match_str:
+                    try:
+                        last_match = datetime.fromisoformat(last_match_str.replace("Z", "+00:00"))
+                        days_since = (now - last_match).days
+                        player.glicko_rd = CamaRatingSystem.apply_rd_decay(
+                            player.glicko_rd, days_since
+                        )
+                    except (ValueError, TypeError):
+                        pass  # Keep original RD if date parsing fails
+
         if len(players) < 10:
             raise ValueError("Need at least 10 players to shuffle.")
 

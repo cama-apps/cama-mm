@@ -247,6 +247,33 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 return None
             return (row["last_match_date"], row["created_at"])
 
+    def get_last_match_dates(self, discord_ids: list[int]) -> dict[int, str | None]:
+        """
+        Get last_match_date for multiple players.
+
+        Args:
+            discord_ids: List of Discord user IDs
+
+        Returns:
+            Dict mapping discord_id to last_match_date (ISO string or None)
+        """
+        if not discord_ids:
+            return {}
+
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            placeholders = ",".join("?" * len(discord_ids))
+            cursor.execute(
+                f"""
+                SELECT discord_id, last_match_date
+                FROM players
+                WHERE discord_id IN ({placeholders})
+                """,
+                discord_ids,
+            )
+            rows = cursor.fetchall()
+            return {row["discord_id"]: row["last_match_date"] for row in rows}
+
     def get_game_count(self, discord_id: int) -> int:
         """Return total games played (wins + losses)."""
         with self.connection() as conn:
