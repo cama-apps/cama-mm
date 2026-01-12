@@ -46,7 +46,7 @@ class ProfileView(discord.ui.View):
         target_user: discord.Member | discord.User,
         target_discord_id: int,
     ):
-        super().__init__(timeout=900)  # 15 minute timeout
+        super().__init__(timeout=840)  # 14 minute timeout (interaction tokens expire at 15min)
         self.cog = cog
         self.target_user = target_user
         self.target_discord_id = target_discord_id
@@ -1095,7 +1095,7 @@ class ProfileCommands(commands.Cog):
         view.stop()  # Stop the view to disable buttons
         try:
             await message.delete()
-            logger.info(f"Profile message {message.id} deleted after {timeout}s timeout")
+            logger.info(f"Profile message {message.id} deleted after {timeout // 60}min timeout")
         except discord.NotFound:
             logger.debug(f"Profile message {message.id} was already deleted")
         except discord.HTTPException as e:
@@ -1156,7 +1156,7 @@ class ProfileCommands(commands.Cog):
 
         # Schedule message deletion after timeout (more reliable than view.on_timeout)
         if message:
-            asyncio.create_task(self._delete_after_timeout(message, view, timeout=900))
+            asyncio.create_task(self._delete_after_timeout(message, view, timeout=840))
 
 
 async def setup(bot: commands.Bot):
