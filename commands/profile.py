@@ -1,0 +1,929 @@
+"""
+Unified profile command with tabbed navigation.
+
+Provides a comprehensive view of player stats across all systems:
+- Overview: Basic stats (rating, W/L, balance, roles)
+- Rating: Detailed calibration and performance analysis
+- Economy: Balance, loans, bankruptcy status
+- Gambling: Degen score, P&L, betting patterns
+- Predictions: Prediction market performance
+"""
+
+import logging
+import time
+
+import discord
+from discord import app_commands
+from discord.ext import commands
+
+from config import (
+    BANKRUPTCY_PENALTY_RATE,
+    LOAN_COOLDOWN_SECONDS,
+    BANKRUPTCY_COOLDOWN_SECONDS,
+)
+from rating_system import CamaRatingSystem
+from utils.formatting import JOPACOIN_EMOTE, TOMBSTONE_EMOJI, format_role_display
+from utils.interaction_safety import safe_defer, safe_followup
+from utils.rate_limiter import GLOBAL_RATE_LIMITER
+from utils.rating_insights import rd_to_certainty, get_rd_tier_name
+
+logger = logging.getLogger("cama_bot.commands.profile")
+
+# Embed colors
+COLOR_BLUE = 0x3498DB
+COLOR_GREEN = 0x57F287
+COLOR_RED = 0xED4245
+COLOR_ORANGE = 0xF39C12
+
+
+class ProfileView(discord.ui.View):
+    """View with tab buttons for navigating profile sections."""
+
+    def __init__(
+        self,
+        cog: "ProfileCommands",
+        target_user: discord.Member | discord.User,
+        target_discord_id: int,
+    ):
+        super().__init__(timeout=900)  # 15 minute timeout
+        self.cog = cog
+        self.target_user = target_user
+        self.target_discord_id = target_discord_id
+        self.current_tab = "overview"
+        self._last_interaction_time: dict[int, float] = {}  # user_id -> timestamp
+        self._update_button_styles()
+
+    def _update_button_styles(self):
+        """Update button styles based on current tab."""
+        tab_buttons = {
+            "overview": self.overview_btn,
+            "rating": self.rating_btn,
+            "economy": self.economy_btn,
+            "gambling": self.gambling_btn,
+            "predictions": self.predictions_btn,
+        }
+        for tab_name, button in tab_buttons.items():
+            if tab_name == self.current_tab:
+                button.style = discord.ButtonStyle.primary
+            else:
+                button.style = discord.ButtonStyle.secondary
+
+    async def _handle_tab_click(
+        self, interaction: discord.Interaction, tab_name: str
+    ):
+        """Handle tab button click with rate limiting."""
+        # Simple rate limit: 2 seconds between clicks per user
+        now = time.time()
+        last_time = self._last_interaction_time.get(interaction.user.id, 0)
+        if now - last_time < 2.0:
+            await interaction.response.defer()
+            return
+        self._last_interaction_time[interaction.user.id] = now
+
+        self.current_tab = tab_name
+        self._update_button_styles()
+
+        embed = await self.cog.build_tab_embed(
+            tab_name, self.target_user, self.target_discord_id
+        )
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="Overview", style=discord.ButtonStyle.primary, row=0)
+    async def overview_btn(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        await self._handle_tab_click(interaction, "overview")
+
+    @discord.ui.button(label="Rating", style=discord.ButtonStyle.secondary, row=0)
+    async def rating_btn(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        await self._handle_tab_click(interaction, "rating")
+
+    @discord.ui.button(label="Economy", style=discord.ButtonStyle.secondary, row=0)
+    async def economy_btn(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        await self._handle_tab_click(interaction, "economy")
+
+    @discord.ui.button(label="Gambling", style=discord.ButtonStyle.secondary, row=0)
+    async def gambling_btn(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        await self._handle_tab_click(interaction, "gambling")
+
+    @discord.ui.button(label="Predictions", style=discord.ButtonStyle.secondary, row=0)
+    async def predictions_btn(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        await self._handle_tab_click(interaction, "predictions")
+
+
+class ProfileCommands(commands.Cog):
+    """Unified profile command with tabbed navigation."""
+
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+
+    def _get_player_service(self):
+        return getattr(self.bot, "player_service", None)
+
+    def _get_player_repo(self):
+        return getattr(self.bot, "player_repo", None)
+
+    def _get_match_repo(self):
+        return getattr(self.bot, "match_repo", None)
+
+    def _get_bankruptcy_service(self):
+        return getattr(self.bot, "bankruptcy_service", None)
+
+    def _get_loan_service(self):
+        return getattr(self.bot, "loan_service", None)
+
+    def _get_gambling_stats_service(self):
+        return getattr(self.bot, "gambling_stats_service", None)
+
+    def _get_prediction_service(self):
+        return getattr(self.bot, "prediction_service", None)
+
+    def _get_rating_system(self):
+        match_service = getattr(self.bot, "match_service", None)
+        if match_service:
+            return match_service.rating_system
+        return CamaRatingSystem()
+
+    async def build_tab_embed(
+        self,
+        tab_name: str,
+        target_user: discord.Member | discord.User,
+        target_discord_id: int,
+    ) -> discord.Embed:
+        """Build the embed for a specific tab."""
+        builders = {
+            "overview": self._build_overview_embed,
+            "rating": self._build_rating_embed,
+            "economy": self._build_economy_embed,
+            "gambling": self._build_gambling_embed,
+            "predictions": self._build_predictions_embed,
+        }
+        builder = builders.get(tab_name, self._build_overview_embed)
+        return await builder(target_user, target_discord_id)
+
+    async def _build_overview_embed(
+        self,
+        target_user: discord.Member | discord.User,
+        target_discord_id: int,
+    ) -> discord.Embed:
+        """Build the Overview tab embed."""
+        player_service = self._get_player_service()
+        bankruptcy_service = self._get_bankruptcy_service()
+        player_repo = self._get_player_repo()
+
+        if not player_service:
+            return discord.Embed(
+                title="Error", description="Player service unavailable", color=COLOR_RED
+            )
+
+        try:
+            stats = player_service.get_stats(target_discord_id)
+        except ValueError:
+            return discord.Embed(
+                title="Not Registered",
+                description=f"{target_user.display_name} is not registered.\nUse `/register` to get started.",
+                color=COLOR_RED,
+            )
+
+        player = stats["player"]
+
+        # Check for bankruptcy penalty
+        penalty_games = 0
+        if bankruptcy_service:
+            state = bankruptcy_service.get_state(target_discord_id)
+            penalty_games = state.penalty_games_remaining
+
+        # Title with tombstone if penalized
+        title_prefix = f"{TOMBSTONE_EMOJI} " if penalty_games > 0 else ""
+        embed = discord.Embed(
+            title=f"{title_prefix}Profile: {target_user.display_name}",
+            color=COLOR_BLUE,
+        )
+
+        # Rating
+        if stats["cama_rating"] is not None:
+            certainty = 100 - stats["uncertainty"]
+            rating_system = self._get_rating_system()
+            rating_display = rating_system.rating_to_display(stats["cama_rating"])
+            embed.add_field(
+                name="Rating",
+                value=f"{rating_display} ({certainty:.0f}% certain)",
+                inline=True,
+            )
+        else:
+            embed.add_field(name="Rating", value="Not set", inline=True)
+
+        # Record
+        total_games = player.wins + player.losses
+        win_rate = stats["win_rate"]
+        if total_games > 0:
+            embed.add_field(
+                name="Record",
+                value=f"{player.wins}W-{player.losses}L ({win_rate:.0f}%)",
+                inline=True,
+            )
+        else:
+            embed.add_field(name="Record", value="No games", inline=True)
+
+        # Balance
+        balance = stats["jopacoin_balance"]
+        balance_emoji = "" if balance >= 0 else "⚠️ "
+        embed.add_field(
+            name="Balance",
+            value=f"{balance_emoji}{balance} {JOPACOIN_EMOTE}",
+            inline=True,
+        )
+
+        # Roles
+        if player.preferred_roles:
+            role_display = ", ".join([format_role_display(r) for r in player.preferred_roles])
+            embed.add_field(name="Roles", value=role_display, inline=True)
+        else:
+            embed.add_field(name="Roles", value="Not set", inline=True)
+
+        # Main role if different
+        if player.main_role:
+            embed.add_field(name="Main", value=format_role_display(player.main_role), inline=True)
+
+        # Hero stats from enriched matches
+        match_repo = self._get_match_repo()
+        if match_repo and hasattr(match_repo, "get_player_hero_stats"):
+            try:
+                from utils.hero_lookup import get_hero_name
+
+                hero_stats = match_repo.get_player_hero_stats(target_discord_id)
+                if isinstance(hero_stats, dict):
+                    hero_lines = []
+                    if hero_stats.get("last_hero_id"):
+                        last_hero = get_hero_name(hero_stats["last_hero_id"])
+                        hero_lines.append(f"**Last:** {last_hero}")
+                    if hero_stats.get("hero_counts"):
+                        top_heroes = []
+                        for hero_id, games, wins in hero_stats["hero_counts"][:3]:
+                            hero_name = get_hero_name(hero_id)
+                            winrate = (wins / games * 100) if games > 0 else 0
+                            top_heroes.append(f"{hero_name} ({games}g, {winrate:.0f}%)")
+                        if top_heroes:
+                            hero_lines.append(f"**Top:** {', '.join(top_heroes)}")
+                    if hero_lines:
+                        embed.add_field(name="Heroes", value="\n".join(hero_lines), inline=False)
+            except Exception as e:
+                logger.debug(f"Could not fetch hero stats: {e}")
+
+        # Bankruptcy penalty warning
+        if penalty_games > 0:
+            penalty_rate_pct = int(BANKRUPTCY_PENALTY_RATE * 100)
+            embed.add_field(
+                name=f"{TOMBSTONE_EMOJI} Bankruptcy Penalty",
+                value=f"{penalty_rate_pct}% win bonus for {penalty_games} more game(s)",
+                inline=False,
+            )
+
+        return embed
+
+    async def _build_rating_embed(
+        self,
+        target_user: discord.Member | discord.User,
+        target_discord_id: int,
+    ) -> discord.Embed:
+        """Build the Rating tab embed with detailed calibration stats."""
+        player_repo = self._get_player_repo()
+        match_repo = self._get_match_repo()
+        rating_system = self._get_rating_system()
+
+        if not player_repo:
+            return discord.Embed(
+                title="Error", description="Player repository unavailable", color=COLOR_RED
+            )
+
+        player = player_repo.get_by_id(target_discord_id)
+        if not player:
+            return discord.Embed(
+                title="Not Registered",
+                description=f"{target_user.display_name} is not registered.",
+                color=COLOR_RED,
+            )
+
+        # Get rating history for trend analysis
+        history = []
+        if match_repo and hasattr(match_repo, "get_player_rating_history_detailed"):
+            history = match_repo.get_player_rating_history_detailed(target_discord_id, limit=50)
+
+        # Calculate percentile
+        all_players = player_repo.get_all()
+        rated_players = [p for p in all_players if p.glicko_rating is not None]
+        percentile = None
+        if player.glicko_rating and rated_players:
+            lower_count = sum(1 for p in rated_players if (p.glicko_rating or 0) < player.glicko_rating)
+            percentile = (lower_count / len(rated_players)) * 100
+
+        # Calculate calibration tier and trend color
+        rd = player.glicko_rd or 350
+        calibration_tier = get_rd_tier_name(rd)
+
+        # Determine color based on recent trend
+        color = COLOR_BLUE
+        last_5_delta = None
+        if len(history) >= 2:
+            if len(history) > 5:
+                last_5_delta = (history[0].get("rating") or 0) - (history[4].get("rating") or 0)
+            else:
+                last_5_delta = (history[0].get("rating") or 0) - (history[-1].get("rating") or 0)
+            if last_5_delta and last_5_delta > 10:
+                color = COLOR_GREEN
+            elif last_5_delta and last_5_delta < -10:
+                color = COLOR_RED
+
+        embed = discord.Embed(
+            title=f"Profile: {target_user.display_name} > Rating",
+            color=color,
+        )
+
+        # Rating profile
+        rating_display = rating_system.rating_to_display(player.glicko_rating) if player.glicko_rating else "N/A"
+        certainty = rd_to_certainty(rd)
+        percentile_text = f"Top {100 - percentile:.0f}%" if percentile else "N/A"
+
+        profile_lines = [
+            f"**Rating:** {rating_display} ({certainty:.0f}% certain)",
+            f"**Tier:** {calibration_tier} | **Percentile:** {percentile_text}",
+        ]
+        if player.glicko_volatility:
+            profile_lines.append(f"**Volatility:** {player.glicko_volatility:.3f}")
+        embed.add_field(name="Rating Profile", value="\n".join(profile_lines), inline=False)
+
+        # Drift from initial seed
+        if player.initial_mmr and player.glicko_rating:
+            seed_rating = rating_system.mmr_to_rating(player.initial_mmr)
+            drift = player.glicko_rating - seed_rating
+            drift_emoji = "+" if drift > 0 else "" if drift < 0 else ""
+            arrow = "📈" if drift > 0 else "📉" if drift < 0 else "➡️"
+            embed.add_field(
+                name="Rating Drift",
+                value=f"{arrow} **{drift_emoji}{drift:.0f}** rating vs initial seed ({player.initial_mmr} MMR)",
+                inline=False,
+            )
+
+        # Performance vs expectations
+        matches_with_predictions = [h for h in history if h.get("expected_team_win_prob") is not None]
+        if matches_with_predictions:
+            actual_wins = sum(1 for h in matches_with_predictions if h.get("won"))
+            expected_wins = sum(h.get("expected_team_win_prob", 0) for h in matches_with_predictions)
+            overperformance = actual_wins - expected_wins
+
+            over_emoji = "🔥" if overperformance > 0 else "💀" if overperformance < 0 else "➡️"
+            embed.add_field(
+                name="Performance",
+                value=(
+                    f"**Actual Wins:** {actual_wins} | **Expected:** {expected_wins:.1f}\n"
+                    f"**Over/Under:** {over_emoji} {overperformance:+.1f} wins"
+                ),
+                inline=True,
+            )
+
+            # Win rates when favored vs underdog
+            favored_matches = [h for h in matches_with_predictions if (h.get("expected_team_win_prob") or 0) >= 0.55]
+            underdog_matches = [h for h in matches_with_predictions if (h.get("expected_team_win_prob") or 0) <= 0.45]
+            favored_wins = sum(1 for h in favored_matches if h.get("won"))
+            underdog_wins = sum(1 for h in underdog_matches if h.get("won"))
+
+            winrate_lines = []
+            if favored_matches:
+                winrate_lines.append(f"**Favored (55%+):** {favored_wins}/{len(favored_matches)} ({favored_wins/len(favored_matches):.0%})")
+            if underdog_matches:
+                winrate_lines.append(f"**Underdog (45%-):** {underdog_wins}/{len(underdog_matches)} ({underdog_wins/len(underdog_matches):.0%})")
+            if winrate_lines:
+                embed.add_field(name="Situational", value="\n".join(winrate_lines), inline=True)
+
+        # Trend and streak
+        if last_5_delta is not None:
+            trend_emoji = "📈" if last_5_delta > 0 else "📉" if last_5_delta < 0 else "➡️"
+            trend_text = f"{trend_emoji} **{last_5_delta:+.0f}** over last {min(5, len(history))} games"
+
+            # Calculate current streak
+            streak = 0
+            streak_type = None
+            for h in matches_with_predictions:
+                won = h.get("won")
+                if streak_type is None:
+                    streak_type = "W" if won else "L"
+                    streak = 1
+                elif (won and streak_type == "W") or (not won and streak_type == "L"):
+                    streak += 1
+                else:
+                    break
+
+            if streak and streak_type:
+                streak_emoji = "🔥" if streak_type == "W" else "💀"
+                trend_text += f"\n{streak_emoji} Current: **{streak_type}{streak}** streak"
+
+            embed.add_field(name="Trend", value=trend_text, inline=True)
+
+        # Recent matches (last 5)
+        if matches_with_predictions:
+            recent_lines = []
+            for h in matches_with_predictions[:5]:
+                prob = h.get("expected_team_win_prob", 0.5)
+                won = h.get("won")
+                expected_win = prob >= 0.5
+                if won:
+                    emoji = "✅" if expected_win else "🔥"  # expected win or upset
+                else:
+                    emoji = "💀" if expected_win else "❌"  # choke or expected loss
+                recent_lines.append(f"{emoji} {prob:.0%} → {'W' if won else 'L'}")
+
+            embed.add_field(
+                name=f"Recent ({len(recent_lines)} games)",
+                value="\n".join(recent_lines),
+                inline=True,
+            )
+
+        # Highlights (biggest upset and choke)
+        upsets = [(h, h.get("expected_team_win_prob", 0.5)) for h in matches_with_predictions
+                  if h.get("won") and (h.get("expected_team_win_prob") or 0.5) < 0.45]
+        chokes = [(h, h.get("expected_team_win_prob", 0.5)) for h in matches_with_predictions
+                  if not h.get("won") and (h.get("expected_team_win_prob") or 0.5) > 0.55]
+        upsets.sort(key=lambda x: x[1])
+        chokes.sort(key=lambda x: x[1], reverse=True)
+
+        highlights = []
+        if upsets:
+            best_upset = upsets[0]
+            highlights.append(f"🔥 **Best Upset:** Won @ {best_upset[1]:.0%} (Match #{best_upset[0].get('match_id')})")
+        if chokes:
+            worst_choke = chokes[0]
+            highlights.append(f"💀 **Worst Choke:** Lost @ {worst_choke[1]:.0%} (Match #{worst_choke[0].get('match_id')})")
+        if highlights:
+            embed.add_field(name="Highlights", value="\n".join(highlights), inline=False)
+
+        # Record
+        total_games = player.wins + player.losses
+        if total_games > 0:
+            embed.add_field(
+                name="Record",
+                value=f"**W-L:** {player.wins}-{player.losses} ({player.wins / total_games:.0%})",
+                inline=True,
+            )
+
+        embed.set_footer(text="Tip: Use /calibration for full analysis | ✅=expected W | 🔥=upset | ❌=expected L | 💀=choke")
+
+        return embed
+
+    async def _build_economy_embed(
+        self,
+        target_user: discord.Member | discord.User,
+        target_discord_id: int,
+    ) -> discord.Embed:
+        """Build the Economy tab embed with balance, loans, and bankruptcy."""
+        player_repo = self._get_player_repo()
+        loan_service = self._get_loan_service()
+        bankruptcy_service = self._get_bankruptcy_service()
+
+        if not player_repo:
+            return discord.Embed(
+                title="Error", description="Player repository unavailable", color=COLOR_RED
+            )
+
+        player = player_repo.get_by_id(target_discord_id)
+        if not player:
+            return discord.Embed(
+                title="Not Registered",
+                description=f"{target_user.display_name} is not registered.",
+                color=COLOR_RED,
+            )
+
+        balance = player.jopacoin_balance or 0
+
+        # Determine color based on balance
+        if balance > 0:
+            color = COLOR_GREEN
+        elif balance < 0:
+            color = COLOR_RED
+        else:
+            color = COLOR_ORANGE
+
+        embed = discord.Embed(
+            title=f"Profile: {target_user.display_name} > Economy",
+            color=color,
+        )
+
+        # Balance with visual indicator
+        balance_emoji = "💰" if balance > 0 else "⚠️" if balance < 0 else "📭"
+        embed.add_field(
+            name=f"{balance_emoji} Balance",
+            value=f"**{balance}** {JOPACOIN_EMOTE}",
+            inline=False,
+        )
+
+        # Loan information
+        if loan_service:
+            loan_state = loan_service.get_state(target_discord_id)
+
+            loan_lines = []
+            loan_lines.append(f"**Loans Taken:** {loan_state.total_loans_taken}")
+            loan_lines.append(f"**Fees Paid:** {loan_state.total_fees_paid} {JOPACOIN_EMOTE}")
+
+            if loan_state.negative_loans_taken > 0:
+                loan_lines.append(f"🔥 **Borrowed While Broke:** {loan_state.negative_loans_taken}x")
+
+            if loan_state.has_outstanding_loan:
+                loan_lines.append(f"\n⚠️ **Outstanding Loan:**")
+                loan_lines.append(f"  Principal: {loan_state.outstanding_principal} {JOPACOIN_EMOTE}")
+                loan_lines.append(f"  Fee: {loan_state.outstanding_fee} {JOPACOIN_EMOTE}")
+                loan_lines.append(f"  **Total Owed:** {loan_state.outstanding_total} {JOPACOIN_EMOTE}")
+                loan_lines.append(f"  *(Repaid on next match)*")
+
+            if loan_state.is_on_cooldown and loan_state.cooldown_ends_at:
+                loan_lines.append(f"\n⏳ **Cooldown:** <t:{loan_state.cooldown_ends_at}:R>")
+            elif not loan_state.has_outstanding_loan:
+                loan_lines.append(f"\n✅ **Loan Available**")
+
+            embed.add_field(
+                name="🏦 Loans",
+                value="\n".join(loan_lines),
+                inline=True,
+            )
+
+        # Bankruptcy information
+        if bankruptcy_service:
+            bankruptcy_repo = bankruptcy_service.bankruptcy_repo
+            state_data = bankruptcy_repo.get_state(target_discord_id)
+            bankruptcy_state = bankruptcy_service.get_state(target_discord_id)
+
+            bankruptcy_lines = []
+            bankruptcy_count = state_data["bankruptcy_count"] if state_data else 0
+            bankruptcy_lines.append(f"**Declarations:** {bankruptcy_count}")
+
+            if bankruptcy_state.penalty_games_remaining > 0:
+                penalty_rate_pct = int(BANKRUPTCY_PENALTY_RATE * 100)
+                bankruptcy_lines.append(f"\n{TOMBSTONE_EMOJI} **Active Penalty:**")
+                bankruptcy_lines.append(f"  {penalty_rate_pct}% win bonus")
+                bankruptcy_lines.append(f"  {bankruptcy_state.penalty_games_remaining} game(s) remaining")
+
+            if bankruptcy_state.is_on_cooldown and bankruptcy_state.cooldown_ends_at:
+                bankruptcy_lines.append(f"\n⏳ **Cooldown:** <t:{bankruptcy_state.cooldown_ends_at}:R>")
+            elif balance < 0:
+                bankruptcy_lines.append(f"\n⚠️ **Bankruptcy Available**")
+
+            embed.add_field(
+                name=f"{TOMBSTONE_EMOJI} Bankruptcy",
+                value="\n".join(bankruptcy_lines),
+                inline=True,
+            )
+
+        # Lowest balance ever reached
+        lowest_balance = player_repo.get_lowest_balance(target_discord_id)
+        if lowest_balance is not None and lowest_balance < 0:
+            embed.add_field(
+                name="📉 Lowest Balance",
+                value=f"**{lowest_balance}** {JOPACOIN_EMOTE}",
+                inline=True,
+            )
+
+        embed.set_footer(text="Tip: Use /balance for quick check, /loan to borrow")
+
+        return embed
+
+    async def _build_gambling_embed(
+        self,
+        target_user: discord.Member | discord.User,
+        target_discord_id: int,
+    ) -> discord.Embed:
+        """Build the Gambling tab embed with degen score and betting stats."""
+        gambling_stats_service = self._get_gambling_stats_service()
+        player_service = self._get_player_service()
+        loan_service = self._get_loan_service()
+        bankruptcy_service = self._get_bankruptcy_service()
+
+        if not gambling_stats_service:
+            return discord.Embed(
+                title="Error", description="Gambling stats service unavailable", color=COLOR_RED
+            )
+
+        stats = gambling_stats_service.get_player_stats(target_discord_id)
+
+        if not stats:
+            return discord.Embed(
+                title=f"Profile: {target_user.display_name} > Gambling",
+                description="No betting history yet.\n\nPlay matches and use `/bet` to get started!",
+                color=COLOR_BLUE,
+            )
+
+        # Color based on P&L
+        color = COLOR_GREEN if stats.net_pnl >= 0 else COLOR_RED
+
+        embed = discord.Embed(
+            title=f"Profile: {target_user.display_name} > Gambling",
+            color=color,
+        )
+
+        # Degen score header
+        degen = stats.degen_score
+        flavor_text = " • ".join(degen.flavor_texts) if degen.flavor_texts else degen.tagline
+        embed.description = (
+            f"**Degen Score: {degen.total}** {degen.emoji} {degen.title}\n"
+            f"*{flavor_text}*"
+        )
+
+        # Performance
+        pnl_str = f"+{stats.net_pnl}" if stats.net_pnl >= 0 else str(stats.net_pnl)
+        roi_str = f"+{stats.roi:.1%}" if stats.roi >= 0 else f"{stats.roi:.1%}"
+
+        # Get current balance
+        player = player_service.get_player(target_discord_id) if player_service else None
+        balance = player.jopacoin_balance if player else 0
+
+        embed.add_field(
+            name="Performance",
+            value=(
+                f"**Balance:** {balance} {JOPACOIN_EMOTE}\n"
+                f"**Net P&L:** {pnl_str} {JOPACOIN_EMOTE}\n"
+                f"**ROI:** {roi_str}\n"
+                f"**Record:** {stats.wins}W-{stats.losses}L ({stats.win_rate:.0%})"
+            ),
+            inline=True,
+        )
+
+        # Volume
+        embed.add_field(
+            name="Volume",
+            value=(
+                f"**Total Bets:** {stats.total_bets}\n"
+                f"**Wagered:** {stats.total_wagered} {JOPACOIN_EMOTE}\n"
+                f"**Avg Bet:** {stats.avg_bet_size:.1f} {JOPACOIN_EMOTE}"
+            ),
+            inline=True,
+        )
+
+        # Leverage distribution
+        lev_parts = []
+        for lev in [1, 2, 3, 5]:
+            count = stats.leverage_distribution.get(lev, 0)
+            if count > 0:
+                pct = count / stats.total_bets * 100
+                lev_parts.append(f"{lev}×({pct:.0f}%)")
+        lev_str = " ".join(lev_parts) if lev_parts else "None"
+
+        # Streaks
+        streak_emoji = "🔥" if stats.current_streak > 0 else "💀" if stats.current_streak < 0 else "➖"
+        streak_val = abs(stats.current_streak)
+        streak_type = "W" if stats.current_streak >= 0 else "L"
+
+        embed.add_field(
+            name="Risk Profile",
+            value=(
+                f"**Leverage:** {lev_str}\n"
+                f"**Streak:** {streak_emoji} {streak_type}{streak_val}\n"
+                f"**Best/Worst:** W{stats.best_streak} / L{abs(stats.worst_streak)}"
+            ),
+            inline=True,
+        )
+
+        # Extremes
+        peak_str = f"+{stats.peak_pnl}" if stats.peak_pnl > 0 else str(stats.peak_pnl)
+        trough_str = str(stats.trough_pnl)
+        biggest_win_str = f"+{stats.biggest_win}" if stats.biggest_win > 0 else "None"
+        biggest_loss_str = str(stats.biggest_loss) if stats.biggest_loss < 0 else "None"
+
+        embed.add_field(
+            name="Extremes",
+            value=(
+                f"**Peak:** {peak_str} {JOPACOIN_EMOTE}\n"
+                f"**Trough:** {trough_str} {JOPACOIN_EMOTE}\n"
+                f"**Best Win:** {biggest_win_str} {JOPACOIN_EMOTE}\n"
+                f"**Worst Loss:** {biggest_loss_str} {JOPACOIN_EMOTE}"
+            ),
+            inline=True,
+        )
+
+        # Paper hands
+        if stats.matches_played > 0:
+            paper_rate = stats.paper_hands_count / stats.matches_played * 100
+            paper_emoji = "📄" if paper_rate >= 30 else "🤔" if paper_rate >= 10 else "💎"
+            embed.add_field(
+                name=f"{paper_emoji} Paper Hands",
+                value=(
+                    f"**Played:** {stats.matches_played} matches\n"
+                    f"**No Self-Bet:** {stats.paper_hands_count} ({paper_rate:.0f}%)"
+                ),
+                inline=True,
+            )
+
+        # Degen score breakdown
+        breakdown_lines = []
+        if degen.max_leverage_score > 0:
+            breakdown_lines.append(f"5x Addiction: {degen.max_leverage_score}/25")
+        if degen.bet_size_score > 0:
+            breakdown_lines.append(f"Bet Size: {degen.bet_size_score}/25")
+        if degen.debt_depth_score > 0:
+            breakdown_lines.append(f"Debt Depth: {degen.debt_depth_score}/20")
+        if degen.bankruptcy_score > 0:
+            breakdown_lines.append(f"Bankruptcies: {degen.bankruptcy_score}/15")
+        if degen.frequency_score > 0:
+            breakdown_lines.append(f"Frequency: {degen.frequency_score}/10")
+        if degen.loss_chase_score > 0:
+            breakdown_lines.append(f"Loss Chasing: {degen.loss_chase_score}/5")
+        if degen.negative_loan_bonus > 0:
+            breakdown_lines.append(f"🔥 Negative Loans: +{degen.negative_loan_bonus}")
+
+        if breakdown_lines:
+            embed.add_field(
+                name="Degen Breakdown",
+                value="\n".join(breakdown_lines),
+                inline=True,
+            )
+
+        embed.set_footer(text="Tip: Use /gambastats for full breakdown, /gambachart for P&L chart")
+
+        return embed
+
+    async def _build_predictions_embed(
+        self,
+        target_user: discord.Member | discord.User,
+        target_discord_id: int,
+    ) -> discord.Embed:
+        """Build the Predictions tab embed with prediction market stats."""
+        prediction_service = self._get_prediction_service()
+
+        if not prediction_service:
+            return discord.Embed(
+                title="Error", description="Prediction service unavailable", color=COLOR_RED
+            )
+
+        # Get prediction stats
+        stats = prediction_service.prediction_repo.get_user_prediction_stats(target_discord_id)
+
+        if not stats:
+            return discord.Embed(
+                title=f"Profile: {target_user.display_name} > Predictions",
+                description="No prediction bets yet.\n\nUse `/predictions` to find active markets!",
+                color=COLOR_BLUE,
+            )
+
+        # Color based on P&L
+        pnl = stats["net_pnl"] or 0
+        color = COLOR_GREEN if pnl >= 0 else COLOR_RED
+
+        embed = discord.Embed(
+            title=f"Profile: {target_user.display_name} > Predictions",
+            color=color,
+        )
+
+        # Performance
+        pnl_str = f"+{pnl}" if pnl >= 0 else str(pnl)
+        wins = stats["wins"] or 0
+        losses = stats["losses"] or 0
+        win_rate = stats["win_rate"] or 0
+
+        embed.add_field(
+            name="Performance",
+            value=(
+                f"**Net P&L:** {pnl_str} {JOPACOIN_EMOTE}\n"
+                f"**Record:** {wins}W-{losses}L ({win_rate:.0%})\n"
+                f"**Best Win:** +{stats['best_win'] or 0} {JOPACOIN_EMOTE}"
+            ),
+            inline=True,
+        )
+
+        # Volume
+        total_wagered = stats["total_wagered"] or 0
+        total_bets = stats["total_bets"] or 0
+        avg_bet = total_wagered / total_bets if total_bets > 0 else 0
+
+        embed.add_field(
+            name="Volume",
+            value=(
+                f"**Total Bets:** {total_bets}\n"
+                f"**Wagered:** {total_wagered} {JOPACOIN_EMOTE}\n"
+                f"**Avg Bet:** {avg_bet:.1f} {JOPACOIN_EMOTE}"
+            ),
+            inline=True,
+        )
+
+        # Active positions
+        positions = prediction_service.get_user_active_positions(target_discord_id)
+        if positions:
+            position_lines = []
+            for pos in positions[:3]:
+                emoji = "✅" if pos["position"] == "yes" else "❌"
+                odds_info = prediction_service.get_odds(pos["prediction_id"])
+                current_odds = odds_info["odds"].get(pos["position"], 0)
+                pool = odds_info["total_pool"]
+                yes_total = odds_info["yes_total"]
+                pct = round(100 * yes_total / pool) if pool > 0 else 50
+                my_pct = pct if pos["position"] == "yes" else 100 - pct
+
+                potential = int(pos["total_amount"] * current_odds) if current_odds > 0 else 0
+                question_short = pos["question"][:35] + "..." if len(pos["question"]) > 35 else pos["question"]
+
+                position_lines.append(
+                    f"{emoji} **#{pos['prediction_id']}:** {question_short}\n"
+                    f"   {pos['position'].upper()} @ {my_pct}% ({current_odds:.2f}x) | "
+                    f"{pos['total_amount']} → {potential} {JOPACOIN_EMOTE}"
+                )
+
+            if len(positions) > 3:
+                position_lines.append(f"*+{len(positions) - 3} more positions*")
+
+            embed.add_field(
+                name=f"🟢 Active Positions ({len(positions)})",
+                value="\n".join(position_lines),
+                inline=False,
+            )
+        else:
+            embed.add_field(
+                name="Active Positions",
+                value="No active positions",
+                inline=False,
+            )
+
+        # Recent resolved
+        resolved = prediction_service.get_user_resolved_positions(target_discord_id)
+        if resolved:
+            recent_lines = []
+            for pos in resolved[:3]:
+                bet_emoji = "✅" if pos["position"] == "yes" else "❌"
+                won = pos["position"] == pos["outcome"]
+                result_emoji = "🏆" if won else "💀"
+                amount = pos["total_amount"]
+                payout = pos["payout"] or 0
+                profit = payout - amount if won else -amount
+                profit_str = f"+{profit}" if profit > 0 else str(profit)
+
+                question_short = pos["question"][:30] + "..." if len(pos["question"]) > 30 else pos["question"]
+                recent_lines.append(
+                    f"{result_emoji} {bet_emoji} {question_short}: {profit_str} {JOPACOIN_EMOTE}"
+                )
+
+            embed.add_field(
+                name="Recent Results",
+                value="\n".join(recent_lines),
+                inline=False,
+            )
+
+        embed.set_footer(text="Tip: Use /mypredictions for all positions, /predictionstats for full stats")
+
+        return embed
+
+    @app_commands.command(name="profile", description="View unified player profile with tabbed stats")
+    @app_commands.describe(user="Player to view profile for (defaults to yourself)")
+    async def profile(
+        self,
+        interaction: discord.Interaction,
+        user: discord.Member | None = None,
+    ):
+        """Display unified player profile with tabbed navigation."""
+        # Rate limiting
+        guild = interaction.guild if interaction.guild else None
+        rl_gid = guild.id if guild else 0
+        rl = GLOBAL_RATE_LIMITER.check(
+            scope="profile",
+            guild_id=rl_gid,
+            user_id=interaction.user.id,
+            limit=5,
+            per_seconds=30,
+        )
+        if not rl.allowed:
+            await interaction.response.send_message(
+                f"⏳ Please wait {rl.retry_after_seconds}s before using `/profile` again.",
+                ephemeral=True,
+            )
+            return
+
+        if not await safe_defer(interaction, ephemeral=False):
+            return
+
+        target_user = user or interaction.user
+        target_discord_id = target_user.id
+
+        # Check if player is registered
+        player_repo = self._get_player_repo()
+        if player_repo:
+            player = player_repo.get_by_id(target_discord_id)
+            if not player:
+                await safe_followup(
+                    interaction,
+                    content=f"❌ {target_user.display_name} is not registered. Use `/register` to get started.",
+                )
+                return
+
+        # Build initial embed (overview)
+        embed = await self.build_tab_embed("overview", target_user, target_discord_id)
+
+        # Create view with tab buttons
+        view = ProfileView(self, target_user, target_discord_id)
+
+        await safe_followup(interaction, embed=embed, view=view)
+
+
+async def setup(bot: commands.Bot):
+    """Setup function called when loading the cog."""
+    await bot.add_cog(ProfileCommands(bot))

@@ -56,7 +56,7 @@ steam_api.py              # Valve Web API client + rate limiter
 player_queue.py           # In-memory queue helper (not wired into commands yet)
 remove_fake_users.py      # CLI script to delete fake users
 
-commands/                 # Discord slash commands (11 cog modules)
+commands/                 # Discord slash commands (12 cog modules)
 ├── match.py              # /shuffle, /record
 ├── registration.py       # /register, /setroles, /stats
 ├── lobby.py              # /lobby, /kick, /resetlobby
@@ -70,6 +70,7 @@ commands/                 # Discord slash commands (11 cog modules)
 ├── dota_info.py          # /hero, /ability (dotabase reference commands)
 ├── predictions.py        # /prediction, /predictions, /mypredictions, /predictionresolve,
 │                         # /predictioncancel, /predictionclose, /predictionstats, /predictionleaderboard
+├── profile.py            # /profile (unified player profile with tabbed navigation)
 ├── shop.py               # /shop
 └── admin.py              # /addfake, /resetuser, /givecoin, /resetloancooldown,
                           # /resetbankruptcycooldown, /setinitialrating, /sync
@@ -400,6 +401,7 @@ payout INTEGER
 | `/register` | Register player | `steam_id`: Steam32 ID |
 | `/setroles` | Set role preferences | `roles`: "1,2,3" or "123" |
 | `/stats` | View player stats | `user`: optional target |
+| `/profile` | Unified player profile with tabs | `user`: optional target |
 | `/calibration` | Rating system stats | `user`: optional target |
 | `/leaderboard` | Rankings by jopacoin | `limit`: default 20 |
 | `/bet` | Place jopacoin bet | `team`, `amount`, `leverage` |
