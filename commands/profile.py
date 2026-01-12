@@ -9,6 +9,7 @@ Provides a comprehensive view of player stats across all systems:
 - Predictions: Prediction market performance
 """
 
+import asyncio
 import logging
 import time
 
@@ -16,12 +17,9 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from config import (
-    BANKRUPTCY_PENALTY_RATE,
-    LOAN_COOLDOWN_SECONDS,
-    BANKRUPTCY_COOLDOWN_SECONDS,
-)
+from config import BANKRUPTCY_PENALTY_RATE
 from rating_system import CamaRatingSystem
+from utils.drawing import draw_gamba_chart, draw_role_graph
 from utils.formatting import JOPACOIN_EMOTE, TOMBSTONE_EMOJI, format_role_display
 from utils.interaction_safety import safe_defer, safe_followup
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
@@ -39,6 +37,9 @@ COLOR_ORANGE = 0xF39C12
 class ProfileView(discord.ui.View):
     """View with tab buttons for navigating profile sections."""
 
+    # Tabs that require expensive operations (OpenDota API, chart generation)
+    EXPENSIVE_TABS = {"dota", "gambling"}
+
     def __init__(
         self,
         cog: "ProfileCommands",
@@ -51,7 +52,27 @@ class ProfileView(discord.ui.View):
         self.target_discord_id = target_discord_id
         self.current_tab = "overview"
         self._last_interaction_time: dict[int, float] = {}  # user_id -> timestamp
+        self.message: discord.Message | None = None  # Set after sending
+        # Cache for expensive tab results: tab_name -> (embed, chart_bytes, filename)
+        # Store raw bytes instead of File since File objects are single-use
+        self._tab_cache: dict[str, tuple[discord.Embed, bytes | None, str | None]] = {}
+        # Lock to prevent concurrent tab switches from interleaving
+        self._update_lock = asyncio.Lock()
         self._update_button_styles()
+
+    async def on_timeout(self):
+        """Delete the message when the view times out."""
+        logger.info(f"ProfileView timeout triggered. Message ref: {self.message}")
+        if self.message:
+            try:
+                await self.message.delete()
+                logger.info("Profile message deleted successfully on timeout")
+            except discord.NotFound:
+                logger.debug("Profile message was already deleted")
+            except discord.HTTPException as e:
+                logger.warning(f"Failed to delete expired profile message: {e}")
+        else:
+            logger.warning("on_timeout called but no message reference stored")
 
     def _update_button_styles(self):
         """Update button styles based on current tab."""
@@ -61,6 +82,7 @@ class ProfileView(discord.ui.View):
             "economy": self.economy_btn,
             "gambling": self.gambling_btn,
             "predictions": self.predictions_btn,
+            "dota": self.dota_btn,
         }
         for tab_name, button in tab_buttons.items():
             if tab_name == self.current_tab:
@@ -71,7 +93,9 @@ class ProfileView(discord.ui.View):
     async def _handle_tab_click(
         self, interaction: discord.Interaction, tab_name: str
     ):
-        """Handle tab button click with rate limiting."""
+        """Handle tab button click with rate limiting, caching, and concurrency control."""
+        from io import BytesIO
+
         # Simple rate limit: 2 seconds between clicks per user
         now = time.time()
         last_time = self._last_interaction_time.get(interaction.user.id, 0)
@@ -80,13 +104,47 @@ class ProfileView(discord.ui.View):
             return
         self._last_interaction_time[interaction.user.id] = now
 
-        self.current_tab = tab_name
-        self._update_button_styles()
+        # For expensive tabs, defer first to avoid 3s timeout (only if not cached)
+        is_expensive = tab_name in self.EXPENSIVE_TABS
+        if is_expensive and tab_name not in self._tab_cache:
+            await interaction.response.defer()
 
-        embed = await self.cog.build_tab_embed(
-            tab_name, self.target_user, self.target_discord_id
-        )
-        await interaction.response.edit_message(embed=embed, view=self)
+        # Use lock to prevent concurrent tab switches from interleaving
+        async with self._update_lock:
+            self.current_tab = tab_name
+            self._update_button_styles()
+
+            file = None
+            # Check cache for expensive tabs
+            if tab_name in self._tab_cache:
+                embed, cached_bytes, filename = self._tab_cache[tab_name]
+                # Create fresh File from cached bytes
+                if cached_bytes is not None and filename:
+                    file = discord.File(BytesIO(cached_bytes), filename=filename)
+            else:
+                embed, file = await self.cog.build_tab_embed(
+                    tab_name, self.target_user, self.target_discord_id
+                )
+                # Cache expensive tab results - extract bytes from File before it's consumed
+                if is_expensive:
+                    cached_bytes = None
+                    filename = None
+                    if file is not None:
+                        # Read bytes from the File's underlying stream
+                        file.fp.seek(0)
+                        cached_bytes = file.fp.read()
+                        file.fp.seek(0)  # Reset for use
+                        filename = file.filename
+                    self._tab_cache[tab_name] = (embed, cached_bytes, filename)
+
+            # Pass attachments to handle chart files - empty list clears previous chart
+            attachments = [file] if file else []
+
+            # Use edit_original_response if we deferred, otherwise edit_message
+            if interaction.response.is_done():
+                await interaction.edit_original_response(embed=embed, attachments=attachments, view=self)
+            else:
+                await interaction.response.edit_message(embed=embed, attachments=attachments, view=self)
 
     @discord.ui.button(label="Overview", style=discord.ButtonStyle.primary, row=0)
     async def overview_btn(
@@ -117,6 +175,12 @@ class ProfileView(discord.ui.View):
         self, interaction: discord.Interaction, button: discord.ui.Button
     ):
         await self._handle_tab_click(interaction, "predictions")
+
+    @discord.ui.button(label="Dota", style=discord.ButtonStyle.secondary, row=1)
+    async def dota_btn(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        await self._handle_tab_click(interaction, "dota")
 
 
 class ProfileCommands(commands.Cog):
@@ -157,14 +221,15 @@ class ProfileCommands(commands.Cog):
         tab_name: str,
         target_user: discord.Member | discord.User,
         target_discord_id: int,
-    ) -> discord.Embed:
-        """Build the embed for a specific tab."""
+    ) -> tuple[discord.Embed, discord.File | None]:
+        """Build the embed and optional chart file for a specific tab."""
         builders = {
             "overview": self._build_overview_embed,
             "rating": self._build_rating_embed,
             "economy": self._build_economy_embed,
             "gambling": self._build_gambling_embed,
             "predictions": self._build_predictions_embed,
+            "dota": self._build_dota_embed,
         }
         builder = builders.get(tab_name, self._build_overview_embed)
         return await builder(target_user, target_discord_id)
@@ -173,7 +238,7 @@ class ProfileCommands(commands.Cog):
         self,
         target_user: discord.Member | discord.User,
         target_discord_id: int,
-    ) -> discord.Embed:
+    ) -> tuple[discord.Embed, discord.File | None]:
         """Build the Overview tab embed."""
         player_service = self._get_player_service()
         bankruptcy_service = self._get_bankruptcy_service()
@@ -182,7 +247,7 @@ class ProfileCommands(commands.Cog):
         if not player_service:
             return discord.Embed(
                 title="Error", description="Player service unavailable", color=COLOR_RED
-            )
+            ), None
 
         try:
             stats = player_service.get_stats(target_discord_id)
@@ -191,7 +256,7 @@ class ProfileCommands(commands.Cog):
                 title="Not Registered",
                 description=f"{target_user.display_name} is not registered.\nUse `/register` to get started.",
                 color=COLOR_RED,
-            )
+            ), None
 
         player = stats["player"]
 
@@ -287,13 +352,13 @@ class ProfileCommands(commands.Cog):
                 inline=False,
             )
 
-        return embed
+        return embed, None
 
     async def _build_rating_embed(
         self,
         target_user: discord.Member | discord.User,
         target_discord_id: int,
-    ) -> discord.Embed:
+    ) -> tuple[discord.Embed, discord.File | None]:
         """Build the Rating tab embed with detailed calibration stats."""
         player_repo = self._get_player_repo()
         match_repo = self._get_match_repo()
@@ -302,7 +367,7 @@ class ProfileCommands(commands.Cog):
         if not player_repo:
             return discord.Embed(
                 title="Error", description="Player repository unavailable", color=COLOR_RED
-            )
+            ), None
 
         player = player_repo.get_by_id(target_discord_id)
         if not player:
@@ -310,7 +375,7 @@ class ProfileCommands(commands.Cog):
                 title="Not Registered",
                 description=f"{target_user.display_name} is not registered.",
                 color=COLOR_RED,
-            )
+            ), None
 
         # Get rating history for trend analysis
         history = []
@@ -350,7 +415,7 @@ class ProfileCommands(commands.Cog):
         # Rating profile
         rating_display = rating_system.rating_to_display(player.glicko_rating) if player.glicko_rating else "N/A"
         certainty = rd_to_certainty(rd)
-        percentile_text = f"Top {100 - percentile:.0f}%" if percentile else "N/A"
+        percentile_text = f"Top {100 - percentile:.0f}%" if percentile is not None else "N/A"
 
         profile_lines = [
             f"**Rating:** {rating_display} ({certainty:.0f}% certain)",
@@ -475,13 +540,13 @@ class ProfileCommands(commands.Cog):
 
         embed.set_footer(text="Tip: Use /calibration for full analysis | ✅=expected W | 🔥=upset | ❌=expected L | 💀=choke")
 
-        return embed
+        return embed, None
 
     async def _build_economy_embed(
         self,
         target_user: discord.Member | discord.User,
         target_discord_id: int,
-    ) -> discord.Embed:
+    ) -> tuple[discord.Embed, discord.File | None]:
         """Build the Economy tab embed with balance, loans, and bankruptcy."""
         player_repo = self._get_player_repo()
         loan_service = self._get_loan_service()
@@ -490,7 +555,7 @@ class ProfileCommands(commands.Cog):
         if not player_repo:
             return discord.Embed(
                 title="Error", description="Player repository unavailable", color=COLOR_RED
-            )
+            ), None
 
         player = player_repo.get_by_id(target_discord_id)
         if not player:
@@ -498,7 +563,7 @@ class ProfileCommands(commands.Cog):
                 title="Not Registered",
                 description=f"{target_user.display_name} is not registered.",
                 color=COLOR_RED,
-            )
+            ), None
 
         balance = player.jopacoin_balance or 0
 
@@ -590,14 +655,14 @@ class ProfileCommands(commands.Cog):
 
         embed.set_footer(text="Tip: Use /balance for quick check, /loan to borrow")
 
-        return embed
+        return embed, None
 
     async def _build_gambling_embed(
         self,
         target_user: discord.Member | discord.User,
         target_discord_id: int,
-    ) -> discord.Embed:
-        """Build the Gambling tab embed with degen score and betting stats."""
+    ) -> tuple[discord.Embed, discord.File | None]:
+        """Build the Gambling tab embed with degen score, stats, and P&L chart."""
         gambling_stats_service = self._get_gambling_stats_service()
         player_service = self._get_player_service()
         loan_service = self._get_loan_service()
@@ -606,7 +671,7 @@ class ProfileCommands(commands.Cog):
         if not gambling_stats_service:
             return discord.Embed(
                 title="Error", description="Gambling stats service unavailable", color=COLOR_RED
-            )
+            ), None
 
         stats = gambling_stats_service.get_player_stats(target_discord_id)
 
@@ -615,7 +680,7 @@ class ProfileCommands(commands.Cog):
                 title=f"Profile: {target_user.display_name} > Gambling",
                 description="No betting history yet.\n\nPlay matches and use `/bet` to get started!",
                 color=COLOR_BLUE,
-            )
+            ), None
 
         # Color based on P&L
         color = COLOR_GREEN if stats.net_pnl >= 0 else COLOR_RED
@@ -741,22 +806,44 @@ class ProfileCommands(commands.Cog):
                 inline=True,
             )
 
-        embed.set_footer(text="Tip: Use /gambastats for full breakdown, /gambachart for P&L chart")
+        # Generate P&L chart
+        chart_file = None
+        try:
+            pnl_series = gambling_stats_service.get_cumulative_pnl_series(target_discord_id)
+            if pnl_series and len(pnl_series) >= 2:
+                degen = stats.degen_score
+                chart_bytes = draw_gamba_chart(
+                    username=target_user.display_name,
+                    degen_score=degen.total,
+                    degen_title=degen.title,
+                    degen_emoji=degen.emoji,
+                    pnl_series=pnl_series,
+                    stats={
+                        "total_bets": stats.total_bets,
+                        "win_rate": stats.win_rate,
+                        "net_pnl": stats.net_pnl,
+                        "roi": stats.roi,
+                    },
+                )
+                chart_file = discord.File(chart_bytes, filename="gamba_chart.png")
+                embed.set_image(url="attachment://gamba_chart.png")
+        except Exception as e:
+            logger.debug(f"Could not generate gamba chart: {e}")
 
-        return embed
+        return embed, chart_file
 
     async def _build_predictions_embed(
         self,
         target_user: discord.Member | discord.User,
         target_discord_id: int,
-    ) -> discord.Embed:
+    ) -> tuple[discord.Embed, discord.File | None]:
         """Build the Predictions tab embed with prediction market stats."""
         prediction_service = self._get_prediction_service()
 
         if not prediction_service:
             return discord.Embed(
                 title="Error", description="Prediction service unavailable", color=COLOR_RED
-            )
+            ), None
 
         # Get prediction stats
         stats = prediction_service.prediction_repo.get_user_prediction_stats(target_discord_id)
@@ -766,7 +853,7 @@ class ProfileCommands(commands.Cog):
                 title=f"Profile: {target_user.display_name} > Predictions",
                 description="No prediction bets yet.\n\nUse `/predictions` to find active markets!",
                 color=COLOR_BLUE,
-            )
+            ), None
 
         # Color based on P&L
         pnl = stats["net_pnl"] or 0
@@ -871,7 +958,148 @@ class ProfileCommands(commands.Cog):
 
         embed.set_footer(text="Tip: Use /mypredictions for all positions, /predictionstats for full stats")
 
-        return embed
+        return embed, None
+
+    async def _build_dota_embed(
+        self,
+        target_user: discord.Member | discord.User,
+        target_discord_id: int,
+    ) -> tuple[discord.Embed, discord.File | None]:
+        """Build the Dota tab embed with OpenDota stats (roles/lanes)."""
+        player_repo = self._get_player_repo()
+        opendota_service = self._get_opendota_player_service()
+
+        if not player_repo:
+            return discord.Embed(
+                title="Error", description="Player repository unavailable", color=COLOR_RED
+            ), None
+
+        player = player_repo.get_by_id(target_discord_id)
+        if not player:
+            return discord.Embed(
+                title="Not Registered",
+                description=f"{target_user.display_name} is not registered.",
+                color=COLOR_RED,
+            ), None
+
+        # Get steam_id from repository (not a Player attribute)
+        steam_id = player_repo.get_steam_id(target_discord_id)
+        if not steam_id:
+            return discord.Embed(
+                title=f"Profile: {target_user.display_name} > Dota Stats",
+                description="No Steam account linked.\n\nUse `/linksteam` to link your Steam ID, or `/register` if you're new.",
+                color=COLOR_ORANGE,
+            ), None
+
+        if not opendota_service:
+            return discord.Embed(
+                title="Error",
+                description="OpenDota service unavailable.",
+                color=COLOR_RED,
+            ), None
+
+        embed = discord.Embed(
+            title=f"Profile: {target_user.display_name} > Dota Stats",
+            color=COLOR_BLUE,
+        )
+
+        # Get role distribution for chart - wrap in try/except for API errors
+        chart_file = None
+        role_dist = None
+        try:
+            role_dist = opendota_service.get_hero_role_distribution(target_discord_id, match_limit=50)
+        except Exception as e:
+            logger.warning(f"Failed to fetch role distribution from OpenDota: {e}")
+
+        if role_dist:
+            try:
+                chart_bytes = draw_role_graph(role_dist, title=f"Roles: {target_user.display_name}")
+                chart_file = discord.File(chart_bytes, filename="role_graph.png")
+                embed.set_image(url="attachment://role_graph.png")
+            except Exception as e:
+                logger.debug(f"Could not generate role graph: {e}")
+
+        # Get full stats for additional info - wrap in try/except for API errors
+        full_stats = None
+        try:
+            full_stats = opendota_service.get_full_stats(target_discord_id, match_limit=50)
+        except Exception as e:
+            logger.warning(f"Failed to fetch full stats from OpenDota: {e}")
+
+        if full_stats:
+            # Lane distribution as text (chart would require second image)
+            lane_dist = full_stats.get("lane_distribution", {})
+            if lane_dist:
+                lane_lines = []
+                for lane, pct in sorted(lane_dist.items(), key=lambda x: -x[1]):
+                    if pct > 0:
+                        bar_len = int(pct / 10)
+                        bar = "█" * bar_len + "░" * (10 - bar_len)
+                        lane_lines.append(f"`{bar}` {lane}: {pct:.0f}%")
+                if lane_lines:
+                    embed.add_field(
+                        name="Lane Distribution",
+                        value="\n".join(lane_lines[:5]),
+                        inline=True,
+                    )
+
+            # Win rate
+            if full_stats.get("win_rate") is not None:
+                embed.add_field(
+                    name="OpenDota Win Rate",
+                    value=f"{full_stats['win_rate']:.1%} (last 50)",
+                    inline=True,
+                )
+
+            # Average stats
+            avg_kills = full_stats.get("avg_kills", 0)
+            avg_deaths = full_stats.get("avg_deaths", 0)
+            avg_assists = full_stats.get("avg_assists", 0)
+            if avg_kills or avg_deaths or avg_assists:
+                embed.add_field(
+                    name="Avg KDA",
+                    value=f"{avg_kills:.1f} / {avg_deaths:.1f} / {avg_assists:.1f}",
+                    inline=True,
+                )
+
+            # Top heroes
+            hero_counts = full_stats.get("hero_counts", [])
+            if hero_counts:
+                from utils.hero_lookup import get_hero_name
+                hero_lines = []
+                for hero_id, games, wins in hero_counts[:5]:
+                    hero_name = get_hero_name(hero_id)
+                    wr = (wins / games * 100) if games > 0 else 0
+                    hero_lines.append(f"**{hero_name}** - {games}g ({wr:.0f}%)")
+                embed.add_field(
+                    name="Top Heroes",
+                    value="\n".join(hero_lines),
+                    inline=False,
+                )
+        else:
+            embed.description = "Could not fetch OpenDota stats. Try again later."
+
+        embed.set_footer(text="Data from OpenDota | Use /rolesgraph or /lanegraph for full charts")
+
+        return embed, chart_file
+
+    def _get_opendota_player_service(self):
+        """Get OpenDotaPlayerService from bot."""
+        return getattr(self.bot, "opendota_player_service", None)
+
+    async def _delete_after_timeout(
+        self, message: discord.Message, view: "ProfileView", timeout: int
+    ):
+        """Delete the profile message after timeout seconds."""
+        await asyncio.sleep(timeout)
+        view.stop()  # Stop the view to disable buttons
+        try:
+            await message.delete()
+            logger.info(f"Profile message {message.id} deleted after {timeout}s timeout")
+        except discord.NotFound:
+            logger.debug(f"Profile message {message.id} was already deleted")
+        except discord.HTTPException as e:
+            logger.warning(f"Failed to delete profile message {message.id}: {e}")
 
     @app_commands.command(name="profile", description="View unified player profile with tabbed stats")
     @app_commands.describe(user="Player to view profile for (defaults to yourself)")
@@ -916,12 +1144,19 @@ class ProfileCommands(commands.Cog):
                 return
 
         # Build initial embed (overview)
-        embed = await self.build_tab_embed("overview", target_user, target_discord_id)
+        embed, file = await self.build_tab_embed("overview", target_user, target_discord_id)
 
         # Create view with tab buttons
         view = ProfileView(self, target_user, target_discord_id)
 
-        await safe_followup(interaction, embed=embed, view=view)
+        # Send and store message reference for timeout cleanup
+        message = await safe_followup(interaction, embed=embed, view=view, file=file)
+        view.message = message
+        logger.info(f"Profile sent. Message ref stored: {message is not None}, msg_id: {getattr(message, 'id', None)}")
+
+        # Schedule message deletion after timeout (more reliable than view.on_timeout)
+        if message:
+            asyncio.create_task(self._delete_after_timeout(message, view, timeout=900))
 
 
 async def setup(bot: commands.Bot):

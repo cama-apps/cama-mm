@@ -74,6 +74,7 @@ from services.match_service import MatchService
 from services.prediction_service import PredictionService
 from services.permissions import has_admin_permission  # noqa: F401 - used by tests
 from services.player_service import PlayerService
+from services.opendota_player_service import OpenDotaPlayerService
 from utils.formatting import ROLE_EMOJIS, ROLE_NAMES, format_role_display
 
 # Bot setup
@@ -205,6 +206,10 @@ def _init_services():
     )
     bot.prediction_service = prediction_service
     bot.prediction_repo = prediction_repo
+
+    # Create OpenDota player service for profile stats
+    opendota_player_service = OpenDotaPlayerService(player_repo)
+    bot.opendota_player_service = opendota_player_service
 
     # Create AI services (optional - only if CEREBRAS_API_KEY is set)
     ai_service = None

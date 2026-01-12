@@ -164,6 +164,56 @@ class RegistrationCommands(commands.Cog):
         )
         return
 
+    @app_commands.command(name="linksteam", description="Link your Steam account (if already registered)")
+    @app_commands.describe(steam_id="Steam32 ID (found in your Dotabuff URL)")
+    async def linksteam(self, interaction: discord.Interaction, steam_id: int):
+        """Link Steam ID for an existing registered player."""
+        logger.info(
+            f"LinkSteam command: User {interaction.user.id} ({interaction.user}) linking Steam ID {steam_id}"
+        )
+
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+
+        player_repo = getattr(self.bot, "player_repo", None)
+        if not player_repo:
+            await interaction.followup.send("❌ Player repository not available.", ephemeral=True)
+            return
+
+        # Check if player is registered
+        player = player_repo.get_by_id(interaction.user.id)
+        if not player:
+            await interaction.followup.send(
+                "❌ You are not registered. Use `/register` first.",
+                ephemeral=True,
+            )
+            return
+
+        # Validate steam_id (basic check)
+        if steam_id <= 0 or steam_id > 2**32:
+            await interaction.followup.send(
+                "❌ Invalid Steam ID. Please use the 32-bit Steam ID from your Dotabuff URL.",
+                ephemeral=True,
+            )
+            return
+
+        # Check if steam_id is already linked to another user
+        existing = player_repo.get_by_steam_id(steam_id)
+        if existing and existing.discord_id != interaction.user.id:
+            await interaction.followup.send(
+                "❌ This Steam ID is already linked to another player.",
+                ephemeral=True,
+            )
+            return
+
+        # Link the steam_id
+        player_repo.set_steam_id(interaction.user.id, steam_id)
+        await interaction.followup.send(
+            f"✅ Steam ID `{steam_id}` linked to your account!\n"
+            "You can now use `/rolesgraph`, `/lanegraph`, and the Dota tab in `/profile`.",
+            ephemeral=True,
+        )
+
     @app_commands.command(name="setroles", description="Set your preferred roles")
     @app_commands.describe(roles="Roles (1-5, e.g., '123' or '1,2,3' for carry, mid, offlane)")
     async def set_roles(self, interaction: discord.Interaction, roles: str):
