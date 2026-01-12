@@ -276,6 +276,7 @@ EXTENSIONS = [
     "commands.shop",
     "commands.predictions",
     "commands.ask",
+    "commands.profile",
 ]
 
 

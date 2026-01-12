@@ -32,6 +32,7 @@ async def safe_followup(
     content: str | None = None,
     embed: discord.Embed | None = None,
     file: discord.File | None = None,
+    view: discord.ui.View | None = None,
     ephemeral: bool = False,
     allowed_mentions: discord.AllowedMentions | None = None,
 ) -> discord.Message | None:
@@ -56,7 +57,7 @@ async def safe_followup(
     )
     # endregion agent log
     try:
-        # Build kwargs, only including file if provided (Discord errors on file=None)
+        # Build kwargs, only including file/view if provided (Discord errors on None)
         send_kwargs = {
             "content": content,
             "embed": embed,
@@ -65,6 +66,8 @@ async def safe_followup(
         }
         if file is not None:
             send_kwargs["file"] = file
+        if view is not None:
+            send_kwargs["view"] = view
 
         msg = await interaction.followup.send(**send_kwargs)
         # region agent log
@@ -115,6 +118,8 @@ async def safe_followup(
         fallback_kwargs = {"content": content, "embed": embed, "allowed_mentions": allowed_mentions}
         if file is not None:
             fallback_kwargs["file"] = file
+        if view is not None:
+            fallback_kwargs["view"] = view
         msg = await channel.send(**fallback_kwargs)
         # region agent log
         _dbg(
