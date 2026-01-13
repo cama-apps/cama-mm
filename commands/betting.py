@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 import random
+import time
 from typing import TYPE_CHECKING
 
 import discord
@@ -469,30 +470,25 @@ class BettingCommands(commands.Cog):
 
         await interaction.followup.send(base_msg, ephemeral=True)
 
-    @app_commands.command(name="bets", description="Show all bets in the current pool (admin only)")
+    @app_commands.command(name="bets", description="Show all bets in the current pool")
     async def bets(self, interaction: discord.Interaction):
-        """Admin-only command to view all bets in the current pool."""
+        """View all bets in the current pool."""
         if not has_admin_permission(interaction):
-            await interaction.response.send_message(
-                "❌ This command is admin-only.", ephemeral=True
+            guild = interaction.guild if interaction.guild else None
+            rl_gid = guild.id if guild else 0
+            rl = GLOBAL_RATE_LIMITER.check(
+                scope="bets",
+                guild_id=rl_gid,
+                user_id=interaction.user.id,
+                limit=1,
+                per_seconds=60,
             )
-            return
-
-        guild = interaction.guild if interaction.guild else None
-        rl_gid = guild.id if guild else 0
-        rl = GLOBAL_RATE_LIMITER.check(
-            scope="bets",
-            guild_id=rl_gid,
-            user_id=interaction.user.id,
-            limit=3,
-            per_seconds=15,
-        )
-        if not rl.allowed:
-            await interaction.response.send_message(
-                f"⏳ Please wait {rl.retry_after_seconds}s before using `/bets` again.",
-                ephemeral=True,
-            )
-            return
+            if not rl.allowed:
+                await interaction.response.send_message(
+                    f"⏳ Please wait {rl.retry_after_seconds}s before using `/bets` again.",
+                    ephemeral=True,
+                )
+                return
 
         if not await safe_defer(interaction, ephemeral=True):
             return
@@ -536,14 +532,22 @@ class BettingCommands(commands.Cog):
         radiant_bets = [b for b in all_bets if b["team_bet_on"] == "radiant"]
         dire_bets = [b for b in all_bets if b["team_bet_on"] == "dire"]
 
+        # Check if betting is still open and if user is admin
+        is_admin = has_admin_permission(interaction)
+        betting_open = lock_until and int(time.time()) < lock_until
+        show_names = is_admin or not betting_open
+
         # Format bet line helper
-        def format_bet_line(bet: dict) -> str:
+        def format_bet_line(bet: dict, index: int) -> str:
             leverage = bet.get("leverage", 1) or 1
             is_blind = bet.get("is_blind", 0)
             odds_at_placement = bet.get("odds_at_placement")
 
-            # Base amount
-            line = f"<@{bet['discord_id']}> • {bet['amount']}"
+            # Base amount - hide names for non-admins while betting is open
+            if show_names:
+                line = f"<@{bet['discord_id']}> • {bet['amount']}"
+            else:
+                line = f"Bettor #{index} • {bet['amount']}"
 
             # Auto tag
             if is_blind:
@@ -562,7 +566,7 @@ class BettingCommands(commands.Cog):
 
         # Radiant bets section
         if radiant_bets:
-            radiant_lines = [format_bet_line(b) for b in radiant_bets]
+            radiant_lines = [format_bet_line(b, i + 1) for i, b in enumerate(radiant_bets)]
             # Truncate if too long
             radiant_text = "\n".join(radiant_lines[:15])
             if len(radiant_bets) > 15:
@@ -575,7 +579,7 @@ class BettingCommands(commands.Cog):
 
         # Dire bets section
         if dire_bets:
-            dire_lines = [format_bet_line(b) for b in dire_bets]
+            dire_lines = [format_bet_line(b, i + 1) for i, b in enumerate(dire_bets)]
             dire_text = "\n".join(dire_lines[:15])
             if len(dire_bets) > 15:
                 dire_text += f"\n... +{len(dire_bets) - 15} more"
