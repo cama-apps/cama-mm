@@ -111,6 +111,50 @@ class Leaderboard:
     total_loans: int
 
 
+@dataclass
+class BettorProfile:
+    """Profile of a bettor's activity on a specific player."""
+
+    discord_id: int
+    total_wagered_for: int  # Amount wagered on player's team
+    total_wagered_against: int  # Amount wagered against player's team
+    net_pnl_for: int  # P&L from bets FOR the player
+    net_pnl_against: int  # P&L from bets AGAINST the player
+    bets_for_count: int
+    bets_against_count: int
+    wins_for: int
+    wins_against: int
+
+
+@dataclass
+class BettingImpactStats:
+    """Stats about how others bet on/against a player."""
+
+    discord_id: int
+    matches_with_bets: int
+
+    # Aggregate totals
+    total_wagered_for: int  # $ bet on player's team by others
+    total_wagered_against: int  # $ bet against player's team by others
+    supporters_net_pnl: int  # Total P&L of people betting FOR player
+    haters_net_pnl: int  # Total P&L of people betting AGAINST player
+
+    # Derived metrics
+    market_favorability: float  # % of bets on player's team
+    supporter_roi: float  # ROI of supporters
+    hater_roi: float  # ROI of haters
+
+    # Notable bettors
+    biggest_fan: BettorProfile | None  # Most $ wagered FOR
+    biggest_hater: BettorProfile | None  # Most $ wagered AGAINST
+    most_profitable_supporter: BettorProfile | None  # Best P&L betting FOR
+    luckiest_hater: BettorProfile | None  # Best P&L betting AGAINST
+
+    # Counts
+    unique_supporters: int
+    unique_haters: int
+
+
 class GamblingStatsService:
     """Service for calculating gambling statistics and degen scores."""
 
@@ -381,6 +425,124 @@ class GamblingStatsService:
             avg_degen_score=avg_degen,
             total_bankruptcies=total_bankruptcies,
             total_loans=total_loans,
+        )
+
+    def get_betting_impact_stats(self, discord_id: int) -> BettingImpactStats | None:
+        """
+        Calculate how others' bets performed on matches this player participated in.
+
+        Returns None if player has no match participation with external bets.
+        """
+        bets = self.bet_repo.get_bets_on_player_matches(discord_id)
+
+        if not bets:
+            return None
+
+        # Aggregate by bettor
+        bettor_data: dict[int, dict] = {}
+        for bet in bets:
+            bettor_id = bet["bettor_id"]
+            if bettor_id not in bettor_data:
+                bettor_data[bettor_id] = {
+                    "wagered_for": 0,
+                    "wagered_against": 0,
+                    "pnl_for": 0,
+                    "pnl_against": 0,
+                    "bets_for": 0,
+                    "bets_against": 0,
+                    "wins_for": 0,
+                    "wins_against": 0,
+                }
+
+            data = bettor_data[bettor_id]
+            if bet["bet_direction"] == "for":
+                data["wagered_for"] += bet["effective_bet"]
+                data["pnl_for"] += bet["profit"]
+                data["bets_for"] += 1
+                if bet["won"]:
+                    data["wins_for"] += 1
+            else:
+                data["wagered_against"] += bet["effective_bet"]
+                data["pnl_against"] += bet["profit"]
+                data["bets_against"] += 1
+                if bet["won"]:
+                    data["wins_against"] += 1
+
+        # Calculate totals
+        total_wagered_for = sum(d["wagered_for"] for d in bettor_data.values())
+        total_wagered_against = sum(d["wagered_against"] for d in bettor_data.values())
+        supporters_net_pnl = sum(d["pnl_for"] for d in bettor_data.values())
+        haters_net_pnl = sum(d["pnl_against"] for d in bettor_data.values())
+
+        total_wagered = total_wagered_for + total_wagered_against
+        market_favorability = total_wagered_for / total_wagered if total_wagered > 0 else 0.5
+        supporter_roi = supporters_net_pnl / total_wagered_for if total_wagered_for > 0 else 0
+        hater_roi = haters_net_pnl / total_wagered_against if total_wagered_against > 0 else 0
+
+        # Count unique matches with bets
+        matches_with_bets = len(set(bet["match_id"] for bet in bets))
+
+        # Find supporters (anyone who bet FOR at least once)
+        supporters = {
+            bid: d for bid, d in bettor_data.items() if d["wagered_for"] > 0
+        }
+        # Find haters (anyone who bet AGAINST at least once)
+        haters = {
+            bid: d for bid, d in bettor_data.items() if d["wagered_against"] > 0
+        }
+
+        def make_profile(bettor_id: int, data: dict) -> BettorProfile:
+            return BettorProfile(
+                discord_id=bettor_id,
+                total_wagered_for=data["wagered_for"],
+                total_wagered_against=data["wagered_against"],
+                net_pnl_for=data["pnl_for"],
+                net_pnl_against=data["pnl_against"],
+                bets_for_count=data["bets_for"],
+                bets_against_count=data["bets_against"],
+                wins_for=data["wins_for"],
+                wins_against=data["wins_against"],
+            )
+
+        # Find notable bettors
+        biggest_fan = None
+        if supporters:
+            fan_id = max(supporters.keys(), key=lambda k: supporters[k]["wagered_for"])
+            biggest_fan = make_profile(fan_id, bettor_data[fan_id])
+
+        biggest_hater = None
+        if haters:
+            hater_id = max(haters.keys(), key=lambda k: haters[k]["wagered_against"])
+            biggest_hater = make_profile(hater_id, bettor_data[hater_id])
+
+        most_profitable_supporter = None
+        if supporters:
+            best_id = max(supporters.keys(), key=lambda k: supporters[k]["pnl_for"])
+            if supporters[best_id]["pnl_for"] > 0:
+                most_profitable_supporter = make_profile(best_id, bettor_data[best_id])
+
+        luckiest_hater = None
+        if haters:
+            lucky_id = max(haters.keys(), key=lambda k: haters[k]["pnl_against"])
+            if haters[lucky_id]["pnl_against"] > 0:
+                luckiest_hater = make_profile(lucky_id, bettor_data[lucky_id])
+
+        return BettingImpactStats(
+            discord_id=discord_id,
+            matches_with_bets=matches_with_bets,
+            total_wagered_for=total_wagered_for,
+            total_wagered_against=total_wagered_against,
+            supporters_net_pnl=supporters_net_pnl,
+            haters_net_pnl=haters_net_pnl,
+            market_favorability=market_favorability,
+            supporter_roi=supporter_roi,
+            hater_roi=hater_roi,
+            biggest_fan=biggest_fan,
+            biggest_hater=biggest_hater,
+            most_profitable_supporter=most_profitable_supporter,
+            luckiest_hater=luckiest_hater,
+            unique_supporters=len(supporters),
+            unique_haters=len(haters),
         )
 
     def get_cumulative_pnl_series(self, discord_id: int) -> list[tuple[int, int, dict]]:

@@ -862,3 +862,59 @@ class BetRepository(BaseRepository, IBetRepository):
             "times_increased_after_loss": times_increased_after_loss,
             "loss_chase_rate": loss_chase_rate,
         }
+
+    def get_bets_on_player_matches(self, target_discord_id: int) -> list[dict]:
+        """
+        Get all bets by OTHER players on matches where target_discord_id participated.
+
+        This is used to calculate "betting impact" stats - how others' bets fared
+        when betting for or against this player's team.
+
+        Returns list of dicts with: bettor_id, match_id, team_bet_on, effective_bet,
+        payout, player_team, bet_direction ('for'/'against'), won (bool)
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT
+                    b.discord_id as bettor_id,
+                    b.match_id,
+                    b.team_bet_on,
+                    b.amount * COALESCE(b.leverage, 1) as effective_bet,
+                    b.payout,
+                    CASE WHEN mp.team_number = 1 THEN 'radiant' ELSE 'dire' END as player_team,
+                    m.winning_team,
+                    CASE
+                        WHEN b.team_bet_on = CASE WHEN mp.team_number = 1 THEN 'radiant' ELSE 'dire' END
+                        THEN 'for'
+                        ELSE 'against'
+                    END as bet_direction,
+                    CASE
+                        WHEN (m.winning_team = 1 AND b.team_bet_on = 'radiant')
+                          OR (m.winning_team = 2 AND b.team_bet_on = 'dire')
+                        THEN 1 ELSE 0
+                    END as won
+                FROM match_participants mp
+                JOIN matches m ON mp.match_id = m.match_id
+                JOIN bets b ON b.match_id = m.match_id
+                    AND b.discord_id != ?
+                WHERE mp.discord_id = ?
+                    AND m.winning_team IS NOT NULL
+                ORDER BY b.match_id, b.bet_time
+                """,
+                (target_discord_id, target_discord_id),
+            )
+            rows = cursor.fetchall()
+            results = []
+            for row in rows:
+                bet = dict(row)
+                effective_bet = bet["effective_bet"]
+                # Calculate profit: won = payout - effective_bet, lost = -effective_bet
+                if bet["won"]:
+                    payout = bet["payout"] if bet["payout"] else effective_bet * 2
+                    bet["profit"] = payout - effective_bet
+                else:
+                    bet["profit"] = -effective_bet
+                results.append(bet)
+            return results

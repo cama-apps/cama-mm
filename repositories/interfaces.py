@@ -137,6 +137,11 @@ class IBetRepository(ABC):
     @abstractmethod
     def delete_pending_bets(self, guild_id: int | None, since_ts: int | None = None) -> int: ...
 
+    @abstractmethod
+    def get_bets_on_player_matches(self, target_discord_id: int) -> list[dict]:
+        """Get all bets by OTHER players on matches where target participated."""
+        ...
+
 
 class IMatchRepository(ABC):
     @abstractmethod
