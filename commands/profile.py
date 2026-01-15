@@ -809,65 +809,66 @@ class ProfileCommands(commands.Cog):
         # Betting Impact section - how others bet on this player
         impact_stats = gambling_stats_service.get_betting_impact_stats(target_discord_id)
         if impact_stats:
-            total_external_wagered = (
-                impact_stats.total_wagered_for + impact_stats.total_wagered_against
-            )
-
-            for_pnl_str = (
-                f"+{impact_stats.supporters_net_pnl}"
-                if impact_stats.supporters_net_pnl >= 0
-                else str(impact_stats.supporters_net_pnl)
-            )
-            against_pnl_str = (
-                f"+{impact_stats.haters_net_pnl}"
-                if impact_stats.haters_net_pnl >= 0
-                else str(impact_stats.haters_net_pnl)
-            )
-
             embed.add_field(
                 name="\u200b",  # Separator
                 value="━━━━━━━━━━━━━━━━━━━━━━",
                 inline=False,
             )
 
+            # Compact supporter/hater lines with emojis
+            supporter_pnl = impact_stats.supporters_net_pnl
+            supporter_pnl_str = f"+{supporter_pnl}" if supporter_pnl >= 0 else str(supporter_pnl)
+            supporter_emoji = "✅" if supporter_pnl >= 0 else "💀"
+
+            hater_pnl = impact_stats.haters_net_pnl
+            hater_pnl_str = f"+{hater_pnl}" if hater_pnl >= 0 else str(hater_pnl)
+            hater_emoji = "✅" if hater_pnl >= 0 else "💀"
+
             embed.add_field(
                 name="Betting Impact",
                 value=(
-                    f"**External Wagered:** {total_external_wagered} {JOPACOIN_EMOTE}\n"
-                    f"├ FOR you: {impact_stats.total_wagered_for} {JOPACOIN_EMOTE} → P&L: {for_pnl_str}\n"
-                    f"└ AGAINST you: {impact_stats.total_wagered_against} {JOPACOIN_EMOTE} → P&L: {against_pnl_str}\n"
-                    f"**Market Favor:** {impact_stats.market_favorability:.0%} FOR"
+                    f"**Supporters:** {impact_stats.total_wagered_for} {JOPACOIN_EMOTE} wagered "
+                    f"→ {supporter_pnl_str} ({impact_stats.supporter_roi:+.0%}) {supporter_emoji}\n"
+                    f"**Haters:** {impact_stats.total_wagered_against} {JOPACOIN_EMOTE} wagered "
+                    f"→ {hater_pnl_str} ({impact_stats.hater_roi:+.0%}) {hater_emoji}\n"
+                    f"**Win Rates:** Supporters {impact_stats.supporter_win_rate:.0%} | "
+                    f"Haters {impact_stats.hater_win_rate:.0%}"
                 ),
                 inline=False,
             )
 
-            # Notable bettors
+            # Notable bettors - show the most interesting ones
             notable_lines = []
+
+            # Biggest fan/hater by $ wagered
             if impact_stats.biggest_fan:
                 fan = impact_stats.biggest_fan
-                fan_pnl = f"+{fan.net_pnl_for}" if fan.net_pnl_for >= 0 else str(fan.net_pnl_for)
                 notable_lines.append(
-                    f"**Biggest Fan:** <@{fan.discord_id}> ({fan.total_wagered_for} {JOPACOIN_EMOTE}, {fan_pnl})"
+                    f"💰 **Biggest Fan:** <@{fan.discord_id}> ({fan.total_wagered_for} {JOPACOIN_EMOTE})"
                 )
             if impact_stats.biggest_hater:
                 hater = impact_stats.biggest_hater
-                hater_pnl = (
-                    f"+{hater.net_pnl_against}"
-                    if hater.net_pnl_against >= 0
-                    else str(hater.net_pnl_against)
-                )
                 notable_lines.append(
-                    f"**Biggest Hater:** <@{hater.discord_id}> ({hater.total_wagered_against} {JOPACOIN_EMOTE}, {hater_pnl})"
+                    f"💸 **Biggest Hater:** <@{hater.discord_id}> ({hater.total_wagered_against} {JOPACOIN_EMOTE})"
                 )
-            if impact_stats.most_profitable_supporter:
-                supporter = impact_stats.most_profitable_supporter
+
+            # Good/bad luck charms
+            if impact_stats.blessing:
+                b = impact_stats.blessing
                 notable_lines.append(
-                    f"**Best Supporter:** <@{supporter.discord_id}> (+{supporter.net_pnl_for} {JOPACOIN_EMOTE})"
+                    f"🍀 **Blessing:** <@{b.discord_id}> (+{b.net_pnl_for} betting on you)"
                 )
+            if impact_stats.jinx:
+                j = impact_stats.jinx
+                notable_lines.append(
+                    f"🪦 **Jinx:** <@{j.discord_id}> ({j.net_pnl_for} betting on you)"
+                )
+
+            # Luckiest hater
             if impact_stats.luckiest_hater:
-                lucky = impact_stats.luckiest_hater
+                h = impact_stats.luckiest_hater
                 notable_lines.append(
-                    f"**Luckiest Hater:** <@{lucky.discord_id}> (+{lucky.net_pnl_against} {JOPACOIN_EMOTE})"
+                    f"😈 **Luckiest Hater:** <@{h.discord_id}> (+{h.net_pnl_against} against you)"
                 )
 
             if notable_lines:
@@ -877,8 +878,18 @@ class ProfileCommands(commands.Cog):
                     inline=False,
                 )
 
-            embed.set_footer(
-                text=f"Impact stats from {impact_stats.matches_with_bets} matches with external betting"
+            # Extremes and star power
+            extremes = []
+            if impact_stats.biggest_single_win > 0:
+                extremes.append(f"**Best Single Bet:** +{impact_stats.biggest_single_win} {JOPACOIN_EMOTE}")
+            if impact_stats.biggest_single_loss < 0:
+                extremes.append(f"**Worst Single Bet:** {impact_stats.biggest_single_loss} {JOPACOIN_EMOTE}")
+            extremes.append(f"**Total Bets:** {impact_stats.total_bets} across {impact_stats.matches_with_bets} matches")
+
+            embed.add_field(
+                name="Bet Extremes",
+                value="\n".join(extremes),
+                inline=False,
             )
 
         # Generate P&L chart

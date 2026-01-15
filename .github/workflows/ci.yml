@@ -19,12 +19,3 @@ jobs:
 
       - name: Run tests
         run: uv run pytest -n auto
-
-  build:
-    runs-on: ubuntu-latest
-    needs: test
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Build Docker image
-        run: docker build -t cama-mm .

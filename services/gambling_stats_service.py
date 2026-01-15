@@ -132,6 +132,7 @@ class BettingImpactStats:
 
     discord_id: int
     matches_with_bets: int
+    total_bets: int  # Total number of external bets
 
     # Aggregate totals
     total_wagered_for: int  # $ bet on player's team by others
@@ -139,16 +140,33 @@ class BettingImpactStats:
     supporters_net_pnl: int  # Total P&L of people betting FOR player
     haters_net_pnl: int  # Total P&L of people betting AGAINST player
 
+    # Win rates
+    supporter_win_rate: float  # % of supporter bets that won
+    hater_win_rate: float  # % of hater bets that won
+    supporter_bets_count: int  # Total supporter bets
+    hater_bets_count: int  # Total hater bets
+
     # Derived metrics
     market_favorability: float  # % of bets on player's team
     supporter_roi: float  # ROI of supporters
     hater_roi: float  # ROI of haters
 
-    # Notable bettors
+    # Notable bettors - by wagered amount
     biggest_fan: BettorProfile | None  # Most $ wagered FOR
     biggest_hater: BettorProfile | None  # Most $ wagered AGAINST
-    most_profitable_supporter: BettorProfile | None  # Best P&L betting FOR
-    luckiest_hater: BettorProfile | None  # Best P&L betting AGAINST
+
+    # Notable bettors - by consistency (bet count)
+    most_consistent_fan: BettorProfile | None  # Most bets placed FOR
+    most_consistent_hater: BettorProfile | None  # Most bets placed AGAINST
+
+    # Notable bettors - by P&L
+    blessing: BettorProfile | None  # Profited most betting FOR (good luck charm)
+    jinx: BettorProfile | None  # Lost most betting FOR (bad luck charm)
+    luckiest_hater: BettorProfile | None  # Profited most betting AGAINST
+
+    # Extremes - single bet records
+    biggest_single_win: int  # Largest profit from a single bet on player's match
+    biggest_single_loss: int  # Largest loss from a single bet on player's match
 
     # Counts
     unique_supporters: int
@@ -479,8 +497,21 @@ class GamblingStatsService:
         supporter_roi = supporters_net_pnl / total_wagered_for if total_wagered_for > 0 else 0
         hater_roi = haters_net_pnl / total_wagered_against if total_wagered_against > 0 else 0
 
+        # Count bets and win rates
+        supporter_bets_count = sum(d["bets_for"] for d in bettor_data.values())
+        hater_bets_count = sum(d["bets_against"] for d in bettor_data.values())
+        supporter_wins = sum(d["wins_for"] for d in bettor_data.values())
+        hater_wins = sum(d["wins_against"] for d in bettor_data.values())
+        supporter_win_rate = supporter_wins / supporter_bets_count if supporter_bets_count > 0 else 0
+        hater_win_rate = hater_wins / hater_bets_count if hater_bets_count > 0 else 0
+
         # Count unique matches with bets
         matches_with_bets = len(set(bet["match_id"] for bet in bets))
+        total_bets = len(bets)
+
+        # Find single bet extremes
+        biggest_single_win = max((bet["profit"] for bet in bets if bet["profit"] > 0), default=0)
+        biggest_single_loss = min((bet["profit"] for bet in bets if bet["profit"] < 0), default=0)
 
         # Find supporters (anyone who bet FOR at least once)
         supporters = {
@@ -504,7 +535,7 @@ class GamblingStatsService:
                 wins_against=data["wins_against"],
             )
 
-        # Find notable bettors
+        # Find notable bettors - by wagered amount
         biggest_fan = None
         if supporters:
             fan_id = max(supporters.keys(), key=lambda k: supporters[k]["wagered_for"])
@@ -515,11 +546,29 @@ class GamblingStatsService:
             hater_id = max(haters.keys(), key=lambda k: haters[k]["wagered_against"])
             biggest_hater = make_profile(hater_id, bettor_data[hater_id])
 
-        most_profitable_supporter = None
+        # Find notable bettors - by consistency (bet count)
+        most_consistent_fan = None
+        if supporters:
+            consistent_id = max(supporters.keys(), key=lambda k: supporters[k]["bets_for"])
+            most_consistent_fan = make_profile(consistent_id, bettor_data[consistent_id])
+
+        most_consistent_hater = None
+        if haters:
+            consistent_id = max(haters.keys(), key=lambda k: haters[k]["bets_against"])
+            most_consistent_hater = make_profile(consistent_id, bettor_data[consistent_id])
+
+        # Find notable bettors - by P&L
+        blessing = None  # Good luck charm - profited most betting FOR
         if supporters:
             best_id = max(supporters.keys(), key=lambda k: supporters[k]["pnl_for"])
             if supporters[best_id]["pnl_for"] > 0:
-                most_profitable_supporter = make_profile(best_id, bettor_data[best_id])
+                blessing = make_profile(best_id, bettor_data[best_id])
+
+        jinx = None  # Bad luck charm - lost most betting FOR
+        if supporters:
+            worst_id = min(supporters.keys(), key=lambda k: supporters[k]["pnl_for"])
+            if supporters[worst_id]["pnl_for"] < 0:
+                jinx = make_profile(worst_id, bettor_data[worst_id])
 
         luckiest_hater = None
         if haters:
@@ -530,17 +579,27 @@ class GamblingStatsService:
         return BettingImpactStats(
             discord_id=discord_id,
             matches_with_bets=matches_with_bets,
+            total_bets=total_bets,
             total_wagered_for=total_wagered_for,
             total_wagered_against=total_wagered_against,
             supporters_net_pnl=supporters_net_pnl,
             haters_net_pnl=haters_net_pnl,
+            supporter_win_rate=supporter_win_rate,
+            hater_win_rate=hater_win_rate,
+            supporter_bets_count=supporter_bets_count,
+            hater_bets_count=hater_bets_count,
             market_favorability=market_favorability,
             supporter_roi=supporter_roi,
             hater_roi=hater_roi,
             biggest_fan=biggest_fan,
             biggest_hater=biggest_hater,
-            most_profitable_supporter=most_profitable_supporter,
+            most_consistent_fan=most_consistent_fan,
+            most_consistent_hater=most_consistent_hater,
+            blessing=blessing,
+            jinx=jinx,
             luckiest_hater=luckiest_hater,
+            biggest_single_win=biggest_single_win,
+            biggest_single_loss=biggest_single_loss,
             unique_supporters=len(supporters),
             unique_haters=len(haters),
         )
