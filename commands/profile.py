@@ -806,6 +806,81 @@ class ProfileCommands(commands.Cog):
                 inline=True,
             )
 
+        # Betting Impact section - how others bet on this player
+        impact_stats = gambling_stats_service.get_betting_impact_stats(target_discord_id)
+        if impact_stats:
+            total_external_wagered = (
+                impact_stats.total_wagered_for + impact_stats.total_wagered_against
+            )
+
+            for_pnl_str = (
+                f"+{impact_stats.supporters_net_pnl}"
+                if impact_stats.supporters_net_pnl >= 0
+                else str(impact_stats.supporters_net_pnl)
+            )
+            against_pnl_str = (
+                f"+{impact_stats.haters_net_pnl}"
+                if impact_stats.haters_net_pnl >= 0
+                else str(impact_stats.haters_net_pnl)
+            )
+
+            embed.add_field(
+                name="\u200b",  # Separator
+                value="━━━━━━━━━━━━━━━━━━━━━━",
+                inline=False,
+            )
+
+            embed.add_field(
+                name="Betting Impact",
+                value=(
+                    f"**External Wagered:** {total_external_wagered} {JOPACOIN_EMOTE}\n"
+                    f"├ FOR you: {impact_stats.total_wagered_for} {JOPACOIN_EMOTE} → P&L: {for_pnl_str}\n"
+                    f"└ AGAINST you: {impact_stats.total_wagered_against} {JOPACOIN_EMOTE} → P&L: {against_pnl_str}\n"
+                    f"**Market Favor:** {impact_stats.market_favorability:.0%} FOR"
+                ),
+                inline=False,
+            )
+
+            # Notable bettors
+            notable_lines = []
+            if impact_stats.biggest_fan:
+                fan = impact_stats.biggest_fan
+                fan_pnl = f"+{fan.net_pnl_for}" if fan.net_pnl_for >= 0 else str(fan.net_pnl_for)
+                notable_lines.append(
+                    f"**Biggest Fan:** <@{fan.discord_id}> ({fan.total_wagered_for} {JOPACOIN_EMOTE}, {fan_pnl})"
+                )
+            if impact_stats.biggest_hater:
+                hater = impact_stats.biggest_hater
+                hater_pnl = (
+                    f"+{hater.net_pnl_against}"
+                    if hater.net_pnl_against >= 0
+                    else str(hater.net_pnl_against)
+                )
+                notable_lines.append(
+                    f"**Biggest Hater:** <@{hater.discord_id}> ({hater.total_wagered_against} {JOPACOIN_EMOTE}, {hater_pnl})"
+                )
+            if impact_stats.most_profitable_supporter:
+                supporter = impact_stats.most_profitable_supporter
+                notable_lines.append(
+                    f"**Best Supporter:** <@{supporter.discord_id}> (+{supporter.net_pnl_for} {JOPACOIN_EMOTE})"
+                )
+            if impact_stats.luckiest_hater:
+                lucky = impact_stats.luckiest_hater
+                notable_lines.append(
+                    f"**Luckiest Hater:** <@{lucky.discord_id}> (+{lucky.net_pnl_against} {JOPACOIN_EMOTE})"
+                )
+
+            if notable_lines:
+                embed.add_field(
+                    name="Notable Bettors",
+                    value="\n".join(notable_lines),
+                    inline=False,
+                )
+
+            embed.set_footer(
+                text=f"Impact stats from {impact_stats.matches_with_bets} matches with external betting"
+            )
+
         # Generate P&L chart
         chart_file = None
         try:
