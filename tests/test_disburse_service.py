@@ -213,17 +213,17 @@ class TestProposalLifecycle:
         assert can
         assert reason == ""
 
-    def test_can_propose_no_debtors(
+    def test_can_propose_no_eligible_recipients(
         self, disburse_service, player_repo, setup_nonprofit_fund
     ):
-        """Test proposal blocked when no players have debt."""
-        # Create a player with positive balance
+        """Test proposal blocked when no debtors and insufficient non-debtors for stimulus."""
+        # Create only 1 player with positive balance (not enough for stimulus)
         player_repo.add(discord_id=9999, discord_username="RichGuy", initial_mmr=3000)
         player_repo.update_balance(9999, 1000)
 
         can, reason = disburse_service.can_propose(guild_id=None)
         assert not can
-        assert reason == "no_debtors"
+        assert reason == "no_eligible_recipients"
 
     def test_create_proposal(
         self, disburse_service, setup_players, setup_nonprofit_fund
@@ -399,3 +399,200 @@ class TestDisbursementHistory:
         """Test when no disbursement history exists."""
         last = disburse_service.get_last_disbursement(guild_id=None)
         assert last is None
+
+
+class TestStimulusDistribution:
+    """Test stimulus distribution calculation."""
+
+    def test_stimulus_distribution_basic(self, disburse_service):
+        """Test even split among eligible players."""
+        # 4 eligible players (non-debtors, not top 3)
+        eligible = [
+            {"discord_id": 1001, "balance": 50},
+            {"discord_id": 1002, "balance": 40},
+            {"discord_id": 1003, "balance": 30},
+            {"discord_id": 1004, "balance": 20},
+        ]
+        distributions = disburse_service._calculate_stimulus_distribution(100, eligible)
+
+        assert len(distributions) == 4
+        amounts = {d[0]: d[1] for d in distributions}
+        # 100 / 4 = 25 each
+        assert sum(amounts.values()) == 100
+        for pid, amount in amounts.items():
+            assert amount == 25
+
+    def test_stimulus_distribution_with_remainder(self, disburse_service):
+        """Test stimulus split with remainder distributed to first players."""
+        eligible = [
+            {"discord_id": 1001, "balance": 50},
+            {"discord_id": 1002, "balance": 40},
+            {"discord_id": 1003, "balance": 30},
+        ]
+        distributions = disburse_service._calculate_stimulus_distribution(100, eligible)
+
+        amounts = {d[0]: d[1] for d in distributions}
+        # 100 / 3 = 33 each, with 1 remainder
+        assert sum(amounts.values()) == 100
+        # First player gets remainder
+        assert amounts[1001] == 34
+        assert amounts[1002] == 33
+        assert amounts[1003] == 33
+
+    def test_stimulus_distribution_empty(self, disburse_service):
+        """Test stimulus with no eligible players."""
+        distributions = disburse_service._calculate_stimulus_distribution(100, [])
+        assert distributions == []
+
+    def test_stimulus_distribution_single_player(self, disburse_service):
+        """Test stimulus with single eligible player."""
+        eligible = [{"discord_id": 1001, "balance": 50}]
+        distributions = disburse_service._calculate_stimulus_distribution(100, eligible)
+
+        assert len(distributions) == 1
+        assert distributions[0] == (1001, 100)
+
+
+class TestStimulusEligibility:
+    """Test stimulus eligibility in repository."""
+
+    def test_get_stimulus_eligible_excludes_top_3(self, player_repo):
+        """Test that top 3 by balance are excluded."""
+        # Create 6 players with varying balances
+        player_repo.add(discord_id=1, discord_username="Rich1", initial_mmr=3000)
+        player_repo.add(discord_id=2, discord_username="Rich2", initial_mmr=3000)
+        player_repo.add(discord_id=3, discord_username="Rich3", initial_mmr=3000)
+        player_repo.add(discord_id=4, discord_username="Mid1", initial_mmr=3000)
+        player_repo.add(discord_id=5, discord_username="Mid2", initial_mmr=3000)
+        player_repo.add(discord_id=6, discord_username="Poor1", initial_mmr=3000)
+
+        player_repo.update_balance(1, 1000)  # Top 1
+        player_repo.update_balance(2, 500)   # Top 2
+        player_repo.update_balance(3, 200)   # Top 3
+        player_repo.update_balance(4, 50)    # Eligible
+        player_repo.update_balance(5, 10)    # Eligible
+        player_repo.update_balance(6, 0)     # Eligible (zero balance is non-negative)
+
+        eligible = player_repo.get_stimulus_eligible_players()
+
+        # Should only return players 4, 5, 6
+        eligible_ids = {p["discord_id"] for p in eligible}
+        assert eligible_ids == {4, 5, 6}
+
+    def test_get_stimulus_eligible_excludes_debtors(self, player_repo):
+        """Test that players with negative balance are excluded."""
+        player_repo.add(discord_id=1, discord_username="Rich", initial_mmr=3000)
+        player_repo.add(discord_id=2, discord_username="Mid", initial_mmr=3000)
+        player_repo.add(discord_id=3, discord_username="Zero", initial_mmr=3000)
+        player_repo.add(discord_id=4, discord_username="Debtor", initial_mmr=3000)
+
+        player_repo.update_balance(1, 100)
+        player_repo.update_balance(2, 50)
+        player_repo.update_balance(3, 0)
+        player_repo.update_balance(4, -50)  # Debtor
+
+        eligible = player_repo.get_stimulus_eligible_players()
+
+        # Only non-debtors, excluding top 3, so none eligible (only 3 non-debtors)
+        eligible_ids = {p["discord_id"] for p in eligible}
+        assert 4 not in eligible_ids  # Debtor excluded
+        assert len(eligible_ids) == 0  # Only 3 non-debtors, all in top 3
+
+    def test_get_stimulus_eligible_fewer_than_4_players(self, player_repo):
+        """Test stimulus with fewer than 4 non-debtor players returns empty."""
+        player_repo.add(discord_id=1, discord_username="Player1", initial_mmr=3000)
+        player_repo.add(discord_id=2, discord_username="Player2", initial_mmr=3000)
+        player_repo.add(discord_id=3, discord_username="Player3", initial_mmr=3000)
+
+        player_repo.update_balance(1, 100)
+        player_repo.update_balance(2, 50)
+        player_repo.update_balance(3, 10)
+
+        eligible = player_repo.get_stimulus_eligible_players()
+        # All 3 are in top 3, so none eligible
+        assert len(eligible) == 0
+
+
+class TestCanProposeWithStimulus:
+    """Test proposal creation with stimulus-only scenarios."""
+
+    def test_can_propose_with_only_stimulus_eligible(
+        self, disburse_service, player_repo, loan_repo
+    ):
+        """Test proposal can be created when no debtors but stimulus recipients exist."""
+        # Create 5 players, all with non-negative balance
+        for i in range(1, 6):
+            player_repo.add(discord_id=i, discord_username=f"Player{i}", initial_mmr=3000)
+            player_repo.update_balance(i, 100 - i * 10)  # 90, 80, 70, 60, 50
+
+        # Add nonprofit fund
+        loan_repo.add_to_nonprofit_fund(guild_id=None, amount=300)
+
+        can, reason = disburse_service.can_propose(guild_id=None)
+        # Should be allowed - 5 non-debtors, 2 eligible (not in top 3)
+        assert can
+        assert reason == ""
+
+    def test_can_propose_no_eligible_recipients(
+        self, disburse_service, player_repo, loan_repo
+    ):
+        """Test proposal blocked when no debtors and no stimulus-eligible players."""
+        # Create only 3 players, all non-debtors (all in top 3)
+        for i in range(1, 4):
+            player_repo.add(discord_id=i, discord_username=f"Player{i}", initial_mmr=3000)
+            player_repo.update_balance(i, 100)
+
+        # Add nonprofit fund
+        loan_repo.add_to_nonprofit_fund(guild_id=None, amount=300)
+
+        can, reason = disburse_service.can_propose(guild_id=None)
+        # Should be blocked - only 3 non-debtors, all in top 3
+        assert not can
+        assert reason == "no_eligible_recipients"
+
+
+class TestStimulusExecution:
+    """Test full stimulus execution flow."""
+
+    def test_execute_stimulus_disbursement(
+        self, disburse_service, player_repo, loan_repo
+    ):
+        """Test full stimulus disbursement execution."""
+        # Create 6 players - varied balances
+        for i in range(1, 7):
+            player_repo.add(discord_id=i, discord_username=f"Player{i}", initial_mmr=3000)
+
+        player_repo.update_balance(1, 500)   # Top 1
+        player_repo.update_balance(2, 300)   # Top 2
+        player_repo.update_balance(3, 100)   # Top 3
+        player_repo.update_balance(4, 50)    # Eligible
+        player_repo.update_balance(5, 30)    # Eligible
+        player_repo.update_balance(6, 10)    # Eligible
+
+        # Add nonprofit fund
+        loan_repo.add_to_nonprofit_fund(guild_id=None, amount=300)
+
+        # Create proposal
+        disburse_service.create_proposal(guild_id=None)
+
+        # Vote for stimulus (quorum = 3 for 6 players at 40%)
+        disburse_service.add_vote(guild_id=None, discord_id=1, method="stimulus")
+        disburse_service.add_vote(guild_id=None, discord_id=2, method="stimulus")
+        disburse_service.add_vote(guild_id=None, discord_id=3, method="stimulus")
+
+        result = disburse_service.execute_disbursement(guild_id=None)
+
+        assert result["success"]
+        assert result["method"] == "stimulus"
+        assert result["recipient_count"] == 3  # Players 4, 5, 6
+        assert result["total_disbursed"] == 300
+
+        # Check balances updated
+        assert player_repo.get_balance(4) == 50 + 100  # 150
+        assert player_repo.get_balance(5) == 30 + 100  # 130
+        assert player_repo.get_balance(6) == 10 + 100  # 110
+
+        # Top 3 unchanged
+        assert player_repo.get_balance(1) == 500
+        assert player_repo.get_balance(2) == 300
+        assert player_repo.get_balance(3) == 100

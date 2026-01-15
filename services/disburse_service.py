@@ -27,7 +27,7 @@ class DisburseProposal:
     fund_amount: int
     quorum_required: int
     status: str
-    votes: dict[str, int] = field(default_factory=lambda: {"even": 0, "proportional": 0, "neediest": 0})
+    votes: dict[str, int] = field(default_factory=lambda: {"even": 0, "proportional": 0, "neediest": 0, "stimulus": 0})
 
     @property
     def total_votes(self) -> int:
@@ -54,11 +54,12 @@ class DisburseService:
     - neediest: All funds go to player with most debt (capped)
     """
 
-    METHODS = ("even", "proportional", "neediest")
+    METHODS = ("even", "proportional", "neediest", "stimulus")
     METHOD_LABELS = {
         "even": "Even Split",
         "proportional": "Proportional",
         "neediest": "Neediest First",
+        "stimulus": "Stimulus",
     }
 
     def __init__(
@@ -94,10 +95,11 @@ class DisburseService:
         if fund < self.min_fund:
             return False, f"insufficient_fund:{fund}:{self.min_fund}"
 
-        # Check for players with negative balance
+        # Check for players with negative balance OR stimulus-eligible players
         debtors = self.player_repo.get_players_with_negative_balance()
-        if not debtors:
-            return False, "no_debtors"
+        stimulus_eligible = self.player_repo.get_stimulus_eligible_players()
+        if not debtors and not stimulus_eligible:
+            return False, "no_eligible_recipients"
 
         return True, ""
 
@@ -132,7 +134,7 @@ class DisburseService:
             fund_amount=fund_amount,
             quorum_required=quorum_required,
             status="active",
-            votes={"even": 0, "proportional": 0, "neediest": 0},
+            votes={"even": 0, "proportional": 0, "neediest": 0, "stimulus": 0},
         )
 
     def set_proposal_message(
@@ -222,13 +224,13 @@ class DisburseService:
         # Get all methods with max votes
         winners = [m for m, v in votes.items() if v == max_votes]
 
-        # Tie-breaker: prefer "even"
-        if "even" in winners:
-            return True, "even"
-        elif "proportional" in winners:
-            return True, "proportional"
-        else:
-            return True, "neediest"
+        # Tie-breaker order: even > proportional > neediest > stimulus
+        for method in ("even", "proportional", "neediest", "stimulus"):
+            if method in winners:
+                return True, method
+
+        # Fallback (shouldn't happen)
+        return True, winners[0]
 
     def execute_disbursement(self, guild_id: int | None) -> dict:
         """
@@ -245,27 +247,42 @@ class DisburseService:
         if not proposal:
             raise ValueError("No active proposal")
 
-        # Get current debtors (may have changed since proposal)
-        debtors = self.player_repo.get_players_with_negative_balance()
-        if not debtors:
-            # Mark as completed even if no one to pay
-            self.disburse_repo.complete_proposal(guild_id)
-            return {
-                "success": True,
-                "method": method,
-                "total_disbursed": 0,
-                "distributions": [],
-                "message": "No players with negative balance to receive funds.",
-            }
-
-        # Calculate distribution based on method
         fund_amount = proposal.fund_amount
-        if method == "even":
-            distributions = self._calculate_even_distribution(fund_amount, debtors)
-        elif method == "proportional":
-            distributions = self._calculate_proportional_distribution(fund_amount, debtors)
-        else:  # neediest
-            distributions = self._calculate_neediest_distribution(fund_amount, debtors)
+
+        # Handle stimulus separately - different eligibility criteria
+        if method == "stimulus":
+            eligible = self.player_repo.get_stimulus_eligible_players()
+            if not eligible:
+                self.disburse_repo.complete_proposal(guild_id)
+                return {
+                    "success": True,
+                    "method": method,
+                    "method_label": self.METHOD_LABELS[method],
+                    "total_disbursed": 0,
+                    "distributions": [],
+                    "message": "No eligible players for stimulus (need 4+ non-debtor players).",
+                }
+            distributions = self._calculate_stimulus_distribution(fund_amount, eligible)
+        else:
+            # Debtor-based methods: even, proportional, neediest
+            debtors = self.player_repo.get_players_with_negative_balance()
+            if not debtors:
+                self.disburse_repo.complete_proposal(guild_id)
+                return {
+                    "success": True,
+                    "method": method,
+                    "method_label": self.METHOD_LABELS[method],
+                    "total_disbursed": 0,
+                    "distributions": [],
+                    "message": "No players with negative balance to receive funds.",
+                }
+
+            if method == "even":
+                distributions = self._calculate_even_distribution(fund_amount, debtors)
+            elif method == "proportional":
+                distributions = self._calculate_proportional_distribution(fund_amount, debtors)
+            else:  # neediest
+                distributions = self._calculate_neediest_distribution(fund_amount, debtors)
 
         # Execute atomic disbursement
         total_disbursed = self.loan_repo.disburse_fund_atomic(guild_id, distributions)
@@ -414,3 +431,27 @@ class DisburseService:
         amount = min(fund, debt)
 
         return [(neediest["discord_id"], amount)]
+
+    def _calculate_stimulus_distribution(
+        self, fund: int, eligible: list[dict]
+    ) -> list[tuple[int, int]]:
+        """
+        Split funds evenly among stimulus-eligible players (non-debtors excluding top 3).
+
+        Unlike debt-based methods, there's no cap - all funds are distributed.
+        """
+        if not eligible:
+            return []
+
+        # Even split - integer division
+        per_player = fund // len(eligible)
+        remainder = fund % len(eligible)
+
+        distributions = []
+        for i, player in enumerate(eligible):
+            # Give 1 extra to first 'remainder' players to distribute remainder
+            amount = per_player + (1 if i < remainder else 0)
+            if amount > 0:
+                distributions.append((player["discord_id"], amount))
+
+        return distributions

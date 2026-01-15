@@ -582,6 +582,31 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 for row in cursor.fetchall()
             ]
 
+    def get_stimulus_eligible_players(self) -> list[dict]:
+        """
+        Get players eligible for stimulus: non-negative balance, excluding top 3 by balance.
+
+        Returns:
+            List of dicts with 'discord_id' and 'balance' for eligible players.
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            # Get all players with non-negative balance, ordered by balance DESC
+            # Skip the top 3 (richest players)
+            cursor.execute(
+                """
+                SELECT discord_id, jopacoin_balance
+                FROM players
+                WHERE jopacoin_balance >= 0
+                ORDER BY jopacoin_balance DESC
+                LIMIT -1 OFFSET 3
+                """
+            )
+            return [
+                {"discord_id": row["discord_id"], "balance": row["jopacoin_balance"]}
+                for row in cursor.fetchall()
+            ]
+
     def apply_interest_bulk(self, updates: list[tuple[int, int]]) -> int:
         """
         Apply interest charges to multiple players in a single transaction.

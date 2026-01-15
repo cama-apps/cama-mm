@@ -118,9 +118,9 @@ class DisburseRepository(BaseRepository):
             guild_id: Guild ID
             proposal_id: Proposal ID to vote on
             discord_id: Voter's Discord ID
-            method: 'even', 'proportional', or 'neediest'
+            method: 'even', 'proportional', 'neediest', or 'stimulus'
         """
-        if method not in ("even", "proportional", "neediest"):
+        if method not in ("even", "proportional", "neediest", "stimulus"):
             raise ValueError(f"Invalid vote method: {method}")
 
         normalized_guild = self._normalize_guild_id(guild_id)

@@ -1598,8 +1598,7 @@ class BettingCommands(commands.Cog):
         embed = discord.Embed(
             title="💝 Nonprofit Fund Disbursement Vote",
             description=(
-                f"Vote on how to distribute **{proposal.fund_amount}** {JOPACOIN_EMOTE} "
-                "to players with negative balance.\n\n"
+                f"Vote on how to distribute **{proposal.fund_amount}** {JOPACOIN_EMOTE}.\n\n"
                 "Click a button below to vote!"
             ),
             color=0xE91E63,  # Pink
@@ -1608,7 +1607,7 @@ class BettingCommands(commands.Cog):
         # Voting options with counts
         embed.add_field(
             name="📊 Even Split",
-            value=f"Split equally (capped at debt)\n**{votes['even']}** votes",
+            value=f"Split equally to debtors\n**{votes['even']}** votes",
             inline=True,
         )
         embed.add_field(
@@ -1619,6 +1618,11 @@ class BettingCommands(commands.Cog):
         embed.add_field(
             name="🎯 Neediest First",
             value=f"All to most indebted\n**{votes['neediest']}** votes",
+            inline=True,
+        )
+        embed.add_field(
+            name="💸 Stimulus",
+            value=f"Even split to non-top-3\n**{votes['stimulus']}** votes",
             inline=True,
         )
 
@@ -1808,6 +1812,17 @@ class DisburseVoteView(discord.ui.View):
         self, interaction: discord.Interaction, button: discord.ui.Button
     ):
         await self._handle_vote(interaction, "neediest", "Neediest First")
+
+    @discord.ui.button(
+        label="Stimulus",
+        emoji="💸",
+        style=discord.ButtonStyle.primary,
+        custom_id="disburse:stimulus",
+    )
+    async def vote_stimulus(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        await self._handle_vote(interaction, "stimulus", "Stimulus")
 
 
 async def setup(bot: commands.Bot):
