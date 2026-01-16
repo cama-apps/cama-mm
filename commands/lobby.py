@@ -412,6 +412,13 @@ class LobbyCommands(commands.Cog):
                 )
             return
 
+        # Cancel any active ready check
+        ready_check_service = getattr(self.bot, "ready_check_service", None)
+        if ready_check_service:
+            ready_check_service.cancel_check(guild_id)
+            ready_check_service.clear_message_id(guild_id)
+            logger.info(f"Cancelled ready check for guild {guild_id} during lobby reset")
+
         # Update channel message to show closed and archive thread
         await self._update_channel_message_closed("Lobby Reset")
         await self._archive_lobby_thread("Lobby Reset")

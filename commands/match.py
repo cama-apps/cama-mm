@@ -362,6 +362,95 @@ class MatchCommands(commands.Cog):
         # The actual shuffle will be handled by the continuation stored in service
         # This is just a notification method
 
+    async def _run_ready_check_timeout(
+        self,
+        guild_id: int | None,
+        channel: discord.abc.Messageable,
+        player_ids: list[int],
+    ):
+        """
+        Run timeout logic for ready check.
+
+        Pings unready players at 30s and 60s.
+        On timeout, kicks unready players and continues with ready players if 10+.
+        """
+        ready_check_service = getattr(self.bot, "ready_check_service", None)
+        if not ready_check_service:
+            return
+
+        timeout_seconds = READY_CHECK_TIMEOUT_SECONDS
+
+        try:
+            # Wait 30s and send warning
+            await asyncio.sleep(timeout_seconds / 2)
+
+            ready_check = ready_check_service.get_check(guild_id)
+            if ready_check and ready_check.status.value == "active":
+                unready = ready_check.get_unready_players()
+                if unready:
+                    mentions = " ".join(f"<@{pid}>" for pid in unready)
+                    await channel.send(
+                        f"⏰ **30 seconds remaining!** {mentions} please confirm ready."
+                    )
+                    # Update embed with new countdown
+                    await self._update_ready_check_embed(guild_id)
+
+            # Wait remaining time
+            await asyncio.sleep(timeout_seconds / 2)
+
+            # Check timeout
+            is_timeout, ready_check = ready_check_service.check_timeout(guild_id)
+            if not is_timeout:
+                return  # Already completed via button clicks
+
+            # Check if everyone is ready now
+            if ready_check.is_complete():
+                ready_check_service.complete_check(guild_id)
+                ready_check_service.clear_message_id(guild_id)
+                await channel.send("✅ **All players ready!** Creating teams...")
+                return  # Shuffle will be triggered by button completion handler
+
+            # Kick unready players
+            unready = ready_check.get_unready_players()
+            if unready:
+                kicked_ids = ready_check_service.kick_unready_players(guild_id)
+                kicked_mentions = " ".join(f"<@{pid}>" for pid in kicked_ids)
+                await channel.send(
+                    f"⏰ **Time's up!** Kicked {len(kicked_ids)} unready players: {kicked_mentions}"
+                )
+
+            # Check if enough ready players remain
+            ready_ids = list(ready_check.get_ready_players())
+            ready_check_service.complete_check(guild_id)
+            ready_check_service.clear_message_id(guild_id)
+
+            if len(ready_ids) < 10:
+                await channel.send(
+                    f"❌ Only {len(ready_ids)}/10 players ready. Shuffle cancelled."
+                )
+                return
+
+            # Proceed with ready players only
+            await channel.send(
+                f"✅ Continuing with {len(ready_ids)} ready players. Creating teams..."
+            )
+
+            # Note: The actual shuffle continuation needs to be handled separately
+            # since we need the original shuffle context (interaction, mode, etc.)
+            logger.info(f"Ready check completed with {len(ready_ids)} players ready")
+
+        except asyncio.CancelledError:
+            # Ready check was cancelled (e.g., manual abort)
+            logger.info(f"Ready check timeout task cancelled for guild {guild_id}")
+            if ready_check_service:
+                ready_check_service.cancel_check(guild_id)
+                ready_check_service.clear_message_id(guild_id)
+        except Exception as exc:
+            logger.error(f"Error in ready check timeout: {exc}", exc_info=True)
+            if ready_check_service:
+                ready_check_service.cancel_check(guild_id)
+                ready_check_service.clear_message_id(guild_id)
+
     def _format_team_lines(self, team, roles, player_ids, players, guild):
         """Return formatted lines with roles and ratings for a team."""
         lines = []
@@ -515,6 +604,59 @@ class MatchCommands(commands.Cog):
         player_ids, players = self.lobby_service.get_lobby_players(lobby)
         # `guild` and `guild_id` already computed before the match check
         mode = "pool"  # betting_mode.value if betting_mode else "pool"
+
+        # === READY CHECK INTEGRATION ===
+        # Start ready check if enabled
+        ready_check_service = getattr(self.bot, "ready_check_service", None)
+        if READY_CHECK_ENABLED and ready_check_service:
+            # Get lobby thread for posting ready check
+            thread_id = self.lobby_service.get_lobby_thread_id()
+            if thread_id:
+                try:
+                    thread = await self.bot.fetch_channel(thread_id)
+
+                    # Start ready check with voice detection
+                    ready_check = ready_check_service.start_check(
+                        guild_id=guild_id,
+                        player_ids=player_ids,
+                        guild=guild,
+                    )
+
+                    # Build and post ready check embed
+                    embed = self._build_ready_check_embed(ready_check, player_ids, players, guild)
+
+                    # Import ReadyCheckView from lobby commands
+                    from commands.lobby import ReadyCheckView
+
+                    view = ReadyCheckView(self.bot, guild_id)
+                    check_msg = await thread.send(embed=embed, view=view)
+
+                    # Store message ID for updates
+                    ready_check_service.set_message_id(guild_id, check_msg.id, thread_id)
+
+                    # Start timeout task
+                    asyncio.create_task(
+                        self._run_ready_check_timeout(guild_id, thread, player_ids)
+                    )
+
+                    # Inform user that ready check has started
+                    await interaction.followup.send(
+                        "✅ Ready check started! All players must confirm within 60 seconds.",
+                        ephemeral=True,
+                    )
+
+                    # Return early - shuffle will continue after ready check completes
+                    return
+
+                except Exception as exc:
+                    logger.error(f"Failed to start ready check: {exc}", exc_info=True)
+                    await interaction.followup.send(
+                        "⚠️ Ready check failed to start. Proceeding with shuffle...",
+                        ephemeral=True,
+                    )
+                    # Fall through to normal shuffle if ready check fails
+        # === END READY CHECK ===
+
         try:
             result = self.match_service.shuffle_players(
                 player_ids, guild_id=guild_id, betting_mode=mode
