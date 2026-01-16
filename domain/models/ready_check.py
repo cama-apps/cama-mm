@@ -72,6 +72,26 @@ class ReadyCheck:
         self.player_ready_states[discord_id] = new_status
         return True
 
+    def mark_unready(self, discord_id: int) -> bool:
+        """
+        Mark a player as unready (allows toggling ready status).
+
+        Args:
+            discord_id: Player Discord ID
+
+        Returns:
+            True if state changed, False if already unready
+        """
+        if discord_id not in self.player_ready_states:
+            return False
+
+        current = self.player_ready_states[discord_id]
+        if current == ReadyStatus.UNCONFIRMED:
+            return False  # Already unready
+
+        self.player_ready_states[discord_id] = ReadyStatus.UNCONFIRMED
+        return True
+
     def is_complete(self) -> bool:
         """Check if all players are ready."""
         return len(self.get_unready_players()) == 0
@@ -86,6 +106,10 @@ class ReadyCheck:
         elapsed = (current_time - self.started_at).total_seconds()
         remaining = max(0, self.timeout_seconds - elapsed)
         return int(remaining)
+
+    def get_end_timestamp(self) -> int:
+        """Get Unix timestamp when ready check ends (for Discord timestamp)."""
+        return int(self.started_at.timestamp()) + self.timeout_seconds
 
     def to_dict(self) -> dict:
         """Serialize for storage."""

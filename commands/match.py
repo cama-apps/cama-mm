@@ -234,8 +234,6 @@ class MatchCommands(commands.Cog):
         guild: discord.Guild | None,
     ) -> discord.Embed:
         """Build ready check status embed."""
-        from datetime import datetime
-
         ready_players = ready_check.get_ready_players()
         unready_players = ready_check.get_unready_players()
 
@@ -244,12 +242,12 @@ class MatchCommands(commands.Cog):
         ready_count = len(ready_players)
         progress_bar = self._create_progress_bar(ready_count, total)
 
-        # Time remaining
-        seconds_left = ready_check.get_seconds_remaining(datetime.now())
+        # Discord timestamp for automatic countdown
+        end_timestamp = ready_check.get_end_timestamp()
 
         embed = discord.Embed(
             title="⏳ Ready Check",
-            description=f"All players must confirm within **{seconds_left}s**",
+            description=f"Ready check ends <t:{end_timestamp}:R>",
             color=discord.Color.blue() if not ready_check.is_complete() else discord.Color.green(),
         )
 

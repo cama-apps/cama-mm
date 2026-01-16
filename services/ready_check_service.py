@@ -140,6 +140,31 @@ class ReadyCheckService:
                 )
             return changed, ready_check
 
+    def mark_unready(
+        self, guild_id: int | None, discord_id: int
+    ) -> tuple[bool, ReadyCheck | None]:
+        """
+        Mark a player as unready (button click).
+
+        Returns:
+            (success, ready_check)
+        """
+        normalized_guild_id = guild_id if guild_id is not None else 0
+        with self._lock:
+            ready_check = self._active_checks.get(normalized_guild_id)
+            if not ready_check or ready_check.status != ReadyCheckStatus.ACTIVE:
+                logger.debug(
+                    f"Cannot mark player {discord_id} unready: no active check for guild {guild_id}"
+                )
+                return False, None
+
+            changed = ready_check.mark_unready(discord_id)
+            if changed:
+                logger.info(
+                    f"Player {discord_id} marked unready via button (guild {guild_id})"
+                )
+            return changed, ready_check
+
     def check_timeout(self, guild_id: int | None) -> tuple[bool, ReadyCheck | None]:
         """
         Check if ready check has timed out.

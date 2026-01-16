@@ -498,3 +498,125 @@ class TestReadyCheckService:
         ready_check_service.clear_message_id(guild_id)
 
         assert ready_check_service.get_message_id(guild_id) is None
+
+    def test_get_end_timestamp_accuracy(self):
+        """Test get_end_timestamp returns correct Unix timestamp."""
+        start_time = datetime(2024, 1, 1, 12, 0, 0)
+        timeout_seconds = 60
+
+        check = ReadyCheck(
+            guild_id=None,
+            started_at=start_time,
+            timeout_seconds=timeout_seconds,
+            player_ready_states={1: ReadyStatus.UNCONFIRMED},
+        )
+
+        end_timestamp = check.get_end_timestamp()
+        expected_timestamp = int(start_time.timestamp()) + timeout_seconds
+
+        assert end_timestamp == expected_timestamp
+
+    def test_mark_unready_changes_state(self):
+        """Test marking player as unready changes state."""
+        check = ReadyCheck(
+            guild_id=None,
+            started_at=datetime.now(),
+            timeout_seconds=60,
+            player_ready_states={1: ReadyStatus.CONFIRMED},
+        )
+
+        changed = check.mark_unready(1)
+
+        assert changed is True
+        assert check.player_ready_states[1] == ReadyStatus.UNCONFIRMED
+        assert 1 in check.get_unready_players()
+        assert 1 not in check.get_ready_players()
+
+    def test_mark_unready_from_auto_ready(self):
+        """Test marking auto-ready player as unready."""
+        check = ReadyCheck(
+            guild_id=None,
+            started_at=datetime.now(),
+            timeout_seconds=60,
+            player_ready_states={1: ReadyStatus.AUTO_READY},
+        )
+
+        changed = check.mark_unready(1)
+
+        assert changed is True
+        assert check.player_ready_states[1] == ReadyStatus.UNCONFIRMED
+
+    def test_mark_unready_already_unready(self):
+        """Test marking unready when already unready returns False."""
+        check = ReadyCheck(
+            guild_id=None,
+            started_at=datetime.now(),
+            timeout_seconds=60,
+            player_ready_states={1: ReadyStatus.UNCONFIRMED},
+        )
+
+        changed = check.mark_unready(1)
+
+        assert changed is False
+        assert check.player_ready_states[1] == ReadyStatus.UNCONFIRMED
+
+    def test_mark_unready_invalid_player(self):
+        """Test marking unready for non-existent player."""
+        check = ReadyCheck(
+            guild_id=None,
+            started_at=datetime.now(),
+            timeout_seconds=60,
+            player_ready_states={1: ReadyStatus.UNCONFIRMED},
+        )
+
+        changed = check.mark_unready(999)
+
+        assert changed is False
+
+    def test_toggle_ready_unready(self):
+        """Test toggling between ready and unready states."""
+        check = ReadyCheck(
+            guild_id=None,
+            started_at=datetime.now(),
+            timeout_seconds=60,
+            player_ready_states={1: ReadyStatus.UNCONFIRMED},
+        )
+
+        # Mark ready
+        changed = check.mark_ready(1, auto=False)
+        assert changed is True
+        assert check.player_ready_states[1] == ReadyStatus.CONFIRMED
+
+        # Mark unready
+        changed = check.mark_unready(1)
+        assert changed is True
+        assert check.player_ready_states[1] == ReadyStatus.UNCONFIRMED
+
+        # Mark ready again
+        changed = check.mark_ready(1, auto=False)
+        assert changed is True
+        assert check.player_ready_states[1] == ReadyStatus.CONFIRMED
+
+    def test_mark_unready_service_integration(self, ready_check_service):
+        """Test mark_unready through service layer."""
+        player_ids = [1, 2, 3]
+        ready_check_service.start_check(guild_id=None, player_ids=player_ids)
+
+        # Mark player 1 as ready first
+        ready_check_service.mark_ready(guild_id=None, discord_id=1)
+
+        # Then mark unready
+        success, updated_check = ready_check_service.mark_unready(
+            guild_id=None, discord_id=1
+        )
+
+        assert success is True
+        assert updated_check.player_ready_states[1] == ReadyStatus.UNCONFIRMED
+        assert 1 not in updated_check.get_ready_players()
+
+    def test_mark_unready_no_active_check(self, ready_check_service):
+        """Test marking unready when no active check."""
+        success, check = ready_check_service.mark_unready(guild_id=None, discord_id=1)
+
+        assert success is False
+        assert check is None

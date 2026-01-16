@@ -513,6 +513,66 @@ class ReadyCheckView(discord.ui.View):
                 except Exception as exc:
                     logger.error(f"Failed to trigger shuffle after ready check: {exc}")
 
+    @discord.ui.button(
+        label="Not Ready",
+        style=discord.ButtonStyle.danger,
+        custom_id="ready_check:unready",
+        emoji="❌",
+    )
+    async def unready_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+        """Handle unready button click."""
+        # Defer immediately
+        await interaction.response.defer(ephemeral=True)
+
+        # Get services
+        player_service = getattr(self.bot, "player_service", None)
+        ready_check_service = getattr(self.bot, "ready_check_service", None)
+
+        if not player_service or not ready_check_service:
+            await interaction.followup.send(
+                "⚠️ Services not available.", ephemeral=True
+            )
+            return
+
+        # Check if player is registered
+        player = player_service.get_player(interaction.user.id)
+        if not player:
+            await interaction.followup.send(
+                "❌ You must be registered to participate. Use `/register` first.",
+                ephemeral=True,
+            )
+            return
+
+        # Mark unready
+        success, ready_check = ready_check_service.mark_unready(
+            self.guild_id,
+            interaction.user.id,
+        )
+
+        if not success:
+            await interaction.followup.send(
+                "⚠️ Ready check has ended or you're not in the lobby.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.followup.send(
+            "❌ Marked as not ready!",
+            ephemeral=True,
+        )
+
+        # Update embed
+        match_cog = self.bot.get_cog("MatchCommands")
+        if match_cog and hasattr(match_cog, "_update_ready_check_embed"):
+            try:
+                await match_cog._update_ready_check_embed(self.guild_id)
+            except Exception as exc:
+                logger.warning(f"Failed to update ready check embed: {exc}")
+
 
 async def setup(bot: commands.Bot):
     lobby_service = getattr(bot, "lobby_service", None)
