@@ -478,6 +478,7 @@ class ReadyCheckView(discord.ui.View):
         success, ready_check = ready_check_service.mark_ready(
             self.guild_id,
             interaction.user.id,
+            auto=False,
         )
 
         if not success:

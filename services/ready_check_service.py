@@ -116,10 +116,15 @@ class ReadyCheckService:
             return self._active_checks.get(normalized_guild_id)
 
     def mark_ready(
-        self, guild_id: int | None, discord_id: int
+        self, guild_id: int | None, discord_id: int, auto: bool = False
     ) -> tuple[bool, ReadyCheck | None]:
         """
-        Mark a player as ready (button click).
+        Mark a player as ready.
+
+        Args:
+            guild_id: Guild ID
+            discord_id: Player Discord ID
+            auto: True if auto-marked via voice, False if button click
 
         Returns:
             (success, ready_check)
@@ -133,10 +138,11 @@ class ReadyCheckService:
                 )
                 return False, None
 
-            changed = ready_check.mark_ready(discord_id, auto=False)
+            changed = ready_check.mark_ready(discord_id, auto=auto)
             if changed:
+                source = "voice" if auto else "button"
                 logger.info(
-                    f"Player {discord_id} marked ready via button (guild {guild_id})"
+                    f"Player {discord_id} marked ready via {source} (guild {guild_id})"
                 )
             return changed, ready_check
 

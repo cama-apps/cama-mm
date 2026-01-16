@@ -620,3 +620,29 @@ class TestReadyCheckService:
 
         assert success is False
         assert check is None
+
+    def test_mark_ready_auto_parameter(self, ready_check_service):
+        """Test marking ready with auto=True sets AUTO_READY status."""
+        player_ids = [1, 2]
+        ready_check_service.start_check(guild_id=None, player_ids=player_ids)
+
+        success, updated_check = ready_check_service.mark_ready(
+            guild_id=None, discord_id=1, auto=True
+        )
+
+        assert success is True
+        assert updated_check.player_ready_states[1] == ReadyStatus.AUTO_READY
+        assert 1 in updated_check.get_ready_players()
+
+    def test_mark_ready_manual_parameter(self, ready_check_service):
+        """Test marking ready with auto=False sets CONFIRMED status."""
+        player_ids = [1, 2]
+        ready_check_service.start_check(guild_id=None, player_ids=player_ids)
+
+        success, updated_check = ready_check_service.mark_ready(
+            guild_id=None, discord_id=1, auto=False
+        )
+
+        assert success is True
+        assert updated_check.player_ready_states[1] == ReadyStatus.CONFIRMED
+        assert 1 in updated_check.get_ready_players()

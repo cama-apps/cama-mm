@@ -601,6 +601,65 @@ async def on_raw_reaction_remove(payload):
         logger.error(f"Error handling reaction remove: {exc}", exc_info=True)
 
 
+@bot.event
+async def on_voice_state_update(member, before, after):
+    """Handle voice state updates for ready check auto-marking."""
+    # Only process if voice state changed (channel or deaf status)
+    if before.channel == after.channel and before.self_deaf == after.self_deaf and before.deaf == after.deaf:
+        return
+
+    ready_check_service = getattr(bot, "ready_check_service", None)
+    if not ready_check_service:
+        return
+
+    guild_id = member.guild.id if member.guild else None
+    check = ready_check_service.get_check(guild_id)
+    if not check:
+        return
+
+    # Import here to avoid circular dependency
+    from domain.models.ready_check import ReadyCheckStatus, ReadyStatus
+
+    if check.status != ReadyCheckStatus.ACTIVE:
+        return
+
+    # Check if this player is in the ready check
+    if member.id not in check.player_ready_states:
+        return
+
+    # Only auto-ready UNCONFIRMED players (don't override manual states)
+    if check.player_ready_states[member.id] != ReadyStatus.UNCONFIRMED:
+        return
+
+    # Check if joined voice and not deafened
+    if ready_check_service._is_voice_ready(member):
+        success, updated_check = ready_check_service.mark_ready(
+            guild_id, member.id, auto=True
+        )
+        if success:
+            logger.info(f"Auto-marked {member.display_name} ready via voice join")
+
+            # Update embed
+            match_cog = bot.get_cog("MatchCommands")
+            if match_cog and hasattr(match_cog, "_update_ready_check_embed"):
+                try:
+                    await match_cog._update_ready_check_embed(guild_id)
+                except Exception as exc:
+                    logger.warning(f"Failed to update ready check embed: {exc}")
+
+            # Check completion and trigger shuffle if all ready
+            if updated_check.is_complete():
+                logger.info(f"All players ready after voice join for guild {guild_id}")
+                if hasattr(match_cog, "_on_ready_check_complete"):
+                    try:
+                        thread_id = lobby_service.get_lobby_thread_id()
+                        if thread_id:
+                            thread = await bot.fetch_channel(thread_id)
+                            await match_cog._on_ready_check_complete(thread, guild_id)
+                    except Exception as exc:
+                        logger.error(f"Failed to trigger shuffle after voice ready check completion: {exc}")
+
+
 def main():
     """Run the bot."""
     token = os.getenv("DISCORD_BOT_TOKEN")
