@@ -11,7 +11,8 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from config import JOPACOIN_MIN_BET
+from config import JOPACOIN_MIN_BET, READY_CHECK_ENABLED, READY_CHECK_TIMEOUT_SECONDS
+from domain.models.ready_check import ReadyStatus
 from services.flavor_text_service import FlavorEvent
 from services.lobby_service import LobbyService
 from services.match_discovery_service import MatchDiscoveryService
@@ -218,6 +219,148 @@ class MatchCommands(commands.Cog):
                 await thread.edit(archived=True)
         except Exception as exc:
             logger.warning(f"Failed to abort lobby thread: {exc}")
+
+    def _create_progress_bar(self, current: int, total: int, length: int = 10) -> str:
+        """Create a progress bar using block characters."""
+        filled = int((current / total) * length) if total > 0 else 0
+        bar = "█" * filled + "░" * (length - filled)
+        return f"{bar} {current}/{total}"
+
+    def _build_ready_check_embed(
+        self,
+        ready_check,
+        player_ids: list[int],
+        players: list,
+        guild: discord.Guild | None,
+    ) -> discord.Embed:
+        """Build ready check status embed."""
+        from datetime import datetime
+
+        ready_players = ready_check.get_ready_players()
+        unready_players = ready_check.get_unready_players()
+
+        # Calculate progress
+        total = len(player_ids)
+        ready_count = len(ready_players)
+        progress_bar = self._create_progress_bar(ready_count, total)
+
+        # Time remaining
+        seconds_left = ready_check.get_seconds_remaining(datetime.now())
+
+        embed = discord.Embed(
+            title="⏳ Ready Check",
+            description=f"All players must confirm within **{seconds_left}s**",
+            color=discord.Color.blue() if not ready_check.is_complete() else discord.Color.green(),
+        )
+
+        # Progress field
+        embed.add_field(
+            name=f"Progress: {ready_count}/{total}",
+            value=progress_bar,
+            inline=False,
+        )
+
+        # Ready players
+        if ready_players:
+            ready_names = []
+            for pid in ready_players:
+                player = next((p for p in players if p.discord_id == pid), None)
+                if player:
+                    display_name = get_player_display_name(player, pid, guild)
+                    status_emoji = (
+                        "🎙️"
+                        if ready_check.player_ready_states.get(pid) == ReadyStatus.AUTO_READY
+                        else "✅"
+                    )
+                    ready_names.append(f"{status_emoji} {display_name}")
+
+            embed.add_field(
+                name=f"✅ Ready ({len(ready_players)})",
+                value="\n".join(ready_names[:25]) or "None",  # Discord limit
+                inline=True,
+            )
+
+        # Unready players
+        if unready_players:
+            unready_names = []
+            for pid in unready_players:
+                player = next((p for p in players if p.discord_id == pid), None)
+                if player:
+                    display_name = get_player_display_name(player, pid, guild)
+                    unready_names.append(f"⏸️ {display_name}")
+
+            embed.add_field(
+                name=f"⏸️ Waiting ({len(unready_players)})",
+                value="\n".join(unready_names[:25]) or "None",  # Discord limit
+                inline=True,
+            )
+
+        # Instructions
+        if ready_check.voice_auto_ready_enabled:
+            embed.set_footer(
+                text="🎙️ Voice = auto-ready | ✅ Button click | "
+                "Players in voice (not deafened) are auto-marked ready."
+            )
+        else:
+            embed.set_footer(text="Click the 'I'm Ready!' button to confirm.")
+
+        return embed
+
+    async def _update_ready_check_embed(self, guild_id: int | None):
+        """Update ready check embed with current state."""
+        ready_check_service = getattr(self.bot, "ready_check_service", None)
+        if not ready_check_service:
+            return
+
+        ready_check = ready_check_service.get_check(guild_id)
+        if not ready_check:
+            return
+
+        # Get message info
+        msg_info = ready_check_service.get_message_id(guild_id)
+        if not msg_info:
+            return
+
+        message_id, channel_id = msg_info
+
+        try:
+            channel = self.bot.get_channel(channel_id)
+            if not channel:
+                channel = await self.bot.fetch_channel(channel_id)
+
+            message = await channel.fetch_message(message_id)
+
+            # Get lobby info for player display
+            lobby = self.lobby_service.get_lobby()
+            if not lobby:
+                return
+
+            player_ids, players = self.lobby_service.get_lobby_players(lobby)
+            guild = channel.guild if hasattr(channel, "guild") else None
+
+            # Build and update embed
+            embed = self._build_ready_check_embed(ready_check, player_ids, players, guild)
+            await message.edit(embed=embed)
+
+        except Exception as exc:
+            logger.error(f"Failed to update ready check embed: {exc}", exc_info=True)
+
+    async def _on_ready_check_complete(
+        self, channel: discord.abc.Messageable, guild_id: int | None
+    ):
+        """Handle ready check completion and continue to shuffle."""
+        logger.info(f"Ready check completed for guild {guild_id}, proceeding to shuffle")
+
+        # Get ready check service and complete the check
+        ready_check_service = getattr(self.bot, "ready_check_service", None)
+        if ready_check_service:
+            ready_check_service.complete_check(guild_id)
+            ready_check_service.clear_message_id(guild_id)
+
+        await channel.send("✅ **All players ready!** Creating balanced teams...")
+
+        # The actual shuffle will be handled by the continuation stored in service
+        # This is just a notification method
 
     def _format_team_lines(self, team, roles, player_ids, players, guild):
         """Return formatted lines with roles and ratings for a team."""
