@@ -51,6 +51,9 @@ from config import (
     LOBBY_MAX_PLAYERS,
     LOBBY_READY_THRESHOLD,
     MAX_DEBT,
+    READY_CHECK_ENABLED,
+    READY_CHECK_TIMEOUT_SECONDS,
+    READY_CHECK_VOICE_AUTO_READY,
     USE_GLICKO,
 )
 from database import Database
@@ -75,6 +78,7 @@ from services.prediction_service import PredictionService
 from services.permissions import has_admin_permission  # noqa: F401 - used by tests
 from services.player_service import PlayerService
 from services.opendota_player_service import OpenDotaPlayerService
+from services.ready_check_service import ReadyCheckService
 from utils.formatting import ROLE_EMOJIS, ROLE_NAMES, format_role_display
 
 # Bot setup
@@ -82,6 +86,7 @@ from utils.formatting import ROLE_EMOJIS, ROLE_NAMES, format_role_display
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
+intents.voice_states = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -157,6 +162,13 @@ def _init_services():
         bankruptcy_repo=bankruptcy_repo,
     )
 
+    # Create ready check service for pre-shuffle ready confirmation
+    ready_check_service = ReadyCheckService(
+        lobby_service=lobby_service,
+        timeout_seconds=READY_CHECK_TIMEOUT_SECONDS,
+        voice_auto_ready_enabled=READY_CHECK_VOICE_AUTO_READY,
+    )
+
     # Create match service
     match_service = MatchService(
         player_repo=player_repo,
@@ -172,6 +184,7 @@ def _init_services():
     bot.lobby_manager = lobby_manager
     bot.player_service = player_service
     bot.lobby_service = lobby_service
+    bot.ready_check_service = ready_check_service
     bot.match_service = match_service
     bot.player_repo = player_repo
     bot.match_repo = match_repo
