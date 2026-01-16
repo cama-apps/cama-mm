@@ -482,8 +482,27 @@ class ReadyCheckView(discord.ui.View):
         )
 
         if not success:
+            # Provide specific feedback based on why marking ready failed
+            if ready_check is not None:
+                # Check if player is already ready
+                from domain.models.ready_check import ReadyStatus
+                current_status = ready_check.player_ready_states.get(interaction.user.id)
+                if current_status in (ReadyStatus.CONFIRMED, ReadyStatus.AUTO_READY):
+                    await interaction.followup.send(
+                        "✅ You're already marked as ready!",
+                        ephemeral=True,
+                    )
+                    return
+                elif interaction.user.id not in ready_check.player_ready_states:
+                    await interaction.followup.send(
+                        "⚠️ You're not in this ready check.",
+                        ephemeral=True,
+                    )
+                    return
+
+            # Generic fallback (check ended or other issue)
             await interaction.followup.send(
-                "⚠️ Ready check has ended or you're not in the lobby.",
+                "⚠️ Ready check has ended.",
                 ephemeral=True,
             )
             return
