@@ -136,3 +136,9 @@ RD_DECAY_CONSTANT = _parse_float("RD_DECAY_CONSTANT", 50.0)  # Constant for Glic
 RD_DECAY_GRACE_PERIOD_WEEKS = _parse_int("RD_DECAY_GRACE_PERIOD_WEEKS", 2)  # No decay for first N weeks after last match
 MMR_MODAL_TIMEOUT_MINUTES = _parse_int("MMR_MODAL_TIMEOUT_MINUTES", 5)  # Timeout for MMR input modal
 MMR_MODAL_RETRY_LIMIT = _parse_int("MMR_MODAL_RETRY_LIMIT", 3)  # Maximum retries for invalid MMR input
+
+# Ready Check configuration
+READY_CHECK_ENABLED = _parse_bool("READY_CHECK_ENABLED", True)  # Enable ready check before shuffle
+READY_CHECK_TIMEOUT_SECONDS = _parse_int("READY_CHECK_TIMEOUT_SECONDS", 60)  # Total ready check duration
+READY_CHECK_VOICE_AUTO_READY = _parse_bool("READY_CHECK_VOICE_AUTO_READY", True)  # Auto-ready for voice users
+READY_CHECK_WARNING_TIME_SECONDS = _parse_int("READY_CHECK_WARNING_TIME_SECONDS", 30)  # Warning ping timing
