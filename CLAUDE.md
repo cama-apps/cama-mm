@@ -295,6 +295,27 @@ set_roles(discord_id, roles) -> None
 get_stats(discord_id) -> dict  # rating, uncertainty, win_rate, balance
 ```
 
+### ReadyCheckService (`services/ready_check_service.py`)
+Manages ready check lifecycle before shuffles. In-memory state (no DB persistence).
+
+```python
+start_check(guild_id, player_ids, guild) -> ReadyCheck  # Auto-detects voice members
+mark_ready(guild_id, discord_id) -> tuple[bool, ReadyCheck]  # Button confirmation
+mark_unready(guild_id, discord_id) -> tuple[bool, ReadyCheck]  # Toggle unready
+check_timeout(guild_id) -> tuple[bool, ReadyCheck]  # Check if timed out
+kick_unready_players(guild_id) -> list[int]  # Remove unready from lobby
+complete_check(guild_id) -> ReadyCheck  # Mark complete and cleanup
+cancel_check(guild_id) -> None  # Cancel and cleanup
+```
+
+**Features:**
+- **Auto-ready detection**: Players in voice channels (not deafened) marked ready automatically
+- **Button confirmation**: "I'm Ready!" and "Not Ready" buttons for manual confirmation
+- **60s timeout**: Kicks unready players after timeout, continues with 10+ ready
+- **Discord timestamps**: Countdown display auto-updates client-side
+- **Thread-safe**: Uses `threading.Lock` for concurrent button interactions
+- **Guild-aware**: Per-guild state isolation for multi-server support
+
 ## Database Schema (Key Tables)
 
 ### players
@@ -526,6 +547,10 @@ def test_full_match_workflow(test_db, mock_lobby_manager):
 | `DEBUG_LOG_PATH` | None | Enable JSONL debug logging when set |
 | `LOBBY_READY_THRESHOLD` | 10 | Min players to shuffle |
 | `LOBBY_MAX_PLAYERS` | 14 | Max players in lobby |
+| `READY_CHECK_ENABLED` | True | Enable ready check before shuffles |
+| `READY_CHECK_TIMEOUT_SECONDS` | 60 | Ready check timeout duration |
+| `READY_CHECK_VOICE_AUTO_READY` | True | Auto-ready voice channel users |
+| `READY_CHECK_WARNING_TIME_SECONDS` | 30 | Warning ping timing |
 | `OFF_ROLE_MULTIPLIER` | 0.95 | Rating effectiveness off-role |
 | `OFF_ROLE_FLAT_PENALTY` | 100.0 | Penalty per off-role player |
 | `LEVERAGE_TIERS` | 2,3,5 | Available bet leverage options |
@@ -583,6 +608,7 @@ See `config.py` for the full list and defaults.
 - **Rating System**: Glicko-2, not simple MMR. Initial RD=350.0, volatility=0.06
 - **5 Roles**: 1=Carry, 2=Mid, 3=Offlane, 4=Soft Support, 5=Hard Support (stored as strings)
 - **Team Convention**: team1=Radiant, team2=Dire, winning_team: 1 or 2
+- **Ready Check**: Runs before every shuffle; 60s timeout; auto-detects voice users (not deafened); kicks unready players; continues with 10+ ready
 - **Betting Window**: 15 minutes (BET_LOCK_SECONDS=900) after shuffle; admins can extend via `/extendbetting`
 - **Voting Threshold**: 2 non-admin votes OR 1 admin vote to record match
 - **Leverage**: Multiplies effective bet; losses can cause debt up to MAX_DEBT
