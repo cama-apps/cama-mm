@@ -1555,7 +1555,7 @@ class BettingCommands(commands.Cog):
     async def _disburse_status(
         self, interaction: discord.Interaction, guild_id: int | None
     ):
-        """Show current proposal status."""
+        """Show current proposal status, replacing the old message to keep it visible."""
         proposal = self.disburse_service.get_proposal(guild_id)
         if not proposal:
             await interaction.response.send_message(
@@ -1564,8 +1564,29 @@ class BettingCommands(commands.Cog):
             )
             return
 
+        # Delete the old message if it exists (to avoid it getting lost in chat)
+        if proposal.message_id and proposal.channel_id:
+            try:
+                old_channel = self.bot.get_channel(proposal.channel_id)
+                if old_channel:
+                    old_message = await old_channel.fetch_message(proposal.message_id)
+                    if old_message:
+                        await old_message.delete()
+            except discord.errors.NotFound:
+                pass  # Message already deleted
+            except Exception as e:
+                logger.warning(f"Failed to delete old disburse message: {e}")
+
+        # Send new message with embed and voting buttons
         embed = self._create_disburse_embed(proposal)
-        await interaction.response.send_message(embed=embed)
+        view = DisburseVoteView(self.disburse_service, self)
+        await interaction.response.send_message(embed=embed, view=view)
+
+        # Update stored message reference to point to the new message
+        msg = await interaction.original_response()
+        self.disburse_service.set_proposal_message(
+            guild_id, msg.id, interaction.channel_id
+        )
 
     async def _disburse_reset(
         self, interaction: discord.Interaction, guild_id: int | None
