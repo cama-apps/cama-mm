@@ -439,13 +439,21 @@ class InfoCommands(commands.Cog):
                 logger.error("Failed to send error message for leaderboard command")
 
     @app_commands.command(
-        name="calibration", description="View rating system stats (server-wide or individual)"
+        name="calibration", description="View rating system stats (admin only)"
     )
     @app_commands.describe(user="Optional: View detailed stats for a specific player")
     async def calibration(
         self, interaction: discord.Interaction, user: discord.Member | None = None
     ):
-        """Show rating system health and calibration stats."""
+        """Show rating system health and calibration stats. Admin only."""
+        # Admin check
+        if not has_admin_permission(interaction):
+            await interaction.response.send_message(
+                "❌ This command is admin-only.",
+                ephemeral=True,
+            )
+            return
+
         target_user = user or interaction.user
         logger.info(f"Calibration command: User {interaction.user.id}, target={target_user.id}")
         guild = interaction.guild if hasattr(interaction, "guild") else None
@@ -883,17 +891,29 @@ class InfoCommands(commands.Cog):
             recent_delta = None
             last_5_delta = None
 
-        # Recent matches (last 5)
-        recent_matches = []
-        for h in matches_with_predictions[:5]:
-            prob = h.get("expected_team_win_prob", 0.5)
+        # Recent matches with per-game rating changes (last 5)
+        recent_game_details = []
+        for h in history[:5]:
+            rating_after = h.get("rating")
+            rating_before = h.get("rating_before")
+            rd_before = h.get("rd_before")
+            rd_after = h.get("rd_after")
             won = h.get("won")
-            expected_win = prob >= 0.5
-            if won:
-                emoji = "✅" if expected_win else "🔥"  # expected win or upset
+            match_id = h.get("match_id")
+
+            if rating_after is not None and rating_before is not None:
+                rating_delta = rating_after - rating_before
+                delta_str = f"{rating_delta:+.0f}"
             else:
-                emoji = "💀" if expected_win else "❌"  # choke (favored) or expected loss
-            recent_matches.append(f"{emoji} {prob:.0%} → {'W' if won else 'L'}")
+                delta_str = "?"
+
+            rd_delta_str = ""
+            if rd_before is not None and rd_after is not None:
+                rd_delta = rd_after - rd_before
+                rd_delta_str = f" (RD {rd_delta:+.0f})"
+
+            result = "W" if won else "L"
+            recent_game_details.append(f"#{match_id}: {result} → **{delta_str}**{rd_delta_str}")
 
         # Find biggest upset (win as underdog) and biggest choke (loss as favorite)
         upsets = [(h, h.get("expected_team_win_prob", 0.5)) for h in matches_with_predictions
@@ -965,13 +985,50 @@ class InfoCommands(commands.Cog):
                 trend_text += f"\n🔥 Current: **{streak}{streak_type}** streak"
             embed.add_field(name="📉 Trend", value=trend_text, inline=True)
 
-        # Recent matches
-        if recent_matches:
+        # Recent matches with per-game rating changes
+        if recent_game_details:
             embed.add_field(
-                name=f"🕐 Recent ({len(recent_matches)} games)",
-                value="\n".join(recent_matches),
-                inline=True,
+                name=f"📊 Recent Games ({len(recent_game_details)})",
+                value="\n".join(recent_game_details),
+                inline=False,
             )
+
+        # RD trend analysis - show how rating changes relate to RD
+        if len(history) >= 2:
+            # Calculate average rating swing and RD change over recent games
+            rating_swings = []
+            rd_changes = []
+            for h in history[:5]:
+                r_before = h.get("rating_before")
+                r_after = h.get("rating")
+                rd_b = h.get("rd_before")
+                rd_a = h.get("rd_after")
+                if r_before is not None and r_after is not None:
+                    rating_swings.append(abs(r_after - r_before))
+                if rd_b is not None and rd_a is not None:
+                    rd_changes.append(rd_a - rd_b)
+
+            if rating_swings and rd_changes:
+                avg_swing = sum(rating_swings) / len(rating_swings)
+                total_rd_change = sum(rd_changes)
+
+                # Determine trend direction
+                if total_rd_change < -5:
+                    rd_trend = "📉 RD decreasing (converging)"
+                    rating_expectation = "Expect smaller rating swings"
+                elif total_rd_change > 5:
+                    rd_trend = "📈 RD increasing (uncertain)"
+                    rating_expectation = "Expect larger rating swings"
+                else:
+                    rd_trend = "➡️ RD stable"
+                    rating_expectation = "Rating swings should be consistent"
+
+                trend_analysis = (
+                    f"{rd_trend}\n"
+                    f"Avg swing: **±{avg_swing:.0f}** per game\n"
+                    f"*{rating_expectation}*"
+                )
+                embed.add_field(name="🔄 Convergence Trend", value=trend_analysis, inline=True)
 
         # Biggest upset and choke
         highlights = []
@@ -990,7 +1047,7 @@ class InfoCommands(commands.Cog):
             record_text += f" ({player.wins / (player.wins + player.losses):.0%})"
         embed.add_field(name="📋 Record", value=record_text, inline=True)
 
-        embed.set_footer(text="✅=expected W | 🔥=upset W | ❌=expected L | 💀=choke L")
+        embed.set_footer(text="Rating delta shown per game | RD decrease = more stable rating")
 
         await safe_followup(
             interaction,
