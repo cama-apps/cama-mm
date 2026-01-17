@@ -907,13 +907,12 @@ class InfoCommands(commands.Cog):
             else:
                 delta_str = "?"
 
-            rd_delta_str = ""
-            if rd_before is not None and rd_after is not None:
-                rd_delta = rd_after - rd_before
-                rd_delta_str = f" (RD {rd_delta:+.0f})"
+            rd_str = ""
+            if rd_after is not None:
+                rd_str = f" [RD {rd_after:.0f}]"
 
             result = "W" if won else "L"
-            recent_game_details.append(f"#{match_id}: {result} → **{delta_str}**{rd_delta_str}")
+            recent_game_details.append(f"#{match_id}: {result} → **{delta_str}**{rd_str}")
 
         # Find biggest upset (win as underdog) and biggest choke (loss as favorite)
         upsets = [(h, h.get("expected_team_win_prob", 0.5)) for h in matches_with_predictions
