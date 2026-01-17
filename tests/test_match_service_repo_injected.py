@@ -59,7 +59,7 @@ def test_match_service_repo_injected_shuffle_and_record():
 
 
 def test_goodness_score_respects_role_matchup_weight(monkeypatch):
-    """Ensure goodness_score uses the weighted role delta (0.3 default)."""
+    """Ensure goodness_score uses the weighted role delta (0.2 default)."""
     fd, db_path = tempfile.mkstemp(suffix=".db")
     os.close(fd)
     try:
@@ -118,7 +118,7 @@ def test_goodness_score_respects_role_matchup_weight(monkeypatch):
         # value diff = |6500 - 6800| = 300
         # role delta = 400; weighted by 0.3 -> 120
         # off-role penalty and exclusion penalty = 0
-        assert result["goodness_score"] == pytest.approx(420)
+        assert result["goodness_score"] == pytest.approx(380)
     finally:
         try:
             os.unlink(db_path)
