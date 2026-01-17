@@ -1480,6 +1480,7 @@ class BettingCommands(commands.Cog):
             app_commands.Choice(name="propose", value="propose"),
             app_commands.Choice(name="status", value="status"),
             app_commands.Choice(name="reset", value="reset"),
+            app_commands.Choice(name="votes", value="votes"),
         ]
     )
     async def disburse(
@@ -1503,6 +1504,8 @@ class BettingCommands(commands.Cog):
             await self._disburse_status(interaction, guild_id)
         elif action_value == "reset":
             await self._disburse_reset(interaction, guild_id)
+        elif action_value == "votes":
+            await self._disburse_votes(interaction, guild_id)
 
     async def _disburse_propose(
         self, interaction: discord.Interaction, guild_id: int | None
@@ -1541,8 +1544,7 @@ class BettingCommands(commands.Cog):
             return
 
         # Create embed and view
-        is_admin = has_admin_permission(interaction)
-        embed = self._create_disburse_embed(proposal, is_admin=is_admin)
+        embed = self._create_disburse_embed(proposal)
         view = DisburseVoteView(self.disburse_service, self)
 
         await interaction.response.send_message(embed=embed, view=view)
@@ -1579,8 +1581,7 @@ class BettingCommands(commands.Cog):
                 logger.warning(f"Failed to delete old disburse message: {e}")
 
         # Send new message with embed and voting buttons
-        is_admin = has_admin_permission(interaction)
-        embed = self._create_disburse_embed(proposal, is_admin=is_admin)
+        embed = self._create_disburse_embed(proposal)
         view = DisburseVoteView(self.disburse_service, self)
         await interaction.response.send_message(embed=embed, view=view)
 
@@ -1611,7 +1612,30 @@ class BettingCommands(commands.Cog):
                 "No active proposal to reset.", ephemeral=True
             )
 
-    def _create_disburse_embed(self, proposal, is_admin: bool = False) -> discord.Embed:
+    async def _disburse_votes(
+        self, interaction: discord.Interaction, guild_id: int | None
+    ):
+        """Show detailed voting information with voter identities. Admin only."""
+        # Check admin
+        if not has_admin_permission(interaction):
+            await interaction.response.send_message(
+                "Only admins can view detailed voting information.", ephemeral=True
+            )
+            return
+
+        proposal = self.disburse_service.get_proposal(guild_id)
+        if not proposal:
+            await interaction.response.send_message(
+                "No active disbursement proposal. Use `/disburse status` to check.",
+                ephemeral=True,
+            )
+            return
+
+        # Create admin-only embed with voter details
+        embed = self._create_disburse_votes_embed(proposal)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    def _create_disburse_embed(self, proposal) -> discord.Embed:
         """Create embed for disbursement proposal."""
         votes = proposal.votes
         total_votes = proposal.total_votes
@@ -1666,34 +1690,74 @@ class BettingCommands(commands.Cog):
                 inline=False,
             )
 
-        # Voter list (ADMIN ONLY)
-        if is_admin:
-            guild_id = proposal.guild_id if proposal.guild_id != 0 else None
-            individual_votes = self.disburse_service.disburse_repo.get_individual_votes(guild_id)
-
-            if individual_votes:
-                voter_lines = []
-                for vote in individual_votes:
-                    discord_id = vote["discord_id"]
-                    method = vote["vote_method"]
-                    method_label = self.disburse_service.METHOD_LABELS.get(method, method)
-                    voter_lines.append(f"• <@{discord_id}> → {method_label}")
-
-                voters_text = "\n".join(voter_lines)
-            else:
-                voters_text = "*No votes yet*"
-
-            # Truncate if too long (Discord field limit is 1024 chars)
-            if len(voters_text) > 1024:
-                voters_text = voters_text[:1021] + "..."
-
-            embed.add_field(
-                name="👥 Voters (Admin Only)",
-                value=voters_text,
-                inline=False,
-            )
-
         embed.set_footer(text="Ties are broken in favor of Even Split")
+
+        return embed
+
+    def _create_disburse_votes_embed(self, proposal) -> discord.Embed:
+        """Create admin-only embed showing detailed voter information."""
+        votes = proposal.votes
+        total_votes = proposal.total_votes
+        quorum = proposal.quorum_required
+        progress = proposal.quorum_progress
+
+        embed = discord.Embed(
+            title="🔍 Disbursement Vote Details (Admin Only)",
+            description=f"Fund Amount: **{proposal.fund_amount}** {JOPACOIN_EMOTE}",
+            color=0x9C27B0,  # Purple (admin color)
+        )
+
+        # Proposal info
+        embed.add_field(
+            name="📋 Proposal Status",
+            value=(
+                f"**Quorum:** {total_votes}/{quorum} ({int(progress * 100)}%)\n"
+                f"**Status:** {'✅ Ready' if proposal.quorum_reached else '⏳ Voting'}"
+            ),
+            inline=False,
+        )
+
+        # Vote breakdown
+        vote_lines = []
+        for method in ["even", "proportional", "neediest", "stimulus"]:
+            count = votes[method]
+            pct = (count / total_votes * 100) if total_votes > 0 else 0
+            label = self.disburse_service.METHOD_LABELS[method]
+            vote_lines.append(f"**{label}:** {count} ({pct:.0f}%)")
+
+        embed.add_field(
+            name="📊 Vote Breakdown",
+            value="\n".join(vote_lines),
+            inline=False,
+        )
+
+        # Individual votes
+        guild_id = proposal.guild_id if proposal.guild_id != 0 else None
+        individual_votes = self.disburse_service.disburse_repo.get_individual_votes(guild_id)
+
+        if individual_votes:
+            voter_lines = []
+            for vote in individual_votes:
+                discord_id = vote["discord_id"]
+                method = vote["vote_method"]
+                method_label = self.disburse_service.METHOD_LABELS.get(method, method)
+                voter_lines.append(f"• <@{discord_id}> → {method_label}")
+
+            voters_text = "\n".join(voter_lines)
+        else:
+            voters_text = "*No votes yet*"
+
+        # Truncate if too long (Discord field limit is 1024 chars)
+        if len(voters_text) > 1024:
+            voters_text = voters_text[:1021] + "..."
+
+        embed.add_field(
+            name="👥 Individual Votes",
+            value=voters_text,
+            inline=False,
+        )
+
+        embed.set_footer(text="This information is only visible to you")
 
         return embed
 
@@ -1712,8 +1776,7 @@ class BettingCommands(commands.Cog):
             if not message:
                 return
 
-            # Public message - do not show voter details
-            embed = self._create_disburse_embed(proposal, is_admin=False)
+            embed = self._create_disburse_embed(proposal)
             await message.edit(embed=embed)
         except discord.errors.NotFound:
             pass
