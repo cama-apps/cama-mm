@@ -202,6 +202,55 @@ class DisburseRepository(BaseRepository):
             )
             return [row["discord_id"] for row in cursor.fetchall()]
 
+    def get_individual_votes(self, guild_id: int | None) -> list[dict]:
+        """
+        Get individual vote details for the active proposal.
+
+        Returns:
+            List of dicts with vote details:
+            [
+                {
+                    "discord_id": int,
+                    "vote_method": str,  # "even", "proportional", "neediest", "stimulus"
+                    "voted_at": int,     # Unix timestamp
+                },
+                ...
+            ]
+            Returns empty list if no active proposal.
+        """
+        normalized_guild = self._normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            # Get the active proposal ID first
+            cursor.execute(
+                "SELECT proposal_id FROM disburse_proposals WHERE guild_id = ? AND status = 'active'",
+                (normalized_guild,),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return []
+
+            proposal_id = row["proposal_id"]
+
+            # Get all individual votes, ordered by voted_at
+            cursor.execute(
+                """
+                SELECT discord_id, vote_method, voted_at
+                FROM disburse_votes
+                WHERE guild_id = ? AND proposal_id = ?
+                ORDER BY voted_at ASC
+                """,
+                (normalized_guild, proposal_id),
+            )
+            return [
+                {
+                    "discord_id": row["discord_id"],
+                    "vote_method": row["vote_method"],
+                    "voted_at": row["voted_at"],
+                }
+                for row in cursor.fetchall()
+            ]
+
     def complete_proposal(self, guild_id: int | None) -> None:
         """
         Mark the active proposal as completed.

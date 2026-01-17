@@ -596,3 +596,84 @@ class TestStimulusExecution:
         assert player_repo.get_balance(1) == 500
         assert player_repo.get_balance(2) == 300
         assert player_repo.get_balance(3) == 100
+
+
+class TestGetIndividualVotes:
+    """Test get_individual_votes repository method."""
+
+    def test_get_individual_votes_basic(
+        self, disburse_repo, disburse_service, setup_players, setup_nonprofit_fund
+    ):
+        """Test retrieving individual vote records."""
+        # Create proposal
+        proposal = disburse_service.create_proposal(guild_id=None)
+
+        # Add votes
+        disburse_service.add_vote(None, 1003, "even")
+        disburse_service.add_vote(None, 1004, "proportional")
+        disburse_service.add_vote(None, 1005, "neediest")
+
+        # Get individual votes
+        votes = disburse_repo.get_individual_votes(None)
+
+        assert len(votes) == 3
+        assert all("discord_id" in v for v in votes)
+        assert all("vote_method" in v for v in votes)
+        assert all("voted_at" in v for v in votes)
+
+        # Check specific votes
+        vote_map = {v["discord_id"]: v["vote_method"] for v in votes}
+        assert vote_map[1003] == "even"
+        assert vote_map[1004] == "proportional"
+        assert vote_map[1005] == "neediest"
+
+    def test_get_individual_votes_no_proposal(self, disburse_repo):
+        """Test getting votes when no active proposal."""
+        votes = disburse_repo.get_individual_votes(None)
+        assert votes == []
+
+    def test_get_individual_votes_chronological(
+        self, disburse_repo, disburse_service, setup_players, setup_nonprofit_fund
+    ):
+        """Test votes are returned in chronological order."""
+        disburse_service.create_proposal(guild_id=None)
+
+        # Add votes with slight delays to ensure different timestamps
+        disburse_service.add_vote(None, 1003, "even")
+        time.sleep(0.01)
+        disburse_service.add_vote(None, 1004, "proportional")
+        time.sleep(0.01)
+        disburse_service.add_vote(None, 1005, "neediest")
+
+        votes = disburse_repo.get_individual_votes(None)
+
+        # Should be chronological
+        assert votes[0]["discord_id"] == 1003
+        assert votes[1]["discord_id"] == 1004
+        assert votes[2]["discord_id"] == 1005
+
+    def test_get_individual_votes_vote_change(
+        self, disburse_repo, disburse_service, setup_players, setup_nonprofit_fund
+    ):
+        """Test that vote changes are reflected correctly."""
+        disburse_service.create_proposal(guild_id=None)
+
+        # Vote even, then change to proportional
+        disburse_service.add_vote(None, 1003, "even")
+        disburse_service.add_vote(None, 1003, "proportional")
+
+        votes = disburse_repo.get_individual_votes(None)
+
+        # Should still have only 1 vote (changed vote)
+        assert len(votes) == 1
+        assert votes[0]["discord_id"] == 1003
+        assert votes[0]["vote_method"] == "proportional"
+
+    def test_get_individual_votes_no_votes_yet(
+        self, disburse_repo, disburse_service, setup_players, setup_nonprofit_fund
+    ):
+        """Test getting votes when proposal exists but no votes yet."""
+        disburse_service.create_proposal(guild_id=None)
+
+        votes = disburse_repo.get_individual_votes(None)
+        assert votes == []
