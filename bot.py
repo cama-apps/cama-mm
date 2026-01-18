@@ -51,9 +51,6 @@ from config import (
     LOBBY_MAX_PLAYERS,
     LOBBY_READY_THRESHOLD,
     MAX_DEBT,
-    READY_CHECK_ENABLED,
-    READY_CHECK_TIMEOUT_SECONDS,
-    READY_CHECK_VOICE_AUTO_READY,
     USE_GLICKO,
 )
 from database import Database
@@ -78,7 +75,6 @@ from services.prediction_service import PredictionService
 from services.permissions import has_admin_permission  # noqa: F401 - used by tests
 from services.player_service import PlayerService
 from services.opendota_player_service import OpenDotaPlayerService
-from services.ready_check_service import ReadyCheckService
 from utils.formatting import ROLE_EMOJIS, ROLE_NAMES, format_role_display
 
 # Bot setup
@@ -162,13 +158,6 @@ def _init_services():
         bankruptcy_repo=bankruptcy_repo,
     )
 
-    # Create ready check service for pre-shuffle ready confirmation
-    ready_check_service = ReadyCheckService(
-        lobby_service=lobby_service,
-        timeout_seconds=READY_CHECK_TIMEOUT_SECONDS,
-        voice_auto_ready_enabled=READY_CHECK_VOICE_AUTO_READY,
-    )
-
     # Create match service
     match_service = MatchService(
         player_repo=player_repo,
@@ -184,7 +173,6 @@ def _init_services():
     bot.lobby_manager = lobby_manager
     bot.player_service = player_service
     bot.lobby_service = lobby_service
-    bot.ready_check_service = ready_check_service
     bot.match_service = match_service
     bot.player_repo = player_repo
     bot.match_repo = match_repo
@@ -599,65 +587,6 @@ async def on_raw_reaction_remove(payload):
                     logger.warning(f"Failed to post leave activity in thread: {exc}")
     except Exception as exc:
         logger.error(f"Error handling reaction remove: {exc}", exc_info=True)
-
-
-@bot.event
-async def on_voice_state_update(member, before, after):
-    """Handle voice state updates for ready check auto-marking."""
-    # Only process if voice state changed (channel or deaf status)
-    if before.channel == after.channel and before.self_deaf == after.self_deaf and before.deaf == after.deaf:
-        return
-
-    ready_check_service = getattr(bot, "ready_check_service", None)
-    if not ready_check_service:
-        return
-
-    guild_id = member.guild.id if member.guild else None
-    check = ready_check_service.get_check(guild_id)
-    if not check:
-        return
-
-    # Import here to avoid circular dependency
-    from domain.models.ready_check import ReadyCheckStatus, ReadyStatus
-
-    if check.status != ReadyCheckStatus.ACTIVE:
-        return
-
-    # Check if this player is in the ready check
-    if member.id not in check.player_ready_states:
-        return
-
-    # Only auto-ready UNCONFIRMED players (don't override manual states)
-    if check.player_ready_states[member.id] != ReadyStatus.UNCONFIRMED:
-        return
-
-    # Check if joined voice and not deafened
-    if ready_check_service._is_voice_ready(member):
-        success, updated_check = ready_check_service.mark_ready(
-            guild_id, member.id, auto=True
-        )
-        if success:
-            logger.info(f"Auto-marked {member.display_name} ready via voice join")
-
-            # Update embed
-            match_cog = bot.get_cog("MatchCommands")
-            if match_cog and hasattr(match_cog, "_update_ready_check_embed"):
-                try:
-                    await match_cog._update_ready_check_embed(guild_id)
-                except Exception as exc:
-                    logger.warning(f"Failed to update ready check embed: {exc}")
-
-            # Check completion and trigger shuffle if all ready
-            if updated_check.is_complete():
-                logger.info(f"All players ready after voice join for guild {guild_id}")
-                if hasattr(match_cog, "_on_ready_check_complete"):
-                    try:
-                        thread_id = lobby_service.get_lobby_thread_id()
-                        if thread_id:
-                            thread = await bot.fetch_channel(thread_id)
-                            await match_cog._on_ready_check_complete(thread, guild_id)
-                    except Exception as exc:
-                        logger.error(f"Failed to trigger shuffle after voice ready check completion: {exc}")
 
 
 def main():
