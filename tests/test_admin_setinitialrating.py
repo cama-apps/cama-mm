@@ -66,7 +66,7 @@ async def test_setinitialrating_happy_path(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_setinitialrating_rejects_too_many_games(monkeypatch):
-    repo = FakeRepo(game_count=10, rating_data=None)
+    repo = FakeRepo(game_count=1000, rating_data=None)
     admin_cmd = AdminCommands(bot=None, lobby_service=None, player_repo=repo, loan_service=None, bankruptcy_service=None)
     monkeypatch.setattr("commands.admin.has_admin_permission", lambda _i: True)
 
