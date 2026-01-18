@@ -76,6 +76,8 @@ from services.permissions import has_admin_permission  # noqa: F401 - used by te
 from services.player_service import PlayerService
 from services.opendota_player_service import OpenDotaPlayerService
 from utils.formatting import ROLE_EMOJIS, ROLE_NAMES, format_role_display
+from utils.typing_tracker import TypingTracker
+from utils.reaction_tracker import ReactionTracker
 
 # Bot setup
 
@@ -83,8 +85,13 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 intents.voice_states = True
+intents.presences = True  # For online/idle/dnd/offline status detection
 
 bot = commands.Bot(command_prefix="!", intents=intents)
+
+# Initialize activity trackers (non-lazy, always available)
+typing_tracker = TypingTracker(default_window_seconds=10)
+reaction_tracker = ReactionTracker()
 
 # Lazy-initialized services (created on first access to avoid blocking test collection)
 _services_initialized = False
@@ -472,6 +479,10 @@ async def on_raw_reaction_add(payload):
     if payload.emoji.name != "⚔️":
         return
 
+    # Track reaction timestamp for AFK detection
+    if payload.guild_id:
+        reaction_tracker.track_reaction(payload.message_id, payload.user_id)
+
     _init_services()  # Ensure services are initialized
     try:
         channel = bot.get_channel(payload.channel_id)
@@ -556,6 +567,10 @@ async def on_raw_reaction_remove(payload):
     if payload.emoji.name != "⚔️":
         return
 
+    # Remove reaction timestamp from tracker
+    if payload.guild_id:
+        reaction_tracker.remove_reaction(payload.message_id, payload.user_id)
+
     _init_services()  # Ensure services are initialized
     try:
         channel = bot.get_channel(payload.channel_id)
@@ -587,6 +602,17 @@ async def on_raw_reaction_remove(payload):
                     logger.warning(f"Failed to post leave activity in thread: {exc}")
     except Exception as exc:
         logger.error(f"Error handling reaction remove: {exc}", exc_info=True)
+
+
+@bot.event
+async def on_typing(channel, user, when):
+    """Track typing events for AFK detection."""
+    # Only track typing in guild channels (not DMs) and ignore bots
+    if not hasattr(channel, "guild") or user.bot:
+        return
+
+    guild_id = channel.guild.id
+    typing_tracker.mark_typing(guild_id, user.id)
 
 
 def main():
