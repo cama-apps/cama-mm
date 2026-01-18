@@ -17,7 +17,7 @@ from services.flavor_text_service import FlavorEvent
 from services.player_service import PlayerService
 from utils.formatting import JOPACOIN_EMOTE
 from utils.hero_lookup import get_hero_color, get_hero_image_url
-from utils.interaction_safety import safe_defer
+from utils.interaction_safety import safe_defer, safe_followup
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
 
 if TYPE_CHECKING:
@@ -160,6 +160,10 @@ class ShopCommands(commands.Cog):
             )
             return
 
+        # Defer now - AI flavor text can take a while
+        if not await safe_defer(interaction, ephemeral=False):
+            return
+
         # Deduct cost
         self.player_service.player_repo.add_balance(user_id, -cost)
         new_balance = balance - cost
@@ -199,15 +203,16 @@ class ShopCommands(commands.Cog):
             interaction.user, new_balance, cost, target, ai_flavor, buyer_stats, target_stats
         )
 
-        # Send public message
+        # Send public message (using followup since we deferred)
         if target:
             # Ping target in message content, embed for the flex
-            await interaction.response.send_message(
+            await safe_followup(
+                interaction,
                 content=target.mention,
                 embed=embed,
             )
         else:
-            await interaction.response.send_message(embed=embed)
+            await safe_followup(interaction, embed=embed)
 
     def _get_flex_stats(self, discord_id: int) -> dict:
         """Get stats for flex comparison."""
