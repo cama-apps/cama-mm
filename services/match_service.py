@@ -8,7 +8,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
-from config import BET_LOCK_SECONDS
+from config import BET_LOCK_SECONDS, CALIBRATION_RD_THRESHOLD
 from domain.models.player import Player
 from domain.models.team import Team
 from domain.services.team_balancing_service import TeamBalancingService
@@ -660,6 +660,16 @@ class MatchService:
             now_iso = datetime.now(timezone.utc).isoformat()
             for pid in expected_ids:
                 self.player_repo.update_last_match_date(pid, now_iso)
+
+            # Track first calibration for players who just became calibrated
+            now_unix = int(time.time())
+            for pid, rating, rd, vol in updates:
+                if rd <= CALIBRATION_RD_THRESHOLD:
+                    # Check if player doesn't have first_calibrated_at set yet
+                    if hasattr(self.player_repo, "get_first_calibrated_at"):
+                        first_cal = self.player_repo.get_first_calibrated_at(pid)
+                        if first_cal is None:
+                            self.player_repo.set_first_calibrated_at(pid, now_unix)
 
             # Store match prediction snapshot (pre-match)
             if hasattr(self.match_repo, "add_match_prediction"):

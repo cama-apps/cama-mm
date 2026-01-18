@@ -916,6 +916,43 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             )
             return cursor.rowcount > 0
 
+    def get_first_calibrated_at(self, discord_id: int) -> int | None:
+        """
+        Get the Unix timestamp when the player first became calibrated.
+
+        Returns:
+            Unix timestamp or None if never calibrated
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT first_calibrated_at FROM players WHERE discord_id = ?",
+                (discord_id,),
+            )
+            row = cursor.fetchone()
+            return row["first_calibrated_at"] if row and row["first_calibrated_at"] else None
+
+    def set_first_calibrated_at(self, discord_id: int, timestamp: int) -> None:
+        """
+        Set the first calibration timestamp for a player.
+
+        Only sets if not already set (first calibration is permanent).
+
+        Args:
+            discord_id: Player's Discord ID
+            timestamp: Unix timestamp when player first became calibrated
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE players
+                SET first_calibrated_at = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE discord_id = ? AND first_calibrated_at IS NULL
+                """,
+                (timestamp, discord_id),
+            )
+
     def get_registered_player_count(self) -> int:
         """
         Get total count of registered players.

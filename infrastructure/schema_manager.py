@@ -195,6 +195,8 @@ class SchemaManager:
             ("add_lobby_thread_columns", self._migration_add_lobby_thread_columns),
             ("add_ai_features_enabled", self._migration_add_ai_features_enabled),
             ("add_bankruptcy_count_column", self._migration_add_bankruptcy_count_column),
+            ("create_recalibration_state_table", self._migration_create_recalibration_state_table),
+            ("add_first_calibrated_at_to_players", self._migration_add_first_calibrated_at_to_players),
         ]
 
     # --- Migrations ---
@@ -674,5 +676,32 @@ class SchemaManager:
             UPDATE bankruptcy_state
             SET bankruptcy_count = 1
             WHERE last_bankruptcy_at IS NOT NULL AND (bankruptcy_count IS NULL OR bankruptcy_count = 0)
+            """
+        )
+
+    def _migration_create_recalibration_state_table(self, cursor) -> None:
+        """Create table for tracking recalibration history and cooldowns."""
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS recalibration_state (
+                discord_id INTEGER PRIMARY KEY,
+                last_recalibration_at INTEGER,
+                total_recalibrations INTEGER DEFAULT 0,
+                rating_at_recalibration REAL,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (discord_id) REFERENCES players(discord_id)
+            )
+            """
+        )
+
+    def _migration_add_first_calibrated_at_to_players(self, cursor) -> None:
+        """Add first_calibrated_at column to players and backfill for calibrated players."""
+        self._add_column_if_not_exists(cursor, "players", "first_calibrated_at", "INTEGER")
+        # Backfill: for players with RD <= 100 (calibrated), use created_at as approximation
+        cursor.execute(
+            """
+            UPDATE players
+            SET first_calibrated_at = CAST(strftime('%s', created_at) AS INTEGER)
+            WHERE glicko_rd IS NOT NULL AND glicko_rd <= 100.0 AND first_calibrated_at IS NULL
             """
         )

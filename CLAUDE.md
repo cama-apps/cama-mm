@@ -73,7 +73,8 @@ commands/                 # Discord slash commands (12 cog modules)
 ├── profile.py            # /profile (unified player profile with tabbed navigation)
 ├── shop.py               # /shop
 └── admin.py              # /addfake, /resetuser, /givecoin, /resetloancooldown,
-                          # /resetbankruptcycooldown, /setinitialrating, /sync
+                          # /resetbankruptcycooldown, /setinitialrating, /sync,
+                          # /recalibrate, /resetrecalibrationcooldown
 
 domain/
 ├── models/               # Pure domain models (no DB dependencies)
@@ -446,6 +447,8 @@ payout INTEGER
 | `/resetloancooldown` | Reset loan cooldown | `user` |
 | `/resetbankruptcycooldown` | Reset bankruptcy cooldown | `user` |
 | `/setinitialrating` | Set initial rating | `user`, `rating` |
+| `/recalibrate` | Reset rating uncertainty for a player | `user` (Admin only) |
+| `/resetrecalibrationcooldown` | Reset recalibration cooldown | `user` (Admin only) |
 | `/extendbetting` | Extend betting window | `minutes`: 1-60 |
 | `/sync` | Force sync commands | Admin only |
 
@@ -546,6 +549,7 @@ def test_full_match_workflow(test_db, mock_lobby_manager):
 | `RD_DECAY_GRACE_PERIOD_WEEKS` | 2 | No RD decay for this grace period |
 | `MMR_MODAL_TIMEOUT_MINUTES` | 5 | Timeout for MMR input modal |
 | `MMR_MODAL_RETRY_LIMIT` | 3 | Max retries for invalid MMR input |
+| `RECALIBRATION_COOLDOWN_SECONDS` | 7776000 | 90 days between recalibrations |
 
 See `config.py` for the full list and defaults.
 
@@ -591,6 +595,7 @@ See `config.py` for the full list and defaults.
 - **Disbursement**: Requires quorum; methods are even/proportional/neediest among debtors
 - **Predictions**: Resolution threshold is 3 matching votes or 1 admin vote (yes/no outcomes)
 - **Degen Score**: 0-100 score based on leverage addiction (40%), bet frequency (20%), bankruptcies (20%), loss chasing (10%), paper hands (10%)
+- **Recalibration**: Admins can reset a player's RD to 350 (high uncertainty) while preserving their rating. 90-day cooldown. Player must have played at least 5 games.
 - **Pairings Storage**: Canonical pairs with player1_id < player2_id to avoid duplicates
 - **Lane Outcomes**: W/L/D determined by comparing avg lane_efficiency (parsed matches only)
 - **Lane Matchups**: Safe vs Off, Mid vs Mid - 5% threshold for win determination

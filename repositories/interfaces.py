@@ -471,3 +471,28 @@ class IPredictionRepository(ABC):
     def refund_prediction_bets(self, prediction_id: int) -> dict:
         """Refund all bets for a cancelled prediction. Returns refund summary."""
         ...
+
+
+class IRecalibrationRepository(ABC):
+    """Repository for recalibration state tracking."""
+
+    @abstractmethod
+    def get_state(self, discord_id: int) -> dict | None:
+        """Get recalibration state for a player."""
+        ...
+
+    @abstractmethod
+    def upsert_state(
+        self,
+        discord_id: int,
+        last_recalibration_at: int | None = None,
+        total_recalibrations: int | None = None,
+        rating_at_recalibration: float | None = None,
+    ) -> None:
+        """Create or update recalibration state."""
+        ...
+
+    @abstractmethod
+    def reset_cooldown(self, discord_id: int) -> None:
+        """Reset recalibration cooldown by setting last_recalibration_at to 0."""
+        ...

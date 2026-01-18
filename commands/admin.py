@@ -26,12 +26,13 @@ _processed_interactions = set()
 class AdminCommands(commands.Cog):
     """Admin-only slash commands."""
 
-    def __init__(self, bot: commands.Bot, lobby_service, player_repo, loan_service=None, bankruptcy_service=None):
+    def __init__(self, bot: commands.Bot, lobby_service, player_repo, loan_service=None, bankruptcy_service=None, recalibration_service=None):
         self.bot = bot
         self.lobby_service = lobby_service
         self.player_repo = player_repo
         self.loan_service = loan_service
         self.bankruptcy_service = bankruptcy_service
+        self.recalibration_service = recalibration_service
 
     @app_commands.command(
         name="addfake", description="Add fake users to lobby for testing (Admin only)"
@@ -498,6 +499,145 @@ class AdminCommands(commands.Cog):
         )
 
     @app_commands.command(
+        name="recalibrate", description="Reset rating uncertainty for a player (Admin only)"
+    )
+    @app_commands.describe(user="The player to recalibrate")
+    async def recalibrate(
+        self, interaction: discord.Interaction, user: discord.Member
+    ):
+        """Admin command to recalibrate a player's rating uncertainty."""
+        if not has_admin_permission(interaction):
+            await interaction.response.send_message(
+                "❌ Admin only! You need Administrator or Manage Server permissions.",
+                ephemeral=True,
+            )
+            return
+
+        if not self.recalibration_service:
+            await interaction.response.send_message(
+                "❌ Recalibration service not available.",
+                ephemeral=True,
+            )
+            return
+
+        result = self.recalibration_service.can_recalibrate(user.id)
+        if not result["allowed"]:
+            reason = result["reason"]
+            if reason == "not_registered":
+                await interaction.response.send_message(
+                    f"❌ {user.mention} is not registered.",
+                    ephemeral=True,
+                )
+            elif reason == "no_rating":
+                await interaction.response.send_message(
+                    f"❌ {user.mention} has no Glicko rating.",
+                    ephemeral=True,
+                )
+            elif reason == "insufficient_games":
+                games_played = result.get("games_played", 0)
+                min_games = result.get("min_games", 5)
+                await interaction.response.send_message(
+                    f"❌ {user.mention} must play at least {min_games} games before recalibrating. "
+                    f"Current: {games_played} games.",
+                    ephemeral=True,
+                )
+            elif reason == "on_cooldown":
+                cooldown_ends = result.get("cooldown_ends_at")
+                await interaction.response.send_message(
+                    f"❌ {user.mention} is on recalibration cooldown. "
+                    f"Can recalibrate again <t:{cooldown_ends}:R>.",
+                    ephemeral=True,
+                )
+            else:
+                await interaction.response.send_message(
+                    f"❌ Cannot recalibrate: {reason}",
+                    ephemeral=True,
+                )
+            return
+
+        # Execute recalibration
+        recal_result = self.recalibration_service.recalibrate(user.id)
+        if not recal_result["success"]:
+            await interaction.response.send_message(
+                f"❌ Recalibration failed: {recal_result.get('reason', 'unknown error')}",
+                ephemeral=True,
+            )
+            return
+
+        old_rd = recal_result["old_rd"]
+        new_rd = recal_result["new_rd"]
+        rating = recal_result["old_rating"]
+        total_recals = recal_result["total_recalibrations"]
+        cooldown_ends = recal_result["cooldown_ends_at"]
+
+        await interaction.response.send_message(
+            f"✅ Recalibrated {user.mention}!\n"
+            f"• Rating: **{rating:.0f}** (unchanged)\n"
+            f"• RD: {old_rd:.1f} → **{new_rd:.0f}** (high uncertainty)\n"
+            f"• Total recalibrations: {total_recals}\n"
+            f"• Next recalibration available: <t:{cooldown_ends}:R>",
+            ephemeral=True,
+        )
+        logger.info(
+            f"Admin {interaction.user.id} ({interaction.user}) recalibrated "
+            f"{user.id} ({user}): rating={rating:.0f}, RD {old_rd:.1f} -> {new_rd:.0f}"
+        )
+
+    @app_commands.command(
+        name="resetrecalibrationcooldown", description="Reset a user's recalibration cooldown (Admin only)"
+    )
+    @app_commands.describe(user="The user whose recalibration cooldown to reset")
+    async def resetrecalibrationcooldown(
+        self, interaction: discord.Interaction, user: discord.Member
+    ):
+        """Admin command to reset a user's recalibration cooldown."""
+        if not has_admin_permission(interaction):
+            await interaction.response.send_message(
+                "❌ Admin only! You need Administrator or Manage Server permissions.",
+                ephemeral=True,
+            )
+            return
+
+        if not self.recalibration_service:
+            await interaction.response.send_message(
+                "❌ Recalibration service not available.",
+                ephemeral=True,
+            )
+            return
+
+        player = self.player_repo.get_by_id(user.id)
+        if not player:
+            await interaction.response.send_message(
+                f"⚠️ {user.mention} is not registered.",
+                ephemeral=True,
+            )
+            return
+
+        result = self.recalibration_service.reset_cooldown(user.id)
+        if not result["success"]:
+            reason = result["reason"]
+            if reason == "no_recalibration_history":
+                await interaction.response.send_message(
+                    f"ℹ️ {user.mention} has no recalibration history to reset.",
+                    ephemeral=True,
+                )
+            else:
+                await interaction.response.send_message(
+                    f"❌ Failed to reset cooldown: {reason}",
+                    ephemeral=True,
+                )
+            return
+
+        await interaction.response.send_message(
+            f"✅ Reset recalibration cooldown for {user.mention}. They can now recalibrate.",
+            ephemeral=True,
+        )
+        logger.info(
+            f"Admin {interaction.user.id} ({interaction.user}) reset recalibration cooldown for "
+            f"{user.id} ({user})"
+        )
+
+    @app_commands.command(
         name="extendbetting", description="Extend the betting window for the current match (Admin only)"
     )
     @app_commands.describe(minutes="Number of minutes to extend betting (1-60)")
@@ -627,17 +767,18 @@ async def setup(bot: commands.Bot):
     player_repo = getattr(bot, "player_repo", None)
     loan_service = getattr(bot, "loan_service", None)
     bankruptcy_service = getattr(bot, "bankruptcy_service", None)
+    recalibration_service = getattr(bot, "recalibration_service", None)
 
     # Check if cog is already loaded
     if "AdminCommands" in [cog.__class__.__name__ for cog in bot.cogs.values()]:
         logger.warning("AdminCommands cog is already loaded, skipping duplicate registration")
         return
 
-    await bot.add_cog(AdminCommands(bot, lobby_service, player_repo, loan_service, bankruptcy_service))
+    await bot.add_cog(AdminCommands(bot, lobby_service, player_repo, loan_service, bankruptcy_service, recalibration_service))
 
     # Log command registration
     admin_commands = [
-        cmd.name for cmd in bot.tree.walk_commands() if cmd.name in ["addfake", "resetuser", "sync", "givecoin", "resetloancooldown", "resetbankruptcycooldown", "setinitialrating", "extendbetting"]
+        cmd.name for cmd in bot.tree.walk_commands() if cmd.name in ["addfake", "resetuser", "sync", "givecoin", "resetloancooldown", "resetbankruptcycooldown", "setinitialrating", "extendbetting", "recalibrate", "resetrecalibrationcooldown"]
     ]
     logger.info(
         f"AdminCommands cog loaded. Registered commands: {admin_commands}. "
