@@ -12,15 +12,16 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from config import SHOP_ANNOUNCE_COST, SHOP_ANNOUNCE_TARGET_COST
+from config import SHOP_ANNOUNCE_COST, SHOP_ANNOUNCE_TARGET_COST, SHOP_PROTECT_HERO_COST
 from services.flavor_text_service import FlavorEvent
 from services.player_service import PlayerService
 from utils.formatting import JOPACOIN_EMOTE
-from utils.hero_lookup import get_hero_color, get_hero_image_url
+from utils.hero_lookup import get_all_heroes, get_hero_color, get_hero_image_url, get_hero_name
 from utils.interaction_safety import safe_defer, safe_followup
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
 
 if TYPE_CHECKING:
+    from services.match_service import MatchService
     from services.flavor_text_service import FlavorTextService
     from services.gambling_stats_service import GamblingStatsService
 
@@ -66,18 +67,33 @@ class ShopCommands(commands.Cog):
         self,
         bot: commands.Bot,
         player_service: PlayerService,
+        match_service: MatchService | None = None,
         flavor_text_service: FlavorTextService | None = None,
         gambling_stats_service: GamblingStatsService | None = None,
     ):
         self.bot = bot
         self.player_service = player_service
+        self.match_service = match_service
         self.flavor_text_service = flavor_text_service
         self.gambling_stats_service = gambling_stats_service
+
+    async def hero_autocomplete(
+        self, interaction: discord.Interaction, current: str
+    ) -> list[app_commands.Choice[str]]:
+        """Autocomplete for hero names."""
+        all_heroes = get_all_heroes()
+        matches = [
+            app_commands.Choice(name=hero_name, value=hero_id)
+            for hero_id, hero_name in all_heroes.items()
+            if current.lower() in hero_name.lower()
+        ]
+        return matches[:25]  # Discord limit
 
     @app_commands.command(name="shop", description="Spend jopacoin in the shop")
     @app_commands.describe(
         item="What to buy",
         target="User to tag (required for 'Announce + Tag' option)",
+        hero="Hero to protect from bans (required for 'Protect Hero' option)",
     )
     @app_commands.choices(
         item=[
@@ -89,13 +105,19 @@ class ShopCommands(commands.Cog):
                 name=f"Announce Balance + Tag User ({SHOP_ANNOUNCE_TARGET_COST} jopacoin)",
                 value="announce_target",
             ),
+            app_commands.Choice(
+                name=f"Protect Hero ({SHOP_PROTECT_HERO_COST} jopacoin)",
+                value="protect_hero",
+            ),
         ]
     )
+    @app_commands.autocomplete(hero=hero_autocomplete)
     async def shop(
         self,
         interaction: discord.Interaction,
         item: app_commands.Choice[str],
         target: discord.Member | None = None,
+        hero: str | None = None,
     ):
         """Buy items from the shop with jopacoin."""
         guild = interaction.guild if interaction.guild else None
@@ -127,6 +149,16 @@ class ShopCommands(commands.Cog):
                 )
                 return
             await self._handle_announce(interaction, target=target)
+        elif item.value == "protect_hero":
+            # Protect hero from bans - require hero selection
+            if not hero:
+                await interaction.response.send_message(
+                    "You selected 'Protect Hero' but didn't specify a hero. "
+                    "Please provide a hero to protect!",
+                    ephemeral=True,
+                )
+                return
+            await self._handle_protect_hero(interaction, hero=hero)
 
     async def _handle_announce(
         self,
@@ -391,15 +423,139 @@ class ShopCommands(commands.Cog):
 
         return flex_lines
 
+    async def _handle_protect_hero(
+        self,
+        interaction: discord.Interaction,
+        hero: str,
+    ):
+        """Handle the protect hero purchase."""
+        user_id = interaction.user.id
+        guild_id = interaction.guild.id if interaction.guild else None
+        cost = SHOP_PROTECT_HERO_COST
+
+        # Check if registered
+        player = self.player_service.get_player(user_id)
+        if not player:
+            await interaction.response.send_message(
+                "You need to `/register` before you can shop.",
+                ephemeral=True,
+            )
+            return
+
+        # Check if match_service is available
+        if not self.match_service:
+            await interaction.response.send_message(
+                "This feature is currently unavailable.",
+                ephemeral=True,
+            )
+            return
+
+        # Check if there's an active shuffle
+        pending_state = self.match_service.get_last_shuffle(guild_id)
+        if not pending_state:
+            await interaction.response.send_message(
+                "There's no active shuffle. You can only protect a hero during an active game.",
+                ephemeral=True,
+            )
+            return
+
+        # Check if player is in the shuffle
+        radiant_ids = pending_state.get("radiant_team_ids", [])
+        dire_ids = pending_state.get("dire_team_ids", [])
+        all_player_ids = radiant_ids + dire_ids
+
+        if user_id not in all_player_ids:
+            await interaction.response.send_message(
+                "You're not in the current shuffle. Only players in the game can protect heroes.",
+                ephemeral=True,
+            )
+            return
+
+        # Check balance
+        balance = self.player_service.get_balance(user_id)
+        if balance < cost:
+            await interaction.response.send_message(
+                f"You need {cost} {JOPACOIN_EMOTE} for this, but you only have {balance}.",
+                ephemeral=True,
+            )
+            return
+
+        # Defer - posting to multiple places
+        if not await safe_defer(interaction, ephemeral=False):
+            return
+
+        # Deduct cost
+        self.player_service.player_repo.add_balance(user_id, -cost)
+
+        # Get hero info
+        hero_id = int(hero)
+        hero_name = get_hero_name(hero_id)
+        hero_image = get_hero_image_url(hero_id)
+        hero_color = get_hero_color(hero_id) or 0xFFD700  # Gold fallback
+
+        # Determine which team the player is on
+        team_name = "Radiant" if user_id in radiant_ids else "Dire"
+
+        # Build mentions for all other players in the shuffle
+        other_player_ids = [pid for pid in all_player_ids if pid != user_id]
+        mentions = " ".join(f"<@{pid}>" for pid in other_player_ids)
+
+        # Build the embed
+        embed = discord.Embed(
+            title=f"Hero Protected: {hero_name}",
+            description=(
+                f"{interaction.user.mention} ({team_name}) has protected "
+                f"**{hero_name}** from being banned!\n\n"
+                f"*This hero cannot be banned during the draft (honor system).*"
+            ),
+            color=hero_color,
+        )
+        if hero_image:
+            embed.set_thumbnail(url=hero_image)
+        embed.set_footer(text=f"Cost: {cost} jopacoin")
+
+        # Build the message content with mentions
+        content = f"{mentions}"
+
+        # Post to the shuffle thread if it exists
+        thread_id = pending_state.get("thread_shuffle_thread_id")
+        if thread_id:
+            try:
+                thread = self.bot.get_channel(thread_id)
+                if not thread:
+                    thread = await self.bot.fetch_channel(thread_id)
+                if thread:
+                    await thread.send(content=content, embed=embed)
+            except Exception as e:
+                logger.warning(f"Failed to post protect hero to thread {thread_id}: {e}")
+
+        # Post to the shuffle channel if it's different from both the thread
+        # and the channel where the command was invoked (to avoid double-posting)
+        channel_id = pending_state.get("shuffle_channel_id")
+        interaction_channel_id = interaction.channel.id if interaction.channel else None
+        if channel_id and channel_id != thread_id and channel_id != interaction_channel_id:
+            try:
+                channel = self.bot.get_channel(channel_id)
+                if not channel:
+                    channel = await self.bot.fetch_channel(channel_id)
+                if channel:
+                    await channel.send(content=content, embed=embed)
+            except Exception as e:
+                logger.warning(f"Failed to post protect hero to channel {channel_id}: {e}")
+
+        # Confirm to the user (this posts to where the command was invoked)
+        await safe_followup(interaction, content=content, embed=embed)
+
 
 async def setup(bot: commands.Bot):
     player_service = getattr(bot, "player_service", None)
     if player_service is None:
         raise RuntimeError("Player service not registered on bot.")
 
+    match_service = getattr(bot, "match_service", None)
     flavor_text_service = getattr(bot, "flavor_text_service", None)
     gambling_stats_service = getattr(bot, "gambling_stats_service", None)
 
     await bot.add_cog(ShopCommands(
-        bot, player_service, flavor_text_service, gambling_stats_service
+        bot, player_service, match_service, flavor_text_service, gambling_stats_service
     ))
