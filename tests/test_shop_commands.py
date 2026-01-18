@@ -14,6 +14,7 @@ def _make_interaction(user_id: int = 1001):
     interaction = MagicMock()
     interaction.user = SimpleNamespace(id=user_id, mention=f"<@{user_id}>")
     interaction.response = AsyncMock()
+    interaction.followup = AsyncMock()
     interaction.guild = None
     return interaction
 
@@ -98,6 +99,7 @@ async def test_handle_announce_success_deducts_balance(monkeypatch):
     player_service.player_repo.add_balance.assert_called_once_with(
         interaction.user.id, -SHOP_ANNOUNCE_TARGET_COST
     )
-    interaction.response.send_message.assert_awaited_once()
-    kwargs = interaction.response.send_message.call_args.kwargs
+    # shop uses safe_defer then safe_followup, so check followup.send
+    interaction.followup.send.assert_awaited_once()
+    kwargs = interaction.followup.send.call_args.kwargs
     assert "embed" in kwargs
