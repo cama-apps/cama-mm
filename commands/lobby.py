@@ -1,9 +1,10 @@
 """
-Lobby commands: /lobby, /kick, /resetlobby.
+Lobby commands: /lobby, /kick, /resetlobby, /rc.
 
 Uses Discord threads for lobby management similar to /prediction.
 """
 
+import asyncio
 import logging
 from typing import TYPE_CHECKING
 
@@ -11,8 +12,10 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from config import AFK_CHECK_ACTIVITY_WINDOW_SECONDS, AFK_CHECK_DEFAULT_WAIT_TIME
 from services.lobby_service import LobbyService
 from services.permissions import has_admin_permission
+from utils.formatting import get_player_display_name
 from utils.interaction_safety import safe_defer
 
 if TYPE_CHECKING:
@@ -430,6 +433,225 @@ class LobbyCommands(commands.Cog):
             await interaction.followup.send(
                 "✅ Lobby reset. You can create a new lobby with `/lobby`.", ephemeral=True
             )
+
+    @app_commands.command(
+        name="rc",
+        description="Check which lobby players might be AFK based on activity signals",
+    )
+    @app_commands.describe(
+        wait_time="Seconds to wait before final report (default: 30s, max: 60s)"
+    )
+    async def ready_check(
+        self, interaction: discord.Interaction, wait_time: int = AFK_CHECK_DEFAULT_WAIT_TIME
+    ):
+        """
+        Run an activity-based ready check to detect AFK players.
+
+        Checks for multiple activity signals:
+        - Discord online/DND status
+        - In voice channel (not deafened)
+        - Recent messages in lobby thread
+        - Recent ⚔️ reactions on lobby message
+        - Typing indicator
+
+        Players with no activity signals are pinged, then re-checked after wait_time.
+        """
+        logger.info(f"/rc command invoked by user {interaction.user.id}, wait_time={wait_time}")
+
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+
+        # Validate wait time
+        if wait_time < 10 or wait_time > 60:
+            await interaction.followup.send(
+                "❌ Wait time must be between 10 and 60 seconds.", ephemeral=True
+            )
+            return
+
+        # Check if lobby exists
+        lobby = self.lobby_service.get_lobby()
+        if not lobby:
+            await interaction.followup.send(
+                "❌ No active lobby. Use `/lobby` to create one!", ephemeral=True
+            )
+            return
+
+        if lobby.get_player_count() == 0:
+            await interaction.followup.send(
+                "❌ Lobby is empty. No players to check!", ephemeral=True
+            )
+            return
+
+        # Get lobby info
+        player_ids, players = self.lobby_service.get_lobby_players(lobby)
+        guild = interaction.guild
+        guild_id = guild.id if guild else None
+
+        # Get AFK detection service
+        afk_service = getattr(self.bot, "afk_detection_service", None)
+        if not afk_service:
+            await interaction.followup.send(
+                "❌ AFK detection service not available.", ephemeral=True
+            )
+            return
+
+        # Get lobby message and thread
+        lobby_message_id = self.lobby_service.get_lobby_message_id()
+        thread_id = self.lobby_service.get_lobby_thread_id()
+        lobby_thread = None
+
+        if thread_id and guild:
+            try:
+                lobby_thread = await self.bot.fetch_channel(thread_id)
+            except Exception as exc:
+                logger.warning(f"Could not fetch lobby thread {thread_id}: {exc}")
+
+        # Initial activity check
+        await interaction.followup.send("🔍 Checking player activity...", ephemeral=True)
+
+        activity_results = {}
+        for pid in player_ids:
+            status = await afk_service.check_player_activity(
+                player_id=pid,
+                guild=guild,
+                lobby_message_id=lobby_message_id,
+                lobby_thread=lobby_thread,
+                activity_window_seconds=AFK_CHECK_ACTIVITY_WINDOW_SECONDS,
+            )
+            activity_results[pid] = status
+
+        # Identify AFK players
+        afk_players = [pid for pid, status in activity_results.items() if not status.is_active]
+        active_players = [pid for pid, status in activity_results.items() if status.is_active]
+
+        # If everyone is active, report immediately
+        if not afk_players:
+            embed = self._build_activity_report_embed(
+                activity_results, players, player_ids, guild, all_active=True
+            )
+            if lobby_thread:
+                await lobby_thread.send(embed=embed)
+            else:
+                await interaction.channel.send(embed=embed)
+            return
+
+        # Ping AFK players and wait
+        if lobby_thread:
+            afk_mentions = " ".join(f"<@{pid}>" for pid in afk_players)
+            await lobby_thread.send(
+                f"⚠️ **AFK Check:** {afk_mentions} - Please confirm you're here! "
+                f"Checking again in {wait_time} seconds..."
+            )
+
+        await interaction.followup.send(
+            f"⏳ Pinged {len(afk_players)} potentially AFK players. "
+            f"Waiting {wait_time} seconds...",
+            ephemeral=True,
+        )
+
+        # Wait before re-checking
+        await asyncio.sleep(wait_time)
+
+        # Re-check activity
+        final_results = {}
+        for pid in player_ids:
+            status = await afk_service.check_player_activity(
+                player_id=pid,
+                guild=guild,
+                lobby_message_id=lobby_message_id,
+                lobby_thread=lobby_thread,
+                activity_window_seconds=AFK_CHECK_ACTIVITY_WINDOW_SECONDS,
+            )
+            final_results[pid] = status
+
+        # Build and send final report
+        embed = self._build_activity_report_embed(
+            final_results, players, player_ids, guild, all_active=False
+        )
+
+        if lobby_thread:
+            await lobby_thread.send(embed=embed)
+        else:
+            await interaction.channel.send(embed=embed)
+
+        logger.info(f"Ready check completed for guild {guild_id}")
+
+    def _build_activity_report_embed(
+        self,
+        activity_results: dict,
+        players: list,
+        player_ids: list[int],
+        guild: discord.Guild | None,
+        all_active: bool = False,
+    ) -> discord.Embed:
+        """Build the activity report embed."""
+        active_players = [
+            (pid, status)
+            for pid, status in activity_results.items()
+            if status.is_active
+        ]
+        afk_players = [
+            (pid, status)
+            for pid, status in activity_results.items()
+            if not status.is_active
+        ]
+
+        total = len(activity_results)
+        active_count = len(active_players)
+        afk_count = len(afk_players)
+
+        if all_active:
+            embed = discord.Embed(
+                title="✅ All Players Active!",
+                description=f"All {total} players in lobby are showing activity.",
+                color=discord.Color.green(),
+            )
+        else:
+            embed = discord.Embed(
+                title="📋 Ready Check Results",
+                description=f"Activity check complete: {active_count}/{total} active",
+                color=discord.Color.blue() if afk_count == 0 else discord.Color.orange(),
+            )
+
+        # Active players section
+        if active_players:
+            active_lines = []
+            for pid, status in active_players[:25]:  # Discord limit
+                player = next((p for p in players if p.discord_id == pid), None)
+                if player:
+                    display_name = get_player_display_name(player, pid, guild)
+                    afk_service = getattr(self.bot, "afk_detection_service", None)
+                    signals_str = afk_service.format_activity_status(status) if afk_service else ""
+                    active_lines.append(f"• {display_name} {signals_str}")
+
+            embed.add_field(
+                name=f"✅ Active Players ({len(active_players)})",
+                value="\n".join(active_lines) if active_lines else "None",
+                inline=False,
+            )
+
+        # AFK players section
+        if afk_players:
+            afk_lines = []
+            for pid, status in afk_players[:25]:  # Discord limit
+                player = next((p for p in players if p.discord_id == pid), None)
+                if player:
+                    display_name = get_player_display_name(player, pid, guild)
+                    afk_service = getattr(self.bot, "afk_detection_service", None)
+                    signals_str = afk_service.format_activity_status(status) if afk_service else ""
+                    afk_lines.append(f"• {display_name} {signals_str}")
+
+            embed.add_field(
+                name=f"⚠️ Potentially AFK ({len(afk_players)})",
+                value="\n".join(afk_lines) if afk_lines else "None",
+                inline=False,
+            )
+
+        embed.set_footer(
+            text="Activity signals: 🟢 online | 🎙️ voice | 💬 message | ⚔️ reaction | ⌨️ typing"
+        )
+
+        return embed
 
 
 async def setup(bot: commands.Bot):

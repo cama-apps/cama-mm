@@ -75,6 +75,7 @@ from services.prediction_service import PredictionService
 from services.permissions import has_admin_permission  # noqa: F401 - used by tests
 from services.player_service import PlayerService
 from services.opendota_player_service import OpenDotaPlayerService
+from services.afk_detection_service import AFKDetectionService
 from utils.formatting import ROLE_EMOJIS, ROLE_NAMES, format_role_display
 from utils.typing_tracker import TypingTracker
 from utils.reaction_tracker import ReactionTracker
@@ -175,6 +176,12 @@ def _init_services():
         loan_service=loan_service,
     )
 
+    # Create AFK detection service for /rc command
+    afk_detection_service = AFKDetectionService(
+        typing_tracker=typing_tracker,
+        reaction_tracker=reaction_tracker,
+    )
+
     # Expose on bot for cogs
     bot.db = db
     bot.lobby_manager = lobby_manager
@@ -194,6 +201,7 @@ def _init_services():
     bot.bankruptcy_service = bankruptcy_service
     bot.loan_service = loan_service
     bot.disburse_service = disburse_service
+    bot.afk_detection_service = afk_detection_service
 
     # Create gambling stats service for degen score and leaderboards
     gambling_stats_service = GamblingStatsService(
