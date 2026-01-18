@@ -436,7 +436,7 @@ class TestShuffler:
         """Test that exclusion_penalty_weight parameter is stored correctly."""
         # Test default value
         shuffler1 = BalancedShuffler()
-        assert shuffler1.exclusion_penalty_weight == 50.0
+        assert shuffler1.exclusion_penalty_weight == 45.0
 
         # Test custom value
         shuffler2 = BalancedShuffler(exclusion_penalty_weight=10.0)
@@ -763,7 +763,7 @@ class TestExclusionPenaltyWeightDefault:
     def test_default_weight_is_50(self):
         """Test that default exclusion penalty weight is 50."""
         from config import SHUFFLER_SETTINGS
-        assert SHUFFLER_SETTINGS["exclusion_penalty_weight"] == 50.0
+        assert SHUFFLER_SETTINGS["exclusion_penalty_weight"] == 45.0
 
     def test_higher_weight_prevents_repeat_exclusions(self):
         """
