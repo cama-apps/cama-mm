@@ -68,6 +68,8 @@ from services.garnishment_service import GarnishmentService
 from services.disburse_service import DisburseService
 from services.loan_service import LoanRepository, LoanService
 from services.lobby_service import LobbyService
+from services.recalibration_service import RecalibrationService
+from repositories.recalibration_repository import RecalibrationRepository
 from repositories.disburse_repository import DisburseRepository
 from repositories.prediction_repository import PredictionRepository
 from services.match_service import MatchService
@@ -134,6 +136,10 @@ def _init_services():
     loan_repo = LoanRepository(DB_PATH)
     loan_service = LoanService(loan_repo, player_repo)
 
+    # Create recalibration service for rating uncertainty reset
+    recalibration_repo = RecalibrationRepository(DB_PATH)
+    recalibration_service = RecalibrationService(recalibration_repo, player_repo)
+
     # Create disburse service for nonprofit fund distribution
     disburse_repo = DisburseRepository(DB_PATH)
     disburse_service = DisburseService(disburse_repo, player_repo, loan_repo)
@@ -186,6 +192,7 @@ def _init_services():
     bot.bankruptcy_service = bankruptcy_service
     bot.loan_service = loan_service
     bot.disburse_service = disburse_service
+    bot.recalibration_service = recalibration_service
 
     # Create gambling stats service for degen score and leaderboards
     gambling_stats_service = GamblingStatsService(
