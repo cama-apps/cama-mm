@@ -71,9 +71,9 @@ USE_GLICKO = _parse_bool("USE_GLICKO", True)
 SHUFFLER_SETTINGS: dict[str, Any] = {
     "role_penalty_weight": _parse_float("ROLE_PENALTY_WEIGHT", 0.1),
     "off_role_multiplier": _parse_float("OFF_ROLE_MULTIPLIER", 0.95),
-    "off_role_flat_penalty": _parse_float("OFF_ROLE_FLAT_PENALTY", 200.0),
+    "off_role_flat_penalty": _parse_float("OFF_ROLE_FLAT_PENALTY", 180.0),
     "role_matchup_delta_weight": _parse_float("ROLE_MATCHUP_DELTA_WEIGHT", 0.2),
-    "exclusion_penalty_weight": _parse_float("EXCLUSION_PENALTY_WEIGHT", 50.0),
+    "exclusion_penalty_weight": _parse_float("EXCLUSION_PENALTY_WEIGHT", 45.0),
 }
 
 NEW_PLAYER_EXCLUSION_BOOST = _parse_int("NEW_PLAYER_EXCLUSION_BOOST", 4)
