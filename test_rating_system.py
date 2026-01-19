@@ -159,16 +159,16 @@ class TestRatingSystemEdgeCases:
         )
 
     def test_team_rating_update(self):
-        """Test rating updates for team matches."""
+        """Test rating updates for team matches with hybrid deltas."""
         rating_system = CamaRatingSystem()
 
-        # Create two teams of 5 players each
+        # Create two teams of 5 calibrated players each (RD = 80, below threshold 100)
         team1_players = [
-            (rating_system.create_player_from_rating(1500.0 + i * 10, 350.0, 0.06), 1000 + i)
+            (rating_system.create_player_from_rating(1500.0 + i * 10, 80.0, 0.06), 1000 + i)
             for i in range(5)
         ]
         team2_players = [
-            (rating_system.create_player_from_rating(1500.0 + i * 10, 350.0, 0.06), 2000 + i)
+            (rating_system.create_player_from_rating(1500.0 + i * 10, 80.0, 0.06), 2000 + i)
             for i in range(5)
         ]
 
@@ -185,25 +185,32 @@ class TestRatingSystemEdgeCases:
         assert len(team1_updated) == 5, "Team 1 should have 5 updated ratings"
         assert len(team2_updated) == 5, "Team 2 should have 5 updated ratings"
 
-        # Team 1 players share the same rating delta (within small tolerance)
+        # With hybrid deltas, calibrated players (RD <= threshold) get uniform team delta
         winner_deltas = [
             rating - initial
             for (rating, _, _, _), initial in zip(team1_updated, initial_ratings_team1)
         ]
-        assert all(delta > 0 for delta in winner_deltas)
-        assert max(winner_deltas) - min(winner_deltas) < 1e-6, (
-            "Winner deltas should match across team"
+        assert all(delta > 0 for delta in winner_deltas), "Winners should gain rating"
+        assert all(delta < 100 for delta in winner_deltas), (
+            "Calibrated players should have moderate gains"
         )
-        assert winner_deltas[0] < 400, "Single team win should not create extreme jumps"
+        # All calibrated players should get the SAME delta
+        assert max(winner_deltas) - min(winner_deltas) < 0.01, (
+            "Calibrated players should get identical team delta"
+        )
 
-        # Team 2 players share the same rating delta (within small tolerance)
         loser_deltas = [
             rating - initial
             for (rating, _, _, _), initial in zip(team2_updated, initial_ratings_team2)
         ]
-        assert all(delta < 0 for delta in loser_deltas)
-        assert max(loser_deltas) - min(loser_deltas) < 1e-6, "Loser deltas should match across team"
-        assert loser_deltas[0] > -400, "Single team loss should not create extreme drops"
+        assert all(delta < 0 for delta in loser_deltas), "Losers should lose rating"
+        assert all(delta > -100 for delta in loser_deltas), (
+            "Calibrated players should have moderate losses"
+        )
+        # All calibrated losers should get the SAME delta
+        assert max(loser_deltas) - min(loser_deltas) < 0.01, (
+            "Calibrated losers should get identical team delta"
+        )
 
         # RD should remain positive
         for _rating, rd, _vol, _pid in team1_updated + team2_updated:
@@ -231,42 +238,236 @@ class TestRatingSystemEdgeCases:
             assert rating < 1500
             assert rating > 1200, f"Loser drop too large for single even match: {rating}"
 
-    def test_weak_team_beats_strong_team_has_larger_gain(self):
-        """Weak team win should yield bigger delta than strong team win."""
+    def test_individual_deltas_depend_on_rd(self):
+        """With hybrid deltas, calibrating players get individual deltas based on RD."""
         rating_system = CamaRatingSystem()
-        # Strong team around 1800, weak team around 1200
-        strong_team = [
-            (rating_system.create_player_from_rating(1800.0, 100.0, 0.06), i) for i in range(5)
+
+        # Create teams with different RDs to test individual delta behavior
+        # High RD team (250, calibrating) vs Low RD team (80, calibrated)
+        high_rd_team = [
+            (rating_system.create_player_from_rating(1500.0, 250.0, 0.06), i) for i in range(5)
         ]
-        weak_team = [
-            (rating_system.create_player_from_rating(1200.0, 200.0, 0.06), i + 10) for i in range(5)
+        low_rd_team = [
+            (rating_system.create_player_from_rating(1500.0, 80.0, 0.06), i + 10) for i in range(5)
         ]
 
-        # Case 1: weak team wins
-        weak_win_updates, strong_loss_updates = rating_system.update_ratings_after_match(
-            weak_team, strong_team, winning_team=1
+        # High RD team wins
+        high_rd_win, low_rd_loss = rating_system.update_ratings_after_match(
+            high_rd_team, low_rd_team, winning_team=1
         )
-        weak_win_delta = weak_win_updates[0][0] - 1200.0
-        strong_loss_delta = strong_loss_updates[0][0] - 1800.0
+        high_rd_win_delta = high_rd_win[0][0] - 1500.0
+        low_rd_loss_delta = low_rd_loss[0][0] - 1500.0
 
-        # Reset players for opposite outcome
-        strong_team = [
-            (rating_system.create_player_from_rating(1800.0, 100.0, 0.06), i) for i in range(5)
-        ]
-        weak_team = [
-            (rating_system.create_player_from_rating(1200.0, 200.0, 0.06), i + 10) for i in range(5)
-        ]
-
-        # Case 2: strong team wins
-        strong_win_updates, weak_loss_updates = rating_system.update_ratings_after_match(
-            strong_team, weak_team, winning_team=1
+        # High RD (calibrating) players should have larger swings than low RD (calibrated) players
+        assert abs(high_rd_win_delta) > abs(low_rd_loss_delta), (
+            "Calibrating winner should gain more than calibrated loser loses"
         )
-        strong_win_delta = strong_win_updates[0][0] - 1800.0
-        weak_loss_delta = weak_loss_updates[0][0] - 1200.0
 
-        assert weak_win_delta > strong_win_delta, "Upset should award bigger winner delta"
-        assert abs(strong_loss_delta) < abs(weak_loss_delta), (
-            "Stronger team loss should hurt less than weak team loss"
+        # Reset for opposite outcome
+        high_rd_team = [
+            (rating_system.create_player_from_rating(1500.0, 250.0, 0.06), i) for i in range(5)
+        ]
+        low_rd_team = [
+            (rating_system.create_player_from_rating(1500.0, 80.0, 0.06), i + 10) for i in range(5)
+        ]
+
+        # Low RD team wins
+        low_rd_win, high_rd_loss = rating_system.update_ratings_after_match(
+            low_rd_team, high_rd_team, winning_team=1
+        )
+        low_rd_win_delta = low_rd_win[0][0] - 1500.0
+        high_rd_loss_delta = high_rd_loss[0][0] - 1500.0
+
+        # High RD (calibrating) players should still have larger swings
+        assert abs(high_rd_loss_delta) > abs(low_rd_win_delta), (
+            "Calibrating loser should lose more than calibrated winner gains"
+        )
+
+    def test_upset_rewards_underdog(self):
+        """Underdog winning an upset should be rewarded appropriately."""
+        rating_system = CamaRatingSystem()
+
+        # Use same RD (calibrated) to isolate the upset effect
+        favorite_team = [
+            (rating_system.create_player_from_rating(1800.0, 80.0, 0.06), i) for i in range(5)
+        ]
+        underdog_team = [
+            (rating_system.create_player_from_rating(1200.0, 80.0, 0.06), i + 10) for i in range(5)
+        ]
+
+        # Underdog wins (upset)
+        underdog_win, favorite_loss = rating_system.update_ratings_after_match(
+            underdog_team, favorite_team, winning_team=1
+        )
+        underdog_win_delta = underdog_win[0][0] - 1200.0
+        favorite_loss_delta = favorite_loss[0][0] - 1800.0
+
+        # Reset for expected outcome
+        favorite_team = [
+            (rating_system.create_player_from_rating(1800.0, 80.0, 0.06), i) for i in range(5)
+        ]
+        underdog_team = [
+            (rating_system.create_player_from_rating(1200.0, 80.0, 0.06), i + 10) for i in range(5)
+        ]
+
+        # Favorite wins (expected)
+        favorite_win, underdog_loss = rating_system.update_ratings_after_match(
+            favorite_team, underdog_team, winning_team=1
+        )
+        favorite_win_delta = favorite_win[0][0] - 1800.0
+        underdog_loss_delta = underdog_loss[0][0] - 1200.0
+
+        # Upset win should be rewarded more than expected win
+        assert underdog_win_delta > favorite_win_delta, (
+            "Underdog upset win should gain more than favorite expected win"
+        )
+        # Upset loss should hurt more than expected loss
+        assert abs(favorite_loss_delta) > abs(underdog_loss_delta), (
+            "Favorite upset loss should hurt more than underdog expected loss"
+        )
+
+    def test_hybrid_delta_guardrails_winner(self):
+        """Test that calibrating winners get at least the team delta."""
+        rating_system = CamaRatingSystem()
+
+        # Mixed team: calibrated (RD=80) + calibrating (RD=150)
+        # Use same rating so we can isolate the RD effect
+        mixed_team = [
+            (rating_system.create_player_from_rating(1500.0, 80.0, 0.06), 1),  # calibrated
+            (rating_system.create_player_from_rating(1500.0, 80.0, 0.06), 2),  # calibrated
+            (rating_system.create_player_from_rating(1500.0, 80.0, 0.06), 3),  # calibrated
+            (rating_system.create_player_from_rating(1500.0, 150.0, 0.06), 4),  # calibrating
+            (rating_system.create_player_from_rating(1500.0, 150.0, 0.06), 5),  # calibrating
+        ]
+        opponent_team = [
+            (rating_system.create_player_from_rating(1500.0, 80.0, 0.06), i + 10) for i in range(5)
+        ]
+
+        # Mixed team wins
+        mixed_updated, _ = rating_system.update_ratings_after_match(
+            mixed_team, opponent_team, winning_team=1
+        )
+
+        # All calibrated players should have identical deltas (team delta)
+        calibrated_deltas = [mixed_updated[i][0] - 1500.0 for i in range(3)]
+        team_delta = calibrated_deltas[0]
+        assert max(calibrated_deltas) - min(calibrated_deltas) < 0.01, (
+            "Calibrated players should have identical team delta"
+        )
+        assert team_delta > 0, "Team delta should be positive for win"
+
+        # Calibrating players should have delta >= team delta (guardrail: max)
+        calibrating_deltas = [mixed_updated[i][0] - 1500.0 for i in range(3, 5)]
+        for delta in calibrating_deltas:
+            assert delta >= team_delta - 0.01, (
+                f"Calibrating winner should get at least team delta: {delta} < {team_delta}"
+            )
+
+    def test_hybrid_delta_guardrails_loser(self):
+        """Test that calibrating losers get at least the team delta (loss)."""
+        rating_system = CamaRatingSystem()
+
+        # Mixed team: calibrated + calibrating
+        mixed_team = [
+            (rating_system.create_player_from_rating(1500.0, 80.0, 0.06), 1),  # calibrated
+            (rating_system.create_player_from_rating(1500.0, 80.0, 0.06), 2),  # calibrated
+            (rating_system.create_player_from_rating(1500.0, 80.0, 0.06), 3),  # calibrated
+            (rating_system.create_player_from_rating(1500.0, 150.0, 0.06), 4),  # calibrating
+            (rating_system.create_player_from_rating(1500.0, 150.0, 0.06), 5),  # calibrating
+        ]
+        opponent_team = [
+            (rating_system.create_player_from_rating(1500.0, 80.0, 0.06), i + 10) for i in range(5)
+        ]
+
+        # Mixed team loses
+        mixed_updated, _ = rating_system.update_ratings_after_match(
+            mixed_team, opponent_team, winning_team=2
+        )
+
+        # All calibrated players should have identical deltas
+        calibrated_deltas = [mixed_updated[i][0] - 1500.0 for i in range(3)]
+        team_delta = calibrated_deltas[0]
+        assert max(calibrated_deltas) - min(calibrated_deltas) < 0.01
+        assert team_delta < 0, "Team delta should be negative for loss"
+
+        # Calibrating players should have delta <= team delta (guardrail: min for loss)
+        calibrating_deltas = [mixed_updated[i][0] - 1500.0 for i in range(3, 5)]
+        for delta in calibrating_deltas:
+            assert delta <= team_delta + 0.01, (
+                f"Calibrating loser should get at least team loss: {delta} > {team_delta}"
+            )
+
+    def test_mixed_team_hybrid_behavior(self):
+        """Test complete mixed team scenario with various RDs."""
+        rating_system = CamaRatingSystem()
+
+        # Simulates a real match scenario with varied RDs
+        # Some players calibrated, some calibrating with different RD levels
+        team1 = [
+            (rating_system.create_player_from_rating(1600.0, 80.0, 0.06), 1),   # calibrated
+            (rating_system.create_player_from_rating(1400.0, 250.0, 0.06), 2),  # calibrating, low rating
+            (rating_system.create_player_from_rating(1500.0, 120.0, 0.06), 3),  # barely calibrating
+            (rating_system.create_player_from_rating(1550.0, 90.0, 0.06), 4),   # calibrated
+            (rating_system.create_player_from_rating(1450.0, 180.0, 0.06), 5),  # calibrating
+        ]
+        team2 = [
+            (rating_system.create_player_from_rating(1500.0, 80.0, 0.06), i + 10) for i in range(5)
+        ]
+
+        # Team 1 wins
+        t1_updated, t2_updated = rating_system.update_ratings_after_match(
+            team1, team2, winning_team=1
+        )
+
+        # Extract deltas
+        t1_deltas = [
+            t1_updated[i][0] - [1600.0, 1400.0, 1500.0, 1550.0, 1450.0][i]
+            for i in range(5)
+        ]
+
+        # Calibrated players (indices 0, 3) should have same delta
+        calibrated_deltas = [t1_deltas[0], t1_deltas[3]]
+        assert abs(calibrated_deltas[0] - calibrated_deltas[1]) < 0.01, (
+            "Calibrated teammates should have identical deltas"
+        )
+
+        # All winners should gain rating
+        assert all(d > 0 for d in t1_deltas), "All winners should gain rating"
+
+        # Team 2 (calibrated losers) should all have same delta
+        t2_deltas = [t2_updated[i][0] - 1500.0 for i in range(5)]
+        assert max(t2_deltas) - min(t2_deltas) < 0.01, (
+            "Calibrated losers should have identical deltas"
+        )
+        assert all(d < 0 for d in t2_deltas), "All losers should lose rating"
+
+    def test_all_calibrating_team_uses_threshold_rd(self):
+        """Test that a team with no calibrated players uses threshold RD for team delta."""
+        rating_system = CamaRatingSystem()
+
+        # Both teams are all calibrating (no one with RD <= 100)
+        team1 = [
+            (rating_system.create_player_from_rating(1500.0, 150.0, 0.06), i) for i in range(5)
+        ]
+        team2 = [
+            (rating_system.create_player_from_rating(1500.0, 150.0, 0.06), i + 10) for i in range(5)
+        ]
+
+        # Team 1 wins
+        t1_updated, t2_updated = rating_system.update_ratings_after_match(
+            team1, team2, winning_team=1
+        )
+
+        # All players should gain/lose rating appropriately
+        for rating, _, _, _ in t1_updated:
+            assert rating > 1500.0, "Winner should gain rating"
+        for rating, _, _, _ in t2_updated:
+            assert rating < 1500.0, "Loser should lose rating"
+
+        # Since all have same RD and rating, their individual deltas should be similar
+        t1_deltas = [r[0] - 1500.0 for r in t1_updated]
+        assert max(t1_deltas) - min(t1_deltas) < 1.0, (
+            "Same-RD calibrating players should have very similar deltas"
         )
 
 

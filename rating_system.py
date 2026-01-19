@@ -50,7 +50,8 @@ class CamaRatingSystem:
         """
         Aggregate a team into rating, RD, and volatility snapshots.
 
-        Uses mean rating and RMS RD to represent overall uncertainty.
+        Uses mean rating and RMS RD. This aggregate is used to represent the
+        opponent team's strength when computing individual player updates.
         """
         if not players:
             return 0.0, 350.0, self.initial_volatility
@@ -170,6 +171,31 @@ class CamaRatingSystem:
         """
         return Player(rating=rating, rd=rd, vol=volatility)
 
+    def _compute_team_delta(
+        self,
+        team_rating: float,
+        team_rd: float,
+        opponent_rating: float,
+        opponent_rd: float,
+        result: float,
+    ) -> tuple[float, float, float]:
+        """
+        Compute the team-level rating delta using a synthetic player.
+
+        Args:
+            team_rating: Aggregate team rating
+            team_rd: RD to use for the synthetic player (typically avg calibrated RD)
+            opponent_rating: Opponent aggregate rating
+            opponent_rd: Opponent aggregate RD
+            result: 1.0 for win, 0.0 for loss
+
+        Returns:
+            Tuple of (new_rating, new_rd, new_vol) for the synthetic player
+        """
+        synth = Player(rating=team_rating, rd=team_rd, vol=self.initial_volatility)
+        synth.update_player([opponent_rating], [opponent_rd], [result])
+        return synth.rating, synth.rd, synth.vol
+
     def update_ratings_after_match(
         self,
         team1_players: list[tuple[Player, int]],  # (player, discord_id)
@@ -177,7 +203,17 @@ class CamaRatingSystem:
         winning_team: int,
     ) -> tuple[list[tuple[float, float, float, int]], list[tuple[float, float, float, int]]]:
         """
-        Update ratings after a match.
+        Update ratings after a match using a hybrid delta system.
+
+        Hybrid approach (mirrors Dota 2's official system):
+        - Calibrated players (RD <= threshold): Get uniform team delta
+        - Calibrating players (RD > threshold): Get individual delta with guardrails
+          - Winners: max(individual_delta, team_delta) - at least team gain
+          - Losers: min(individual_delta, team_delta) - at least team loss
+
+        This prevents rating compression where high-rated players always get
+        tiny gains (always "favored" vs team average) while still allowing
+        calibrating players to swing fast to find their true rating.
 
         Args:
             team1_players: List of (Glicko-2 Player, discord_id) for team 1
@@ -188,55 +224,99 @@ class CamaRatingSystem:
             Tuple of (team1_updated_ratings, team2_updated_ratings)
             Each rating is (rating, rd, volatility, discord_id)
         """
-
         # Aggregated team views (for opponent strength)
-        team1_rating, team1_rd, team1_vol = self.aggregate_team_stats(
-            [p for p, _ in team1_players]
-        )
-        team2_rating, team2_rd, team2_vol = self.aggregate_team_stats(
-            [p for p, _ in team2_players]
-        )
+        team1_rating, team1_rd, _ = self.aggregate_team_stats([p for p, _ in team1_players])
+        team2_rating, team2_rd, _ = self.aggregate_team_stats([p for p, _ in team2_players])
 
         team1_result = 1.0 if winning_team == 1 else 0.0
         team2_result = 1.0 if winning_team == 2 else 0.0
 
-        # Team-level synthetic players to compute shared rating deltas
-        team1_synthetic = Player(rating=team1_rating, rd=team1_rd, vol=team1_vol)
-        team2_synthetic = Player(rating=team2_rating, rd=team2_rd, vol=team2_vol)
-        team1_synthetic.update_player([team2_rating], [team2_rd], [team1_result])
-        team2_synthetic.update_player([team1_rating], [team1_rd], [team2_result])
+        # Separate calibrated vs calibrating players
+        team1_calibrated = [(p, pid) for p, pid in team1_players if self.is_calibrated(p.rd)]
+        team2_calibrated = [(p, pid) for p, pid in team2_players if self.is_calibrated(p.rd)]
 
-        def _dampen_delta(
-            delta: float, team_rating: float, opponent_rating: float, result: float
-        ) -> float:
-            # If a heavy favorite loses, soften the drop to avoid over-penalizing.
-            if result == 0.0 and (team_rating - opponent_rating) > 200:
-                return delta * 0.05
-            return delta
+        # Compute team delta using calibrated players' average RD
+        # Default to threshold if no calibrated players (ensures reasonable delta)
+        team1_cal_rd = (
+            sum(p.rd for p, _ in team1_calibrated) / len(team1_calibrated)
+            if team1_calibrated
+            else CALIBRATION_RD_THRESHOLD
+        )
+        team2_cal_rd = (
+            sum(p.rd for p, _ in team2_calibrated) / len(team2_calibrated)
+            if team2_calibrated
+            else CALIBRATION_RD_THRESHOLD
+        )
 
-        team1_delta = _dampen_delta(
-            team1_synthetic.rating - team1_rating, team1_rating, team2_rating, team1_result
+        # Compute team-level deltas
+        team1_new_rating, team1_new_rd, team1_new_vol = self._compute_team_delta(
+            team1_rating, team1_cal_rd, team2_rating, team2_rd, team1_result
         )
-        team2_delta = _dampen_delta(
-            team2_synthetic.rating - team2_rating, team2_rating, team1_rating, team2_result
+        team2_new_rating, team2_new_rd, team2_new_vol = self._compute_team_delta(
+            team2_rating, team2_cal_rd, team1_rating, team1_rd, team2_result
         )
+
+        team1_delta = team1_new_rating - team1_rating
+        team2_delta = team2_new_rating - team2_rating
 
         team1_updated = []
         team2_updated = []
 
-        # Update RD/vol individually, then apply shared team delta so deltas match across team members.
+        # Apply hybrid logic per player
         for player, discord_id in team1_players:
-            original = player.rating
-            player.update_player([team2_rating], [team2_rd], [team1_result])
-            # Keep RD/vol updates, but enforce uniform team delta for ratings.
-            player.rating = max(0.0, original + team1_delta)
-            team1_updated.append((player.rating, player.rd, player.vol, discord_id))
+            original_rating = player.rating
+            original_rd = player.rd
+            original_vol = player.vol
+
+            if self.is_calibrated(original_rd):
+                # Calibrated: use team delta directly
+                final_rating = max(0.0, original_rating + team1_delta)
+                # Update RD/vol using team-level computation
+                final_rd = team1_new_rd
+                final_vol = team1_new_vol
+            else:
+                # Calibrating: compute individual delta, apply guardrails
+                player.update_player([team2_rating], [team2_rd], [team1_result])
+                individual_delta = player.rating - original_rating
+
+                if team1_result == 1.0:  # Won
+                    # At least team gain
+                    final_delta = max(individual_delta, team1_delta)
+                else:  # Lost
+                    # At least team loss (more negative)
+                    final_delta = min(individual_delta, team1_delta)
+
+                final_rating = max(0.0, original_rating + final_delta)
+                final_rd = player.rd
+                final_vol = player.vol
+
+            team1_updated.append((final_rating, final_rd, final_vol, discord_id))
 
         for player, discord_id in team2_players:
-            original = player.rating
-            player.update_player([team1_rating], [team1_rd], [team2_result])
-            player.rating = max(0.0, original + team2_delta)
-            team2_updated.append((player.rating, player.rd, player.vol, discord_id))
+            original_rating = player.rating
+            original_rd = player.rd
+            original_vol = player.vol
+
+            if self.is_calibrated(original_rd):
+                # Calibrated: use team delta directly
+                final_rating = max(0.0, original_rating + team2_delta)
+                final_rd = team2_new_rd
+                final_vol = team2_new_vol
+            else:
+                # Calibrating: compute individual delta, apply guardrails
+                player.update_player([team1_rating], [team1_rd], [team2_result])
+                individual_delta = player.rating - original_rating
+
+                if team2_result == 1.0:  # Won
+                    final_delta = max(individual_delta, team2_delta)
+                else:  # Lost
+                    final_delta = min(individual_delta, team2_delta)
+
+                final_rating = max(0.0, original_rating + final_delta)
+                final_rd = player.rd
+                final_vol = player.vol
+
+            team2_updated.append((final_rating, final_rd, final_vol, discord_id))
 
         return team1_updated, team2_updated
 
