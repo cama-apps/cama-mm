@@ -150,7 +150,6 @@ class LobbyCommands(commands.Cog):
         except Exception as exc:
             logger.warning(f"Failed to post leave activity: {exc}")
 
-
     async def _update_channel_message_closed(self, reason: str = "Lobby Closed") -> None:
         """Update the channel message embed to show lobby is closed."""
         message_id = self.lobby_service.get_lobby_message_id()
@@ -245,9 +244,7 @@ class LobbyCommands(commands.Cog):
                 message = await interaction.channel.fetch_message(message_id)
                 await self._update_thread_embed(lobby)
 
-                await interaction.followup.send(
-                    f"[View Lobby]({message.jump_url})", ephemeral=True
-                )
+                await interaction.followup.send(f"[View Lobby]({message.jump_url})", ephemeral=True)
                 return
             except Exception:
                 # Fall through to create a new one
@@ -390,7 +387,9 @@ class LobbyCommands(commands.Cog):
                     jump_url = pending_match.get("shuffle_message_jump_url")
                     message_text = "❌ There's a pending match that needs to be recorded!"
                     if jump_url:
-                        message_text += f" [View pending match]({jump_url}) then use `/record` first."
+                        message_text += (
+                            f" [View pending match]({jump_url}) then use `/record` first."
+                        )
                     else:
                         message_text += " Use `/record` first."
                     await interaction.followup.send(message_text, ephemeral=True)
@@ -412,6 +411,17 @@ class LobbyCommands(commands.Cog):
                 )
             return
 
+        # Block if there's an active draft
+        draft_state_manager = getattr(self.bot, "draft_state_manager", None)
+        if draft_state_manager and draft_state_manager.has_active_draft(guild_id):
+            if can_respond:
+                await interaction.followup.send(
+                    "❌ There's an active draft in progress. "
+                    "Use `/restartdraft` first to clear the draft.",
+                    ephemeral=True,
+                )
+            return
+
         # Update channel message to show closed and archive thread
         await self._update_channel_message_closed("Lobby Reset")
         await self._archive_lobby_thread("Lobby Reset")
@@ -421,7 +431,8 @@ class LobbyCommands(commands.Cog):
         logger.info(f"Lobby reset by user {interaction.user.id}")
         if can_respond:
             await interaction.followup.send(
-                "✅ Lobby reset. You can create a new lobby with `/lobby`.", ephemeral=True
+                "✅ Lobby reset. You can create a new lobby with `/lobby`.",
+                ephemeral=True,
             )
 
 

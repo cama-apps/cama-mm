@@ -965,6 +965,79 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             row = cursor.fetchone()
             return row["count"] if row else 0
 
+    # --- Captain eligibility (Immortal Draft) ---
+
+    def set_captain_eligible(self, discord_id: int, eligible: bool) -> bool:
+        """
+        Set captain eligibility for a player.
+
+        Args:
+            discord_id: Player's Discord ID
+            eligible: True to mark as captain-eligible, False to remove eligibility
+
+        Returns:
+            True if player was found and updated, False if player not found
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE players
+                SET is_captain_eligible = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE discord_id = ?
+                """,
+                (1 if eligible else 0, discord_id),
+            )
+            return cursor.rowcount > 0
+
+    def get_captain_eligible(self, discord_id: int) -> bool:
+        """
+        Check if a player is captain-eligible.
+
+        Args:
+            discord_id: Player's Discord ID
+
+        Returns:
+            True if player is captain-eligible, False otherwise (including if not found)
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT is_captain_eligible FROM players WHERE discord_id = ?",
+                (discord_id,),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return False
+            return bool(row["is_captain_eligible"])
+
+    def get_captain_eligible_players(self, discord_ids: list[int]) -> list[int]:
+        """
+        Get list of captain-eligible player IDs from a given set of IDs.
+
+        Args:
+            discord_ids: List of Discord IDs to filter
+
+        Returns:
+            List of Discord IDs that are captain-eligible
+        """
+        if not discord_ids:
+            return []
+
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            placeholders = ",".join("?" * len(discord_ids))
+            cursor.execute(
+                f"""
+                SELECT discord_id FROM players
+                WHERE discord_id IN ({placeholders})
+                AND is_captain_eligible = 1
+                """,
+                discord_ids,
+            )
+            return [row["discord_id"] for row in cursor.fetchall()]
+
     def _row_to_player(self, row) -> Player:
         """Convert database row to Player object."""
         preferred_roles = json.loads(row["preferred_roles"]) if row["preferred_roles"] else None

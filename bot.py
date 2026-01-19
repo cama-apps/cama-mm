@@ -289,6 +289,7 @@ EXTENSIONS = [
     "commands.predictions",
     "commands.ask",
     "commands.profile",
+    "commands.draft",
 ]
 
 

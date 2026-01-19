@@ -197,6 +197,7 @@ class SchemaManager:
             ("add_bankruptcy_count_column", self._migration_add_bankruptcy_count_column),
             ("create_recalibration_state_table", self._migration_create_recalibration_state_table),
             ("add_first_calibrated_at_to_players", self._migration_add_first_calibrated_at_to_players),
+            ("add_captain_eligible_column", self._migration_add_captain_eligible_column),
         ]
 
     # --- Migrations ---
@@ -705,3 +706,7 @@ class SchemaManager:
             WHERE glicko_rd IS NOT NULL AND glicko_rd <= 100.0 AND first_calibrated_at IS NULL
             """
         )
+
+    def _migration_add_captain_eligible_column(self, cursor) -> None:
+        """Add is_captain_eligible column to players for Immortal Draft mode."""
+        self._add_column_if_not_exists(cursor, "players", "is_captain_eligible", "INTEGER DEFAULT 0")
