@@ -1,0 +1,7 @@
+- Sort available/buttons by rating
+- Show position in avialable
+- Show position on team selected, including captains
+- Look at shuffle output and be more consistent (include what is useful)
+- Shuffle and startdraft should be mutually exclusive
+- Ping players when draft finishes in thread
+- Post output in thread
