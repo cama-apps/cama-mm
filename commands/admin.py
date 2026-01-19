@@ -26,7 +26,15 @@ _processed_interactions = set()
 class AdminCommands(commands.Cog):
     """Admin-only slash commands."""
 
-    def __init__(self, bot: commands.Bot, lobby_service, player_repo, loan_service=None, bankruptcy_service=None, recalibration_service=None):
+    def __init__(
+        self,
+        bot: commands.Bot,
+        lobby_service,
+        player_repo,
+        loan_service=None,
+        bankruptcy_service=None,
+        recalibration_service=None,
+    ):
         self.bot = bot
         self.lobby_service = lobby_service
         self.player_repo = player_repo
@@ -37,8 +45,16 @@ class AdminCommands(commands.Cog):
     @app_commands.command(
         name="addfake", description="Add fake users to lobby for testing (Admin only)"
     )
-    @app_commands.describe(count="Number of fake users to add (1-10)")
-    async def addfake(self, interaction: discord.Interaction, count: int = 1):
+    @app_commands.describe(
+        count="Number of fake users to add (1-10)",
+        captain_eligible="Make fake users captain-eligible for Immortal Draft testing",
+    )
+    async def addfake(
+        self,
+        interaction: discord.Interaction,
+        count: int = 1,
+        captain_eligible: bool = False,
+    ):
         guild = interaction.guild if interaction.guild else None
         rl_gid = guild.id if guild else 0
         rl = GLOBAL_RATE_LIMITER.check(
@@ -146,6 +162,10 @@ class AdminCommands(commands.Cog):
                 except ValueError:
                     pass
 
+            # Set captain eligibility if requested
+            if captain_eligible:
+                self.player_repo.set_captain_eligible(fake_id, True)
+
             success, _ = self.lobby_service.join_lobby(fake_id)
             if success:
                 fake_users_added.append(fake_name)
@@ -167,14 +187,112 @@ class AdminCommands(commands.Cog):
                 logger.warning(f"Failed to refresh lobby message after addfake: {exc}")
 
         if can_respond:
+            captain_note = " (captain-eligible)" if captain_eligible else ""
             await safe_followup(
                 interaction,
                 content=(
-                    f"✅ Added {len(fake_users_added)} fake user(s): " + ", ".join(fake_users_added)
+                    f"✅ Added {len(fake_users_added)} fake user(s){captain_note}: "
+                    + ", ".join(fake_users_added)
                 ),
                 ephemeral=True,
             )
         logger.info(f"addfake completed: added {len(fake_users_added)} fake users")
+
+    @app_commands.command(
+        name="filllobbytest",
+        description="Fill remaining lobby spots with fake users for testing (Admin only)",
+    )
+    @app_commands.describe(
+        captain_eligible="Make fake users captain-eligible for Immortal Draft testing",
+    )
+    async def filllobbytest(
+        self,
+        interaction: discord.Interaction,
+        captain_eligible: bool = False,
+    ):
+        """Fill lobby to ready threshold with fake users."""
+        if not has_admin_permission(interaction):
+            await interaction.response.send_message("❌ Admin only command.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        lobby = self.lobby_service.get_or_create_lobby()
+        current = lobby.get_player_count()
+        ready_threshold = self.lobby_service.ready_threshold
+
+        if current >= ready_threshold:
+            await interaction.followup.send(
+                f"✅ Lobby already has {current}/{ready_threshold} players.",
+                ephemeral=True,
+            )
+            return
+
+        needed = ready_threshold - current
+        if needed > 10:
+            needed = 10  # Cap at 10 per call for safety
+
+        role_choices = list(ROLE_EMOJIS.keys())
+
+        # Find highest existing fake user index
+        existing_fake_ids = [pid for pid in lobby.players if pid < 0]
+        next_index = max([-pid for pid in existing_fake_ids], default=0) + 1
+
+        fake_users_added = []
+        for _ in range(needed):
+            fake_id = -next_index
+            fake_name = f"FakeUser{next_index}"
+            next_index += 1
+
+            existing = self.player_repo.get_by_id(fake_id)
+            if not existing:
+                rating = random.randint(1000, 2000)
+                rd = random.uniform(50, 350)
+                vol = 0.06
+                num_roles = random.randint(1, min(5, len(role_choices)))
+                roles = random.sample(role_choices, k=num_roles)
+                try:
+                    self.player_repo.add(
+                        discord_id=fake_id,
+                        discord_username=fake_name,
+                        initial_mmr=None,
+                        glicko_rating=rating,
+                        glicko_rd=rd,
+                        glicko_volatility=vol,
+                        preferred_roles=roles,
+                    )
+                except ValueError:
+                    pass
+
+            if captain_eligible:
+                self.player_repo.set_captain_eligible(fake_id, True)
+
+            success, _ = self.lobby_service.join_lobby(fake_id)
+            if success:
+                fake_users_added.append(fake_name)
+
+        # Update lobby message if it exists
+        lobby = self.lobby_service.get_lobby()
+        message_id = self.lobby_service.get_lobby_message_id()
+        channel_id = self.lobby_service.get_lobby_channel_id()
+        if message_id and channel_id and lobby:
+            try:
+                channel = self.bot.get_channel(channel_id)
+                if not channel:
+                    channel = await self.bot.fetch_channel(channel_id)
+                message = await channel.fetch_message(message_id)
+                embed = self.lobby_service.build_lobby_embed(lobby)
+                if embed:
+                    await message.edit(embed=embed)
+            except Exception as exc:
+                logger.warning(f"Failed to refresh lobby message after filllobbytest: {exc}")
+
+        captain_note = " (captain-eligible)" if captain_eligible else ""
+        await interaction.followup.send(
+            f"✅ Added {len(fake_users_added)} fake user(s){captain_note} to fill lobby.",
+            ephemeral=True,
+        )
+        logger.info(f"filllobbytest completed: added {len(fake_users_added)} fake users")
 
     @app_commands.command(
         name="resetuser", description="Reset a specific user's account (Admin only)"
@@ -282,16 +400,12 @@ class AdminCommands(commands.Cog):
                 ephemeral=True,
             )
 
-    @app_commands.command(
-        name="givecoin", description="Give jopacoin to a user (Admin only)"
-    )
+    @app_commands.command(name="givecoin", description="Give jopacoin to a user (Admin only)")
     @app_commands.describe(
         user="The user to give coins to",
         amount="Amount to give (can be negative to take)",
     )
-    async def givecoin(
-        self, interaction: discord.Interaction, user: discord.Member, amount: int
-    ):
+    async def givecoin(self, interaction: discord.Interaction, user: discord.Member, amount: int):
         """Admin command to give or take jopacoin from a user."""
         if not has_admin_permission(interaction):
             await interaction.response.send_message(
@@ -329,9 +443,7 @@ class AdminCommands(commands.Cog):
         name="resetloancooldown", description="Reset a user's loan cooldown (Admin only)"
     )
     @app_commands.describe(user="The user whose loan cooldown to reset")
-    async def resetloancooldown(
-        self, interaction: discord.Interaction, user: discord.Member
-    ):
+    async def resetloancooldown(self, interaction: discord.Interaction, user: discord.Member):
         """Admin command to reset a user's loan cooldown."""
         if not has_admin_permission(interaction):
             await interaction.response.send_message(
@@ -380,12 +492,11 @@ class AdminCommands(commands.Cog):
         )
 
     @app_commands.command(
-        name="resetbankruptcycooldown", description="Reset a user's bankruptcy cooldown (Admin only)"
+        name="resetbankruptcycooldown",
+        description="Reset a user's bankruptcy cooldown (Admin only)",
     )
     @app_commands.describe(user="The user whose bankruptcy cooldown to reset")
-    async def resetbankruptcycooldown(
-        self, interaction: discord.Interaction, user: discord.Member
-    ):
+    async def resetbankruptcycooldown(self, interaction: discord.Interaction, user: discord.Member):
         """Admin command to reset a user's bankruptcy cooldown."""
         if not has_admin_permission(interaction):
             await interaction.response.send_message(
@@ -435,9 +546,7 @@ class AdminCommands(commands.Cog):
             f"{user.id} ({user})"
         )
 
-    @app_commands.command(
-        name="setinitialrating", description="Set initial rating for a player"
-    )
+    @app_commands.command(name="setinitialrating", description="Set initial rating for a player")
     @app_commands.describe(
         user="Player to adjust (must have few games)",
         rating="Initial rating (0-3000)",
@@ -638,7 +747,8 @@ class AdminCommands(commands.Cog):
         )
 
     @app_commands.command(
-        name="extendbetting", description="Extend the betting window for the current match (Admin only)"
+        name="extendbetting",
+        description="Extend the betting window for the current match (Admin only)",
     )
     @app_commands.describe(minutes="Number of minutes to extend betting (1-60)")
     async def extendbetting(self, interaction: discord.Interaction, minutes: int):
@@ -721,7 +831,9 @@ class AdminCommands(commands.Cog):
                         betting_mode = pending_state.get("betting_mode", "pool")
 
                         if betting_service:
-                            totals = betting_service.get_pot_odds(guild_id, pending_state=pending_state)
+                            totals = betting_service.get_pot_odds(
+                                guild_id, pending_state=pending_state
+                            )
 
                         new_field_name, new_field_value = format_betting_display(
                             totals["radiant"], totals["dire"], betting_mode, new_lock_until
@@ -730,9 +842,15 @@ class AdminCommands(commands.Cog):
                         # Find and replace the betting field (usually the last field or has "Wagers" in name)
                         new_fields = []
                         for field in embed.fields:
-                            if "Wagers" in field.name or "Current Wagers" in field.name or "Pool" in field.name:
+                            if (
+                                "Wagers" in field.name
+                                or "Current Wagers" in field.name
+                                or "Pool" in field.name
+                            ):
                                 new_fields.append(
-                                    discord.EmbedField(name=new_field_name, value=new_field_value, inline=False)
+                                    discord.EmbedField(
+                                        name=new_field_name, value=new_field_value, inline=False
+                                    )
                                 )
                             else:
                                 new_fields.append(field)
@@ -761,6 +879,7 @@ class AdminCommands(commands.Cog):
             f"for guild {guild_id}. New lock: {new_lock_until}{status_note}"
         )
 
+
 async def setup(bot: commands.Bot):
     lobby_service = getattr(bot, "lobby_service", None)
     # Use player_repo directly from bot for admin operations
@@ -774,11 +893,29 @@ async def setup(bot: commands.Bot):
         logger.warning("AdminCommands cog is already loaded, skipping duplicate registration")
         return
 
-    await bot.add_cog(AdminCommands(bot, lobby_service, player_repo, loan_service, bankruptcy_service, recalibration_service))
+    await bot.add_cog(
+        AdminCommands(
+            bot, lobby_service, player_repo, loan_service, bankruptcy_service, recalibration_service
+        )
+    )
 
     # Log command registration
     admin_commands = [
-        cmd.name for cmd in bot.tree.walk_commands() if cmd.name in ["addfake", "resetuser", "sync", "givecoin", "resetloancooldown", "resetbankruptcycooldown", "setinitialrating", "extendbetting", "recalibrate", "resetrecalibrationcooldown"]
+        cmd.name
+        for cmd in bot.tree.walk_commands()
+        if cmd.name
+        in [
+            "addfake",
+            "resetuser",
+            "sync",
+            "givecoin",
+            "resetloancooldown",
+            "resetbankruptcycooldown",
+            "setinitialrating",
+            "extendbetting",
+            "recalibrate",
+            "resetrecalibrationcooldown",
+        ]
     ]
     logger.info(
         f"AdminCommands cog loaded. Registered commands: {admin_commands}. "

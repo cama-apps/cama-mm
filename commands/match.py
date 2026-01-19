@@ -128,8 +128,7 @@ class MatchCommands(commands.Cog):
                 thread_shuffle_msg = await thread.send(embed=shuffle_embed)
             else:
                 thread_shuffle_msg = await thread.send(
-                    "🔀 **Teams have been shuffled!**\n"
-                    "Use `/record` to record the match result."
+                    "🔀 **Teams have been shuffled!**\nUse `/record` to record the match result."
                 )
 
             # Ping included players in thread (subscribes them to thread notifications)
@@ -269,7 +268,9 @@ class MatchCommands(commands.Cog):
             return None, {}
 
         # Filter out excluded player if specified
-        available_winners = [w for w in winning_ids if w != exclude_id] if exclude_id else winning_ids
+        available_winners = (
+            [w for w in winning_ids if w != exclude_id] if exclude_id else winning_ids
+        )
         if not available_winners:
             return None, {}  # All winners excluded
 
@@ -353,6 +354,16 @@ class MatchCommands(commands.Cog):
             else:
                 message_text += " Use `/record` first."
             await interaction.followup.send(message_text, ephemeral=True)
+            return
+
+        # Check for active draft
+        draft_state_manager = getattr(self.bot, "draft_state_manager", None)
+        if draft_state_manager and draft_state_manager.has_active_draft(guild_id):
+            await interaction.followup.send(
+                "❌ There's an active Immortal Draft in progress! "
+                "Use `/restartdraft` to restart it or complete the draft first.",
+                ephemeral=True,
+            )
             return
 
         lobby = self.lobby_service.get_lobby()
@@ -644,7 +655,9 @@ class MatchCommands(commands.Cog):
 
         # Save thread_id before record_match clears the pending state
         pending_state = self.match_service.get_last_shuffle(guild_id)
-        thread_id_for_finalize = pending_state.get("thread_shuffle_thread_id") if pending_state else None
+        thread_id_for_finalize = (
+            pending_state.get("thread_shuffle_thread_id") if pending_state else None
+        )
 
         try:
             record_result = self.match_service.record_match(
@@ -780,20 +793,22 @@ class MatchCommands(commands.Cog):
 
                 # Prioritize biggest leveraged loss, then biggest winner
                 leveraged_losers = [
-                    entry for entry in losers
+                    entry
+                    for entry in losers
                     if (entry.get("leverage", 1) or 1) > 1 and not entry.get("refunded")
                 ]
                 if leveraged_losers:
                     # Pick the biggest effective loss (leverage * amount)
                     notable_bettor = max(
-                        leveraged_losers,
-                        key=lambda e: e.get("effective_bet", e["amount"])
+                        leveraged_losers, key=lambda e: e.get("effective_bet", e["amount"])
                     )
                     flavor_event = FlavorEvent.LEVERAGE_LOSS
                     event_details = {
                         "amount": notable_bettor["amount"],
                         "leverage": notable_bettor.get("leverage", 1),
-                        "effective_loss": notable_bettor.get("effective_bet", notable_bettor["amount"]),
+                        "effective_loss": notable_bettor.get(
+                            "effective_bet", notable_bettor["amount"]
+                        ),
                         "team": notable_bettor.get("team", "unknown"),
                     }
                 elif winners:
@@ -867,7 +882,9 @@ class MatchCommands(commands.Cog):
         await interaction.followup.send(message, ephemeral=False)
 
         # Finalize lobby thread with results (use saved thread_id since pending state is cleared)
-        await self._finalize_lobby_thread(guild_id, winning_result, thread_id=thread_id_for_finalize)
+        await self._finalize_lobby_thread(
+            guild_id, winning_result, thread_id=thread_id_for_finalize
+        )
 
         # Trigger auto-discovery in background if enabled
         match_id = record_result.get("match_id")
