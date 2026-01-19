@@ -674,6 +674,40 @@ class InfoCommands(commands.Cog):
             embed.add_field(name="🔄 Rating Drift (Seed vs Current)", value=drift_text, inline=False)
             embed.add_field(name="⚖️ Rating Stability", value=stability_text, inline=False)
 
+            # Lobby type impact
+            lobby_stats = self.match_repo.get_lobby_type_stats() if self.match_repo else []
+            if lobby_stats:
+                lobby_lines = []
+                shuffle_stats = next((s for s in lobby_stats if s["lobby_type"] == "shuffle"), None)
+                draft_stats = next((s for s in lobby_stats if s["lobby_type"] == "draft"), None)
+
+                if shuffle_stats:
+                    avg_swing = shuffle_stats["avg_swing"] or 0
+                    games = shuffle_stats["games"]
+                    actual = (shuffle_stats["actual_win_rate"] or 0) * 100
+                    expected = (shuffle_stats["expected_win_rate"] or 0.5) * 100
+                    lobby_lines.append(f"🎲 **Shuffle**: ±{avg_swing:.1f} avg swing ({games} games) | {actual:.0f}% actual vs {expected:.0f}% exp")
+
+                if draft_stats:
+                    avg_swing = draft_stats["avg_swing"] or 0
+                    games = draft_stats["games"]
+                    actual = (draft_stats["actual_win_rate"] or 0) * 100
+                    expected = (draft_stats["expected_win_rate"] or 0.5) * 100
+                    lobby_lines.append(f"👑 **Draft**: ±{avg_swing:.1f} avg swing ({games} games) | {actual:.0f}% actual vs {expected:.0f}% exp")
+
+                # Add comparison insight if both exist
+                if shuffle_stats and draft_stats and shuffle_stats["avg_swing"] and draft_stats["avg_swing"]:
+                    shuffle_swing = shuffle_stats["avg_swing"]
+                    draft_swing = draft_stats["avg_swing"]
+                    if shuffle_swing > 0:
+                        diff_pct = ((draft_swing - shuffle_swing) / shuffle_swing) * 100
+                        if abs(diff_pct) >= 5:
+                            more_volatile = "Draft" if diff_pct > 0 else "Shuffle"
+                            lobby_lines.append(f"*{more_volatile} shows {abs(diff_pct):.0f}% larger swings - more volatile outcomes*")
+
+                if lobby_lines:
+                    embed.add_field(name="🎲 Lobby Type Impact", value="\n".join(lobby_lines), inline=False)
+
             embed.add_field(
                 name="Highest Rated",
                 value=format_ranked(
@@ -900,6 +934,8 @@ class InfoCommands(commands.Cog):
             rd_after = h.get("rd_after")
             won = h.get("won")
             match_id = h.get("match_id")
+            lobby_type = h.get("lobby_type", "shuffle")
+            lobby_emoji = "👑" if lobby_type == "draft" else "🎲"
 
             if rating_after is not None and rating_before is not None:
                 rating_delta = rating_after - rating_before
@@ -912,7 +948,7 @@ class InfoCommands(commands.Cog):
                 rd_str = f" [RD {rd_after:.0f}]"
 
             result = "W" if won else "L"
-            recent_game_details.append(f"#{match_id}: {result} → **{delta_str}**{rd_str}")
+            recent_game_details.append(f"{lobby_emoji}#{match_id}: {result} → **{delta_str}**{rd_str}")
 
         # Find biggest upset (win as underdog) and biggest choke (loss as favorite)
         upsets = [(h, h.get("expected_team_win_prob", 0.5)) for h in matches_with_predictions
@@ -991,6 +1027,40 @@ class InfoCommands(commands.Cog):
                 value="\n".join(recent_game_details),
                 inline=False,
             )
+
+        # Lobby type breakdown for this player
+        player_lobby_stats = self.match_repo.get_player_lobby_type_stats(user.id) if self.match_repo else []
+        if player_lobby_stats and len(player_lobby_stats) > 1:
+            lobby_lines = []
+            shuffle_stats = next((s for s in player_lobby_stats if s["lobby_type"] == "shuffle"), None)
+            draft_stats = next((s for s in player_lobby_stats if s["lobby_type"] == "draft"), None)
+
+            if shuffle_stats:
+                avg_swing = shuffle_stats["avg_swing"] or 0
+                games = shuffle_stats["games"]
+                actual = (shuffle_stats["actual_win_rate"] or 0) * 100
+                expected = (shuffle_stats["expected_win_rate"] or 0.5) * 100
+                lobby_lines.append(f"🎲 **Shuffle**: ±{avg_swing:.1f} avg ({games} games) | W: {actual:.0f}% vs {expected:.0f}% exp")
+
+            if draft_stats:
+                avg_swing = draft_stats["avg_swing"] or 0
+                games = draft_stats["games"]
+                actual = (draft_stats["actual_win_rate"] or 0) * 100
+                expected = (draft_stats["expected_win_rate"] or 0.5) * 100
+                lobby_lines.append(f"👑 **Draft**: ±{avg_swing:.1f} avg ({games} games) | W: {actual:.0f}% vs {expected:.0f}% exp")
+
+            # Add comparison insight if both exist
+            if shuffle_stats and draft_stats and shuffle_stats["avg_swing"] and draft_stats["avg_swing"]:
+                shuffle_swing = shuffle_stats["avg_swing"]
+                draft_swing = draft_stats["avg_swing"]
+                if shuffle_swing > 0:
+                    diff_pct = ((draft_swing - shuffle_swing) / shuffle_swing) * 100
+                    if abs(diff_pct) >= 5:
+                        more_volatile = "drafts" if diff_pct > 0 else "shuffles"
+                        lobby_lines.append(f"*You swing {abs(diff_pct):.0f}% more in {more_volatile}*")
+
+            if lobby_lines:
+                embed.add_field(name="🎲 Rating Swings by Lobby Type", value="\n".join(lobby_lines), inline=False)
 
         # RD trend analysis - show how rating changes relate to RD
         if len(history) >= 2:

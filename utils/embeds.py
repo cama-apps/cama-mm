@@ -241,6 +241,7 @@ def create_enriched_match_embed(
     dire_participants: list[dict],
     show_mvp: bool = True,
     bankruptcy_repo=None,
+    lobby_type: str = "shuffle",
 ) -> discord.Embed:
     """
     Create a rich embed displaying enriched match statistics.
@@ -261,9 +262,10 @@ def create_enriched_match_embed(
     """
     winner = "Radiant" if winning_team == 1 else "Dire"
     duration_str = _format_duration(duration_seconds)
+    lobby_emoji = "👑" if lobby_type == "draft" else "🎲"
 
     # Build title and description
-    title = f"Match #{match_id} - {winner} Victory"
+    title = f"{lobby_emoji} Match #{match_id} - {winner} Victory"
     if duration_str != "—":
         title += f" ({duration_str})"
 
@@ -393,6 +395,7 @@ def create_match_summary_embed(
     dire_participants: list[dict],
     valve_match_id: int | None = None,
     bankruptcy_repo=None,
+    lobby_type: str = "shuffle",
 ) -> discord.Embed:
     """
     Create a simpler match summary embed for non-enriched matches.
@@ -400,9 +403,10 @@ def create_match_summary_embed(
     Shows hero and KDA only (no damage/net worth without enrichment).
     """
     winner = "Radiant" if winning_team == 1 else "Dire"
+    lobby_emoji = "👑" if lobby_type == "draft" else "🎲"
 
     embed = discord.Embed(
-        title=f"Match #{match_id} - {winner} Victory",
+        title=f"{lobby_emoji} Match #{match_id} - {winner} Victory",
         color=discord.Color.green() if winning_team == 1 else discord.Color.red(),
     )
 

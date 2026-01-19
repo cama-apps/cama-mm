@@ -30,6 +30,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
         dire_team_ids: list[int] | None = None,
         dotabuff_match_id: str | None = None,
         notes: str | None = None,
+        lobby_type: str = "shuffle",
     ) -> int:
         """
         Record a match result.
@@ -56,8 +57,8 @@ class MatchRepository(BaseRepository, IMatchRepository):
             cursor.execute(
                 """
                 INSERT INTO matches (team1_players, team2_players, winning_team,
-                                    dotabuff_match_id, notes)
-                VALUES (?, ?, ?, ?, ?)
+                                    dotabuff_match_id, notes, lobby_type)
+                VALUES (?, ?, ?, ?, ?, ?)
             """,
                 (
                     json.dumps(team1_ids),
@@ -65,6 +66,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     winning_team,
                     dotabuff_match_id,
                     notes,
+                    lobby_type,
                 ),
             )
 
@@ -213,6 +215,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 "radiant_score": row["radiant_score"] if "radiant_score" in row.keys() else None,
                 "dire_score": row["dire_score"] if "dire_score" in row.keys() else None,
                 "game_mode": row["game_mode"] if "game_mode" in row.keys() else None,
+                "lobby_type": row["lobby_type"] if "lobby_type" in row.keys() else "shuffle",
             }
 
     def get_player_matches(self, discord_id: int, limit: int = 10) -> list[dict]:
@@ -243,6 +246,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     "player_won": bool(row["won"]),
                     "side": row["side"],
                     "valve_match_id": row["valve_match_id"],
+                    "lobby_type": row["lobby_type"] if "lobby_type" in row.keys() else "shuffle",
                 }
                 for row in rows
             ]
@@ -277,10 +281,11 @@ class MatchRepository(BaseRepository, IMatchRepository):
             cursor = conn.cursor()
             cursor.execute(
                 """
-                SELECT *
-                FROM rating_history
-                WHERE discord_id = ?
-                ORDER BY timestamp DESC
+                SELECT rh.*, m.lobby_type
+                FROM rating_history rh
+                LEFT JOIN matches m ON rh.match_id = m.match_id
+                WHERE rh.discord_id = ?
+                ORDER BY rh.timestamp DESC
                 LIMIT ?
             """,
                 (discord_id, limit),
@@ -299,6 +304,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     "won": row["won"],
                     "match_id": row["match_id"],
                     "timestamp": row["timestamp"],
+                    "lobby_type": row["lobby_type"] if "lobby_type" in row.keys() else "shuffle",
                 }
                 for row in rows
             ]
@@ -876,6 +882,80 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     "actual_wins": row["actual_wins"],
                     "expected_wins": row["expected_wins"],
                     "overperformance": row["actual_wins"] - row["expected_wins"],
+                }
+                for row in rows
+            ]
+
+    def get_lobby_type_stats(self) -> list[dict]:
+        """
+        Get server-wide rating swing statistics by lobby type.
+
+        Returns list of dicts with:
+        - lobby_type: 'shuffle' or 'draft'
+        - avg_swing: average absolute rating change
+        - games: number of rating changes recorded
+        - actual_win_rate: percentage of games won
+        - expected_win_rate: average expected win probability
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT
+                    m.lobby_type,
+                    AVG(ABS(rh.rating - rh.rating_before)) as avg_swing,
+                    COUNT(*) as games,
+                    AVG(CASE WHEN rh.won = 1 THEN 1.0 ELSE 0.0 END) as actual_win_rate,
+                    AVG(rh.expected_team_win_prob) as expected_win_rate
+                FROM rating_history rh
+                JOIN matches m ON rh.match_id = m.match_id
+                WHERE rh.rating_before IS NOT NULL
+                GROUP BY m.lobby_type
+                """
+            )
+            rows = cursor.fetchall()
+            return [
+                {
+                    "lobby_type": row["lobby_type"] or "shuffle",
+                    "avg_swing": row["avg_swing"],
+                    "games": row["games"],
+                    "actual_win_rate": row["actual_win_rate"],
+                    "expected_win_rate": row["expected_win_rate"],
+                }
+                for row in rows
+            ]
+
+    def get_player_lobby_type_stats(self, discord_id: int) -> list[dict]:
+        """
+        Get individual player's rating swing statistics by lobby type.
+
+        Same return format as get_lobby_type_stats but filtered to one player.
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT
+                    m.lobby_type,
+                    AVG(ABS(rh.rating - rh.rating_before)) as avg_swing,
+                    COUNT(*) as games,
+                    AVG(CASE WHEN rh.won = 1 THEN 1.0 ELSE 0.0 END) as actual_win_rate,
+                    AVG(rh.expected_team_win_prob) as expected_win_rate
+                FROM rating_history rh
+                JOIN matches m ON rh.match_id = m.match_id
+                WHERE rh.rating_before IS NOT NULL AND rh.discord_id = ?
+                GROUP BY m.lobby_type
+                """,
+                (discord_id,),
+            )
+            rows = cursor.fetchall()
+            return [
+                {
+                    "lobby_type": row["lobby_type"] or "shuffle",
+                    "avg_swing": row["avg_swing"],
+                    "games": row["games"],
+                    "actual_win_rate": row["actual_win_rate"],
+                    "expected_win_rate": row["expected_win_rate"],
                 }
                 for row in rows
             ]

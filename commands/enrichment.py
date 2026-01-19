@@ -180,6 +180,7 @@ class EnrichmentCommands(commands.Cog):
                 radiant_participants=radiant,
                 dire_participants=dire,
                 bankruptcy_repo=self.bankruptcy_repo,
+                lobby_type=match_data.get("lobby_type", "shuffle"),
             )
 
             # Add summary note
@@ -372,6 +373,8 @@ class EnrichmentCommands(commands.Cog):
                     break
 
             result_emoji = "✅" if won else "❌"
+            lobby_type = match.get("lobby_type", "shuffle")
+            lobby_emoji = "👑" if lobby_type == "draft" else "🎲"
 
             valve_match_id = match.get("valve_match_id")
             dotabuff_link = (
@@ -444,12 +447,12 @@ class EnrichmentCommands(commands.Cog):
                     stats_block += f"{dotabuff_link}"
 
                 embed.add_field(
-                    name=f"{result_emoji} #{match_id} • {hero}", value=stats_block, inline=True
+                    name=f"{result_emoji}{lobby_emoji} #{match_id} • {hero}", value=stats_block, inline=True
                 )
             else:
                 stats_block = f"```\nKDA: -/-/-  GPM: -\nDMG: -  TD: -\nNW: -  Side: {side}\n```"
                 embed.add_field(
-                    name=f"{result_emoji} #{match_id} • ???", value=stats_block, inline=True
+                    name=f"{result_emoji}{lobby_emoji} #{match_id} • ???", value=stats_block, inline=True
                 )
 
         # Set thumbnail to most recently played hero
@@ -542,6 +545,7 @@ class EnrichmentCommands(commands.Cog):
                 radiant_participants=radiant,
                 dire_participants=dire,
                 bankruptcy_repo=self.bankruptcy_repo,
+                lobby_type=match_data.get("lobby_type", "shuffle"),
             )
 
             # Generate and attach stats image
@@ -572,6 +576,7 @@ class EnrichmentCommands(commands.Cog):
                 dire_participants=dire,
                 valve_match_id=match_data.get("valve_match_id"),
                 bankruptcy_repo=self.bankruptcy_repo,
+                lobby_type=match_data.get("lobby_type", "shuffle"),
             )
             note = (
                 "ℹ️ This match has not been enriched yet. Use `/enrichmatch` to add detailed stats."

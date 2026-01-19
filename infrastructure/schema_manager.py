@@ -198,6 +198,7 @@ class SchemaManager:
             ("create_recalibration_state_table", self._migration_create_recalibration_state_table),
             ("add_first_calibrated_at_to_players", self._migration_add_first_calibrated_at_to_players),
             ("add_captain_eligible_column", self._migration_add_captain_eligible_column),
+            ("add_lobby_type_column", self._migration_add_lobby_type_column),
         ]
 
     # --- Migrations ---
@@ -710,3 +711,7 @@ class SchemaManager:
     def _migration_add_captain_eligible_column(self, cursor) -> None:
         """Add is_captain_eligible column to players for Immortal Draft mode."""
         self._add_column_if_not_exists(cursor, "players", "is_captain_eligible", "INTEGER DEFAULT 0")
+
+    def _migration_add_lobby_type_column(self, cursor) -> None:
+        """Add lobby_type column to matches for tracking shuffle vs draft mode."""
+        self._add_column_if_not_exists(cursor, "matches", "lobby_type", "TEXT DEFAULT 'shuffle'")
