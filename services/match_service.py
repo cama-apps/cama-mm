@@ -170,6 +170,7 @@ class MatchService:
             "shuffle_message_id": state.get("shuffle_message_id"),
             "shuffle_channel_id": state.get("shuffle_channel_id"),
             "betting_mode": state.get("betting_mode", "pool"),
+            "is_draft": state.get("is_draft", False),
         }
 
     def _persist_match_state(self, guild_id: int | None, state: dict) -> None:
@@ -454,6 +455,7 @@ class MatchService:
             "shuffle_message_id": None,
             "shuffle_channel_id": None,
             "betting_mode": betting_mode,
+            "is_draft": False,
         }
         self.set_last_shuffle(guild_id, shuffle_state)
         self._persist_match_state(guild_id, shuffle_state)
@@ -552,11 +554,15 @@ class MatchService:
             winning_ids = radiant_team_ids if winning_team == "radiant" else dire_team_ids
             losing_ids = dire_team_ids if winning_team == "radiant" else radiant_team_ids
 
+            # Determine lobby type from pending state (draft sets is_draft=True)
+            lobby_type = "draft" if last_shuffle.get("is_draft") else "shuffle"
+
             match_id = self.match_repo.record_match(
                 team1_ids=radiant_team_ids,
                 team2_ids=dire_team_ids,
                 winning_team=1 if winning_team == "radiant" else 2,
                 dotabuff_match_id=dotabuff_match_id,
+                lobby_type=lobby_type,
             )
 
             # Persist win/loss counters for all players in the match (prefer single transaction).
