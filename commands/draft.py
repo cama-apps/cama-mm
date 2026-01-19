@@ -1430,6 +1430,11 @@ class DraftCommands(commands.Cog):
             # Get pending state for betting display
             pending_state = self.match_service.get_last_shuffle(guild_id)
 
+            # Decay exclusion counts for included players (same as shuffle mode)
+            included_player_ids = state.radiant_player_ids + state.dire_player_ids
+            for pid in included_player_ids:
+                self.player_repo.decay_exclusion_count(pid)
+
             # Save thread ID before resetting lobby
             lobby_service = getattr(self.bot, "lobby_service", None)
             thread_id = lobby_service.get_lobby_thread_id() if lobby_service else None
