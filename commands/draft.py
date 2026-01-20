@@ -10,8 +10,11 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+import math
+
 from config import BET_LOCK_SECONDS, JOPACOIN_MIN_BET, LOBBY_READY_THRESHOLD
 from domain.models.draft import SNAKE_DRAFT_ORDER, DraftPhase, DraftState
+from rating_system import CamaRatingSystem
 from domain.services.draft_service import DraftService
 from services.draft_state_manager import DraftStateManager
 from services.permissions import has_admin_permission
@@ -430,6 +433,17 @@ class DraftCommands(commands.Cog):
                 ephemeral=True,
             )
             return
+
+        # Clear any pending stakes if a match was created from the draft
+        if self.match_service:
+            pending_state = self.match_service.get_last_shuffle(guild_id)
+            if pending_state and pending_state.get("is_draft"):
+                # Clear stakes
+                stake_service = getattr(self.bot, "stake_service", None)
+                if stake_service:
+                    stake_service.clear_stakes(guild_id, pending_state)
+                # Clear pending match
+                self.match_service.clear_last_shuffle(guild_id)
 
         # Clear the draft state
         self.draft_state_manager.clear_state(guild_id)
@@ -1541,6 +1555,21 @@ class DraftCommands(commands.Cog):
         dire_value = sum(p.glicko_rating or 1500.0 for p in dire_players)
         value_diff = abs(radiant_value - dire_value)
 
+        # Calculate win probability for stake pool using Glicko-2 expected outcome
+        radiant_mean = radiant_value / len(radiant_players) if radiant_players else 1500.0
+        dire_mean = dire_value / len(dire_players) if dire_players else 1500.0
+
+        # Calculate RMS RD for each team
+        radiant_rds = [p.glicko_rd or 350.0 for p in radiant_players]
+        dire_rds = [p.glicko_rd or 350.0 for p in dire_players]
+        radiant_rms_rd = math.sqrt(sum(rd**2 for rd in radiant_rds) / len(radiant_rds)) if radiant_rds else 350.0
+        dire_rms_rd = math.sqrt(sum(rd**2 for rd in dire_rds) / len(dire_rds)) if dire_rds else 350.0
+
+        # Calculate expected win probability
+        radiant_win_prob = CamaRatingSystem.expected_outcome(
+            radiant_mean, radiant_rms_rd, dire_mean, dire_rms_rd
+        )
+
         # Create shuffle state dict compatible with match_service
         shuffle_state = {
             "radiant_team_ids": state.radiant_player_ids,
@@ -1562,7 +1591,30 @@ class DraftCommands(commands.Cog):
             "shuffle_channel_id": state.draft_channel_id,
             "betting_mode": "pool",  # Default to pool mode for drafts
             "is_draft": True,  # Mark as draft for any special handling
+            "stake_radiant_win_prob": radiant_win_prob,  # For stake pool calculations
         }
+
+        # Create stakes for player stake pool (draft only)
+        stake_service = getattr(self.bot, "stake_service", None)
+        stake_result = None
+        if stake_service and stake_service.is_enabled():
+            stake_result = stake_service.create_stakes_for_draft(
+                guild_id=guild_id,
+                radiant_ids=state.radiant_player_ids,
+                dire_ids=state.dire_player_ids,
+                excluded_ids=state.excluded_player_ids,
+                radiant_win_prob=radiant_win_prob,
+                stake_time=now_ts,
+            )
+            shuffle_state["stake_pool_created"] = True
+            shuffle_state["stake_result"] = stake_result
+            logger.info(
+                f"Created stake pool for draft: radiant_win_prob={radiant_win_prob:.2f}, "
+                f"radiant_payout={stake_result.get('radiant_payout_if_win')}, "
+                f"dire_payout={stake_result.get('dire_payout_if_win')}"
+            )
+        else:
+            shuffle_state["stake_pool_created"] = False
 
         self.match_service.set_last_shuffle(guild_id, shuffle_state)
         self.match_service._persist_match_state(guild_id, shuffle_state)
@@ -1705,6 +1757,57 @@ class DraftCommands(commands.Cog):
                     f"🔴 Dire: {blind_bets['total_dire']} {JOPACOIN_EMOTE}"
                 )
                 embed.add_field(name="🎲 Blind Bets", value=blind_note, inline=False)
+
+            # Player Stake Pool (draft mode only) - Dual Pool System
+            stake_service = getattr(self.bot, "stake_service", None)
+            if stake_service and stake_service.is_enabled() and pending_state.get("stake_pool_created"):
+                stake_result = pending_state.get("stake_result", {})
+                radiant_win_prob = stake_result.get("radiant_win_prob", 0.5)
+                dire_win_prob = 1.0 - radiant_win_prob
+                radiant_auto = stake_result.get("radiant_auto", 25)
+                dire_auto = stake_result.get("dire_auto", 25)
+                pool_size = stake_result.get("pool_size", 50)
+                radiant_mult = stake_result.get("initial_radiant_multiplier", 2.0)
+                dire_mult = stake_result.get("initial_dire_multiplier", 2.0)
+                excluded_count = len(state.excluded_player_ids)
+                excluded_payout_radiant = stake_result.get("excluded_payout_if_radiant_wins", 10)
+                excluded_payout_dire = stake_result.get("excluded_payout_if_dire_wins", 10)
+
+                # Determine favored team
+                if radiant_win_prob > 0.52:
+                    radiant_label = f"🟢 Radiant ({radiant_win_prob*100:.0f}% favored)"
+                    dire_label = f"🔴 Dire ({dire_win_prob*100:.0f}% underdog)"
+                elif dire_win_prob > 0.52:
+                    radiant_label = f"🟢 Radiant ({radiant_win_prob*100:.0f}% underdog)"
+                    dire_label = f"🔴 Dire ({dire_win_prob*100:.0f}% favored)"
+                else:
+                    radiant_label = f"🟢 Radiant ({radiant_win_prob*100:.0f}%)"
+                    dire_label = f"🔴 Dire ({dire_win_prob*100:.0f}%)"
+
+                # Player Pool: auto-liquidity + optional player bets
+                player_pool_note = (
+                    f"**{pool_size} {JOPACOIN_EMOTE} auto-liquidity** (Glicko-weighted)\n"
+                    f"{radiant_label}: {radiant_auto:.1f} {JOPACOIN_EMOTE} → **{radiant_mult:.2f}x**\n"
+                    f"{dire_label}: {dire_auto:.1f} {JOPACOIN_EMOTE} → **{dire_mult:.2f}x**\n"
+                    f"*Players: `/bet` on your team to add to pool*"
+                )
+                if excluded_count > 0:
+                    player_pool_note += (
+                        f"\nExcluded ({excluded_count}): **{excluded_payout_radiant}** if Rad / "
+                        f"**{excluded_payout_dire}** if Dire"
+                    )
+
+                embed.add_field(name="🎯 Player Stake Pool", value=player_pool_note, inline=False)
+
+            # Spectator Pool (draft mode only)
+            spectator_pool_service = getattr(self.bot, "spectator_pool_service", None)
+            if spectator_pool_service and pending_state.get("is_draft"):
+                spectator_note = (
+                    "Spectators: `/bet <team> <amount>`\n"
+                    "90% to winning bettors, 10% to winning players\n"
+                    "Pool: 🟢 0 JC | 🔴 0 JC"
+                )
+                embed.add_field(name="🎲 Spectator Pool", value=spectator_note, inline=False)
 
             # Current wagers
             guild_id = state.guild_id

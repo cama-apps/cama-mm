@@ -51,6 +51,12 @@ from config import (
     LOBBY_MAX_PLAYERS,
     LOBBY_READY_THRESHOLD,
     MAX_DEBT,
+    PLAYER_STAKE_ENABLED,
+    PLAYER_STAKE_PER_PLAYER,
+    PLAYER_STAKE_POOL_SIZE,
+    SPECTATOR_POOL_PLAYER_CUT,
+    STAKE_WIN_PROB_MAX,
+    STAKE_WIN_PROB_MIN,
     USE_GLICKO,
 )
 from database import Database
@@ -72,8 +78,13 @@ from services.recalibration_service import RecalibrationService
 from repositories.recalibration_repository import RecalibrationRepository
 from repositories.disburse_repository import DisburseRepository
 from repositories.prediction_repository import PredictionRepository
+from repositories.stake_repository import StakeRepository
+from repositories.spectator_bet_repository import SpectatorBetRepository
+from repositories.player_pool_bet_repository import PlayerPoolBetRepository
 from services.match_service import MatchService
+from services.spectator_pool_service import SpectatorPoolConfig, SpectatorPoolService
 from services.prediction_service import PredictionService
+from services.stake_service import StakePoolConfig, StakeService
 from services.permissions import has_admin_permission  # noqa: F401 - used by tests
 from services.player_service import PlayerService
 from services.opendota_player_service import OpenDotaPlayerService
@@ -217,6 +228,39 @@ def _init_services():
     # Create OpenDota player service for profile stats
     opendota_player_service = OpenDotaPlayerService(player_repo)
     bot.opendota_player_service = opendota_player_service
+
+    # Create stake service for draft mode player pool
+    stake_repo = StakeRepository(DB_PATH)
+    player_pool_bet_repo = PlayerPoolBetRepository(DB_PATH)
+    stake_config = StakePoolConfig(
+        pool_size=PLAYER_STAKE_POOL_SIZE,
+        stake_per_player=PLAYER_STAKE_PER_PLAYER,
+        enabled=PLAYER_STAKE_ENABLED,
+        win_prob_min=STAKE_WIN_PROB_MIN,
+        win_prob_max=STAKE_WIN_PROB_MAX,
+    )
+    stake_service = StakeService(
+        stake_repo, player_repo, player_pool_bet_repo, stake_config
+    )
+    bot.stake_service = stake_service
+    bot.stake_repo = stake_repo
+    bot.player_pool_bet_repo = player_pool_bet_repo
+
+    # Create spectator pool service for non-participant betting
+    spectator_bet_repo = SpectatorBetRepository(DB_PATH)
+    spectator_pool_config = SpectatorPoolConfig(
+        enabled=True,
+        player_cut=SPECTATOR_POOL_PLAYER_CUT,
+    )
+    spectator_pool_service = SpectatorPoolService(
+        spectator_bet_repo, player_repo, spectator_pool_config
+    )
+    bot.spectator_pool_service = spectator_pool_service
+    bot.spectator_bet_repo = spectator_bet_repo
+
+    # Update match_service with stake and spectator services
+    match_service.stake_service = stake_service
+    match_service.spectator_pool_service = spectator_pool_service
 
     # Create AI services (optional - only if CEREBRAS_API_KEY is set)
     ai_service = None
