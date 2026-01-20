@@ -59,9 +59,10 @@ async def test_setinitialrating_happy_path(monkeypatch):
     assert repo.updates, "update_glicko_rating should be called"
     _pid, rating, rd, vol = repo.updates[0]
     assert rating == 2500.0
-    assert rd == 300.0
+    assert rd == 100.0  # RD should be preserved from existing rating_data
     assert vol == 0.07
     assert any("Set initial rating" in msg for msg, _ep in interaction.response_messages)
+    assert any("RD kept at 100.0" in msg for msg, _ep in interaction.response_messages)
 
 
 @pytest.mark.asyncio

@@ -587,24 +587,26 @@ class AdminCommands(commands.Cog):
             )
             return
 
-        # Keep existing volatility if available
+        # Keep existing RD and volatility if available
+        rd = 300.0
         vol = 0.06
         rating_data = self.player_repo.get_glicko_rating(user.id)
         if rating_data:
-            _current_rating, _current_rd, current_vol = rating_data
+            _current_rating, current_rd, current_vol = rating_data
+            if current_rd is not None:
+                rd = current_rd
             if current_vol is not None:
                 vol = current_vol
 
-        rd_reset = 300.0
-        self.player_repo.update_glicko_rating(user.id, rating, rd_reset, vol)
+        self.player_repo.update_glicko_rating(user.id, rating, rd, vol)
 
         await interaction.response.send_message(
-            f"✅ Set initial rating for {user.mention} to {rating} (RD reset to {rd_reset}).",
+            f"✅ Set initial rating for {user.mention} to {rating} (RD kept at {rd:.1f}).",
             ephemeral=True,
         )
         logger.info(
             f"Admin {interaction.user.id} ({interaction.user}) set initial rating for "
-            f"{user.id} ({user}) to {rating} with RD={rd_reset}"
+            f"{user.id} ({user}) to {rating} with RD={rd:.1f}"
         )
 
     @app_commands.command(
