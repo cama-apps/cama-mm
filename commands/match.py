@@ -781,6 +781,28 @@ class MatchCommands(commands.Cog):
         if distribution_lines:
             distribution_text = "\n" + "\n".join(distribution_lines)
 
+        # Add stake distribution info (draft mode only)
+        stake_distributions = record_result.get("stake_distributions", {})
+        if stake_distributions.get("enabled") and stake_distributions.get("winners"):
+            stake_winners = stake_distributions.get("winners", [])
+            payout_per_winner = stake_distributions.get("payout_per_winner", 0)
+            total_payout = stake_distributions.get("total_payout", 0)
+
+            # Count team winners vs excluded
+            team_winners = [w for w in stake_winners if not w.get("is_excluded")]
+            excluded_winners = [w for w in stake_winners if w.get("is_excluded")]
+
+            stake_text = f"\n\n🎯 **Stake Pool Payouts:** +{payout_per_winner} {JOPACOIN_EMOTE} each"
+            if team_winners:
+                stake_text += f"\n  Winners ({len(team_winners)}): "
+                stake_text += ", ".join(f"<@{w['discord_id']}>" for w in team_winners)
+            if excluded_winners:
+                stake_text += f"\n  Excluded ({len(excluded_winners)}): "
+                stake_text += ", ".join(f"<@{w['discord_id']}>" for w in excluded_winners)
+            stake_text += f"\n  **Total minted:** {total_payout} {JOPACOIN_EMOTE}"
+
+            distribution_text += stake_text
+
         # Generate AI flavor text for a notable bettor
         ai_flavor = None
         notable_bettor = None  # Track for exclusion from match flavor
@@ -981,12 +1003,26 @@ class MatchCommands(commands.Cog):
         self, interaction: discord.Interaction, guild_id: int | None, admin_override: bool
     ):
         betting_service = getattr(self.bot, "betting_service", None)
+        stake_service = getattr(self.bot, "stake_service", None)
+        spectator_pool_service = getattr(self.bot, "spectator_pool_service", None)
         pending_state = self.match_service.get_last_shuffle(guild_id)
         if betting_service and pending_state:
             try:
                 betting_service.refund_pending_bets(guild_id, pending_state)
             except Exception as exc:
                 logger.error(f"Error refunding pending bets on abort: {exc}", exc_info=True)
+        # Clear player stakes (draft mode - refunds player pool bets)
+        if stake_service and pending_state and pending_state.get("is_draft"):
+            try:
+                stake_service.clear_stakes(guild_id, pending_state)
+            except Exception as exc:
+                logger.error(f"Error clearing stakes on abort: {exc}", exc_info=True)
+        # Refund spectator pool bets (draft mode only)
+        if spectator_pool_service and pending_state and pending_state.get("is_draft"):
+            try:
+                spectator_pool_service.refund_bets(guild_id, pending_state)
+            except Exception as exc:
+                logger.error(f"Error refunding spectator bets on abort: {exc}", exc_info=True)
         # Cancel any pending betting reminders
         self._cancel_betting_tasks(guild_id)
 

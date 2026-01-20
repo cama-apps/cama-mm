@@ -199,6 +199,9 @@ class SchemaManager:
             ("add_first_calibrated_at_to_players", self._migration_add_first_calibrated_at_to_players),
             ("add_captain_eligible_column", self._migration_add_captain_eligible_column),
             ("add_lobby_type_column", self._migration_add_lobby_type_column),
+            ("create_player_stakes_table", self._migration_create_player_stakes_table),
+            ("create_spectator_bets_table", self._migration_create_spectator_bets_table),
+            ("create_player_pool_bets_table", self._migration_create_player_pool_bets_table),
         ]
 
     # --- Migrations ---
@@ -715,3 +718,87 @@ class SchemaManager:
     def _migration_add_lobby_type_column(self, cursor) -> None:
         """Add lobby_type column to matches for tracking shuffle vs draft mode."""
         self._add_column_if_not_exists(cursor, "matches", "lobby_type", "TEXT DEFAULT 'shuffle'")
+
+    def _migration_create_player_stakes_table(self, cursor) -> None:
+        """Create table for player stake pool in draft mode."""
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS player_stakes (
+                stake_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL DEFAULT 0,
+                match_id INTEGER,
+                discord_id INTEGER NOT NULL,
+                team TEXT NOT NULL,
+                is_excluded INTEGER DEFAULT 0,
+                payout INTEGER,
+                stake_time INTEGER NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (match_id) REFERENCES matches(match_id),
+                FOREIGN KEY (discord_id) REFERENCES players(discord_id)
+            )
+            """
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_player_stakes_guild_match "
+            "ON player_stakes(guild_id, match_id, stake_time)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_player_stakes_discord "
+            "ON player_stakes(discord_id)"
+        )
+
+    def _migration_create_spectator_bets_table(self, cursor) -> None:
+        """Create table for spectator pool bets (parimutuel with player cut)."""
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS spectator_bets (
+                bet_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL DEFAULT 0,
+                match_id INTEGER,
+                discord_id INTEGER NOT NULL,
+                team TEXT NOT NULL,
+                amount INTEGER NOT NULL,
+                bet_time INTEGER NOT NULL,
+                payout INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (match_id) REFERENCES matches(match_id),
+                FOREIGN KEY (discord_id) REFERENCES players(discord_id)
+            )
+            """
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_spectator_bets_guild_match "
+            "ON spectator_bets(guild_id, match_id, bet_time)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_spectator_bets_discord "
+            "ON spectator_bets(discord_id)"
+        )
+
+    def _migration_create_player_pool_bets_table(self, cursor) -> None:
+        """Create table for player pool bets (real JC bets by match participants)."""
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS player_pool_bets (
+                bet_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL DEFAULT 0,
+                match_id INTEGER,
+                discord_id INTEGER NOT NULL,
+                team TEXT NOT NULL,
+                amount INTEGER NOT NULL,
+                bet_time INTEGER NOT NULL,
+                payout INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (match_id) REFERENCES matches(match_id),
+                FOREIGN KEY (discord_id) REFERENCES players(discord_id)
+            )
+            """
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_player_pool_bets_guild_match "
+            "ON player_pool_bets(guild_id, match_id, bet_time)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_player_pool_bets_discord "
+            "ON player_pool_bets(discord_id)"
+        )

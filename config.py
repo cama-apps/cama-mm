@@ -142,3 +142,13 @@ MMR_MODAL_RETRY_LIMIT = _parse_int("MMR_MODAL_RETRY_LIMIT", 3)  # Maximum retrie
 RECALIBRATION_COOLDOWN_SECONDS = _parse_int("RECALIBRATION_COOLDOWN_SECONDS", 7776000)  # 90 days
 RECALIBRATION_INITIAL_RD = _parse_float("RECALIBRATION_INITIAL_RD", 350.0)  # RD to reset to
 RECALIBRATION_INITIAL_VOLATILITY = _parse_float("RECALIBRATION_INITIAL_VOLATILITY", 0.06)  # Volatility to reset to
+
+# Player Stake Pool configuration (draft mode auto-liquidity)
+PLAYER_STAKE_POOL_SIZE = _parse_int("PLAYER_STAKE_POOL_SIZE", 50)  # Total auto-liquidity pool (5 per drafted player)
+PLAYER_STAKE_PER_PLAYER = _parse_int("PLAYER_STAKE_PER_PLAYER", 5)  # Auto-liquidity per drafted player
+PLAYER_STAKE_ENABLED = _parse_bool("PLAYER_STAKE_ENABLED", True)  # Enable stake pool in draft mode
+STAKE_WIN_PROB_MIN = _parse_float("STAKE_WIN_PROB_MIN", 0.10)  # Clamp to prevent extreme odds
+STAKE_WIN_PROB_MAX = _parse_float("STAKE_WIN_PROB_MAX", 0.90)
+
+# Spectator Pool configuration
+SPECTATOR_POOL_PLAYER_CUT = _parse_float("SPECTATOR_POOL_PLAYER_CUT", 0.10)  # 10% to winning players
