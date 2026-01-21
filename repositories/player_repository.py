@@ -167,6 +167,43 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             rows = cursor.fetchall()
             return [self._row_to_player(row) for row in rows]
 
+    def get_leaderboard(self, limit: int = 20, offset: int = 0) -> list[Player]:
+        """
+        Get players for leaderboard, sorted by jopacoin balance descending.
+
+        Uses SQL sorting to avoid loading all players into memory.
+
+        Args:
+            limit: Maximum number of players to return
+            offset: Number of players to skip (for pagination)
+
+        Returns:
+            List of Player objects sorted by jopacoin_balance DESC, wins DESC, glicko_rating DESC
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT * FROM players
+                ORDER BY
+                    COALESCE(jopacoin_balance, 0) DESC,
+                    COALESCE(wins, 0) DESC,
+                    COALESCE(glicko_rating, 0) DESC
+                LIMIT ? OFFSET ?
+                """,
+                (limit, offset),
+            )
+            rows = cursor.fetchall()
+            return [self._row_to_player(row) for row in rows]
+
+    def get_player_count(self) -> int:
+        """Get total number of players."""
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) as count FROM players")
+            row = cursor.fetchone()
+            return row["count"] if row else 0
+
     def exists(self, discord_id: int) -> bool:
         """Check if a player exists."""
         with self.connection() as conn:

@@ -863,6 +863,164 @@ class BetRepository(BaseRepository, IBetRepository):
             "loss_chase_rate": loss_chase_rate,
         }
 
+    def get_bulk_leverage_distribution(
+        self, guild_id: int | None, discord_ids: list[int]
+    ) -> dict[int, dict[int, int]]:
+        """
+        Get leverage distribution for multiple players in a single query.
+
+        Returns dict[discord_id, dict[leverage, count]] for efficient batch processing.
+        """
+        if not discord_ids:
+            return {}
+
+        normalized_guild = self._normalize_guild_id(guild_id)
+        placeholders = ",".join("?" * len(discord_ids))
+
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"""
+                SELECT discord_id, COALESCE(leverage, 1) as leverage, COUNT(*) as count
+                FROM bets
+                WHERE guild_id = ? AND match_id IS NOT NULL AND discord_id IN ({placeholders})
+                GROUP BY discord_id, COALESCE(leverage, 1)
+                """,
+                (normalized_guild, *discord_ids),
+            )
+            rows = cursor.fetchall()
+
+        # Build nested dict structure
+        result: dict[int, dict[int, int]] = {did: {} for did in discord_ids}
+        for row in rows:
+            discord_id = row["discord_id"]
+            leverage = row["leverage"]
+            count = row["count"]
+            if discord_id in result:
+                result[discord_id][leverage] = count
+
+        return result
+
+    def get_bulk_loss_chasing_data(
+        self, guild_id: int | None, discord_ids: list[int]
+    ) -> dict[int, dict]:
+        """
+        Get loss chasing data for multiple players in a single query.
+
+        Returns dict[discord_id, {"sequences_analyzed": int, "times_increased_after_loss": int}]
+        """
+        if not discord_ids:
+            return {}
+
+        normalized_guild = self._normalize_guild_id(guild_id)
+        placeholders = ",".join("?" * len(discord_ids))
+
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            # Get bet history with outcome for all players in one query
+            cursor.execute(
+                f"""
+                SELECT
+                    b.discord_id,
+                    b.bet_id,
+                    b.amount * COALESCE(b.leverage, 1) as effective_bet,
+                    b.bet_time,
+                    CASE
+                        WHEN (m.winning_team = 1 AND b.team_bet_on = 'radiant')
+                          OR (m.winning_team = 2 AND b.team_bet_on = 'dire')
+                        THEN 'won' ELSE 'lost'
+                    END as outcome
+                FROM bets b
+                JOIN matches m ON b.match_id = m.match_id
+                WHERE b.guild_id = ? AND b.match_id IS NOT NULL AND b.discord_id IN ({placeholders})
+                ORDER BY b.discord_id, b.bet_time ASC
+                """,
+                (normalized_guild, *discord_ids),
+            )
+            rows = cursor.fetchall()
+
+        # Group by discord_id and calculate loss chasing
+        result: dict[int, dict] = {
+            did: {"sequences_analyzed": 0, "times_increased_after_loss": 0}
+            for did in discord_ids
+        }
+
+        # Process rows grouped by player
+        current_player: int | None = None
+        player_history: list[dict] = []
+
+        def process_player_history(player_id: int, history: list[dict]) -> None:
+            if len(history) < 2:
+                return
+            times_increased = 0
+            loss_sequences = 0
+            for i in range(1, len(history)):
+                if history[i - 1]["outcome"] == "lost":
+                    loss_sequences += 1
+                    if history[i]["effective_bet"] > history[i - 1]["effective_bet"]:
+                        times_increased += 1
+            result[player_id]["sequences_analyzed"] = loss_sequences
+            result[player_id]["times_increased_after_loss"] = times_increased
+
+        for row in rows:
+            discord_id = row["discord_id"]
+            if discord_id != current_player:
+                if current_player is not None:
+                    process_player_history(current_player, player_history)
+                current_player = discord_id
+                player_history = []
+            player_history.append(dict(row))
+
+        # Process last player
+        if current_player is not None:
+            process_player_history(current_player, player_history)
+
+        return result
+
+    def get_bulk_bankruptcy_counts(self, discord_ids: list[int]) -> dict[int, int]:
+        """
+        Get bankruptcy counts for multiple players in a single query.
+
+        Returns dict[discord_id, count].
+        """
+        if not discord_ids:
+            return {}
+
+        placeholders = ",".join("?" * len(discord_ids))
+
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"""
+                SELECT discord_id, COALESCE(bankruptcy_count, 0) as count
+                FROM bankruptcy_state
+                WHERE discord_id IN ({placeholders})
+                """,
+                discord_ids,
+            )
+            rows = cursor.fetchall()
+
+        result = {did: 0 for did in discord_ids}
+        for row in rows:
+            result[row["discord_id"]] = row["count"]
+
+        return result
+
+    def get_total_settled_matches(self, guild_id: int | None = None) -> int:
+        """
+        Get total count of settled matches (for degen score frequency calculation).
+
+        Args:
+            guild_id: Optional guild filter. If None, counts all matches.
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT COUNT(*) as count FROM matches WHERE winning_team IS NOT NULL"
+            )
+            row = cursor.fetchone()
+            return row["count"] if row else 0
+
     def get_bets_on_player_matches(self, target_discord_id: int) -> list[dict]:
         """
         Get all bets by OTHER players on matches where target_discord_id participated.
