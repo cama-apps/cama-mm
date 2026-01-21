@@ -20,6 +20,106 @@ from utils.rating_insights import compute_calibration_stats, rd_to_certainty
 
 logger = logging.getLogger("cama_bot.commands.info")
 
+LEADERBOARD_PAGE_SIZE = 20  # Players per page (fits within 4096 char embed limit)
+
+
+class LeaderboardView(discord.ui.View):
+    """Paginated view for leaderboard with Previous/Next buttons."""
+
+    def __init__(
+        self,
+        players_with_stats: list[dict],
+        total_player_count: int,
+        rating_system: "CamaRatingSystem",
+        timeout: float = 840.0,  # 14 minutes (max is 15)
+    ):
+        super().__init__(timeout=timeout)
+        self.players = players_with_stats
+        self.total_player_count = total_player_count
+        self.rating_system = rating_system
+        self.current_page = 0
+        self.max_page = (len(players_with_stats) - 1) // LEADERBOARD_PAGE_SIZE
+        self.message: discord.Message | None = None  # Store message reference for deletion
+        self._update_buttons()
+
+    def _update_buttons(self) -> None:
+        """Enable/disable buttons based on current page."""
+        self.prev_button.disabled = self.current_page == 0
+        self.next_button.disabled = self.current_page >= self.max_page
+
+    def build_embed(self) -> discord.Embed:
+        """Build the embed for the current page."""
+        embed = discord.Embed(title="🏆 Leaderboard", color=discord.Color.gold())
+
+        start_idx = self.current_page * LEADERBOARD_PAGE_SIZE
+        end_idx = start_idx + LEADERBOARD_PAGE_SIZE
+        page_players = self.players[start_idx:end_idx]
+
+        leaderboard_text = ""
+        for i, entry in enumerate(page_players, start=start_idx + 1):
+            medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"{i}."
+            stats = f"{entry['wins']}-{entry['losses']}"
+            if entry["wins"] + entry["losses"] > 0:
+                stats += f" ({entry['win_rate']:.0f}%)"
+            rating_display = f" [{entry['rating']}]" if entry["rating"] is not None else ""
+            is_real_user = entry["discord_id"] and entry["discord_id"] > 0
+            display_name = f"<@{entry['discord_id']}>" if is_real_user else entry["username"]
+            jopacoin_balance = entry.get("jopacoin_balance", 0) or 0
+            jopacoin_display = f"{jopacoin_balance} {JOPACOIN_EMOTE}"
+            line = f"{medal} **{display_name}** - {jopacoin_display} - {stats}{rating_display}\n"
+            leaderboard_text += line
+
+        embed.description = leaderboard_text
+
+        # Footer with page info
+        page_info = f"Page {self.current_page + 1}/{self.max_page + 1}"
+        if self.total_player_count > len(self.players):
+            page_info += f" • Showing {len(self.players)} of {self.total_player_count} players"
+        embed.set_footer(text=page_info)
+
+        # Add Wall of Shame on first page only
+        if self.current_page == 0:
+            debtors = [p for p in self.players if p["jopacoin_balance"] < 0]
+            if debtors:
+                debtors.sort(key=lambda x: x["jopacoin_balance"])
+                shame_text = ""
+                for i, debtor in enumerate(debtors[:10], 1):
+                    is_real_user = debtor["discord_id"] and debtor["discord_id"] > 0
+                    display_name = (
+                        f"<@{debtor['discord_id']}>" if is_real_user else debtor["username"]
+                    )
+                    shame_text += (
+                        f"{i}. {display_name} - {debtor['jopacoin_balance']} {JOPACOIN_EMOTE}\n"
+                    )
+                embed.add_field(name="Wall of Shame", value=shame_text, inline=False)
+
+        return embed
+
+    @discord.ui.button(label="◀ Previous", style=discord.ButtonStyle.secondary)
+    async def prev_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Go to previous page."""
+        self.current_page = max(0, self.current_page - 1)
+        self._update_buttons()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    @discord.ui.button(label="Next ▶", style=discord.ButtonStyle.secondary)
+    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Go to next page."""
+        self.current_page = min(self.max_page, self.current_page + 1)
+        self._update_buttons()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    async def on_timeout(self) -> None:
+        """Delete the message when view times out."""
+        if self.message:
+            try:
+                await self.message.delete()
+                logger.info(f"Leaderboard message {self.message.id} deleted after timeout")
+            except discord.NotFound:
+                pass  # Already deleted
+            except discord.HTTPException as e:
+                logger.warning(f"Failed to delete leaderboard message: {e}")
+
 
 class InfoCommands(commands.Cog):
     """Commands for viewing information and leaderboards."""
@@ -320,103 +420,25 @@ class InfoCommands(commands.Cog):
                 )
                 return
 
-            embed = discord.Embed(title="🏆 Leaderboard", color=discord.Color.gold())
-
-            leaderboard_text = ""
-            for i, entry in enumerate(players_with_stats[:limit], 1):
-                medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"{i}."
-                stats = f"{entry['wins']}-{entry['losses']}"
-                if entry["wins"] + entry["losses"] > 0:
-                    stats += f" ({entry['win_rate']:.0f}%)"
-                rating_display = f" [{entry['rating']}]" if entry["rating"] is not None else ""
-                is_real_user = entry["discord_id"] and entry["discord_id"] > 0
-                display_name = f"<@{entry['discord_id']}>" if is_real_user else entry["username"]
-                jopacoin_balance = entry.get("jopacoin_balance", 0) or 0
-                jopacoin_display = f"{jopacoin_balance} {JOPACOIN_EMOTE}"
-                line = (
-                    f"{medal} **{display_name}** - {jopacoin_display} - {stats}{rating_display}\n"
-                )
-                leaderboard_text += line
-                # Log first entry to verify format
-                if i == 1:
-                    logger.info(f"First leaderboard line format: {line.strip()}")
-                    _dbg_log(
-                        "H5",
-                        "commands/info.py:leaderboard:first_line",
-                        "first line formatted",
-                        {"line": line.strip()},
-                    )
-
-            embed.description = leaderboard_text
-            displayed_count = len(players_with_stats[:limit])
-            logger.info(f"Leaderboard embed created with {displayed_count} entries (limit={limit})")
-            _dbg_log(
-                "H6",
-                "commands/info.py:leaderboard:embed",
-                "embed ready",
-                {
-                    "entries": displayed_count,
-                    "limit": limit,
-                    "first_line": leaderboard_text.splitlines()[0]
-                    if leaderboard_text.splitlines()
-                    else "",
-                },
+            # Use paginated view for leaderboard
+            view = LeaderboardView(
+                players_with_stats=players_with_stats,
+                total_player_count=total_player_count,
+                rating_system=rating_system,
             )
+            embed = view.build_embed()
 
-            if total_player_count > len(players_with_stats):
-                embed.set_footer(text=f"Showing top {len(players_with_stats)} of {total_player_count} players")
+            logger.info(f"Leaderboard embed created with {len(players_with_stats)} entries, {view.max_page + 1} pages")
 
-            # Add Wall of Shame section for players with negative balances
-            debtors = [p for p in players_with_stats if p["jopacoin_balance"] < 0]
-            if debtors:
-                # Sort by most debt (most negative first)
-                debtors.sort(key=lambda x: x["jopacoin_balance"])
-                shame_text = ""
-                for i, debtor in enumerate(debtors[:10], 1):  # Cap at 10 debtors
-                    is_real_user = debtor["discord_id"] and debtor["discord_id"] > 0
-                    display_name = (
-                        f"<@{debtor['discord_id']}>" if is_real_user else debtor["username"]
-                    )
-                    shame_text += (
-                        f"{i}. {display_name} - {debtor['jopacoin_balance']} {JOPACOIN_EMOTE}\n"
-                    )
-
-                embed.add_field(
-                    name="Wall of Shame",
-                    value=shame_text,
-                    inline=False,
-                )
-
-            # AI insight for leaderboard - disabled
-            # guild_id = guild.id if guild else None
-            # if self.flavor_text_service and players_with_stats:
-            #     try:
-            #         leaderboard_data = {
-            #             "top_players": [
-            #                 {"name": p["username"], "balance": p["jopacoin_balance"], "win_rate": p["win_rate"]}
-            #                 for p in players_with_stats[:5]
-            #             ],
-            #             "bottom_players": [
-            #                 {"name": p["username"], "balance": p["jopacoin_balance"]}
-            #                 for p in debtors[:3]
-            #             ] if debtors else [],
-            #             "total_players": len(players_with_stats),
-            #         }
-            #         ai_insight = await self.flavor_text_service.generate_data_insight(
-            #             guild_id=guild_id,
-            #             data_type="leaderboard",
-            #             data=leaderboard_data,
-            #         )
-            #         if ai_insight:
-            #             embed.add_field(name="💬 AI Insight", value=ai_insight, inline=False)
-            #     except Exception as e:
-            #         logger.warning(f"Failed to generate AI insight for leaderboard: {e}")
-
-            await safe_followup(
+            message = await safe_followup(
                 interaction,
                 embed=embed,
+                view=view,
                 allowed_mentions=discord.AllowedMentions(users=True),
             )
+            # Store message reference for deletion on timeout
+            if message:
+                view.message = message
 
         except Exception as e:
             logger.error(f"Error in leaderboard command: {str(e)}", exc_info=True)
