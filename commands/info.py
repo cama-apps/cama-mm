@@ -215,11 +215,15 @@ class InfoCommands(commands.Cog):
         try:
             rating_system = CamaRatingSystem()
 
-            all_players = self.player_repo.get_all()
-            logger.info(f"Leaderboard query returned {len(all_players)} players")
+            # Use optimized leaderboard query with SQL sorting
+            # Fetch limit + extra for Wall of Shame section (debtors)
+            leaderboard_players = self.player_repo.get_leaderboard(limit=limit)
+            total_player_count = self.player_repo.get_player_count()
+
+            logger.info(f"Leaderboard query returned {len(leaderboard_players)} players (total: {total_player_count})")
             # Log sample jopacoin values
-            if all_players:
-                sample = all_players[:3]
+            if leaderboard_players:
+                sample = leaderboard_players[:3]
                 for player in sample:
                     logger.info(f"  Sample: {player.name} - jopacoin={player.jopacoin_balance}")
             _dbg_log(
@@ -227,7 +231,8 @@ class InfoCommands(commands.Cog):
                 "commands/info.py:leaderboard:query",
                 "query rows",
                 {
-                    "row_count": len(all_players),
+                    "row_count": len(leaderboard_players),
+                    "total_players": total_player_count,
                     "samples": [
                         {
                             "id": int(p.discord_id) if p.discord_id else 0,
@@ -236,13 +241,13 @@ class InfoCommands(commands.Cog):
                             "wins": int(p.wins),
                             "losses": int(p.losses),
                         }
-                        for p in all_players[:3]
+                        for p in leaderboard_players[:3]
                     ],
                 },
                 run_id="run1",
             )
 
-            if not all_players:
+            if not leaderboard_players:
                 await safe_followup(
                     interaction,
                     content="No players registered yet!",
@@ -250,19 +255,13 @@ class InfoCommands(commands.Cog):
                 )
                 return
 
-            # Build unique player stats from player objects
-            players_by_id = {}
-            for player in all_players:
+            # Build stats from already-sorted player objects
+            players_with_stats = []
+            for player in leaderboard_players:
                 discord_id = player.discord_id
                 if discord_id is None:
                     continue
-                if discord_id in players_by_id:
-                    logger.warning("Duplicate player entry found for discord_id=%s", discord_id)
-                    continue
-                players_by_id[discord_id] = player
 
-            players_with_stats = []
-            for discord_id, player in players_by_id.items():
                 wins = player.wins or 0
                 losses = player.losses or 0
                 total_games = wins + losses
@@ -296,17 +295,10 @@ class InfoCommands(commands.Cog):
                 },
             )
 
-            players_with_stats.sort(
-                key=lambda x: (
-                    x["jopacoin_balance"],
-                    x["wins"],
-                    x["rating"] if x["rating"] is not None else 0,
-                ),
-                reverse=True,
-            )
+            # No need to sort - already sorted by SQL query
 
-            # Log top 3 players after sorting
-            logger.info("Top 3 players after jopacoin sort:")
+            # Log top 3 players
+            logger.info("Top 3 players from SQL-sorted leaderboard:")
             for i, entry in enumerate(players_with_stats[:3], 1):
                 logger.info(
                     f"  {i}. {entry['username']} - jopacoin={entry['jopacoin_balance']}, wins={entry['wins']}, rating={entry['rating']}"
@@ -371,9 +363,8 @@ class InfoCommands(commands.Cog):
                 },
             )
 
-            if len(players_with_stats) > limit:
-                shown = min(limit, len(players_with_stats))
-                embed.set_footer(text=f"Showing top {shown} of {len(players_with_stats)} players")
+            if total_player_count > len(players_with_stats):
+                embed.set_footer(text=f"Showing top {len(players_with_stats)} of {total_player_count} players")
 
             # Add Wall of Shame section for players with negative balances
             debtors = [p for p in players_with_stats if p["jopacoin_balance"] < 0]

@@ -203,6 +203,7 @@ class SchemaManager:
             ("create_spectator_bets_table", self._migration_create_spectator_bets_table),
             ("create_player_pool_bets_table", self._migration_create_player_pool_bets_table),
             ("add_conditional_players_to_lobby", self._migration_add_conditional_players_to_lobby),
+            ("add_leaderboard_performance_indexes", self._migration_add_leaderboard_performance_indexes),
         ]
 
     # --- Migrations ---
@@ -808,4 +809,20 @@ class SchemaManager:
         """Add conditional_players column to lobby_state for frogling players."""
         self._add_column_if_not_exists(
             cursor, "lobby_state", "conditional_players", "TEXT DEFAULT '[]'"
+        )
+
+    def _migration_add_leaderboard_performance_indexes(self, cursor) -> None:
+        """Add indexes to improve leaderboard query performance."""
+        # Index for filtering bets by discord_id (used in gambling stats)
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_bets_discord_id ON bets(discord_id)"
+        )
+        # Composite index for guild + discord_id lookups
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_bets_guild_discord ON bets(guild_id, discord_id)"
+        )
+        # Index for player leaderboard sorting (jopacoin, wins)
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_players_leaderboard "
+            "ON players(jopacoin_balance DESC, wins DESC, glicko_rating DESC)"
         )

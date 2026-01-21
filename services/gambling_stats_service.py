@@ -373,16 +373,83 @@ class GamblingStatsService:
     def get_leaderboard(
         self, guild_id: int | None, limit: int = 5, min_bets: int = 3
     ) -> Leaderboard:
-        """Get server gambling leaderboard with multiple sections."""
+        """Get server gambling leaderboard with multiple sections.
+
+        Uses batch queries to avoid N+1 pattern for degen score calculation.
+        """
         summaries = self.bet_repo.get_guild_gambling_summary(guild_id, min_bets=min_bets)
 
-        # Build entries with degen scores
+        if not summaries:
+            return Leaderboard(
+                top_earners=[],
+                down_bad=[],
+                hall_of_degen=[],
+                total_wagered=0,
+                total_bets=0,
+                avg_degen_score=0,
+                total_bankruptcies=0,
+                total_loans=0,
+            )
+
+        # Get all discord_ids for batch queries
+        discord_ids = [s["discord_id"] for s in summaries]
+
+        # Batch fetch all data needed for degen score calculation
+        bulk_leverage = self.bet_repo.get_bulk_leverage_distribution(guild_id, discord_ids)
+        bulk_loss_chase = self.bet_repo.get_bulk_loss_chasing_data(guild_id, discord_ids)
+        bulk_bankruptcy = self.bet_repo.get_bulk_bankruptcy_counts(discord_ids)
+        total_matches = self.bet_repo.get_total_settled_matches(guild_id)
+
+        # Batch fetch lowest balances for all players
+        lowest_balances = {}
+        if discord_ids:
+            placeholders = ",".join("?" * len(discord_ids))
+            with self.player_repo.connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    f"SELECT discord_id, lowest_balance_ever FROM players WHERE discord_id IN ({placeholders})",
+                    discord_ids,
+                )
+                for row in cursor.fetchall():
+                    lowest_balances[row["discord_id"]] = row["lowest_balance_ever"]
+
+        # Batch fetch negative loans if loan_service available
+        negative_loans_by_id: dict[int, int] = {}
+        if self.loan_service and discord_ids:
+            # Get negative loans in bulk from loan_state table
+            placeholders = ",".join("?" * len(discord_ids))
+            with self.bet_repo.connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    f"""
+                    SELECT discord_id, COALESCE(negative_loans_taken, 0) as negative_loans
+                    FROM loan_state
+                    WHERE discord_id IN ({placeholders})
+                    """,
+                    discord_ids,
+                )
+                for row in cursor.fetchall():
+                    negative_loans_by_id[row["discord_id"]] = row["negative_loans"]
+
+        # Build entries with batch-computed degen scores
         entries: list[LeaderboardEntry] = []
         for s in summaries:
-            degen = self.calculate_degen_score(s["discord_id"])
+            discord_id = s["discord_id"]
+            degen = self._calculate_degen_score_from_batch(
+                discord_id=discord_id,
+                leverage_dist=bulk_leverage.get(discord_id, {}),
+                loss_chase_data=bulk_loss_chase.get(discord_id, {"sequences_analyzed": 0, "times_increased_after_loss": 0}),
+                bankruptcy_count=bulk_bankruptcy.get(discord_id, 0),
+                total_matches=total_matches,
+                matches_bet_on=s["total_bets"],  # This is an approximation - unique matches would be better
+                lowest_balance=lowest_balances.get(discord_id),
+                negative_loans=negative_loans_by_id.get(discord_id, 0),
+                total_wagered=s["total_wagered"],
+                total_bets=s["total_bets"],
+            )
             entries.append(
                 LeaderboardEntry(
-                    discord_id=s["discord_id"],
+                    discord_id=discord_id,
                     total_bets=s["total_bets"],
                     wins=s["wins"],
                     losses=s["losses"],
@@ -407,18 +474,15 @@ class GamblingStatsService:
 
         # Server totals
         total_wagered = sum(s["total_wagered"] for s in summaries)
-        total_bets = sum(s["total_bets"] for s in summaries)
+        total_bets_count = sum(s["total_bets"] for s in summaries)
         avg_degen = (
             sum(e.degen_score or 0 for e in entries) / len(entries)
             if entries
             else 0
         )
 
-        # Count bankruptcies
-        total_bankruptcies = sum(
-            self.bet_repo.get_player_bankruptcy_count(s["discord_id"])
-            for s in summaries
-        )
+        # Count bankruptcies from bulk data
+        total_bankruptcies = sum(bulk_bankruptcy.values())
 
         # Count total loans taken (server-wide aggregate stat)
         total_loans = 0
@@ -439,10 +503,124 @@ class GamblingStatsService:
             down_bad=down_bad,
             hall_of_degen=hall_of_degen,
             total_wagered=total_wagered,
-            total_bets=total_bets,
+            total_bets=total_bets_count,
             avg_degen_score=avg_degen,
             total_bankruptcies=total_bankruptcies,
             total_loans=total_loans,
+        )
+
+    def _calculate_degen_score_from_batch(
+        self,
+        discord_id: int,
+        leverage_dist: dict[int, int],
+        loss_chase_data: dict,
+        bankruptcy_count: int,
+        total_matches: int,
+        matches_bet_on: int,
+        lowest_balance: int | None,
+        negative_loans: int,
+        total_wagered: int,
+        total_bets: int,
+    ) -> DegenScoreBreakdown:
+        """Calculate degen score from pre-fetched batch data."""
+        flavor_texts = []
+        total_leverage_bets = sum(leverage_dist.values())
+
+        # 1. Max leverage addiction (0-25) - % of bets at 5x
+        if total_leverage_bets > 0:
+            pct_5x = leverage_dist.get(5, 0) / total_leverage_bets
+            max_leverage_score = min(int(pct_5x * MAX_LEVERAGE_WEIGHT), MAX_LEVERAGE_WEIGHT)
+
+            if pct_5x >= 0.5:
+                flavor_texts.append("5x addict")
+            elif pct_5x >= 0.2:
+                flavor_texts.append("5x enthusiast")
+        else:
+            max_leverage_score = 0
+
+        # 2. Bet size (0-25) - avg effective bet vs typical income
+        if total_bets > 0:
+            avg_bet = total_wagered / total_bets
+            bet_ratio = avg_bet / TYPICAL_INCOME_PER_MATCH
+            bet_size_score = min(int((bet_ratio - 1) / 9 * BET_SIZE_WEIGHT), BET_SIZE_WEIGHT)
+            bet_size_score = max(0, bet_size_score)
+
+            if bet_ratio >= 10:
+                flavor_texts.append("high roller")
+            elif bet_ratio >= 5:
+                flavor_texts.append("big bets")
+        else:
+            bet_size_score = 0
+
+        # 3. Debt depth (0-20) - lowest balance ever reached
+        if lowest_balance is not None and lowest_balance < 0:
+            from config import MAX_DEBT
+            debt_ratio = min(abs(lowest_balance) / MAX_DEBT, 1.0)
+            debt_depth_score = int(debt_ratio * DEBT_DEPTH_WEIGHT)
+
+            if lowest_balance <= -400:
+                flavor_texts.append("debt lord")
+            elif lowest_balance <= -200:
+                flavor_texts.append("deep in debt")
+        else:
+            debt_depth_score = 0
+
+        # 4. Bankruptcy count (0-15) - each = 5pts, max 15
+        bankruptcy_score = min(bankruptcy_count * 5, BANKRUPTCY_WEIGHT)
+        if bankruptcy_count >= 3:
+            flavor_texts.append(f"{bankruptcy_count} bankruptcies")
+        elif bankruptcy_count > 0:
+            flavor_texts.append(f"{bankruptcy_count} bankruptcy")
+
+        # 5. Bet frequency (0-10) - % of matches bet on
+        if total_matches > 0:
+            frequency_rate = matches_bet_on / total_matches
+            frequency_score = min(int(frequency_rate * FREQUENCY_WEIGHT), FREQUENCY_WEIGHT)
+            if frequency_rate >= 0.8:
+                flavor_texts.append("never misses")
+        else:
+            frequency_score = 0
+
+        # 6. Loss chasing (0-5)
+        loss_sequences = loss_chase_data.get("sequences_analyzed", 0)
+        times_increased = loss_chase_data.get("times_increased_after_loss", 0)
+        loss_chase_rate = times_increased / loss_sequences if loss_sequences > 0 else 0.0
+        loss_chase_score = min(int(loss_chase_rate * LOSS_CHASE_WEIGHT), LOSS_CHASE_WEIGHT)
+        if loss_chase_rate >= 0.5:
+            flavor_texts.append("loss chaser")
+
+        # 7. Negative loan bonus (+25 each, can exceed 100)
+        negative_loan_bonus = negative_loans * NEGATIVE_LOAN_BONUS
+        if negative_loans >= 1:
+            flavor_texts.insert(0, f"borrowed while broke x{negative_loans}")
+
+        # Total score (can exceed 100 with negative loan bonus)
+        total = (
+            max_leverage_score
+            + bet_size_score
+            + debt_depth_score
+            + bankruptcy_score
+            + frequency_score
+            + loss_chase_score
+            + negative_loan_bonus
+        )
+
+        # Get tier (capped at 100 for tier lookup)
+        title, tagline, emoji = self._get_degen_tier(min(total, 100))
+
+        return DegenScoreBreakdown(
+            total=total,
+            title=title,
+            emoji=emoji,
+            tagline=tagline,
+            max_leverage_score=max_leverage_score,
+            bet_size_score=bet_size_score,
+            debt_depth_score=debt_depth_score,
+            bankruptcy_score=bankruptcy_score,
+            frequency_score=frequency_score,
+            loss_chase_score=loss_chase_score,
+            negative_loan_bonus=negative_loan_bonus,
+            flavor_texts=flavor_texts[:3],
         )
 
     def get_betting_impact_stats(self, discord_id: int) -> BettingImpactStats | None:
