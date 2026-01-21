@@ -607,15 +607,23 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         Get all players with negative balance for interest application.
 
         Returns:
-            List of dicts with 'discord_id' and 'balance' for each debtor.
+            List of dicts with 'discord_id', 'balance', and 'username' for each debtor,
+            sorted by balance ascending (most debt first).
         """
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT discord_id, jopacoin_balance FROM players WHERE jopacoin_balance < 0"
+                """SELECT discord_id, jopacoin_balance, discord_username
+                FROM players
+                WHERE jopacoin_balance < 0
+                ORDER BY jopacoin_balance ASC"""
             )
             return [
-                {"discord_id": row["discord_id"], "balance": row["jopacoin_balance"]}
+                {
+                    "discord_id": row["discord_id"],
+                    "balance": row["jopacoin_balance"],
+                    "username": row["discord_username"],
+                }
                 for row in cursor.fetchall()
             ]
 

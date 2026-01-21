@@ -31,12 +31,14 @@ class LeaderboardView(discord.ui.View):
         players_with_stats: list[dict],
         total_player_count: int,
         rating_system: "CamaRatingSystem",
+        debtors: list[dict] | None = None,
         timeout: float = 840.0,  # 14 minutes (max is 15)
     ):
         super().__init__(timeout=timeout)
         self.players = players_with_stats
         self.total_player_count = total_player_count
         self.rating_system = rating_system
+        self.debtors = debtors or []
         self.current_page = 0
         self.max_page = (len(players_with_stats) - 1) // LEADERBOARD_PAGE_SIZE
         self.message: discord.Message | None = None  # Store message reference for deletion
@@ -77,21 +79,18 @@ class LeaderboardView(discord.ui.View):
             page_info += f" • Showing {len(self.players)} of {self.total_player_count} players"
         embed.set_footer(text=page_info)
 
-        # Add Wall of Shame on first page only
-        if self.current_page == 0:
-            debtors = [p for p in self.players if p["jopacoin_balance"] < 0]
-            if debtors:
-                debtors.sort(key=lambda x: x["jopacoin_balance"])
-                shame_text = ""
-                for i, debtor in enumerate(debtors[:10], 1):
-                    is_real_user = debtor["discord_id"] and debtor["discord_id"] > 0
-                    display_name = (
-                        f"<@{debtor['discord_id']}>" if is_real_user else debtor["username"]
-                    )
-                    shame_text += (
-                        f"{i}. {display_name} - {debtor['jopacoin_balance']} {JOPACOIN_EMOTE}\n"
-                    )
-                embed.add_field(name="Wall of Shame", value=shame_text, inline=False)
+        # Add Wall of Shame on first page only (uses separately-fetched debtors)
+        if self.current_page == 0 and self.debtors:
+            shame_text = ""
+            for i, debtor in enumerate(self.debtors[:10], 1):
+                is_real_user = debtor["discord_id"] and debtor["discord_id"] > 0
+                display_name = (
+                    f"<@{debtor['discord_id']}>" if is_real_user else debtor["username"]
+                )
+                shame_text += (
+                    f"{i}. {display_name} - {debtor['balance']} {JOPACOIN_EMOTE}\n"
+                )
+            embed.add_field(name="Wall of Shame", value=shame_text, inline=False)
 
         return embed
 
@@ -420,11 +419,15 @@ class InfoCommands(commands.Cog):
                 )
                 return
 
+            # Fetch debtors separately for Wall of Shame (always shown regardless of limit)
+            debtors = self.player_repo.get_players_with_negative_balance()
+
             # Use paginated view for leaderboard
             view = LeaderboardView(
                 players_with_stats=players_with_stats,
                 total_player_count=total_player_count,
                 rating_system=rating_system,
+                debtors=debtors,
             )
             embed = view.build_embed()
 
