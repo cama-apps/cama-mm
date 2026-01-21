@@ -246,17 +246,16 @@ Example: "what's my win rate?" → WHERE discord_id = {asker_discord_id}
         messages = [
             {
                 "role": "system",
-                "content": f"""You are a SQL query generator. Be MINIMAL - select only 1-3 columns that directly answer the question.
+                "content": f"""You are a SQL query generator. Attempt to answer the intent of the user's question.
 
 Database schema:
 {schema_context}
 {asker_context}
 Rules:
-- Select ONLY the columns needed to answer the question (1-3 max)
+- Select ONLY the columns needed to answer the question
 - Always include discord_username for player queries
-- Never use SELECT * - be specific
 - Never include: discord_id, steam_id, dotabuff_url, timestamps
-- LIMIT 10 for lists, LIMIT 1 for "who has the most" questions
+- LIMIT 10 unless asked for more for lists, LIMIT 1 for "who has the most" questions
 - Use proper SQLite syntax
 
 Good: SELECT discord_username, total_loans_taken FROM players p JOIN loan_state l ON p.discord_id = l.discord_id ORDER BY total_loans_taken DESC LIMIT 1
@@ -370,7 +369,9 @@ Generate a cocky FLEX message hyping up their wealth."""
                 narrative = f"UNDERDOG VICTORY - team only had {expected_prob:.0%} chance to win, they defied the odds"
                 tone_hint = "Acknowledge they proved doubters wrong, beat expectations"
             elif is_big_gainer and rating_change:
-                narrative = f"BIG CLIMB - gained {rating_change:.0f} rating points this match"
+                narrative = (
+                    f"BIG CLIMB - gained {rating_change:.0f} rating points this match"
+                )
                 tone_hint = "Acknowledge the rating boost, the grind paying off"
             else:
                 narrative = "Solid win, nothing exceptional but still a W"
@@ -461,7 +462,8 @@ Generate a PERSONALIZED roast referencing their specific history."""
         try:
             fallback_result = await self.complete(
                 prompt=messages[1]["content"],
-                system_prompt=messages[0]["content"] + "\n\nRespond with just the roast, nothing else.",
+                system_prompt=messages[0]["content"]
+                + "\n\nRespond with just the roast, nothing else.",
                 temperature=0.9,
             )
             return fallback_result
