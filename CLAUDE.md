@@ -34,8 +34,8 @@ uv run pytest tests/test_e2e_workflow.py -v
 # Run single test
 uv run pytest tests/test_betting_service.py::TestBettingService::test_place_bet -v
 
-# Restart the bot (IMPORTANT: always remove .bot.lock first!)
-pkill -9 -f "python.*bot" 2>/dev/null; rm -f .bot.lock; uv run python bot.py > /tmp/bot.log 2>&1 &
+# Restart the bot
+pkill -f "bot.py" || true; nohup uv run python bot.py > /tmp/bot.log 2>&1 &
 
 # Check bot logs
 tail -f /tmp/bot.log
@@ -583,7 +583,6 @@ See `config.py` for the full list and defaults.
 
 ## Important Notes
 
-- **Single Instance Lock**: Bot uses `.bot.lock` file to prevent duplicate instances
 - **Rating System**: Glicko-2, not simple MMR. Initial RD=350.0, volatility=0.06
 - **5 Roles**: 1=Carry, 2=Mid, 3=Offlane, 4=Soft Support, 5=Hard Support (stored as strings)
 - **Team Convention**: team1=Radiant, team2=Dire, winning_team: 1 or 2

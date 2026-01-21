@@ -566,6 +566,26 @@ class Database:
                 (discord_id,),
             )
 
+    def increment_exclusion_count_half(self, discord_id: int):
+        """
+        Increment a player's exclusion count by 2 (half the normal bonus).
+        Called for conditional players who weren't picked.
+
+        Args:
+            discord_id: Discord user ID
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+
+            cursor.execute(
+                """
+                UPDATE players
+                SET exclusion_count = COALESCE(exclusion_count, 0) + 2, updated_at = CURRENT_TIMESTAMP
+                WHERE discord_id = ?
+            """,
+                (discord_id,),
+            )
+
     def decay_exclusion_count(self, discord_id: int):
         """
         Decay a player's exclusion count by halving it (rounded down).
@@ -722,17 +742,20 @@ class Database:
         channel_id: int | None = None,
         thread_id: int | None = None,
         embed_message_id: int | None = None,
+        conditional_players: list[int] | None = None,
     ) -> None:
         payload = json.dumps(players)
+        conditional_payload = json.dumps(conditional_players or [])
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                INSERT INTO lobby_state (lobby_id, players, status, created_by, created_at,
+                INSERT INTO lobby_state (lobby_id, players, conditional_players, status, created_by, created_at,
                                          message_id, channel_id, thread_id, embed_message_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(lobby_id) DO UPDATE SET
                     players = excluded.players,
+                    conditional_players = excluded.conditional_players,
                     status = excluded.status,
                     created_by = excluded.created_by,
                     created_at = excluded.created_at,
@@ -742,7 +765,7 @@ class Database:
                     embed_message_id = excluded.embed_message_id,
                     updated_at = CURRENT_TIMESTAMP
             """,
-                (lobby_id, payload, status, created_by, created_at, message_id, channel_id,
+                (lobby_id, payload, conditional_payload, status, created_by, created_at, message_id, channel_id,
                  thread_id, embed_message_id),
             )
 
@@ -757,6 +780,7 @@ class Database:
             return {
                 "lobby_id": row_dict["lobby_id"],
                 "players": json.loads(row_dict["players"]) if row_dict.get("players") else [],
+                "conditional_players": json.loads(row_dict["conditional_players"]) if row_dict.get("conditional_players") else [],
                 "status": row_dict["status"],
                 "created_by": row_dict["created_by"],
                 "created_at": row_dict["created_at"],

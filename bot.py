@@ -88,7 +88,7 @@ from services.stake_service import StakePoolConfig, StakeService
 from services.permissions import has_admin_permission  # noqa: F401 - used by tests
 from services.player_service import PlayerService
 from services.opendota_player_service import OpenDotaPlayerService
-from utils.formatting import ROLE_EMOJIS, ROLE_NAMES, format_role_display
+from utils.formatting import FROGLING_EMOJI_ID, FROGLING_EMOTE, ROLE_EMOJIS, ROLE_NAMES, format_role_display
 
 # Bot setup
 
@@ -514,13 +514,27 @@ async def on_app_command_error(interaction: discord.Interaction, error: discord.
         logger.error(f"Failed to send error message to user: {followup_error}")
 
 
+def _is_sword_emoji(emoji) -> bool:
+    """Check if the emoji is the sword emoji for regular lobby joining."""
+    return emoji.name == "⚔️"
+
+
+def _is_frogling_emoji(emoji) -> bool:
+    """Check if the emoji is the frogling emoji for conditional lobby joining."""
+    # Custom emoji: check by ID or name
+    return emoji.id == FROGLING_EMOJI_ID or emoji.name == "frogling"
+
+
 @bot.event
 async def on_raw_reaction_add(payload):
-    """Handle reaction adds for lobby joining."""
+    """Handle reaction adds for lobby joining (⚔️ for regular, :frogling: for conditional)."""
     if not bot.user or payload.user_id == bot.user.id:
         return
 
-    if payload.emoji.name != "⚔️":
+    is_sword = _is_sword_emoji(payload.emoji)
+    is_frogling = _is_frogling_emoji(payload.emoji)
+
+    if not is_sword and not is_frogling:
         return
 
     _init_services()  # Ensure services are initialized
@@ -567,7 +581,25 @@ async def on_raw_reaction_add(payload):
                 pass
             return
 
-        success, reason = lobby_service.join_lobby(payload.user_id)
+        # Handle mutual exclusivity: remove the other reaction if present
+        if is_sword:
+            # Joining as regular player - remove frogling if present
+            try:
+                frogling_emoji = discord.PartialEmoji(name="frogling", id=FROGLING_EMOJI_ID)
+                await message.remove_reaction(frogling_emoji, user)
+            except Exception:
+                pass
+            success, reason = lobby_service.join_lobby(payload.user_id)
+            join_type = "regular"
+        else:
+            # Joining as conditional (frogling) - remove sword if present
+            try:
+                await message.remove_reaction("⚔️", user)
+            except Exception:
+                pass
+            success, reason = lobby_service.join_lobby_conditional(payload.user_id)
+            join_type = "conditional"
+
         if not success:
             try:
                 await message.remove_reaction(payload.emoji, user)
@@ -588,7 +620,10 @@ async def on_raw_reaction_add(payload):
                 thread = bot.get_channel(thread_id)
                 if not thread:
                     thread = await bot.fetch_channel(thread_id)
-                await thread.send(f"✅ {user.mention} joined the lobby!")
+                if join_type == "conditional":
+                    await thread.send(f"{FROGLING_EMOTE} {user.mention} joined as conditional!")
+                else:
+                    await thread.send(f"✅ {user.mention} joined the lobby!")
             except Exception as exc:
                 logger.warning(f"Failed to post join activity in thread: {exc}")
 
@@ -600,11 +635,14 @@ async def on_raw_reaction_add(payload):
 
 @bot.event
 async def on_raw_reaction_remove(payload):
-    """Handle reaction removes for lobby leaving."""
+    """Handle reaction removes for lobby leaving (⚔️ for regular, :frogling: for conditional)."""
     if not bot.user or payload.user_id == bot.user.id:
         return
 
-    if payload.emoji.name != "⚔️":
+    is_sword = _is_sword_emoji(payload.emoji)
+    is_frogling = _is_frogling_emoji(payload.emoji)
+
+    if not is_sword and not is_frogling:
         return
 
     _init_services()  # Ensure services are initialized
@@ -620,7 +658,13 @@ async def on_raw_reaction_remove(payload):
         if not lobby or lobby.status != "open":
             return
 
-        if lobby_service.leave_lobby(payload.user_id):
+        # Remove from appropriate set based on which emoji was removed
+        if is_sword:
+            left = lobby_service.leave_lobby(payload.user_id)
+        else:
+            left = lobby_service.leave_lobby_conditional(payload.user_id)
+
+        if left:
             await update_lobby_message(message, lobby)
 
             # Post leave message in thread

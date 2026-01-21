@@ -202,6 +202,7 @@ class SchemaManager:
             ("create_player_stakes_table", self._migration_create_player_stakes_table),
             ("create_spectator_bets_table", self._migration_create_spectator_bets_table),
             ("create_player_pool_bets_table", self._migration_create_player_pool_bets_table),
+            ("add_conditional_players_to_lobby", self._migration_add_conditional_players_to_lobby),
         ]
 
     # --- Migrations ---
@@ -801,4 +802,10 @@ class SchemaManager:
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_player_pool_bets_discord "
             "ON player_pool_bets(discord_id)"
+        )
+
+    def _migration_add_conditional_players_to_lobby(self, cursor) -> None:
+        """Add conditional_players column to lobby_state for frogling players."""
+        self._add_column_if_not_exists(
+            cursor, "lobby_state", "conditional_players", "TEXT DEFAULT '[]'"
         )

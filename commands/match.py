@@ -19,6 +19,7 @@ from services.match_service import MatchService
 from services.permissions import has_admin_permission
 from utils.embeds import create_enriched_match_embed
 from utils.formatting import (
+    FROGLING_EMOTE,
     JOPACOIN_EMOTE,
     ROLE_EMOJIS,
     ROLE_NAMES,
@@ -373,14 +374,53 @@ class MatchCommands(commands.Cog):
             )
             return
 
-        if lobby.get_player_count() < 10:
+        regular_count = lobby.get_player_count()
+        conditional_count = lobby.get_conditional_count()
+        total_count = lobby.get_total_count()
+
+        if total_count < 10:
             await interaction.followup.send(
-                f"❌ Need at least 10 players in lobby. Currently {lobby.get_player_count()}/10.",
+                f"❌ Need at least 10 players in lobby. Currently {total_count}/10 "
+                f"({regular_count} regular, {conditional_count} conditional).",
                 ephemeral=True,
             )
             return
 
+        # Build the player list for shuffling
+        # Priority: regular players first, then fill with conditional if needed
         player_ids, players = self.lobby_service.get_lobby_players(lobby)
+        conditional_player_ids_included = []
+        excluded_conditional_ids = []
+
+        # Always get conditional players to track who wasn't included
+        all_conditional_ids, all_conditional_players = self.lobby_service.get_conditional_players(lobby)
+
+        if regular_count < 10:
+            # Need to include some conditional players
+            # Sort conditional players by rating/RD priority (same as exclusion logic)
+            # Higher RD = more uncertain = lower priority, higher rating = higher priority
+            def priority_key(player):
+                rating = player.glicko_rating if player.glicko_rating else 1500.0
+                rd = player.glicko_rd if player.glicko_rd else 350.0
+                # Higher rating and lower RD = higher priority
+                return (rating, -rd)
+
+            # Pair conditional players with their IDs for sorting
+            conditional_pairs = list(zip(all_conditional_ids, all_conditional_players))
+            conditional_pairs.sort(key=lambda x: priority_key(x[1]), reverse=True)
+
+            # Take enough conditional players to reach at least 10, up to 14 total
+            needed = min(14, total_count) - regular_count
+            for cid, cplayer in conditional_pairs[:needed]:
+                player_ids.append(cid)
+                players.append(cplayer)
+                conditional_player_ids_included.append(cid)
+
+            # Track conditional players who weren't included
+            excluded_conditional_ids = [cid for cid, _ in conditional_pairs[needed:]]
+        else:
+            # 10+ regular players means all conditional players are excluded
+            excluded_conditional_ids = list(all_conditional_ids)
         # `guild` and `guild_id` already computed before the match check
         mode = "pool"  # betting_mode.value if betting_mode else "pool"
         try:
@@ -467,16 +507,52 @@ class MatchCommands(commands.Cog):
             f"**Value diff:** {value_diff:.0f}\n"
             f"**Off-role players:** Radiant: {radiant_off}, Dire: {dire_off} (Total: {radiant_off + dire_off})"
         )
+        # Build excluded list - combine regular excluded + excluded conditional players
+        all_excluded_names = []
         if excluded_ids:
-            excluded_names = []
             for pid in excluded_ids:
                 player_obj = self.player_service.get_player(pid)
                 if player_obj:
                     display_name = get_player_display_name(player_obj, discord_id=pid, guild=guild)
-                    excluded_names.append(display_name)
+                    all_excluded_names.append(display_name)
                 else:
-                    excluded_names.append(f"Unknown({pid})")
-            balance_info += f"\n**Excluded:** {', '.join(excluded_names)}"
+                    all_excluded_names.append(f"Unknown({pid})")
+
+        # Add excluded conditional players with frogling emoji
+        if excluded_conditional_ids:
+            for pid in excluded_conditional_ids:
+                player_obj = self.player_service.get_player(pid)
+                if player_obj:
+                    display_name = get_player_display_name(player_obj, discord_id=pid, guild=guild)
+                    all_excluded_names.append(f"{FROGLING_EMOTE} {display_name}")
+                else:
+                    all_excluded_names.append(f"{FROGLING_EMOTE} Unknown({pid})")
+
+            # Give conditional players half the exclusion count bonus
+            # (jopacoin bonus is awarded at record time in match_service)
+            for pid in excluded_conditional_ids:
+                self.player_repo.increment_exclusion_count_half(pid)
+
+            # Store excluded conditional IDs in shuffle state for jopacoin bonus at record time
+            pending_state = self.match_service.get_last_shuffle(guild_id)
+            if pending_state:
+                pending_state["excluded_conditional_player_ids"] = excluded_conditional_ids
+                self.match_service.set_last_shuffle(guild_id, pending_state)
+
+        if all_excluded_names:
+            balance_info += f"\n**Excluded:** {', '.join(all_excluded_names)}"
+
+        # Show conditional players who were pulled into the shuffle
+        if conditional_player_ids_included:
+            conditional_names = []
+            for pid in conditional_player_ids_included:
+                player_obj = self.player_service.get_player(pid)
+                if player_obj:
+                    display_name = get_player_display_name(player_obj, discord_id=pid, guild=guild)
+                    conditional_names.append(display_name)
+                else:
+                    conditional_names.append(f"Unknown({pid})")
+            balance_info += f"\n{FROGLING_EMOTE} **Pulled from conditional:** {', '.join(conditional_names)}"
         embed.add_field(name="📊 Balance", value=balance_info, inline=False)
 
         # Betting instructions (mode-aware)

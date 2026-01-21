@@ -16,13 +16,17 @@ class Lobby:
     created_by: int  # Discord ID of creator
     created_at: datetime
     players: set[int] = field(default_factory=set)
+    conditional_players: set[int] = field(default_factory=set)  # "Frogling" players
     status: str = "open"
 
     def add_player(self, discord_id: int) -> bool:
+        """Add a player to the regular queue. Removes from conditional if present."""
         if self.status != "open":
             return False
         if discord_id in self.players:
             return False
+        # Remove from conditional if switching
+        self.conditional_players.discard(discord_id)
         self.players.add(discord_id)
         return True
 
@@ -32,16 +36,49 @@ class Lobby:
             return True
         return False
 
+    def add_conditional_player(self, discord_id: int) -> bool:
+        """Add a player to the conditional queue. Removes from regular if present."""
+        if self.status != "open":
+            return False
+        if discord_id in self.conditional_players:
+            return False
+        # Remove from regular if switching
+        self.players.discard(discord_id)
+        self.conditional_players.add(discord_id)
+        return True
+
+    def remove_conditional_player(self, discord_id: int) -> bool:
+        if discord_id in self.conditional_players:
+            self.conditional_players.remove(discord_id)
+            return True
+        return False
+
+    def is_player_conditional(self, discord_id: int) -> bool:
+        """Check if a player is in the conditional set."""
+        return discord_id in self.conditional_players
+
     def get_player_count(self) -> int:
+        """Return count of regular players only."""
         return len(self.players)
 
+    def get_conditional_count(self) -> int:
+        """Return count of conditional players."""
+        return len(self.conditional_players)
+
+    def get_total_count(self) -> int:
+        """Return combined count of regular and conditional players."""
+        return len(self.players) + len(self.conditional_players)
+
     def is_ready(self, min_players: int = 10) -> bool:
-        return len(self.players) >= min_players
+        """Ready if combined total meets threshold."""
+        return self.get_total_count() >= min_players
 
     def can_create_teams(self, player_roles: dict[int, list[str]]) -> bool:
         role_counts = {"1": 0, "2": 0, "3": 0, "4": 0, "5": 0}
 
-        for player_id in self.players:
+        # Include both regular and conditional players
+        all_players = self.players | self.conditional_players
+        for player_id in all_players:
             if player_id in player_roles and player_roles[player_id]:
                 primary_role = player_roles[player_id][0]
                 if primary_role in role_counts:
@@ -55,6 +92,7 @@ class Lobby:
             "created_by": self.created_by,
             "created_at": self.created_at.isoformat(),
             "players": list(self.players),
+            "conditional_players": list(self.conditional_players),
             "status": self.status,
         }
 
@@ -63,11 +101,13 @@ class Lobby:
         created_at = data.get("created_at")
         created_at_dt = datetime.fromisoformat(created_at) if created_at else datetime.now()
         players = set(data.get("players", []))
+        conditional_players = set(data.get("conditional_players", []))
         return cls(
             lobby_id=data.get("lobby_id", 1),
             created_by=data.get("created_by", 0),
             created_at=created_at_dt,
             players=players,
+            conditional_players=conditional_players,
             status=data.get("status", "open"),
         )
 
@@ -101,9 +141,21 @@ class LobbyManager:
 
     def join_lobby(self, discord_id: int, max_players: int = 12) -> bool:
         lobby = self.get_or_create_lobby()
-        if lobby.get_player_count() >= max_players:
+        # Check total count (regular + conditional) against max
+        if lobby.get_total_count() >= max_players:
             return False
         success = lobby.add_player(discord_id)
+        if success:
+            self._persist_lobby()
+        return success
+
+    def join_lobby_conditional(self, discord_id: int, max_players: int = 12) -> bool:
+        """Add player to conditional queue (frogling)."""
+        lobby = self.get_or_create_lobby()
+        # Check total count (regular + conditional) against max
+        if lobby.get_total_count() >= max_players:
+            return False
+        success = lobby.add_conditional_player(discord_id)
         if success:
             self._persist_lobby()
         return success
@@ -112,6 +164,15 @@ class LobbyManager:
         if not self.lobby:
             return False
         success = self.lobby.remove_player(discord_id)
+        if success:
+            self._persist_lobby()
+        return success
+
+    def leave_lobby_conditional(self, discord_id: int) -> bool:
+        """Remove player from conditional queue."""
+        if not self.lobby:
+            return False
+        success = self.lobby.remove_conditional_player(discord_id)
         if success:
             self._persist_lobby()
         return success
@@ -153,6 +214,7 @@ class LobbyManager:
         self.lobby_repo.save_lobby_state(
             lobby_id=self.DEFAULT_LOBBY_ID,
             players=list(self.lobby.players),
+            conditional_players=list(self.lobby.conditional_players),
             status=self.lobby.status,
             created_by=self.lobby.created_by,
             created_at=self.lobby.created_at.isoformat(),

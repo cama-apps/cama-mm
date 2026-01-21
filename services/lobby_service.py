@@ -33,7 +33,7 @@ class LobbyService:
     def join_lobby(self, discord_id: int) -> tuple[bool, str]:
         lobby = self.get_or_create_lobby()
 
-        if lobby.get_player_count() >= self.max_players:
+        if lobby.get_total_count() >= self.max_players:
             return False, f"Lobby is full ({self.max_players}/{self.max_players})."
 
         # Use manager's join_lobby which persists to database
@@ -42,9 +42,26 @@ class LobbyService:
 
         return True, ""
 
+    def join_lobby_conditional(self, discord_id: int) -> tuple[bool, str]:
+        """Add a player to the conditional (frogling) queue."""
+        lobby = self.get_or_create_lobby()
+
+        if lobby.get_total_count() >= self.max_players:
+            return False, f"Lobby is full ({self.max_players}/{self.max_players})."
+
+        # Use manager's join_lobby_conditional which persists to database
+        if not self.lobby_manager.join_lobby_conditional(discord_id, self.max_players):
+            return False, "Already in lobby or lobby is closed."
+
+        return True, ""
+
     def leave_lobby(self, discord_id: int) -> bool:
         # Use manager's leave_lobby which persists to database
         return self.lobby_manager.leave_lobby(discord_id)
+
+    def leave_lobby_conditional(self, discord_id: int) -> bool:
+        """Remove a player from the conditional (frogling) queue."""
+        return self.lobby_manager.leave_lobby_conditional(discord_id)
 
     def reset_lobby(self):
         self.lobby_manager.reset_lobby()
@@ -74,7 +91,14 @@ class LobbyService:
         return self.lobby_manager.lobby_embed_message_id
 
     def get_lobby_players(self, lobby: Lobby) -> tuple[list[int], list]:
+        """Get regular (non-conditional) player IDs and Player objects."""
         player_ids = list(lobby.players)
+        players = self.player_repo.get_by_ids(player_ids)
+        return player_ids, players
+
+    def get_conditional_players(self, lobby: Lobby) -> tuple[list[int], list]:
+        """Get conditional (frogling) player IDs and Player objects."""
+        player_ids = list(lobby.conditional_players)
         players = self.player_repo.get_by_ids(player_ids)
         return player_ids, players
 
@@ -82,12 +106,16 @@ class LobbyService:
         if not lobby:
             return None
         player_ids, players = self.get_lobby_players(lobby)
+        conditional_ids, conditional_players = self.get_conditional_players(lobby)
         return create_lobby_embed(
             lobby, players, player_ids,
+            conditional_players=conditional_players,
+            conditional_ids=conditional_ids,
             ready_threshold=self.ready_threshold,
             max_players=self.max_players,
             bankruptcy_repo=self.bankruptcy_repo,
         )
 
     def is_ready(self, lobby: Lobby) -> bool:
-        return lobby.get_player_count() >= self.ready_threshold
+        """Ready if combined total meets threshold."""
+        return lobby.get_total_count() >= self.ready_threshold
