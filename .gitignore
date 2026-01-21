@@ -115,6 +115,7 @@ plans/
 .aider*
 .copilot/
 .ai/
+.claude/
 *_history.txt
 *_session.txt
 
