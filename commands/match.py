@@ -396,7 +396,9 @@ class MatchCommands(commands.Cog):
         all_conditional_ids, all_conditional_players = self.lobby_service.get_conditional_players(lobby)
 
         if regular_count < 10:
-            # Need to include some conditional players
+            # Need to include some conditional players to reach exactly 10
+            # Regular players should ALWAYS play when there are fewer than 10 of them
+            # Only conditional players can fill the remaining slots
             # Sort conditional players by rating/RD priority (same as exclusion logic)
             # Higher RD = more uncertain = lower priority, higher rating = higher priority
             def priority_key(player):
@@ -409,15 +411,17 @@ class MatchCommands(commands.Cog):
             conditional_pairs = list(zip(all_conditional_ids, all_conditional_players))
             conditional_pairs.sort(key=lambda x: priority_key(x[1]), reverse=True)
 
-            # Take enough conditional players to reach at least 10, up to 14 total
-            needed = min(14, total_count) - regular_count
-            for cid, cplayer in conditional_pairs[:needed]:
+            # Take exactly enough conditional players to reach 10 (no more)
+            # This ensures the shuffler gets exactly 10 players and excludes none,
+            # guaranteeing all regular players are included
+            slots_available = 10 - regular_count
+            for cid, cplayer in conditional_pairs[:slots_available]:
                 player_ids.append(cid)
                 players.append(cplayer)
                 conditional_player_ids_included.append(cid)
 
-            # Track conditional players who weren't included
-            excluded_conditional_ids = [cid for cid, _ in conditional_pairs[needed:]]
+            # All remaining conditional players are excluded
+            excluded_conditional_ids = [cid for cid, _ in conditional_pairs[slots_available:]]
         else:
             # 10+ regular players means all conditional players are excluded
             excluded_conditional_ids = list(all_conditional_ids)
