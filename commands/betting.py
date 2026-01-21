@@ -112,6 +112,10 @@ NEGATIVE_LOAN_MESSAGES = [
 ]
 
 
+GAMBA_GIF_URL = "https://tenor.com/view/uncut-gems-sports-betting-sports-acting-adam-sandler-gif-11474547316651780959"
+GAMBA_COOLDOWN_SECONDS = 86400  # 24 hours
+
+
 class BettingCommands(commands.Cog):
     """Slash commands to place and view wagers."""
 
@@ -136,6 +140,7 @@ class BettingCommands(commands.Cog):
         self.gambling_stats_service = gambling_stats_service
         self.loan_service = loan_service
         self.disburse_service = disburse_service
+        self._gamba_cooldowns: dict[int, float] = {}  # user_id -> last use timestamp
 
     async def _update_shuffle_message_wagers(self, guild_id: int | None) -> None:
         """
@@ -757,6 +762,29 @@ class BettingCommands(commands.Cog):
                 f"Use `/loan` to borrow more jopacoin (with a fee).",
                 ephemeral=True,
             )
+
+    @app_commands.command(name="gamba", description="Get hyped for gambling (once per day)")
+    async def gamba(self, interaction: discord.Interaction):
+        user_id = interaction.user.id
+        now = time.time()
+
+        # Check cooldown
+        last_use = self._gamba_cooldowns.get(user_id, 0)
+        time_since_last = now - last_use
+
+        if time_since_last < GAMBA_COOLDOWN_SECONDS:
+            remaining = GAMBA_COOLDOWN_SECONDS - time_since_last
+            hours = int(remaining // 3600)
+            minutes = int((remaining % 3600) // 60)
+            await interaction.response.send_message(
+                f"You already got hyped today! Try again in **{hours}h {minutes}m**.",
+                ephemeral=True,
+            )
+            return
+
+        # Update cooldown and send GIF
+        self._gamba_cooldowns[user_id] = now
+        await interaction.response.send_message(GAMBA_GIF_URL)
 
     @app_commands.command(name="paydebt", description="Help another player pay off their debt")
     @app_commands.describe(
