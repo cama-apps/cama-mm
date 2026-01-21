@@ -73,6 +73,9 @@ class IPlayerRepository(ABC):
     def increment_exclusion_count(self, discord_id: int) -> None: ...
 
     @abstractmethod
+    def increment_exclusion_count_half(self, discord_id: int) -> None: ...
+
+    @abstractmethod
     def decay_exclusion_count(self, discord_id: int) -> None: ...
 
     @abstractmethod
@@ -241,6 +244,7 @@ class ILobbyRepository(ABC):
         channel_id: int | None = None,
         thread_id: int | None = None,
         embed_message_id: int | None = None,
+        conditional_players: list[int] | None = None,
     ) -> None: ...
 
     @abstractmethod

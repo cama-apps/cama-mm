@@ -23,6 +23,8 @@ class TestLobbyEmbedTimestamp:
         lobby = MagicMock()
         lobby.created_at = datetime(2026, 1, 2, 12, 30, 0)
         lobby.get_player_count.return_value = 5
+        lobby.get_conditional_count.return_value = 0
+        lobby.get_total_count.return_value = 5
 
         embed = create_lobby_embed(lobby, players=[], player_ids={}, ready_threshold=10)
 
@@ -36,6 +38,8 @@ class TestLobbyEmbedTimestamp:
         lobby = MagicMock()
         lobby.created_at = None
         lobby.get_player_count.return_value = 0
+        lobby.get_conditional_count.return_value = 0
+        lobby.get_total_count.return_value = 0
 
         embed = create_lobby_embed(lobby, players=[], player_ids={}, ready_threshold=10)
 
@@ -46,6 +50,8 @@ class TestLobbyEmbedTimestamp:
         lobby = MagicMock()
         lobby.created_at = datetime.now()
         lobby.get_player_count.return_value = 3
+        lobby.get_conditional_count.return_value = 0
+        lobby.get_total_count.return_value = 3
 
         embed = create_lobby_embed(lobby, players=[], player_ids={}, ready_threshold=10)
 

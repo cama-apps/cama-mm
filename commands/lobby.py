@@ -13,6 +13,7 @@ from discord.ext import commands
 
 from services.lobby_service import LobbyService
 from services.permissions import has_admin_permission
+from utils.formatting import FROGLING_EMOJI_ID
 from utils.interaction_safety import safe_defer
 
 if TYPE_CHECKING:
@@ -57,8 +58,8 @@ class LobbyCommands(commands.Cog):
         except Exception as exc:
             logger.warning(f"Failed to unpin lobby message: {exc}")
 
-    async def _remove_user_sword_reaction(self, user: discord.User | discord.Member) -> None:
-        """Remove a user's sword reaction from the channel lobby message."""
+    async def _remove_user_lobby_reactions(self, user: discord.User | discord.Member) -> None:
+        """Remove a user's lobby reactions (sword and frogling) from the channel lobby message."""
         message_id = self.lobby_service.get_lobby_message_id()
         channel_id = self.lobby_service.get_lobby_channel_id()
         if not message_id or not channel_id:
@@ -69,11 +70,21 @@ class LobbyCommands(commands.Cog):
             if not channel:
                 channel = await self.bot.fetch_channel(channel_id)
             message = await channel.fetch_message(message_id)
-            await message.remove_reaction("⚔️", user)
+            # Remove sword reaction
+            try:
+                await message.remove_reaction("⚔️", user)
+            except Exception:
+                pass
+            # Remove frogling reaction
+            try:
+                frogling_emoji = discord.PartialEmoji(name="frogling", id=FROGLING_EMOJI_ID)
+                await message.remove_reaction(frogling_emoji, user)
+            except Exception:
+                pass
         except discord.Forbidden:
             logger.warning("Cannot remove reaction: missing Manage Messages permission.")
         except Exception as exc:
-            logger.warning(f"Failed to remove user sword reaction: {exc}")
+            logger.warning(f"Failed to remove user lobby reactions: {exc}")
 
     async def _update_lobby_message(self, interaction: discord.Interaction, lobby) -> None:
         message_id = self.lobby_service.get_lobby_message_id()
@@ -256,9 +267,12 @@ class LobbyCommands(commands.Cog):
         # Pin the lobby message for visibility
         await self._safe_pin(channel_msg)
 
-        # Add sword emoji for reaction-based joining
+        # Add reaction emojis for joining (sword for regular, frogling for conditional)
         try:
             await channel_msg.add_reaction("⚔️")
+            # Add frogling emoji using PartialEmoji with ID
+            frogling_emoji = discord.PartialEmoji(name="frogling", id=FROGLING_EMOJI_ID)
+            await channel_msg.add_reaction(frogling_emoji)
         except Exception:
             pass
 
@@ -328,13 +342,21 @@ class LobbyCommands(commands.Cog):
             )
             return
 
-        if player.id not in lobby.players:
+        # Check if player is in regular or conditional set
+        in_regular = player.id in lobby.players
+        in_conditional = player.id in lobby.conditional_players
+
+        if not in_regular and not in_conditional:
             await interaction.followup.send(
                 f"⚠️ {player.mention} is not in the lobby.", ephemeral=True
             )
             return
 
-        removed = self.lobby_service.leave_lobby(player.id)
+        # Remove from whichever set they're in
+        if in_regular:
+            removed = self.lobby_service.leave_lobby(player.id)
+        else:
+            removed = self.lobby_service.leave_lobby_conditional(player.id)
         if removed:
             await interaction.followup.send(
                 f"✅ Kicked {player.mention} from the lobby.", ephemeral=True
@@ -343,8 +365,8 @@ class LobbyCommands(commands.Cog):
             # Update both channel message and thread embed
             await self._sync_lobby_displays(lobby)
 
-            # Remove kicked player's sword reaction
-            await self._remove_user_sword_reaction(player)
+            # Remove kicked player's lobby reactions (sword and frogling)
+            await self._remove_user_lobby_reactions(player)
 
             # Post kick activity in thread
             thread_id = self.lobby_service.get_lobby_thread_id()

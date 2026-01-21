@@ -588,6 +588,10 @@ class MatchService:
                 self.betting_service.award_win_bonus(winning_ids)
                 if excluded_player_ids:
                     self.betting_service.award_exclusion_bonus(excluded_player_ids)
+                # Award half exclusion bonus to conditional players who were excluded
+                excluded_conditional_ids = last_shuffle.get("excluded_conditional_player_ids", [])
+                if excluded_conditional_ids:
+                    self.betting_service.award_exclusion_bonus_half(excluded_conditional_ids)
 
             # Settle player stakes (draft mode only)
             stake_distributions = {}

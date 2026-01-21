@@ -26,10 +26,12 @@ class MatchState:
         radiant_value: float,
         dire_value: float,
         first_pick_team: str,
+        excluded_conditional_player_ids: list | None = None,
     ):
         self.radiant_team_ids = radiant_team_ids
         self.dire_team_ids = dire_team_ids
         self.excluded_player_ids = excluded_player_ids
+        self.excluded_conditional_player_ids = excluded_conditional_player_ids or []
         self.radiant_team = radiant_team
         self.dire_team = dire_team
         self.radiant_roles = radiant_roles
@@ -44,6 +46,7 @@ class MatchState:
             "radiant_team_ids": self.radiant_team_ids,
             "dire_team_ids": self.dire_team_ids,
             "excluded_player_ids": self.excluded_player_ids,
+            "excluded_conditional_player_ids": self.excluded_conditional_player_ids,
             "radiant_team": self.radiant_team,
             "dire_team": self.dire_team,
             "radiant_roles": self.radiant_roles,
@@ -60,6 +63,7 @@ class MatchState:
             radiant_team_ids=data["radiant_team_ids"],
             dire_team_ids=data["dire_team_ids"],
             excluded_player_ids=data.get("excluded_player_ids", []),
+            excluded_conditional_player_ids=data.get("excluded_conditional_player_ids", []),
             radiant_team=data["radiant_team"],
             dire_team=data["dire_team"],
             radiant_roles=data["radiant_roles"],

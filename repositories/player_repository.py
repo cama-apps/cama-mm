@@ -733,6 +733,23 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 (discord_id,),
             )
 
+    def increment_exclusion_count_half(self, discord_id: int) -> None:
+        """Increment player's exclusion count by 2 (half the normal bonus).
+
+        Used for conditional players who weren't picked.
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE players
+                SET exclusion_count = COALESCE(exclusion_count, 0) + 2,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE discord_id = ?
+            """,
+                (discord_id,),
+            )
+
     def decay_exclusion_count(self, discord_id: int) -> None:
         """Decay player's exclusion count by halving it."""
         with self.connection() as conn:

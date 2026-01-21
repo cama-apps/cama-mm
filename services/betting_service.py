@@ -357,6 +357,46 @@ class BettingService:
 
         return results
 
+    def award_exclusion_bonus_half(
+        self, excluded_ids: list[int]
+    ) -> dict[int, dict[str, int]]:
+        """
+        Reward conditional players excluded from shuffle with half the normal bonus.
+
+        Same processing as award_exclusion_bonus but with JOPACOIN_EXCLUSION_REWARD // 2.
+        """
+        results: dict[int, dict[str, int]] = {}
+        if not excluded_ids:
+            return results
+
+        half_reward = JOPACOIN_EXCLUSION_REWARD // 2
+        for pid in excluded_ids:
+            reward = half_reward
+            bankruptcy_penalty = 0
+
+            if self.bankruptcy_service:
+                penalty_result = self.bankruptcy_service.apply_penalty_to_winnings(
+                    pid, reward
+                )
+                reward = penalty_result["penalized"]
+                bankruptcy_penalty = penalty_result["penalty_applied"]
+
+            if self.garnishment_service:
+                result = self.garnishment_service.add_income(pid, reward)
+                result["bankruptcy_penalty"] = bankruptcy_penalty
+                result["gross"] = half_reward
+                results[pid] = result
+            else:
+                self.player_repo.add_balance(pid, reward)
+                results[pid] = {
+                    "gross": half_reward,
+                    "garnished": 0,
+                    "net": reward,
+                    "bankruptcy_penalty": bankruptcy_penalty,
+                }
+
+        return results
+
     def get_pot_odds(
         self, guild_id: int | None, pending_state: dict[str, Any] | None = None
     ) -> dict[str, int]:

@@ -5,7 +5,7 @@ Reusable Discord embed builders.
 import discord
 
 from rating_system import CamaRatingSystem
-from utils.formatting import ROLE_EMOJIS, TOMBSTONE_EMOJI
+from utils.formatting import FROGLING_EMOTE, ROLE_EMOJIS, TOMBSTONE_EMOJI
 from utils.hero_lookup import get_hero_image_url, get_hero_name
 
 
@@ -79,42 +79,75 @@ def format_player_list(players, player_ids, bankruptcy_repo=None):
 
 
 def create_lobby_embed(
-    lobby, players, player_ids, ready_threshold: int = 10, max_players: int = 14, bankruptcy_repo=None
+    lobby, players, player_ids,
+    conditional_players=None, conditional_ids=None,
+    ready_threshold: int = 10, max_players: int = 14, bankruptcy_repo=None
 ):
-    """Create the lobby embed with player list and status."""
-    player_count = lobby.get_player_count()
+    """Create the lobby embed with player list and status.
+
+    Args:
+        lobby: Lobby object
+        players: List of regular Player objects
+        player_ids: List of regular player Discord IDs
+        conditional_players: List of conditional (frogling) Player objects
+        conditional_ids: List of conditional player Discord IDs
+        ready_threshold: Minimum players needed to shuffle
+        max_players: Maximum players allowed in lobby
+        bankruptcy_repo: BankruptcyRepository instance
+    """
+    regular_count = lobby.get_player_count()
+    conditional_count = lobby.get_conditional_count()
+    total_count = lobby.get_total_count()
 
     if lobby.created_at:
         timestamp_text = f"Opened at <t:{int(lobby.created_at.timestamp())}:t>"
     else:
         timestamp_text = "Opened just now"
 
+    # Green if ready (total meets threshold), blue if not
     embed = discord.Embed(
         title="🎮 Matchmaking Lobby",
         description=f"Join to play!\n{timestamp_text}",
-        color=discord.Color.green() if player_count >= ready_threshold else discord.Color.blue(),
+        color=discord.Color.green() if total_count >= ready_threshold else discord.Color.blue(),
     )
 
+    # Regular players section
     player_list, unique_count = format_player_list(players, player_ids, bankruptcy_repo)
 
     embed.add_field(
-        name=f"Players ({player_count}/{max_players})",
+        name=f"**Players ({regular_count})** ⚔️",
         value=player_list if players else "No players yet",
         inline=False,
     )
 
-    if player_count >= ready_threshold:
+    # Conditional (frogling) players section - only show if there are any
+    if conditional_players and conditional_ids:
+        conditional_list, _ = format_player_list(
+            conditional_players, conditional_ids, bankruptcy_repo
+        )
+        embed.add_field(
+            name=f"**Conditional ({conditional_count})** {FROGLING_EMOTE}",
+            value=conditional_list,
+            inline=False,
+        )
+
+    # Status/ready indicator
+    if total_count >= ready_threshold:
         embed.add_field(
             name="✅ Ready!",
             value="Anyone can use `/shuffle` to create teams!",
             inline=False,
         )
     else:
+        needed = ready_threshold - total_count
         embed.add_field(
             name="Status",
-            value="🟢 Open - Click the thread to join!",
+            value=f"🟢 Open - Need {needed} more player{'s' if needed > 1 else ''}!",
             inline=False,
         )
+
+    # Footer showing total count and max
+    embed.set_footer(text=f"Total: {total_count}/{max_players}")
 
     return embed
 
