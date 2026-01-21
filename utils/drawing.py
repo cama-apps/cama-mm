@@ -5,7 +5,10 @@ Image generation utilities for Dota 2 stats visualization.
 import math
 from io import BytesIO
 
+import matplotlib.pyplot as plt
+import numpy as np
 from PIL import Image, ImageDraw, ImageFont
+from scipy import stats
 
 # Discord-like dark theme colors
 DISCORD_BG = "#36393F"
@@ -851,7 +854,7 @@ def draw_rating_distribution(
     ratings: list[float], avg_rating: float | None = None, median_rating: float | None = None
 ) -> BytesIO:
     """
-    Generate a vertical histogram showing player rating distribution.
+    Generate a histogram with fitted normal distribution curve overlay.
 
     Args:
         ratings: List of player ratings
@@ -861,136 +864,116 @@ def draw_rating_distribution(
     Returns:
         BytesIO containing the PNG image
     """
-    # Define rating buckets (250 point ranges from 0 to 2000+)
-    buckets = [
-        ("0-499", 0, 500),
-        ("500-749", 500, 750),
-        ("750-999", 750, 1000),
-        ("1000-1249", 1000, 1250),
-        ("1250-1499", 1250, 1500),
-        ("1500-1749", 1500, 1750),
-        ("1750+", 1750, float("inf")),
-    ]
+    if not ratings:
+        # Return empty image if no data
+        fig, ax = plt.subplots(figsize=(6.5, 4), facecolor="#36393F")
+        ax.set_facecolor("#2F3136")
+        ax.text(0.5, 0.5, "No rating data", ha="center", va="center", color="white", fontsize=14)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        fp = BytesIO()
+        fig.savefig(fp, format="PNG", dpi=100, bbox_inches="tight", facecolor="#36393F")
+        plt.close(fig)
+        fp.seek(0)
+        return fp
 
-    # Count players in each bucket
-    bucket_counts = []
-    for label, low, high in buckets:
-        count = sum(1 for r in ratings if low <= r < high)
-        bucket_counts.append((label, count))
+    ratings_arr = np.array(ratings)
 
-    # Image dimensions - 520px matches Discord embed max width
-    width = 520
-    padding = 25
-    title_height = 50
-    chart_height = 180
-    label_height = 45
-    footer_height = 30
+    # Calculate statistics
+    mean = np.mean(ratings_arr)
+    std = np.std(ratings_arr)
+    skewness = stats.skew(ratings_arr)
+    kurtosis = stats.kurtosis(ratings_arr)  # Excess kurtosis (0 = normal)
 
-    # Calculate bar dimensions to fill width
-    bar_gap = 10
-    bar_width = (width - padding * 2 - bar_gap * (len(buckets) - 1)) // len(buckets)
-    height = padding + title_height + chart_height + label_height + footer_height
+    # Shapiro-Wilk test for normality (only reliable for n < 5000)
+    if len(ratings_arr) >= 3:
+        if len(ratings_arr) <= 5000:
+            shapiro_stat, shapiro_p = stats.shapiro(ratings_arr)
+        else:
+            # Use D'Agostino-Pearson for larger samples
+            shapiro_stat, shapiro_p = stats.normaltest(ratings_arr)
+    else:
+        shapiro_stat, shapiro_p = None, None
 
-    # Create image
-    img = Image.new("RGBA", (width, height), DISCORD_BG)
-    draw = ImageDraw.Draw(img)
+    # Create figure with Discord-like dark theme
+    fig, ax = plt.subplots(figsize=(6.5, 4), facecolor="#36393F")
+    ax.set_facecolor("#2F3136")
 
-    # Draw title
-    title_font = _get_font(16)
-    draw.text((padding, padding), "Rating Distribution", fill=DISCORD_WHITE, font=title_font)
+    # Plot histogram with more granular bins (100-point bins)
+    bin_width = 100
+    min_rating = max(0, int(min(ratings_arr) // bin_width) * bin_width)
+    max_rating = int(np.ceil(max(ratings_arr) / bin_width) * bin_width) + bin_width
+    bins = np.arange(min_rating, max_rating + bin_width, bin_width)
 
-    # Subtitle with player count
-    subtitle_font = _get_font(11)
-    draw.text(
-        (padding, padding + 20),
-        f"{len(ratings)} players",
-        fill=DISCORD_GREY,
-        font=subtitle_font,
+    # Plot histogram (density=True to normalize for PDF overlay)
+    n, bins_edges, patches = ax.hist(
+        ratings_arr,
+        bins=bins,
+        density=True,
+        alpha=0.7,
+        color="#5865F2",
+        edgecolor="#36393F",
+        linewidth=0.5,
+        label=f"Data (n={len(ratings)})",
     )
 
-    # Color gradient from red (low) to blue (high)
-    bucket_colors = [
-        "#ED4245",  # 0-499 (red)
-        "#F47B67",  # 500-749
-        "#FEE75C",  # 750-999 (yellow)
-        "#A3D977",  # 1000-1249
-        "#57F287",  # 1250-1499 (green)
-        "#43B581",  # 1500-1749
-        "#5865F2",  # 1750+ (discord blue)
-    ]
+    # Fit and plot normal distribution curve
+    x_range = np.linspace(min_rating, max_rating, 200)
+    normal_pdf = stats.norm.pdf(x_range, mean, std)
+    ax.plot(x_range, normal_pdf, color="#57F287", linewidth=2.5, label="Normal fit", linestyle="-")
 
-    label_font = _get_font(10)
-    count_font = _get_font(11)
+    # Also show a kernel density estimate for comparison
+    if len(ratings_arr) >= 5:
+        kde = stats.gaussian_kde(ratings_arr)
+        kde_pdf = kde(x_range)
+        ax.plot(x_range, kde_pdf, color="#FEE75C", linewidth=2, label="KDE", linestyle="--", alpha=0.8)
 
-    chart_top = padding + title_height
-    chart_bottom = chart_top + chart_height
-    max_count = max(c for _, c in bucket_counts) if bucket_counts else 1
+    # Add vertical lines for mean and median
+    ax.axvline(mean, color="#ED4245", linestyle="-", linewidth=1.5, alpha=0.8, label=f"Mean: {mean:.0f}")
+    if median_rating is not None:
+        ax.axvline(median_rating, color="#F47B67", linestyle="--", linewidth=1.5, alpha=0.8, label=f"Median: {median_rating:.0f}")
 
-    # Draw bars
-    x = padding
-    for i, (label, count) in enumerate(bucket_counts):
-        color = bucket_colors[i]
+    # Style the plot
+    ax.set_xlabel("Rating", color="#B9BBBE", fontsize=11)
+    ax.set_ylabel("Density", color="#B9BBBE", fontsize=11)
+    ax.tick_params(colors="#B9BBBE", labelsize=9)
+    for spine in ax.spines.values():
+        spine.set_color("#4F545C")
 
-        # Calculate bar height (proportional to max count)
-        if count > 0 and max_count > 0:
-            bar_h = int(chart_height * count / max_count)
+    # Title with stats
+    title = f"Rating Distribution (n={len(ratings)})"
+    ax.set_title(title, color="white", fontsize=13, fontweight="bold", pad=10)
+
+    # Legend
+    ax.legend(loc="upper right", facecolor="#2F3136", edgecolor="#4F545C", labelcolor="white", fontsize=8)
+
+    # Add stats annotation box
+    normality_text = ""
+    if shapiro_p is not None:
+        if shapiro_p > 0.05:
+            normality_text = f"Normal (p={shapiro_p:.3f})"
         else:
-            bar_h = 0
+            normality_text = f"Non-normal (p={shapiro_p:.3f})"
 
-        bar_top = chart_bottom - bar_h
+    stats_text = f"μ={mean:.0f}, σ={std:.0f}\nSkew={skewness:.2f}, Kurt={kurtosis:.2f}"
+    if normality_text:
+        stats_text += f"\n{normality_text}"
 
-        # Draw bar background
-        draw.rectangle(
-            [(x, chart_top), (x + bar_width, chart_bottom)],
-            fill=DISCORD_DARKER,
-        )
+    ax.text(
+        0.02, 0.98, stats_text,
+        transform=ax.transAxes,
+        fontsize=9,
+        verticalalignment="top",
+        color="#B9BBBE",
+        family="monospace",
+        bbox=dict(boxstyle="round,pad=0.3", facecolor="#2F3136", edgecolor="#4F545C", alpha=0.9),
+    )
 
-        # Draw bar fill
-        if bar_h > 0:
-            draw.rectangle(
-                [(x, bar_top), (x + bar_width, chart_bottom)],
-                fill=color,
-            )
-
-            # Draw count above bar
-            count_text = str(count)
-            tw = _get_text_size(count_font, count_text)[0]
-            draw.text(
-                (x + (bar_width - tw) // 2, bar_top - 18),
-                count_text,
-                fill=DISCORD_WHITE,
-                font=count_font,
-            )
-
-        # Draw label below bar (rotated text simulation - just shorter labels)
-        short_label = label.split("-")[0]  # "0", "500", "750", etc.
-        if "+" in label:
-            short_label = label  # Keep "1750+"
-        lw = _get_text_size(label_font, short_label)[0]
-        draw.text(
-            (x + (bar_width - lw) // 2, chart_bottom + 8),
-            short_label,
-            fill=DISCORD_GREY,
-            font=label_font,
-        )
-
-        x += bar_width + bar_gap
-
-    # Draw footer with avg/median
-    if avg_rating is not None or median_rating is not None:
-        footer_y = height - footer_height
-        footer_font = _get_font(12)
-        footer_parts = []
-        if avg_rating is not None:
-            footer_parts.append(f"Avg: {avg_rating:.0f}")
-        if median_rating is not None:
-            footer_parts.append(f"Median: {median_rating:.0f}")
-        footer_text = "  |  ".join(footer_parts)
-        text_w = _get_text_size(footer_font, footer_text)[0]
-        draw.text(((width - text_w) // 2, footer_y), footer_text, fill=DISCORD_GREY, font=footer_font)
+    plt.tight_layout()
 
     # Save to BytesIO
     fp = BytesIO()
-    img.save(fp, format="PNG")
+    fig.savefig(fp, format="PNG", dpi=100, bbox_inches="tight", facecolor="#36393F")
+    plt.close(fig)
     fp.seek(0)
     return fp

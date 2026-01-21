@@ -16,6 +16,8 @@ dependencies = [
     "sqlalchemy-utils>=0.41.0",
     "pillow>=10.0.0",
     "litellm>=1.0.0",
+    "matplotlib>=3.8.0",
+    "scipy>=1.11.0",
 ]
 
 [dependency-groups]
