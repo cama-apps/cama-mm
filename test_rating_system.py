@@ -397,18 +397,18 @@ class TestRatingSystemEdgeCases:
                 f"Calibrating loser should get at least team loss: {delta} > {team_delta}"
             )
 
-    def test_mixed_team_hybrid_behavior(self):
-        """Test complete mixed team scenario with various RDs."""
+    def test_mixed_team_rd_weighted_behavior(self):
+        """Test complete mixed team scenario with various RDs using V2 RD²-weighted system."""
         rating_system = CamaRatingSystem()
 
         # Simulates a real match scenario with varied RDs
-        # Some players calibrated, some calibrating with different RD levels
+        # V2: All players get RD²-weighted deltas (no calibrated/calibrating distinction)
         team1 = [
-            (rating_system.create_player_from_rating(1600.0, 80.0, 0.06), 1),   # calibrated
-            (rating_system.create_player_from_rating(1400.0, 250.0, 0.06), 2),  # calibrating, low rating
-            (rating_system.create_player_from_rating(1500.0, 120.0, 0.06), 3),  # barely calibrating
-            (rating_system.create_player_from_rating(1550.0, 90.0, 0.06), 4),   # calibrated
-            (rating_system.create_player_from_rating(1450.0, 180.0, 0.06), 5),  # calibrating
+            (rating_system.create_player_from_rating(1600.0, 80.0, 0.06), 1),   # low RD
+            (rating_system.create_player_from_rating(1400.0, 250.0, 0.06), 2),  # high RD
+            (rating_system.create_player_from_rating(1500.0, 120.0, 0.06), 3),  # medium RD
+            (rating_system.create_player_from_rating(1550.0, 90.0, 0.06), 4),   # low RD
+            (rating_system.create_player_from_rating(1450.0, 180.0, 0.06), 5),  # medium-high RD
         ]
         team2 = [
             (rating_system.create_player_from_rating(1500.0, 80.0, 0.06), i + 10) for i in range(5)
@@ -419,25 +419,29 @@ class TestRatingSystemEdgeCases:
             team1, team2, winning_team=1
         )
 
-        # Extract deltas
+        # Extract deltas and RDs
+        t1_rds = [80.0, 250.0, 120.0, 90.0, 180.0]
         t1_deltas = [
             t1_updated[i][0] - [1600.0, 1400.0, 1500.0, 1550.0, 1450.0][i]
             for i in range(5)
         ]
 
-        # Calibrated players (indices 0, 3) should have same delta
-        calibrated_deltas = [t1_deltas[0], t1_deltas[3]]
-        assert abs(calibrated_deltas[0] - calibrated_deltas[1]) < 0.01, (
-            "Calibrated teammates should have identical deltas"
+        # V2: Higher RD players should get larger deltas (RD² weighting)
+        # Player 1 (RD 250) should have largest delta
+        # Players 0, 3 (RD 80, 90) should have smallest deltas
+        high_rd_delta = t1_deltas[1]  # RD 250
+        low_rd_deltas = [t1_deltas[0], t1_deltas[3]]  # RD 80, 90
+        assert high_rd_delta > max(low_rd_deltas), (
+            f"Higher RD should get larger delta: RD250={high_rd_delta}, RD80/90={low_rd_deltas}"
         )
 
         # All winners should gain rating
         assert all(d > 0 for d in t1_deltas), "All winners should gain rating"
 
-        # Team 2 (calibrated losers) should all have same delta
+        # Team 2 (all same RD) should all have same delta
         t2_deltas = [t2_updated[i][0] - 1500.0 for i in range(5)]
         assert max(t2_deltas) - min(t2_deltas) < 0.01, (
-            "Calibrated losers should have identical deltas"
+            "Same-RD teammates should have identical deltas"
         )
         assert all(d < 0 for d in t2_deltas), "All losers should lose rating"
 
