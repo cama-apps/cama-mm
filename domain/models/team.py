@@ -120,8 +120,6 @@ class Team:
         This is a pure computation. For performance-critical code paths,
         callers should use services/role_assignment_cache.py for caching.
         """
-        from services.role_assignment_cache import get_cached_role_assignments
-
         player_roles_key = self._get_player_roles_key()
         result = compute_optimal_role_assignments(player_roles_key)
         return [list(assignment) for assignment in result]
