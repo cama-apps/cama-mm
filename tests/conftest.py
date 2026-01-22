@@ -9,7 +9,7 @@ import tempfile
 import pytest
 
 from database import Database
-from domain.models.lobby import LobbyManager
+from services.lobby_manager_service import LobbyManagerService as LobbyManager
 from domain.models.player import Player
 from repositories.lobby_repository import LobbyRepository
 from repositories.match_repository import MatchRepository

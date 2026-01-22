@@ -144,11 +144,8 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 ),
             )
 
-    def _normalize_guild_id(self, guild_id: int | None) -> int:
-        return guild_id if guild_id is not None else 0
-
     def save_pending_match(self, guild_id: int | None, payload: dict) -> None:
-        normalized = self._normalize_guild_id(guild_id)
+        normalized = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -163,7 +160,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
             )
 
     def get_pending_match(self, guild_id: int | None) -> dict | None:
-        normalized = self._normalize_guild_id(guild_id)
+        normalized = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT payload FROM pending_matches WHERE guild_id = ?", (normalized,))
@@ -173,13 +170,13 @@ class MatchRepository(BaseRepository, IMatchRepository):
             return json.loads(row["payload"])
 
     def clear_pending_match(self, guild_id: int | None) -> None:
-        normalized = self._normalize_guild_id(guild_id)
+        normalized = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM pending_matches WHERE guild_id = ?", (normalized,))
 
     def consume_pending_match(self, guild_id: int | None) -> dict | None:
-        normalized = self._normalize_guild_id(guild_id)
+        normalized = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT payload FROM pending_matches WHERE guild_id = ?", (normalized,))

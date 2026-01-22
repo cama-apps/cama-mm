@@ -9,7 +9,7 @@ import pytest
 
 from commands.lobby import LobbyCommands
 from database import Database
-from domain.models.lobby import LobbyManager
+from services.lobby_manager_service import LobbyManagerService as LobbyManager
 from services.lobby_service import LobbyService
 
 

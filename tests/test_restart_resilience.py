@@ -13,7 +13,7 @@ import time
 
 import pytest
 
-from domain.models.lobby import LobbyManager
+from services.lobby_manager_service import LobbyManagerService as LobbyManager
 from infrastructure.schema_manager import SchemaManager
 from repositories.bet_repository import BetRepository
 from repositories.lobby_repository import LobbyRepository

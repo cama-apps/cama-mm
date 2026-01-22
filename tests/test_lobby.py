@@ -9,7 +9,8 @@ from datetime import datetime
 import pytest
 
 from database import Database
-from domain.models.lobby import Lobby, LobbyManager
+from domain.models.lobby import Lobby
+from services.lobby_manager_service import LobbyManagerService as LobbyManager
 
 
 def _cleanup_db_file(db_path: str) -> None:

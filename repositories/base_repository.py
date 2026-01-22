@@ -35,6 +35,22 @@ class BaseRepository(ABC):
             Database(db_path)
             type(self)._schema_initialized_paths.add(db_path)
 
+    @staticmethod
+    def normalize_guild_id(guild_id: int | None) -> int:
+        """
+        Normalize guild_id for database storage.
+
+        Converts None to 0 for consistent storage. This allows using
+        guild_id=None for DMs or tests while maintaining proper indexing.
+
+        Args:
+            guild_id: Discord guild ID or None
+
+        Returns:
+            The guild_id if not None, otherwise 0
+        """
+        return guild_id if guild_id is not None else 0
+
     def get_connection(self) -> sqlite3.Connection:
         """Get database connection with row factory enabled."""
         conn = sqlite3.connect(self.db_path)
@@ -51,6 +67,35 @@ class BaseRepository(ABC):
         """
         conn = self.get_connection()
         try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    @contextmanager
+    def atomic_transaction(self):
+        """
+        Context manager for atomic transactions with immediate write lock.
+
+        Uses BEGIN IMMEDIATE to acquire a write lock immediately, preventing
+        concurrent writes from interleaving. This is essential for operations
+        like betting where race conditions could cause double-spending.
+
+        Usage:
+            with self.atomic_transaction() as conn:
+                cursor = conn.cursor()
+                # Perform atomic operations
+                cursor.execute(...)
+
+        The transaction commits on success and rolls back on exception.
+        """
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("BEGIN IMMEDIATE")
             yield conn
             conn.commit()
         except Exception:

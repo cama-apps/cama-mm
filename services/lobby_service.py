@@ -2,8 +2,9 @@
 Lobby orchestration and embed helpers.
 """
 
-from domain.models.lobby import Lobby, LobbyManager
+from domain.models.lobby import Lobby
 from repositories.interfaces import IPlayerRepository
+from services.lobby_manager_service import LobbyManagerService as LobbyManager
 from utils.embeds import create_lobby_embed
 
 
