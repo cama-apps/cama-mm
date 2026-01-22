@@ -85,6 +85,25 @@ class TestDomainLayerConstraints:
                 "Domain models should not depend on database infrastructure."
             )
 
+    def test_domain_models_have_no_service_imports(self):
+        """Domain models should not import from services layer."""
+        root = get_project_root()
+        domain_models = root / "domain" / "models"
+
+        if not domain_models.exists():
+            return
+
+        for file_path in get_all_python_files(domain_models):
+            imports = get_imports_from_file(file_path)
+            service_imports = [
+                imp for imp in imports
+                if imp.startswith("services")
+            ]
+            assert not service_imports, (
+                f"{file_path.name} imports services: {service_imports}. "
+                "Domain models should not depend on service layer."
+            )
+
     def test_domain_services_have_no_repository_imports(self):
         """Domain services should not import from repositories."""
         root = get_project_root()

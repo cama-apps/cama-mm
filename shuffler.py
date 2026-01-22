@@ -12,6 +12,7 @@ from collections.abc import Iterable
 from config import RD_PRIORITY_WEIGHT, SHUFFLER_SETTINGS
 from domain.models.player import Player
 from domain.models.team import Team
+from services.role_assignment_cache import get_cached_role_assignments
 
 logger = logging.getLogger("cama_bot.shuffler")
 
@@ -247,6 +248,25 @@ class BalancedShuffler:
 
         return abs(t1 - t2)
 
+    def _get_cached_role_assignments(self, players: list[Player]) -> list[list[str]]:
+        """
+        Get optimal role assignments using service-layer caching.
+
+        This provides performance optimization for repeated shuffles with
+        the same player combinations, while keeping the domain layer pure.
+
+        Args:
+            players: List of 5 players
+
+        Returns:
+            List of optimal role assignment permutations
+        """
+        player_roles_key = tuple(
+            tuple(p.preferred_roles) if p.preferred_roles else () for p in players
+        )
+        cached_result = get_cached_role_assignments(player_roles_key)
+        return [list(assignment) for assignment in cached_result]
+
     def _optimize_role_assignments_for_matchup(
         self,
         team1_players: list[Player],
@@ -267,12 +287,9 @@ class BalancedShuffler:
         Returns:
             Tuple of (best_team1, best_team2, best_score)
         """
-        team1_base = Team(team1_players)
-        team2_base = Team(team2_players)
-
-        # Get all optimal role assignments for each team (limited)
-        team1_assignments = team1_base.get_all_optimal_role_assignments()[:max_assignments_per_team]
-        team2_assignments = team2_base.get_all_optimal_role_assignments()[:max_assignments_per_team]
+        # Get all optimal role assignments for each team (with caching, limited)
+        team1_assignments = self._get_cached_role_assignments(team1_players)[:max_assignments_per_team]
+        team2_assignments = self._get_cached_role_assignments(team2_players)[:max_assignments_per_team]
 
         best_team1 = None
         best_team2 = None

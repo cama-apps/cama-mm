@@ -111,13 +111,12 @@ class Team:
         """
         Return all permutations that minimize off-role penalties.
 
-        Uses service-layer caching to avoid recalculating for the same player role combinations.
+        This is a pure computation. For performance-critical code paths,
+        callers should use services/role_assignment_cache.py for caching.
         """
-        from services.role_assignment_cache import get_cached_role_assignments
-
         player_roles_key = self._get_player_roles_key()
-        cached_result = get_cached_role_assignments(player_roles_key)
-        return [list(assignment) for assignment in cached_result]
+        result = compute_optimal_role_assignments(player_roles_key)
+        return [list(assignment) for assignment in result]
 
     def _assign_roles_optimally(self) -> list[str]:
         """
