@@ -27,7 +27,7 @@ class EnrichmentCommands(commands.Cog):
         bot: commands.Bot,
         match_repo,
         player_repo,
-        guild_config_repo,
+        guild_config_service,
         enrichment_service: MatchEnrichmentService,
         opendota_player_service: OpenDotaPlayerService,
         bankruptcy_repo=None,
@@ -35,7 +35,7 @@ class EnrichmentCommands(commands.Cog):
         self.bot = bot
         self.match_repo = match_repo
         self.player_repo = player_repo
-        self.guild_config_repo = guild_config_repo
+        self.guild_config_service = guild_config_service
         self.enrichment_service = enrichment_service
         self.opendota_player_service = opendota_player_service
         self.bankruptcy_repo = bankruptcy_repo
@@ -68,7 +68,7 @@ class EnrichmentCommands(commands.Cog):
             )
             return
 
-        self.guild_config_repo.set_league_id(guild_id, league_id)
+        self.guild_config_service.set_league_id(guild_id, league_id)
         await safe_followup(
             interaction,
             content=f"League ID set to **{league_id}** for this server.",
@@ -264,7 +264,7 @@ class EnrichmentCommands(commands.Cog):
             )
             return
 
-        config = self.guild_config_repo.get_config(guild_id)
+        config = self.guild_config_service.get_config(guild_id)
 
         if not config:
             await safe_followup(
@@ -1094,11 +1094,11 @@ async def setup(bot: commands.Bot):
     """Setup function called when loading the cog."""
     match_repo = getattr(bot, "match_repo", None)
     player_repo = getattr(bot, "player_repo", None)
-    guild_config_repo = getattr(bot, "guild_config_repo", None)
+    guild_config_service = getattr(bot, "guild_config_service", None)
     bankruptcy_repo = getattr(bot, "bankruptcy_repo", None)
 
-    if not all([match_repo, player_repo, guild_config_repo]):
-        logger.warning("enrichment cog: required repos not available, skipping")
+    if not all([match_repo, player_repo, guild_config_service]):
+        logger.warning("enrichment cog: required repos/services not available, skipping")
         return
 
     enrichment_service = MatchEnrichmentService(match_repo, player_repo)
@@ -1109,7 +1109,7 @@ async def setup(bot: commands.Bot):
             bot,
             match_repo,
             player_repo,
-            guild_config_repo,
+            guild_config_service,
             enrichment_service,
             opendota_player_service,
             bankruptcy_repo,

@@ -25,13 +25,13 @@ class AdvancedStatsCommands(commands.Cog):
         player_repo,
         *,
         flavor_text_service=None,
-        guild_config_repo=None,
+        guild_config_service=None,
     ):
         self.bot = bot
         self.pairings_repo = pairings_repo
         self.player_repo = player_repo
         self.flavor_text_service = flavor_text_service
-        self.guild_config_repo = guild_config_repo
+        self.guild_config_service = guild_config_service
 
     @app_commands.command(name="pairwise", description="View pairwise statistics")
     @app_commands.describe(
@@ -414,7 +414,7 @@ async def setup(bot: commands.Bot):
     pairings_repo = getattr(bot, "pairings_repo", None)
     player_repo = getattr(bot, "player_repo", None)
     flavor_text_service = getattr(bot, "flavor_text_service", None)
-    guild_config_repo = getattr(bot, "guild_config_repo", None)
+    guild_config_service = getattr(bot, "guild_config_service", None)
 
     if pairings_repo is None or player_repo is None:
         logger.warning("advstats cog: pairings_repo or player_repo not available, skipping")
@@ -426,6 +426,6 @@ async def setup(bot: commands.Bot):
             pairings_repo,
             player_repo,
             flavor_text_service=flavor_text_service,
-            guild_config_repo=guild_config_repo,
+            guild_config_service=guild_config_service,
         )
     )

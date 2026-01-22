@@ -132,7 +132,7 @@ class InfoCommands(commands.Cog):
         role_names: dict,
         *,
         flavor_text_service=None,
-        guild_config_repo=None,
+        guild_config_service=None,
     ):
         self.bot = bot
         self.player_repo = player_repo
@@ -140,7 +140,7 @@ class InfoCommands(commands.Cog):
         self.role_emojis = role_emojis
         self.role_names = role_names
         self.flavor_text_service = flavor_text_service
-        self.guild_config_repo = guild_config_repo
+        self.guild_config_service = guild_config_service
 
     @app_commands.command(name="help", description="List all available commands")
     async def help_command(self, interaction: discord.Interaction):
@@ -1150,7 +1150,7 @@ async def setup(bot: commands.Bot):
     role_emojis = getattr(bot, "role_emojis", {})
     role_names = getattr(bot, "role_names", {})
     flavor_text_service = getattr(bot, "flavor_text_service", None)
-    guild_config_repo = getattr(bot, "guild_config_repo", None)
+    guild_config_service = getattr(bot, "guild_config_service", None)
 
     await bot.add_cog(
         InfoCommands(
@@ -1160,6 +1160,6 @@ async def setup(bot: commands.Bot):
             role_emojis,
             role_names,
             flavor_text_service=flavor_text_service,
-            guild_config_repo=guild_config_repo,
+            guild_config_service=guild_config_service,
         )
     )
