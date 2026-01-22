@@ -5,6 +5,7 @@ Moved from domain/models/lobby.py to maintain clean architecture -
 domain models should not depend on infrastructure (repositories).
 """
 
+import asyncio
 import logging
 from datetime import datetime
 
@@ -32,7 +33,13 @@ class LobbyManagerService:
         self.lobby_embed_message_id: int | None = None
         self.origin_channel_id: int | None = None  # Channel where /lobby was originally run
         self.lobby: Lobby | None = None
+        self._creation_lock = asyncio.Lock()
         self._load_state()
+
+    @property
+    def creation_lock(self) -> asyncio.Lock:
+        """Lock for protecting the full lobby creation flow."""
+        return self._creation_lock
 
     def get_or_create_lobby(self, creator_id: int | None = None) -> Lobby:
         if self.lobby is None or self.lobby.status != "open":

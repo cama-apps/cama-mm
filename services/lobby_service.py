@@ -2,6 +2,8 @@
 Lobby orchestration and embed helpers.
 """
 
+import asyncio
+
 from domain.models.lobby import Lobby
 from repositories.interfaces import IPlayerRepository
 from services.lobby_manager_service import LobbyManagerService as LobbyManager
@@ -24,6 +26,11 @@ class LobbyService:
         self.ready_threshold = ready_threshold
         self.max_players = max_players
         self.bankruptcy_repo = bankruptcy_repo
+
+    @property
+    def creation_lock(self) -> asyncio.Lock:
+        """Lock for protecting the full lobby creation flow."""
+        return self.lobby_manager.creation_lock
 
     def get_or_create_lobby(self, creator_id: int | None = None) -> Lobby:
         return self.lobby_manager.get_or_create_lobby(creator_id=creator_id)

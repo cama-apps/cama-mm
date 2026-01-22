@@ -287,97 +287,99 @@ class LobbyCommands(commands.Cog):
                 await interaction.followup.send(message_text, ephemeral=True)
                 return
 
-        lobby = self.lobby_service.get_or_create_lobby(creator_id=interaction.user.id)
-        embed = self.lobby_service.build_lobby_embed(lobby)
+        # Acquire lock to prevent race condition when multiple users call /lobby simultaneously
+        async with self.lobby_service.creation_lock:
+            lobby = self.lobby_service.get_or_create_lobby(creator_id=interaction.user.id)
+            embed = self.lobby_service.build_lobby_embed(lobby)
 
-        # If message/thread already exists, refresh it; otherwise create new
-        message_id = self.lobby_service.get_lobby_message_id()
-        thread_id = self.lobby_service.get_lobby_thread_id()
+            # If message/thread already exists, refresh it; otherwise create new
+            message_id = self.lobby_service.get_lobby_message_id()
+            thread_id = self.lobby_service.get_lobby_thread_id()
 
-        if message_id and thread_id:
-            try:
-                # Fetch message from the dedicated/lobby channel (not necessarily interaction channel)
-                lobby_channel_id = self.lobby_service.get_lobby_channel_id()
-                if lobby_channel_id:
-                    channel = self.bot.get_channel(lobby_channel_id)
-                    if not channel:
-                        channel = await self.bot.fetch_channel(lobby_channel_id)
-                    message = await channel.fetch_message(message_id)
-                else:
-                    message = await interaction.channel.fetch_message(message_id)
-                await self._update_thread_embed(lobby)
+            if message_id and thread_id:
+                try:
+                    # Fetch message from the dedicated/lobby channel (not necessarily interaction channel)
+                    lobby_channel_id = self.lobby_service.get_lobby_channel_id()
+                    if lobby_channel_id:
+                        channel = self.bot.get_channel(lobby_channel_id)
+                        if not channel:
+                            channel = await self.bot.fetch_channel(lobby_channel_id)
+                        message = await channel.fetch_message(message_id)
+                    else:
+                        message = await interaction.channel.fetch_message(message_id)
+                    await self._update_thread_embed(lobby)
 
-                await interaction.followup.send(f"[View Lobby]({message.jump_url})", ephemeral=True)
+                    await interaction.followup.send(f"[View Lobby]({message.jump_url})", ephemeral=True)
+                    return
+                except Exception:
+                    # Fall through to create a new one
+                    pass
+
+            # Get target channel (dedicated or fallback to interaction channel)
+            target_channel, is_dedicated = await self._get_lobby_target_channel(interaction)
+            if not target_channel:
+                await interaction.followup.send(
+                    "❌ Could not find a valid channel to post the lobby.", ephemeral=True
+                )
                 return
+
+            # Store the origin channel (where /lobby was run) for rally notifications
+            origin_channel_id = interaction.channel.id
+
+            # Send channel message with embed
+            channel_msg = await target_channel.send(embed=embed)
+
+            # Pin the lobby message for visibility
+            await self._safe_pin(channel_msg)
+
+            # Add reaction emojis for joining (sword for regular, frogling for conditional, jopacoin for gamba notifications)
+            try:
+                await channel_msg.add_reaction("⚔️")
+                # Add frogling emoji using PartialEmoji with ID
+                frogling_emoji = discord.PartialEmoji(name="frogling", id=FROGLING_EMOJI_ID)
+                await channel_msg.add_reaction(frogling_emoji)
+                # Add jopacoin emoji for subscribing to gamba notifications
+                jopacoin_emoji = discord.PartialEmoji(name="jopacoin", id=JOPACOIN_EMOJI_ID)
+                await channel_msg.add_reaction(jopacoin_emoji)
             except Exception:
-                # Fall through to create a new one
                 pass
 
-        # Get target channel (dedicated or fallback to interaction channel)
-        target_channel, is_dedicated = await self._get_lobby_target_channel(interaction)
-        if not target_channel:
-            await interaction.followup.send(
-                "❌ Could not find a valid channel to post the lobby.", ephemeral=True
-            )
-            return
+            # Create thread from message (static name to avoid rate limits)
+            try:
+                thread_name = "🎮 Matchmaking Lobby"
+                thread = await channel_msg.create_thread(name=thread_name)
 
-        # Store the origin channel (where /lobby was run) for rally notifications
-        origin_channel_id = interaction.channel.id
+                # Store all IDs (embed is on channel_msg, which is also the thread starter)
+                # Also store origin_channel_id for rally notifications
+                self.lobby_service.set_lobby_message_id(
+                    message_id=channel_msg.id,
+                    channel_id=target_channel.id,  # Where the embed lives (dedicated or interaction)
+                    thread_id=thread.id,
+                    embed_message_id=channel_msg.id,  # The channel msg IS the embed in thread
+                    origin_channel_id=origin_channel_id,  # Where /lobby was run (for rally)
+                )
 
-        # Send channel message with embed
-        channel_msg = await target_channel.send(embed=embed)
+                # Complete the deferred response
+                await interaction.followup.send(
+                    f"✅ Lobby created! [View Lobby]({channel_msg.jump_url})", ephemeral=True
+                )
+                return
 
-        # Pin the lobby message for visibility
-        await self._safe_pin(channel_msg)
-
-        # Add reaction emojis for joining (sword for regular, frogling for conditional, jopacoin for gamba notifications)
-        try:
-            await channel_msg.add_reaction("⚔️")
-            # Add frogling emoji using PartialEmoji with ID
-            frogling_emoji = discord.PartialEmoji(name="frogling", id=FROGLING_EMOJI_ID)
-            await channel_msg.add_reaction(frogling_emoji)
-            # Add jopacoin emoji for subscribing to gamba notifications
-            jopacoin_emoji = discord.PartialEmoji(name="jopacoin", id=JOPACOIN_EMOJI_ID)
-            await channel_msg.add_reaction(jopacoin_emoji)
-        except Exception:
-            pass
-
-        # Create thread from message (static name to avoid rate limits)
-        try:
-            thread_name = "🎮 Matchmaking Lobby"
-            thread = await channel_msg.create_thread(name=thread_name)
-
-            # Store all IDs (embed is on channel_msg, which is also the thread starter)
-            # Also store origin_channel_id for rally notifications
-            self.lobby_service.set_lobby_message_id(
-                message_id=channel_msg.id,
-                channel_id=target_channel.id,  # Where the embed lives (dedicated or interaction)
-                thread_id=thread.id,
-                embed_message_id=channel_msg.id,  # The channel msg IS the embed in thread
-                origin_channel_id=origin_channel_id,  # Where /lobby was run (for rally)
-            )
-
-            # Complete the deferred response
-            await interaction.followup.send(
-                f"✅ Lobby created! [View Lobby]({channel_msg.jump_url})", ephemeral=True
-            )
-            return
-
-        except discord.Forbidden:
-            # Thread permissions required
-            logger.warning("Cannot create lobby thread: missing Create Public Threads permission.")
-            await channel_msg.delete()
-            await interaction.followup.send(
-                "❌ Bot needs 'Create Public Threads' permission to create lobbies.",
-                ephemeral=True,
-            )
-        except Exception as exc:
-            logger.exception(f"Error creating lobby thread: {exc}")
-            await channel_msg.delete()
-            await interaction.followup.send(
-                f"❌ Failed to create lobby thread: {exc}",
-                ephemeral=True,
-            )
+            except discord.Forbidden:
+                # Thread permissions required
+                logger.warning("Cannot create lobby thread: missing Create Public Threads permission.")
+                await channel_msg.delete()
+                await interaction.followup.send(
+                    "❌ Bot needs 'Create Public Threads' permission to create lobbies.",
+                    ephemeral=True,
+                )
+            except Exception as exc:
+                logger.exception(f"Error creating lobby thread: {exc}")
+                await channel_msg.delete()
+                await interaction.followup.send(
+                    f"❌ Failed to create lobby thread: {exc}",
+                    ephemeral=True,
+                )
 
     @app_commands.command(
         name="kick",
