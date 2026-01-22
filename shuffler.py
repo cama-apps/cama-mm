@@ -12,7 +12,7 @@ from collections.abc import Iterable
 from config import RD_PRIORITY_WEIGHT, SHUFFLER_SETTINGS
 from domain.models.player import Player
 from domain.models.team import Team
-from services.role_assignment_cache import get_cached_role_assignments
+from utils.role_assignment_cache import get_cached_role_assignments
 
 logger = logging.getLogger("cama_bot.shuffler")
 
