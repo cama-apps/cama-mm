@@ -3,16 +3,11 @@ Team domain model.
 """
 
 import itertools
-from functools import lru_cache
 
 from domain.models.player import Player
 
 
-# Module-level cache for role assignment calculations
-# Key: tuple of (player_preferred_roles_tuple, ...)
-# Value: list of optimal role assignments
-@lru_cache(maxsize=1024)
-def _cached_optimal_role_assignments(
+def compute_optimal_role_assignments(
     player_roles_key: tuple[tuple[str, ...], ...],
 ) -> tuple[tuple[str, ...], ...]:
     """
@@ -116,10 +111,12 @@ class Team:
         """
         Return all permutations that minimize off-role penalties.
 
-        Uses caching to avoid recalculating for the same player role combinations.
+        Uses service-layer caching to avoid recalculating for the same player role combinations.
         """
+        from services.role_assignment_cache import get_cached_role_assignments
+
         player_roles_key = self._get_player_roles_key()
-        cached_result = _cached_optimal_role_assignments(player_roles_key)
+        cached_result = get_cached_role_assignments(player_roles_key)
         return [list(assignment) for assignment in cached_result]
 
     def _assign_roles_optimally(self) -> list[str]:

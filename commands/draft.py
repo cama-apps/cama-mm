@@ -23,7 +23,7 @@ from utils.formatting import JOPACOIN_EMOTE, format_betting_display
 from utils.interaction_safety import safe_defer
 
 if TYPE_CHECKING:
-    from domain.models.lobby import LobbyManager
+    from services.lobby_manager_service import LobbyManagerService as LobbyManager
     from repositories.player_repository import PlayerRepository
     from services.match_service import MatchService
 

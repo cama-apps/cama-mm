@@ -480,9 +480,8 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         if amount <= 0:
             return {"gross": amount, "garnished": 0, "net": amount}
 
-        with self.connection() as conn:
+        with self.atomic_transaction() as conn:
             cursor = conn.cursor()
-            cursor.execute("BEGIN IMMEDIATE")
 
             cursor.execute(
                 "SELECT COALESCE(jopacoin_balance, 0) as balance FROM players WHERE discord_id = ?",
@@ -542,9 +541,8 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         if amount <= 0:
             raise ValueError("Amount must be positive.")
 
-        with self.connection() as conn:
+        with self.atomic_transaction() as conn:
             cursor = conn.cursor()
-            cursor.execute("BEGIN IMMEDIATE")
 
             # Get sender balance
             cursor.execute(

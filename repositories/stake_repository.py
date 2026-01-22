@@ -16,10 +16,6 @@ class StakeRepository(BaseRepository, IStakeRepository):
     automatically stake a portion of a pool based on win probability.
     """
 
-    @staticmethod
-    def _normalize_guild_id(guild_id: int | None) -> int:
-        return guild_id if guild_id is not None else 0
-
     def create_stakes(
         self,
         guild_id: int | None,
@@ -41,7 +37,7 @@ class StakeRepository(BaseRepository, IStakeRepository):
         Returns:
             Dict with creation summary: created count, team totals
         """
-        normalized_guild = self._normalize_guild_id(guild_id)
+        normalized_guild = self.normalize_guild_id(guild_id)
 
         with self.connection() as conn:
             cursor = conn.cursor()
@@ -119,13 +115,12 @@ class StakeRepository(BaseRepository, IStakeRepository):
         Returns:
             Dict with settlement summary
         """
-        normalized_guild = self._normalize_guild_id(guild_id)
+        normalized_guild = self.normalize_guild_id(guild_id)
         winners: list[dict] = []
         losers: list[dict] = []
 
-        with self.connection() as conn:
+        with self.atomic_transaction() as conn:
             cursor = conn.cursor()
-            cursor.execute("BEGIN IMMEDIATE")
 
             # Get all pending stakes for this match
             cursor.execute(
@@ -226,7 +221,7 @@ class StakeRepository(BaseRepository, IStakeRepository):
         Returns:
             List of stake dicts
         """
-        normalized_guild = self._normalize_guild_id(guild_id)
+        normalized_guild = self.normalize_guild_id(guild_id)
 
         with self.connection() as conn:
             cursor = conn.cursor()
@@ -257,7 +252,7 @@ class StakeRepository(BaseRepository, IStakeRepository):
         Returns:
             Number of stakes deleted
         """
-        normalized_guild = self._normalize_guild_id(guild_id)
+        normalized_guild = self.normalize_guild_id(guild_id)
 
         with self.connection() as conn:
             cursor = conn.cursor()
@@ -284,7 +279,7 @@ class StakeRepository(BaseRepository, IStakeRepository):
         Returns:
             Number of stakes updated
         """
-        normalized_guild = self._normalize_guild_id(guild_id)
+        normalized_guild = self.normalize_guild_id(guild_id)
 
         with self.connection() as conn:
             cursor = conn.cursor()

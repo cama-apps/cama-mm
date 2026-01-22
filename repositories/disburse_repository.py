@@ -15,10 +15,6 @@ class DisburseRepository(BaseRepository):
     Handles CRUD operations for disburse_proposals and disburse_votes tables.
     """
 
-    @staticmethod
-    def _normalize_guild_id(guild_id: int | None) -> int:
-        return guild_id if guild_id is not None else 0
-
     def get_active_proposal(self, guild_id: int | None) -> dict | None:
         """
         Get the active proposal for a guild, if any.
@@ -26,7 +22,7 @@ class DisburseRepository(BaseRepository):
         Returns:
             dict with proposal data or None if no active proposal
         """
-        normalized_guild = self._normalize_guild_id(guild_id)
+        normalized_guild = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -68,7 +64,7 @@ class DisburseRepository(BaseRepository):
             fund_amount: Snapshot of fund at proposal time
             quorum_required: Number of votes needed (40% of players)
         """
-        normalized_guild = self._normalize_guild_id(guild_id)
+        normalized_guild = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             # Replace any existing proposal for this guild
@@ -92,7 +88,7 @@ class DisburseRepository(BaseRepository):
         """
         Set the Discord message ID for an active proposal.
         """
-        normalized_guild = self._normalize_guild_id(guild_id)
+        normalized_guild = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -123,7 +119,7 @@ class DisburseRepository(BaseRepository):
         if method not in ("even", "proportional", "neediest", "stimulus"):
             raise ValueError(f"Invalid vote method: {method}")
 
-        normalized_guild = self._normalize_guild_id(guild_id)
+        normalized_guild = self.normalize_guild_id(guild_id)
         voted_at = int(time.time())
 
         with self.connection() as conn:
@@ -144,7 +140,7 @@ class DisburseRepository(BaseRepository):
         Returns:
             dict with counts: {"even": n, "proportional": n, "neediest": n}
         """
-        normalized_guild = self._normalize_guild_id(guild_id)
+        normalized_guild = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             # Get the active proposal ID
@@ -184,7 +180,7 @@ class DisburseRepository(BaseRepository):
         """
         Get list of discord_ids who have voted on the active proposal.
         """
-        normalized_guild = self._normalize_guild_id(guild_id)
+        normalized_guild = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -218,7 +214,7 @@ class DisburseRepository(BaseRepository):
             ]
             Returns empty list if no active proposal.
         """
-        normalized_guild = self._normalize_guild_id(guild_id)
+        normalized_guild = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             # Get the active proposal ID first
@@ -255,7 +251,7 @@ class DisburseRepository(BaseRepository):
         """
         Mark the active proposal as completed.
         """
-        normalized_guild = self._normalize_guild_id(guild_id)
+        normalized_guild = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -274,7 +270,7 @@ class DisburseRepository(BaseRepository):
         Returns:
             True if a proposal was reset, False if no active proposal
         """
-        normalized_guild = self._normalize_guild_id(guild_id)
+        normalized_guild = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             # Get proposal_id first
@@ -325,7 +321,7 @@ class DisburseRepository(BaseRepository):
         Returns:
             The history record ID
         """
-        normalized_guild = self._normalize_guild_id(guild_id)
+        normalized_guild = self.normalize_guild_id(guild_id)
         now = int(time.time())
         recipients_json = json.dumps(distributions)
 
@@ -355,7 +351,7 @@ class DisburseRepository(BaseRepository):
         Returns:
             dict with disbursement info or None if no history
         """
-        normalized_guild = self._normalize_guild_id(guild_id)
+        normalized_guild = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(

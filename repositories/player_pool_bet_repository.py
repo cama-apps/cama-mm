@@ -18,10 +18,6 @@ class PlayerPoolBetRepository(BaseRepository, IPlayerPoolBetRepository):
 
     VALID_TEAMS = {"radiant", "dire"}
 
-    @staticmethod
-    def _normalize_guild_id(guild_id: int | None) -> int:
-        return guild_id if guild_id is not None else 0
-
     def create_bet_atomic(
         self,
         guild_id: int | None,
@@ -48,11 +44,10 @@ class PlayerPoolBetRepository(BaseRepository, IPlayerPoolBetRepository):
         if amount <= 0:
             raise ValueError(f"Bet amount must be positive, got {amount}")
 
-        normalized_guild = self._normalize_guild_id(guild_id)
+        normalized_guild = self.normalize_guild_id(guild_id)
 
-        with self.connection() as conn:
+        with self.atomic_transaction() as conn:
             cursor = conn.cursor()
-            cursor.execute("BEGIN IMMEDIATE")
 
             # Check current balance
             cursor.execute(
@@ -113,7 +108,7 @@ class PlayerPoolBetRepository(BaseRepository, IPlayerPoolBetRepository):
         Returns:
             List of bet dicts
         """
-        normalized_guild = self._normalize_guild_id(guild_id)
+        normalized_guild = self.normalize_guild_id(guild_id)
 
         with self.connection() as conn:
             cursor = conn.cursor()
@@ -143,7 +138,7 @@ class PlayerPoolBetRepository(BaseRepository, IPlayerPoolBetRepository):
         Returns:
             Bet dict or None
         """
-        normalized_guild = self._normalize_guild_id(guild_id)
+        normalized_guild = self.normalize_guild_id(guild_id)
 
         with self.connection() as conn:
             cursor = conn.cursor()
@@ -188,7 +183,7 @@ class PlayerPoolBetRepository(BaseRepository, IPlayerPoolBetRepository):
         Returns:
             Dict with {radiant: n, dire: m, total: n+m}
         """
-        normalized_guild = self._normalize_guild_id(guild_id)
+        normalized_guild = self.normalize_guild_id(guild_id)
 
         with self.connection() as conn:
             cursor = conn.cursor()
@@ -236,7 +231,7 @@ class PlayerPoolBetRepository(BaseRepository, IPlayerPoolBetRepository):
         Returns:
             Dict with settlement summary
         """
-        normalized_guild = self._normalize_guild_id(guild_id)
+        normalized_guild = self.normalize_guild_id(guild_id)
         winners: list[dict] = []
         losers: list[dict] = []
 
@@ -249,9 +244,8 @@ class PlayerPoolBetRepository(BaseRepository, IPlayerPoolBetRepository):
         else:
             multiplier = 0
 
-        with self.connection() as conn:
+        with self.atomic_transaction() as conn:
             cursor = conn.cursor()
-            cursor.execute("BEGIN IMMEDIATE")
 
             # Get all pending bets
             cursor.execute(
@@ -353,7 +347,7 @@ class PlayerPoolBetRepository(BaseRepository, IPlayerPoolBetRepository):
         Returns:
             Number of bets deleted
         """
-        normalized_guild = self._normalize_guild_id(guild_id)
+        normalized_guild = self.normalize_guild_id(guild_id)
 
         with self.connection() as conn:
             cursor = conn.cursor()
@@ -379,11 +373,10 @@ class PlayerPoolBetRepository(BaseRepository, IPlayerPoolBetRepository):
         Returns:
             Dict with refund summary
         """
-        normalized_guild = self._normalize_guild_id(guild_id)
+        normalized_guild = self.normalize_guild_id(guild_id)
 
-        with self.connection() as conn:
+        with self.atomic_transaction() as conn:
             cursor = conn.cursor()
-            cursor.execute("BEGIN IMMEDIATE")
 
             # Get all pending bets
             cursor.execute(
@@ -452,7 +445,7 @@ class PlayerPoolBetRepository(BaseRepository, IPlayerPoolBetRepository):
         Returns:
             Number of bets updated
         """
-        normalized_guild = self._normalize_guild_id(guild_id)
+        normalized_guild = self.normalize_guild_id(guild_id)
 
         with self.connection() as conn:
             cursor = conn.cursor()

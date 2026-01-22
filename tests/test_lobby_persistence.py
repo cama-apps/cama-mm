@@ -1,7 +1,7 @@
 import os
 import tempfile
 
-from domain.models.lobby import LobbyManager
+from services.lobby_manager_service import LobbyManagerService as LobbyManager
 from infrastructure.schema_manager import SchemaManager
 from repositories.lobby_repository import LobbyRepository
 from repositories.player_repository import PlayerRepository

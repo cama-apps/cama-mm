@@ -176,9 +176,8 @@ class LoanRepository(BaseRepository):
         normalized_guild_id = guild_id if guild_id is not None else 0
         total = sum(amount for _, amount in distributions)
 
-        with self.connection() as conn:
+        with self.atomic_transaction() as conn:
             cursor = conn.cursor()
-            cursor.execute("BEGIN IMMEDIATE")
 
             # Verify sufficient funds
             cursor.execute(

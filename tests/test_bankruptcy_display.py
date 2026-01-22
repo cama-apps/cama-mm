@@ -10,7 +10,7 @@ with active bankruptcy penalties in:
 
 import pytest
 
-from domain.models.lobby import LobbyManager
+from services.lobby_manager_service import LobbyManagerService as LobbyManager
 from repositories.lobby_repository import LobbyRepository
 from repositories.match_repository import MatchRepository
 from repositories.player_repository import PlayerRepository

@@ -18,17 +18,13 @@ class BetRepository(BaseRepository, IBetRepository):
 
     VALID_TEAMS = {"radiant", "dire"}
 
-    @staticmethod
-    def _normalize_guild_id(guild_id: int | None) -> int:
-        return guild_id if guild_id is not None else 0
-
     def create_bet(
         self, guild_id: int | None, discord_id: int, team: str, amount: int, bet_time: int
     ) -> int:
         """
         Place a bet for the current pending match.
         """
-        normalized_guild = self._normalize_guild_id(guild_id)
+        normalized_guild = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -75,12 +71,10 @@ class BetRepository(BaseRepository, IBetRepository):
             raise ValueError("Leverage must be at least 1.")
 
         effective_bet = amount * leverage
-        normalized_guild = self._normalize_guild_id(guild_id)
+        normalized_guild = self.normalize_guild_id(guild_id)
 
-        with self.connection() as conn:
+        with self.atomic_transaction() as conn:
             cursor = conn.cursor()
-            # Take a write lock up-front so two concurrent bet attempts can't interleave.
-            cursor.execute("BEGIN IMMEDIATE")
 
             # Check for existing bets - allow additional bets only on the same team
             cursor.execute(
@@ -176,11 +170,10 @@ class BetRepository(BaseRepository, IBetRepository):
             raise ValueError("Leverage must be at least 1.")
 
         effective_bet = amount * leverage
-        normalized_guild = self._normalize_guild_id(guild_id)
+        normalized_guild = self.normalize_guild_id(guild_id)
 
-        with self.connection() as conn:
+        with self.atomic_transaction() as conn:
             cursor = conn.cursor()
-            cursor.execute("BEGIN IMMEDIATE")
 
             cursor.execute(
                 "SELECT payload FROM pending_matches WHERE guild_id = ?",
@@ -278,7 +271,7 @@ class BetRepository(BaseRepository, IBetRepository):
         """
         Return the bet placed by a player for the pending match in the guild.
         """
-        normalized_guild = self._normalize_guild_id(guild_id)
+        normalized_guild = self.normalize_guild_id(guild_id)
         ts_filter = "AND bet_time >= ?" if since_ts is not None else ""
         params = (
             (normalized_guild, discord_id)
@@ -310,7 +303,7 @@ class BetRepository(BaseRepository, IBetRepository):
         Return all bets placed by a player for the pending match in the guild.
         Ordered by bet_time ascending.
         """
-        normalized_guild = self._normalize_guild_id(guild_id)
+        normalized_guild = self.normalize_guild_id(guild_id)
         ts_filter = "AND bet_time >= ?" if since_ts is not None else ""
         params = (
             (normalized_guild, discord_id)
@@ -340,7 +333,7 @@ class BetRepository(BaseRepository, IBetRepository):
         """
         Return bets associated with the pending match for a guild.
         """
-        normalized_guild = self._normalize_guild_id(guild_id)
+        normalized_guild = self.normalize_guild_id(guild_id)
         ts_filter = "AND bet_time >= ?" if since_ts is not None else ""
         params = (normalized_guild,) if since_ts is None else (normalized_guild, since_ts)
         with self.connection() as conn:
@@ -362,7 +355,7 @@ class BetRepository(BaseRepository, IBetRepository):
 
     def delete_bets_for_guild(self, guild_id: int | None) -> int:
         """Remove all bets for the specified guild."""
-        normalized_guild = self._normalize_guild_id(guild_id)
+        normalized_guild = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM bets WHERE guild_id = ?", (normalized_guild,))
@@ -375,7 +368,7 @@ class BetRepository(BaseRepository, IBetRepository):
 
         Effective amount = amount * leverage, used for pool mode calculations.
         """
-        normalized_guild = self._normalize_guild_id(guild_id)
+        normalized_guild = self.normalize_guild_id(guild_id)
         ts_filter = "AND bet_time >= ?" if since_ts is not None else ""
         params = (normalized_guild,) if since_ts is None else (normalized_guild, since_ts)
         with self.connection() as conn:
@@ -397,7 +390,7 @@ class BetRepository(BaseRepository, IBetRepository):
         self, guild_id: int | None, match_id: int, since_ts: int | None = None
     ) -> None:
         """Tie all pending bets for the current match window to a recorded match."""
-        normalized_guild = self._normalize_guild_id(guild_id)
+        normalized_guild = self.normalize_guild_id(guild_id)
         ts_filter = "AND bet_time >= ?" if since_ts is not None else ""
         params = (
             (match_id, normalized_guild)
@@ -418,7 +411,7 @@ class BetRepository(BaseRepository, IBetRepository):
 
     def delete_pending_bets(self, guild_id: int | None, since_ts: int | None = None) -> int:
         """Delete pending bets (match_id IS NULL) for the current match window."""
-        normalized_guild = self._normalize_guild_id(guild_id)
+        normalized_guild = self.normalize_guild_id(guild_id)
         ts_filter = "AND bet_time >= ?" if since_ts is not None else ""
         params = (normalized_guild,) if since_ts is None else (normalized_guild, since_ts)
         with self.connection() as conn:
@@ -447,7 +440,7 @@ class BetRepository(BaseRepository, IBetRepository):
         Args:
             betting_mode: "pool" for parimutuel betting, "house" for 1:1 payouts
         """
-        normalized_guild = self._normalize_guild_id(guild_id)
+        normalized_guild = self.normalize_guild_id(guild_id)
         distributions: dict[str, list[dict]] = {"winners": [], "losers": []}
 
         with self.connection() as conn:
@@ -613,7 +606,7 @@ class BetRepository(BaseRepository, IBetRepository):
 
         Refunds the effective bet amount (amount * leverage).
         """
-        normalized_guild = self._normalize_guild_id(guild_id)
+        normalized_guild = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -707,7 +700,7 @@ class BetRepository(BaseRepository, IBetRepository):
         Returns list of dicts with: discord_id, total_bets, wins, losses, win_rate,
         net_pnl, total_wagered, roi, avg_leverage
         """
-        normalized_guild = self._normalize_guild_id(guild_id)
+        normalized_guild = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -874,7 +867,7 @@ class BetRepository(BaseRepository, IBetRepository):
         if not discord_ids:
             return {}
 
-        normalized_guild = self._normalize_guild_id(guild_id)
+        normalized_guild = self.normalize_guild_id(guild_id)
         placeholders = ",".join("?" * len(discord_ids))
 
         with self.connection() as conn:
@@ -912,7 +905,7 @@ class BetRepository(BaseRepository, IBetRepository):
         if not discord_ids:
             return {}
 
-        normalized_guild = self._normalize_guild_id(guild_id)
+        normalized_guild = self.normalize_guild_id(guild_id)
         placeholders = ",".join("?" * len(discord_ids))
 
         with self.connection() as conn:

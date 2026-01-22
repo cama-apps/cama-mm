@@ -60,7 +60,7 @@ from config import (
     USE_GLICKO,
 )
 from database import Database
-from domain.models.lobby import LobbyManager
+from services.lobby_manager_service import LobbyManagerService as LobbyManager
 from repositories.bet_repository import BetRepository
 from repositories.guild_config_repository import GuildConfigRepository
 from repositories.lobby_repository import LobbyRepository

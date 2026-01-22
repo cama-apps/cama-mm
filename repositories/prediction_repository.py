@@ -20,10 +20,6 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
     VALID_POSITIONS = {"yes", "no"}
     VALID_STATUSES = {"open", "locked", "resolved", "cancelled"}
 
-    @staticmethod
-    def _normalize_guild_id(guild_id: int | None) -> int:
-        return guild_id if guild_id is not None else 0
-
     def create_prediction(
         self,
         guild_id: int,
@@ -35,7 +31,7 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
         embed_message_id: int | None = None,
     ) -> int:
         """Create a new prediction and return its ID."""
-        normalized_guild = self._normalize_guild_id(guild_id)
+        normalized_guild = self.normalize_guild_id(guild_id)
         created_at = int(time.time())
 
         with self.connection() as conn:
@@ -76,7 +72,7 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
 
     def get_active_predictions(self, guild_id: int) -> list[dict]:
         """Get all open/locked predictions for a guild."""
-        normalized_guild = self._normalize_guild_id(guild_id)
+        normalized_guild = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -93,7 +89,7 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
         """Get predictions filtered by status."""
         if status not in self.VALID_STATUSES:
             raise ValueError(f"Invalid status: {status}")
-        normalized_guild = self._normalize_guild_id(guild_id)
+        normalized_guild = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -163,9 +159,8 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
         if outcome not in self.VALID_POSITIONS:
             raise ValueError(f"Invalid outcome: {outcome}")
 
-        with self.connection() as conn:
+        with self.atomic_transaction() as conn:
             cursor = conn.cursor()
-            cursor.execute("BEGIN IMMEDIATE")
 
             # Get current votes
             cursor.execute(
@@ -277,9 +272,8 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
 
         bet_time = int(time.time())
 
-        with self.connection() as conn:
+        with self.atomic_transaction() as conn:
             cursor = conn.cursor()
-            cursor.execute("BEGIN IMMEDIATE")
 
             # Get prediction and validate
             cursor.execute(
@@ -535,9 +529,8 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
         if winning_position not in self.VALID_POSITIONS:
             raise ValueError(f"Invalid winning position: {winning_position}")
 
-        with self.connection() as conn:
+        with self.atomic_transaction() as conn:
             cursor = conn.cursor()
-            cursor.execute("BEGIN IMMEDIATE")
 
             # Get all bets grouped by user and position
             cursor.execute(
@@ -633,9 +626,8 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
 
     def refund_prediction_bets(self, prediction_id: int) -> dict:
         """Refund all bets for a cancelled prediction. Returns refund summary."""
-        with self.connection() as conn:
+        with self.atomic_transaction() as conn:
             cursor = conn.cursor()
-            cursor.execute("BEGIN IMMEDIATE")
 
             # Get all bets grouped by user
             cursor.execute(
@@ -713,7 +705,7 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
 
         Returns dict with top_earners and down_bad lists.
         """
-        normalized_guild = self._normalize_guild_id(guild_id)
+        normalized_guild = self.normalize_guild_id(guild_id)
 
         with self.connection() as conn:
             cursor = conn.cursor()
@@ -802,7 +794,7 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
 
         Returns dict with total_predictions, total_pool, total_bets, etc.
         """
-        normalized_guild = self._normalize_guild_id(guild_id)
+        normalized_guild = self.normalize_guild_id(guild_id)
 
         with self.connection() as conn:
             cursor = conn.cursor()

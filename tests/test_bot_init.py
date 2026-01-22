@@ -12,7 +12,7 @@ def test_imports():
     """Test that all required modules can be imported."""
     # Test core modules
     from database import Database
-    from domain.models.lobby import LobbyManager
+    from services.lobby_manager_service import LobbyManagerService as LobbyManager
     from domain.models.player import Player
     from domain.models.team import Team
     from shuffler import BalancedShuffler
