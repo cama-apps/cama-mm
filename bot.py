@@ -63,6 +63,7 @@ from database import Database
 from services.lobby_manager_service import LobbyManagerService as LobbyManager
 from repositories.bet_repository import BetRepository
 from repositories.guild_config_repository import GuildConfigRepository
+from services.guild_config_service import GuildConfigService
 from repositories.lobby_repository import LobbyRepository
 from repositories.match_repository import MatchRepository
 from repositories.pairings_repository import PairingsRepository
@@ -135,6 +136,7 @@ def _init_services():
     match_repo = MatchRepository(DB_PATH)
     pairings_repo = PairingsRepository(DB_PATH)
     guild_config_repo = GuildConfigRepository(DB_PATH)
+    guild_config_service = GuildConfigService(guild_config_repo)
 
     # Create garnishment service for debt repayment
     garnishment_service = GarnishmentService(player_repo, GARNISHMENT_PERCENTAGE)
@@ -194,6 +196,7 @@ def _init_services():
     bot.match_repo = match_repo
     bot.pairings_repo = pairings_repo
     bot.guild_config_repo = guild_config_repo
+    bot.guild_config_service = guild_config_service
     bot.bankruptcy_repo = bankruptcy_repo
     bot.role_emojis = ROLE_EMOJIS
     bot.role_names = ROLE_NAMES

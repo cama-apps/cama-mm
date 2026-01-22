@@ -42,7 +42,7 @@ class MatchCommands(commands.Cog):
         match_service: MatchService,
         player_service,
         *,
-        guild_config_repo=None,
+        guild_config_service=None,
         player_repo=None,
         match_repo=None,
         bankruptcy_repo=None,
@@ -52,7 +52,7 @@ class MatchCommands(commands.Cog):
         self.lobby_service = lobby_service
         self.match_service = match_service
         self.player_service = player_service
-        self.guild_config_repo = guild_config_repo
+        self.guild_config_service = guild_config_service
         self.player_repo = player_repo
         self.match_repo = match_repo
         self.bankruptcy_repo = bankruptcy_repo
@@ -1009,8 +1009,8 @@ class MatchCommands(commands.Cog):
         """
         try:
             # Check if auto_enrich is enabled for this guild
-            if self.guild_config_repo:
-                auto_enrich = self.guild_config_repo.get_auto_enrich(guild_id or 0)
+            if self.guild_config_service:
+                auto_enrich = self.guild_config_service.is_auto_enrich_enabled(guild_id)
                 if not auto_enrich:
                     logger.debug(f"Auto-enrich disabled for guild {guild_id}, skipping discovery")
                     return
@@ -1223,7 +1223,7 @@ async def setup(bot: commands.Bot):
     lobby_service = getattr(bot, "lobby_service", None)
     match_service = getattr(bot, "match_service", None)
     player_service = getattr(bot, "player_service", None)
-    guild_config_repo = getattr(bot, "guild_config_repo", None)
+    guild_config_service = getattr(bot, "guild_config_service", None)
     player_repo = getattr(bot, "player_repo", None)
     match_repo = getattr(bot, "match_repo", None)
     bankruptcy_repo = getattr(bot, "bankruptcy_repo", None)
@@ -1234,7 +1234,7 @@ async def setup(bot: commands.Bot):
             lobby_service,
             match_service,
             player_service,
-            guild_config_repo=guild_config_repo,
+            guild_config_service=guild_config_service,
             player_repo=player_repo,
             match_repo=match_repo,
             bankruptcy_repo=bankruptcy_repo,
