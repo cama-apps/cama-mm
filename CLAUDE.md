@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Git Commits
+
+When committing, do not include the Co-Authored-By trailer.
+
 ## Project Overview
 
 Cama Balanced Shuffle is a Discord bot for Dota 2 inhouse leagues. It implements:
