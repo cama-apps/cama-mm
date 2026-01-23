@@ -209,9 +209,6 @@ class MatchCommands(commands.Cog):
 
             await thread.send("🚫 **Match Aborted** - All bets have been refunded.")
 
-            # Wait before archiving so players can see the message
-            await asyncio.sleep(15)
-
             try:
                 await thread.edit(name="🚫 Match Aborted", archived=True)
             except discord.Forbidden:
