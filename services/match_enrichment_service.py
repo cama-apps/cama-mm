@@ -81,7 +81,13 @@ class MatchEnrichmentService:
     to populate KDA, hero, GPM, damage, fantasy points, etc.
     """
 
-    def __init__(self, match_repo, player_repo, opendota_api: OpenDotaAPI | None = None):
+    def __init__(
+        self,
+        match_repo,
+        player_repo,
+        opendota_api: OpenDotaAPI | None = None,
+        match_service=None,
+    ):
         """
         Initialize the enrichment service.
 
@@ -89,10 +95,12 @@ class MatchEnrichmentService:
             match_repo: MatchRepository instance
             player_repo: PlayerRepository instance
             opendota_api: Optional OpenDotaAPI instance (creates one if not provided)
+            match_service: Optional MatchService for OpenSkill updates after enrichment
         """
         self.match_repo = match_repo
         self.player_repo = player_repo
         self.opendota_api = opendota_api or OpenDotaAPI()
+        self.match_service = match_service
 
     def _validate_enrichment(
         self,
@@ -314,6 +322,25 @@ class MatchEnrichmentService:
             f"Fantasy: Radiant={radiant_fantasy:.1f}, Dire={dire_fantasy:.1f}"
         )
 
+        # Update OpenSkill ratings using fantasy points as weights
+        openskill_result = None
+        if self.match_service and players_enriched > 0:
+            try:
+                openskill_result = self.match_service.update_openskill_ratings_for_match(
+                    internal_match_id
+                )
+                if openskill_result.get("success"):
+                    logger.info(
+                        f"OpenSkill update: {openskill_result.get('players_updated', 0)} players updated"
+                    )
+                else:
+                    logger.warning(
+                        f"OpenSkill update failed: {openskill_result.get('error', 'unknown')}"
+                    )
+            except Exception as e:
+                logger.error(f"OpenSkill update error: {e}")
+                openskill_result = {"success": False, "error": str(e)}
+
         return {
             "success": True,
             "players_enriched": players_enriched,
@@ -327,6 +354,7 @@ class MatchEnrichmentService:
                 "radiant": round(radiant_fantasy, 2),
                 "dire": round(dire_fantasy, 2),
             },
+            "openskill_update": openskill_result,
         }
 
     def backfill_steam_ids(self) -> dict:

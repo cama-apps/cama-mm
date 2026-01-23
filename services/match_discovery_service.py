@@ -30,10 +30,17 @@ class MatchDiscoveryService:
     player match histories from OpenDota.
     """
 
-    def __init__(self, match_repo, player_repo, opendota_api: OpenDotaAPI | None = None):
+    def __init__(
+        self,
+        match_repo,
+        player_repo,
+        opendota_api: OpenDotaAPI | None = None,
+        match_service=None,
+    ):
         self.match_repo = match_repo
         self.player_repo = player_repo
         self.opendota_api = opendota_api or OpenDotaAPI()
+        self.match_service = match_service
 
     def discover_all_matches(self, dry_run: bool = False) -> dict:
         """
@@ -192,7 +199,10 @@ class MatchDiscoveryService:
                 from services.match_enrichment_service import MatchEnrichmentService
 
                 enrichment_service = MatchEnrichmentService(
-                    self.match_repo, self.player_repo, self.opendota_api
+                    self.match_repo,
+                    self.player_repo,
+                    self.opendota_api,
+                    match_service=self.match_service,
                 )
                 result = enrichment_service.enrich_match(
                     match_id,

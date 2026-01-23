@@ -18,6 +18,7 @@ dependencies = [
     "litellm>=1.0.0",
     "matplotlib>=3.8.0",
     "scipy>=1.11.0",
+    "openskill>=6.0.0",
 ]
 
 [dependency-groups]
