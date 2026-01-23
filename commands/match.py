@@ -642,6 +642,10 @@ class MatchCommands(commands.Cog):
         await self._safe_unpin(interaction.channel, self.lobby_service.get_lobby_message_id())
         self.lobby_service.reset_lobby()
 
+        # Clear lobby rally cooldowns
+        from bot import clear_lobby_rally_cooldowns
+        clear_lobby_rally_cooldowns(guild_id or 0)
+
     @app_commands.command(
         name="record",
         description="Record a match result or abort the match",
@@ -1113,6 +1117,11 @@ class MatchCommands(commands.Cog):
         self.match_service.clear_last_shuffle(guild_id)
         await self._safe_unpin(interaction.channel, self.lobby_service.get_lobby_message_id())
         self.lobby_service.reset_lobby()
+
+        # Clear lobby rally cooldowns
+        from bot import clear_lobby_rally_cooldowns
+        clear_lobby_rally_cooldowns(guild_id or 0)
+
         await interaction.followup.send(
             "✅ Match aborted. You can create a new lobby.", ephemeral=False
         )

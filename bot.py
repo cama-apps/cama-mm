@@ -5,6 +5,7 @@ Main Discord bot entry for Cama Balanced Shuffle.
 import asyncio
 import logging
 import os
+import time
 
 from utils.debug_logging import debug_log as _debug_log
 
@@ -49,6 +50,7 @@ from config import (
     GARNISHMENT_PERCENTAGE,
     LEVERAGE_TIERS,
     LOBBY_MAX_PLAYERS,
+    LOBBY_RALLY_COOLDOWN_SECONDS,
     LOBBY_READY_THRESHOLD,
     MAX_DEBT,
     PLAYER_STAKE_ENABLED,
@@ -109,6 +111,11 @@ player_repo = None
 bet_repo = None
 betting_service = None
 match_service = None
+
+# Lobby rally notification cooldowns
+# Key: (guild_id, needed_count) -> timestamp
+# Allows independent cooldowns for +2 and +1 notifications
+_lobby_rally_cooldowns: dict[tuple[int, int], float] = {}
 
 
 def _init_services():
@@ -451,6 +458,52 @@ async def notify_lobby_ready(channel, lobby):
         logger.error(f"Error notifying lobby ready: {exc}", exc_info=True)
 
 
+async def notify_lobby_rally(channel, thread, lobby, guild_id: int) -> bool:
+    """
+    Notify that lobby is almost ready. Returns True if notification was sent.
+    Each threshold (+2, +1) has an independent cooldown.
+    """
+    total = lobby.get_total_count()
+    needed = LOBBY_READY_THRESHOLD - total
+
+    if needed < 1 or needed > 2:
+        return False  # Only notify for +1 or +2
+
+    now = time.time()
+    cooldown_key = (guild_id, needed)
+    last_sent = _lobby_rally_cooldowns.get(cooldown_key, 0)
+
+    if now - last_sent < LOBBY_RALLY_COOLDOWN_SECONDS:
+        return False  # Still in cooldown for this threshold
+
+    try:
+        embed = discord.Embed(
+            title="📢 Almost Ready!",
+            description=f"The lobby has **{total}** players — just **+{needed}** more needed!",
+            color=discord.Color.orange(),
+        )
+
+        # Send to channel (no ping)
+        await channel.send(embed=embed)
+
+        # Send to thread
+        if thread:
+            await thread.send(f"📢 **+{needed}** more player{'s' if needed > 1 else ''} needed!")
+
+        _lobby_rally_cooldowns[cooldown_key] = now
+        return True
+    except Exception as exc:
+        logger.error(f"Error sending rally notification: {exc}", exc_info=True)
+        return False
+
+
+def clear_lobby_rally_cooldowns(guild_id: int) -> None:
+    """Clear lobby rally cooldowns for a guild. Called on /resetlobby and shuffle."""
+    keys_to_remove = [k for k in _lobby_rally_cooldowns if k[0] == guild_id]
+    for key in keys_to_remove:
+        del _lobby_rally_cooldowns[key]
+
+
 @bot.event
 async def setup_hook():
     """Load command cogs."""
@@ -618,6 +671,7 @@ async def on_raw_reaction_add(payload):
 
         # Mention user in thread to subscribe them
         thread_id = lobby_service.get_lobby_thread_id()
+        thread = None
         if thread_id:
             try:
                 thread = bot.get_channel(thread_id)
@@ -630,7 +684,11 @@ async def on_raw_reaction_add(payload):
             except Exception as exc:
                 logger.warning(f"Failed to post join activity in thread: {exc}")
 
-        if lobby_service.is_ready(lobby):
+        # Check for rally notification (+2 or +1 needed)
+        if not lobby_service.is_ready(lobby):
+            guild_id = payload.guild_id or 0
+            await notify_lobby_rally(channel, thread, lobby, guild_id)
+        else:
             await notify_lobby_ready(channel, lobby)
     except Exception as exc:
         logger.error(f"Error handling reaction add: {exc}", exc_info=True)

@@ -450,6 +450,11 @@ class LobbyCommands(commands.Cog):
 
         await self._safe_unpin(interaction.channel, self.lobby_service.get_lobby_message_id())
         self.lobby_service.reset_lobby()
+
+        # Clear lobby rally cooldowns
+        from bot import clear_lobby_rally_cooldowns
+        clear_lobby_rally_cooldowns(guild_id or 0)
+
         logger.info(f"Lobby reset by user {interaction.user.id}")
         if can_respond:
             await interaction.followup.send(
