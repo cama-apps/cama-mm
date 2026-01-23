@@ -625,7 +625,10 @@ class EnrichmentCommands(commands.Cog):
             await self._refill_fantasy_data(interaction, dry_run)
             return
 
-        discovery_service = MatchDiscoveryService(self.match_repo, self.player_repo)
+        match_service = getattr(self.bot, "match_service", None)
+        discovery_service = MatchDiscoveryService(
+            self.match_repo, self.player_repo, match_service=match_service
+        )
 
         await safe_followup(
             interaction,
@@ -904,12 +907,15 @@ async def setup(bot: commands.Bot):
     player_repo = getattr(bot, "player_repo", None)
     guild_config_service = getattr(bot, "guild_config_service", None)
     bankruptcy_repo = getattr(bot, "bankruptcy_repo", None)
+    match_service = getattr(bot, "match_service", None)
 
     if not all([match_repo, player_repo, guild_config_service]):
         logger.warning("enrichment cog: required repos/services not available, skipping")
         return
 
-    enrichment_service = MatchEnrichmentService(match_repo, player_repo)
+    enrichment_service = MatchEnrichmentService(
+        match_repo, player_repo, match_service=match_service
+    )
     opendota_player_service = OpenDotaPlayerService(player_repo)
 
     await bot.add_cog(

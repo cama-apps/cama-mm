@@ -1112,9 +1112,102 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             )
             return [row["discord_id"] for row in cursor.fetchall()]
 
+    # --- OpenSkill Plackett-Luce rating methods ---
+
+    def get_openskill_rating(self, discord_id: int) -> tuple[float, float] | None:
+        """
+        Get player's OpenSkill rating (mu, sigma).
+
+        Returns:
+            Tuple of (mu, sigma) or None if not found or not set
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT os_mu, os_sigma FROM players WHERE discord_id = ?",
+                (discord_id,),
+            )
+            row = cursor.fetchone()
+            if row and row["os_mu"] is not None:
+                return (row["os_mu"], row["os_sigma"])
+            return None
+
+    def update_openskill_rating(self, discord_id: int, mu: float, sigma: float) -> None:
+        """Update player's OpenSkill rating."""
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE players
+                SET os_mu = ?, os_sigma = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE discord_id = ?
+                """,
+                (mu, sigma, discord_id),
+            )
+
+    def update_openskill_ratings_bulk(
+        self, updates: list[tuple[int, float, float]]
+    ) -> int:
+        """
+        Bulk update OpenSkill ratings in a single transaction.
+
+        Args:
+            updates: List of (discord_id, mu, sigma) tuples
+
+        Returns:
+            Number of rows updated
+        """
+        if not updates:
+            return 0
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.executemany(
+                """
+                UPDATE players
+                SET os_mu = ?, os_sigma = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE discord_id = ?
+                """,
+                [(mu, sigma, pid) for pid, mu, sigma in updates],
+            )
+            return cursor.rowcount
+
+    def get_openskill_ratings_bulk(
+        self, discord_ids: list[int]
+    ) -> dict[int, tuple[float | None, float | None]]:
+        """
+        Get OpenSkill ratings for multiple players.
+
+        Args:
+            discord_ids: List of Discord user IDs
+
+        Returns:
+            Dict mapping discord_id to (mu, sigma) tuple (values may be None)
+        """
+        if not discord_ids:
+            return {}
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            placeholders = ",".join("?" * len(discord_ids))
+            cursor.execute(
+                f"""
+                SELECT discord_id, os_mu, os_sigma
+                FROM players
+                WHERE discord_id IN ({placeholders})
+                """,
+                discord_ids,
+            )
+            return {
+                row["discord_id"]: (row["os_mu"], row["os_sigma"])
+                for row in cursor.fetchall()
+            }
+
     def _row_to_player(self, row) -> Player:
         """Convert database row to Player object."""
         preferred_roles = json.loads(row["preferred_roles"]) if row["preferred_roles"] else None
+
+        # Handle os_mu and os_sigma which may not exist in older schemas
+        os_mu = row["os_mu"] if "os_mu" in row.keys() else None
+        os_sigma = row["os_sigma"] if "os_sigma" in row.keys() else None
 
         return Player(
             name=row["discord_username"],
@@ -1127,6 +1220,8 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             glicko_rating=row["glicko_rating"],
             glicko_rd=row["glicko_rd"],
             glicko_volatility=row["glicko_volatility"],
+            os_mu=os_mu,
+            os_sigma=os_sigma,
             discord_id=row["discord_id"],
             jopacoin_balance=row["jopacoin_balance"] if row["jopacoin_balance"] else 0,
         )

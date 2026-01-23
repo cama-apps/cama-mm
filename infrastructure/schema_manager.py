@@ -205,6 +205,7 @@ class SchemaManager:
             ("add_conditional_players_to_lobby", self._migration_add_conditional_players_to_lobby),
             ("add_leaderboard_performance_indexes", self._migration_add_leaderboard_performance_indexes),
             ("add_fantasy_columns", self._migration_add_fantasy_columns),
+            ("add_openskill_columns", self._migration_add_openskill_columns),
         ]
 
     # --- Migrations ---
@@ -847,3 +848,16 @@ class SchemaManager:
         self._add_column_if_not_exists(cursor, "match_participants", "stuns", "REAL")
         # Calculated fantasy points
         self._add_column_if_not_exists(cursor, "match_participants", "fantasy_points", "REAL")
+
+    def _migration_add_openskill_columns(self, cursor) -> None:
+        """Add OpenSkill Plackett-Luce rating columns to players and rating_history."""
+        # Player-level OpenSkill ratings (mu, sigma)
+        self._add_column_if_not_exists(cursor, "players", "os_mu", "REAL")
+        self._add_column_if_not_exists(cursor, "players", "os_sigma", "REAL")
+
+        # Rating history for OpenSkill tracking
+        self._add_column_if_not_exists(cursor, "rating_history", "os_mu_before", "REAL")
+        self._add_column_if_not_exists(cursor, "rating_history", "os_mu_after", "REAL")
+        self._add_column_if_not_exists(cursor, "rating_history", "os_sigma_before", "REAL")
+        self._add_column_if_not_exists(cursor, "rating_history", "os_sigma_after", "REAL")
+        self._add_column_if_not_exists(cursor, "rating_history", "fantasy_weight", "REAL")

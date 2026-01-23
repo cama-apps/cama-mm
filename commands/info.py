@@ -9,6 +9,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from config import LEVERAGE_TIERS
+from openskill_rating_system import CamaOpenSkillSystem
 from rating_system import CamaRatingSystem
 from services.permissions import has_admin_permission
 from utils.debug_logging import debug_log as _dbg_log
@@ -1430,6 +1431,24 @@ class InfoCommands(commands.Cog):
                 fp_text += "\n" + " | ".join(fp_details)
 
             embed.add_field(name="⭐ Fantasy Points", value=fp_text, inline=False)
+
+        # OpenSkill Rating (Fantasy-Weighted)
+        os_system = CamaOpenSkillSystem()
+        os_data = self.player_repo.get_openskill_rating(user.id) if self.player_repo else None
+        if os_data:
+            os_mu, os_sigma = os_data
+            os_ordinal = os_system.ordinal(os_mu, os_sigma)
+            os_calibrated = os_system.is_calibrated(os_sigma)
+            os_certainty = os_system.get_certainty_percentage(os_sigma)
+            os_display = os_system.mu_to_display(os_mu)
+
+            os_text = (
+                f"**Skill (μ):** {os_mu:.2f} → **{os_display}** display\n"
+                f"**Uncertainty (σ):** {os_sigma:.3f} ({os_certainty:.0f}% certain)\n"
+                f"**Ordinal** (μ-3σ): {os_ordinal:.2f}\n"
+                f"**Calibrated:** {'Yes' if os_calibrated else 'No'}"
+            )
+            embed.add_field(name="🎲 OpenSkill Rating (Fantasy-Weighted)", value=os_text, inline=False)
 
         # Record
         record_text = f"**W-L:** {player.wins}-{player.losses}"

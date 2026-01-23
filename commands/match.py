@@ -1025,7 +1025,9 @@ class MatchCommands(commands.Cog):
             await asyncio.sleep(60)  # Wait 1 minute before trying
 
             # Run discovery in executor to avoid blocking
-            discovery_service = MatchDiscoveryService(self.match_repo, self.player_repo)
+            discovery_service = MatchDiscoveryService(
+                self.match_repo, self.player_repo, match_service=self.match_service
+            )
 
             loop = asyncio.get_event_loop()
             result = await loop.run_in_executor(None, discovery_service.discover_match, match_id)

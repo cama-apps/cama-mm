@@ -108,8 +108,13 @@ class MatchRepository(BaseRepository, IMatchRepository):
         expected_team_win_prob: float | None = None,
         team_number: int | None = None,
         won: bool | None = None,
+        os_mu_before: float | None = None,
+        os_mu_after: float | None = None,
+        os_sigma_before: float | None = None,
+        os_sigma_after: float | None = None,
+        fantasy_weight: float | None = None,
     ) -> None:
-        """Record a rating change in history."""
+        """Record a rating change in history (Glicko-2 and optionally OpenSkill)."""
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -125,9 +130,14 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     expected_team_win_prob,
                     team_number,
                     won,
-                    match_id
+                    match_id,
+                    os_mu_before,
+                    os_mu_after,
+                    os_sigma_before,
+                    os_sigma_after,
+                    fantasy_weight
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
                 (
                     discord_id,
@@ -141,6 +151,11 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     team_number,
                     won,
                     match_id,
+                    os_mu_before,
+                    os_mu_after,
+                    os_sigma_before,
+                    os_sigma_after,
+                    fantasy_weight,
                 ),
             )
 

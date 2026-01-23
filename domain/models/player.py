@@ -24,6 +24,9 @@ class Player:
     glicko_rating: float | None = None
     glicko_rd: float | None = None
     glicko_volatility: float | None = None
+    # OpenSkill Plackett-Luce rating fields (fantasy-weighted)
+    os_mu: float | None = None
+    os_sigma: float | None = None
     # Identity and economy
     discord_id: int | None = None
     jopacoin_balance: int = 0
