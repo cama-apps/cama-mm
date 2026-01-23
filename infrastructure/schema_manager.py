@@ -204,6 +204,7 @@ class SchemaManager:
             ("create_player_pool_bets_table", self._migration_create_player_pool_bets_table),
             ("add_conditional_players_to_lobby", self._migration_add_conditional_players_to_lobby),
             ("add_leaderboard_performance_indexes", self._migration_add_leaderboard_performance_indexes),
+            ("add_fantasy_columns", self._migration_add_fantasy_columns),
         ]
 
     # --- Migrations ---
@@ -826,3 +827,23 @@ class SchemaManager:
             "CREATE INDEX IF NOT EXISTS idx_players_leaderboard "
             "ON players(jopacoin_balance DESC, wins DESC, glicko_rating DESC)"
         )
+
+    def _migration_add_fantasy_columns(self, cursor) -> None:
+        """Add fantasy scoring columns to match_participants for OpenDota enrichment."""
+        # Tower/Roshan objectives
+        self._add_column_if_not_exists(cursor, "match_participants", "towers_killed", "INTEGER")
+        self._add_column_if_not_exists(cursor, "match_participants", "roshans_killed", "INTEGER")
+        # Teamfight participation (0.0 - 1.0)
+        self._add_column_if_not_exists(cursor, "match_participants", "teamfight_participation", "REAL")
+        # Vision game
+        self._add_column_if_not_exists(cursor, "match_participants", "obs_placed", "INTEGER")
+        self._add_column_if_not_exists(cursor, "match_participants", "sen_placed", "INTEGER")
+        # Jungle/economy
+        self._add_column_if_not_exists(cursor, "match_participants", "camps_stacked", "INTEGER")
+        self._add_column_if_not_exists(cursor, "match_participants", "rune_pickups", "INTEGER")
+        # Early game
+        self._add_column_if_not_exists(cursor, "match_participants", "firstblood_claimed", "INTEGER")
+        # Crowd control (stun duration in seconds)
+        self._add_column_if_not_exists(cursor, "match_participants", "stuns", "REAL")
+        # Calculated fantasy points
+        self._add_column_if_not_exists(cursor, "match_participants", "fantasy_points", "REAL")

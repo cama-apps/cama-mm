@@ -151,8 +151,10 @@ class EnrichmentCommands(commands.Cog):
                 )
                 return
 
-        # Perform enrichment
-        result = self.enrichment_service.enrich_match(internal_match_id, valve_match_id)
+        # Perform enrichment (skip_validation=True for manual admin enrichment)
+        result = self.enrichment_service.enrich_match(
+            internal_match_id, valve_match_id, skip_validation=True
+        )
 
         if not result["success"]:
             await safe_followup(
@@ -591,11 +593,13 @@ class EnrichmentCommands(commands.Cog):
     )
     @app_commands.describe(
         dry_run="Preview only, don't apply enrichments (default: False)",
+        refill_fantasy="Re-enrich matches that have enrichment but no fantasy data",
     )
     async def autodiscover(
         self,
         interaction: discord.Interaction,
         dry_run: bool = False,
+        refill_fantasy: bool = False,
     ):
         """Auto-discover Dota 2 match IDs by correlating player match histories."""
         if not has_admin_permission(interaction):
@@ -606,12 +610,20 @@ class EnrichmentCommands(commands.Cog):
             )
             return
 
-        logger.info(f"Autodiscover command: User {interaction.user.id}, dry_run={dry_run}")
+        logger.info(
+            f"Autodiscover command: User {interaction.user.id}, "
+            f"dry_run={dry_run}, refill_fantasy={refill_fantasy}"
+        )
 
         if not await safe_defer(interaction, ephemeral=True):
             return
 
         from services.match_discovery_service import MatchDiscoveryService
+
+        # Handle refill_fantasy mode - re-enrich matches that have valve_match_id but no fantasy data
+        if refill_fantasy:
+            await self._refill_fantasy_data(interaction, dry_run)
+            return
 
         discovery_service = MatchDiscoveryService(self.match_repo, self.player_repo)
 
@@ -630,6 +642,7 @@ class EnrichmentCommands(commands.Cog):
             f"Total unenriched: {results['total_unenriched']}",
             f"Discovered: {results['discovered']}",
             f"Skipped (low confidence): {results['skipped_low_confidence']}",
+            f"Skipped (validation failed): {results.get('skipped_validation_failed', 0)}",
             f"Skipped (no steam IDs): {results['skipped_no_steam_ids']}",
             f"Errors: {results['errors']}",
         ]
@@ -646,6 +659,107 @@ class EnrichmentCommands(commands.Cog):
                 )
             if len(discovered) > 10:
                 lines.append(f"  ... and {len(discovered) - 10} more")
+
+        # Show low confidence matches that need manual attention
+        low_confidence = [
+            d for d in results["details"]
+            if d["status"] == "low_confidence" and d.get("best_valve_match_id")
+        ]
+        if low_confidence:
+            lines.append("")
+            lines.append("**⚠️ Low Confidence (needs manual review):**")
+            for d in low_confidence[:5]:
+                lines.append(
+                    f"  #{d['match_id']} → {d['best_valve_match_id']} "
+                    f"({d['confidence']:.0%} - {d['player_count']}/{d['total_players']} players)"
+                )
+            if len(low_confidence) > 5:
+                lines.append(f"  ... and {len(low_confidence) - 5} more")
+            lines.append("*Use `/enrichmatch` to manually enrich these matches*")
+
+        # Show validation failures
+        validation_failed = [
+            d for d in results["details"]
+            if d["status"] == "validation_failed"
+        ]
+        if validation_failed:
+            lines.append("")
+            lines.append("**❌ Validation Failed:**")
+            for d in validation_failed[:5]:
+                lines.append(
+                    f"  #{d['match_id']} → {d.get('best_valve_match_id', '?')}: {d.get('validation_error', 'Unknown')}"
+                )
+            if len(validation_failed) > 5:
+                lines.append(f"  ... and {len(validation_failed) - 5} more")
+
+        await interaction.edit_original_response(content="\n".join(lines))
+
+    async def _refill_fantasy_data(self, interaction: discord.Interaction, dry_run: bool):
+        """Re-enrich matches that have enrichment but no fantasy data."""
+        matches = self.match_repo.get_matches_without_fantasy_data(limit=100)
+
+        if not matches:
+            await safe_followup(
+                interaction,
+                content="No matches need fantasy data refill. All enriched matches have fantasy points.",
+                ephemeral=True,
+            )
+            return
+
+        await safe_followup(
+            interaction,
+            content=f"Found {len(matches)} matches without fantasy data. {'Previewing...' if dry_run else 'Re-enriching...'}",
+            ephemeral=True,
+        )
+
+        refilled = []
+        errors = []
+
+        for match in matches:
+            match_id = match["match_id"]
+            valve_match_id = match["valve_match_id"]
+
+            if dry_run:
+                refilled.append({"match_id": match_id, "valve_match_id": valve_match_id})
+            else:
+                try:
+                    # Re-enrich with skip_validation since we already have the correct valve_match_id
+                    result = self.enrichment_service.enrich_match(
+                        match_id, valve_match_id, source="manual", skip_validation=True
+                    )
+                    if result["success"]:
+                        refilled.append({
+                            "match_id": match_id,
+                            "valve_match_id": valve_match_id,
+                            "fantasy_calculated": result.get("fantasy_points_calculated", False),
+                        })
+                    else:
+                        errors.append({"match_id": match_id, "error": result.get("error", "Unknown")})
+                except Exception as e:
+                    errors.append({"match_id": match_id, "error": str(e)})
+
+        # Build response
+        lines = [
+            f"**Fantasy Data Refill {'(DRY RUN)' if dry_run else 'Complete'}**",
+            "",
+            f"Matches processed: {len(matches)}",
+            f"Successfully refilled: {len(refilled)}",
+            f"Errors: {len(errors)}",
+        ]
+
+        if refilled and not dry_run:
+            lines.append("")
+            lines.append("**Refilled:**")
+            for r in refilled[:10]:
+                lines.append(f"  #{r['match_id']} → {r['valve_match_id']}")
+            if len(refilled) > 10:
+                lines.append(f"  ... and {len(refilled) - 10} more")
+
+        if errors:
+            lines.append("")
+            lines.append("**Errors:**")
+            for e in errors[:5]:
+                lines.append(f"  #{e['match_id']}: {e['error']}")
 
         await interaction.edit_original_response(content="\n".join(lines))
 

@@ -29,6 +29,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         discord_id: int,
         discord_username: str,
         dotabuff_url: str | None = None,
+        steam_id: int | None = None,
         initial_mmr: int | None = None,
         preferred_roles: list[str] | None = None,
         main_role: str | None = None,
@@ -38,6 +39,18 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
     ) -> None:
         """
         Add a new player to the database.
+
+        Args:
+            discord_id: Discord user ID
+            discord_username: Discord username
+            dotabuff_url: Optional Dotabuff profile URL
+            steam_id: Optional Steam32 account ID for match enrichment
+            initial_mmr: Optional initial MMR from OpenDota
+            preferred_roles: Optional list of preferred roles ["1", "2", etc.]
+            main_role: Optional primary role
+            glicko_rating: Optional initial Glicko rating
+            glicko_rd: Optional initial rating deviation
+            glicko_volatility: Optional initial volatility
 
         Raises:
             ValueError: If player with this discord_id already exists
@@ -55,15 +68,16 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             cursor.execute(
                 """
                 INSERT INTO players
-                (discord_id, discord_username, dotabuff_url, initial_mmr, current_mmr,
+                (discord_id, discord_username, dotabuff_url, steam_id, initial_mmr, current_mmr,
                  preferred_roles, main_role, glicko_rating, glicko_rd, glicko_volatility,
                  exclusion_count, jopacoin_balance, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 3, CURRENT_TIMESTAMP)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 3, CURRENT_TIMESTAMP)
             """,
                 (
                     discord_id,
                     discord_username,
                     dotabuff_url,
+                    steam_id,
                     initial_mmr,
                     initial_mmr,
                     roles_json,

@@ -1059,6 +1059,7 @@ class MatchCommands(commands.Cog):
                                 bankruptcy_repo=self.bankruptcy_repo,
                                 lobby_type=match_data.get("lobby_type", "shuffle"),
                             )
+
                             await channel.send(
                                 f"📊 Match #{match_id} auto-enriched ({confidence:.0%} confidence)",
                                 embed=embed,
