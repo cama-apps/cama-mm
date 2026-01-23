@@ -441,5 +441,169 @@ class TestGetNameFunctionSync:
         )
 
 
+class TestCriticalCommandsAlwaysLoaded:
+    """
+    Regression tests to ensure critical commands are always loadable.
+
+    These tests prevent deployment issues where commands don't appear in Discord
+    due to import errors, missing dependencies, or misconfiguration.
+    """
+
+    def test_critical_extensions_in_extensions_list(self):
+        """Verify critical command extensions are in the EXTENSIONS list."""
+        from bot import EXTENSIONS
+
+        # Critical extensions that must always be loaded
+        critical_extensions = [
+            "commands.info",      # /help, /leaderboard, /calibration
+            "commands.profile",   # /profile
+        ]
+
+        for ext in critical_extensions:
+            assert ext in EXTENSIONS, (
+                f"Critical extension '{ext}' is missing from EXTENSIONS list in bot.py. "
+                "This will cause commands to not appear in Discord."
+            )
+
+    def test_info_commands_module_imports_without_error(self):
+        """Verify commands.info module can be imported without errors."""
+        # This catches missing dependencies like matplotlib, dotabase
+        try:
+            from commands import info
+            assert hasattr(info, "InfoCommands"), "InfoCommands class should exist"
+            assert hasattr(info, "setup"), "setup function should exist"
+        except ImportError as e:
+            pytest.fail(f"commands.info failed to import: {e}")
+
+    def test_profile_commands_module_imports_without_error(self):
+        """Verify commands.profile module can be imported without errors."""
+        try:
+            from commands import profile
+            assert hasattr(profile, "ProfileCommands"), "ProfileCommands class should exist"
+            assert hasattr(profile, "setup"), "setup function should exist"
+        except ImportError as e:
+            pytest.fail(f"commands.profile failed to import: {e}")
+
+    def test_dota_info_commands_module_imports_without_error(self):
+        """Verify commands.dota_info module can be imported (requires dotabase)."""
+        try:
+            from commands import dota_info
+            assert hasattr(dota_info, "DotaInfoCommands"), "DotaInfoCommands class should exist"
+            assert hasattr(dota_info, "setup"), "setup function should exist"
+        except ImportError as e:
+            pytest.fail(f"commands.dota_info failed to import: {e}")
+
+    def test_info_cog_has_help_command(self):
+        """Verify InfoCommands cog has the /help command."""
+        from commands.info import InfoCommands
+        from discord.app_commands import Command
+
+        # Check that help_command method exists and is decorated as app_command
+        assert hasattr(InfoCommands, "help_command"), (
+            "InfoCommands should have a help_command method"
+        )
+
+        # Decorated methods become Command objects
+        cmd = getattr(InfoCommands, "help_command")
+        assert isinstance(cmd, Command), (
+            "help_command should be a discord.app_commands.Command"
+        )
+        assert cmd.name == "help", "Command name should be 'help'"
+
+    def test_info_cog_has_leaderboard_command(self):
+        """Verify InfoCommands cog has the /leaderboard command."""
+        from commands.info import InfoCommands
+        from discord.app_commands import Command
+
+        assert hasattr(InfoCommands, "leaderboard"), (
+            "InfoCommands should have a leaderboard method"
+        )
+        cmd = getattr(InfoCommands, "leaderboard")
+        assert isinstance(cmd, Command), (
+            "leaderboard should be a discord.app_commands.Command"
+        )
+        assert cmd.name == "leaderboard", "Command name should be 'leaderboard'"
+
+    def test_profile_cog_has_profile_command(self):
+        """Verify ProfileCommands cog has the /profile command."""
+        from commands.profile import ProfileCommands
+        from discord.app_commands import Command
+
+        assert hasattr(ProfileCommands, "profile"), (
+            "ProfileCommands should have a profile method"
+        )
+        cmd = getattr(ProfileCommands, "profile")
+        assert isinstance(cmd, Command), (
+            "profile should be a discord.app_commands.Command"
+        )
+        assert cmd.name == "profile", "Command name should be 'profile'"
+
+    def test_dota_info_cog_has_hero_and_ability_commands(self):
+        """Verify DotaInfoCommands cog has /hero and /ability commands."""
+        from commands.dota_info import DotaInfoCommands
+        from discord.app_commands import Command
+
+        assert hasattr(DotaInfoCommands, "hero"), (
+            "DotaInfoCommands should have a hero method"
+        )
+        hero_cmd = getattr(DotaInfoCommands, "hero")
+        assert isinstance(hero_cmd, Command), "hero should be a Command"
+        assert hero_cmd.name == "hero", "Command name should be 'hero'"
+
+        assert hasattr(DotaInfoCommands, "ability"), (
+            "DotaInfoCommands should have an ability method"
+        )
+        ability_cmd = getattr(DotaInfoCommands, "ability")
+        assert isinstance(ability_cmd, Command), "ability should be a Command"
+        assert ability_cmd.name == "ability", "Command name should be 'ability'"
+
+    def test_info_cog_can_be_instantiated(self):
+        """Verify InfoCommands cog can be instantiated with mock dependencies."""
+        from commands.info import InfoCommands
+
+        mock_bot = MagicMock()
+
+        # InfoCommands requires these constructor args
+        cog = InfoCommands(
+            bot=mock_bot,
+            player_repo=MagicMock(),
+            match_repo=MagicMock(),
+            role_emojis={},
+            role_names={},
+        )
+
+        assert cog is not None, "InfoCommands should instantiate successfully"
+        assert cog.bot is mock_bot, "Bot should be stored on cog"
+
+    def test_profile_cog_can_be_instantiated(self):
+        """Verify ProfileCommands cog can be instantiated with mock dependencies."""
+        from commands.profile import ProfileCommands
+
+        mock_bot = MagicMock()
+        cog = ProfileCommands(bot=mock_bot)
+
+        assert cog is not None, "ProfileCommands should instantiate successfully"
+        assert cog.bot is mock_bot, "Bot should be stored on cog"
+
+    def test_all_extensions_importable(self):
+        """Verify all extensions in EXTENSIONS list can be imported."""
+        from bot import EXTENSIONS
+        import importlib
+
+        failed_imports = []
+        for ext in EXTENSIONS:
+            try:
+                importlib.import_module(ext)
+            except ImportError as e:
+                failed_imports.append((ext, str(e)))
+
+        if failed_imports:
+            failures = "\n".join(f"  - {ext}: {err}" for ext, err in failed_imports)
+            pytest.fail(
+                f"The following extensions failed to import:\n{failures}\n"
+                "This will cause commands to not appear in Discord."
+            )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
