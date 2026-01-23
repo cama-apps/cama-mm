@@ -344,6 +344,7 @@ EXTENSIONS = [
     "commands.ask",
     "commands.profile",
     "commands.draft",
+    "commands.rating_analysis",
 ]
 
 
