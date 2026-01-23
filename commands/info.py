@@ -501,24 +501,38 @@ class InfoCommands(commands.Cog):
             color=0xFFD700,  # Gold
         )
 
+        # Pre-fetch guild members to avoid individual API calls
+        guild_members = {m.id: m for m in interaction.guild.members} if interaction.guild else {}
+
+        # Collect all unique discord_ids from all leaderboard sections
+        all_discord_ids = set()
+        for entry in leaderboard.top_earners:
+            all_discord_ids.add(entry.discord_id)
+        for entry in leaderboard.down_bad:
+            all_discord_ids.add(entry.discord_id)
+        for entry in leaderboard.hall_of_degen:
+            all_discord_ids.add(entry.discord_id)
+        for entry in leaderboard.biggest_gamblers:
+            all_discord_ids.add(entry.discord_id)
+
+        # Batch fetch bankruptcy states ONCE (replaces up to 80 individual calls)
+        bankruptcy_states = {}
+        if self.bankruptcy_service and all_discord_ids:
+            bankruptcy_states = self.bankruptcy_service.get_bulk_states(list(all_discord_ids))
+
         # Helper to get username with tombstone if bankrupt
-        async def get_name(discord_id: int) -> str:
-            try:
-                member = interaction.guild.get_member(discord_id) if interaction.guild else None
-                if member:
-                    name = member.display_name
-                else:
-                    user = await self.bot.fetch_user(discord_id)
-                    name = user.display_name if user else f"User {discord_id}"
-            except Exception:
+        def get_name(discord_id: int) -> str:
+            member = guild_members.get(discord_id)
+            if member:
+                name = member.display_name
+            else:
                 name = f"User {discord_id}"
 
-            # Add tombstone if player has active bankruptcy penalty
-            if self.bankruptcy_service:
-                state = self.bankruptcy_service.get_state(discord_id)
-                if state and state.penalty_games_remaining > 0:
-                    from utils.formatting import TOMBSTONE_EMOJI
-                    name = f"{TOMBSTONE_EMOJI} {name}"
+            # Use pre-fetched bankruptcy state instead of individual DB call
+            state = bankruptcy_states.get(discord_id)
+            if state and state.penalty_games_remaining > 0:
+                from utils.formatting import TOMBSTONE_EMOJI
+                name = f"{TOMBSTONE_EMOJI} {name}"
 
             return name
 
@@ -526,10 +540,10 @@ class InfoCommands(commands.Cog):
         if leaderboard.top_earners:
             lines = []
             for i, entry in enumerate(leaderboard.top_earners, 1):
-                name = await get_name(entry["discord_id"])
-                pnl = entry["net_pnl"]
+                name = get_name(entry.discord_id)
+                pnl = entry.net_pnl
                 pnl_str = f"+{pnl}" if pnl >= 0 else str(pnl)
-                lines.append(f"{i}. **{name}** {pnl_str} {JOPACOIN_EMOTE} ({entry['win_rate']:.0%})")
+                lines.append(f"{i}. **{name}** {pnl_str} {JOPACOIN_EMOTE} ({entry.win_rate:.0%})")
             embed.add_field(
                 name="💰 Top Earners",
                 value="\n".join(lines),
@@ -537,12 +551,12 @@ class InfoCommands(commands.Cog):
             )
 
         # Down bad (only show if negative)
-        down_bad = [e for e in leaderboard.down_bad if e["net_pnl"] < 0]
+        down_bad = [e for e in leaderboard.down_bad if e.net_pnl < 0]
         if down_bad:
             lines = []
             for i, entry in enumerate(down_bad[:limit], 1):
-                name = await get_name(entry["discord_id"])
-                lines.append(f"{i}. **{name}** {entry['net_pnl']} {JOPACOIN_EMOTE} ({entry['win_rate']:.0%})")
+                name = get_name(entry.discord_id)
+                lines.append(f"{i}. **{name}** {entry.net_pnl} {JOPACOIN_EMOTE} ({entry.win_rate:.0%})")
             embed.add_field(
                 name="📉 Down Bad",
                 value="\n".join(lines),
@@ -553,32 +567,34 @@ class InfoCommands(commands.Cog):
         if leaderboard.hall_of_degen:
             lines = []
             for i, entry in enumerate(leaderboard.hall_of_degen, 1):
-                name = await get_name(entry["discord_id"])
-                lines.append(f"{i}. **{name}** {entry['degen_score']} {entry['degen_emoji']} {entry['degen_title']}")
+                name = get_name(entry.discord_id)
+                lines.append(f"{i}. **{name}** {entry.degen_score} {entry.degen_emoji} {entry.degen_title}")
             embed.add_field(
                 name="🎰 Hall of Degen",
                 value="\n".join(lines),
                 inline=False,
             )
 
-        # Biggest gamblers (most bets)
+        # Biggest gamblers (sorted by total wagered)
         if leaderboard.biggest_gamblers:
             lines = []
             for i, entry in enumerate(leaderboard.biggest_gamblers, 1):
-                name = await get_name(entry["discord_id"])
-                lines.append(f"{i}. **{name}** {entry['total_bets']} bets ({entry['total_wagered']} wagered)")
+                name = get_name(entry.discord_id)
+                lines.append(f"{i}. **{name}** {entry.total_wagered}{JOPACOIN_EMOTE} wagered")
             embed.add_field(
-                name="🎲 Biggest Gamblers",
+                name="🎰 Biggest Gamblers",
                 value="\n".join(lines),
                 inline=False,
             )
 
-        # Server stats footer
+        # Server stats footer (compact single line)
         if leaderboard.server_stats:
             embed.set_footer(
-                text=f"📊 {leaderboard.server_stats['total_bets']} total bets • "
-                f"{leaderboard.server_stats['total_wagered']} wagered • "
-                f"{leaderboard.server_stats['unique_gamblers']} players"
+                text=f"📊 {leaderboard.server_stats['total_bets']} bets • "
+                f"{leaderboard.server_stats['total_wagered']}{JOPACOIN_EMOTE} wagered • "
+                f"{leaderboard.server_stats['unique_gamblers']} players • "
+                f"{leaderboard.server_stats['avg_bet_size']}{JOPACOIN_EMOTE} avg • "
+                f"{leaderboard.server_stats['total_bankruptcies']} bankruptcies"
             )
 
         await safe_followup(

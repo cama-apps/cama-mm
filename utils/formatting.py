@@ -23,6 +23,7 @@ ROLE_NAMES = {
 
 # Custom jopacoin emote used across embeds/messages
 JOPACOIN_EMOTE = "<:jopacoin:954159801049440297>"
+JOPACOIN_EMOJI_ID = 954159801049440297
 
 # Custom frogling emote for conditional lobby players
 FROGLING_EMOTE = "<:frogling:1463270458848842003>"

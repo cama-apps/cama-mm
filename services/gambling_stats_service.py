@@ -3,7 +3,7 @@ Service for gambling statistics and degen score calculation.
 """
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypedDict
 
 if TYPE_CHECKING:
     from repositories.bet_repository import BetRepository
@@ -36,6 +36,16 @@ DEGEN_TIERS = [
     (80, 89, "Menace", "Financial advisor on suicide watch"),
     (90, 100, "Legendary Degen", "They write songs about you"),
 ]
+
+
+class ServerStats(TypedDict):
+    """Server-wide gambling statistics for leaderboard footer."""
+
+    total_bets: int
+    total_wagered: int
+    unique_gamblers: int
+    avg_bet_size: int
+    total_bankruptcies: int
 
 
 @dataclass
@@ -92,9 +102,11 @@ class LeaderboardEntry:
     losses: int
     win_rate: float
     net_pnl: int
+    total_wagered: int
     avg_leverage: float
     degen_score: int | None = None
     degen_title: str | None = None
+    degen_emoji: str | None = None
 
 
 @dataclass
@@ -104,11 +116,13 @@ class Leaderboard:
     top_earners: list[LeaderboardEntry]
     down_bad: list[LeaderboardEntry]
     hall_of_degen: list[LeaderboardEntry]
+    biggest_gamblers: list[LeaderboardEntry]
     total_wagered: int
     total_bets: int
     avg_degen_score: float
     total_bankruptcies: int
     total_loans: int
+    server_stats: ServerStats
 
 
 @dataclass
@@ -380,15 +394,24 @@ class GamblingStatsService:
         summaries = self.bet_repo.get_guild_gambling_summary(guild_id, min_bets=min_bets)
 
         if not summaries:
+            empty_stats: ServerStats = {
+                "total_bets": 0,
+                "total_wagered": 0,
+                "unique_gamblers": 0,
+                "avg_bet_size": 0,
+                "total_bankruptcies": 0,
+            }
             return Leaderboard(
                 top_earners=[],
                 down_bad=[],
                 hall_of_degen=[],
+                biggest_gamblers=[],
                 total_wagered=0,
                 total_bets=0,
                 avg_degen_score=0,
                 total_bankruptcies=0,
                 total_loans=0,
+                server_stats=empty_stats,
             )
 
         # Get all discord_ids for batch queries
@@ -455,9 +478,11 @@ class GamblingStatsService:
                     losses=s["losses"],
                     win_rate=s["win_rate"],
                     net_pnl=s["net_pnl"],
+                    total_wagered=s["total_wagered"],
                     avg_leverage=s["avg_leverage"],
                     degen_score=degen.total,
                     degen_title=degen.title,
+                    degen_emoji=degen.emoji,
                 )
             )
 
@@ -470,6 +495,11 @@ class GamblingStatsService:
         # Hall of degen (sorted by degen score descending)
         hall_of_degen = sorted(
             entries, key=lambda e: e.degen_score or 0, reverse=True
+        )[:limit]
+
+        # Biggest gamblers (sorted by total_wagered descending)
+        biggest_gamblers = sorted(
+            entries, key=lambda e: e.total_wagered, reverse=True
         )[:limit]
 
         # Server totals
@@ -498,15 +528,28 @@ class GamblingStatsService:
             if row:
                 total_loans = row["total"]
 
+        # Build server stats
+        unique_gamblers = len(summaries)
+        avg_bet_size = int(total_wagered / total_bets_count) if total_bets_count > 0 else 0
+        server_stats: ServerStats = {
+            "total_bets": total_bets_count,
+            "total_wagered": total_wagered,
+            "unique_gamblers": unique_gamblers,
+            "avg_bet_size": avg_bet_size,
+            "total_bankruptcies": total_bankruptcies,
+        }
+
         return Leaderboard(
             top_earners=top_earners,
             down_bad=down_bad,
             hall_of_degen=hall_of_degen,
+            biggest_gamblers=biggest_gamblers,
             total_wagered=total_wagered,
             total_bets=total_bets_count,
             avg_degen_score=avg_degen,
             total_bankruptcies=total_bankruptcies,
             total_loans=total_loans,
+            server_stats=server_stats,
         )
 
     def _calculate_degen_score_from_batch(
