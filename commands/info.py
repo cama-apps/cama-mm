@@ -501,16 +501,15 @@ class InfoCommands(commands.Cog):
             color=0xFFD700,  # Gold
         )
 
+        # Pre-fetch guild members to avoid individual API calls
+        guild_members = {m.id: m for m in interaction.guild.members} if interaction.guild else {}
+
         # Helper to get username with tombstone if bankrupt
-        async def get_name(discord_id: int) -> str:
-            try:
-                member = interaction.guild.get_member(discord_id) if interaction.guild else None
-                if member:
-                    name = member.display_name
-                else:
-                    user = await self.bot.fetch_user(discord_id)
-                    name = user.display_name if user else f"User {discord_id}"
-            except Exception:
+        def get_name(discord_id: int) -> str:
+            member = guild_members.get(discord_id)
+            if member:
+                name = member.display_name
+            else:
                 name = f"User {discord_id}"
 
             # Add tombstone if player has active bankruptcy penalty
@@ -526,7 +525,7 @@ class InfoCommands(commands.Cog):
         if leaderboard.top_earners:
             lines = []
             for i, entry in enumerate(leaderboard.top_earners, 1):
-                name = await get_name(entry.discord_id)
+                name = get_name(entry.discord_id)
                 pnl = entry.net_pnl
                 pnl_str = f"+{pnl}" if pnl >= 0 else str(pnl)
                 lines.append(f"{i}. **{name}** {pnl_str} {JOPACOIN_EMOTE} ({entry.win_rate:.0%})")
@@ -541,7 +540,7 @@ class InfoCommands(commands.Cog):
         if down_bad:
             lines = []
             for i, entry in enumerate(down_bad[:limit], 1):
-                name = await get_name(entry.discord_id)
+                name = get_name(entry.discord_id)
                 lines.append(f"{i}. **{name}** {entry.net_pnl} {JOPACOIN_EMOTE} ({entry.win_rate:.0%})")
             embed.add_field(
                 name="📉 Down Bad",
@@ -553,7 +552,7 @@ class InfoCommands(commands.Cog):
         if leaderboard.hall_of_degen:
             lines = []
             for i, entry in enumerate(leaderboard.hall_of_degen, 1):
-                name = await get_name(entry.discord_id)
+                name = get_name(entry.discord_id)
                 lines.append(f"{i}. **{name}** {entry.degen_score} {entry.degen_emoji} {entry.degen_title}")
             embed.add_field(
                 name="🎰 Hall of Degen",
@@ -565,7 +564,7 @@ class InfoCommands(commands.Cog):
         if leaderboard.biggest_gamblers:
             lines = []
             for i, entry in enumerate(leaderboard.biggest_gamblers, 1):
-                name = await get_name(entry.discord_id)
+                name = get_name(entry.discord_id)
                 lines.append(f"{i}. **{name}** {entry.total_wagered}{JOPACOIN_EMOTE} wagered")
             embed.add_field(
                 name="🎰 Biggest Gamblers",

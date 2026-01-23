@@ -1369,7 +1369,7 @@ class ProfileCommands(commands.Cog):
         else:
             embed.add_field(name="⚔️ Most Played Against", value="No data yet", inline=True)
 
-        # Spacer
+        # Spacer to complete row and force Even sections to new row
         embed.add_field(name="\u200b", value="\u200b", inline=True)
 
         # Evenly Matched (teammates with ~50% win rate)
