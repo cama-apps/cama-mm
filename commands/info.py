@@ -475,10 +475,6 @@ class InfoCommands(commands.Cog):
 
     async def _show_gambling_leaderboard(self, interaction: discord.Interaction, limit: int):
         """Show the gambling leaderboard."""
-        import time as time_module
-        t0 = time_module.time()
-        logger.info(f"[GAMBA-DEBUG] Starting _show_gambling_leaderboard at {t0}")
-
         if not self.gambling_stats_service:
             await safe_followup(
                 interaction,
@@ -490,9 +486,7 @@ class InfoCommands(commands.Cog):
         guild_id = interaction.guild.id if interaction.guild else None
         limit = max(1, min(limit, 20))  # Clamp between 1 and 20
 
-        logger.info(f"[GAMBA-DEBUG] Calling get_leaderboard at {time_module.time() - t0:.2f}s")
         leaderboard = self.gambling_stats_service.get_leaderboard(guild_id, limit=limit)
-        logger.info(f"[GAMBA-DEBUG] get_leaderboard returned at {time_module.time() - t0:.2f}s")
 
         if not leaderboard.top_earners and not leaderboard.hall_of_degen:
             await safe_followup(
@@ -507,10 +501,8 @@ class InfoCommands(commands.Cog):
             color=0xFFD700,  # Gold
         )
 
-        logger.info(f"[GAMBA-DEBUG] Building guild_members at {time_module.time() - t0:.2f}s")
         # Pre-fetch guild members to avoid individual API calls
         guild_members = {m.id: m for m in interaction.guild.members} if interaction.guild else {}
-        logger.info(f"[GAMBA-DEBUG] guild_members built ({len(guild_members)} members) at {time_module.time() - t0:.2f}s")
 
         # Collect all unique discord_ids from all leaderboard sections
         all_discord_ids = set()
@@ -524,11 +516,9 @@ class InfoCommands(commands.Cog):
             all_discord_ids.add(entry.discord_id)
 
         # Batch fetch bankruptcy states ONCE (replaces up to 80 individual calls)
-        logger.info(f"[GAMBA-DEBUG] Fetching bankruptcy states for {len(all_discord_ids)} users at {time_module.time() - t0:.2f}s")
         bankruptcy_states = {}
         if self.bankruptcy_service and all_discord_ids:
             bankruptcy_states = self.bankruptcy_service.get_bulk_states(list(all_discord_ids))
-        logger.info(f"[GAMBA-DEBUG] Bankruptcy states fetched at {time_module.time() - t0:.2f}s")
 
         # Helper to get username with tombstone if bankrupt
         def get_name(discord_id: int) -> str:
@@ -547,7 +537,6 @@ class InfoCommands(commands.Cog):
             return name
 
         # Top earners
-        logger.info(f"[GAMBA-DEBUG] Building top_earners field at {time_module.time() - t0:.2f}s")
         if leaderboard.top_earners:
             lines = []
             for i, entry in enumerate(leaderboard.top_earners, 1):
@@ -562,7 +551,6 @@ class InfoCommands(commands.Cog):
             )
 
         # Down bad (only show if negative)
-        logger.info(f"[GAMBA-DEBUG] Building down_bad field at {time_module.time() - t0:.2f}s")
         down_bad = [e for e in leaderboard.down_bad if e.net_pnl < 0]
         if down_bad:
             lines = []
@@ -576,7 +564,6 @@ class InfoCommands(commands.Cog):
             )
 
         # Hall of Degen (highest degen scores)
-        logger.info(f"[GAMBA-DEBUG] Building hall_of_degen field at {time_module.time() - t0:.2f}s")
         if leaderboard.hall_of_degen:
             lines = []
             for i, entry in enumerate(leaderboard.hall_of_degen, 1):
@@ -589,7 +576,6 @@ class InfoCommands(commands.Cog):
             )
 
         # Biggest gamblers (sorted by total wagered)
-        logger.info(f"[GAMBA-DEBUG] Building biggest_gamblers field at {time_module.time() - t0:.2f}s")
         if leaderboard.biggest_gamblers:
             lines = []
             for i, entry in enumerate(leaderboard.biggest_gamblers, 1):
@@ -611,13 +597,11 @@ class InfoCommands(commands.Cog):
                 f"{leaderboard.server_stats['total_bankruptcies']} bankruptcies"
             )
 
-        logger.info(f"[GAMBA-DEBUG] Calling safe_followup at {time_module.time() - t0:.2f}s")
         await safe_followup(
             interaction,
             embed=embed,
             allowed_mentions=discord.AllowedMentions(users=True),
         )
-        logger.info(f"[GAMBA-DEBUG] safe_followup returned at {time_module.time() - t0:.2f}s")
 
     async def _show_predictions_leaderboard(self, interaction: discord.Interaction, limit: int):
         """Show the predictions leaderboard."""
