@@ -413,3 +413,143 @@ class TestBankruptcyCount:
 
         count = bet_repo.get_player_bankruptcy_count(pid)
         assert count == 0
+
+
+class TestBulkBankruptcyState:
+    """Tests for bulk state fetching."""
+
+    def test_get_bulk_states_empty_list(self, db_and_repos, bankruptcy_service):
+        """Empty list should return empty dict."""
+        result = bankruptcy_service.get_bulk_states([])
+        assert result == {}
+
+    def test_get_bulk_states_single_user_no_bankruptcy(self, db_and_repos, bankruptcy_service):
+        """User without bankruptcy should return default state."""
+        player_repo = db_and_repos["player_repo"]
+        pid = create_test_player(player_repo, 1001, balance=100)
+
+        states = bankruptcy_service.get_bulk_states([pid])
+
+        assert len(states) == 1
+        assert pid in states
+        assert states[pid].discord_id == pid
+        assert states[pid].penalty_games_remaining == 0
+        assert states[pid].is_on_cooldown is False
+        assert states[pid].last_bankruptcy_at is None
+
+    def test_get_bulk_states_single_user_with_bankruptcy(self, db_and_repos, bankruptcy_service):
+        """User with bankruptcy should return correct state."""
+        player_repo = db_and_repos["player_repo"]
+        pid = create_test_player(player_repo, 1001, balance=-200)
+
+        bankruptcy_service.declare_bankruptcy(pid)
+        states = bankruptcy_service.get_bulk_states([pid])
+
+        assert len(states) == 1
+        assert states[pid].discord_id == pid
+        assert states[pid].penalty_games_remaining == 5
+        assert states[pid].is_on_cooldown is True
+        assert states[pid].last_bankruptcy_at is not None
+
+    def test_get_bulk_states_multiple_users_mixed(self, db_and_repos, bankruptcy_service):
+        """Should correctly fetch mixed users - some with bankruptcy, some without."""
+        player_repo = db_and_repos["player_repo"]
+
+        # User with bankruptcy
+        pid1 = create_test_player(player_repo, 1001, balance=-200)
+        bankruptcy_service.declare_bankruptcy(pid1)
+
+        # User without bankruptcy (positive balance)
+        pid2 = create_test_player(player_repo, 1002, balance=50)
+
+        # User without bankruptcy (never registered for bankruptcy)
+        pid3 = create_test_player(player_repo, 1003, balance=10)
+
+        states = bankruptcy_service.get_bulk_states([pid1, pid2, pid3])
+
+        assert len(states) == 3
+
+        # User 1: has bankruptcy
+        assert states[pid1].penalty_games_remaining == 5
+        assert states[pid1].is_on_cooldown is True
+
+        # User 2: no bankruptcy
+        assert states[pid2].penalty_games_remaining == 0
+        assert states[pid2].is_on_cooldown is False
+
+        # User 3: no bankruptcy
+        assert states[pid3].penalty_games_remaining == 0
+        assert states[pid3].is_on_cooldown is False
+
+    def test_get_bulk_states_cooldown_calculation(self, db_and_repos):
+        """Should correctly calculate cooldown status for bulk fetch."""
+        player_repo = db_and_repos["player_repo"]
+        bankruptcy_repo = db_and_repos["bankruptcy_repo"]
+
+        # Create service with very short cooldown for testing
+        short_cooldown_service = BankruptcyService(
+            bankruptcy_repo=bankruptcy_repo,
+            player_repo=player_repo,
+            cooldown_seconds=1,  # 1 second cooldown
+            penalty_games=5,
+            penalty_rate=0.5,
+        )
+
+        pid = create_test_player(player_repo, 1001, balance=-200)
+        short_cooldown_service.declare_bankruptcy(pid)
+
+        # Immediately after: should be on cooldown
+        states = short_cooldown_service.get_bulk_states([pid])
+        assert states[pid].is_on_cooldown is True
+
+        # Wait for cooldown to expire
+        time.sleep(1.1)
+
+        # After cooldown: should not be on cooldown
+        states = short_cooldown_service.get_bulk_states([pid])
+        assert states[pid].is_on_cooldown is False
+
+    def test_get_bulk_states_nonexistent_user(self, db_and_repos, bankruptcy_service):
+        """Non-existent user should return default state."""
+        # User ID that doesn't exist in any table
+        nonexistent_id = 999999999
+
+        states = bankruptcy_service.get_bulk_states([nonexistent_id])
+
+        assert len(states) == 1
+        assert nonexistent_id in states
+        assert states[nonexistent_id].penalty_games_remaining == 0
+        assert states[nonexistent_id].is_on_cooldown is False
+
+    def test_get_bulk_states_repo_returns_only_existing(self, db_and_repos, bankruptcy_service):
+        """Repository bulk fetch should only return users with bankruptcy records."""
+        player_repo = db_and_repos["player_repo"]
+        bankruptcy_repo = db_and_repos["bankruptcy_repo"]
+
+        # User with bankruptcy
+        pid1 = create_test_player(player_repo, 1001, balance=-200)
+        bankruptcy_service.declare_bankruptcy(pid1)
+
+        # User without bankruptcy
+        pid2 = create_test_player(player_repo, 1002, balance=50)
+
+        # Repository-level fetch (raw, not service)
+        raw_states = bankruptcy_repo.get_bulk_states([pid1, pid2])
+
+        # Repository only returns users WITH bankruptcy records
+        assert len(raw_states) == 1
+        assert pid1 in raw_states
+        assert pid2 not in raw_states
+
+    def test_get_bulk_states_with_duplicates(self, db_and_repos, bankruptcy_service):
+        """Should handle duplicate IDs in input list."""
+        player_repo = db_and_repos["player_repo"]
+        pid = create_test_player(player_repo, 1001, balance=-200)
+        bankruptcy_service.declare_bankruptcy(pid)
+
+        # Pass same ID multiple times
+        states = bankruptcy_service.get_bulk_states([pid, pid, pid])
+
+        # Should still return just one entry
+        assert len(states) == 1
+        assert states[pid].penalty_games_remaining == 5

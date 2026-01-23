@@ -55,6 +55,33 @@ class BankruptcyRepository(BaseRepository):
                 "bankruptcy_count": row["bankruptcy_count"],
             }
 
+    def get_bulk_states(self, discord_ids: list[int]) -> dict[int, dict]:
+        """Get bankruptcy states for multiple players in one query.
+
+        Args:
+            discord_ids: List of Discord IDs to fetch states for.
+
+        Returns:
+            Dict mapping discord_id to state dict. Only includes users
+            who have bankruptcy records in the database (excludes users
+            who have never declared bankruptcy). Empty input returns empty dict.
+        """
+        if not discord_ids:
+            return {}
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            placeholders = ",".join("?" * len(discord_ids))
+            cursor.execute(
+                f"""
+                SELECT discord_id, last_bankruptcy_at, penalty_games_remaining,
+                       COALESCE(bankruptcy_count, 0) as bankruptcy_count
+                FROM bankruptcy_state
+                WHERE discord_id IN ({placeholders})
+                """,
+                discord_ids,
+            )
+            return {row["discord_id"]: dict(row) for row in cursor.fetchall()}
+
     def upsert_state(
         self, discord_id: int, last_bankruptcy_at: int, penalty_games_remaining: int
     ) -> None:
@@ -180,6 +207,47 @@ class BankruptcyService:
             is_on_cooldown=is_on_cooldown,
             cooldown_ends_at=cooldown_ends if is_on_cooldown else None,
         )
+
+    def get_bulk_states(self, discord_ids: list[int]) -> dict[int, BankruptcyState]:
+        """Get bankruptcy states for multiple players efficiently.
+
+        Args:
+            discord_ids: List of Discord IDs to fetch states for.
+                Duplicates are automatically de-duped before processing.
+
+        Returns:
+            Dict mapping discord_id to BankruptcyState. Players without
+            bankruptcy history return a default state (no penalty, no cooldown).
+            Empty input returns empty dict.
+        """
+        if not discord_ids:
+            return {}
+        unique_ids = list(set(discord_ids))  # De-dupe for efficiency
+        raw_states = self.bankruptcy_repo.get_bulk_states(unique_ids)
+        now = int(time.time())
+        result = {}
+        for discord_id in unique_ids:
+            state = raw_states.get(discord_id)
+            if not state:
+                result[discord_id] = BankruptcyState(
+                    discord_id=discord_id,
+                    last_bankruptcy_at=None,
+                    penalty_games_remaining=0,
+                    is_on_cooldown=False,
+                    cooldown_ends_at=None,
+                )
+            else:
+                last_bankruptcy = state["last_bankruptcy_at"]
+                cooldown_ends = last_bankruptcy + self.cooldown_seconds if last_bankruptcy else None
+                is_on_cooldown = cooldown_ends is not None and now < cooldown_ends
+                result[discord_id] = BankruptcyState(
+                    discord_id=discord_id,
+                    last_bankruptcy_at=last_bankruptcy,
+                    penalty_games_remaining=state["penalty_games_remaining"],
+                    is_on_cooldown=is_on_cooldown,
+                    cooldown_ends_at=cooldown_ends if is_on_cooldown else None,
+                )
+        return result
 
     def can_declare_bankruptcy(self, discord_id: int) -> dict:
         """
