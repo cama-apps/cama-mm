@@ -91,7 +91,7 @@ from services.stake_service import StakePoolConfig, StakeService
 from services.permissions import has_admin_permission  # noqa: F401 - used by tests
 from services.player_service import PlayerService
 from services.opendota_player_service import OpenDotaPlayerService
-from utils.formatting import FROGLING_EMOJI_ID, FROGLING_EMOTE, ROLE_EMOJIS, ROLE_NAMES, format_role_display
+from utils.formatting import FROGLING_EMOJI_ID, FROGLING_EMOTE, JOPACOIN_EMOJI_ID, JOPACOIN_EMOTE, ROLE_EMOJIS, ROLE_NAMES, format_role_display
 
 # Bot setup
 
@@ -581,16 +581,23 @@ def _is_frogling_emoji(emoji) -> bool:
     return emoji.id == FROGLING_EMOJI_ID or emoji.name == "frogling"
 
 
+def _is_jopacoin_emoji(emoji) -> bool:
+    """Check if the emoji is the jopacoin emoji for gamba notifications."""
+    # Custom emoji: check by ID or name
+    return emoji.id == JOPACOIN_EMOJI_ID or emoji.name == "jopacoin"
+
+
 @bot.event
 async def on_raw_reaction_add(payload):
-    """Handle reaction adds for lobby joining (⚔️ for regular, :frogling: for conditional)."""
+    """Handle reaction adds for lobby joining (⚔️ for regular, :frogling: for conditional, :jopacoin: for gamba notifications)."""
     if not bot.user or payload.user_id == bot.user.id:
         return
 
     is_sword = _is_sword_emoji(payload.emoji)
     is_frogling = _is_frogling_emoji(payload.emoji)
+    is_jopacoin = _is_jopacoin_emoji(payload.emoji)
 
-    if not is_sword and not is_frogling:
+    if not is_sword and not is_frogling and not is_jopacoin:
         return
 
     _init_services()  # Ensure services are initialized
@@ -608,6 +615,24 @@ async def on_raw_reaction_add(payload):
             return
 
         user = await bot.fetch_user(payload.user_id)
+
+        # Handle jopacoin reaction for gamba notifications
+        if is_jopacoin:
+            # Only ping if user is NOT already in the lobby (regular or conditional)
+            already_in_lobby = payload.user_id in lobby.players or payload.user_id in lobby.conditional_players
+            if not already_in_lobby:
+                thread_id = lobby_service.get_lobby_thread_id()
+                if thread_id:
+                    try:
+                        thread = bot.get_channel(thread_id)
+                        if not thread:
+                            thread = await bot.fetch_channel(thread_id)
+                        await thread.send(f"{JOPACOIN_EMOTE} {user.mention} is here for the gamba!")
+                    except Exception as exc:
+                        logger.warning(f"Failed to post gamba subscription in thread: {exc}")
+            return
+
+        # Rest of the handler is for sword/frogling (lobby joining)
         player = player_service.get_player(payload.user_id)
         if not player:
             try:
