@@ -159,7 +159,7 @@ class TestRatingSystemEdgeCases:
         )
 
     def test_team_rating_update(self):
-        """Test rating updates for team matches with hybrid deltas."""
+        """Test rating updates for team matches with individual Glicko-2 updates."""
         rating_system = CamaRatingSystem()
 
         # Create two teams of 5 calibrated players each (RD = 80, below threshold 100)
@@ -185,7 +185,8 @@ class TestRatingSystemEdgeCases:
         assert len(team1_updated) == 5, "Team 1 should have 5 updated ratings"
         assert len(team2_updated) == 5, "Team 2 should have 5 updated ratings"
 
-        # With hybrid deltas, calibrated players (RD <= threshold) get uniform team delta
+        # V3 uses individual Glicko-2 updates - each player computes their own update
+        # Players at slightly different ratings will get slightly different deltas
         winner_deltas = [
             rating - initial
             for (rating, _, _, _), initial in zip(team1_updated, initial_ratings_team1)
@@ -194,9 +195,9 @@ class TestRatingSystemEdgeCases:
         assert all(delta < 100 for delta in winner_deltas), (
             "Calibrated players should have moderate gains"
         )
-        # All calibrated players should get the SAME delta
-        assert max(winner_deltas) - min(winner_deltas) < 0.01, (
-            "Calibrated players should get identical team delta"
+        # All calibrated players should get similar (but not necessarily identical) deltas
+        assert max(winner_deltas) - min(winner_deltas) < 5, (
+            "Calibrated players with similar ratings should get similar deltas"
         )
 
         loser_deltas = [
@@ -207,9 +208,9 @@ class TestRatingSystemEdgeCases:
         assert all(delta > -100 for delta in loser_deltas), (
             "Calibrated players should have moderate losses"
         )
-        # All calibrated losers should get the SAME delta
-        assert max(loser_deltas) - min(loser_deltas) < 0.01, (
-            "Calibrated losers should get identical team delta"
+        # All calibrated losers should get similar deltas
+        assert max(loser_deltas) - min(loser_deltas) < 5, (
+            "Calibrated losers with similar ratings should get similar deltas"
         )
 
         # RD should remain positive
