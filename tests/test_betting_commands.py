@@ -522,3 +522,247 @@ async def test_disburse_status_no_stored_message():
 
     # Message reference should be updated
     disburse_service.set_proposal_message.assert_called_once_with(123, 333, 444)
+
+
+@pytest.mark.asyncio
+async def test_tip_successful_transfer():
+    """Verify /tip successfully transfers jopacoin between players."""
+    bot = MagicMock()
+    betting_service = MagicMock()
+    match_service = MagicMock()
+    player_service = MagicMock()
+
+    # Both players are registered
+    sender = MagicMock(name="Sender")
+    recipient = MagicMock(name="Recipient")
+    player_service.get_player.side_effect = lambda discord_id: (
+        sender if discord_id == 123 else recipient if discord_id == 456 else None
+    )
+    player_service.get_balance.return_value = 100  # Sender has 100 coins
+
+    # Mock the repository
+    player_service.player_repo.add_balance_many = MagicMock()
+
+    # Create a proper guild mock for rate limiter
+    guild = MagicMock()
+    guild.id = 789
+
+    interaction = MagicMock()
+    interaction.guild = guild
+    interaction.user.id = 123
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock()
+
+    recipient_member = MagicMock()
+    recipient_member.id = 456
+    recipient_member.mention = "<@456>"
+
+    commands = BettingCommands(bot, betting_service, match_service, player_service)
+    await commands.tip.callback(commands, interaction, player=recipient_member, amount=50)
+
+    # Should transfer the funds
+    player_service.player_repo.add_balance_many.assert_called_once_with({123: -50, 456: 50})
+
+    # Should send success message
+    interaction.followup.send.assert_awaited_once()
+    call_kwargs = interaction.followup.send.call_args.kwargs
+    message = call_kwargs.get("content", interaction.followup.send.call_args.args[0])
+    assert "tipped" in message.lower()
+    assert "50" in message
+    assert call_kwargs.get("ephemeral") is False  # Public message
+
+
+@pytest.mark.asyncio
+async def test_tip_insufficient_balance():
+    """Verify /tip rejects when sender has insufficient balance."""
+    bot = MagicMock()
+    betting_service = MagicMock()
+    match_service = MagicMock()
+    player_service = MagicMock()
+
+    # Both players are registered
+    sender = MagicMock(name="Sender")
+    recipient = MagicMock(name="Recipient")
+    player_service.get_player.side_effect = lambda discord_id: (
+        sender if discord_id == 123 else recipient if discord_id == 456 else None
+    )
+    player_service.get_balance.return_value = 20  # Sender only has 20 coins
+
+    player_service.player_repo.add_balance_many = MagicMock()
+
+    # Create a proper guild mock for rate limiter
+    guild = MagicMock()
+    guild.id = 789
+
+    interaction = MagicMock()
+    interaction.guild = guild
+    interaction.user.id = 123
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock()
+
+    recipient_member = MagicMock()
+    recipient_member.id = 456
+
+    commands = BettingCommands(bot, betting_service, match_service, player_service)
+    await commands.tip.callback(commands, interaction, player=recipient_member, amount=50)
+
+    # Should NOT transfer
+    player_service.player_repo.add_balance_many.assert_not_called()
+
+    # Should send error message
+    interaction.followup.send.assert_awaited_once()
+    call_kwargs = interaction.followup.send.call_args.kwargs
+    message = call_kwargs.get("content", interaction.followup.send.call_args.args[0])
+    assert "insufficient" in message.lower()
+    assert call_kwargs.get("ephemeral") is True
+
+
+@pytest.mark.asyncio
+async def test_tip_sender_not_registered():
+    """Verify /tip rejects when sender is not registered."""
+    bot = MagicMock()
+    betting_service = MagicMock()
+    match_service = MagicMock()
+    player_service = MagicMock()
+
+    # Sender is NOT registered
+    player_service.get_player.return_value = None
+
+    # Create a proper guild mock for rate limiter
+    guild = MagicMock()
+    guild.id = 789
+
+    interaction = MagicMock()
+    interaction.guild = guild
+    interaction.user.id = 123
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock()
+
+    recipient_member = MagicMock()
+    recipient_member.id = 456
+
+    commands = BettingCommands(bot, betting_service, match_service, player_service)
+    await commands.tip.callback(commands, interaction, player=recipient_member, amount=50)
+
+    # Should send registration error
+    interaction.followup.send.assert_awaited_once()
+    call_kwargs = interaction.followup.send.call_args.kwargs
+    message = call_kwargs.get("content", interaction.followup.send.call_args.args[0])
+    assert "register" in message.lower()
+    assert call_kwargs.get("ephemeral") is True
+
+
+@pytest.mark.asyncio
+async def test_tip_recipient_not_registered():
+    """Verify /tip rejects when recipient is not registered."""
+    bot = MagicMock()
+    betting_service = MagicMock()
+    match_service = MagicMock()
+    player_service = MagicMock()
+
+    # Sender is registered, recipient is NOT
+    sender = MagicMock(name="Sender")
+    player_service.get_player.side_effect = lambda discord_id: (
+        sender if discord_id == 123 else None
+    )
+
+    # Create a proper guild mock for rate limiter
+    guild = MagicMock()
+    guild.id = 789
+
+    interaction = MagicMock()
+    interaction.guild = guild
+    interaction.user.id = 123
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock()
+
+    recipient_member = MagicMock()
+    recipient_member.id = 456
+    recipient_member.mention = "<@456>"
+
+    commands = BettingCommands(bot, betting_service, match_service, player_service)
+    await commands.tip.callback(commands, interaction, player=recipient_member, amount=50)
+
+    # Should send error that recipient is not registered
+    interaction.followup.send.assert_awaited_once()
+    call_kwargs = interaction.followup.send.call_args.kwargs
+    message = call_kwargs.get("content", interaction.followup.send.call_args.args[0])
+    assert "not registered" in message.lower()
+    assert call_kwargs.get("ephemeral") is True
+
+
+@pytest.mark.asyncio
+async def test_tip_self_not_allowed():
+    """Verify /tip rejects when trying to tip yourself."""
+    bot = MagicMock()
+    betting_service = MagicMock()
+    match_service = MagicMock()
+    player_service = MagicMock()
+
+    # Create a proper guild mock for rate limiter
+    # Use unique IDs to avoid rate limiting from previous tests
+    guild = MagicMock()
+    guild.id = 785
+
+    interaction = MagicMock()
+    interaction.guild = guild
+    interaction.user.id = 125
+    interaction.user.mention = "<@125>"
+    interaction.response.defer = AsyncMock()
+    interaction.response.send_message = AsyncMock()
+    interaction.followup.send = AsyncMock()
+
+    # Trying to tip self
+    recipient_member = MagicMock()
+    recipient_member.id = 125  # Same as sender
+
+    commands = BettingCommands(bot, betting_service, match_service, player_service)
+    await commands.tip.callback(commands, interaction, player=recipient_member, amount=50)
+
+    # Should defer first
+    interaction.response.defer.assert_awaited_once_with(ephemeral=False)
+
+    # Should send error
+    interaction.followup.send.assert_awaited_once()
+    call_kwargs = interaction.followup.send.call_args.kwargs
+    message = call_kwargs.get("content", interaction.followup.send.call_args.args[0])
+    assert "tip yourself" in message.lower()
+    assert call_kwargs.get("ephemeral") is True
+
+
+@pytest.mark.asyncio
+async def test_tip_negative_amount():
+    """Verify /tip rejects negative amounts."""
+    bot = MagicMock()
+    betting_service = MagicMock()
+    match_service = MagicMock()
+    player_service = MagicMock()
+
+    # Create a proper guild mock for rate limiter
+    # Use unique IDs to avoid rate limiting from previous tests
+    guild = MagicMock()
+    guild.id = 786
+
+    interaction = MagicMock()
+    interaction.guild = guild
+    interaction.user.id = 126
+    interaction.user.mention = "<@126>"
+    interaction.response.defer = AsyncMock()
+    interaction.response.send_message = AsyncMock()
+    interaction.followup.send = AsyncMock()
+
+    recipient_member = MagicMock()
+    recipient_member.id = 457
+
+    commands = BettingCommands(bot, betting_service, match_service, player_service)
+    await commands.tip.callback(commands, interaction, player=recipient_member, amount=-10)
+
+    # Should defer first
+    interaction.response.defer.assert_awaited_once_with(ephemeral=False)
+
+    # Should send error
+    interaction.followup.send.assert_awaited_once()
+    call_kwargs = interaction.followup.send.call_args.kwargs
+    message = call_kwargs.get("content", interaction.followup.send.call_args.args[0])
+    assert "positive" in message.lower()
+    assert call_kwargs.get("ephemeral") is True
