@@ -19,7 +19,7 @@ from discord.ext import commands
 
 from config import BANKRUPTCY_PENALTY_RATE
 from rating_system import CamaRatingSystem
-from utils.drawing import draw_gamba_chart, draw_role_graph
+from utils.drawing import draw_gamba_chart, draw_lane_distribution, draw_role_graph
 from utils.formatting import JOPACOIN_EMOTE, TOMBSTONE_EMOJI, format_role_display
 from utils.interaction_safety import safe_defer, safe_followup
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
@@ -53,9 +53,9 @@ class ProfileView(discord.ui.View):
         self.current_tab = "overview"
         self._last_interaction_time: dict[int, float] = {}  # user_id -> timestamp
         self.message: discord.Message | None = None  # Set after sending
-        # Cache for expensive tab results: tab_name -> (embed, chart_bytes, filename)
+        # Cache for expensive tab results: tab_name -> (embed, list of (bytes, filename) tuples)
         # Store raw bytes instead of File since File objects are single-use
-        self._tab_cache: dict[str, tuple[discord.Embed, bytes | None, str | None]] = {}
+        self._tab_cache: dict[str, tuple[discord.Embed, list[tuple[bytes, str]]]] = {}
         # Lock to prevent concurrent tab switches from interleaving
         self._update_lock = asyncio.Lock()
         self._update_button_styles()
@@ -83,6 +83,7 @@ class ProfileView(discord.ui.View):
             "gambling": self.gambling_btn,
             "predictions": self.predictions_btn,
             "dota": self.dota_btn,
+            "teammates": self.teammates_btn,
         }
         for tab_name, button in tab_buttons.items():
             if tab_name == self.current_tab:
@@ -114,31 +115,29 @@ class ProfileView(discord.ui.View):
             self.current_tab = tab_name
             self._update_button_styles()
 
-            file = None
+            files = []
             # Check cache for expensive tabs
             if tab_name in self._tab_cache:
-                embed, cached_bytes, filename = self._tab_cache[tab_name]
-                # Create fresh File from cached bytes
-                if cached_bytes is not None and filename:
-                    file = discord.File(BytesIO(cached_bytes), filename=filename)
+                embed, cached_files = self._tab_cache[tab_name]
+                # Create fresh Files from cached bytes
+                for cached_bytes, filename in cached_files:
+                    files.append(discord.File(BytesIO(cached_bytes), filename=filename))
             else:
-                embed, file = await self.cog.build_tab_embed(
+                embed, files = await self.cog.build_tab_embed(
                     tab_name, self.target_user, self.target_discord_id
                 )
-                # Cache expensive tab results - extract bytes from File before it's consumed
+                # Cache expensive tab results - extract bytes from Files before they're consumed
                 if is_expensive:
-                    cached_bytes = None
-                    filename = None
-                    if file is not None:
-                        # Read bytes from the File's underlying stream
+                    cached_files = []
+                    for file in files:
                         file.fp.seek(0)
                         cached_bytes = file.fp.read()
                         file.fp.seek(0)  # Reset for use
-                        filename = file.filename
-                    self._tab_cache[tab_name] = (embed, cached_bytes, filename)
+                        cached_files.append((cached_bytes, file.filename))
+                    self._tab_cache[tab_name] = (embed, cached_files)
 
             # Pass attachments to handle chart files - empty list clears previous chart
-            attachments = [file] if file else []
+            attachments = files
 
             # Use edit_original_response if we deferred, otherwise edit_message
             if interaction.response.is_done():
@@ -182,6 +181,12 @@ class ProfileView(discord.ui.View):
     ):
         await self._handle_tab_click(interaction, "dota")
 
+    @discord.ui.button(label="Teammates", style=discord.ButtonStyle.secondary, row=1)
+    async def teammates_btn(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        await self._handle_tab_click(interaction, "teammates")
+
 
 class ProfileCommands(commands.Cog):
     """Unified profile command with tabbed navigation."""
@@ -210,6 +215,9 @@ class ProfileCommands(commands.Cog):
     def _get_prediction_service(self):
         return getattr(self.bot, "prediction_service", None)
 
+    def _get_pairings_repo(self):
+        return getattr(self.bot, "pairings_repo", None)
+
     def _get_rating_system(self):
         match_service = getattr(self.bot, "match_service", None)
         if match_service:
@@ -221,8 +229,8 @@ class ProfileCommands(commands.Cog):
         tab_name: str,
         target_user: discord.Member | discord.User,
         target_discord_id: int,
-    ) -> tuple[discord.Embed, discord.File | None]:
-        """Build the embed and optional chart file for a specific tab."""
+    ) -> tuple[discord.Embed, list[discord.File]]:
+        """Build the embed and optional chart files for a specific tab."""
         builders = {
             "overview": self._build_overview_embed,
             "rating": self._build_rating_embed,
@@ -230,9 +238,19 @@ class ProfileCommands(commands.Cog):
             "gambling": self._build_gambling_embed,
             "predictions": self._build_predictions_embed,
             "dota": self._build_dota_embed,
+            "teammates": self._build_teammates_embed,
         }
         builder = builders.get(tab_name, self._build_overview_embed)
-        return await builder(target_user, target_discord_id)
+        result = await builder(target_user, target_discord_id)
+        # Normalize return value to always return a list of files
+        embed = result[0]
+        file_or_files = result[1]
+        if file_or_files is None:
+            return embed, []
+        elif isinstance(file_or_files, list):
+            return embed, file_or_files
+        else:
+            return embed, [file_or_files]
 
     async def _build_overview_embed(
         self,
@@ -1042,7 +1060,7 @@ class ProfileCommands(commands.Cog):
                 inline=False,
             )
 
-        embed.set_footer(text="Tip: Use /mypredictions for all positions, /predictionstats for full stats")
+        embed.set_footer(text="Tip: Use /mypredictions for all positions")
 
         return embed, None
 
@@ -1050,7 +1068,7 @@ class ProfileCommands(commands.Cog):
         self,
         target_user: discord.Member | discord.User,
         target_discord_id: int,
-    ) -> tuple[discord.Embed, discord.File | None]:
+    ) -> tuple[discord.Embed, list[discord.File]]:
         """Build the Dota tab embed with OpenDota stats (roles/lanes)."""
         player_repo = self._get_player_repo()
         opendota_service = self._get_opendota_player_service()
@@ -1058,7 +1076,7 @@ class ProfileCommands(commands.Cog):
         if not player_repo:
             return discord.Embed(
                 title="Error", description="Player repository unavailable", color=COLOR_RED
-            ), None
+            ), []
 
         player = player_repo.get_by_id(target_discord_id)
         if not player:
@@ -1066,7 +1084,7 @@ class ProfileCommands(commands.Cog):
                 title="Not Registered",
                 description=f"{target_user.display_name} is not registered.",
                 color=COLOR_RED,
-            ), None
+            ), []
 
         # Get steam_id from repository (not a Player attribute)
         steam_id = player_repo.get_steam_id(target_discord_id)
@@ -1075,22 +1093,23 @@ class ProfileCommands(commands.Cog):
                 title=f"Profile: {target_user.display_name} > Dota Stats",
                 description="No Steam account linked.\n\nUse `/linksteam` to link your Steam ID, or `/register` if you're new.",
                 color=COLOR_ORANGE,
-            ), None
+            ), []
 
         if not opendota_service:
             return discord.Embed(
                 title="Error",
                 description="OpenDota service unavailable.",
                 color=COLOR_RED,
-            ), None
+            ), []
 
         embed = discord.Embed(
             title=f"Profile: {target_user.display_name} > Dota Stats",
             color=COLOR_BLUE,
         )
 
+        files = []
+
         # Get role distribution for chart - wrap in try/except for API errors
-        chart_file = None
         role_dist = None
         try:
             role_dist = opendota_service.get_hero_role_distribution(target_discord_id, match_limit=50)
@@ -1100,7 +1119,8 @@ class ProfileCommands(commands.Cog):
         if role_dist:
             try:
                 chart_bytes = draw_role_graph(role_dist, title=f"Roles: {target_user.display_name}")
-                chart_file = discord.File(chart_bytes, filename="role_graph.png")
+                role_file = discord.File(chart_bytes, filename="role_graph.png")
+                files.append(role_file)
                 embed.set_image(url="attachment://role_graph.png")
             except Exception as e:
                 logger.debug(f"Could not generate role graph: {e}")
@@ -1113,21 +1133,38 @@ class ProfileCommands(commands.Cog):
             logger.warning(f"Failed to fetch full stats from OpenDota: {e}")
 
         if full_stats:
-            # Lane distribution as text (chart would require second image)
+            # Generate lane distribution chart
             lane_dist = full_stats.get("lane_distribution", {})
-            if lane_dist:
-                lane_lines = []
-                for lane, pct in sorted(lane_dist.items(), key=lambda x: -x[1]):
-                    if pct > 0:
-                        bar_len = int(pct / 10)
-                        bar = "█" * bar_len + "░" * (10 - bar_len)
-                        lane_lines.append(f"`{bar}` {lane}: {pct:.0f}%")
-                if lane_lines:
+            # Filter out lanes with 0% to reduce clutter
+            lane_dist_filtered = {k: v for k, v in lane_dist.items() if v > 0}
+
+            if lane_dist_filtered:
+                try:
+                    lane_bytes = draw_lane_distribution(lane_dist_filtered)
+                    lane_file = discord.File(lane_bytes, filename="lane_graph.png")
+                    files.append(lane_file)
+                    # Add lane chart info to embed (image will appear as second attachment)
+                    lane_parsed = full_stats.get("lane_parsed_count", 0)
                     embed.add_field(
                         name="Lane Distribution",
-                        value="\n".join(lane_lines[:5]),
+                        value=f"Based on {lane_parsed} parsed matches\n*(see lane_graph.png below)*",
                         inline=True,
                     )
+                except Exception as e:
+                    logger.debug(f"Could not generate lane graph: {e}")
+                    # Fall back to text display
+                    lane_lines = []
+                    for lane, pct in sorted(lane_dist.items(), key=lambda x: -x[1]):
+                        if pct > 0:
+                            bar_len = int(pct / 10)
+                            bar = "█" * bar_len + "░" * (10 - bar_len)
+                            lane_lines.append(f"`{bar}` {lane}: {pct:.0f}%")
+                    if lane_lines:
+                        embed.add_field(
+                            name="Lane Distribution",
+                            value="\n".join(lane_lines[:5]),
+                            inline=True,
+                        )
 
             # Win rate
             if full_stats.get("win_rate") is not None:
@@ -1165,9 +1202,220 @@ class ProfileCommands(commands.Cog):
         else:
             embed.description = "Could not fetch OpenDota stats. Try again later."
 
-        embed.set_footer(text="Data from OpenDota | Use /rolesgraph or /lanegraph for full charts")
+        embed.set_footer(text="Data from OpenDota | Based on last 50 matches")
 
-        return embed, chart_file
+        return embed, files
+
+    async def _build_teammates_embed(
+        self,
+        target_user: discord.Member | discord.User,
+        target_discord_id: int,
+    ) -> tuple[discord.Embed, discord.File | None]:
+        """Build the Teammates tab embed with pairwise statistics."""
+        pairings_repo = self._get_pairings_repo()
+        player_repo = self._get_player_repo()
+
+        if not pairings_repo or not player_repo:
+            return discord.Embed(
+                title="Error", description="Pairings data unavailable", color=COLOR_RED
+            ), None
+
+        player = player_repo.get_by_id(target_discord_id)
+        if not player:
+            return discord.Embed(
+                title="Not Registered",
+                description=f"{target_user.display_name} is not registered.",
+                color=COLOR_RED,
+            ), None
+
+        embed = discord.Embed(
+            title=f"Profile: {target_user.display_name} > Teammates",
+            color=0x9B59B6,  # Purple
+        )
+
+        min_games = 3
+        limit = 5
+
+        def get_player_mention(discord_id: int) -> str:
+            """Get a mention string for a player."""
+            if discord_id and discord_id > 0:
+                return f"<@{discord_id}>"
+            p = player_repo.get_by_id(discord_id)
+            return p.name if p else f"Unknown ({discord_id})"
+
+        # Best Teammates (highest win rate with)
+        best_teammates = pairings_repo.get_best_teammates(
+            target_discord_id, min_games=min_games, limit=limit
+        )
+        if best_teammates:
+            lines = []
+            for tm in best_teammates:
+                name = get_player_mention(tm["teammate_id"])
+                wins = tm["wins_together"]
+                games = tm["games_together"]
+                rate = tm["win_rate"] * 100
+                lines.append(f"{name} - {rate:.0f}% ({wins}W/{games - wins}L)")
+            embed.add_field(
+                name="🏆 Best Teammates",
+                value="\n".join(lines),
+                inline=True,
+            )
+        else:
+            embed.add_field(name="🏆 Best Teammates", value="No data yet", inline=True)
+
+        # Worst Teammates (lowest win rate with)
+        worst_teammates = pairings_repo.get_worst_teammates(
+            target_discord_id, min_games=min_games, limit=limit
+        )
+        if worst_teammates:
+            lines = []
+            for tm in worst_teammates:
+                name = get_player_mention(tm["teammate_id"])
+                wins = tm["wins_together"]
+                games = tm["games_together"]
+                rate = tm["win_rate"] * 100
+                lines.append(f"{name} - {rate:.0f}% ({wins}W/{games - wins}L)")
+            embed.add_field(
+                name="💀 Worst Teammates",
+                value="\n".join(lines),
+                inline=True,
+            )
+        else:
+            embed.add_field(name="💀 Worst Teammates", value="No data yet", inline=True)
+
+        # Spacer
+        embed.add_field(name="\u200b", value="\u200b", inline=True)
+
+        # Dominates (best matchups against)
+        best_matchups = pairings_repo.get_best_matchups(
+            target_discord_id, min_games=min_games, limit=limit
+        )
+        if best_matchups:
+            lines = []
+            for m in best_matchups:
+                name = get_player_mention(m["opponent_id"])
+                wins = m["wins_against"]
+                games = m["games_against"]
+                rate = m["win_rate"] * 100
+                lines.append(f"{name} - {rate:.0f}% ({wins}W/{games - wins}L)")
+            embed.add_field(
+                name="😈 Dominates",
+                value="\n".join(lines),
+                inline=True,
+            )
+        else:
+            embed.add_field(name="😈 Dominates", value="No data yet", inline=True)
+
+        # Struggles Against (worst matchups)
+        worst_matchups = pairings_repo.get_worst_matchups(
+            target_discord_id, min_games=min_games, limit=limit
+        )
+        if worst_matchups:
+            lines = []
+            for m in worst_matchups:
+                name = get_player_mention(m["opponent_id"])
+                wins = m["wins_against"]
+                games = m["games_against"]
+                rate = m["win_rate"] * 100
+                lines.append(f"{name} - {rate:.0f}% ({wins}W/{games - wins}L)")
+            embed.add_field(
+                name="😰 Struggles Against",
+                value="\n".join(lines),
+                inline=True,
+            )
+        else:
+            embed.add_field(name="😰 Struggles Against", value="No data yet", inline=True)
+
+        # Spacer
+        embed.add_field(name="\u200b", value="\u200b", inline=True)
+
+        # Most Played With
+        most_played_with = pairings_repo.get_most_played_with(
+            target_discord_id, min_games=min_games, limit=limit
+        )
+        if most_played_with:
+            lines = []
+            for tm in most_played_with:
+                name = get_player_mention(tm["teammate_id"])
+                wins = tm["wins_together"]
+                games = tm["games_together"]
+                rate = tm["win_rate"] * 100
+                lines.append(f"{name} - {games}g ({rate:.0f}%)")
+            embed.add_field(
+                name="👥 Most Played With",
+                value="\n".join(lines),
+                inline=True,
+            )
+        else:
+            embed.add_field(name="👥 Most Played With", value="No data yet", inline=True)
+
+        # Most Played Against
+        most_played_against = pairings_repo.get_most_played_against(
+            target_discord_id, min_games=min_games, limit=limit
+        )
+        if most_played_against:
+            lines = []
+            for m in most_played_against:
+                name = get_player_mention(m["opponent_id"])
+                wins = m["wins_against"]
+                games = m["games_against"]
+                rate = m["win_rate"] * 100
+                lines.append(f"{name} - {games}g ({rate:.0f}%)")
+            embed.add_field(
+                name="⚔️ Most Played Against",
+                value="\n".join(lines),
+                inline=True,
+            )
+        else:
+            embed.add_field(name="⚔️ Most Played Against", value="No data yet", inline=True)
+
+        # Spacer
+        embed.add_field(name="\u200b", value="\u200b", inline=True)
+
+        # Evenly Matched (teammates with ~50% win rate)
+        even_teammates = pairings_repo.get_evenly_matched_teammates(
+            target_discord_id, min_games=min_games, limit=limit
+        )
+        if even_teammates:
+            lines = []
+            for tm in even_teammates:
+                name = get_player_mention(tm["teammate_id"])
+                wins = tm["wins_together"]
+                games = tm["games_together"]
+                lines.append(f"{name} ({wins}W/{games - wins}L)")
+            embed.add_field(
+                name="⚖️ Even Teammates",
+                value="\n".join(lines),
+                inline=True,
+            )
+
+        # Evenly Matched Opponents
+        even_opponents = pairings_repo.get_evenly_matched_opponents(
+            target_discord_id, min_games=min_games, limit=limit
+        )
+        if even_opponents:
+            lines = []
+            for m in even_opponents:
+                name = get_player_mention(m["opponent_id"])
+                wins = m["wins_against"]
+                games = m["games_against"]
+                lines.append(f"{name} ({wins}W/{games - wins}L)")
+            embed.add_field(
+                name="⚖️ Even Opponents",
+                value="\n".join(lines),
+                inline=True,
+            )
+
+        # Get totals for footer
+        counts = pairings_repo.get_pairing_counts(target_discord_id, min_games=min_games)
+        footer_parts = [f"Min {min_games} games"]
+        if counts["unique_teammates"] > 0 or counts["unique_opponents"] > 0:
+            footer_parts.append(
+                f"{counts['unique_teammates']} teammates, {counts['unique_opponents']} opponents tracked"
+            )
+        embed.set_footer(text=" | ".join(footer_parts))
+
+        return embed, None
 
     def _get_opendota_player_service(self):
         """Get OpenDotaPlayerService from bot."""
@@ -1230,13 +1478,14 @@ class ProfileCommands(commands.Cog):
                 return
 
         # Build initial embed (overview)
-        embed, file = await self.build_tab_embed("overview", target_user, target_discord_id)
+        embed, files = await self.build_tab_embed("overview", target_user, target_discord_id)
 
         # Create view with tab buttons
         view = ProfileView(self, target_user, target_discord_id)
 
         # Send and store message reference for timeout cleanup
-        message = await safe_followup(interaction, embed=embed, view=view, file=file)
+        # safe_followup accepts 'files' kwarg for multiple files
+        message = await safe_followup(interaction, embed=embed, view=view, files=files if files else None)
         view.message = message
         logger.info(f"Profile sent. Message ref stored: {message is not None}, msg_id: {getattr(message, 'id', None)}")
 

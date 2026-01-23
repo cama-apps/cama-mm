@@ -404,11 +404,11 @@ payout INTEGER
 | `/shuffle` | Create balanced teams | `betting_mode`: house/pool |
 | `/record` | Record match result | `result`: Radiant/Dire/Abort |
 | `/register` | Register player | `steam_id`: Steam32 ID |
+| `/linksteam` | Link Steam account if registered | `steam_id`: Steam32 ID |
 | `/setroles` | Set role preferences | `roles`: "1,2,3" or "123" |
-| `/stats` | View player stats | `user`: optional target |
-| `/profile` | Unified player profile with tabs | `user`: optional target |
-| `/calibration` | Rating system stats | `user`: optional target |
-| `/leaderboard` | Rankings by jopacoin | `limit`: default 20 |
+| `/profile` | Unified player profile with 7 tabs | `user`: optional target |
+| `/calibration` | Rating system stats (admin) | `user`: optional target |
+| `/leaderboard` | Rankings (balance, gambling, predictions) | `type`, `limit` |
 | `/bet` | Place jopacoin bet | `team`, `amount`, `leverage` |
 | `/mybets` | Show active bets | - |
 | `/balance` | Check balance/debt | - |
@@ -417,9 +417,6 @@ payout INTEGER
 | `/loan` | Borrow jopacoin (with fee) | `amount` |
 | `/nonprofit` | View nonprofit fund | - |
 | `/disburse` | Propose/manage fund distribution | `action`: propose/status/reset |
-| `/gambastats` | Gambling stats + degen score | `user`: optional |
-| `/gambachart` | P&L history chart | `user`: optional |
-| `/gambaleaderboard` | Server gambling rankings | `limit`: default 5 |
 | `/shop` | Spend jopacoin in the shop | `item`, `target` |
 | `/prediction` | Create prediction market | `question`, `closes_in` |
 | `/predictions` | List active predictions | - |
@@ -427,9 +424,6 @@ payout INTEGER
 | `/predictionresolve` | Vote to resolve prediction | `prediction_id`, `outcome` |
 | `/predictionclose` | Close prediction betting early | Admin only |
 | `/predictioncancel` | Cancel a prediction | Admin only |
-| `/predictionstats` | Prediction betting stats | `user`: optional |
-| `/predictionleaderboard` | Prediction leaderboard | `limit` |
-| `/pairwise` | Teammate/opponent stats | `user`, `min_games` |
 | `/matchup` | Head-to-head stats | `user1`, `user2` |
 | `/rebuildpairings` | Rebuild pairings table | Admin only |
 | `/setleague` | Set Valve league ID | `league_id` |
@@ -439,10 +433,7 @@ payout INTEGER
 | `/autodiscover` | Auto-discover matches for league | Admin only |
 | `/matchhistory` | Recent matches with stats | `user`, `limit` |
 | `/viewmatch` | Detailed match embed | `match_id`, `user` |
-| `/dotastats` | Comprehensive OpenDota stats | `user`: optional |
 | `/recent` | Match table as image | `user`, `limit` |
-| `/rolesgraph` | Hero role radar graph | `user`, `matches` |
-| `/lanegraph` | Lane distribution chart | `user`, `matches` |
 | `/hero` | Hero reference lookup | `hero_name` (autocomplete) |
 | `/ability` | Ability reference lookup | `ability_name` (autocomplete) |
 | `/addfake` | Add fake users to lobby | `count` |
@@ -455,6 +446,11 @@ payout INTEGER
 | `/resetrecalibrationcooldown` | Reset recalibration cooldown | `user` (Admin only) |
 | `/extendbetting` | Extend betting window | `minutes`: 1-60 |
 | `/sync` | Force sync commands | Admin only |
+
+**Consolidated Commands:**
+- `/profile` replaces: `/stats`, `/gambastats`, `/gambachart`, `/predictionstats`, `/dotastats`, `/rolesgraph`, `/lanegraph`, `/pairwise`
+- `/leaderboard type:gambling` replaces: `/gambaleaderboard`
+- `/leaderboard type:predictions` replaces: `/predictionleaderboard`
 
 ## Testing
 

@@ -54,8 +54,8 @@ def test_bot_commands_registered():
         "lobby",
         "shuffle",
         "record",
-        "stats",
-        "leaderboard",
+        "profile",  # Replaces stats, gambastats, pairwise, dotastats, etc.
+        "leaderboard",  # Now includes type parameter for balance/gambling/predictions
         "help",
         "resetuser",  # Note: 'reset' was renamed to 'resetuser' (admin only)
     ]
