@@ -594,6 +594,13 @@ See `config.py` for the full list and defaults.
 - **Disbursement**: Requires quorum; methods are even/proportional/neediest among debtors
 - **Predictions**: Resolution threshold is 3 matching votes or 1 admin vote (yes/no outcomes)
 - **Degen Score**: 0-100 score based on leverage addiction (40%), bet frequency (20%), bankruptcies (20%), loss chasing (10%), paper hands (10%)
+- **Gambling Leaderboard** (`/leaderboard type:gambling`): 4 sections + footer stats
+  - 💰 **Top Earners**: Sorted by net P&L descending
+  - 📉 **Down Bad**: Only players with negative P&L, sorted ascending
+  - 🎰 **Hall of Degen**: Sorted by degen score descending (score + emoji + title)
+  - 🎰 **Biggest Gamblers**: Sorted by total wagered descending
+  - **Footer**: total_bets, total_wagered, unique_gamblers, avg_bet_size, total_bankruptcies
+  - Players need min 3 bets to appear; players can appear in multiple sections
 - **Recalibration**: Admins can reset a player's RD to 350 (high uncertainty) while preserving their rating. 90-day cooldown. Player must have played at least 5 games.
 - **Pairings Storage**: Canonical pairs with player1_id < player2_id to avoid duplicates
 - **Lane Outcomes**: W/L/D determined by comparing avg lane_efficiency (parsed matches only)

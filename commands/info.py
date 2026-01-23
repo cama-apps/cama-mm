@@ -526,10 +526,10 @@ class InfoCommands(commands.Cog):
         if leaderboard.top_earners:
             lines = []
             for i, entry in enumerate(leaderboard.top_earners, 1):
-                name = await get_name(entry["discord_id"])
-                pnl = entry["net_pnl"]
+                name = await get_name(entry.discord_id)
+                pnl = entry.net_pnl
                 pnl_str = f"+{pnl}" if pnl >= 0 else str(pnl)
-                lines.append(f"{i}. **{name}** {pnl_str} {JOPACOIN_EMOTE} ({entry['win_rate']:.0%})")
+                lines.append(f"{i}. **{name}** {pnl_str} {JOPACOIN_EMOTE} ({entry.win_rate:.0%})")
             embed.add_field(
                 name="💰 Top Earners",
                 value="\n".join(lines),
@@ -537,12 +537,12 @@ class InfoCommands(commands.Cog):
             )
 
         # Down bad (only show if negative)
-        down_bad = [e for e in leaderboard.down_bad if e["net_pnl"] < 0]
+        down_bad = [e for e in leaderboard.down_bad if e.net_pnl < 0]
         if down_bad:
             lines = []
             for i, entry in enumerate(down_bad[:limit], 1):
-                name = await get_name(entry["discord_id"])
-                lines.append(f"{i}. **{name}** {entry['net_pnl']} {JOPACOIN_EMOTE} ({entry['win_rate']:.0%})")
+                name = await get_name(entry.discord_id)
+                lines.append(f"{i}. **{name}** {entry.net_pnl} {JOPACOIN_EMOTE} ({entry.win_rate:.0%})")
             embed.add_field(
                 name="📉 Down Bad",
                 value="\n".join(lines),
@@ -553,32 +553,34 @@ class InfoCommands(commands.Cog):
         if leaderboard.hall_of_degen:
             lines = []
             for i, entry in enumerate(leaderboard.hall_of_degen, 1):
-                name = await get_name(entry["discord_id"])
-                lines.append(f"{i}. **{name}** {entry['degen_score']} {entry['degen_emoji']} {entry['degen_title']}")
+                name = await get_name(entry.discord_id)
+                lines.append(f"{i}. **{name}** {entry.degen_score} {entry.degen_emoji} {entry.degen_title}")
             embed.add_field(
                 name="🎰 Hall of Degen",
                 value="\n".join(lines),
                 inline=False,
             )
 
-        # Biggest gamblers (most bets)
+        # Biggest gamblers (sorted by total wagered)
         if leaderboard.biggest_gamblers:
             lines = []
             for i, entry in enumerate(leaderboard.biggest_gamblers, 1):
-                name = await get_name(entry["discord_id"])
-                lines.append(f"{i}. **{name}** {entry['total_bets']} bets ({entry['total_wagered']} wagered)")
+                name = await get_name(entry.discord_id)
+                lines.append(f"{i}. **{name}** {entry.total_wagered}{JOPACOIN_EMOTE} wagered")
             embed.add_field(
-                name="🎲 Biggest Gamblers",
+                name="🎰 Biggest Gamblers",
                 value="\n".join(lines),
                 inline=False,
             )
 
-        # Server stats footer
+        # Server stats footer (compact single line)
         if leaderboard.server_stats:
             embed.set_footer(
-                text=f"📊 {leaderboard.server_stats['total_bets']} total bets • "
-                f"{leaderboard.server_stats['total_wagered']} wagered • "
-                f"{leaderboard.server_stats['unique_gamblers']} players"
+                text=f"📊 {leaderboard.server_stats['total_bets']} bets • "
+                f"{leaderboard.server_stats['total_wagered']}{JOPACOIN_EMOTE} wagered • "
+                f"{leaderboard.server_stats['unique_gamblers']} players • "
+                f"{leaderboard.server_stats['avg_bet_size']}{JOPACOIN_EMOTE} avg • "
+                f"{leaderboard.server_stats['total_bankruptcies']} bankruptcies"
             )
 
         await safe_followup(
