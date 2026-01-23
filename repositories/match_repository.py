@@ -288,7 +288,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
             ]
 
     def get_player_rating_history_detailed(self, discord_id: int, limit: int = 50) -> list[dict]:
-        """Get detailed rating history for a player including prediction data."""
+        """Get detailed rating history for a player including prediction and OpenSkill data."""
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -317,6 +317,10 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     "match_id": row["match_id"],
                     "timestamp": row["timestamp"],
                     "lobby_type": row["lobby_type"] if "lobby_type" in row.keys() else "shuffle",
+                    "os_mu_before": row["os_mu_before"] if "os_mu_before" in row.keys() else None,
+                    "os_mu_after": row["os_mu_after"] if "os_mu_after" in row.keys() else None,
+                    "os_sigma_before": row["os_sigma_before"] if "os_sigma_before" in row.keys() else None,
+                    "os_sigma_after": row["os_sigma_after"] if "os_sigma_after" in row.keys() else None,
                 }
                 for row in rows
             ]
@@ -348,6 +352,40 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 }
                 for row in rows
             ]
+
+    def get_os_ratings_for_match(self, match_id: int) -> dict:
+        """
+        Get OpenSkill ratings (before match) for all players in a match, grouped by team.
+
+        Returns:
+            Dict with 'team1' and 'team2' keys, each containing list of (os_mu, os_sigma) tuples.
+            Returns empty lists if no OpenSkill data available.
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT discord_id, team_number, os_mu_before, os_sigma_before
+                FROM rating_history
+                WHERE match_id = ?
+                  AND os_mu_before IS NOT NULL
+                  AND os_sigma_before IS NOT NULL
+            """,
+                (match_id,),
+            )
+            rows = cursor.fetchall()
+
+            team1_ratings: list[tuple[float, float]] = []
+            team2_ratings: list[tuple[float, float]] = []
+
+            for row in rows:
+                rating_tuple = (row["os_mu_before"], row["os_sigma_before"])
+                if row["team_number"] == 1:
+                    team1_ratings.append(rating_tuple)
+                elif row["team_number"] == 2:
+                    team2_ratings.append(rating_tuple)
+
+            return {"team1": team1_ratings, "team2": team2_ratings}
 
     def get_recent_rating_history(self, limit: int = 200) -> list[dict]:
         """Get recent rating history entries for all players."""
@@ -674,6 +712,90 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     discord_id,
                 ),
             )
+
+    def update_participant_stats_bulk(self, match_id: int, updates: list[dict]) -> int:
+        """
+        Update all participants in a single transaction.
+
+        Args:
+            match_id: The match ID
+            updates: List of dicts with keys:
+                - discord_id (required)
+                - hero_id, kills, deaths, assists, gpm, xpm, hero_damage, tower_damage,
+                  last_hits, denies, net_worth, hero_healing, lane_role, lane_efficiency,
+                  towers_killed, roshans_killed, teamfight_participation, obs_placed,
+                  sen_placed, camps_stacked, rune_pickups, firstblood_claimed, stuns,
+                  fantasy_points
+
+        Returns:
+            Number of rows updated
+        """
+        if not updates:
+            return 0
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.executemany(
+                """
+                UPDATE match_participants
+                SET hero_id = ?,
+                    kills = ?,
+                    deaths = ?,
+                    assists = ?,
+                    gpm = ?,
+                    xpm = ?,
+                    hero_damage = ?,
+                    tower_damage = ?,
+                    last_hits = ?,
+                    denies = ?,
+                    net_worth = ?,
+                    hero_healing = ?,
+                    lane_role = ?,
+                    lane_efficiency = ?,
+                    towers_killed = ?,
+                    roshans_killed = ?,
+                    teamfight_participation = ?,
+                    obs_placed = ?,
+                    sen_placed = ?,
+                    camps_stacked = ?,
+                    rune_pickups = ?,
+                    firstblood_claimed = ?,
+                    stuns = ?,
+                    fantasy_points = ?
+                WHERE match_id = ? AND discord_id = ?
+                """,
+                [
+                    (
+                        u.get("hero_id"),
+                        u.get("kills"),
+                        u.get("deaths"),
+                        u.get("assists"),
+                        u.get("gpm"),
+                        u.get("xpm"),
+                        u.get("hero_damage"),
+                        u.get("tower_damage"),
+                        u.get("last_hits"),
+                        u.get("denies"),
+                        u.get("net_worth"),
+                        u.get("hero_healing"),
+                        u.get("lane_role"),
+                        u.get("lane_efficiency"),
+                        u.get("towers_killed"),
+                        u.get("roshans_killed"),
+                        u.get("teamfight_participation"),
+                        u.get("obs_placed"),
+                        u.get("sen_placed"),
+                        u.get("camps_stacked"),
+                        u.get("rune_pickups"),
+                        u.get("firstblood_claimed"),
+                        u.get("stuns"),
+                        u.get("fantasy_points"),
+                        match_id,
+                        u["discord_id"],
+                    )
+                    for u in updates
+                ],
+            )
+            return cursor.rowcount
 
     def get_match_participants(self, match_id: int) -> list[dict]:
         """Get all participants for a match with their stats."""
@@ -1333,3 +1455,47 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 }
                 for row in rows
             ]
+
+    def update_rating_history_openskill_bulk(
+        self, match_id: int, updates: list[dict]
+    ) -> int:
+        """
+        Bulk update rating_history entries with OpenSkill data.
+
+        Args:
+            match_id: The match ID
+            updates: List of dicts with keys:
+                - discord_id (required)
+                - os_mu_before, os_mu_after, os_sigma_before, os_sigma_after, fantasy_weight
+
+        Returns:
+            Number of rows updated
+        """
+        if not updates:
+            return 0
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.executemany(
+                """
+                UPDATE rating_history
+                SET os_mu_before = ?,
+                    os_mu_after = ?,
+                    os_sigma_before = ?,
+                    os_sigma_after = ?,
+                    fantasy_weight = ?
+                WHERE match_id = ? AND discord_id = ?
+                """,
+                [
+                    (
+                        u.get("os_mu_before"),
+                        u.get("os_mu_after"),
+                        u.get("os_sigma_before"),
+                        u.get("os_sigma_after"),
+                        u.get("fantasy_weight"),
+                        match_id,
+                        u["discord_id"],
+                    )
+                    for u in updates
+                ],
+            )
+            return cursor.rowcount

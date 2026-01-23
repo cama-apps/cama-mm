@@ -1185,30 +1185,55 @@ class InfoCommands(commands.Cog):
             recent_delta = None
             last_5_delta = None
 
-        # Recent matches with per-game rating changes (last 5)
+        # Recent matches with predictions comparison (last 5)
+        # Shows Glicko-2 vs OpenSkill expected outcomes vs actual result
+        os_system = CamaOpenSkillSystem()
         recent_game_details = []
         for h in history[:5]:
             rating_after = h.get("rating")
             rating_before = h.get("rating_before")
-            rd_before = h.get("rd_before")
-            rd_after = h.get("rd_after")
             won = h.get("won")
             match_id = h.get("match_id")
             lobby_type = h.get("lobby_type", "shuffle")
             lobby_emoji = "👑" if lobby_type == "draft" else "🎲"
+            glicko_expected = h.get("expected_team_win_prob")
 
+            # Calculate rating delta
             if rating_after is not None and rating_before is not None:
                 rating_delta = rating_after - rating_before
                 delta_str = f"{rating_delta:+.0f}"
             else:
                 delta_str = "?"
 
-            rd_str = ""
-            if rd_after is not None:
-                rd_str = f" [RD {rd_after:.0f}]"
-
             result = "W" if won else "L"
-            recent_game_details.append(f"{lobby_emoji}#{match_id}: {result} → **{delta_str}**{rd_str}")
+            result_emoji = "✅" if won else "❌"
+
+            # Get OpenSkill expected outcome for this match
+            os_expected = None
+            if match_id and self.match_repo:
+                os_ratings = self.match_repo.get_os_ratings_for_match(match_id)
+                if os_ratings["team1"] and os_ratings["team2"]:
+                    team_num = h.get("team_number")
+                    if team_num == 1:
+                        os_expected = os_system.os_predict_win_probability(
+                            os_ratings["team1"], os_ratings["team2"]
+                        )
+                    elif team_num == 2:
+                        os_expected = os_system.os_predict_win_probability(
+                            os_ratings["team2"], os_ratings["team1"]
+                        )
+
+            # Build compact prediction string: G=Glicko, O=OpenSkill
+            pred_parts = []
+            if glicko_expected is not None:
+                pred_parts.append(f"G:{glicko_expected:.0%}")
+            if os_expected is not None:
+                pred_parts.append(f"O:{os_expected:.0%}")
+            pred_str = " ".join(pred_parts) if pred_parts else "no pred"
+
+            recent_game_details.append(
+                f"{lobby_emoji}#{match_id}: {result_emoji}{result} ({pred_str}) → **{delta_str}**"
+            )
 
         # Find biggest upset (win as underdog) and biggest choke (loss as favorite)
         upsets = [(h, h.get("expected_team_win_prob", 0.5)) for h in matches_with_predictions
@@ -1280,10 +1305,10 @@ class InfoCommands(commands.Cog):
                 trend_text += f"\n🔥 Current: **{streak}{streak_type}** streak"
             embed.add_field(name="📉 Trend", value=trend_text, inline=True)
 
-        # Recent matches with per-game rating changes
+        # Recent matches with predictions comparison
         if recent_game_details:
             embed.add_field(
-                name=f"📊 Recent Games ({len(recent_game_details)})",
+                name=f"📊 Last {len(recent_game_details)} Matches (G=Glicko O=OpenSkill)",
                 value="\n".join(recent_game_details),
                 inline=False,
             )
@@ -1433,7 +1458,6 @@ class InfoCommands(commands.Cog):
             embed.add_field(name="⭐ Fantasy Points", value=fp_text, inline=False)
 
         # OpenSkill Rating (Fantasy-Weighted)
-        os_system = CamaOpenSkillSystem()
         os_data = self.player_repo.get_openskill_rating(user.id) if self.player_repo else None
         if os_data:
             os_mu, os_sigma = os_data

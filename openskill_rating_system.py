@@ -224,3 +224,35 @@ class CamaOpenSkillSystem:
         # Map to 0-3000 for familiar MMR-like display
         display = max(0, (mu - 10) * 100)
         return int(round(display))
+
+    def os_predict_win_probability(
+        self,
+        team1_ratings: list[tuple[float, float]],
+        team2_ratings: list[tuple[float, float]],
+    ) -> float:
+        """
+        Predict OpenSkill win probability for team1 against team2.
+
+        Uses OpenSkill's predict_win() which implements Bradley-Terry model.
+
+        Args:
+            team1_ratings: List of (mu, sigma) tuples for team 1
+            team2_ratings: List of (mu, sigma) tuples for team 2
+
+        Returns:
+            Probability that team1 wins (0.0 to 1.0)
+        """
+        if not team1_ratings or not team2_ratings:
+            return 0.5
+
+        # Create Rating objects for each team
+        team1 = [self.create_rating(mu, sigma) for mu, sigma in team1_ratings]
+        team2 = [self.create_rating(mu, sigma) for mu, sigma in team2_ratings]
+
+        # predict_win returns [team1_prob, team2_prob]
+        try:
+            probs = self.model.predict_win([team1, team2])
+            return probs[0]  # team1 win probability
+        except Exception as e:
+            logger.warning(f"OpenSkill predict_win failed: {e}")
+            return 0.5
