@@ -941,3 +941,140 @@ class MatchService:
                 logger.warning(
                     f"No rating_history entry found for match {match_id}, player {discord_id}"
                 )
+
+    def backfill_openskill_ratings(self, reset_first: bool = True) -> dict:
+        """
+        Backfill OpenSkill ratings from all enriched matches with fantasy data.
+
+        Processes matches in chronological order to simulate rating progression.
+
+        Args:
+            reset_first: If True, reset all players' OpenSkill ratings to defaults before backfill
+
+        Returns:
+            Dict with:
+            - matches_processed: int
+            - players_updated: int (unique players)
+            - errors: list of error messages
+        """
+        logger.info("Starting OpenSkill backfill...")
+
+        errors = []
+        matches_processed = 0
+        players_touched = set()
+
+        # Get all enriched matches in chronological order
+        enriched_matches = self.match_repo.get_enriched_matches_chronological()
+        total_matches = len(enriched_matches)
+        logger.info(f"Found {total_matches} enriched matches to process")
+
+        if total_matches == 0:
+            return {
+                "matches_processed": 0,
+                "players_updated": 0,
+                "errors": ["No enriched matches found"],
+            }
+
+        # Reset all players' OpenSkill ratings if requested
+        if reset_first:
+            all_players = self.player_repo.get_all()
+            reset_updates = [
+                (p.discord_id, self.openskill_system.DEFAULT_MU, self.openskill_system.DEFAULT_SIGMA)
+                for p in all_players
+                if p.discord_id is not None
+            ]
+            if reset_updates:
+                self.player_repo.update_openskill_ratings_bulk(reset_updates)
+                logger.info(f"Reset {len(reset_updates)} players to default OpenSkill ratings")
+
+        # Process each match in chronological order
+        for i, match in enumerate(enriched_matches):
+            match_id = match["match_id"]
+            try:
+                result = self.update_openskill_ratings_for_match(match_id)
+                if result.get("success"):
+                    matches_processed += 1
+                    # Track unique players
+                    participants = self.match_repo.get_match_participants(match_id)
+                    for p in participants:
+                        players_touched.add(p["discord_id"])
+                else:
+                    error = result.get("error", "Unknown error")
+                    if "No fantasy data" not in error:
+                        errors.append(f"Match {match_id}: {error}")
+            except Exception as e:
+                errors.append(f"Match {match_id}: {str(e)}")
+                logger.error(f"Backfill error for match {match_id}: {e}")
+
+            # Log progress periodically
+            if (i + 1) % 50 == 0 or (i + 1) == total_matches:
+                logger.info(f"Backfill progress: {i + 1}/{total_matches} matches processed")
+
+        logger.info(
+            f"OpenSkill backfill complete: {matches_processed} matches, "
+            f"{len(players_touched)} unique players"
+        )
+
+        return {
+            "matches_processed": matches_processed,
+            "players_updated": len(players_touched),
+            "total_matches": total_matches,
+            "errors": errors[:10],  # Limit error list
+        }
+
+    def get_openskill_predictions_for_match(
+        self, team1_ids: list[int], team2_ids: list[int]
+    ) -> dict:
+        """
+        Get OpenSkill predicted win probability for a match.
+
+        Args:
+            team1_ids: Discord IDs for team 1 (Radiant)
+            team2_ids: Discord IDs for team 2 (Dire)
+
+        Returns:
+            Dict with team1_win_prob, team1_ordinal, team2_ordinal
+        """
+        from openskill.models import PlackettLuce
+
+        # Get current ratings
+        all_ids = team1_ids + team2_ids
+        os_ratings = self.player_repo.get_openskill_ratings_bulk(all_ids)
+
+        # Build ratings for each team
+        team1_ratings = []
+        team1_ordinals = []
+        for pid in team1_ids:
+            mu, sigma = os_ratings.get(pid, (None, None))
+            rating = self.openskill_system.create_rating(mu, sigma)
+            team1_ratings.append(rating)
+            actual_mu = mu if mu is not None else self.openskill_system.DEFAULT_MU
+            actual_sigma = sigma if sigma is not None else self.openskill_system.DEFAULT_SIGMA
+            team1_ordinals.append(self.openskill_system.ordinal(actual_mu, actual_sigma))
+
+        team2_ratings = []
+        team2_ordinals = []
+        for pid in team2_ids:
+            mu, sigma = os_ratings.get(pid, (None, None))
+            rating = self.openskill_system.create_rating(mu, sigma)
+            team2_ratings.append(rating)
+            actual_mu = mu if mu is not None else self.openskill_system.DEFAULT_MU
+            actual_sigma = sigma if sigma is not None else self.openskill_system.DEFAULT_SIGMA
+            team2_ordinals.append(self.openskill_system.ordinal(actual_mu, actual_sigma))
+
+        # Calculate win probability using ordinals
+        # Higher ordinal = higher skill
+        team1_avg_ordinal = sum(team1_ordinals) / len(team1_ordinals) if team1_ordinals else 0
+        team2_avg_ordinal = sum(team2_ordinals) / len(team2_ordinals) if team2_ordinals else 0
+
+        # Use a logistic function to convert ordinal difference to win probability
+        # Similar to Elo expected score calculation
+        ordinal_diff = team1_avg_ordinal - team2_avg_ordinal
+        # Scale factor: typical ordinal range is roughly -10 to +15, so 10 point diff ≈ 76% win
+        team1_win_prob = 1.0 / (1.0 + 10 ** (-ordinal_diff / 10.0))
+
+        return {
+            "team1_win_prob": team1_win_prob,
+            "team1_avg_ordinal": team1_avg_ordinal,
+            "team2_avg_ordinal": team2_avg_ordinal,
+        }

@@ -1215,3 +1215,121 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 }
                 for row in rows
             ]
+
+    def get_enriched_matches_chronological(self) -> list[dict]:
+        """
+        Get all matches with fantasy data in chronological order for backfill.
+
+        Returns matches ordered by match_date ASC (oldest first) where at least
+        one participant has fantasy_points set.
+
+        Returns:
+            List of dicts with match_id, winning_team, match_date, team1_players, team2_players
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT DISTINCT m.match_id, m.winning_team, m.match_date,
+                       m.team1_players, m.team2_players
+                FROM matches m
+                JOIN match_participants mp ON m.match_id = mp.match_id
+                WHERE mp.fantasy_points IS NOT NULL
+                ORDER BY m.match_date ASC
+                """
+            )
+            rows = cursor.fetchall()
+            return [
+                {
+                    "match_id": row["match_id"],
+                    "winning_team": row["winning_team"],
+                    "match_date": row["match_date"],
+                    "team1_players": json.loads(row["team1_players"]),
+                    "team2_players": json.loads(row["team2_players"]),
+                }
+                for row in rows
+            ]
+
+    def get_all_matches_with_predictions(self) -> list[dict]:
+        """
+        Get all matches with Glicko-2 prediction data for analysis.
+
+        Returns matches with expected_radiant_win_prob from match_predictions,
+        along with actual outcome and team info.
+
+        Returns:
+            List of dicts with match data and prediction info
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT m.match_id, m.winning_team, m.match_date,
+                       m.team1_players, m.team2_players,
+                       mp.expected_radiant_win_prob,
+                       mp.radiant_rating, mp.dire_rating,
+                       mp.radiant_rd, mp.dire_rd
+                FROM matches m
+                JOIN match_predictions mp ON m.match_id = mp.match_id
+                ORDER BY m.match_date ASC
+                """
+            )
+            rows = cursor.fetchall()
+            return [
+                {
+                    "match_id": row["match_id"],
+                    "winning_team": row["winning_team"],
+                    "match_date": row["match_date"],
+                    "team1_players": json.loads(row["team1_players"]),
+                    "team2_players": json.loads(row["team2_players"]),
+                    "expected_radiant_win_prob": row["expected_radiant_win_prob"],
+                    "radiant_rating": row["radiant_rating"],
+                    "dire_rating": row["dire_rating"],
+                    "radiant_rd": row["radiant_rd"],
+                    "dire_rd": row["dire_rd"],
+                }
+                for row in rows
+            ]
+
+    def get_player_openskill_history(self, discord_id: int, limit: int = 10) -> list[dict]:
+        """
+        Get a player's recent OpenSkill rating changes.
+
+        Args:
+            discord_id: Player's Discord ID
+            limit: Maximum number of history entries to return
+
+        Returns:
+            List of dicts with os_mu_before, os_mu_after, os_sigma_before, os_sigma_after,
+            fantasy_weight, won, match_id, ordered by most recent first.
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT rh.os_mu_before, rh.os_mu_after, rh.os_sigma_before, rh.os_sigma_after,
+                       rh.fantasy_weight, rh.won, rh.match_id, m.match_date
+                FROM rating_history rh
+                JOIN matches m ON rh.match_id = m.match_id
+                WHERE rh.discord_id = ?
+                  AND rh.os_mu_before IS NOT NULL
+                  AND rh.os_mu_after IS NOT NULL
+                ORDER BY m.match_date DESC
+                LIMIT ?
+                """,
+                (discord_id, limit),
+            )
+            rows = cursor.fetchall()
+            return [
+                {
+                    "os_mu_before": row["os_mu_before"],
+                    "os_mu_after": row["os_mu_after"],
+                    "os_sigma_before": row["os_sigma_before"],
+                    "os_sigma_after": row["os_sigma_after"],
+                    "fantasy_weight": row["fantasy_weight"],
+                    "won": row["won"],
+                    "match_id": row["match_id"],
+                    "match_date": row["match_date"],
+                }
+                for row in rows
+            ]

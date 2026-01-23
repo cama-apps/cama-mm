@@ -977,3 +977,235 @@ def draw_rating_distribution(
     plt.close(fig)
     fp.seek(0)
     return fp
+
+
+def draw_calibration_curve(
+    glicko_data: list[tuple[float, float, int]],
+    openskill_data: list[tuple[float, float, int]],
+) -> BytesIO:
+    """
+    Draw calibration curves comparing Glicko-2 and OpenSkill predictions.
+
+    A well-calibrated system has points on the diagonal (predicted = actual).
+
+    Args:
+        glicko_data: List of (avg_predicted, actual_rate, count) tuples for Glicko-2
+        openskill_data: List of (avg_predicted, actual_rate, count) tuples for OpenSkill
+
+    Returns:
+        BytesIO containing the PNG image
+    """
+    fig, ax = plt.subplots(figsize=(6.5, 5), facecolor=DISCORD_BG)
+    ax.set_facecolor(DISCORD_DARKER)
+
+    # Perfect calibration line
+    ax.plot([0, 1], [0, 1], color=DISCORD_GREY, linestyle="--", linewidth=1.5,
+            label="Perfect calibration", alpha=0.7)
+
+    # Glicko-2 curve
+    if glicko_data:
+        g_predicted = [d[0] for d in glicko_data]
+        g_actual = [d[1] for d in glicko_data]
+        g_counts = [d[2] for d in glicko_data]
+        # Size points by sample count
+        sizes = [min(200, 20 + c * 3) for c in g_counts]
+        ax.scatter(g_predicted, g_actual, s=sizes, c=DISCORD_ACCENT, alpha=0.8,
+                   label="Glicko-2", edgecolors="white", linewidths=0.5)
+        if len(g_predicted) > 1:
+            ax.plot(g_predicted, g_actual, color=DISCORD_ACCENT, alpha=0.5, linewidth=1)
+
+    # OpenSkill curve
+    if openskill_data:
+        o_predicted = [d[0] for d in openskill_data]
+        o_actual = [d[1] for d in openskill_data]
+        o_counts = [d[2] for d in openskill_data]
+        sizes = [min(200, 20 + c * 3) for c in o_counts]
+        ax.scatter(o_predicted, o_actual, s=sizes, c=DISCORD_GREEN, alpha=0.8,
+                   label="OpenSkill", edgecolors="white", linewidths=0.5, marker="s")
+        if len(o_predicted) > 1:
+            ax.plot(o_predicted, o_actual, color=DISCORD_GREEN, alpha=0.5, linewidth=1)
+
+    # Styling
+    ax.set_xlabel("Predicted Win Probability", color=DISCORD_GREY, fontsize=11)
+    ax.set_ylabel("Actual Win Rate", color=DISCORD_GREY, fontsize=11)
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    ax.tick_params(colors=DISCORD_GREY, labelsize=9)
+    for spine in ax.spines.values():
+        spine.set_color("#4F545C")
+
+    ax.set_title("Calibration Curve: Predicted vs Actual", color="white",
+                 fontsize=13, fontweight="bold", pad=10)
+    ax.legend(loc="lower right", facecolor=DISCORD_DARKER, edgecolor="#4F545C",
+              labelcolor="white", fontsize=9)
+
+    # Add grid for easier reading
+    ax.grid(True, alpha=0.2, color=DISCORD_GREY)
+
+    plt.tight_layout()
+
+    fp = BytesIO()
+    fig.savefig(fp, format="PNG", dpi=100, bbox_inches="tight", facecolor=DISCORD_BG)
+    plt.close(fig)
+    fp.seek(0)
+    return fp
+
+
+def draw_rating_comparison_chart(comparison_data: dict) -> BytesIO:
+    """
+    Draw a comparison chart showing Glicko-2 vs OpenSkill metrics.
+
+    Args:
+        comparison_data: Dict from RatingComparisonService.get_comparison_summary()
+
+    Returns:
+        BytesIO containing the PNG image
+    """
+    if "error" in comparison_data:
+        # Return error image
+        fig, ax = plt.subplots(figsize=(6.5, 4), facecolor=DISCORD_BG)
+        ax.set_facecolor(DISCORD_DARKER)
+        ax.text(0.5, 0.5, comparison_data["error"], ha="center", va="center",
+                color="white", fontsize=14)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        fp = BytesIO()
+        fig.savefig(fp, format="PNG", dpi=100, bbox_inches="tight", facecolor=DISCORD_BG)
+        plt.close(fig)
+        fp.seek(0)
+        return fp
+
+    glicko = comparison_data["glicko"]
+    openskill = comparison_data["openskill"]
+
+    fig, axes = plt.subplots(1, 3, figsize=(10, 4), facecolor=DISCORD_BG)
+
+    metrics = [
+        ("Brier Score\n(Lower = Better)", "brier_score", True),
+        ("Accuracy\n(Higher = Better)", "accuracy", False),
+        ("Log Loss\n(Lower = Better)", "log_loss", True),
+    ]
+
+    for ax, (title, key, lower_is_better) in zip(axes, metrics):
+        ax.set_facecolor(DISCORD_DARKER)
+
+        g_val = glicko[key]
+        o_val = openskill[key]
+
+        bars = ax.bar(
+            ["Glicko-2", "OpenSkill"],
+            [g_val, o_val],
+            color=[DISCORD_ACCENT, DISCORD_GREEN],
+            edgecolor="white",
+            linewidth=0.5,
+        )
+
+        # Highlight winner
+        if lower_is_better:
+            winner_idx = 0 if g_val < o_val else 1
+        else:
+            winner_idx = 0 if g_val > o_val else 1
+        bars[winner_idx].set_edgecolor(DISCORD_YELLOW)
+        bars[winner_idx].set_linewidth(2)
+
+        ax.set_title(title, color="white", fontsize=10, fontweight="bold")
+        ax.tick_params(colors=DISCORD_GREY, labelsize=9)
+        for spine in ax.spines.values():
+            spine.set_color("#4F545C")
+
+        # Add value labels on bars
+        for bar, val in zip(bars, [g_val, o_val]):
+            height = bar.get_height()
+            ax.annotate(
+                f"{val:.3f}",
+                xy=(bar.get_x() + bar.get_width() / 2, height),
+                xytext=(0, 3),
+                textcoords="offset points",
+                ha="center", va="bottom",
+                color="white", fontsize=9,
+            )
+
+    fig.suptitle(
+        f"Rating System Comparison ({comparison_data['matches_analyzed']} matches)",
+        color="white", fontsize=12, fontweight="bold", y=1.02,
+    )
+
+    plt.tight_layout()
+
+    fp = BytesIO()
+    fig.savefig(fp, format="PNG", dpi=100, bbox_inches="tight", facecolor=DISCORD_BG)
+    plt.close(fig)
+    fp.seek(0)
+    return fp
+
+
+def draw_prediction_over_time(match_data: list[dict], window: int = 20) -> BytesIO:
+    """
+    Draw rolling accuracy of predictions over time for both systems.
+
+    Args:
+        match_data: List of match dicts with prediction data (chronological)
+        window: Rolling window size for smoothing
+
+    Returns:
+        BytesIO containing the PNG image
+    """
+    if len(match_data) < window:
+        # Return error image
+        fig, ax = plt.subplots(figsize=(8, 4), facecolor=DISCORD_BG)
+        ax.set_facecolor(DISCORD_DARKER)
+        ax.text(0.5, 0.5, f"Need at least {window} matches for trend analysis",
+                ha="center", va="center", color="white", fontsize=14)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        fp = BytesIO()
+        fig.savefig(fp, format="PNG", dpi=100, bbox_inches="tight", facecolor=DISCORD_BG)
+        plt.close(fig)
+        fp.seek(0)
+        return fp
+
+    fig, ax = plt.subplots(figsize=(8, 4), facecolor=DISCORD_BG)
+    ax.set_facecolor(DISCORD_DARKER)
+
+    # Calculate rolling accuracy
+    n = len(match_data)
+    glicko_rolling = []
+    openskill_rolling = []
+    x_vals = []
+
+    for i in range(window, n + 1):
+        window_data = match_data[i - window:i]
+        g_correct = sum(1 for m in window_data if m["glicko_correct"])
+        o_correct = sum(1 for m in window_data if m["openskill_correct"])
+        glicko_rolling.append(g_correct / window)
+        openskill_rolling.append(o_correct / window)
+        x_vals.append(i)
+
+    ax.plot(x_vals, glicko_rolling, color=DISCORD_ACCENT, linewidth=2,
+            label=f"Glicko-2 ({window}-match rolling)")
+    ax.plot(x_vals, openskill_rolling, color=DISCORD_GREEN, linewidth=2,
+            label=f"OpenSkill ({window}-match rolling)")
+
+    # 50% reference line (coin flip)
+    ax.axhline(0.5, color=DISCORD_GREY, linestyle="--", alpha=0.5, label="Coin flip (50%)")
+
+    ax.set_xlabel("Match Number", color=DISCORD_GREY, fontsize=11)
+    ax.set_ylabel("Prediction Accuracy", color=DISCORD_GREY, fontsize=11)
+    ax.set_ylim(0.3, 0.9)
+    ax.tick_params(colors=DISCORD_GREY, labelsize=9)
+    for spine in ax.spines.values():
+        spine.set_color("#4F545C")
+
+    ax.set_title("Prediction Accuracy Over Time", color="white",
+                 fontsize=13, fontweight="bold", pad=10)
+    ax.legend(loc="lower right", facecolor=DISCORD_DARKER, edgecolor="#4F545C",
+              labelcolor="white", fontsize=9)
+    ax.grid(True, alpha=0.2, color=DISCORD_GREY)
+
+    plt.tight_layout()
+
+    fp = BytesIO()
+    fig.savefig(fp, format="PNG", dpi=100, bbox_inches="tight", facecolor=DISCORD_BG)
+    plt.close(fig)
+    fp.seek(0)
+    return fp
