@@ -62,6 +62,7 @@ if _admin_env:
 
 LOBBY_READY_THRESHOLD = _parse_int("LOBBY_READY_THRESHOLD", 10)
 LOBBY_MAX_PLAYERS = _parse_int("LOBBY_MAX_PLAYERS", 14)
+LOBBY_RALLY_COOLDOWN_SECONDS = _parse_int("LOBBY_RALLY_COOLDOWN_SECONDS", 120)  # 2 minutes
 # Legacy: Not used in current balancing algorithm (replaced by Glicko-2 ratings)
 WIN_LOSS_MULTIPLIER = _parse_int("WIN_LOSS_MULTIPLIER", 200)
 # Legacy: Not used in current balancing algorithm
