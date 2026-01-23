@@ -154,3 +154,7 @@ STAKE_WIN_PROB_MAX = _parse_float("STAKE_WIN_PROB_MAX", 0.90)
 
 # Spectator Pool configuration
 SPECTATOR_POOL_PLAYER_CUT = _parse_float("SPECTATOR_POOL_PLAYER_CUT", 0.10)  # 10% to winning players
+
+# Match Enrichment configuration
+ENRICHMENT_DISCOVERY_TIME_WINDOW = _parse_int("ENRICHMENT_DISCOVERY_TIME_WINDOW", 7200)  # 2 hours (seconds)
+ENRICHMENT_MIN_PLAYER_MATCH = _parse_int("ENRICHMENT_MIN_PLAYER_MATCH", 10)  # All 10 players required for strict validation

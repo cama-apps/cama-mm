@@ -27,8 +27,11 @@ class TestMatchEnrichmentService:
         return opendota_api
 
     def test_enrich_match_success(self, mock_repos, mock_opendota_api):
-        """Test successful match enrichment."""
+        """Test successful match enrichment (with skip_validation for unit test)."""
         match_repo, player_repo = mock_repos
+
+        # Setup mock internal match
+        match_repo.get_match.return_value = {"match_id": 1, "winning_team": 1}
 
         # Setup mock OpenDota API response
         mock_opendota_api.get_match_details.return_value = {
@@ -41,6 +44,7 @@ class TestMatchEnrichmentService:
             "players": [
                 {
                     "account_id": 12345,
+                    "player_slot": 0,  # Radiant slot
                     "hero_id": 1,
                     "kills": 10,
                     "deaths": 2,
@@ -65,12 +69,14 @@ class TestMatchEnrichmentService:
         player_repo.get_steam_id.return_value = 12345
 
         service = MatchEnrichmentService(match_repo, player_repo, mock_opendota_api)
-        result = service.enrich_match(1, 8181518332)
+        # Use skip_validation for unit test - validation is tested separately
+        result = service.enrich_match(1, 8181518332, skip_validation=True)
 
         assert result["success"] is True
         assert result["players_enriched"] == 1
         assert result["duration"] == 2400
         assert result["radiant_win"] is True
+        assert result["fantasy_points_calculated"] is True
 
         # Verify update calls
         match_repo.update_match_enrichment.assert_called_once()
@@ -91,6 +97,9 @@ class TestMatchEnrichmentService:
         """Test enrichment when player steam_id not in API response."""
         match_repo, player_repo = mock_repos
 
+        # Setup mock internal match
+        match_repo.get_match.return_value = {"match_id": 1, "winning_team": 1}
+
         mock_opendota_api.get_match_details.return_value = {
             "match_id": 8181518332,
             "duration": 2400,
@@ -109,7 +118,8 @@ class TestMatchEnrichmentService:
         player_repo.get_steam_id.return_value = 12345  # Different from API response
 
         service = MatchEnrichmentService(match_repo, player_repo, mock_opendota_api)
-        result = service.enrich_match(1, 8181518332)
+        # Use skip_validation for unit test
+        result = service.enrich_match(1, 8181518332, skip_validation=True)
 
         assert result["success"] is True
         assert result["players_enriched"] == 0
@@ -118,6 +128,9 @@ class TestMatchEnrichmentService:
     def test_enrich_match_no_steam_id(self, mock_repos, mock_opendota_api):
         """Test enrichment when player has no steam_id."""
         match_repo, player_repo = mock_repos
+
+        # Setup mock internal match
+        match_repo.get_match.return_value = {"match_id": 1, "winning_team": 1}
 
         mock_opendota_api.get_match_details.return_value = {
             "match_id": 8181518332,
@@ -135,7 +148,8 @@ class TestMatchEnrichmentService:
         player_repo.get_steam_id.return_value = None  # No steam_id
 
         service = MatchEnrichmentService(match_repo, player_repo, mock_opendota_api)
-        result = service.enrich_match(1, 8181518332)
+        # Use skip_validation for unit test
+        result = service.enrich_match(1, 8181518332, skip_validation=True)
 
         assert result["success"] is True
         assert result["players_enriched"] == 0

@@ -1410,6 +1410,27 @@ class InfoCommands(commands.Cog):
 
             embed.add_field(name="🦸 Recent Heroes", value=hero_text, inline=False)
 
+        # Fantasy stats from enriched matches
+        fantasy_stats = self.match_repo.get_player_fantasy_stats(user.id) if self.match_repo else None
+        if fantasy_stats and fantasy_stats["total_games"] > 0:
+            fp_text = (
+                f"**Avg FP:** {fantasy_stats['avg_fp']:.1f} | "
+                f"**Best:** {fantasy_stats['best_fp']:.1f} (Match #{fantasy_stats['best_match_id']})\n"
+                f"**Total:** {fantasy_stats['total_fp']:.1f} FP over {fantasy_stats['total_games']} enriched games"
+            )
+
+            # Recent games with FP
+            recent_fp = fantasy_stats.get("recent_games", [])[:5]
+            if recent_fp:
+                fp_details = []
+                for g in recent_fp:
+                    result = "W" if g["won"] else "L"
+                    hero_name = get_hero_short_name(g["hero_id"]) if g.get("hero_id") else "?"
+                    fp_details.append(f"#{g['match_id']}: {result} {hero_name} **{g['fantasy_points']:.1f}**")
+                fp_text += "\n" + " | ".join(fp_details)
+
+            embed.add_field(name="⭐ Fantasy Points", value=fp_text, inline=False)
+
         # Record
         record_text = f"**W-L:** {player.wins}-{player.losses}"
         if player.wins + player.losses > 0:

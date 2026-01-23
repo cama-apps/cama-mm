@@ -586,6 +586,17 @@ class MatchRepository(BaseRepository, IMatchRepository):
         hero_healing: int = 0,
         lane_role: int | None = None,
         lane_efficiency: int | None = None,
+        # Fantasy fields
+        towers_killed: int | None = None,
+        roshans_killed: int | None = None,
+        teamfight_participation: float | None = None,
+        obs_placed: int | None = None,
+        sen_placed: int | None = None,
+        camps_stacked: int | None = None,
+        rune_pickups: int | None = None,
+        firstblood_claimed: int | None = None,
+        stuns: float | None = None,
+        fantasy_points: float | None = None,
     ) -> None:
         """Update a match participant with enriched stats from OpenDota API."""
         with self.connection() as conn:
@@ -606,7 +617,17 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     net_worth = ?,
                     hero_healing = ?,
                     lane_role = ?,
-                    lane_efficiency = ?
+                    lane_efficiency = ?,
+                    towers_killed = ?,
+                    roshans_killed = ?,
+                    teamfight_participation = ?,
+                    obs_placed = ?,
+                    sen_placed = ?,
+                    camps_stacked = ?,
+                    rune_pickups = ?,
+                    firstblood_claimed = ?,
+                    stuns = ?,
+                    fantasy_points = ?
                 WHERE match_id = ? AND discord_id = ?
                 """,
                 (
@@ -624,6 +645,16 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     hero_healing,
                     lane_role,
                     lane_efficiency,
+                    towers_killed,
+                    roshans_killed,
+                    teamfight_participation,
+                    obs_placed,
+                    sen_placed,
+                    camps_stacked,
+                    rune_pickups,
+                    firstblood_claimed,
+                    stuns,
+                    fantasy_points,
                     match_id,
                     discord_id,
                 ),
@@ -719,7 +750,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
             if cursor.rowcount == 0:
                 return False
 
-            # Clear participant-level stats
+            # Clear participant-level stats (including fantasy fields)
             cursor.execute(
                 """
                 UPDATE match_participants
@@ -733,7 +764,20 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     tower_damage = NULL,
                     last_hits = NULL,
                     denies = NULL,
-                    net_worth = NULL
+                    net_worth = NULL,
+                    hero_healing = NULL,
+                    lane_role = NULL,
+                    lane_efficiency = NULL,
+                    towers_killed = NULL,
+                    roshans_killed = NULL,
+                    teamfight_participation = NULL,
+                    obs_placed = NULL,
+                    sen_placed = NULL,
+                    camps_stacked = NULL,
+                    rune_pickups = NULL,
+                    firstblood_claimed = NULL,
+                    stuns = NULL,
+                    fantasy_points = NULL
                 WHERE match_id = ?
                 """,
                 (match_id,),
@@ -773,7 +817,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 """
             )
 
-            # Clear participant stats for those matches
+            # Clear participant stats for those matches (including fantasy fields)
             placeholders = ",".join("?" * len(match_ids))
             cursor.execute(
                 f"""
@@ -788,7 +832,20 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     tower_damage = NULL,
                     last_hits = NULL,
                     denies = NULL,
-                    net_worth = NULL
+                    net_worth = NULL,
+                    hero_healing = NULL,
+                    lane_role = NULL,
+                    lane_efficiency = NULL,
+                    towers_killed = NULL,
+                    roshans_killed = NULL,
+                    teamfight_participation = NULL,
+                    obs_placed = NULL,
+                    sen_placed = NULL,
+                    camps_stacked = NULL,
+                    rune_pickups = NULL,
+                    firstblood_claimed = NULL,
+                    stuns = NULL,
+                    fantasy_points = NULL
                 WHERE match_id IN ({placeholders})
                 """,
                 match_ids,
@@ -1028,3 +1085,118 @@ class MatchRepository(BaseRepository, IMatchRepository):
             )
             rows = cursor.fetchall()
             return [{"hero_id": row["hero_id"], "games": row["games"]} for row in rows]
+
+    def get_player_fantasy_stats(self, discord_id: int) -> dict:
+        """
+        Get fantasy point statistics for a player from enriched matches.
+
+        Returns:
+            Dict with:
+            - total_games: int (games with fantasy data)
+            - total_fp: float (total fantasy points)
+            - avg_fp: float (average fantasy points per game)
+            - best_fp: float (highest fantasy points in a game)
+            - best_match_id: int (match_id of best game)
+            - recent_games: list of (match_id, fantasy_points, won) for last 10 games
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+
+            # Get aggregate stats
+            cursor.execute(
+                """
+                SELECT
+                    COUNT(*) as total_games,
+                    SUM(fantasy_points) as total_fp,
+                    AVG(fantasy_points) as avg_fp,
+                    MAX(fantasy_points) as best_fp
+                FROM match_participants
+                WHERE discord_id = ? AND fantasy_points IS NOT NULL
+                """,
+                (discord_id,),
+            )
+            row = cursor.fetchone()
+
+            if not row or row["total_games"] == 0:
+                return {
+                    "total_games": 0,
+                    "total_fp": 0.0,
+                    "avg_fp": 0.0,
+                    "best_fp": 0.0,
+                    "best_match_id": None,
+                    "recent_games": [],
+                }
+
+            # Get best match
+            cursor.execute(
+                """
+                SELECT match_id
+                FROM match_participants
+                WHERE discord_id = ? AND fantasy_points = ?
+                LIMIT 1
+                """,
+                (discord_id, row["best_fp"]),
+            )
+            best_row = cursor.fetchone()
+            best_match_id = best_row["match_id"] if best_row else None
+
+            # Get recent games with fantasy data
+            cursor.execute(
+                """
+                SELECT mp.match_id, mp.fantasy_points, mp.won, mp.hero_id
+                FROM match_participants mp
+                JOIN matches m ON mp.match_id = m.match_id
+                WHERE mp.discord_id = ? AND mp.fantasy_points IS NOT NULL
+                ORDER BY m.match_date DESC
+                LIMIT 10
+                """,
+                (discord_id,),
+            )
+            recent = [
+                {
+                    "match_id": r["match_id"],
+                    "fantasy_points": r["fantasy_points"],
+                    "won": r["won"],
+                    "hero_id": r["hero_id"],
+                }
+                for r in cursor.fetchall()
+            ]
+
+            return {
+                "total_games": row["total_games"],
+                "total_fp": row["total_fp"] or 0.0,
+                "avg_fp": row["avg_fp"] or 0.0,
+                "best_fp": row["best_fp"] or 0.0,
+                "best_match_id": best_match_id,
+                "recent_games": recent,
+            }
+
+    def get_matches_without_fantasy_data(self, limit: int = 100) -> list[dict]:
+        """
+        Get matches that have enrichment but no fantasy data.
+
+        Returns matches where valve_match_id is set but fantasy_points is NULL.
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT DISTINCT m.match_id, m.valve_match_id, m.match_date
+                FROM matches m
+                JOIN match_participants mp ON m.match_id = mp.match_id
+                WHERE m.valve_match_id IS NOT NULL
+                  AND mp.fantasy_points IS NULL
+                ORDER BY m.match_date DESC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+            rows = cursor.fetchall()
+            return [
+                {
+                    "match_id": row["match_id"],
+                    "valve_match_id": row["valve_match_id"],
+                    "match_date": row["match_date"],
+                }
+                for row in rows
+            ]

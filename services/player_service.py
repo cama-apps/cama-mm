@@ -78,6 +78,7 @@ class PlayerService:
             discord_id=discord_id,
             discord_username=discord_username,
             dotabuff_url=dotabuff_url,
+            steam_id=steam_id,
             initial_mmr=mmr,
             glicko_rating=glicko_player.rating,
             glicko_rd=glicko_player.rd,
