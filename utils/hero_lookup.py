@@ -206,3 +206,100 @@ def get_hero_color(hero_id: int) -> int | None:
         return int(color_str.lstrip("#"), 16)
     except (ValueError, TypeError):
         return None
+
+
+# Cache for hero roles
+_HERO_ROLES_CACHE: dict[int, list[str]] = {}
+
+
+def _load_hero_roles():
+    """Load hero roles from dotabase."""
+    global _HERO_ROLES_CACHE
+    if _HERO_ROLES_CACHE:
+        return
+
+    try:
+        from dotabase import Hero, dotabase_session
+
+        session = dotabase_session()
+        for hero in session.query(Hero).all():
+            if hero.roles:
+                _HERO_ROLES_CACHE[hero.id] = hero.roles.split("|")
+            else:
+                _HERO_ROLES_CACHE[hero.id] = []
+    except ImportError:
+        pass
+    except Exception:
+        pass
+
+
+def get_hero_roles(hero_id: int) -> list[str]:
+    """
+    Get the roles for a hero (e.g., ['Carry', 'Escape', 'Nuker']).
+
+    Args:
+        hero_id: The Dota 2 hero ID
+
+    Returns:
+        List of role strings, or empty list if not found
+    """
+    _load_hero_roles()
+    return _HERO_ROLES_CACHE.get(hero_id, [])
+
+
+def is_support_hero(hero_id: int) -> bool:
+    """
+    Check if a hero is primarily a support.
+
+    A hero is considered support if 'Support' is in their roles.
+
+    Args:
+        hero_id: The Dota 2 hero ID
+
+    Returns:
+        True if hero has Support role
+    """
+    roles = get_hero_roles(hero_id)
+    return "Support" in roles
+
+
+def is_core_hero(hero_id: int) -> bool:
+    """
+    Check if a hero is primarily a core (carry/mid/offlane).
+
+    A hero is considered core if 'Carry' is in their roles and not primarily support,
+    OR if they have no Support role.
+
+    Args:
+        hero_id: The Dota 2 hero ID
+
+    Returns:
+        True if hero is primarily played as core
+    """
+    roles = get_hero_roles(hero_id)
+    if not roles:
+        return True  # Default to core if unknown
+
+    # If hero has Carry but not Support, definitely core
+    if "Carry" in roles and "Support" not in roles:
+        return True
+
+    # If hero has Support, not core
+    if "Support" in roles:
+        return False
+
+    # Otherwise (Initiator, Durable, etc. without Support) = core
+    return True
+
+
+def classify_hero_role(hero_id: int) -> str:
+    """
+    Classify a hero as 'Core' or 'Support'.
+
+    Args:
+        hero_id: The Dota 2 hero ID
+
+    Returns:
+        'Core' or 'Support'
+    """
+    return "Support" if is_support_hero(hero_id) else "Core"
