@@ -30,6 +30,7 @@ class LobbyManagerService:
         self.lobby_channel_id: int | None = None
         self.lobby_thread_id: int | None = None
         self.lobby_embed_message_id: int | None = None
+        self.origin_channel_id: int | None = None  # Channel where /lobby was originally run
         self.lobby: Lobby | None = None
         self._load_state()
 
@@ -90,6 +91,7 @@ class LobbyManagerService:
         channel_id: int | None,
         thread_id: int | None = None,
         embed_message_id: int | None = None,
+        origin_channel_id: int | None = None,
     ) -> None:
         """Set the lobby message, channel, and thread IDs, persisting to database."""
         self.lobby_message_id = message_id
@@ -98,6 +100,8 @@ class LobbyManagerService:
             self.lobby_thread_id = thread_id
         if embed_message_id is not None:
             self.lobby_embed_message_id = embed_message_id
+        if origin_channel_id is not None:
+            self.origin_channel_id = origin_channel_id
         if self.lobby:
             self._persist_lobby()
 
@@ -111,6 +115,7 @@ class LobbyManagerService:
         self.lobby_channel_id = None
         self.lobby_thread_id = None
         self.lobby_embed_message_id = None
+        self.origin_channel_id = None
         self._clear_persistent_lobby()
         logger.info("reset_lobby completed - cleared persistent lobby")
 
@@ -128,6 +133,7 @@ class LobbyManagerService:
             channel_id=self.lobby_channel_id,
             thread_id=self.lobby_thread_id,
             embed_message_id=self.lobby_embed_message_id,
+            origin_channel_id=self.origin_channel_id,
         )
 
     def _clear_persistent_lobby(self) -> None:
@@ -142,6 +148,7 @@ class LobbyManagerService:
         self.lobby_channel_id = data.get("channel_id")
         self.lobby_thread_id = data.get("thread_id")
         self.lobby_embed_message_id = data.get("embed_message_id")
+        self.origin_channel_id = data.get("origin_channel_id")
 
 
 # Backward compatibility alias - allows gradual migration

@@ -207,6 +207,7 @@ class SchemaManager:
             ("add_fantasy_columns", self._migration_add_fantasy_columns),
             ("add_openskill_columns", self._migration_add_openskill_columns),
             ("create_tip_transactions_table", self._migration_create_tip_transactions_table),
+            ("add_origin_channel_id_to_lobby", self._migration_add_origin_channel_id_to_lobby),
         ]
 
     # --- Migrations ---
@@ -889,3 +890,7 @@ class SchemaManager:
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_tip_transactions_timestamp ON tip_transactions(timestamp)"
         )
+
+    def _migration_add_origin_channel_id_to_lobby(self, cursor) -> None:
+        """Add origin_channel_id column to lobby_state for dedicated lobby channel support."""
+        self._add_column_if_not_exists(cursor, "lobby_state", "origin_channel_id", "INTEGER")

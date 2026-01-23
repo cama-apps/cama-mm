@@ -592,17 +592,25 @@ class MatchCommands(commands.Cog):
         )
         embed.add_field(name=wager_field_name, value=wager_field_value, inline=False)
 
-        # Always post shuffle embed to the lobby channel (not as followup)
-        channel_id = self.lobby_service.get_lobby_channel_id()
+        # Post shuffle embed to the lobby channel (dedicated channel where embed lives)
+        lobby_channel_id = self.lobby_service.get_lobby_channel_id()
         message = None
-        if channel_id:
+        if lobby_channel_id:
             try:
-                channel = self.bot.get_channel(channel_id)
+                channel = self.bot.get_channel(lobby_channel_id)
                 if not channel:
-                    channel = await self.bot.fetch_channel(channel_id)
+                    channel = await self.bot.fetch_channel(lobby_channel_id)
                 message = await channel.send(embed=embed)
             except Exception as exc:
-                logger.warning(f"Failed to post shuffle to channel: {exc}")
+                logger.warning(f"Failed to post shuffle to lobby channel: {exc}")
+
+        # Also post to command channel if different from lobby channel (dedicated channel setup)
+        command_channel_id = interaction.channel.id if interaction.channel else None
+        if command_channel_id and command_channel_id != lobby_channel_id:
+            try:
+                await interaction.channel.send(embed=embed)
+            except Exception as exc:
+                logger.warning(f"Failed to post shuffle to command channel: {exc}")
 
         # Send ephemeral confirmation to user
         await interaction.followup.send("✅ Teams shuffled!", ephemeral=True)
@@ -636,7 +644,19 @@ class MatchCommands(commands.Cog):
             shuffle_embed=embed,
             included_player_ids=included_ids,
         )
-        await self._safe_unpin(interaction.channel, self.lobby_service.get_lobby_message_id())
+        # Unpin from the lobby channel (may be dedicated channel, not interaction channel)
+        lobby_channel_id = self.lobby_service.get_lobby_channel_id()
+        lobby_channel = None
+        if lobby_channel_id:
+            try:
+                lobby_channel = self.bot.get_channel(lobby_channel_id)
+                if not lobby_channel:
+                    lobby_channel = await self.bot.fetch_channel(lobby_channel_id)
+            except Exception:
+                lobby_channel = interaction.channel
+        else:
+            lobby_channel = interaction.channel
+        await self._safe_unpin(lobby_channel, self.lobby_service.get_lobby_message_id())
         self.lobby_service.reset_lobby()
 
         # Clear lobby rally cooldowns

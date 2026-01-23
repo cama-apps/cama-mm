@@ -11,6 +11,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from config import LOBBY_CHANNEL_ID
 from services.lobby_service import LobbyService
 from services.permissions import has_admin_permission
 from utils.formatting import FROGLING_EMOJI_ID, JOPACOIN_EMOJI_ID
@@ -29,6 +30,50 @@ class LobbyCommands(commands.Cog):
         self.bot = bot
         self.lobby_service = lobby_service
         self.player_service = player_service
+
+    async def _get_lobby_target_channel(
+        self, interaction: discord.Interaction
+    ) -> tuple[discord.abc.Messageable | None, bool]:
+        """
+        Get the target channel for lobby embeds.
+
+        Returns:
+            (channel, is_dedicated) tuple:
+            - channel: The channel to post to (dedicated or interaction channel)
+            - is_dedicated: True if posting to dedicated channel, False if fallback
+        """
+        # If no dedicated channel configured, use interaction channel
+        if not LOBBY_CHANNEL_ID:
+            return interaction.channel, False
+
+        try:
+            channel = self.bot.get_channel(LOBBY_CHANNEL_ID)
+            if not channel:
+                channel = await self.bot.fetch_channel(LOBBY_CHANNEL_ID)
+
+            # Verify we can send messages to this channel
+            if isinstance(channel, discord.TextChannel):
+                # Ensure dedicated channel is in the same guild
+                if interaction.guild and channel.guild.id != interaction.guild.id:
+                    logger.warning(
+                        f"Dedicated lobby channel {LOBBY_CHANNEL_ID} is in different guild"
+                    )
+                    return interaction.channel, False
+
+                perms = channel.permissions_for(channel.guild.me)
+                if not perms.send_messages or not perms.create_public_threads:
+                    logger.warning(
+                        f"Bot lacks permissions in dedicated lobby channel {LOBBY_CHANNEL_ID}"
+                    )
+                    return interaction.channel, False
+
+            return channel, True
+        except (discord.NotFound, discord.Forbidden) as exc:
+            logger.warning(f"Cannot access dedicated lobby channel {LOBBY_CHANNEL_ID}: {exc}")
+            return interaction.channel, False
+        except Exception as exc:
+            logger.warning(f"Error fetching dedicated lobby channel: {exc}")
+            return interaction.channel, False
 
     async def _safe_pin(self, message: discord.Message) -> None:
         """Pin the lobby message, logging but not raising on failure (e.g., missing perms)."""
@@ -251,8 +296,15 @@ class LobbyCommands(commands.Cog):
 
         if message_id and thread_id:
             try:
-                # Just update the thread embed (channel message doesn't have embed)
-                message = await interaction.channel.fetch_message(message_id)
+                # Fetch message from the dedicated/lobby channel (not necessarily interaction channel)
+                lobby_channel_id = self.lobby_service.get_lobby_channel_id()
+                if lobby_channel_id:
+                    channel = self.bot.get_channel(lobby_channel_id)
+                    if not channel:
+                        channel = await self.bot.fetch_channel(lobby_channel_id)
+                    message = await channel.fetch_message(message_id)
+                else:
+                    message = await interaction.channel.fetch_message(message_id)
                 await self._update_thread_embed(lobby)
 
                 await interaction.followup.send(f"[View Lobby]({message.jump_url})", ephemeral=True)
@@ -261,8 +313,19 @@ class LobbyCommands(commands.Cog):
                 # Fall through to create a new one
                 pass
 
-        # Send channel message with embed (same as thread, but no buttons)
-        channel_msg = await interaction.channel.send(embed=embed)
+        # Get target channel (dedicated or fallback to interaction channel)
+        target_channel, is_dedicated = await self._get_lobby_target_channel(interaction)
+        if not target_channel:
+            await interaction.followup.send(
+                "❌ Could not find a valid channel to post the lobby.", ephemeral=True
+            )
+            return
+
+        # Store the origin channel (where /lobby was run) for rally notifications
+        origin_channel_id = interaction.channel.id
+
+        # Send channel message with embed
+        channel_msg = await target_channel.send(embed=embed)
 
         # Pin the lobby message for visibility
         await self._safe_pin(channel_msg)
@@ -285,11 +348,13 @@ class LobbyCommands(commands.Cog):
             thread = await channel_msg.create_thread(name=thread_name)
 
             # Store all IDs (embed is on channel_msg, which is also the thread starter)
+            # Also store origin_channel_id for rally notifications
             self.lobby_service.set_lobby_message_id(
                 message_id=channel_msg.id,
-                channel_id=interaction.channel.id,
+                channel_id=target_channel.id,  # Where the embed lives (dedicated or interaction)
                 thread_id=thread.id,
                 embed_message_id=channel_msg.id,  # The channel msg IS the embed in thread
+                origin_channel_id=origin_channel_id,  # Where /lobby was run (for rally)
             )
 
             # Complete the deferred response
@@ -571,7 +636,19 @@ class LobbyCommands(commands.Cog):
         await self._update_channel_message_closed("Lobby Reset")
         await self._archive_lobby_thread("Lobby Reset")
 
-        await self._safe_unpin(interaction.channel, self.lobby_service.get_lobby_message_id())
+        # Unpin from the lobby channel (may be dedicated channel, not interaction channel)
+        lobby_channel_id = self.lobby_service.get_lobby_channel_id()
+        lobby_channel = None
+        if lobby_channel_id:
+            try:
+                lobby_channel = self.bot.get_channel(lobby_channel_id)
+                if not lobby_channel:
+                    lobby_channel = await self.bot.fetch_channel(lobby_channel_id)
+            except Exception:
+                lobby_channel = interaction.channel
+        else:
+            lobby_channel = interaction.channel
+        await self._safe_unpin(lobby_channel, self.lobby_service.get_lobby_message_id())
         self.lobby_service.reset_lobby()
 
         # Clear lobby rally cooldowns
