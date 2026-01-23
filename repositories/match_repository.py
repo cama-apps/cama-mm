@@ -956,3 +956,75 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 }
                 for row in rows
             ]
+
+    def get_player_hero_stats(self, discord_id: int, limit: int = 10) -> list[dict]:
+        """
+        Get a player's recent hero performance from enriched matches.
+
+        Args:
+            discord_id: Player's Discord ID
+            limit: Maximum number of hero performances to return
+
+        Returns:
+            List of dicts with hero_id, wins, losses, avg_kda, avg_gpm, avg_damage,
+            ordered by most recent match.
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT
+                    mp.hero_id,
+                    COUNT(*) as games,
+                    SUM(CASE WHEN mp.won = 1 THEN 1 ELSE 0 END) as wins,
+                    SUM(CASE WHEN mp.won = 0 THEN 1 ELSE 0 END) as losses,
+                    AVG(mp.kills) as avg_kills,
+                    AVG(mp.deaths) as avg_deaths,
+                    AVG(mp.assists) as avg_assists,
+                    AVG(mp.gpm) as avg_gpm,
+                    AVG(mp.hero_damage) as avg_damage,
+                    MAX(mp.match_id) as last_match_id
+                FROM match_participants mp
+                WHERE mp.discord_id = ? AND mp.hero_id IS NOT NULL
+                GROUP BY mp.hero_id
+                ORDER BY last_match_id DESC
+                LIMIT ?
+                """,
+                (discord_id, limit),
+            )
+            rows = cursor.fetchall()
+            return [
+                {
+                    "hero_id": row["hero_id"],
+                    "games": row["games"],
+                    "wins": row["wins"],
+                    "losses": row["losses"],
+                    "avg_kills": row["avg_kills"] or 0,
+                    "avg_deaths": row["avg_deaths"] or 0,
+                    "avg_assists": row["avg_assists"] or 0,
+                    "avg_gpm": row["avg_gpm"] or 0,
+                    "avg_damage": row["avg_damage"] or 0,
+                }
+                for row in rows
+            ]
+
+    def get_player_hero_role_breakdown(self, discord_id: int) -> dict:
+        """
+        Get breakdown of core vs support heroes played by a player.
+
+        Returns:
+            Dict with total_games, core_games, support_games based on hero_id classification.
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT hero_id, COUNT(*) as games
+                FROM match_participants
+                WHERE discord_id = ? AND hero_id IS NOT NULL
+                GROUP BY hero_id
+                """,
+                (discord_id,),
+            )
+            rows = cursor.fetchall()
+            return [{"hero_id": row["hero_id"], "games": row["games"]} for row in rows]

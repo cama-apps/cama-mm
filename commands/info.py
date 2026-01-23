@@ -14,6 +14,7 @@ from services.permissions import has_admin_permission
 from utils.debug_logging import debug_log as _dbg_log
 from utils.drawing import draw_rating_distribution
 from utils.formatting import JOPACOIN_EMOTE
+from utils.hero_lookup import get_hero_short_name, classify_hero_role
 from utils.interaction_safety import safe_defer, safe_followup
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
 from utils.rating_insights import compute_calibration_stats, rd_to_certainty
@@ -1351,6 +1352,47 @@ class InfoCommands(commands.Cog):
             highlights.append(f"💀 **Worst Choke:** Lost with {worst_choke[1]:.0%} chance (Match #{worst_choke[0].get('match_id')})")
         if highlights:
             embed.add_field(name="⚡ Highlights", value="\n".join(highlights), inline=False)
+
+        # Hero performance from enriched matches
+        hero_stats = self.match_repo.get_player_hero_stats(user.id, limit=8) if self.match_repo else []
+        if hero_stats:
+            # Calculate role alignment
+            hero_breakdown = self.match_repo.get_player_hero_role_breakdown(user.id) if self.match_repo else []
+            total_hero_games = sum(h["games"] for h in hero_breakdown)
+            core_games = sum(h["games"] for h in hero_breakdown if classify_hero_role(h["hero_id"]) == "Core")
+            support_games = total_hero_games - core_games
+
+            # Check for role mismatch
+            preferred_roles = player.preferred_roles or []
+            prefers_support = any(r in ["4", "5"] for r in preferred_roles) and not any(r in ["1", "2", "3"] for r in preferred_roles)
+            prefers_core = any(r in ["1", "2", "3"] for r in preferred_roles) and not any(r in ["4", "5"] for r in preferred_roles)
+
+            role_mismatch = None
+            if total_hero_games >= 5:
+                core_pct = core_games / total_hero_games if total_hero_games > 0 else 0
+                if prefers_support and core_pct > 0.6:
+                    role_mismatch = f"⚠️ Prefers Support but plays {core_pct:.0%} Core heroes"
+                elif prefers_core and core_pct < 0.4:
+                    role_mismatch = f"⚠️ Prefers Core but plays {(1 - core_pct):.0%} Support heroes"
+
+            # Build hero table
+            hero_lines = []
+            for h in hero_stats[:6]:
+                hero_name = get_hero_short_name(h["hero_id"])
+                wl = f"{h['wins']}-{h['losses']}"
+                kda = f"{h['avg_kills']:.0f}/{h['avg_deaths']:.0f}/{h['avg_assists']:.0f}"
+                gpm = f"{h['avg_gpm']:.0f}"
+                dmg = f"{h['avg_damage'] / 1000:.1f}k" if h['avg_damage'] else "-"
+                hero_lines.append(f"`{hero_name:<8}` {wl:<5} {kda:<9} {gpm:<4} {dmg}")
+
+            hero_text = "```\nHero     W-L   KDA       GPM  Dmg\n"
+            hero_text += "\n".join(hero_lines)
+            hero_text += "\n```"
+
+            if role_mismatch:
+                hero_text += f"\n{role_mismatch}"
+
+            embed.add_field(name="🦸 Recent Heroes", value=hero_text, inline=False)
 
         # Record
         record_text = f"**W-L:** {player.wins}-{player.losses}"
