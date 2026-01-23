@@ -3,7 +3,12 @@ Glicko-2 rating system implementation for Cama matchmaking.
 """
 
 import math
-from config import CALIBRATION_RD_THRESHOLD, RD_DECAY_CONSTANT, RD_DECAY_GRACE_PERIOD_WEEKS
+from config import (
+    CALIBRATION_RD_THRESHOLD,
+    MAX_RATING_SWING_PER_GAME,
+    RD_DECAY_CONSTANT,
+    RD_DECAY_GRACE_PERIOD_WEEKS,
+)
 
 from glicko2 import Player
 
@@ -171,30 +176,47 @@ class CamaRatingSystem:
         """
         return Player(rating=rating, rd=rd, vol=volatility)
 
-    def _compute_team_delta(
+    def _update_player_rating(
         self,
+        player: Player,
         team_rating: float,
-        team_rd: float,
         opponent_rating: float,
         opponent_rd: float,
         result: float,
     ) -> tuple[float, float, float]:
         """
-        Compute the team-level rating delta using a synthetic player.
+        Compute updated rating, RD, and volatility for a single player.
+
+        Uses team-based expected outcome: the player's delta is computed as if
+        a synthetic player at team_rating (with this player's RD) played the match.
+        This ensures all teammates gain/lose in the same direction based on
+        team-level expected outcome, preventing rating compression.
 
         Args:
-            team_rating: Aggregate team rating
-            team_rd: RD to use for the synthetic player (typically avg calibrated RD)
-            opponent_rating: Opponent aggregate rating
-            opponent_rd: Opponent aggregate RD
+            player: The player to update
+            team_rating: This player's team average rating
+            opponent_rating: Opponent team average rating
+            opponent_rd: Opponent team RMS RD
             result: 1.0 for win, 0.0 for loss
 
         Returns:
-            Tuple of (new_rating, new_rd, new_vol) for the synthetic player
+            Tuple of (new_rating, new_rd, new_vol)
         """
-        synth = Player(rating=team_rating, rd=team_rd, vol=self.initial_volatility)
+        # Use TEAM rating for expected outcome, but PLAYER's RD for convergence speed
+        synth = Player(rating=team_rating, rd=player.rd, vol=player.vol)
         synth.update_player([opponent_rating], [opponent_rd], [result])
-        return synth.rating, synth.rd, synth.vol
+
+        # Delta is how much the "team representative with this player's RD" moved
+        delta = synth.rating - team_rating
+        delta = max(-MAX_RATING_SWING_PER_GAME, min(MAX_RATING_SWING_PER_GAME, delta))
+
+        final_rating = max(0.0, player.rating + delta)
+        # RD and volatility from the synthetic player (team-based update)
+        # RD should never increase after a match
+        final_rd = min(player.rd, synth.rd)
+        final_vol = synth.vol
+
+        return final_rating, final_rd, final_vol
 
     def update_ratings_after_match(
         self,
@@ -203,105 +225,62 @@ class CamaRatingSystem:
         winning_team: int,
     ) -> tuple[list[tuple[float, float, float, int]], list[tuple[float, float, float, int]]]:
         """
-        Update ratings after a match using RD²-weighted team delta.
+        Update ratings after a match using team-based expected outcome with individual RD.
 
-        V2 approach (based on TrueSkill/Team Glicko research):
-        1. Compute team-level Glicko-2 update (team vs team)
-        2. Distribute team delta to players by RD² weight
-        3. Update each player's RD using team-level opponent stats
+        V3 approach (fixes V2 RD² concentration issues):
+        1. Expected outcome is TEAM vs TEAM (not individual vs team)
+        2. Each player's delta magnitude is determined by their RD (convergence speed)
+        3. Apply ±MAX_RATING_SWING_PER_GAME cap to prevent extreme outliers
+        4. RD always decreases after match
 
-        This fixes the old system's problems:
-        - Low-rated high-RD players no longer get +600 swings (bounded by team delta * weight)
-        - Win/loss is symmetric (~2:1 ratio instead of 46:1)
-        - High-RD players still converge faster (larger share of team delta)
+        Key insight: When a team wins/loses, ALL players on that team should gain/lose
+        in the same direction. The expected outcome depends on team ratings, not
+        individual player rating vs opponent team.
+
+        This prevents rating compression where:
+        - Low-rated players slowly inflate (would lose less, gain more personally)
+        - High-rated players slowly deflate (would gain less, lose more personally)
+
+        Expected outcomes (based on RD, not rating):
+        - New player (RD 350): ±150-200 (capped at MAX_RATING_SWING_PER_GAME)
+        - Settling (RD 150): ±40-60
+        - Calibrated (RD 80): ±10-20
 
         Args:
-            team1_players: List of (Glicko-2 Player, discord_id) for team 1
-            team2_players: List of (Glicko-2 Player, discord_id) for team 2
+            team1_players: List of (Glicko-2 Player, discord_id) for team 1 (non-empty)
+            team2_players: List of (Glicko-2 Player, discord_id) for team 2 (non-empty)
             winning_team: 1 or 2 (which team won)
 
         Returns:
             Tuple of (team1_updated_ratings, team2_updated_ratings)
             Each rating is (rating, rd, volatility, discord_id)
+
+        Raises:
+            ValueError: If either team is empty or winning_team is not 1 or 2
         """
-        # Aggregated team views (mean rating, RMS RD)
+        if not team1_players:
+            raise ValueError("team1_players cannot be empty")
+        if not team2_players:
+            raise ValueError("team2_players cannot be empty")
+        if winning_team not in (1, 2):
+            raise ValueError(f"winning_team must be 1 or 2, got {winning_team}")
+
+        # Get team aggregates (mean rating, RMS RD)
         team1_rating, team1_rd, _ = self.aggregate_team_stats([p for p, _ in team1_players])
         team2_rating, team2_rd, _ = self.aggregate_team_stats([p for p, _ in team2_players])
 
         team1_result = 1.0 if winning_team == 1 else 0.0
         team2_result = 1.0 if winning_team == 2 else 0.0
 
-        # Compute team-level deltas using RMS RD for each team
-        team1_new_rating, _, _ = self._compute_team_delta(
-            team1_rating, team1_rd, team2_rating, team2_rd, team1_result
-        )
-        team2_new_rating, _, _ = self._compute_team_delta(
-            team2_rating, team2_rd, team1_rating, team1_rd, team2_result
-        )
-
-        team1_delta = team1_new_rating - team1_rating
-        team2_delta = team2_new_rating - team2_rating
-
-        # Calculate RD² weights for each team
-        team1_total_var = sum(p.rd**2 for p, _ in team1_players)
-        team2_total_var = sum(p.rd**2 for p, _ in team2_players)
-
-        # Avoid division by zero (shouldn't happen with valid RDs)
-        if team1_total_var == 0:
-            team1_total_var = 1.0
-        if team2_total_var == 0:
-            team2_total_var = 1.0
-
-        team1_updated = []
-        team2_updated = []
-
-        # Update team 1 players
-        for player, discord_id in team1_players:
-            original_rating = player.rating
-            original_rd = player.rd
-            original_vol = player.vol
-
-            # RD² weight determines share of team delta
-            weight = (original_rd**2) / team1_total_var
-
-            # Player delta = team_delta * weight * num_players
-            # (multiply by 5 so mean rating moves by team_delta)
-            player_delta = team1_delta * weight * len(team1_players)
-
-            final_rating = max(0.0, original_rating + player_delta)
-
-            # Update RD: use synthetic player with own RD vs team-level opponent
-            # This ensures RD always decreases (more certain after playing)
-            rd_synth = Player(rating=original_rating, rd=original_rd, vol=original_vol)
-            rd_synth.update_player([team2_rating], [team2_rd], [team1_result])
-            # RD should never increase after a match
-            final_rd = min(original_rd, rd_synth.rd)
-            final_vol = rd_synth.vol
-
-            team1_updated.append((final_rating, final_rd, final_vol, discord_id))
-
-        # Update team 2 players
-        for player, discord_id in team2_players:
-            original_rating = player.rating
-            original_rd = player.rd
-            original_vol = player.vol
-
-            # RD² weight determines share of team delta
-            weight = (original_rd**2) / team2_total_var
-
-            # Player delta = team_delta * weight * num_players
-            player_delta = team2_delta * weight * len(team2_players)
-
-            final_rating = max(0.0, original_rating + player_delta)
-
-            # Update RD: use synthetic player with own RD vs team-level opponent
-            rd_synth = Player(rating=original_rating, rd=original_rd, vol=original_vol)
-            rd_synth.update_player([team1_rating], [team1_rd], [team2_result])
-            # RD should never increase after a match
-            final_rd = min(original_rd, rd_synth.rd)
-            final_vol = rd_synth.vol
-
-            team2_updated.append((final_rating, final_rd, final_vol, discord_id))
+        # Update all players using the helper method
+        team1_updated = [
+            (*self._update_player_rating(player, team1_rating, team2_rating, team2_rd, team1_result), discord_id)
+            for player, discord_id in team1_players
+        ]
+        team2_updated = [
+            (*self._update_player_rating(player, team2_rating, team1_rating, team1_rd, team2_result), discord_id)
+            for player, discord_id in team2_players
+        ]
 
         return team1_updated, team2_updated
 
