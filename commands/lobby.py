@@ -13,7 +13,7 @@ from discord.ext import commands
 
 from services.lobby_service import LobbyService
 from services.permissions import has_admin_permission
-from utils.formatting import FROGLING_EMOJI_ID
+from utils.formatting import FROGLING_EMOJI_ID, JOPACOIN_EMOJI_ID
 from utils.interaction_safety import safe_defer
 
 if TYPE_CHECKING:
@@ -267,12 +267,15 @@ class LobbyCommands(commands.Cog):
         # Pin the lobby message for visibility
         await self._safe_pin(channel_msg)
 
-        # Add reaction emojis for joining (sword for regular, frogling for conditional)
+        # Add reaction emojis for joining (sword for regular, frogling for conditional, jopacoin for gamba notifications)
         try:
             await channel_msg.add_reaction("⚔️")
             # Add frogling emoji using PartialEmoji with ID
             frogling_emoji = discord.PartialEmoji(name="frogling", id=FROGLING_EMOJI_ID)
             await channel_msg.add_reaction(frogling_emoji)
+            # Add jopacoin emoji for subscribing to gamba notifications
+            jopacoin_emoji = discord.PartialEmoji(name="jopacoin", id=JOPACOIN_EMOJI_ID)
+            await channel_msg.add_reaction(jopacoin_emoji)
         except Exception:
             pass
 
