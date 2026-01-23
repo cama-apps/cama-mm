@@ -354,6 +354,98 @@ class AdminCommands(commands.Cog):
                 ephemeral=True,
             )
 
+    @app_commands.command(
+        name="registeruser", description="Register another user as a player (Admin only)"
+    )
+    @app_commands.describe(
+        user="The user to register",
+        steam_id="Steam32 ID (found in Dotabuff URL)",
+        mmr="Optional MMR override (0-12000)",
+    )
+    async def registeruser(
+        self,
+        interaction: discord.Interaction,
+        user: discord.Member,
+        steam_id: int,
+        mmr: int = None,
+    ):
+        guild = interaction.guild if interaction.guild else None
+        rl_gid = guild.id if guild else 0
+        rl = GLOBAL_RATE_LIMITER.check(
+            scope="registeruser",
+            guild_id=rl_gid,
+            user_id=interaction.user.id,
+            limit=5,
+            per_seconds=60,
+        )
+        if not rl.allowed:
+            await interaction.response.send_message(
+                f"⏳ Please wait {rl.retry_after_seconds}s before using `/registeruser` again.",
+                ephemeral=True,
+            )
+            return
+
+        await safe_defer(interaction, ephemeral=True)
+
+        if not has_admin_permission(interaction):
+            await safe_followup(
+                interaction,
+                content="❌ Admin only! You need Administrator or Manage Server permissions.",
+                ephemeral=True,
+            )
+            return
+
+        # Get player_service from bot
+        player_service = getattr(self.bot, "player_service", None)
+        if not player_service:
+            await safe_followup(
+                interaction,
+                content="❌ Player service not available.",
+                ephemeral=True,
+            )
+            return
+
+        # Validate MMR if provided
+        if mmr is not None and (mmr < 0 or mmr > 12000):
+            await safe_followup(
+                interaction,
+                content="❌ MMR must be between 0 and 12000.",
+                ephemeral=True,
+            )
+            return
+
+        try:
+            result = player_service.register_player(
+                discord_id=user.id,
+                discord_username=str(user),
+                steam_id=steam_id,
+                mmr_override=mmr,
+            )
+            await safe_followup(
+                interaction,
+                content=(
+                    f"✅ Registered {user.mention}!\n"
+                    f"Cama Rating: {result['cama_rating']} ({result['uncertainty']:.0f}% uncertainty)\n"
+                    f"They can use `/setroles` to set their preferred roles."
+                ),
+                ephemeral=True,
+            )
+        except ValueError as e:
+            await safe_followup(
+                interaction,
+                content=f"❌ {str(e)}",
+                ephemeral=True,
+            )
+        except Exception as e:
+            logger.error(
+                f"Error in registeruser command for user {user.id}: {str(e)}", exc_info=True
+            )
+            await safe_followup(
+                interaction,
+                content="❌ Unexpected error registering user. Check logs.",
+                ephemeral=True,
+            )
+
     @app_commands.command(name="sync", description="Force sync commands (Admin only)")
     async def sync(self, interaction: discord.Interaction):
         guild = interaction.guild if interaction.guild else None
@@ -909,6 +1001,7 @@ async def setup(bot: commands.Bot):
         in [
             "addfake",
             "resetuser",
+            "registeruser",
             "sync",
             "givecoin",
             "resetloancooldown",

@@ -414,6 +414,7 @@ payout INTEGER
 | `/bet` | Place jopacoin bet | `team`, `amount`, `leverage` |
 | `/mybets` | Show active bets | - |
 | `/balance` | Check balance/debt | - |
+| `/tip` | Give jopacoin to another player | `player`, `amount` |
 | `/paydebt` | Help another player pay debt | `user`, `amount` |
 | `/bankruptcy` | Clear debt (1wk cooldown) | - |
 | `/loan` | Borrow jopacoin (with fee) | `amount` |
@@ -440,6 +441,7 @@ payout INTEGER
 | `/ability` | Ability reference lookup | `ability_name` (autocomplete) |
 | `/addfake` | Add fake users to lobby | `count` |
 | `/resetuser` | Reset a user's account | `user` |
+| `/registeruser` | Register another user | `user`, `steam_id`, `mmr` (optional) | Admin only
 | `/givecoin` | Give or take jopacoin | `user`, `amount` |
 | `/resetloancooldown` | Reset loan cooldown | `user` |
 | `/resetbankruptcycooldown` | Reset bankruptcy cooldown | `user` |

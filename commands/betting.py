@@ -790,6 +790,98 @@ class BettingCommands(commands.Cog):
 
         await interaction.response.send_message(f"{GAMBA_GIF_URL}\n\n🎲 Your lucky number: **{lucky_number}**")
 
+    @app_commands.command(name="tip", description="Give jopacoin to another player")
+    @app_commands.describe(
+        player="Player to tip",
+        amount="Amount of jopacoin to give",
+    )
+    async def tip(
+        self,
+        interaction: discord.Interaction,
+        player: discord.Member,
+        amount: int,
+    ):
+        guild = interaction.guild if interaction.guild else None
+        rl_gid = guild.id if guild else 0
+        rl = GLOBAL_RATE_LIMITER.check(
+            scope="tip",
+            guild_id=rl_gid,
+            user_id=interaction.user.id,
+            limit=5,
+            per_seconds=10,
+        )
+        if not rl.allowed:
+            await interaction.response.send_message(
+                f"Please wait {rl.retry_after_seconds}s before using `/tip` again.",
+                ephemeral=True,
+            )
+            return
+
+        # Always public since giving to another player
+        if not await safe_defer(interaction, ephemeral=False):
+            return
+
+        # Validate amount
+        if amount <= 0:
+            await interaction.followup.send(
+                "Amount must be positive....",
+                ephemeral=True,
+            )
+            return
+
+        # Check if tipping themselves
+        if player.id == interaction.user.id:
+            await interaction.followup.send(
+                "You cannot tip yourself....",
+                ephemeral=True,
+            )
+            return
+
+        # Check if both players are registered
+        sender = self.player_service.get_player(interaction.user.id)
+        recipient = self.player_service.get_player(player.id)
+
+        if not sender:
+            await interaction.followup.send(
+                "You need to `/register` before you can tip.",
+                ephemeral=True,
+            )
+            return
+
+        if not recipient:
+            await interaction.followup.send(
+                f"{player.mention} is not registered.",
+                ephemeral=True,
+            )
+            return
+
+        # Check sender balance
+        sender_balance = self.player_service.get_balance(interaction.user.id)
+        if sender_balance < amount:
+            await interaction.followup.send(
+                f"Insufficient balance. You have {sender_balance} {JOPACOIN_EMOTE}.",
+                ephemeral=True,
+            )
+            return
+
+        try:
+            # Perform the transfer atomically using add_balance_many
+            self.player_service.player_repo.add_balance_many({
+                interaction.user.id: -amount,
+                player.id: amount,
+            })
+
+            await interaction.followup.send(
+                f"{interaction.user.mention} tipped {amount} {JOPACOIN_EMOTE} to {player.mention}!",
+                ephemeral=False,
+            )
+        except Exception as exc:
+            logger.error(f"Failed to process tip: {exc}", exc_info=True)
+            await interaction.followup.send(
+                f"Failed to process tip: {exc}",
+                ephemeral=True,
+            )
+
     @app_commands.command(name="paydebt", description="Help another player pay off their debt")
     @app_commands.describe(
         player="Player whose debt to pay",
