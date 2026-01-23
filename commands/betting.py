@@ -783,7 +783,12 @@ class BettingCommands(commands.Cog):
 
         # Update cooldown and send GIF
         self._gamba_cooldowns[user_id] = now
-        await interaction.response.send_message(GAMBA_GIF_URL)
+
+        # Random number from 0 to player's balance - Doesn't do anything...yet..
+        balance = self.player_service.get_balance(user_id)
+        lucky_number = random.randint(0, max(balance, 0))
+
+        await interaction.response.send_message(f"{GAMBA_GIF_URL}\n\n🎲 Your lucky number: **{lucky_number}**")
 
     @app_commands.command(name="paydebt", description="Help another player pay off their debt")
     @app_commands.describe(
