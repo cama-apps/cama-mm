@@ -136,7 +136,7 @@ class RatingAnalysisCommands(commands.Cog):
 
     async def _handle_compare(self, interaction: discord.Interaction):
         """Handle the compare action - show comparison statistics and chart."""
-        if not await safe_defer(interaction, ephemeral=False):
+        if not await safe_defer(interaction, ephemeral=True):
             return
 
         comparison_service = RatingComparisonService(
@@ -244,7 +244,7 @@ class RatingAnalysisCommands(commands.Cog):
 
     async def _handle_calibration(self, interaction: discord.Interaction):
         """Handle the calibration action - show calibration curves."""
-        if not await safe_defer(interaction, ephemeral=False):
+        if not await safe_defer(interaction, ephemeral=True):
             return
 
         comparison_service = RatingComparisonService(
@@ -298,7 +298,7 @@ class RatingAnalysisCommands(commands.Cog):
 
     async def _handle_trend(self, interaction: discord.Interaction):
         """Handle the trend action - show accuracy over time."""
-        if not await safe_defer(interaction, ephemeral=False):
+        if not await safe_defer(interaction, ephemeral=True):
             return
 
         comparison_service = RatingComparisonService(
@@ -361,7 +361,7 @@ class RatingAnalysisCommands(commands.Cog):
         self, interaction: discord.Interaction, user: discord.Member | None
     ):
         """Handle the player action - show a player's OpenSkill rating details."""
-        if not await safe_defer(interaction, ephemeral=False):
+        if not await safe_defer(interaction, ephemeral=True):
             return
 
         # Default to the command invoker if no user specified
@@ -389,9 +389,33 @@ class RatingAnalysisCommands(commands.Cog):
             mu, sigma = os_data
             # Calculate ordinal (conservative skill estimate)
             ordinal = mu - 3 * sigma
+            # Normalize to Glicko-like scale: μ * 50 + 250 (so μ=25 → 1500)
+            normalized_rating = mu * 50 + 250
             # Check calibration status (sigma <= 4.0 is calibrated)
             is_calibrated = sigma <= 4.0
 
+            # Normalized rating for easy comparison
+            embed.add_field(
+                name="Normalized Rating",
+                value=f"**{normalized_rating:.0f}**",
+                inline=True,
+            )
+
+            # Add Glicko comparison if available
+            if player.glicko_rating is not None:
+                embed.add_field(
+                    name="Glicko-2 Rating",
+                    value=f"**{player.glicko_rating:.0f}** ± {player.glicko_rd:.0f}",
+                    inline=True,
+                )
+
+            embed.add_field(
+                name="Calibrated",
+                value="✓ Yes" if is_calibrated else f"No (need σ ≤ 4.0)",
+                inline=True,
+            )
+
+            # OpenSkill native values
             embed.add_field(
                 name="Skill (μ)",
                 value=f"**{mu:.2f}**",
@@ -407,19 +431,6 @@ class RatingAnalysisCommands(commands.Cog):
                 value=f"**{ordinal:.2f}**",
                 inline=True,
             )
-            embed.add_field(
-                name="Calibrated",
-                value="Yes ✓" if is_calibrated else f"No (need σ ≤ 4.0)",
-                inline=True,
-            )
-
-            # Add Glicko comparison if available
-            if player.glicko_rating is not None:
-                embed.add_field(
-                    name="Glicko-2 Rating",
-                    value=f"**{player.glicko_rating:.0f}** ± {player.glicko_rd:.0f}",
-                    inline=True,
-                )
 
             # Get recent rating history for this player
             history = self.match_repo.get_player_openskill_history(discord_id, limit=5)
@@ -439,10 +450,6 @@ class RatingAnalysisCommands(commands.Cog):
                     value="\n".join(history_lines),
                     inline=False,
                 )
-
-            embed.set_footer(
-                text="OpenSkill uses fantasy points as weights - higher fantasy = more rating impact"
-            )
         else:
             embed.description = (
                 "No OpenSkill rating data yet.\n\n"
