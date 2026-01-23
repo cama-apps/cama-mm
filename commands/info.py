@@ -134,6 +134,9 @@ class InfoCommands(commands.Cog):
         *,
         flavor_text_service=None,
         guild_config_service=None,
+        gambling_stats_service=None,
+        prediction_service=None,
+        bankruptcy_service=None,
     ):
         self.bot = bot
         self.player_repo = player_repo
@@ -142,6 +145,9 @@ class InfoCommands(commands.Cog):
         self.role_names = role_names
         self.flavor_text_service = flavor_text_service
         self.guild_config_service = guild_config_service
+        self.gambling_stats_service = gambling_stats_service
+        self.prediction_service = prediction_service
+        self.bankruptcy_service = bankruptcy_service
 
     @app_commands.command(name="help", description="List all available commands")
     async def help_command(self, interaction: discord.Interaction):
@@ -162,8 +168,7 @@ class InfoCommands(commands.Cog):
             value=(
                 "`/register` - Register yourself as a player\n"
                 "`/setroles` - Set your preferred roles (1-5)\n"
-                "`/stats` - View your personal statistics\n"
-                "`/pairwise` - View pairwise stats (best/worst teammates & matchups)\n"
+                "`/profile` - View unified profile (stats, rating, economy, gambling, predictions, Dota, teammates)\n"
                 "`/matchup` - Head-to-head comparison between two players"
             ),
             inline=False,
@@ -173,12 +178,10 @@ class InfoCommands(commands.Cog):
         embed.add_field(
             name="📊 Dota 2 Stats (OpenDota)",
             value=(
-                "`/dotastats` - Comprehensive stats (W/L, KDA, heroes, distributions)\n"
                 "`/matchhistory` - Recent matches with heroes and stats\n"
                 "`/viewmatch` - View detailed match embed\n"
                 "`/recent` - Recent matches as image table\n"
-                "`/rolesgraph` - Hero role distribution radar graph\n"
-                "`/lanegraph` - Lane distribution bar chart"
+                "*Use `/profile` Dota tab for role & lane graphs*"
             ),
             inline=False,
         )
@@ -232,22 +235,15 @@ class InfoCommands(commands.Cog):
             inline=False,
         )
 
-        # Gamba Stats
-        embed.add_field(
-            name="📈 Gamba Stats",
-            value=(
-                "`/gambastats` - View gambling stats and Degen Score™\n"
-                "`/gambachart` - View P&L history as a chart\n"
-                "`/gambaleaderboard` - Server gambling rankings & Hall of Degen"
-            ),
-            inline=False,
-        )
-
         # Leaderboard
         embed.add_field(
             name="🏆 Leaderboard",
-            value=("`/leaderboard` - View leaderboard sorted by jopacoin\n"
-                   "`/calibration` - Rating system health & calibration stats"),
+            value=(
+                "`/leaderboard` - View leaderboard (default: balance)\n"
+                "`/leaderboard type:gambling` - Gambling rankings & Hall of Degen\n"
+                "`/leaderboard type:predictions` - Prediction market rankings\n"
+                "`/calibration` - Rating system health & calibration stats"
+            ),
             inline=False,
         )
 
@@ -271,12 +267,25 @@ class InfoCommands(commands.Cog):
 
         await interaction.followup.send(embed=embed, ephemeral=True)
 
-    @app_commands.command(name="leaderboard", description="View leaderboard sorted by jopacoin")
-    @app_commands.describe(limit="Number of players to show (default: 20, max: 100)")
-    async def leaderboard(self, interaction: discord.Interaction, limit: int = 20):
-        """Show leaderboard of all players sorted by jopacoin balance."""
-        logger.info(f"Leaderboard command: User {interaction.user.id} ({interaction.user})")
-        logger.info("LEADERBOARD V2: Using jopacoin sorting and display")
+    @app_commands.command(name="leaderboard", description="View leaderboard (balance, gambling, or predictions)")
+    @app_commands.describe(
+        type="Leaderboard type (default: balance)",
+        limit="Number of entries to show (default: 20, max: 100)",
+    )
+    @app_commands.choices(type=[
+        app_commands.Choice(name="Balance", value="balance"),
+        app_commands.Choice(name="Gambling", value="gambling"),
+        app_commands.Choice(name="Predictions", value="predictions"),
+    ])
+    async def leaderboard(
+        self,
+        interaction: discord.Interaction,
+        type: app_commands.Choice[str] | None = None,
+        limit: int = 20,
+    ):
+        """Show leaderboard - balance (default), gambling, or predictions."""
+        leaderboard_type = type.value if type else "balance"
+        logger.info(f"Leaderboard command: User {interaction.user.id} ({interaction.user}), type={leaderboard_type}")
         guild = interaction.guild if hasattr(interaction, "guild") else None
         rl_gid = guild.id if guild else 0
         rl = GLOBAL_RATE_LIMITER.check(
@@ -312,6 +321,15 @@ class InfoCommands(commands.Cog):
             )
             return
 
+        # Route to appropriate leaderboard handler
+        if leaderboard_type == "gambling":
+            await self._show_gambling_leaderboard(interaction, limit)
+            return
+        elif leaderboard_type == "predictions":
+            await self._show_predictions_leaderboard(interaction, limit)
+            return
+
+        # Default: balance leaderboard
         try:
             rating_system = CamaRatingSystem()
 
@@ -454,6 +472,214 @@ class InfoCommands(commands.Cog):
                 )
             except Exception:
                 logger.error("Failed to send error message for leaderboard command")
+
+    async def _show_gambling_leaderboard(self, interaction: discord.Interaction, limit: int):
+        """Show the gambling leaderboard."""
+        if not self.gambling_stats_service:
+            await safe_followup(
+                interaction,
+                content="Gambling stats service is not available.",
+                ephemeral=True,
+            )
+            return
+
+        guild_id = interaction.guild.id if interaction.guild else None
+        limit = max(1, min(limit, 20))  # Clamp between 1 and 20
+
+        leaderboard = self.gambling_stats_service.get_leaderboard(guild_id, limit=limit)
+
+        if not leaderboard.top_earners and not leaderboard.hall_of_degen:
+            await safe_followup(
+                interaction,
+                content="No gambling data yet! Players need at least 3 settled bets to appear.",
+                ephemeral=True,
+            )
+            return
+
+        embed = discord.Embed(
+            title="🏆 GAMBLING LEADERBOARD",
+            color=0xFFD700,  # Gold
+        )
+
+        # Helper to get username with tombstone if bankrupt
+        async def get_name(discord_id: int) -> str:
+            try:
+                member = interaction.guild.get_member(discord_id) if interaction.guild else None
+                if member:
+                    name = member.display_name
+                else:
+                    user = await self.bot.fetch_user(discord_id)
+                    name = user.display_name if user else f"User {discord_id}"
+            except Exception:
+                name = f"User {discord_id}"
+
+            # Add tombstone if player has active bankruptcy penalty
+            if self.bankruptcy_service:
+                state = self.bankruptcy_service.get_state(discord_id)
+                if state and state.penalty_games_remaining > 0:
+                    from utils.formatting import TOMBSTONE_EMOJI
+                    name = f"{TOMBSTONE_EMOJI} {name}"
+
+            return name
+
+        # Top earners
+        if leaderboard.top_earners:
+            lines = []
+            for i, entry in enumerate(leaderboard.top_earners, 1):
+                name = await get_name(entry["discord_id"])
+                pnl = entry["net_pnl"]
+                pnl_str = f"+{pnl}" if pnl >= 0 else str(pnl)
+                lines.append(f"{i}. **{name}** {pnl_str} {JOPACOIN_EMOTE} ({entry['win_rate']:.0%})")
+            embed.add_field(
+                name="💰 Top Earners",
+                value="\n".join(lines),
+                inline=False,
+            )
+
+        # Down bad (only show if negative)
+        down_bad = [e for e in leaderboard.down_bad if e["net_pnl"] < 0]
+        if down_bad:
+            lines = []
+            for i, entry in enumerate(down_bad[:limit], 1):
+                name = await get_name(entry["discord_id"])
+                lines.append(f"{i}. **{name}** {entry['net_pnl']} {JOPACOIN_EMOTE} ({entry['win_rate']:.0%})")
+            embed.add_field(
+                name="📉 Down Bad",
+                value="\n".join(lines),
+                inline=False,
+            )
+
+        # Hall of Degen (highest degen scores)
+        if leaderboard.hall_of_degen:
+            lines = []
+            for i, entry in enumerate(leaderboard.hall_of_degen, 1):
+                name = await get_name(entry["discord_id"])
+                lines.append(f"{i}. **{name}** {entry['degen_score']} {entry['degen_emoji']} {entry['degen_title']}")
+            embed.add_field(
+                name="🎰 Hall of Degen",
+                value="\n".join(lines),
+                inline=False,
+            )
+
+        # Biggest gamblers (most bets)
+        if leaderboard.biggest_gamblers:
+            lines = []
+            for i, entry in enumerate(leaderboard.biggest_gamblers, 1):
+                name = await get_name(entry["discord_id"])
+                lines.append(f"{i}. **{name}** {entry['total_bets']} bets ({entry['total_wagered']} wagered)")
+            embed.add_field(
+                name="🎲 Biggest Gamblers",
+                value="\n".join(lines),
+                inline=False,
+            )
+
+        # Server stats footer
+        if leaderboard.server_stats:
+            embed.set_footer(
+                text=f"📊 {leaderboard.server_stats['total_bets']} total bets • "
+                f"{leaderboard.server_stats['total_wagered']} wagered • "
+                f"{leaderboard.server_stats['unique_gamblers']} players"
+            )
+
+        await safe_followup(
+            interaction,
+            embed=embed,
+            allowed_mentions=discord.AllowedMentions(users=True),
+        )
+
+    async def _show_predictions_leaderboard(self, interaction: discord.Interaction, limit: int):
+        """Show the predictions leaderboard."""
+        if not self.prediction_service:
+            await safe_followup(
+                interaction,
+                content="Prediction service is not available.",
+                ephemeral=True,
+            )
+            return
+
+        guild_id = interaction.guild.id if interaction.guild else None
+        limit = max(1, min(limit, 20))  # Clamp between 1 and 20
+
+        leaderboard = self.prediction_service.prediction_repo.get_prediction_leaderboard(
+            guild_id, limit
+        )
+
+        if not leaderboard["top_earners"] and not leaderboard["most_accurate"]:
+            await safe_followup(
+                interaction,
+                content="No prediction data yet! Users need at least 2 resolved predictions to appear.",
+                ephemeral=True,
+            )
+            return
+
+        embed = discord.Embed(
+            title="🔮 PREDICTION LEADERBOARD",
+            color=0xFFD700,  # Gold
+        )
+
+        async def get_name(discord_id: int) -> str:
+            try:
+                member = interaction.guild.get_member(discord_id) if interaction.guild else None
+                if member:
+                    return member.display_name
+                fetched = await self.bot.fetch_user(discord_id)
+                return fetched.display_name if fetched else f"User {discord_id}"
+            except Exception:
+                return f"User {discord_id}"
+
+        # Top earners
+        if leaderboard["top_earners"]:
+            lines = []
+            for i, entry in enumerate(leaderboard["top_earners"], 1):
+                name = await get_name(entry["discord_id"])
+                pnl = entry["net_pnl"]
+                pnl_str = f"+{pnl}" if pnl >= 0 else str(pnl)
+                lines.append(f"{i}. **{name}** {pnl_str} {JOPACOIN_EMOTE} ({entry['win_rate']:.0%})")
+            embed.add_field(
+                name="💰 Top Earners",
+                value="\n".join(lines),
+                inline=False,
+            )
+
+        # Down bad (only show if negative)
+        down_bad = [e for e in leaderboard["down_bad"] if e["net_pnl"] < 0]
+        if down_bad:
+            lines = []
+            for i, entry in enumerate(down_bad[:limit], 1):
+                name = await get_name(entry["discord_id"])
+                lines.append(f"{i}. **{name}** {entry['net_pnl']} {JOPACOIN_EMOTE} ({entry['win_rate']:.0%})")
+            embed.add_field(
+                name="📉 Down Bad",
+                value="\n".join(lines),
+                inline=False,
+            )
+
+        # Most accurate
+        if leaderboard["most_accurate"]:
+            lines = []
+            for i, entry in enumerate(leaderboard["most_accurate"], 1):
+                name = await get_name(entry["discord_id"])
+                lines.append(f"{i}. **{name}** {entry['win_rate']:.0%} ({entry['wins']}W-{entry['losses']}L)")
+            embed.add_field(
+                name="🎯 Most Accurate",
+                value="\n".join(lines),
+                inline=False,
+            )
+
+        # Server stats
+        server_stats = self.prediction_service.prediction_repo.get_server_prediction_stats(guild_id)
+        if server_stats["total_predictions"]:
+            embed.set_footer(
+                text=f"📊 {server_stats['total_predictions']} predictions • "
+                f"{server_stats['total_bets'] or 0} bets • "
+                f"{server_stats['total_wagered'] or 0} wagered"
+            )
+
+        await safe_followup(
+            interaction,
+            embed=embed,
+            allowed_mentions=discord.AllowedMentions(users=True),
+        )
 
     @app_commands.command(
         name="calibration", description="View rating system stats (admin only)"
@@ -1193,6 +1419,9 @@ async def setup(bot: commands.Bot):
     role_names = getattr(bot, "role_names", {})
     flavor_text_service = getattr(bot, "flavor_text_service", None)
     guild_config_service = getattr(bot, "guild_config_service", None)
+    gambling_stats_service = getattr(bot, "gambling_stats_service", None)
+    prediction_service = getattr(bot, "prediction_service", None)
+    bankruptcy_service = getattr(bot, "bankruptcy_service", None)
 
     await bot.add_cog(
         InfoCommands(
@@ -1203,5 +1432,8 @@ async def setup(bot: commands.Bot):
             role_names,
             flavor_text_service=flavor_text_service,
             guild_config_service=guild_config_service,
+            gambling_stats_service=gambling_stats_service,
+            prediction_service=prediction_service,
+            bankruptcy_service=bankruptcy_service,
         )
     )

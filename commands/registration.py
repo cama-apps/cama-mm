@@ -9,11 +9,10 @@ from discord import app_commands
 from discord.ext import commands
 
 from config import (
-    BANKRUPTCY_PENALTY_RATE,
     MMR_MODAL_RETRY_LIMIT,
     MMR_MODAL_TIMEOUT_MINUTES,
 )
-from utils.formatting import JOPACOIN_EMOTE, TOMBSTONE_EMOJI, format_role_display
+from utils.formatting import format_role_display
 from utils.interaction_safety import safe_defer, safe_followup
 
 logger = logging.getLogger("cama_bot.commands.registration")
@@ -29,14 +28,12 @@ class RegistrationCommands(commands.Cog):
         player_service,
         role_emojis: dict,
         role_names: dict,
-        bankruptcy_service=None,
     ):
         self.bot = bot
         self.db = db
         self.player_service = player_service
         self.role_emojis = role_emojis
         self.role_names = role_names
-        self.bankruptcy_service = bankruptcy_service
 
     @app_commands.command(name="register", description="Register yourself as a player")
     @app_commands.describe(steam_id="Steam32 ID (found in your Dotabuff URL)")
@@ -263,118 +260,6 @@ class RegistrationCommands(commands.Cog):
                 ephemeral=True,
             )
 
-    @app_commands.command(name="stats", description="View player stats (your own by default)")
-    @app_commands.describe(user="Optional Discord user to look up (mention or select)")
-    async def stats(self, interaction: discord.Interaction, user: discord.Member | None = None):
-        """View player statistics for yourself or another registered player."""
-        logger.info(
-            "Stats command: User %s (%s) requested stats for %s",
-            interaction.user.id,
-            interaction.user,
-            user.id if user else "self",
-        )
-        if not await safe_defer(interaction, ephemeral=False):
-            return
-
-        target_discord_id = user.id if user else interaction.user.id
-
-        try:
-            stats = self.player_service.get_stats(target_discord_id)
-            player = stats["player"]
-
-            # Check for bankruptcy penalty
-            penalty_games = 0
-            if self.bankruptcy_service:
-                state = self.bankruptcy_service.get_state(target_discord_id)
-                penalty_games = state.penalty_games_remaining
-
-            # Add tombstone to title if player has active bankruptcy penalty
-            title_prefix = f"{TOMBSTONE_EMOJI} " if penalty_games > 0 else ""
-            embed = discord.Embed(
-                title=f"📊 Stats for {title_prefix}{player.name}", color=discord.Color.green()
-            )
-
-            if stats["cama_rating"] is not None:
-                certainty = 100 - stats["uncertainty"]
-                embed.add_field(
-                    name="Cama Rating",
-                    value=f"{stats['cama_rating']} ({certainty:.0f}% certain)",
-                    inline=True,
-                )
-            else:
-                embed.add_field(name="Cama Rating", value="Not set", inline=True)
-
-            embed.add_field(name="Wins", value=str(player.wins), inline=True)
-            embed.add_field(name="Losses", value=str(player.losses), inline=True)
-            win_rate = stats["win_rate"]
-            embed.add_field(
-                name="Win Rate",
-                value=f"{win_rate:.1f}%" if win_rate is not None else "N/A",
-                inline=True,
-            )
-            embed.add_field(
-                name="Jopacoin Balance",
-                value=f"{stats['jopacoin_balance']} {JOPACOIN_EMOTE}",
-                inline=True,
-            )
-
-            if player.main_role:
-                embed.add_field(name="Main Role", value=player.main_role, inline=True)
-
-            if player.preferred_roles:
-                role_display = ", ".join([format_role_display(r) for r in player.preferred_roles])
-                embed.add_field(name="Preferred Roles", value=role_display, inline=False)
-
-            # Add hero stats from enriched matches (if available)
-            match_repo = getattr(self.bot, "match_repo", None)
-            if match_repo and hasattr(match_repo, "get_player_hero_stats"):
-                try:
-                    from utils.hero_lookup import get_hero_name
-
-                    hero_stats = match_repo.get_player_hero_stats(target_discord_id)
-
-                    # Only process if we got a valid dict back
-                    if isinstance(hero_stats, dict):
-                        # Last played hero
-                        if hero_stats.get("last_hero_id"):
-                            last_hero = get_hero_name(hero_stats["last_hero_id"])
-                            embed.add_field(name="Last Played", value=last_hero, inline=True)
-
-                        # Most played heroes
-                        if hero_stats.get("hero_counts"):
-                            hero_lines = []
-                            for hero_id, games, wins in hero_stats["hero_counts"][:3]:
-                                hero_name = get_hero_name(hero_id)
-                                winrate = (wins / games * 100) if games > 0 else 0
-                                hero_lines.append(f"{hero_name}: {games}g ({winrate:.0f}%)")
-                            if hero_lines:
-                                embed.add_field(
-                                    name="Top Heroes", value="\n".join(hero_lines), inline=True
-                                )
-                except Exception as e:
-                    # Hero stats are optional, don't fail the whole command
-                    logger.debug(f"Could not fetch hero stats: {e}")
-
-            # Show bankruptcy penalty info if active
-            if penalty_games > 0:
-                penalty_rate_pct = int(BANKRUPTCY_PENALTY_RATE * 100)
-                embed.add_field(
-                    name=f"{TOMBSTONE_EMOJI} Bankruptcy Penalty",
-                    value=f"{penalty_rate_pct}% win bonus for {penalty_games} more game(s)",
-                    inline=False,
-                )
-
-            await interaction.followup.send(embed=embed)
-
-        except ValueError as e:
-            await safe_followup(interaction, content=f"❌ {str(e)}", ephemeral=True)
-        except Exception as e:
-            logger.error(f"Error fetching stats for {target_discord_id}: {e}", exc_info=True)
-            await safe_followup(
-                interaction, content="❌ Failed to fetch stats. Try again later.", ephemeral=True
-            )
-
-
 async def setup(bot: commands.Bot):
     """Setup function called when loading the cog."""
     # Get db and config from bot
@@ -382,10 +267,7 @@ async def setup(bot: commands.Bot):
     player_service = getattr(bot, "player_service", None)
     role_emojis = getattr(bot, "role_emojis", {})
     role_names = getattr(bot, "role_names", {})
-    bankruptcy_service = getattr(bot, "bankruptcy_service", None)
 
     await bot.add_cog(
-        RegistrationCommands(
-            bot, db, player_service, role_emojis, role_names, bankruptcy_service
-        )
+        RegistrationCommands(bot, db, player_service, role_emojis, role_names)
     )

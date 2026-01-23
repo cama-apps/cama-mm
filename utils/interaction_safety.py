@@ -32,6 +32,7 @@ async def safe_followup(
     content: str | None = None,
     embed: discord.Embed | None = None,
     file: discord.File | None = None,
+    files: list[discord.File] | None = None,
     view: discord.ui.View | None = None,
     ephemeral: bool = False,
     allowed_mentions: discord.AllowedMentions | None = None,
@@ -40,6 +41,7 @@ async def safe_followup(
     Send a followup via the interaction if possible; otherwise post directly in the channel.
 
     Returns None if the interaction was already responded to (to prevent duplicate messages).
+    Supports either file (single) or files (multiple) - not both.
     """
     # region agent log
     _dbg(
@@ -50,6 +52,7 @@ async def safe_followup(
             "has_content": content is not None,
             "has_embed": embed is not None,
             "has_file": file is not None,
+            "has_files": files is not None and len(files) > 0,
             "ephemeral": ephemeral,
             "interaction_id": getattr(interaction, "id", None),
         },
@@ -57,14 +60,17 @@ async def safe_followup(
     )
     # endregion agent log
     try:
-        # Build kwargs, only including file/view if provided (Discord errors on None)
+        # Build kwargs, only including file/files/view if provided (Discord errors on None)
         send_kwargs = {
             "content": content,
             "embed": embed,
             "ephemeral": ephemeral,
             "allowed_mentions": allowed_mentions,
         }
-        if file is not None:
+        # Support either file (single) or files (multiple)
+        if files is not None and len(files) > 0:
+            send_kwargs["files"] = files
+        elif file is not None:
             send_kwargs["file"] = file
         if view is not None:
             send_kwargs["view"] = view
@@ -116,7 +122,9 @@ async def safe_followup(
             raise
         # Build kwargs for fallback send
         fallback_kwargs = {"content": content, "embed": embed, "allowed_mentions": allowed_mentions}
-        if file is not None:
+        if files is not None and len(files) > 0:
+            fallback_kwargs["files"] = files
+        elif file is not None:
             fallback_kwargs["file"] = file
         if view is not None:
             fallback_kwargs["view"] = view

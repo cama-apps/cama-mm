@@ -2,12 +2,8 @@
 Unit tests for win/loss reporting and stats calculation.
 """
 
-from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
-
 import pytest
 
-from commands.registration import RegistrationCommands
 from repositories.player_repository import PlayerRepository
 from services.player_service import PlayerService
 
@@ -60,55 +56,3 @@ def test_get_stats_win_rate_variations(player_repo):
     _set_wins_losses(player_repo, player_id, wins=3, losses=3)
     stats = service.get_stats(player_id)
     assert stats["win_rate"] == pytest.approx(50.0)
-
-
-class FakeInteraction:
-    """Minimal interaction stub to inspect stats embed output."""
-
-    def __init__(self, user_id: int, user_name: str = "SelfUser"):
-        self.user = SimpleNamespace(
-            id=user_id,
-            mention=f"<@{user_id}>",
-            __str__=lambda self: user_name,
-        )
-        self.response = SimpleNamespace(defer=AsyncMock(), is_done=lambda: False)
-        self.followup = SimpleNamespace(send=AsyncMock())
-        self.channel = None
-        self.guild = None
-
-
-@pytest.mark.asyncio
-async def test_stats_command_includes_win_loss_and_win_rate(player_repo):
-    requester_id = 72001
-    target_id = 72002
-    _add_player(player_repo, requester_id, "Requester")
-    _add_player(player_repo, target_id, "TargetUser")
-    _set_wins_losses(player_repo, target_id, wins=4, losses=1)  # 80% win rate
-
-    player_service = PlayerService(player_repo)
-    bot = Mock()
-    commands_cog = RegistrationCommands(
-        bot, db=None, player_service=player_service, role_emojis={}, role_names={}
-    )
-
-    interaction = FakeInteraction(user_id=requester_id, user_name="Requester")
-    target_member = SimpleNamespace(
-        id=target_id, mention=f"<@{target_id}>", display_name="TargetUser"
-    )
-
-    await RegistrationCommands.stats.callback(commands_cog, interaction, user=target_member)
-
-    interaction.response.defer.assert_awaited_once()
-    interaction.followup.send.assert_awaited_once()
-
-    _, kwargs = interaction.followup.send.call_args
-    embed = kwargs["embed"]
-
-    # Field order: Cama Rating, Wins, Losses, Win Rate, Jopacoin Balance
-    wins_field = next((f for f in embed.fields if f.name == "Wins"), None)
-    losses_field = next((f for f in embed.fields if f.name == "Losses"), None)
-    win_rate_field = next((f for f in embed.fields if f.name == "Win Rate"), None)
-
-    assert wins_field is not None and wins_field.value == "4"
-    assert losses_field is not None and losses_field.value == "1"
-    assert win_rate_field is not None and "80.0%" in win_rate_field.value
