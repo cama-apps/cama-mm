@@ -63,6 +63,15 @@ if _admin_env:
 LOBBY_READY_THRESHOLD = _parse_int("LOBBY_READY_THRESHOLD", 10)
 LOBBY_MAX_PLAYERS = _parse_int("LOBBY_MAX_PLAYERS", 14)
 LOBBY_RALLY_COOLDOWN_SECONDS = _parse_int("LOBBY_RALLY_COOLDOWN_SECONDS", 120)  # 2 minutes
+
+# Dedicated lobby channel - if set, lobby embeds are posted here instead of command channel
+LOBBY_CHANNEL_ID: int | None = None
+_lobby_channel_raw = os.getenv("LOBBY_CHANNEL_ID")
+if _lobby_channel_raw:
+    try:
+        LOBBY_CHANNEL_ID = int(_lobby_channel_raw.strip())
+    except ValueError:
+        LOBBY_CHANNEL_ID = None
 # Legacy: Not used in current balancing algorithm (replaced by Glicko-2 ratings)
 WIN_LOSS_MULTIPLIER = _parse_int("WIN_LOSS_MULTIPLIER", 200)
 # Legacy: Not used in current balancing algorithm

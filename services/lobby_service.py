@@ -73,10 +73,11 @@ class LobbyService:
         channel_id: int | None = None,
         thread_id: int | None = None,
         embed_message_id: int | None = None,
+        origin_channel_id: int | None = None,
     ):
         """Set the lobby message ID and optionally channel/thread IDs, persisting to database."""
         self.lobby_manager.set_lobby_message(
-            message_id, channel_id, thread_id, embed_message_id
+            message_id, channel_id, thread_id, embed_message_id, origin_channel_id
         )
 
     def get_lobby_message_id(self) -> int | None:
@@ -90,6 +91,10 @@ class LobbyService:
 
     def get_lobby_embed_message_id(self) -> int | None:
         return self.lobby_manager.lobby_embed_message_id
+
+    def get_origin_channel_id(self) -> int | None:
+        """Get the channel where /lobby was originally run (for rally notifications)."""
+        return self.lobby_manager.origin_channel_id
 
     def get_lobby_players(self, lobby: Lobby) -> tuple[list[int], list]:
         """Get regular (non-conditional) player IDs and Player objects."""

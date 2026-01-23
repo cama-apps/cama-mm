@@ -468,6 +468,9 @@ async def notify_lobby_rally(channel, thread, lobby, guild_id: int) -> bool:
     """
     Notify that lobby is almost ready. Returns True if notification was sent.
     Each threshold (+2, +1) has an independent cooldown.
+
+    If a dedicated lobby channel is configured, rally notifications go to the
+    origin channel (where /lobby was run) instead of the reaction channel.
     """
     total = lobby.get_total_count()
     needed = LOBBY_READY_THRESHOLD - total
@@ -489,8 +492,21 @@ async def notify_lobby_rally(channel, thread, lobby, guild_id: int) -> bool:
             color=discord.Color.orange(),
         )
 
-        # Send to channel (no ping)
-        await channel.send(embed=embed)
+        # Use origin channel if available (where /lobby was run), otherwise fallback to reaction channel
+        origin_channel_id = lobby_service.get_origin_channel_id() if lobby_service else None
+        target_channel = channel  # Default to reaction channel
+
+        if origin_channel_id and origin_channel_id != channel.id:
+            try:
+                target_channel = bot.get_channel(origin_channel_id)
+                if not target_channel:
+                    target_channel = await bot.fetch_channel(origin_channel_id)
+            except Exception as exc:
+                logger.warning(f"Could not fetch origin channel {origin_channel_id}: {exc}")
+                target_channel = channel  # Fallback
+
+        # Send to origin channel (or reaction channel as fallback)
+        await target_channel.send(embed=embed)
 
         # Send to thread
         if thread:

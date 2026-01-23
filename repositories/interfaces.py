@@ -245,6 +245,7 @@ class ILobbyRepository(ABC):
         thread_id: int | None = None,
         embed_message_id: int | None = None,
         conditional_players: list[int] | None = None,
+        origin_channel_id: int | None = None,
     ) -> None: ...
 
     @abstractmethod
