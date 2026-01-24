@@ -19,12 +19,15 @@ def calculate_fantasy_points(player_data: dict) -> float:
     """
     Calculate Dota 2 fantasy points from OpenDota player data.
 
-    Fantasy scoring formula based on official DPC fantasy:
+    Fantasy scoring formula based on official DPC fantasy with role balance additions:
     - Kills: +0.3 per kill
     - Deaths: -0.3 per death
     - Assists: +0.15 per assist
     - Last hits: +0.003 per LH
+    - Denies: +0.02 per deny (rewards lane control, esp. mid)
     - GPM: +0.002 per GPM
+    - XPM: +0.002 per XPM (rewards solo XP efficiency)
+    - Tower damage: +0.0001 per damage (rewards splitpush heroes)
     - Tower kills: +1.0 per tower
     - Roshan kills: +1.0 per Roshan
     - Teamfight participation: +3.0 weighted (0-1 scale)
@@ -32,7 +35,8 @@ def calculate_fantasy_points(player_data: dict) -> float:
     - Camps stacked: +0.5 per stack
     - Rune pickups: +0.25 per rune
     - First blood: +4.0 if claimed
-    - Stun duration: +0.05 per second
+    - Stun duration: +0.07 per second (rewards initiators/stunners)
+    - Hero healing: +0.0004 per HP healed (rewards healing supports)
 
     Args:
         player_data: OpenDota player data dict from match response
@@ -47,9 +51,12 @@ def calculate_fantasy_points(player_data: dict) -> float:
     points -= player_data.get("deaths", 0) * 0.3
     points += player_data.get("assists", 0) * 0.15
     points += player_data.get("last_hits", 0) * 0.003
+    points += player_data.get("denies", 0) * 0.02
     points += player_data.get("gold_per_min", 0) * 0.002
+    points += player_data.get("xp_per_min", 0) * 0.002
 
     # Objectives
+    points += player_data.get("tower_damage", 0) * 0.0001
     points += player_data.get("towers_killed", 0) * 1.0
     points += player_data.get("roshans_killed", 0) * 1.0
 
@@ -68,7 +75,10 @@ def calculate_fantasy_points(player_data: dict) -> float:
         points += 4.0
 
     # Crowd control
-    points += player_data.get("stuns", 0) * 0.05
+    points += player_data.get("stuns", 0) * 0.07
+
+    # Healing
+    points += player_data.get("hero_healing", 0) * 0.0004
 
     return round(points, 2)
 

@@ -488,7 +488,9 @@ class TestFantasyPointCalculation:
             "deaths": 5,
             "assists": 15,
             "last_hits": 200,
+            "denies": 10,
             "gold_per_min": 500,
+            "xp_per_min": 450,
         }
 
         points = calculate_fantasy_points(player_data)
@@ -497,9 +499,11 @@ class TestFantasyPointCalculation:
         # deaths: 5 * -0.3 = -1.5
         # assists: 15 * 0.15 = 2.25
         # last_hits: 200 * 0.003 = 0.6
+        # denies: 10 * 0.02 = 0.2
         # gpm: 500 * 0.002 = 1.0
-        # Total: 5.35
-        assert points == 5.35
+        # xpm: 450 * 0.002 = 0.9
+        # Total: 6.45
+        assert points == 6.45
 
     def test_calculate_fantasy_points_with_objectives(self):
         """Test fantasy points with tower/roshan kills."""
@@ -510,7 +514,10 @@ class TestFantasyPointCalculation:
             "deaths": 2,
             "assists": 10,
             "last_hits": 100,
+            "denies": 5,
             "gold_per_min": 400,
+            "xp_per_min": 350,
+            "tower_damage": 3000,
             "towers_killed": 3,
             "roshans_killed": 1,
         }
@@ -521,11 +528,14 @@ class TestFantasyPointCalculation:
         # deaths: 2 * -0.3 = -0.6
         # assists: 10 * 0.15 = 1.5
         # last_hits: 100 * 0.003 = 0.3
+        # denies: 5 * 0.02 = 0.1
         # gpm: 400 * 0.002 = 0.8
+        # xpm: 350 * 0.002 = 0.7
+        # tower_damage: 3000 * 0.0001 = 0.3
         # towers: 3 * 1.0 = 3.0
         # roshans: 1 * 1.0 = 1.0
-        # Total: 7.5
-        assert points == 7.5
+        # Total: 8.6
+        assert points == 8.6
 
     def test_calculate_fantasy_points_support_style(self):
         """Test fantasy points for support-style performance."""
@@ -537,10 +547,13 @@ class TestFantasyPointCalculation:
             "assists": 25,
             "last_hits": 50,
             "gold_per_min": 250,
+            "xp_per_min": 300,
+            "tower_damage": 500,
             "obs_placed": 15,
             "sen_placed": 10,
             "camps_stacked": 8,
             "teamfight_participation": 0.85,
+            "hero_healing": 5000,
         }
 
         points = calculate_fantasy_points(player_data)
@@ -550,11 +563,14 @@ class TestFantasyPointCalculation:
         # assists: 25 * 0.15 = 3.75
         # last_hits: 50 * 0.003 = 0.15
         # gpm: 250 * 0.002 = 0.5
+        # xpm: 300 * 0.002 = 0.6
+        # tower_damage: 500 * 0.0001 = 0.05
         # wards: (15 + 10) * 0.5 = 12.5
         # camps: 8 * 0.5 = 4.0
         # teamfight: 0.85 * 3.0 = 2.55
-        # Total: 21.65
-        assert points == 21.65
+        # hero_healing: 5000 * 0.0004 = 2.0
+        # Total: 24.3
+        assert points == 24.3
 
     def test_calculate_fantasy_points_first_blood(self):
         """Test fantasy points with first blood bonus."""
@@ -591,8 +607,42 @@ class TestFantasyPointCalculation:
 
         points = calculate_fantasy_points(player_data)
 
-        # stuns: 100 * 0.05 = 5.0
-        assert points == 5.0
+        # stuns: 100 * 0.07 = 7.0
+        assert points == 7.0
+
+    def test_calculate_fantasy_points_offlane_style(self):
+        """Test fantasy points for offlane-style performance (initiator/splitpush)."""
+        from services.match_enrichment_service import calculate_fantasy_points
+
+        player_data = {
+            "kills": 4,
+            "deaths": 6,
+            "assists": 18,
+            "last_hits": 150,
+            "denies": 8,
+            "gold_per_min": 380,
+            "xp_per_min": 550,
+            "tower_damage": 5000,
+            "towers_killed": 2,
+            "stuns": 85.0,  # Initiator hero like Slardar/Tide
+            "teamfight_participation": 0.75,
+        }
+
+        points = calculate_fantasy_points(player_data)
+
+        # kills: 4 * 0.3 = 1.2
+        # deaths: 6 * -0.3 = -1.8
+        # assists: 18 * 0.15 = 2.7
+        # last_hits: 150 * 0.003 = 0.45
+        # denies: 8 * 0.02 = 0.16
+        # gpm: 380 * 0.002 = 0.76
+        # xpm: 550 * 0.002 = 1.1
+        # tower_damage: 5000 * 0.0001 = 0.5
+        # towers: 2 * 1.0 = 2.0
+        # stuns: 85 * 0.07 = 5.95
+        # teamfight: 0.75 * 3.0 = 2.25
+        # Total: 15.27
+        assert points == 15.27
 
     def test_calculate_fantasy_points_empty(self):
         """Test fantasy points with empty data."""
