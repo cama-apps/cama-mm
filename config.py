@@ -158,3 +158,4 @@ SPECTATOR_POOL_PLAYER_CUT = _parse_float("SPECTATOR_POOL_PLAYER_CUT", 0.10)  # 1
 # Match Enrichment configuration
 ENRICHMENT_DISCOVERY_TIME_WINDOW = _parse_int("ENRICHMENT_DISCOVERY_TIME_WINDOW", 7200)  # 2 hours (seconds)
 ENRICHMENT_MIN_PLAYER_MATCH = _parse_int("ENRICHMENT_MIN_PLAYER_MATCH", 10)  # All 10 players required for strict validation
+ENRICHMENT_RETRY_DELAYS = _parse_int_list("ENRICHMENT_RETRY_DELAYS", [1, 5, 20, 60, 180])  # Exponential backoff delays (seconds)

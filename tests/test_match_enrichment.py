@@ -65,8 +65,8 @@ class TestMatchEnrichmentService:
             {"discord_id": 100, "side": "radiant"},
         ]
 
-        # Setup mock steam_id lookup
-        player_repo.get_steam_id.return_value = 12345
+        # Setup mock steam_id bulk lookup
+        player_repo.get_steam_ids_bulk.return_value = {100: 12345}
 
         service = MatchEnrichmentService(match_repo, player_repo, mock_opendota_api)
         # Use skip_validation for unit test - validation is tested separately
@@ -80,7 +80,7 @@ class TestMatchEnrichmentService:
 
         # Verify update calls
         match_repo.update_match_enrichment.assert_called_once()
-        match_repo.update_participant_stats.assert_called_once()
+        match_repo.update_participant_stats_bulk.assert_called_once()
 
     def test_enrich_match_api_failure(self, mock_repos, mock_opendota_api):
         """Test enrichment when OpenDota API fails."""
@@ -115,7 +115,8 @@ class TestMatchEnrichmentService:
         match_repo.get_match_participants.return_value = [
             {"discord_id": 100, "side": "radiant"},
         ]
-        player_repo.get_steam_id.return_value = 12345  # Different from API response
+        # Setup mock steam_id bulk lookup - steam_id 12345 not in API response
+        player_repo.get_steam_ids_bulk.return_value = {100: 12345}
 
         service = MatchEnrichmentService(match_repo, player_repo, mock_opendota_api)
         # Use skip_validation for unit test
@@ -145,7 +146,8 @@ class TestMatchEnrichmentService:
         match_repo.get_match_participants.return_value = [
             {"discord_id": 100, "side": "radiant"},
         ]
-        player_repo.get_steam_id.return_value = None  # No steam_id
+        # Setup mock steam_id bulk lookup - no steam_id for player
+        player_repo.get_steam_ids_bulk.return_value = {100: None}
 
         service = MatchEnrichmentService(match_repo, player_repo, mock_opendota_api)
         # Use skip_validation for unit test

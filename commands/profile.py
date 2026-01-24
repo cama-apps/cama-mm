@@ -18,6 +18,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from config import BANKRUPTCY_PENALTY_RATE
+from openskill_rating_system import CamaOpenSkillSystem
 from rating_system import CamaRatingSystem
 from utils.drawing import draw_gamba_chart, draw_lane_distribution, draw_role_graph
 from utils.formatting import JOPACOIN_EMOTE, TOMBSTONE_EMOJI, format_role_display
@@ -510,21 +511,44 @@ class ProfileCommands(commands.Cog):
 
             embed.add_field(name="Trend", value=trend_text, inline=True)
 
-        # Recent matches (last 5)
+        # Recent matches (last 5) with Glicko-2 and OpenSkill predictions
         if matches_with_predictions:
+            os_system = CamaOpenSkillSystem()
             recent_lines = []
             for h in matches_with_predictions[:5]:
-                prob = h.get("expected_team_win_prob", 0.5)
+                glicko_prob = h.get("expected_team_win_prob", 0.5)
                 won = h.get("won")
-                expected_win = prob >= 0.5
+                match_id = h.get("match_id")
+                expected_win = glicko_prob >= 0.5
+
+                # Get OpenSkill expected outcome
+                os_prob = None
+                if match_id and match_repo:
+                    os_ratings = match_repo.get_os_ratings_for_match(match_id)
+                    if os_ratings["team1"] and os_ratings["team2"]:
+                        team_num = h.get("team_number")
+                        if team_num == 1:
+                            os_prob = os_system.os_predict_win_probability(
+                                os_ratings["team1"], os_ratings["team2"]
+                            )
+                        elif team_num == 2:
+                            os_prob = os_system.os_predict_win_probability(
+                                os_ratings["team2"], os_ratings["team1"]
+                            )
+
                 if won:
                     emoji = "✅" if expected_win else "🔥"  # expected win or upset
                 else:
                     emoji = "💀" if expected_win else "❌"  # choke or expected loss
-                recent_lines.append(f"{emoji} {prob:.0%} → {'W' if won else 'L'}")
+
+                # Build prediction string with both systems
+                pred_str = f"G:{glicko_prob:.0%}"
+                if os_prob is not None:
+                    pred_str += f" O:{os_prob:.0%}"
+                recent_lines.append(f"{emoji} {pred_str} → {'W' if won else 'L'}")
 
             embed.add_field(
-                name=f"Recent ({len(recent_lines)} games)",
+                name=f"Recent ({len(recent_lines)}) G=Glicko O=OS",
                 value="\n".join(recent_lines),
                 inline=True,
             )

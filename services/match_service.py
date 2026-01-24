@@ -873,20 +873,27 @@ class MatchService:
         updates = [(pid, mu, sigma) for pid, (mu, sigma, _) in results.items()]
         updated_count = self.player_repo.update_openskill_ratings_bulk(updates)
 
-        # Record in rating history (update existing entries for this match)
+        # Record in rating history (bulk update existing entries for this match)
+        history_updates = []
         for pid, (new_mu, new_sigma, fantasy_weight) in results.items():
             old_mu, old_sigma = os_ratings.get(pid, (None, None))
-            # Update the rating_history entry for this player/match with OpenSkill data
-            # Note: This adds OpenSkill data to existing Glicko rating history entries
-            self._update_rating_history_openskill(
-                match_id=match_id,
-                discord_id=pid,
-                os_mu_before=old_mu,
-                os_mu_after=new_mu,
-                os_sigma_before=old_sigma,
-                os_sigma_after=new_sigma,
-                fantasy_weight=fantasy_weight,
+            history_updates.append({
+                "discord_id": pid,
+                "os_mu_before": old_mu,
+                "os_mu_after": new_mu,
+                "os_sigma_before": old_sigma,
+                "os_sigma_after": new_sigma,
+                "fantasy_weight": fantasy_weight,
+            })
+
+        if history_updates:
+            history_updated = self.match_repo.update_rating_history_openskill_bulk(
+                match_id, history_updates
             )
+            if history_updated < len(history_updates):
+                logger.warning(
+                    f"Only {history_updated}/{len(history_updates)} rating_history entries found for match {match_id}"
+                )
 
         logger.info(
             f"OpenSkill update complete for match {match_id}: {updated_count} players updated"

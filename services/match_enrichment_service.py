@@ -214,15 +214,11 @@ class MatchEnrichmentService:
                 "players_not_found": [],
             }
 
-        # Get our match participants and their steam_ids
+        # Get our match participants and their steam_ids (bulk lookup)
         participants = self.match_repo.get_match_participants(internal_match_id)
-        steam_ids = []
-        discord_to_steam = {}
-        for p in participants:
-            steam_id = self.player_repo.get_steam_id(p["discord_id"])
-            steam_ids.append(steam_id)
-            if steam_id:
-                discord_to_steam[p["discord_id"]] = steam_id
+        discord_ids = [p["discord_id"] for p in participants]
+        discord_to_steam = self.player_repo.get_steam_ids_bulk(discord_ids)
+        steam_ids = [discord_to_steam.get(p["discord_id"]) for p in participants]
 
         # Strict validation (unless skipped for manual enrichment)
         if not skip_validation:
@@ -259,6 +255,7 @@ class MatchEnrichmentService:
         players_not_found = []
         radiant_fantasy = 0.0
         dire_fantasy = 0.0
+        participant_updates = []  # Collect updates for bulk operation
 
         # Match each participant
         for participant in participants:
@@ -284,37 +281,40 @@ class MatchEnrichmentService:
             else:
                 dire_fantasy += fantasy_points
 
-            # Update participant stats with fantasy data
-            self.match_repo.update_participant_stats(
-                match_id=internal_match_id,
-                discord_id=discord_id,
-                hero_id=player_data.get("hero_id", 0),
-                kills=player_data.get("kills", 0),
-                deaths=player_data.get("deaths", 0),
-                assists=player_data.get("assists", 0),
-                gpm=player_data.get("gold_per_min", 0),
-                xpm=player_data.get("xp_per_min", 0),
-                hero_damage=player_data.get("hero_damage", 0),
-                tower_damage=player_data.get("tower_damage", 0),
-                last_hits=player_data.get("last_hits", 0),
-                denies=player_data.get("denies", 0),
-                net_worth=player_data.get("net_worth", player_data.get("total_gold", 0)),
-                hero_healing=player_data.get("hero_healing", 0),
-                lane_role=player_data.get("lane_role"),  # 1=Safe, 2=Mid, 3=Off, 4=Jungle
-                lane_efficiency=player_data.get("lane_efficiency_pct"),  # 0-100
+            # Collect participant stats for bulk update
+            participant_updates.append({
+                "discord_id": discord_id,
+                "hero_id": player_data.get("hero_id", 0),
+                "kills": player_data.get("kills", 0),
+                "deaths": player_data.get("deaths", 0),
+                "assists": player_data.get("assists", 0),
+                "gpm": player_data.get("gold_per_min", 0),
+                "xpm": player_data.get("xp_per_min", 0),
+                "hero_damage": player_data.get("hero_damage", 0),
+                "tower_damage": player_data.get("tower_damage", 0),
+                "last_hits": player_data.get("last_hits", 0),
+                "denies": player_data.get("denies", 0),
+                "net_worth": player_data.get("net_worth", player_data.get("total_gold", 0)),
+                "hero_healing": player_data.get("hero_healing", 0),
+                "lane_role": player_data.get("lane_role"),  # 1=Safe, 2=Mid, 3=Off, 4=Jungle
+                "lane_efficiency": player_data.get("lane_efficiency_pct"),  # 0-100
                 # Fantasy fields
-                towers_killed=player_data.get("towers_killed"),
-                roshans_killed=player_data.get("roshans_killed"),
-                teamfight_participation=player_data.get("teamfight_participation"),
-                obs_placed=player_data.get("obs_placed"),
-                sen_placed=player_data.get("sen_placed"),
-                camps_stacked=player_data.get("camps_stacked"),
-                rune_pickups=player_data.get("rune_pickups"),
-                firstblood_claimed=1 if player_data.get("firstblood_claimed") else 0,
-                stuns=player_data.get("stuns"),
-                fantasy_points=fantasy_points,
-            )
+                "towers_killed": player_data.get("towers_killed"),
+                "roshans_killed": player_data.get("roshans_killed"),
+                "teamfight_participation": player_data.get("teamfight_participation"),
+                "obs_placed": player_data.get("obs_placed"),
+                "sen_placed": player_data.get("sen_placed"),
+                "camps_stacked": player_data.get("camps_stacked"),
+                "rune_pickups": player_data.get("rune_pickups"),
+                "firstblood_claimed": 1 if player_data.get("firstblood_claimed") else 0,
+                "stuns": player_data.get("stuns"),
+                "fantasy_points": fantasy_points,
+            })
             players_enriched += 1
+
+        # Bulk update all participant stats in a single transaction
+        if participant_updates:
+            self.match_repo.update_participant_stats_bulk(internal_match_id, participant_updates)
 
         logger.info(
             f"Enrichment complete: {players_enriched} players enriched, "

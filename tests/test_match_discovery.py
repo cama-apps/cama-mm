@@ -663,7 +663,8 @@ class TestEnrichmentValidation:
         match_repo.get_match_participants.return_value = [
             {"discord_id": 123, "side": "radiant"},
         ]
-        player_repo.get_steam_id.return_value = 12345678
+        # Use bulk method
+        player_repo.get_steam_ids_bulk.return_value = {123: 12345678}
 
         # OpenDota: Player 12345678 on Dire (slot 128+)
         mock_opendota_api.get_match_details.return_value = {
@@ -700,8 +701,8 @@ class TestEnrichmentValidation:
         match_repo.get_match.return_value = {"match_id": 1, "winning_team": 1}
         match_repo.get_match_participants.return_value = participants
 
-        # Map discord_id to steam_id (same value for simplicity)
-        player_repo.get_steam_id.side_effect = lambda x: x + 1000
+        # Map discord_id to steam_id using bulk method (discord_id + 1000)
+        player_repo.get_steam_ids_bulk.return_value = {i: i + 1000 for i in range(10)}
 
         # Create OpenDota players
         od_players = []

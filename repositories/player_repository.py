@@ -893,6 +893,27 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             row = cursor.fetchone()
             return row["steam_id"] if row and row["steam_id"] else None
 
+    def get_steam_ids_bulk(self, discord_ids: list[int]) -> dict[int, int | None]:
+        """
+        Get steam_ids for multiple players in one query.
+
+        Args:
+            discord_ids: List of Discord user IDs
+
+        Returns:
+            Dict mapping discord_id to steam_id (or None if not set)
+        """
+        if not discord_ids:
+            return {}
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            placeholders = ",".join("?" * len(discord_ids))
+            cursor.execute(
+                f"SELECT discord_id, steam_id FROM players WHERE discord_id IN ({placeholders})",
+                discord_ids,
+            )
+            return {row["discord_id"]: row["steam_id"] for row in cursor.fetchall()}
+
     def set_steam_id(self, discord_id: int, steam_id: int) -> None:
         """
         Set a player's Steam ID.
