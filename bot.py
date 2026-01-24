@@ -84,6 +84,7 @@ from repositories.prediction_repository import PredictionRepository
 from repositories.stake_repository import StakeRepository
 from repositories.spectator_bet_repository import SpectatorBetRepository
 from repositories.player_pool_bet_repository import PlayerPoolBetRepository
+from repositories.tip_repository import TipRepository
 from services.match_service import MatchService
 from services.spectator_pool_service import SpectatorPoolConfig, SpectatorPoolService
 from services.prediction_service import PredictionService
@@ -238,6 +239,10 @@ def _init_services():
     # Create OpenDota player service for profile stats
     opendota_player_service = OpenDotaPlayerService(player_repo)
     bot.opendota_player_service = opendota_player_service
+
+    # Create tip repository for transaction logging
+    tip_repository = TipRepository(DB_PATH)
+    bot.tip_repository = tip_repository
 
     # Create stake service for draft mode player pool
     stake_repo = StakeRepository(DB_PATH)

@@ -206,6 +206,7 @@ class SchemaManager:
             ("add_leaderboard_performance_indexes", self._migration_add_leaderboard_performance_indexes),
             ("add_fantasy_columns", self._migration_add_fantasy_columns),
             ("add_openskill_columns", self._migration_add_openskill_columns),
+            ("create_tip_transactions_table", self._migration_create_tip_transactions_table),
         ]
 
     # --- Migrations ---
@@ -861,3 +862,30 @@ class SchemaManager:
         self._add_column_if_not_exists(cursor, "rating_history", "os_sigma_before", "REAL")
         self._add_column_if_not_exists(cursor, "rating_history", "os_sigma_after", "REAL")
         self._add_column_if_not_exists(cursor, "rating_history", "fantasy_weight", "REAL")
+
+    def _migration_create_tip_transactions_table(self, cursor) -> None:
+        """Create table for tracking tip transactions with fees."""
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS tip_transactions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                sender_id INTEGER NOT NULL,
+                recipient_id INTEGER NOT NULL,
+                amount INTEGER NOT NULL,
+                fee INTEGER NOT NULL,
+                guild_id INTEGER NOT NULL DEFAULT 0,
+                timestamp INTEGER NOT NULL,
+                FOREIGN KEY (sender_id) REFERENCES players(discord_id),
+                FOREIGN KEY (recipient_id) REFERENCES players(discord_id)
+            )
+            """
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tip_transactions_sender ON tip_transactions(sender_id)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tip_transactions_recipient ON tip_transactions(recipient_id)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tip_transactions_timestamp ON tip_transactions(timestamp)"
+        )

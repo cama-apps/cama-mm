@@ -433,3 +433,7 @@ class LoanService:
     def get_nonprofit_fund(self, guild_id: int | None) -> int:
         """Get the total collected in the nonprofit fund."""
         return self.loan_repo.get_nonprofit_fund(guild_id)
+
+    def add_to_nonprofit_fund(self, guild_id: int | None, amount: int) -> int:
+        """Add amount to the nonprofit fund. Returns the new total."""
+        return self.loan_repo.add_to_nonprofit_fund(guild_id, amount)
