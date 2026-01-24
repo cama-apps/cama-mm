@@ -28,7 +28,6 @@ class BalancedShuffler:
         self,
         use_glicko: bool = True,
         consider_roles: bool = True,
-        role_penalty_weight: float | None = None,
         off_role_multiplier: float | None = None,
         off_role_flat_penalty: float | None = None,
         role_matchup_delta_weight: float | None = None,
@@ -41,20 +40,14 @@ class BalancedShuffler:
         Args:
             use_glicko: Whether to use Glicko-2 ratings (default True)
             consider_roles: Whether to consider role distribution
-            role_penalty_weight: Weight for role imbalance penalty (deprecated)
             off_role_multiplier: Multiplier for MMR when playing off-role (default 0.95 = 95% effectiveness)
-            off_role_flat_penalty: Flat penalty per off-role player added to team value difference (default 100)
+            off_role_flat_penalty: Flat penalty per off-role player added to team value difference (default 350)
             role_matchup_delta_weight: Weight applied to lane matchup delta when scoring teams
             exclusion_penalty_weight: Penalty per exclusion count for excluded players (default 50.0)
         """
         self.use_glicko = use_glicko
         self.consider_roles = consider_roles
         settings = SHUFFLER_SETTINGS
-        self.role_penalty_weight = (
-            role_penalty_weight
-            if role_penalty_weight is not None
-            else settings["role_penalty_weight"]
-        )
         self.off_role_multiplier = (
             off_role_multiplier
             if off_role_multiplier is not None
