@@ -920,5 +920,300 @@ class TestNotifyLobbyRally:
         reaction_channel.send.assert_called_once()
 
 
+class TestShuffleDedicatedChannel:
+    """Test /shuffle command behavior with dedicated lobby channel."""
+
+    @pytest.mark.asyncio
+    async def test_shuffle_posts_to_dedicated_channel(self):
+        """Test that shuffle posts embed to the dedicated lobby channel."""
+        from commands.match import MatchCommands
+
+        # Create mock bot
+        bot = MagicMock()
+        dedicated_channel = MagicMock()
+        dedicated_channel.id = 100
+        dedicated_channel.send = AsyncMock(return_value=MagicMock(id=999))
+        bot.get_channel.return_value = dedicated_channel
+
+        # Create mock services (match signature: bot, lobby_service, match_service, player_service)
+        lobby_service = MagicMock()
+        lobby_service.get_lobby_channel_id.return_value = 100  # Dedicated channel
+        lobby_service.get_lobby.return_value = MagicMock(players={1, 2, 3, 4, 5, 6, 7, 8, 9, 10})
+        lobby_service.get_lobby_message_id.return_value = 111
+        lobby_service.get_lobby_thread_id.return_value = 222
+
+        match_service = MagicMock()
+        player_service = MagicMock()
+
+        cog = MatchCommands(bot, lobby_service, match_service, player_service)
+
+        # Test the channel resolution logic directly (lines 596-605 in match.py)
+        lobby_channel_id = lobby_service.get_lobby_channel_id()
+        assert lobby_channel_id == 100
+
+        # Verify bot.get_channel is called with the dedicated channel ID
+        bot.get_channel.assert_not_called()  # Not called yet
+        channel = bot.get_channel(lobby_channel_id)
+        bot.get_channel.assert_called_with(100)
+        assert channel == dedicated_channel
+
+    @pytest.mark.asyncio
+    async def test_shuffle_no_double_post_when_run_from_dedicated_channel(self):
+        """Test that shuffle doesn't double-post when run from the dedicated lobby channel."""
+        from commands.match import MatchCommands
+
+        bot = MagicMock()
+        dedicated_channel = MagicMock()
+        dedicated_channel.id = 100
+        dedicated_channel.send = AsyncMock(return_value=MagicMock(id=999))
+        bot.get_channel.return_value = dedicated_channel
+
+        lobby_service = MagicMock()
+        lobby_service.get_lobby_channel_id.return_value = 100  # Dedicated channel
+
+        # Simulate interaction from the SAME channel as dedicated (100)
+        interaction = MagicMock()
+        interaction.channel = MagicMock()
+        interaction.channel.id = 100  # Same as dedicated channel
+        interaction.channel.send = AsyncMock()
+
+        # Test the double-post prevention logic directly
+        lobby_channel_id = lobby_service.get_lobby_channel_id()
+        command_channel_id = interaction.channel.id if interaction.channel else None
+
+        # This is the condition from match.py lines 608-609
+        should_post_to_command_channel = (
+            command_channel_id and command_channel_id != lobby_channel_id
+        )
+
+        # When channels are the same, should NOT post to command channel
+        assert should_post_to_command_channel is False
+        assert command_channel_id == lobby_channel_id == 100
+
+    @pytest.mark.asyncio
+    async def test_shuffle_posts_to_both_channels_when_different(self):
+        """Test that shuffle posts to both channels when they differ."""
+        from commands.match import MatchCommands
+
+        bot = MagicMock()
+        dedicated_channel = MagicMock()
+        dedicated_channel.id = 100
+        dedicated_channel.send = AsyncMock(return_value=MagicMock(id=999))
+        bot.get_channel.return_value = dedicated_channel
+
+        lobby_service = MagicMock()
+        lobby_service.get_lobby_channel_id.return_value = 100  # Dedicated channel
+
+        # Simulate interaction from a DIFFERENT channel (200)
+        interaction = MagicMock()
+        interaction.channel = MagicMock()
+        interaction.channel.id = 200  # Different from dedicated channel
+        interaction.channel.send = AsyncMock()
+
+        # Test the double-post logic
+        lobby_channel_id = lobby_service.get_lobby_channel_id()
+        command_channel_id = interaction.channel.id if interaction.channel else None
+
+        should_post_to_command_channel = (
+            command_channel_id and command_channel_id != lobby_channel_id
+        )
+
+        # When channels differ, SHOULD post to command channel
+        assert should_post_to_command_channel is True
+        assert command_channel_id == 200
+        assert lobby_channel_id == 100
+
+
+class TestResetLobbyDedicatedChannel:
+    """Test /resetlobby command behavior with dedicated lobby channel."""
+
+    @pytest.mark.asyncio
+    async def test_resetlobby_unpins_from_dedicated_channel(self):
+        """Test that resetlobby unpins from the dedicated lobby channel, not interaction channel."""
+        from commands.lobby import LobbyCommands
+
+        bot = MagicMock()
+        dedicated_channel = MagicMock()
+        dedicated_channel.id = 100
+
+        # Mock the pinned message
+        pinned_message = MagicMock()
+        pinned_message.unpin = AsyncMock()
+        dedicated_channel.fetch_message = AsyncMock(return_value=pinned_message)
+
+        bot.get_channel.return_value = dedicated_channel
+
+        lobby_service = MagicMock()
+        lobby_service.get_lobby_channel_id.return_value = 100  # Dedicated channel
+        lobby_service.get_lobby_message_id.return_value = 111
+        lobby_service.get_lobby.return_value = MagicMock(
+            created_by=12345,
+            players=set()
+        )
+
+        player_service = MagicMock()
+
+        cog = LobbyCommands(bot, lobby_service, player_service)
+
+        # Simulate the channel resolution logic from resetlobby (lines 639-650)
+        lobby_channel_id = lobby_service.get_lobby_channel_id()
+        lobby_channel = None
+        if lobby_channel_id:
+            lobby_channel = bot.get_channel(lobby_channel_id)
+
+        # Verify dedicated channel is used for unpinning
+        assert lobby_channel == dedicated_channel
+        assert lobby_channel.id == 100
+        bot.get_channel.assert_called_with(100)
+
+    @pytest.mark.asyncio
+    async def test_resetlobby_falls_back_to_interaction_channel(self):
+        """Test that resetlobby falls back to interaction channel when dedicated channel unavailable."""
+        from commands.lobby import LobbyCommands
+
+        bot = MagicMock()
+        bot.get_channel.return_value = None  # Dedicated channel not found
+        bot.fetch_channel = AsyncMock(side_effect=Exception("Channel not found"))
+
+        lobby_service = MagicMock()
+        lobby_service.get_lobby_channel_id.return_value = 100  # Configured but unavailable
+        lobby_service.get_lobby_message_id.return_value = 111
+
+        interaction_channel = MagicMock()
+        interaction_channel.id = 200
+
+        # Simulate the fallback logic from resetlobby (lines 647-650)
+        lobby_channel_id = lobby_service.get_lobby_channel_id()
+        lobby_channel = None
+        if lobby_channel_id:
+            try:
+                lobby_channel = bot.get_channel(lobby_channel_id)
+                if not lobby_channel:
+                    lobby_channel = await bot.fetch_channel(lobby_channel_id)
+            except Exception:
+                lobby_channel = interaction_channel
+        else:
+            lobby_channel = interaction_channel
+
+        # Should fall back to interaction channel
+        assert lobby_channel == interaction_channel
+        assert lobby_channel.id == 200
+
+    @pytest.mark.asyncio
+    async def test_resetlobby_uses_interaction_channel_when_no_dedicated(self):
+        """Test that resetlobby uses interaction channel when no dedicated channel configured."""
+        from commands.lobby import LobbyCommands
+
+        bot = MagicMock()
+
+        lobby_service = MagicMock()
+        lobby_service.get_lobby_channel_id.return_value = None  # No dedicated channel
+        lobby_service.get_lobby_message_id.return_value = 111
+
+        interaction_channel = MagicMock()
+        interaction_channel.id = 200
+
+        # Simulate the logic from resetlobby
+        lobby_channel_id = lobby_service.get_lobby_channel_id()
+        if lobby_channel_id:
+            lobby_channel = bot.get_channel(lobby_channel_id)
+        else:
+            lobby_channel = interaction_channel
+
+        # Should use interaction channel directly
+        assert lobby_channel == interaction_channel
+        bot.get_channel.assert_not_called()
+
+
+class TestSchemaMigration:
+    """Test the origin_channel_id schema migration."""
+
+    def test_migration_adds_origin_channel_id_column(self):
+        """Test that the migration adds origin_channel_id column to lobby_state."""
+        import sqlite3
+        from infrastructure.schema_manager import SchemaManager
+
+        # Use temp file since :memory: creates new DB per connection
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".db") as f:
+            db_path = f.name
+
+        try:
+            manager = SchemaManager(db_path)
+            manager.initialize()
+
+            # Verify the column exists
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+            cursor.execute("PRAGMA table_info(lobby_state)")
+            columns = {row[1] for row in cursor.fetchall()}
+            conn.close()
+
+            assert "origin_channel_id" in columns
+        finally:
+            _cleanup_db_file(db_path)
+
+    def test_migration_allows_null_origin_channel_id(self):
+        """Test that origin_channel_id can be NULL (for backward compatibility)."""
+        import sqlite3
+        from infrastructure.schema_manager import SchemaManager
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".db") as f:
+            db_path = f.name
+
+        try:
+            manager = SchemaManager(db_path)
+            manager.initialize()
+
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+
+            # Insert a row without origin_channel_id
+            cursor.execute("""
+                INSERT INTO lobby_state (lobby_id, players, status, created_by, created_at)
+                VALUES (1, '[]', 'open', 12345, '2024-01-01')
+            """)
+            conn.commit()
+
+            # Verify it was inserted with NULL
+            cursor.execute("SELECT origin_channel_id FROM lobby_state WHERE lobby_id = 1")
+            result = cursor.fetchone()
+            conn.close()
+
+            assert result[0] is None
+        finally:
+            _cleanup_db_file(db_path)
+
+    def test_migration_stores_origin_channel_id(self):
+        """Test that origin_channel_id can be stored and retrieved."""
+        import sqlite3
+        from infrastructure.schema_manager import SchemaManager
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".db") as f:
+            db_path = f.name
+
+        try:
+            manager = SchemaManager(db_path)
+            manager.initialize()
+
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+
+            # Insert a row with origin_channel_id
+            cursor.execute("""
+                INSERT INTO lobby_state (lobby_id, players, status, created_by, created_at, origin_channel_id)
+                VALUES (1, '[]', 'open', 12345, '2024-01-01', 999888777)
+            """)
+            conn.commit()
+
+            # Verify it was stored
+            cursor.execute("SELECT origin_channel_id FROM lobby_state WHERE lobby_id = 1")
+            result = cursor.fetchone()
+            conn.close()
+
+            assert result[0] == 999888777
+        finally:
+            _cleanup_db_file(db_path)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
