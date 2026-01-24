@@ -5,6 +5,7 @@ Betting commands for jopacoin wagers.
 from __future__ import annotations
 
 import logging
+import math
 import random
 import time
 from typing import TYPE_CHECKING
@@ -24,6 +25,7 @@ from config import (
     JOPACOIN_MIN_BET,
     LOAN_FEE_RATE,
     MAX_DEBT,
+    TIP_FEE_RATE,
 )
 from config import DISBURSE_MIN_FUND
 from services.bankruptcy_service import BankruptcyService
@@ -34,6 +36,7 @@ from services.loan_service import LoanService
 from services.match_service import MatchService
 from services.permissions import has_admin_permission
 from services.player_service import PlayerService
+from repositories.tip_repository import TipRepository
 from utils.formatting import JOPACOIN_EMOTE, TOMBSTONE_EMOJI, format_betting_display
 from utils.interaction_safety import safe_defer
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
@@ -129,6 +132,7 @@ class BettingCommands(commands.Cog):
         loan_service: LoanService | None = None,
         disburse_service: DisburseService | None = None,
         flavor_text_service: FlavorTextService | None = None,
+        tip_repository: TipRepository | None = None,
     ):
         self.bot = bot
         self.betting_service = betting_service
@@ -139,6 +143,7 @@ class BettingCommands(commands.Cog):
         self.gambling_stats_service = gambling_stats_service
         self.loan_service = loan_service
         self.disburse_service = disburse_service
+        self.tip_repository = tip_repository
         self._gamba_cooldowns: dict[int, float] = {}  # user_id -> last use timestamp
 
     async def _update_shuffle_message_wagers(self, guild_id: int | None) -> None:
@@ -824,7 +829,7 @@ class BettingCommands(commands.Cog):
         # Validate amount
         if amount <= 0:
             await interaction.followup.send(
-                "Amount must be positive....",
+                "Amount must be positive.",
                 ephemeral=True,
             )
             return
@@ -832,10 +837,13 @@ class BettingCommands(commands.Cog):
         # Check if tipping themselves
         if player.id == interaction.user.id:
             await interaction.followup.send(
-                "You cannot tip yourself....",
+                "You cannot tip yourself.",
                 ephemeral=True,
             )
             return
+
+        # Extract guild_id early for consistent audit trail
+        guild_id = interaction.guild.id if interaction.guild else None
 
         # Check if both players are registered
         sender = self.player_service.get_player(interaction.user.id)
@@ -855,32 +863,79 @@ class BettingCommands(commands.Cog):
             )
             return
 
-        # Check sender balance
+        # Calculate fee (1% minimum 1 coin, rounded up)
+        fee = max(1, math.ceil(amount * TIP_FEE_RATE))
+        total_cost = amount + fee
+
+        # Check sender balance first (most fundamental constraint)
         sender_balance = self.player_service.get_balance(interaction.user.id)
-        if sender_balance < amount:
+        if sender_balance < total_cost:
             await interaction.followup.send(
-                f"Insufficient balance. You have {sender_balance} {JOPACOIN_EMOTE}.",
+                f"Insufficient balance. You need {total_cost} {JOPACOIN_EMOTE} "
+                f"({amount} tip + {fee} fee). You have {sender_balance} {JOPACOIN_EMOTE}.",
                 ephemeral=True,
             )
             return
 
-        try:
-            # Perform the transfer atomically using add_balance_many
-            self.player_service.player_repo.add_balance_many({
-                interaction.user.id: -amount,
-                player.id: amount,
-            })
+        # Check if sender has outstanding loan (blocked from tipping)
+        if self.loan_service:
+            loan_state = self.loan_service.get_state(interaction.user.id)
+            if loan_state.has_outstanding_loan:
+                await interaction.followup.send(
+                    f"You cannot tip while you have an outstanding loan. "
+                    f"Play a match to repay your loan ({loan_state.outstanding_total} {JOPACOIN_EMOTE}).",
+                    ephemeral=True,
+                )
+                return
 
-            await interaction.followup.send(
-                f"{interaction.user.mention} tipped {amount} {JOPACOIN_EMOTE} to {player.mention}!",
-                ephemeral=False,
+        # Perform atomic transfer (fee goes to nonprofit)
+        try:
+            result = self.player_service.player_repo.tip_atomic(
+                from_discord_id=interaction.user.id,
+                to_discord_id=player.id,
+                amount=amount,
+                fee=fee,
             )
+        except ValueError as exc:
+            # Transfer failed - user error (insufficient funds, not found, etc.)
+            await interaction.followup.send(f"{exc}", ephemeral=True)
+            return
         except Exception as exc:
-            logger.error(f"Failed to process tip: {exc}", exc_info=True)
+            # Unexpected error during transfer
+            logger.error(f"Failed to process tip transfer: {exc}", exc_info=True)
             await interaction.followup.send(
-                f"Failed to process tip: {exc}",
+                "Failed to process tip. Please try again.",
                 ephemeral=True,
             )
+            return
+
+        # Add fee to nonprofit fund (non-critical - failure here doesn't affect the tip)
+        if self.loan_service and fee > 0:
+            try:
+                self.loan_service.add_to_nonprofit_fund(guild_id, fee)
+            except Exception as nonprofit_exc:
+                logger.warning(f"Failed to add tip fee to nonprofit fund: {nonprofit_exc}")
+
+        # Transfer succeeded - send success message
+        await interaction.followup.send(
+            f"{interaction.user.mention} tipped {amount} {JOPACOIN_EMOTE} to {player.mention}! "
+            f"({fee} {JOPACOIN_EMOTE} fee to nonprofit)",
+            ephemeral=False,
+        )
+
+        # Log the transaction (non-critical - failure here doesn't affect the tip)
+        if self.tip_repository:
+            try:
+                self.tip_repository.log_tip(
+                    sender_id=interaction.user.id,
+                    recipient_id=player.id,
+                    amount=amount,
+                    fee=fee,
+                    guild_id=guild_id,
+                )
+            except Exception as log_exc:
+                # Log failure but don't notify user - tip already succeeded
+                logger.warning(f"Failed to log tip transaction: {log_exc}")
 
     @app_commands.command(name="paydebt", description="Help another player pay off their debt")
     @app_commands.describe(
@@ -1810,7 +1865,8 @@ async def setup(bot: commands.Bot):
     loan_service = getattr(bot, "loan_service", None)
     disburse_service = getattr(bot, "disburse_service", None)
     flavor_text_service = getattr(bot, "flavor_text_service", None)
-    # bankruptcy_service, gambling_stats_service, loan_service, disburse_service, flavor_text_service are optional
+    tip_repository = getattr(bot, "tip_repository", None)
+    # bankruptcy_service, gambling_stats_service, loan_service, disburse_service, flavor_text_service, tip_repository are optional
 
     cog = BettingCommands(
         bot,
@@ -1822,6 +1878,7 @@ async def setup(bot: commands.Bot):
         loan_service,
         disburse_service,
         flavor_text_service,
+        tip_repository,
     )
     await bot.add_cog(cog)
 

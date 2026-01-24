@@ -614,6 +614,107 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 "to_new_balance": to_balance + actual_amount,
             }
 
+    def tip_atomic(
+        self,
+        from_discord_id: int,
+        to_discord_id: int,
+        amount: int,
+        fee: int,
+    ) -> dict[str, int]:
+        """
+        Atomically transfer jopacoin from one player to another with a fee.
+
+        The fee is sent to the nonprofit fund. Sender pays amount + fee,
+        recipient receives only amount.
+
+        Args:
+            from_discord_id: Player sending the tip
+            to_discord_id: Player receiving the tip
+            amount: Amount to transfer to recipient
+            fee: Fee for nonprofit fund (sender pays this on top of amount)
+
+        Returns:
+            Dict with 'amount', 'fee', 'from_new_balance', 'to_new_balance'
+
+        Raises:
+            ValueError if insufficient funds or player not found
+        """
+        total_cost = amount + fee
+
+        if amount <= 0:
+            raise ValueError("Amount must be positive.")
+        if fee < 0:
+            raise ValueError("Fee cannot be negative.")
+
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+
+            # Get sender balance
+            cursor.execute(
+                "SELECT COALESCE(jopacoin_balance, 0) as balance FROM players WHERE discord_id = ?",
+                (from_discord_id,),
+            )
+            from_row = cursor.fetchone()
+            if not from_row:
+                raise ValueError("Sender not found.")
+
+            from_balance = int(from_row["balance"])
+            if from_balance < total_cost:
+                raise ValueError(
+                    f"Insufficient balance. You need {total_cost} (tip: {amount}, fee: {fee}). "
+                    f"You have {from_balance}."
+                )
+
+            # Check recipient exists
+            cursor.execute(
+                "SELECT COALESCE(jopacoin_balance, 0) as balance FROM players WHERE discord_id = ?",
+                (to_discord_id,),
+            )
+            to_row = cursor.fetchone()
+            if not to_row:
+                raise ValueError("Recipient not found.")
+
+            to_balance = int(to_row["balance"])
+
+            # Deduct from sender (amount + fee)
+            cursor.execute(
+                """
+                UPDATE players
+                SET jopacoin_balance = jopacoin_balance - ?, updated_at = CURRENT_TIMESTAMP
+                WHERE discord_id = ?
+                """,
+                (total_cost, from_discord_id),
+            )
+
+            # Add to recipient (only amount, fee is burned)
+            cursor.execute(
+                """
+                UPDATE players
+                SET jopacoin_balance = jopacoin_balance + ?, updated_at = CURRENT_TIMESTAMP
+                WHERE discord_id = ?
+                """,
+                (amount, to_discord_id),
+            )
+
+            # Track lowest balance for sender
+            new_from_balance = from_balance - total_cost
+            cursor.execute(
+                """
+                UPDATE players
+                SET lowest_balance_ever = ?
+                WHERE discord_id = ?
+                AND (lowest_balance_ever IS NULL OR ? < lowest_balance_ever)
+                """,
+                (new_from_balance, from_discord_id, new_from_balance),
+            )
+
+            return {
+                "amount": amount,
+                "fee": fee,
+                "from_new_balance": new_from_balance,
+                "to_new_balance": to_balance + amount,
+            }
+
     def get_players_with_negative_balance(self) -> list[dict]:
         """
         Get all players with negative balance for interest application.

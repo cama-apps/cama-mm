@@ -118,6 +118,10 @@ SHOP_ANNOUNCE_COST = _parse_int("SHOP_ANNOUNCE_COST", 10)
 SHOP_ANNOUNCE_TARGET_COST = _parse_int("SHOP_ANNOUNCE_TARGET_COST", 100)
 SHOP_PROTECT_HERO_COST = _parse_int("SHOP_PROTECT_HERO_COST", 200)
 
+# Tip transaction fee (clamped to 0.0 - 0.5 to prevent economy-breaking values)
+_raw_tip_fee_rate = _parse_float("TIP_FEE_RATE", 0.01)
+TIP_FEE_RATE = max(0.0, min(0.5, _raw_tip_fee_rate))  # 1% default, max 50%
+
 # Steam/Valve API
 STEAM_API_KEY = os.getenv("STEAM_API_KEY")
 

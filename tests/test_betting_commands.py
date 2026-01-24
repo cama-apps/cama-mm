@@ -526,11 +526,13 @@ async def test_disburse_status_no_stored_message():
 
 @pytest.mark.asyncio
 async def test_tip_successful_transfer():
-    """Verify /tip successfully transfers jopacoin between players."""
+    """Verify /tip successfully transfers jopacoin between players with fee to nonprofit."""
     bot = MagicMock()
     betting_service = MagicMock()
     match_service = MagicMock()
     player_service = MagicMock()
+    tip_repository = MagicMock()
+    loan_service = MagicMock()
 
     # Both players are registered
     sender = MagicMock(name="Sender")
@@ -540,8 +542,18 @@ async def test_tip_successful_transfer():
     )
     player_service.get_balance.return_value = 100  # Sender has 100 coins
 
-    # Mock the repository
-    player_service.player_repo.add_balance_many = MagicMock()
+    # No outstanding loan
+    loan_state = MagicMock()
+    loan_state.has_outstanding_loan = False
+    loan_service.get_state.return_value = loan_state
+
+    # Mock the atomic tip method
+    player_service.player_repo.tip_atomic = MagicMock(return_value={
+        "amount": 50,
+        "fee": 1,
+        "from_new_balance": 49,
+        "to_new_balance": 50,
+    })
 
     # Create a proper guild mock for rate limiter
     guild = MagicMock()
@@ -557,24 +569,45 @@ async def test_tip_successful_transfer():
     recipient_member.id = 456
     recipient_member.mention = "<@456>"
 
-    commands = BettingCommands(bot, betting_service, match_service, player_service)
+    commands = BettingCommands(
+        bot, betting_service, match_service, player_service,
+        tip_repository=tip_repository, loan_service=loan_service
+    )
     await commands.tip.callback(commands, interaction, player=recipient_member, amount=50)
 
-    # Should transfer the funds
-    player_service.player_repo.add_balance_many.assert_called_once_with({123: -50, 456: 50})
+    # Should call atomic tip method with correct args
+    player_service.player_repo.tip_atomic.assert_called_once_with(
+        from_discord_id=123,
+        to_discord_id=456,
+        amount=50,
+        fee=1,
+    )
 
-    # Should send success message
+    # Should add fee to nonprofit fund
+    loan_service.add_to_nonprofit_fund.assert_called_once_with(789, 1)
+
+    # Should log the transaction
+    tip_repository.log_tip.assert_called_once_with(
+        sender_id=123,
+        recipient_id=456,
+        amount=50,
+        fee=1,
+        guild_id=789,
+    )
+
+    # Should send success message with fee to nonprofit info
     interaction.followup.send.assert_awaited_once()
     call_kwargs = interaction.followup.send.call_args.kwargs
     message = call_kwargs.get("content", interaction.followup.send.call_args.args[0])
     assert "tipped" in message.lower()
     assert "50" in message
+    assert "nonprofit" in message.lower()
     assert call_kwargs.get("ephemeral") is False  # Public message
 
 
 @pytest.mark.asyncio
 async def test_tip_insufficient_balance():
-    """Verify /tip rejects when sender has insufficient balance."""
+    """Verify /tip rejects when sender has insufficient balance (including fee)."""
     bot = MagicMock()
     betting_service = MagicMock()
     match_service = MagicMock()
@@ -609,11 +642,14 @@ async def test_tip_insufficient_balance():
     # Should NOT transfer
     player_service.player_repo.add_balance_many.assert_not_called()
 
-    # Should send error message
+    # Should send error message showing fee
     interaction.followup.send.assert_awaited_once()
     call_kwargs = interaction.followup.send.call_args.kwargs
     message = call_kwargs.get("content", interaction.followup.send.call_args.args[0])
     assert "insufficient" in message.lower()
+    # Message should show total cost (50 + 1 fee = 51)
+    assert "51" in message
+    assert "fee" in message.lower()
     assert call_kwargs.get("ephemeral") is True
 
 
@@ -765,4 +801,503 @@ async def test_tip_negative_amount():
     call_kwargs = interaction.followup.send.call_args.kwargs
     message = call_kwargs.get("content", interaction.followup.send.call_args.args[0])
     assert "positive" in message.lower()
+    assert call_kwargs.get("ephemeral") is True
+
+
+@pytest.mark.asyncio
+async def test_tip_with_outstanding_loan_blocked():
+    """Verify /tip rejects when sender has outstanding loan."""
+    bot = MagicMock()
+    betting_service = MagicMock()
+    match_service = MagicMock()
+    player_service = MagicMock()
+    loan_service = MagicMock()
+
+    # Both players are registered
+    sender = MagicMock(name="Sender")
+    recipient = MagicMock(name="Recipient")
+    player_service.get_player.side_effect = lambda discord_id: (
+        sender if discord_id == 130 else recipient if discord_id == 460 else None
+    )
+    player_service.get_balance.return_value = 100  # Sender has 100 coins
+
+    # Sender has outstanding loan
+    loan_state = MagicMock()
+    loan_state.has_outstanding_loan = True
+    loan_state.outstanding_total = 60
+    loan_service.get_state.return_value = loan_state
+
+    player_service.player_repo.add_balance_many = MagicMock()
+
+    guild = MagicMock()
+    guild.id = 791
+
+    interaction = MagicMock()
+    interaction.guild = guild
+    interaction.user.id = 130
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock()
+
+    recipient_member = MagicMock()
+    recipient_member.id = 460
+    recipient_member.mention = "<@460>"
+
+    commands = BettingCommands(
+        bot, betting_service, match_service, player_service, loan_service=loan_service
+    )
+    await commands.tip.callback(commands, interaction, player=recipient_member, amount=50)
+
+    # Should NOT transfer
+    player_service.player_repo.add_balance_many.assert_not_called()
+
+    # Should send error about outstanding loan
+    interaction.followup.send.assert_awaited_once()
+    call_kwargs = interaction.followup.send.call_args.kwargs
+    message = call_kwargs.get("content", interaction.followup.send.call_args.args[0])
+    assert "outstanding loan" in message.lower()
+    assert "60" in message  # Shows outstanding amount
+    assert call_kwargs.get("ephemeral") is True
+
+
+@pytest.mark.asyncio
+async def test_tip_fee_calculation_minimum_1_coin():
+    """Verify /tip charges minimum 1 coin fee even for small tips."""
+    bot = MagicMock()
+    betting_service = MagicMock()
+    match_service = MagicMock()
+    player_service = MagicMock()
+    tip_repository = MagicMock()
+
+    # Both players are registered
+    sender = MagicMock(name="Sender")
+    recipient = MagicMock(name="Recipient")
+    player_service.get_player.side_effect = lambda discord_id: (
+        sender if discord_id == 131 else recipient if discord_id == 461 else None
+    )
+    player_service.get_balance.return_value = 10  # Sender has 10 coins
+
+    # Mock the atomic tip method
+    player_service.player_repo.tip_atomic = MagicMock(return_value={
+        "amount": 1,
+        "fee": 1,
+        "from_new_balance": 8,
+        "to_new_balance": 1,
+    })
+
+    guild = MagicMock()
+    guild.id = 792
+
+    interaction = MagicMock()
+    interaction.guild = guild
+    interaction.user.id = 131
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock()
+
+    recipient_member = MagicMock()
+    recipient_member.id = 461
+    recipient_member.mention = "<@461>"
+
+    commands = BettingCommands(
+        bot, betting_service, match_service, player_service, tip_repository=tip_repository
+    )
+    # Tip 1 coin - 1% = 0.01, but minimum is 1
+    await commands.tip.callback(commands, interaction, player=recipient_member, amount=1)
+
+    # Should call atomic tip with minimum fee of 1
+    player_service.player_repo.tip_atomic.assert_called_once_with(
+        from_discord_id=131,
+        to_discord_id=461,
+        amount=1,
+        fee=1,
+    )
+
+    # Should log with fee=1
+    tip_repository.log_tip.assert_called_once()
+    call_kwargs = tip_repository.log_tip.call_args.kwargs
+    assert call_kwargs["fee"] == 1
+
+
+@pytest.mark.asyncio
+async def test_tip_fee_calculation_percentage():
+    """Verify /tip calculates fee correctly for larger amounts."""
+    bot = MagicMock()
+    betting_service = MagicMock()
+    match_service = MagicMock()
+    player_service = MagicMock()
+    tip_repository = MagicMock()
+
+    # Both players are registered
+    sender = MagicMock(name="Sender")
+    recipient = MagicMock(name="Recipient")
+    player_service.get_player.side_effect = lambda discord_id: (
+        sender if discord_id == 132 else recipient if discord_id == 462 else None
+    )
+    player_service.get_balance.return_value = 300  # Sender has 300 coins
+
+    # Mock the atomic tip method
+    player_service.player_repo.tip_atomic = MagicMock(return_value={
+        "amount": 150,
+        "fee": 2,
+        "from_new_balance": 148,
+        "to_new_balance": 150,
+    })
+
+    guild = MagicMock()
+    guild.id = 793
+
+    interaction = MagicMock()
+    interaction.guild = guild
+    interaction.user.id = 132
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock()
+
+    recipient_member = MagicMock()
+    recipient_member.id = 462
+    recipient_member.mention = "<@462>"
+
+    commands = BettingCommands(
+        bot, betting_service, match_service, player_service, tip_repository=tip_repository
+    )
+    # Tip 150 coins - 1% = 1.5, ceil = 2
+    await commands.tip.callback(commands, interaction, player=recipient_member, amount=150)
+
+    # Should call atomic tip with fee=2 (ceil(150 * 0.01))
+    player_service.player_repo.tip_atomic.assert_called_once_with(
+        from_discord_id=132,
+        to_discord_id=462,
+        amount=150,
+        fee=2,
+    )
+
+    # Should log with fee=2
+    tip_repository.log_tip.assert_called_once()
+    call_kwargs = tip_repository.log_tip.call_args.kwargs
+    assert call_kwargs["fee"] == 2
+
+
+@pytest.mark.asyncio
+async def test_tip_fee_goes_to_nonprofit():
+    """Verify /tip sends fee to nonprofit fund."""
+    bot = MagicMock()
+    betting_service = MagicMock()
+    match_service = MagicMock()
+    player_service = MagicMock()
+    tip_repository = MagicMock()
+    loan_service = MagicMock()
+
+    # Both players are registered
+    sender = MagicMock(name="Sender")
+    recipient = MagicMock(name="Recipient")
+    player_service.get_player.side_effect = lambda discord_id: (
+        sender if discord_id == 133 else recipient if discord_id == 463 else None
+    )
+    player_service.get_balance.return_value = 200  # Sender has 200 coins
+
+    # No outstanding loan
+    loan_state = MagicMock()
+    loan_state.has_outstanding_loan = False
+    loan_service.get_state.return_value = loan_state
+
+    # Mock the atomic tip method
+    player_service.player_repo.tip_atomic = MagicMock(return_value={
+        "amount": 100,
+        "fee": 1,
+        "from_new_balance": 99,
+        "to_new_balance": 100,
+    })
+
+    guild = MagicMock()
+    guild.id = 794
+
+    interaction = MagicMock()
+    interaction.guild = guild
+    interaction.user.id = 133
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock()
+
+    recipient_member = MagicMock()
+    recipient_member.id = 463
+    recipient_member.mention = "<@463>"
+
+    commands = BettingCommands(
+        bot, betting_service, match_service, player_service,
+        tip_repository=tip_repository, loan_service=loan_service
+    )
+    # Tip 100 coins - 1% = 1 fee
+    await commands.tip.callback(commands, interaction, player=recipient_member, amount=100)
+
+    # Verify atomic transfer
+    player_service.player_repo.tip_atomic.assert_called_once_with(
+        from_discord_id=133,
+        to_discord_id=463,
+        amount=100,
+        fee=1,
+    )
+
+    # Verify fee goes to nonprofit fund
+    loan_service.add_to_nonprofit_fund.assert_called_once_with(794, 1)
+
+
+@pytest.mark.asyncio
+async def test_tip_transaction_logged():
+    """Verify /tip logs the transaction to tip_repository."""
+    bot = MagicMock()
+    betting_service = MagicMock()
+    match_service = MagicMock()
+    player_service = MagicMock()
+    tip_repository = MagicMock()
+
+    # Both players are registered
+    sender = MagicMock(name="Sender")
+    recipient = MagicMock(name="Recipient")
+    player_service.get_player.side_effect = lambda discord_id: (
+        sender if discord_id == 134 else recipient if discord_id == 464 else None
+    )
+    player_service.get_balance.return_value = 500  # Sender has 500 coins
+
+    # Mock the atomic tip method
+    player_service.player_repo.tip_atomic = MagicMock(return_value={
+        "amount": 250,
+        "fee": 3,
+        "from_new_balance": 247,
+        "to_new_balance": 250,
+    })
+
+    guild = MagicMock()
+    guild.id = 795
+
+    interaction = MagicMock()
+    interaction.guild = guild
+    interaction.user.id = 134
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock()
+
+    recipient_member = MagicMock()
+    recipient_member.id = 464
+    recipient_member.mention = "<@464>"
+
+    commands = BettingCommands(
+        bot, betting_service, match_service, player_service, tip_repository=tip_repository
+    )
+    await commands.tip.callback(commands, interaction, player=recipient_member, amount=250)
+
+    # Should call atomic tip
+    player_service.player_repo.tip_atomic.assert_called_once_with(
+        from_discord_id=134,
+        to_discord_id=464,
+        amount=250,
+        fee=3,
+    )
+
+    # Should log transaction with correct values
+    # 250 * 0.01 = 2.5, ceil = 3
+    tip_repository.log_tip.assert_called_once_with(
+        sender_id=134,
+        recipient_id=464,
+        amount=250,
+        fee=3,
+        guild_id=795,
+    )
+
+
+@pytest.mark.asyncio
+async def test_tip_unexpected_error_handling():
+    """Verify /tip handles unexpected errors gracefully."""
+    bot = MagicMock()
+    betting_service = MagicMock()
+    match_service = MagicMock()
+    player_service = MagicMock()
+    tip_repository = MagicMock()
+
+    # Both players are registered
+    sender = MagicMock(name="Sender")
+    recipient = MagicMock(name="Recipient")
+    player_service.get_player.side_effect = lambda discord_id: (
+        sender if discord_id == 137 else recipient if discord_id == 467 else None
+    )
+    player_service.get_balance.return_value = 100  # Sender has 100 coins
+
+    # Mock tip_atomic to raise an unexpected exception (not ValueError)
+    player_service.player_repo.tip_atomic = MagicMock(
+        side_effect=RuntimeError("Database connection lost")
+    )
+
+    guild = MagicMock()
+    guild.id = 798
+
+    interaction = MagicMock()
+    interaction.guild = guild
+    interaction.user.id = 137
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock()
+
+    recipient_member = MagicMock()
+    recipient_member.id = 467
+    recipient_member.mention = "<@467>"
+
+    commands = BettingCommands(
+        bot, betting_service, match_service, player_service, tip_repository=tip_repository
+    )
+    await commands.tip.callback(commands, interaction, player=recipient_member, amount=50)
+
+    # Should NOT log the transaction (transfer failed)
+    tip_repository.log_tip.assert_not_called()
+
+    # Should send generic error message
+    interaction.followup.send.assert_awaited_once()
+    call_kwargs = interaction.followup.send.call_args.kwargs
+    message = call_kwargs.get("content", interaction.followup.send.call_args.args[0])
+    assert "failed" in message.lower()
+    assert "try again" in message.lower()
+    assert call_kwargs.get("ephemeral") is True
+
+
+@pytest.mark.asyncio
+async def test_tip_value_error_handling():
+    """Verify /tip handles ValueError from tip_atomic (insufficient funds, not found)."""
+    bot = MagicMock()
+    betting_service = MagicMock()
+    match_service = MagicMock()
+    player_service = MagicMock()
+    tip_repository = MagicMock()
+
+    # Both players are registered
+    sender = MagicMock(name="Sender")
+    recipient = MagicMock(name="Recipient")
+    player_service.get_player.side_effect = lambda discord_id: (
+        sender if discord_id == 138 else recipient if discord_id == 468 else None
+    )
+    player_service.get_balance.return_value = 100  # Sender has 100 coins
+
+    # Mock tip_atomic to raise ValueError (insufficient funds detected atomically)
+    player_service.player_repo.tip_atomic = MagicMock(
+        side_effect=ValueError("Insufficient balance. You need 51 (tip: 50, fee: 1). You have 49.")
+    )
+
+    guild = MagicMock()
+    guild.id = 799
+
+    interaction = MagicMock()
+    interaction.guild = guild
+    interaction.user.id = 138
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock()
+
+    recipient_member = MagicMock()
+    recipient_member.id = 468
+    recipient_member.mention = "<@468>"
+
+    commands = BettingCommands(
+        bot, betting_service, match_service, player_service, tip_repository=tip_repository
+    )
+    await commands.tip.callback(commands, interaction, player=recipient_member, amount=50)
+
+    # Should NOT log the transaction (transfer failed)
+    tip_repository.log_tip.assert_not_called()
+
+    # Should send the ValueError message directly
+    interaction.followup.send.assert_awaited_once()
+    call_kwargs = interaction.followup.send.call_args.kwargs
+    message = call_kwargs.get("content", interaction.followup.send.call_args.args[0])
+    assert "insufficient" in message.lower()
+    assert call_kwargs.get("ephemeral") is True
+
+
+@pytest.mark.asyncio
+async def test_tip_no_loan_service_still_works():
+    """Verify /tip works when loan_service is not configured."""
+    bot = MagicMock()
+    betting_service = MagicMock()
+    match_service = MagicMock()
+    player_service = MagicMock()
+    tip_repository = MagicMock()
+
+    # Both players are registered
+    sender = MagicMock(name="Sender")
+    recipient = MagicMock(name="Recipient")
+    player_service.get_player.side_effect = lambda discord_id: (
+        sender if discord_id == 135 else recipient if discord_id == 465 else None
+    )
+    player_service.get_balance.return_value = 100  # Sender has 100 coins
+
+    # Mock the atomic tip method
+    player_service.player_repo.tip_atomic = MagicMock(return_value={
+        "amount": 50,
+        "fee": 1,
+        "from_new_balance": 49,
+        "to_new_balance": 50,
+    })
+
+    guild = MagicMock()
+    guild.id = 796
+
+    interaction = MagicMock()
+    interaction.guild = guild
+    interaction.user.id = 135
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock()
+
+    recipient_member = MagicMock()
+    recipient_member.id = 465
+    recipient_member.mention = "<@465>"
+
+    # No loan_service
+    commands = BettingCommands(
+        bot, betting_service, match_service, player_service,
+        loan_service=None, tip_repository=tip_repository
+    )
+    await commands.tip.callback(commands, interaction, player=recipient_member, amount=50)
+
+    # Should still work and call atomic tip
+    player_service.player_repo.tip_atomic.assert_called_once_with(
+        from_discord_id=135,
+        to_discord_id=465,
+        amount=50,
+        fee=1,
+    )
+    interaction.followup.send.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_tip_insufficient_balance_boundary():
+    """Verify /tip rejects when balance is exactly equal to tip (but not fee)."""
+    bot = MagicMock()
+    betting_service = MagicMock()
+    match_service = MagicMock()
+    player_service = MagicMock()
+
+    # Both players are registered
+    sender = MagicMock(name="Sender")
+    recipient = MagicMock(name="Recipient")
+    player_service.get_player.side_effect = lambda discord_id: (
+        sender if discord_id == 136 else recipient if discord_id == 466 else None
+    )
+    # Sender has exactly 50 coins, but needs 51 (50 + 1 fee)
+    player_service.get_balance.return_value = 50
+
+    player_service.player_repo.add_balance_many = MagicMock()
+
+    guild = MagicMock()
+    guild.id = 797
+
+    interaction = MagicMock()
+    interaction.guild = guild
+    interaction.user.id = 136
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock()
+
+    recipient_member = MagicMock()
+    recipient_member.id = 466
+
+    commands = BettingCommands(bot, betting_service, match_service, player_service)
+    await commands.tip.callback(commands, interaction, player=recipient_member, amount=50)
+
+    # Should NOT transfer (50 < 51)
+    player_service.player_repo.add_balance_many.assert_not_called()
+
+    # Should send error about insufficient balance
+    interaction.followup.send.assert_awaited_once()
+    call_kwargs = interaction.followup.send.call_args.kwargs
+    message = call_kwargs.get("content", interaction.followup.send.call_args.args[0])
+    assert "insufficient" in message.lower()
     assert call_kwargs.get("ephemeral") is True
