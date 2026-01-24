@@ -532,7 +532,7 @@ def test_full_match_workflow(test_db, mock_lobby_manager):
 | `LOBBY_READY_THRESHOLD` | 10 | Min players to shuffle |
 | `LOBBY_MAX_PLAYERS` | 14 | Max players in lobby |
 | `OFF_ROLE_MULTIPLIER` | 0.95 | Rating effectiveness off-role |
-| `OFF_ROLE_FLAT_PENALTY` | 100.0 | Penalty per off-role player |
+| `OFF_ROLE_FLAT_PENALTY` | 350.0 | Penalty per off-role player |
 | `LEVERAGE_TIERS` | 2,3,5 | Available bet leverage options |
 | `MAX_DEBT` | 500 | Maximum negative balance |
 | `GARNISHMENT_PERCENTAGE` | 1.0 | Portion of winnings to debt (100%) |
