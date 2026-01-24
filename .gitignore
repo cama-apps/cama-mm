@@ -184,3 +184,4 @@ scripts/
 docs/stats.md
 docs/
 !docs/server-setup.md
+.beads/
