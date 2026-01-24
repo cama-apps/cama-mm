@@ -997,6 +997,81 @@ class MatchRepository(BaseRepository, IMatchRepository):
             cursor.execute("SELECT COUNT(*) as count FROM matches WHERE enrichment_source = 'auto'")
             return cursor.fetchone()["count"]
 
+    def get_enriched_count(self) -> int:
+        """Get count of all enriched matches (any source)."""
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) as count FROM matches WHERE valve_match_id IS NOT NULL")
+            return cursor.fetchone()["count"]
+
+    def wipe_all_enrichments(self) -> int:
+        """
+        Clear ALL enrichments (both auto and manual).
+
+        Returns count of matches wiped.
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+
+            # Get match IDs that are enriched
+            cursor.execute("SELECT match_id FROM matches WHERE valve_match_id IS NOT NULL")
+            match_ids = [row["match_id"] for row in cursor.fetchall()]
+
+            if not match_ids:
+                return 0
+
+            # Clear match-level enrichment
+            cursor.execute(
+                """
+                UPDATE matches
+                SET valve_match_id = NULL,
+                    duration_seconds = NULL,
+                    radiant_score = NULL,
+                    dire_score = NULL,
+                    game_mode = NULL,
+                    enrichment_data = NULL,
+                    enrichment_source = NULL,
+                    enrichment_confidence = NULL
+                WHERE valve_match_id IS NOT NULL
+                """
+            )
+
+            # Clear participant stats for those matches (including fantasy fields)
+            placeholders = ",".join("?" * len(match_ids))
+            cursor.execute(
+                f"""
+                UPDATE match_participants
+                SET hero_id = NULL,
+                    kills = NULL,
+                    deaths = NULL,
+                    assists = NULL,
+                    gpm = NULL,
+                    xpm = NULL,
+                    hero_damage = NULL,
+                    tower_damage = NULL,
+                    last_hits = NULL,
+                    denies = NULL,
+                    net_worth = NULL,
+                    hero_healing = NULL,
+                    lane_role = NULL,
+                    lane_efficiency = NULL,
+                    towers_killed = NULL,
+                    roshans_killed = NULL,
+                    teamfight_participation = NULL,
+                    obs_placed = NULL,
+                    sen_placed = NULL,
+                    camps_stacked = NULL,
+                    rune_pickups = NULL,
+                    firstblood_claimed = NULL,
+                    stuns = NULL,
+                    fantasy_points = NULL
+                WHERE match_id IN ({placeholders})
+                """,
+                match_ids,
+            )
+
+            return len(match_ids)
+
     def get_biggest_upsets(self, limit: int = 5) -> list[dict]:
         """Get matches where the underdog won, sorted by upset magnitude."""
         with self.connection() as conn:

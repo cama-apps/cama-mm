@@ -768,10 +768,10 @@ class EnrichmentCommands(commands.Cog):
 
     @app_commands.command(
         name="wipediscovered",
-        description="[Admin] Wipe all auto-discovered enrichments",
+        description="[Admin] Wipe all match enrichments",
     )
     async def wipediscovered(self, interaction: discord.Interaction):
-        """Clear all enrichments that were auto-discovered, keeping manual ones."""
+        """Clear all match enrichments so they can be re-discovered."""
         if not has_admin_permission(interaction):
             await safe_followup(
                 interaction,
@@ -785,23 +785,21 @@ class EnrichmentCommands(commands.Cog):
         if not await safe_defer(interaction, ephemeral=True):
             return
 
-        # Get count first
-        auto_count = self.match_repo.get_auto_discovered_count()
+        enriched_count = self.match_repo.get_enriched_count()
 
-        if auto_count == 0:
+        if enriched_count == 0:
             await safe_followup(
                 interaction,
-                content="No auto-discovered enrichments to wipe.",
+                content="No enrichments to wipe.",
                 ephemeral=True,
             )
             return
 
-        # Wipe them
-        wiped = self.match_repo.wipe_auto_discovered_enrichments()
+        wiped = self.match_repo.wipe_all_enrichments()
 
         await safe_followup(
             interaction,
-            content=f"Wiped {wiped} auto-discovered enrichments. Manual enrichments preserved.",
+            content=f"Wiped {wiped} enrichments. Run `/autodiscover` to re-enrich.",
             ephemeral=True,
         )
 
