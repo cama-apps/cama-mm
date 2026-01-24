@@ -399,6 +399,8 @@ payout INTEGER
 |---------|---------|----------------|
 | `/help` | List all available commands | - |
 | `/lobby` | Create/view lobby | - |
+| `/join` | Join the matchmaking lobby | - |
+| `/leave` | Leave the matchmaking lobby | - |
 | `/kick` | Remove a user from lobby | `user` |
 | `/resetlobby` | Reset lobby state | Admin only |
 | `/shuffle` | Create balanced teams | `betting_mode`: house/pool |
