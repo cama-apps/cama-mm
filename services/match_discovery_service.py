@@ -2,26 +2,26 @@
 Service for auto-discovering Dota 2 match IDs for internal matches.
 
 Uses OpenDota API to find matches by correlating:
-- Match timestamps (within ±3 hour window)
+- Match timestamps (within configurable time window)
 - Player overlap (steam_ids appearing in the same match)
+- Winning team validation
+- Player side validation
 """
 
 import logging
 import time
 from datetime import datetime
 
+from config import ENRICHMENT_DISCOVERY_TIME_WINDOW, ENRICHMENT_MIN_PLAYER_MATCH
 from opendota_integration import OpenDotaAPI
 
 logger = logging.getLogger("cama_bot.services.match_discovery")
 
-# Time window for matching (3 hours in seconds)
-TIME_WINDOW_SECONDS = 3 * 60 * 60
-
 # Minimum players with steam_id to attempt discovery
 MIN_PLAYERS_FOR_DISCOVERY = 5
 
-# Minimum player overlap for auto-approval (80% = 8 out of 10)
-MIN_CONFIDENCE_FOR_AUTO = 0.8
+# For discovery phase, we require all 10 players by default (from config)
+# But we can still try discovery with fewer if we have at least MIN_PLAYERS_FOR_DISCOVERY
 
 
 class MatchDiscoveryService:
@@ -30,10 +30,17 @@ class MatchDiscoveryService:
     player match histories from OpenDota.
     """
 
-    def __init__(self, match_repo, player_repo, opendota_api: OpenDotaAPI | None = None):
+    def __init__(
+        self,
+        match_repo,
+        player_repo,
+        opendota_api: OpenDotaAPI | None = None,
+        match_service=None,
+    ):
         self.match_repo = match_repo
         self.player_repo = player_repo
         self.opendota_api = opendota_api or OpenDotaAPI()
+        self.match_service = match_service
 
     def discover_all_matches(self, dry_run: bool = False) -> dict:
         """
@@ -59,6 +66,7 @@ class MatchDiscoveryService:
             "discovered": 0,
             "skipped_low_confidence": 0,
             "skipped_no_steam_ids": 0,
+            "skipped_validation_failed": 0,
             "errors": 0,
             "details": [],
         }
@@ -75,6 +83,8 @@ class MatchDiscoveryService:
                     results["skipped_low_confidence"] += 1
                 elif result["status"] == "no_steam_ids":
                     results["skipped_no_steam_ids"] += 1
+                elif result["status"] == "validation_failed":
+                    results["skipped_validation_failed"] += 1
 
             except Exception as e:
                 logger.error(f"Error discovering match {match_id}: {e}")
@@ -93,6 +103,7 @@ class MatchDiscoveryService:
         logger.info(
             f"Discovery complete: {results['discovered']} discovered, "
             f"{results['skipped_low_confidence']} low confidence, "
+            f"{results['skipped_validation_failed']} validation failed, "
             f"{results['skipped_no_steam_ids']} no steam_ids, "
             f"{results['errors']} errors"
         )
@@ -136,6 +147,7 @@ class MatchDiscoveryService:
 
         # Query OpenDota for each player's recent matches
         candidate_matches = {}
+        time_window = ENRICHMENT_DISCOVERY_TIME_WINDOW
 
         for steam_id in steam_ids:
             try:
@@ -145,7 +157,7 @@ class MatchDiscoveryService:
 
                 for m in recent_matches:
                     start_time = m.get("start_time", 0)
-                    if abs(start_time - match_time) <= TIME_WINDOW_SECONDS:
+                    if abs(start_time - match_time) <= time_window:
                         valve_match_id = m.get("match_id")
                         if valve_match_id not in candidate_matches:
                             candidate_matches[valve_match_id] = set()
@@ -160,58 +172,78 @@ class MatchDiscoveryService:
         if not candidate_matches:
             return {"match_id": match_id, "status": "no_candidates"}
 
-        # Find best candidate
+        # Find best candidate based on player count
         best_match_id = None
-        best_confidence = 0.0
         best_player_count = 0
 
         for valve_match_id, players in candidate_matches.items():
             player_count = len(players)
-            confidence = player_count / len(steam_ids)
-
             if player_count > best_player_count:
                 best_match_id = valve_match_id
-                best_confidence = confidence
                 best_player_count = player_count
 
-        if best_match_id and best_confidence >= MIN_CONFIDENCE_FOR_AUTO:
+        # Use strict validation: require all players (configurable via ENRICHMENT_MIN_PLAYER_MATCH)
+        min_required = ENRICHMENT_MIN_PLAYER_MATCH
+        confidence = best_player_count / len(steam_ids) if steam_ids else 0.0
+
+        if best_match_id and best_player_count >= min_required:
             logger.info(
                 f"Match {match_id}: Found valve_match_id={best_match_id} "
-                f"with confidence {best_confidence:.1%} ({best_player_count}/{len(steam_ids)} players)"
+                f"with {best_player_count}/{len(steam_ids)} players"
             )
 
             if not dry_run:
                 # Enrich the match with source='auto'
+                # The enrichment service will perform additional validation
+                # (winning team, player sides) before committing
                 from services.match_enrichment_service import MatchEnrichmentService
 
                 enrichment_service = MatchEnrichmentService(
-                    self.match_repo, self.player_repo, self.opendota_api
+                    self.match_repo,
+                    self.player_repo,
+                    self.opendota_api,
+                    match_service=self.match_service,
                 )
-                enrichment_service.enrich_match(
+                result = enrichment_service.enrich_match(
                     match_id,
                     best_match_id,
                     source="auto",
-                    confidence=best_confidence,
+                    confidence=confidence,
                 )
+
+                # If validation failed in enrichment service, report as low_confidence
+                if not result.get("success"):
+                    logger.warning(
+                        f"Match {match_id}: Enrichment validation failed: {result.get('error')}"
+                    )
+                    return {
+                        "match_id": match_id,
+                        "status": "validation_failed",
+                        "best_valve_match_id": best_match_id,
+                        "confidence": confidence,
+                        "player_count": best_player_count,
+                        "total_players": len(steam_ids),
+                        "validation_error": result.get("validation_error", result.get("error")),
+                    }
 
             return {
                 "match_id": match_id,
                 "status": "discovered",
                 "valve_match_id": best_match_id,
-                "confidence": best_confidence,
+                "confidence": confidence,
                 "player_count": best_player_count,
                 "total_players": len(steam_ids),
             }
         else:
             logger.debug(
-                f"Match {match_id}: Best candidate {best_match_id} has low confidence "
-                f"{best_confidence:.1%} ({best_player_count}/{len(steam_ids)} players)"
+                f"Match {match_id}: Best candidate {best_match_id} has only "
+                f"{best_player_count}/{len(steam_ids)} players (need {min_required})"
             )
             return {
                 "match_id": match_id,
                 "status": "low_confidence",
                 "best_valve_match_id": best_match_id,
-                "confidence": best_confidence,
+                "confidence": confidence,
                 "player_count": best_player_count,
                 "total_players": len(steam_ids),
             }

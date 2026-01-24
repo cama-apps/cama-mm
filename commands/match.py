@@ -11,7 +11,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from config import JOPACOIN_MIN_BET
+from config import ENRICHMENT_RETRY_DELAYS, JOPACOIN_MIN_BET
 from services.flavor_text_service import FlavorEvent
 from services.lobby_service import LobbyService
 from services.match_discovery_service import MatchDiscoveryService
@@ -1003,10 +1003,11 @@ class MatchCommands(commands.Cog):
         channel: discord.abc.Messageable | None,
     ) -> None:
         """
-        Trigger auto-discovery for a match in the background.
+        Trigger auto-discovery for a match in the background with exponential backoff.
 
         Checks if auto_enrich is enabled, then attempts to find and enrich
         the Dota 2 match ID using player match histories from OpenDota.
+        Uses exponential backoff retry logic: attempts at 1s, 5s, 20s, 60s, 180s.
         """
         try:
             # Check if auto_enrich is enabled for this guild
@@ -1021,64 +1022,113 @@ class MatchCommands(commands.Cog):
                 logger.warning("Cannot auto-discover: missing match_repo or player_repo")
                 return
 
-            # Small delay to let OpenDota parse the match (matches take time to appear)
-            await asyncio.sleep(60)  # Wait 1 minute before trying
+            # Create discovery service once
+            discovery_service = MatchDiscoveryService(
+                self.match_repo, self.player_repo, match_service=self.match_service
+            )
 
-            # Run discovery in executor to avoid blocking
-            discovery_service = MatchDiscoveryService(self.match_repo, self.player_repo)
+            # Exponential backoff retry loop
+            delays = ENRICHMENT_RETRY_DELAYS  # [1, 5, 20, 60, 180]
+            total_attempts = len(delays)
 
-            loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(None, discovery_service.discover_match, match_id)
+            for attempt, delay in enumerate(delays, 1):
+                await asyncio.sleep(delay)
 
-            if result.get("status") == "discovered":
-                valve_match_id = result.get("valve_match_id")
-                confidence = result.get("confidence", 0)
-                logger.info(
-                    f"Auto-discovered match {match_id} -> valve_match_id={valve_match_id} "
-                    f"(confidence: {confidence:.0%})"
+                # Run discovery in executor to avoid blocking
+                loop = asyncio.get_event_loop()
+                result = await loop.run_in_executor(
+                    None, discovery_service.discover_match, match_id
                 )
-                if channel:
-                    try:
-                        # Fetch enriched match data for embed
-                        match_data = self.match_repo.get_match(match_id)
-                        participants = self.match_repo.get_match_participants(match_id)
 
-                        if match_data and participants:
-                            radiant = [p for p in participants if p.get("side") == "radiant"]
-                            dire = [p for p in participants if p.get("side") == "dire"]
+                status = result.get("status")
 
-                            embed = create_enriched_match_embed(
-                                match_id=match_id,
-                                valve_match_id=valve_match_id,
-                                duration_seconds=match_data.get("duration_seconds"),
-                                radiant_score=match_data.get("radiant_score"),
-                                dire_score=match_data.get("dire_score"),
-                                winning_team=match_data.get("winning_team", 1),
-                                radiant_participants=radiant,
-                                dire_participants=dire,
-                                bankruptcy_repo=self.bankruptcy_repo,
-                                lobby_type=match_data.get("lobby_type", "shuffle"),
-                            )
-                            await channel.send(
-                                f"📊 Match #{match_id} auto-enriched ({confidence:.0%} confidence)",
-                                embed=embed,
-                            )
-                        else:
-                            # Fallback to simple message
-                            await channel.send(
-                                f"📊 Match #{match_id} auto-enriched! "
-                                f"(Dota Match ID: {valve_match_id}, {confidence:.0%} confidence)"
-                            )
-                    except Exception:
-                        pass  # Ignore if we can't send message
-            else:
+                if status == "discovered":
+                    # Success - send enriched embed
+                    await self._send_enrichment_result(channel, match_id, result)
+                    return
+
+                if status in ("low_confidence", "no_candidates"):
+                    # OpenDota hasn't parsed yet - retry with next delay
+                    logger.info(
+                        f"Match {match_id}: OpenDota not ready (attempt {attempt}/{total_attempts}), "
+                        f"status={status}, confidence={result.get('confidence', 0):.0%}"
+                    )
+                    continue
+
+                if status == "validation_failed":
+                    # Validation failed - likely wrong match, don't retry
+                    logger.warning(
+                        f"Match {match_id}: Validation failed: {result.get('validation_error')}"
+                    )
+                    return
+
+                # Other errors (no_steam_ids, not_found, etc.) - don't retry
                 logger.debug(
-                    f"Auto-discovery for match {match_id}: {result.get('status')} "
-                    f"(best confidence: {result.get('confidence', 0):.0%})"
+                    f"Match {match_id}: Discovery status={status}, not retrying"
                 )
+                return
+
+            # Exhausted all retries
+            logger.warning(
+                f"Match {match_id}: Gave up after {total_attempts} attempts "
+                f"(total wait: {sum(delays)}s)"
+            )
 
         except Exception as exc:
             logger.error(f"Error in auto-discovery for match {match_id}: {exc}", exc_info=True)
+
+    async def _send_enrichment_result(
+        self,
+        channel: discord.abc.Messageable | None,
+        match_id: int,
+        result: dict,
+    ) -> None:
+        """Send enriched match embed to channel after successful discovery."""
+        valve_match_id = result.get("valve_match_id")
+        confidence = result.get("confidence", 0)
+
+        logger.info(
+            f"Auto-discovered match {match_id} -> valve_match_id={valve_match_id} "
+            f"(confidence: {confidence:.0%})"
+        )
+
+        if not channel:
+            return
+
+        try:
+            # Fetch enriched match data for embed
+            match_data = self.match_repo.get_match(match_id)
+            participants = self.match_repo.get_match_participants(match_id)
+
+            if match_data and participants:
+                radiant = [p for p in participants if p.get("side") == "radiant"]
+                dire = [p for p in participants if p.get("side") == "dire"]
+
+                embed = create_enriched_match_embed(
+                    match_id=match_id,
+                    valve_match_id=valve_match_id,
+                    duration_seconds=match_data.get("duration_seconds"),
+                    radiant_score=match_data.get("radiant_score"),
+                    dire_score=match_data.get("dire_score"),
+                    winning_team=match_data.get("winning_team", 1),
+                    radiant_participants=radiant,
+                    dire_participants=dire,
+                    bankruptcy_repo=self.bankruptcy_repo,
+                    lobby_type=match_data.get("lobby_type", "shuffle"),
+                )
+
+                await channel.send(
+                    f"📊 Match #{match_id} auto-enriched ({confidence:.0%} confidence)",
+                    embed=embed,
+                )
+            else:
+                # Fallback to simple message
+                await channel.send(
+                    f"📊 Match #{match_id} auto-enriched! "
+                    f"(Dota Match ID: {valve_match_id}, {confidence:.0%} confidence)"
+                )
+        except Exception as exc:
+            logger.warning(f"Failed to send enrichment result: {exc}")
 
     async def _finalize_abort(
         self, interaction: discord.Interaction, guild_id: int | None, admin_override: bool

@@ -108,8 +108,13 @@ class MatchRepository(BaseRepository, IMatchRepository):
         expected_team_win_prob: float | None = None,
         team_number: int | None = None,
         won: bool | None = None,
+        os_mu_before: float | None = None,
+        os_mu_after: float | None = None,
+        os_sigma_before: float | None = None,
+        os_sigma_after: float | None = None,
+        fantasy_weight: float | None = None,
     ) -> None:
-        """Record a rating change in history."""
+        """Record a rating change in history (Glicko-2 and optionally OpenSkill)."""
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -125,9 +130,14 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     expected_team_win_prob,
                     team_number,
                     won,
-                    match_id
+                    match_id,
+                    os_mu_before,
+                    os_mu_after,
+                    os_sigma_before,
+                    os_sigma_after,
+                    fantasy_weight
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
                 (
                     discord_id,
@@ -141,6 +151,11 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     team_number,
                     won,
                     match_id,
+                    os_mu_before,
+                    os_mu_after,
+                    os_sigma_before,
+                    os_sigma_after,
+                    fantasy_weight,
                 ),
             )
 
@@ -273,7 +288,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
             ]
 
     def get_player_rating_history_detailed(self, discord_id: int, limit: int = 50) -> list[dict]:
-        """Get detailed rating history for a player including prediction data."""
+        """Get detailed rating history for a player including prediction and OpenSkill data."""
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -302,6 +317,10 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     "match_id": row["match_id"],
                     "timestamp": row["timestamp"],
                     "lobby_type": row["lobby_type"] if "lobby_type" in row.keys() else "shuffle",
+                    "os_mu_before": row["os_mu_before"] if "os_mu_before" in row.keys() else None,
+                    "os_mu_after": row["os_mu_after"] if "os_mu_after" in row.keys() else None,
+                    "os_sigma_before": row["os_sigma_before"] if "os_sigma_before" in row.keys() else None,
+                    "os_sigma_after": row["os_sigma_after"] if "os_sigma_after" in row.keys() else None,
                 }
                 for row in rows
             ]
@@ -333,6 +352,40 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 }
                 for row in rows
             ]
+
+    def get_os_ratings_for_match(self, match_id: int) -> dict:
+        """
+        Get OpenSkill ratings (before match) for all players in a match, grouped by team.
+
+        Returns:
+            Dict with 'team1' and 'team2' keys, each containing list of (os_mu, os_sigma) tuples.
+            Returns empty lists if no OpenSkill data available.
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT discord_id, team_number, os_mu_before, os_sigma_before
+                FROM rating_history
+                WHERE match_id = ?
+                  AND os_mu_before IS NOT NULL
+                  AND os_sigma_before IS NOT NULL
+            """,
+                (match_id,),
+            )
+            rows = cursor.fetchall()
+
+            team1_ratings: list[tuple[float, float]] = []
+            team2_ratings: list[tuple[float, float]] = []
+
+            for row in rows:
+                rating_tuple = (row["os_mu_before"], row["os_sigma_before"])
+                if row["team_number"] == 1:
+                    team1_ratings.append(rating_tuple)
+                elif row["team_number"] == 2:
+                    team2_ratings.append(rating_tuple)
+
+            return {"team1": team1_ratings, "team2": team2_ratings}
 
     def get_recent_rating_history(self, limit: int = 200) -> list[dict]:
         """Get recent rating history entries for all players."""
@@ -586,6 +639,17 @@ class MatchRepository(BaseRepository, IMatchRepository):
         hero_healing: int = 0,
         lane_role: int | None = None,
         lane_efficiency: int | None = None,
+        # Fantasy fields
+        towers_killed: int | None = None,
+        roshans_killed: int | None = None,
+        teamfight_participation: float | None = None,
+        obs_placed: int | None = None,
+        sen_placed: int | None = None,
+        camps_stacked: int | None = None,
+        rune_pickups: int | None = None,
+        firstblood_claimed: int | None = None,
+        stuns: float | None = None,
+        fantasy_points: float | None = None,
     ) -> None:
         """Update a match participant with enriched stats from OpenDota API."""
         with self.connection() as conn:
@@ -606,7 +670,17 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     net_worth = ?,
                     hero_healing = ?,
                     lane_role = ?,
-                    lane_efficiency = ?
+                    lane_efficiency = ?,
+                    towers_killed = ?,
+                    roshans_killed = ?,
+                    teamfight_participation = ?,
+                    obs_placed = ?,
+                    sen_placed = ?,
+                    camps_stacked = ?,
+                    rune_pickups = ?,
+                    firstblood_claimed = ?,
+                    stuns = ?,
+                    fantasy_points = ?
                 WHERE match_id = ? AND discord_id = ?
                 """,
                 (
@@ -624,10 +698,104 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     hero_healing,
                     lane_role,
                     lane_efficiency,
+                    towers_killed,
+                    roshans_killed,
+                    teamfight_participation,
+                    obs_placed,
+                    sen_placed,
+                    camps_stacked,
+                    rune_pickups,
+                    firstblood_claimed,
+                    stuns,
+                    fantasy_points,
                     match_id,
                     discord_id,
                 ),
             )
+
+    def update_participant_stats_bulk(self, match_id: int, updates: list[dict]) -> int:
+        """
+        Update all participants in a single transaction.
+
+        Args:
+            match_id: The match ID
+            updates: List of dicts with keys:
+                - discord_id (required)
+                - hero_id, kills, deaths, assists, gpm, xpm, hero_damage, tower_damage,
+                  last_hits, denies, net_worth, hero_healing, lane_role, lane_efficiency,
+                  towers_killed, roshans_killed, teamfight_participation, obs_placed,
+                  sen_placed, camps_stacked, rune_pickups, firstblood_claimed, stuns,
+                  fantasy_points
+
+        Returns:
+            Number of rows updated
+        """
+        if not updates:
+            return 0
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.executemany(
+                """
+                UPDATE match_participants
+                SET hero_id = ?,
+                    kills = ?,
+                    deaths = ?,
+                    assists = ?,
+                    gpm = ?,
+                    xpm = ?,
+                    hero_damage = ?,
+                    tower_damage = ?,
+                    last_hits = ?,
+                    denies = ?,
+                    net_worth = ?,
+                    hero_healing = ?,
+                    lane_role = ?,
+                    lane_efficiency = ?,
+                    towers_killed = ?,
+                    roshans_killed = ?,
+                    teamfight_participation = ?,
+                    obs_placed = ?,
+                    sen_placed = ?,
+                    camps_stacked = ?,
+                    rune_pickups = ?,
+                    firstblood_claimed = ?,
+                    stuns = ?,
+                    fantasy_points = ?
+                WHERE match_id = ? AND discord_id = ?
+                """,
+                [
+                    (
+                        u.get("hero_id"),
+                        u.get("kills"),
+                        u.get("deaths"),
+                        u.get("assists"),
+                        u.get("gpm"),
+                        u.get("xpm"),
+                        u.get("hero_damage"),
+                        u.get("tower_damage"),
+                        u.get("last_hits"),
+                        u.get("denies"),
+                        u.get("net_worth"),
+                        u.get("hero_healing"),
+                        u.get("lane_role"),
+                        u.get("lane_efficiency"),
+                        u.get("towers_killed"),
+                        u.get("roshans_killed"),
+                        u.get("teamfight_participation"),
+                        u.get("obs_placed"),
+                        u.get("sen_placed"),
+                        u.get("camps_stacked"),
+                        u.get("rune_pickups"),
+                        u.get("firstblood_claimed"),
+                        u.get("stuns"),
+                        u.get("fantasy_points"),
+                        match_id,
+                        u["discord_id"],
+                    )
+                    for u in updates
+                ],
+            )
+            return cursor.rowcount
 
     def get_match_participants(self, match_id: int) -> list[dict]:
         """Get all participants for a match with their stats."""
@@ -719,7 +887,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
             if cursor.rowcount == 0:
                 return False
 
-            # Clear participant-level stats
+            # Clear participant-level stats (including fantasy fields)
             cursor.execute(
                 """
                 UPDATE match_participants
@@ -733,7 +901,20 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     tower_damage = NULL,
                     last_hits = NULL,
                     denies = NULL,
-                    net_worth = NULL
+                    net_worth = NULL,
+                    hero_healing = NULL,
+                    lane_role = NULL,
+                    lane_efficiency = NULL,
+                    towers_killed = NULL,
+                    roshans_killed = NULL,
+                    teamfight_participation = NULL,
+                    obs_placed = NULL,
+                    sen_placed = NULL,
+                    camps_stacked = NULL,
+                    rune_pickups = NULL,
+                    firstblood_claimed = NULL,
+                    stuns = NULL,
+                    fantasy_points = NULL
                 WHERE match_id = ?
                 """,
                 (match_id,),
@@ -773,7 +954,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 """
             )
 
-            # Clear participant stats for those matches
+            # Clear participant stats for those matches (including fantasy fields)
             placeholders = ",".join("?" * len(match_ids))
             cursor.execute(
                 f"""
@@ -788,7 +969,20 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     tower_damage = NULL,
                     last_hits = NULL,
                     denies = NULL,
-                    net_worth = NULL
+                    net_worth = NULL,
+                    hero_healing = NULL,
+                    lane_role = NULL,
+                    lane_efficiency = NULL,
+                    towers_killed = NULL,
+                    roshans_killed = NULL,
+                    teamfight_participation = NULL,
+                    obs_placed = NULL,
+                    sen_placed = NULL,
+                    camps_stacked = NULL,
+                    rune_pickups = NULL,
+                    firstblood_claimed = NULL,
+                    stuns = NULL,
+                    fantasy_points = NULL
                 WHERE match_id IN ({placeholders})
                 """,
                 match_ids,
@@ -802,6 +996,81 @@ class MatchRepository(BaseRepository, IMatchRepository):
             cursor = conn.cursor()
             cursor.execute("SELECT COUNT(*) as count FROM matches WHERE enrichment_source = 'auto'")
             return cursor.fetchone()["count"]
+
+    def get_enriched_count(self) -> int:
+        """Get count of all enriched matches (any source)."""
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) as count FROM matches WHERE valve_match_id IS NOT NULL")
+            return cursor.fetchone()["count"]
+
+    def wipe_all_enrichments(self) -> int:
+        """
+        Clear ALL enrichments (both auto and manual).
+
+        Returns count of matches wiped.
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+
+            # Get match IDs that are enriched
+            cursor.execute("SELECT match_id FROM matches WHERE valve_match_id IS NOT NULL")
+            match_ids = [row["match_id"] for row in cursor.fetchall()]
+
+            if not match_ids:
+                return 0
+
+            # Clear match-level enrichment
+            cursor.execute(
+                """
+                UPDATE matches
+                SET valve_match_id = NULL,
+                    duration_seconds = NULL,
+                    radiant_score = NULL,
+                    dire_score = NULL,
+                    game_mode = NULL,
+                    enrichment_data = NULL,
+                    enrichment_source = NULL,
+                    enrichment_confidence = NULL
+                WHERE valve_match_id IS NOT NULL
+                """
+            )
+
+            # Clear participant stats for those matches (including fantasy fields)
+            placeholders = ",".join("?" * len(match_ids))
+            cursor.execute(
+                f"""
+                UPDATE match_participants
+                SET hero_id = NULL,
+                    kills = NULL,
+                    deaths = NULL,
+                    assists = NULL,
+                    gpm = NULL,
+                    xpm = NULL,
+                    hero_damage = NULL,
+                    tower_damage = NULL,
+                    last_hits = NULL,
+                    denies = NULL,
+                    net_worth = NULL,
+                    hero_healing = NULL,
+                    lane_role = NULL,
+                    lane_efficiency = NULL,
+                    towers_killed = NULL,
+                    roshans_killed = NULL,
+                    teamfight_participation = NULL,
+                    obs_placed = NULL,
+                    sen_placed = NULL,
+                    camps_stacked = NULL,
+                    rune_pickups = NULL,
+                    firstblood_claimed = NULL,
+                    stuns = NULL,
+                    fantasy_points = NULL
+                WHERE match_id IN ({placeholders})
+                """,
+                match_ids,
+            )
+
+            return len(match_ids)
 
     def get_biggest_upsets(self, limit: int = 5) -> list[dict]:
         """Get matches where the underdog won, sorted by upset magnitude."""
@@ -1028,3 +1297,280 @@ class MatchRepository(BaseRepository, IMatchRepository):
             )
             rows = cursor.fetchall()
             return [{"hero_id": row["hero_id"], "games": row["games"]} for row in rows]
+
+    def get_player_fantasy_stats(self, discord_id: int) -> dict:
+        """
+        Get fantasy point statistics for a player from enriched matches.
+
+        Returns:
+            Dict with:
+            - total_games: int (games with fantasy data)
+            - total_fp: float (total fantasy points)
+            - avg_fp: float (average fantasy points per game)
+            - best_fp: float (highest fantasy points in a game)
+            - best_match_id: int (match_id of best game)
+            - recent_games: list of (match_id, fantasy_points, won) for last 10 games
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+
+            # Get aggregate stats
+            cursor.execute(
+                """
+                SELECT
+                    COUNT(*) as total_games,
+                    SUM(fantasy_points) as total_fp,
+                    AVG(fantasy_points) as avg_fp,
+                    MAX(fantasy_points) as best_fp
+                FROM match_participants
+                WHERE discord_id = ? AND fantasy_points IS NOT NULL
+                """,
+                (discord_id,),
+            )
+            row = cursor.fetchone()
+
+            if not row or row["total_games"] == 0:
+                return {
+                    "total_games": 0,
+                    "total_fp": 0.0,
+                    "avg_fp": 0.0,
+                    "best_fp": 0.0,
+                    "best_match_id": None,
+                    "recent_games": [],
+                }
+
+            # Get best match
+            cursor.execute(
+                """
+                SELECT match_id
+                FROM match_participants
+                WHERE discord_id = ? AND fantasy_points = ?
+                LIMIT 1
+                """,
+                (discord_id, row["best_fp"]),
+            )
+            best_row = cursor.fetchone()
+            best_match_id = best_row["match_id"] if best_row else None
+
+            # Get recent games with fantasy data
+            cursor.execute(
+                """
+                SELECT mp.match_id, mp.fantasy_points, mp.won, mp.hero_id
+                FROM match_participants mp
+                JOIN matches m ON mp.match_id = m.match_id
+                WHERE mp.discord_id = ? AND mp.fantasy_points IS NOT NULL
+                ORDER BY m.match_date DESC
+                LIMIT 10
+                """,
+                (discord_id,),
+            )
+            recent = [
+                {
+                    "match_id": r["match_id"],
+                    "fantasy_points": r["fantasy_points"],
+                    "won": r["won"],
+                    "hero_id": r["hero_id"],
+                }
+                for r in cursor.fetchall()
+            ]
+
+            return {
+                "total_games": row["total_games"],
+                "total_fp": row["total_fp"] or 0.0,
+                "avg_fp": row["avg_fp"] or 0.0,
+                "best_fp": row["best_fp"] or 0.0,
+                "best_match_id": best_match_id,
+                "recent_games": recent,
+            }
+
+    def get_matches_without_fantasy_data(self, limit: int = 100) -> list[dict]:
+        """
+        Get matches that have enrichment but no fantasy data.
+
+        Returns matches where valve_match_id is set but fantasy_points is NULL.
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT DISTINCT m.match_id, m.valve_match_id, m.match_date
+                FROM matches m
+                JOIN match_participants mp ON m.match_id = mp.match_id
+                WHERE m.valve_match_id IS NOT NULL
+                  AND mp.fantasy_points IS NULL
+                ORDER BY m.match_date DESC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+            rows = cursor.fetchall()
+            return [
+                {
+                    "match_id": row["match_id"],
+                    "valve_match_id": row["valve_match_id"],
+                    "match_date": row["match_date"],
+                }
+                for row in rows
+            ]
+
+    def get_enriched_matches_chronological(self) -> list[dict]:
+        """
+        Get all matches with fantasy data in chronological order for backfill.
+
+        Returns matches ordered by match_date ASC (oldest first) where at least
+        one participant has fantasy_points set.
+
+        Returns:
+            List of dicts with match_id, winning_team, match_date, team1_players, team2_players
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT DISTINCT m.match_id, m.winning_team, m.match_date,
+                       m.team1_players, m.team2_players
+                FROM matches m
+                JOIN match_participants mp ON m.match_id = mp.match_id
+                WHERE mp.fantasy_points IS NOT NULL
+                ORDER BY m.match_date ASC
+                """
+            )
+            rows = cursor.fetchall()
+            return [
+                {
+                    "match_id": row["match_id"],
+                    "winning_team": row["winning_team"],
+                    "match_date": row["match_date"],
+                    "team1_players": json.loads(row["team1_players"]),
+                    "team2_players": json.loads(row["team2_players"]),
+                }
+                for row in rows
+            ]
+
+    def get_all_matches_with_predictions(self) -> list[dict]:
+        """
+        Get all matches with Glicko-2 prediction data for analysis.
+
+        Returns matches with expected_radiant_win_prob from match_predictions,
+        along with actual outcome and team info.
+
+        Returns:
+            List of dicts with match data and prediction info
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT m.match_id, m.winning_team, m.match_date,
+                       m.team1_players, m.team2_players,
+                       mp.expected_radiant_win_prob,
+                       mp.radiant_rating, mp.dire_rating,
+                       mp.radiant_rd, mp.dire_rd
+                FROM matches m
+                JOIN match_predictions mp ON m.match_id = mp.match_id
+                ORDER BY m.match_date ASC
+                """
+            )
+            rows = cursor.fetchall()
+            return [
+                {
+                    "match_id": row["match_id"],
+                    "winning_team": row["winning_team"],
+                    "match_date": row["match_date"],
+                    "team1_players": json.loads(row["team1_players"]),
+                    "team2_players": json.loads(row["team2_players"]),
+                    "expected_radiant_win_prob": row["expected_radiant_win_prob"],
+                    "radiant_rating": row["radiant_rating"],
+                    "dire_rating": row["dire_rating"],
+                    "radiant_rd": row["radiant_rd"],
+                    "dire_rd": row["dire_rd"],
+                }
+                for row in rows
+            ]
+
+    def get_player_openskill_history(self, discord_id: int, limit: int = 10) -> list[dict]:
+        """
+        Get a player's recent OpenSkill rating changes.
+
+        Args:
+            discord_id: Player's Discord ID
+            limit: Maximum number of history entries to return
+
+        Returns:
+            List of dicts with os_mu_before, os_mu_after, os_sigma_before, os_sigma_after,
+            fantasy_weight, won, match_id, ordered by most recent first.
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT rh.os_mu_before, rh.os_mu_after, rh.os_sigma_before, rh.os_sigma_after,
+                       rh.fantasy_weight, rh.won, rh.match_id, m.match_date
+                FROM rating_history rh
+                JOIN matches m ON rh.match_id = m.match_id
+                WHERE rh.discord_id = ?
+                  AND rh.os_mu_before IS NOT NULL
+                  AND rh.os_mu_after IS NOT NULL
+                ORDER BY m.match_date DESC
+                LIMIT ?
+                """,
+                (discord_id, limit),
+            )
+            rows = cursor.fetchall()
+            return [
+                {
+                    "os_mu_before": row["os_mu_before"],
+                    "os_mu_after": row["os_mu_after"],
+                    "os_sigma_before": row["os_sigma_before"],
+                    "os_sigma_after": row["os_sigma_after"],
+                    "fantasy_weight": row["fantasy_weight"],
+                    "won": row["won"],
+                    "match_id": row["match_id"],
+                    "match_date": row["match_date"],
+                }
+                for row in rows
+            ]
+
+    def update_rating_history_openskill_bulk(
+        self, match_id: int, updates: list[dict]
+    ) -> int:
+        """
+        Bulk update rating_history entries with OpenSkill data.
+
+        Args:
+            match_id: The match ID
+            updates: List of dicts with keys:
+                - discord_id (required)
+                - os_mu_before, os_mu_after, os_sigma_before, os_sigma_after, fantasy_weight
+
+        Returns:
+            Number of rows updated
+        """
+        if not updates:
+            return 0
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.executemany(
+                """
+                UPDATE rating_history
+                SET os_mu_before = ?,
+                    os_mu_after = ?,
+                    os_sigma_before = ?,
+                    os_sigma_after = ?,
+                    fantasy_weight = ?
+                WHERE match_id = ? AND discord_id = ?
+                """,
+                [
+                    (
+                        u.get("os_mu_before"),
+                        u.get("os_mu_after"),
+                        u.get("os_sigma_before"),
+                        u.get("os_sigma_after"),
+                        u.get("fantasy_weight"),
+                        match_id,
+                        u["discord_id"],
+                    )
+                    for u in updates
+                ],
+            )
+            return cursor.rowcount

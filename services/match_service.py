@@ -8,14 +8,19 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
+import logging
+
 from config import BET_LOCK_SECONDS, CALIBRATION_RD_THRESHOLD
 from domain.models.player import Player
 from domain.models.team import Team
 from domain.services.team_balancing_service import TeamBalancingService
+from openskill_rating_system import CamaOpenSkillSystem
 from rating_system import CamaRatingSystem
 from repositories.interfaces import IMatchRepository, IPairingsRepository, IPlayerRepository
 from services.betting_service import BettingService
 from shuffler import BalancedShuffler
+
+logger = logging.getLogger("cama_bot.services.match")
 
 
 class MatchService:
@@ -50,6 +55,7 @@ class MatchService:
         self.match_repo = match_repo
         self.use_glicko = use_glicko
         self.rating_system = CamaRatingSystem()
+        self.openskill_system = CamaOpenSkillSystem()
         self.shuffler = BalancedShuffler(use_glicko=use_glicko, consider_roles=True)
         self.team_balancing_service = TeamBalancingService(
             use_glicko=use_glicko,
@@ -759,3 +765,323 @@ class MatchService:
         finally:
             with self._recording_lock:
                 self._recording_in_progress.discard(normalized_gid)
+
+    def update_openskill_ratings_for_match(self, match_id: int) -> dict:
+        """
+        Update OpenSkill ratings for a match using fantasy points as weights.
+
+        This method should be called AFTER match enrichment when fantasy_points
+        have been calculated and stored in match_participants.
+
+        Args:
+            match_id: The internal match ID to update ratings for
+
+        Returns:
+            Dict with:
+            - success: bool
+            - players_updated: int
+            - players_skipped: int (missing fantasy data)
+            - error: str (if failed)
+        """
+        # Get match data
+        match = self.match_repo.get_match(match_id)
+        if not match:
+            return {
+                "success": False,
+                "error": f"Match {match_id} not found",
+                "players_updated": 0,
+                "players_skipped": 0,
+            }
+
+        winning_team = match.get("winning_team")  # 1 = Radiant, 2 = Dire
+        if winning_team not in (1, 2):
+            return {
+                "success": False,
+                "error": f"Invalid winning_team: {winning_team}",
+                "players_updated": 0,
+                "players_skipped": 0,
+            }
+
+        # Get participants with fantasy points
+        participants = self.match_repo.get_match_participants(match_id)
+        if not participants:
+            return {
+                "success": False,
+                "error": "No participants found for match",
+                "players_updated": 0,
+                "players_skipped": 0,
+            }
+
+        # Separate by team
+        radiant = [p for p in participants if p.get("side") == "radiant"]
+        dire = [p for p in participants if p.get("side") == "dire"]
+
+        if len(radiant) != 5 or len(dire) != 5:
+            logger.warning(
+                f"Match {match_id}: unexpected team sizes radiant={len(radiant)}, dire={len(dire)}"
+            )
+
+        # Check if any participants have fantasy data
+        has_fantasy = any(p.get("fantasy_points") is not None for p in participants)
+        if not has_fantasy:
+            logger.info(f"Match {match_id}: no fantasy data available, skipping OpenSkill update")
+            return {
+                "success": True,
+                "players_updated": 0,
+                "players_skipped": len(participants),
+                "reason": "No fantasy data available",
+            }
+
+        # Get current OpenSkill ratings for all players
+        discord_ids = [p["discord_id"] for p in participants]
+        os_ratings = self.player_repo.get_openskill_ratings_bulk(discord_ids)
+
+        # Build team data for OpenSkill update
+        # Format: (discord_id, mu, sigma, fantasy_points)
+        team1_data = []  # Radiant
+        team2_data = []  # Dire
+
+        for p in radiant:
+            discord_id = p["discord_id"]
+            mu, sigma = os_ratings.get(discord_id, (None, None))
+            fantasy_points = p.get("fantasy_points")
+            team1_data.append((discord_id, mu, sigma, fantasy_points))
+
+        for p in dire:
+            discord_id = p["discord_id"]
+            mu, sigma = os_ratings.get(discord_id, (None, None))
+            fantasy_points = p.get("fantasy_points")
+            team2_data.append((discord_id, mu, sigma, fantasy_points))
+
+        # Run OpenSkill update
+        try:
+            results = self.openskill_system.update_ratings_after_match(
+                team1_data=team1_data,
+                team2_data=team2_data,
+                winning_team=winning_team,
+            )
+        except Exception as e:
+            logger.error(f"OpenSkill update failed for match {match_id}: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "players_updated": 0,
+                "players_skipped": 0,
+            }
+
+        # Persist updated ratings
+        updates = [(pid, mu, sigma) for pid, (mu, sigma, _) in results.items()]
+        updated_count = self.player_repo.update_openskill_ratings_bulk(updates)
+
+        # Record in rating history (bulk update existing entries for this match)
+        history_updates = []
+        for pid, (new_mu, new_sigma, fantasy_weight) in results.items():
+            old_mu, old_sigma = os_ratings.get(pid, (None, None))
+            history_updates.append({
+                "discord_id": pid,
+                "os_mu_before": old_mu,
+                "os_mu_after": new_mu,
+                "os_sigma_before": old_sigma,
+                "os_sigma_after": new_sigma,
+                "fantasy_weight": fantasy_weight,
+            })
+
+        if history_updates:
+            history_updated = self.match_repo.update_rating_history_openskill_bulk(
+                match_id, history_updates
+            )
+            if history_updated < len(history_updates):
+                logger.warning(
+                    f"Only {history_updated}/{len(history_updates)} rating_history entries found for match {match_id}"
+                )
+
+        logger.info(
+            f"OpenSkill update complete for match {match_id}: {updated_count} players updated"
+        )
+
+        return {
+            "success": True,
+            "players_updated": updated_count,
+            "players_skipped": len(participants) - updated_count,
+        }
+
+    def _update_rating_history_openskill(
+        self,
+        match_id: int,
+        discord_id: int,
+        os_mu_before: float | None,
+        os_mu_after: float,
+        os_sigma_before: float | None,
+        os_sigma_after: float,
+        fantasy_weight: float | None,
+    ) -> None:
+        """
+        Update an existing rating_history entry with OpenSkill data.
+
+        If no existing entry exists, this is a no-op (OpenSkill updates happen
+        after enrichment, so rating_history should already exist from record_match).
+        """
+        # Try to update existing entry
+        with self.match_repo.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE rating_history
+                SET os_mu_before = ?,
+                    os_mu_after = ?,
+                    os_sigma_before = ?,
+                    os_sigma_after = ?,
+                    fantasy_weight = ?
+                WHERE match_id = ? AND discord_id = ?
+                """,
+                (
+                    os_mu_before,
+                    os_mu_after,
+                    os_sigma_before,
+                    os_sigma_after,
+                    fantasy_weight,
+                    match_id,
+                    discord_id,
+                ),
+            )
+            if cursor.rowcount == 0:
+                logger.warning(
+                    f"No rating_history entry found for match {match_id}, player {discord_id}"
+                )
+
+    def backfill_openskill_ratings(self, reset_first: bool = True) -> dict:
+        """
+        Backfill OpenSkill ratings from all enriched matches with fantasy data.
+
+        Processes matches in chronological order to simulate rating progression.
+
+        Args:
+            reset_first: If True, reset all players' OpenSkill ratings to defaults before backfill
+
+        Returns:
+            Dict with:
+            - matches_processed: int
+            - players_updated: int (unique players)
+            - errors: list of error messages
+        """
+        logger.info("Starting OpenSkill backfill...")
+
+        errors = []
+        matches_processed = 0
+        players_touched = set()
+
+        # Get all enriched matches in chronological order
+        enriched_matches = self.match_repo.get_enriched_matches_chronological()
+        total_matches = len(enriched_matches)
+        logger.info(f"Found {total_matches} enriched matches to process")
+
+        if total_matches == 0:
+            return {
+                "matches_processed": 0,
+                "players_updated": 0,
+                "errors": ["No enriched matches found"],
+            }
+
+        # Reset all players' OpenSkill ratings if requested
+        if reset_first:
+            all_players = self.player_repo.get_all()
+            reset_updates = [
+                (p.discord_id, self.openskill_system.DEFAULT_MU, self.openskill_system.DEFAULT_SIGMA)
+                for p in all_players
+                if p.discord_id is not None
+            ]
+            if reset_updates:
+                self.player_repo.update_openskill_ratings_bulk(reset_updates)
+                logger.info(f"Reset {len(reset_updates)} players to default OpenSkill ratings")
+
+        # Process each match in chronological order
+        for i, match in enumerate(enriched_matches):
+            match_id = match["match_id"]
+            try:
+                result = self.update_openskill_ratings_for_match(match_id)
+                if result.get("success"):
+                    matches_processed += 1
+                    # Track unique players
+                    participants = self.match_repo.get_match_participants(match_id)
+                    for p in participants:
+                        players_touched.add(p["discord_id"])
+                else:
+                    error = result.get("error", "Unknown error")
+                    if "No fantasy data" not in error:
+                        errors.append(f"Match {match_id}: {error}")
+            except Exception as e:
+                errors.append(f"Match {match_id}: {str(e)}")
+                logger.error(f"Backfill error for match {match_id}: {e}")
+
+            # Log progress periodically
+            if (i + 1) % 50 == 0 or (i + 1) == total_matches:
+                logger.info(f"Backfill progress: {i + 1}/{total_matches} matches processed")
+
+        logger.info(
+            f"OpenSkill backfill complete: {matches_processed} matches, "
+            f"{len(players_touched)} unique players"
+        )
+
+        return {
+            "matches_processed": matches_processed,
+            "players_updated": len(players_touched),
+            "total_matches": total_matches,
+            "errors": errors[:10],  # Limit error list
+        }
+
+    def get_openskill_predictions_for_match(
+        self, team1_ids: list[int], team2_ids: list[int]
+    ) -> dict:
+        """
+        Get OpenSkill predicted win probability for a match.
+
+        Args:
+            team1_ids: Discord IDs for team 1 (Radiant)
+            team2_ids: Discord IDs for team 2 (Dire)
+
+        Returns:
+            Dict with team1_win_prob, team1_ordinal, team2_ordinal
+        """
+        from openskill.models import PlackettLuce
+
+        # Get current ratings
+        all_ids = team1_ids + team2_ids
+        os_ratings = self.player_repo.get_openskill_ratings_bulk(all_ids)
+
+        # Build ratings for each team
+        team1_ratings = []
+        team1_ordinals = []
+        for pid in team1_ids:
+            mu, sigma = os_ratings.get(pid, (None, None))
+            rating = self.openskill_system.create_rating(mu, sigma)
+            team1_ratings.append(rating)
+            actual_mu = mu if mu is not None else self.openskill_system.DEFAULT_MU
+            actual_sigma = sigma if sigma is not None else self.openskill_system.DEFAULT_SIGMA
+            team1_ordinals.append(self.openskill_system.ordinal(actual_mu, actual_sigma))
+
+        team2_ratings = []
+        team2_ordinals = []
+        for pid in team2_ids:
+            mu, sigma = os_ratings.get(pid, (None, None))
+            rating = self.openskill_system.create_rating(mu, sigma)
+            team2_ratings.append(rating)
+            actual_mu = mu if mu is not None else self.openskill_system.DEFAULT_MU
+            actual_sigma = sigma if sigma is not None else self.openskill_system.DEFAULT_SIGMA
+            team2_ordinals.append(self.openskill_system.ordinal(actual_mu, actual_sigma))
+
+        # Calculate win probability using ordinals
+        # Higher ordinal = higher skill
+        team1_avg_ordinal = sum(team1_ordinals) / len(team1_ordinals) if team1_ordinals else 0
+        team2_avg_ordinal = sum(team2_ordinals) / len(team2_ordinals) if team2_ordinals else 0
+
+        # Use a logistic function to convert ordinal difference to win probability
+        # Similar to Elo expected score calculation
+        ordinal_diff = team1_avg_ordinal - team2_avg_ordinal
+        # Scale factor: typical ordinal range is roughly -10 to +15, so 10 point diff ≈ 76% win
+        team1_win_prob = 1.0 / (1.0 + 10 ** (-ordinal_diff / 10.0))
+
+        return {
+            "team1_win_prob": team1_win_prob,
+            "team1_avg_ordinal": team1_avg_ordinal,
+            "team2_avg_ordinal": team2_avg_ordinal,
+        }

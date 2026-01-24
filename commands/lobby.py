@@ -394,6 +394,126 @@ class LobbyCommands(commands.Cog):
         else:
             await interaction.followup.send(f"❌ Failed to kick {player.mention}.", ephemeral=True)
 
+    @app_commands.command(name="join", description="Join the matchmaking lobby")
+    async def join(self, interaction: discord.Interaction):
+        """Join the matchmaking lobby from any channel."""
+        logger.info(f"Join command: User {interaction.user.id} ({interaction.user})")
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+
+        # Check registration
+        player = self.player_service.get_player(interaction.user.id)
+        if not player:
+            await interaction.followup.send(
+                "❌ You're not registered! Use `/register` first.", ephemeral=True
+            )
+            return
+
+        # Check roles set
+        if not player.preferred_roles:
+            await interaction.followup.send(
+                "❌ Set your preferred roles first! Use `/setroles`.", ephemeral=True
+            )
+            return
+
+        # Check lobby exists
+        lobby = self.lobby_service.get_lobby()
+        if not lobby:
+            await interaction.followup.send(
+                "⚠️ No active lobby. Use `/lobby` to create one.", ephemeral=True
+            )
+            return
+
+        # Block if a match is pending recording
+        guild_id = interaction.guild.id if interaction.guild else None
+        match_service = getattr(self.bot, "match_service", None)
+        if match_service:
+            pending_match = match_service.get_last_shuffle(guild_id)
+            if pending_match:
+                jump_url = pending_match.get("shuffle_message_jump_url")
+                message_text = "❌ There's a pending match that needs to be recorded!"
+                if jump_url:
+                    message_text += f" [View pending match]({jump_url}) then use `/record` first."
+                else:
+                    message_text += " Use `/record` first."
+                await interaction.followup.send(message_text, ephemeral=True)
+                return
+
+        # Attempt to join
+        success, reason = self.lobby_service.join_lobby(interaction.user.id)
+        if not success:
+            await interaction.followup.send(f"❌ {reason}", ephemeral=True)
+            return
+
+        # Refresh lobby state after join
+        lobby = self.lobby_service.get_lobby()
+
+        # Update displays and post activity
+        await self._sync_lobby_displays(lobby)
+        thread_id = self.lobby_service.get_lobby_thread_id()
+        if thread_id:
+            await self._post_join_activity(thread_id, interaction.user)
+
+        # Rally/ready notifications
+        from bot import notify_lobby_rally, notify_lobby_ready
+
+        channel_id = self.lobby_service.get_lobby_channel_id()
+        if channel_id and thread_id:
+            try:
+                channel = self.bot.get_channel(channel_id)
+                if not channel:
+                    channel = await self.bot.fetch_channel(channel_id)
+                thread = self.bot.get_channel(thread_id)
+                if not thread:
+                    thread = await self.bot.fetch_channel(thread_id)
+
+                if not self.lobby_service.is_ready(lobby):
+                    await notify_lobby_rally(channel, thread, lobby, guild_id or 0)
+                else:
+                    await notify_lobby_ready(channel, lobby)
+            except Exception as exc:
+                logger.warning(f"Failed to send rally/ready notification: {exc}")
+
+        await interaction.followup.send("✅ Joined the lobby!", ephemeral=True)
+
+    @app_commands.command(name="leave", description="Leave the matchmaking lobby")
+    async def leave(self, interaction: discord.Interaction):
+        """Leave the matchmaking lobby from any channel."""
+        logger.info(f"Leave command: User {interaction.user.id} ({interaction.user})")
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+
+        lobby = self.lobby_service.get_lobby()
+        if not lobby:
+            await interaction.followup.send("⚠️ No active lobby.", ephemeral=True)
+            return
+
+        in_regular = interaction.user.id in lobby.players
+        in_conditional = interaction.user.id in lobby.conditional_players
+
+        if not in_regular and not in_conditional:
+            await interaction.followup.send("⚠️ You're not in the lobby.", ephemeral=True)
+            return
+
+        # Remove from appropriate queue
+        if in_regular:
+            self.lobby_service.leave_lobby(interaction.user.id)
+        else:
+            self.lobby_service.leave_lobby_conditional(interaction.user.id)
+
+        # Update displays
+        await self._sync_lobby_displays(lobby)
+
+        # Remove user's reactions
+        await self._remove_user_lobby_reactions(interaction.user)
+
+        # Post leave activity in thread
+        thread_id = self.lobby_service.get_lobby_thread_id()
+        if thread_id:
+            await self._post_leave_activity(thread_id, interaction.user)
+
+        await interaction.followup.send("✅ Left the lobby.", ephemeral=True)
+
     @app_commands.command(
         name="resetlobby",
         description="Reset the current lobby (Admin or lobby creator only)",

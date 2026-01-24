@@ -9,6 +9,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from config import LEVERAGE_TIERS
+from openskill_rating_system import CamaOpenSkillSystem
 from rating_system import CamaRatingSystem
 from services.permissions import has_admin_permission
 from utils.debug_logging import debug_log as _dbg_log
@@ -1184,30 +1185,55 @@ class InfoCommands(commands.Cog):
             recent_delta = None
             last_5_delta = None
 
-        # Recent matches with per-game rating changes (last 5)
+        # Recent matches with predictions comparison (last 5)
+        # Shows Glicko-2 vs OpenSkill expected outcomes vs actual result
+        os_system = CamaOpenSkillSystem()
         recent_game_details = []
         for h in history[:5]:
             rating_after = h.get("rating")
             rating_before = h.get("rating_before")
-            rd_before = h.get("rd_before")
-            rd_after = h.get("rd_after")
             won = h.get("won")
             match_id = h.get("match_id")
             lobby_type = h.get("lobby_type", "shuffle")
             lobby_emoji = "👑" if lobby_type == "draft" else "🎲"
+            glicko_expected = h.get("expected_team_win_prob")
 
+            # Calculate rating delta
             if rating_after is not None and rating_before is not None:
                 rating_delta = rating_after - rating_before
                 delta_str = f"{rating_delta:+.0f}"
             else:
                 delta_str = "?"
 
-            rd_str = ""
-            if rd_after is not None:
-                rd_str = f" [RD {rd_after:.0f}]"
-
             result = "W" if won else "L"
-            recent_game_details.append(f"{lobby_emoji}#{match_id}: {result} → **{delta_str}**{rd_str}")
+            result_emoji = "✅" if won else "❌"
+
+            # Get OpenSkill expected outcome for this match
+            os_expected = None
+            if match_id and self.match_repo:
+                os_ratings = self.match_repo.get_os_ratings_for_match(match_id)
+                if os_ratings["team1"] and os_ratings["team2"]:
+                    team_num = h.get("team_number")
+                    if team_num == 1:
+                        os_expected = os_system.os_predict_win_probability(
+                            os_ratings["team1"], os_ratings["team2"]
+                        )
+                    elif team_num == 2:
+                        os_expected = os_system.os_predict_win_probability(
+                            os_ratings["team2"], os_ratings["team1"]
+                        )
+
+            # Build compact prediction string: G=Glicko, O=OpenSkill
+            pred_parts = []
+            if glicko_expected is not None:
+                pred_parts.append(f"G:{glicko_expected:.0%}")
+            if os_expected is not None:
+                pred_parts.append(f"O:{os_expected:.0%}")
+            pred_str = " ".join(pred_parts) if pred_parts else "no pred"
+
+            recent_game_details.append(
+                f"{lobby_emoji}#{match_id}: {result_emoji}{result} ({pred_str}) → **{delta_str}**"
+            )
 
         # Find biggest upset (win as underdog) and biggest choke (loss as favorite)
         upsets = [(h, h.get("expected_team_win_prob", 0.5)) for h in matches_with_predictions
@@ -1279,10 +1305,10 @@ class InfoCommands(commands.Cog):
                 trend_text += f"\n🔥 Current: **{streak}{streak_type}** streak"
             embed.add_field(name="📉 Trend", value=trend_text, inline=True)
 
-        # Recent matches with per-game rating changes
+        # Recent matches with predictions comparison
         if recent_game_details:
             embed.add_field(
-                name=f"📊 Recent Games ({len(recent_game_details)})",
+                name=f"📊 Last {len(recent_game_details)} Matches (G=Glicko O=OpenSkill)",
                 value="\n".join(recent_game_details),
                 inline=False,
             )
@@ -1409,6 +1435,44 @@ class InfoCommands(commands.Cog):
                 hero_text += f"\n{role_mismatch}"
 
             embed.add_field(name="🦸 Recent Heroes", value=hero_text, inline=False)
+
+        # Fantasy stats from enriched matches
+        fantasy_stats = self.match_repo.get_player_fantasy_stats(user.id) if self.match_repo else None
+        if fantasy_stats and fantasy_stats["total_games"] > 0:
+            fp_text = (
+                f"**Avg FP:** {fantasy_stats['avg_fp']:.1f} | "
+                f"**Best:** {fantasy_stats['best_fp']:.1f} (Match #{fantasy_stats['best_match_id']})\n"
+                f"**Total:** {fantasy_stats['total_fp']:.1f} FP over {fantasy_stats['total_games']} enriched games"
+            )
+
+            # Recent games with FP
+            recent_fp = fantasy_stats.get("recent_games", [])[:5]
+            if recent_fp:
+                fp_details = []
+                for g in recent_fp:
+                    result = "W" if g["won"] else "L"
+                    hero_name = get_hero_short_name(g["hero_id"]) if g.get("hero_id") else "?"
+                    fp_details.append(f"#{g['match_id']}: {result} {hero_name} **{g['fantasy_points']:.1f}**")
+                fp_text += "\n" + " | ".join(fp_details)
+
+            embed.add_field(name="⭐ Fantasy Points", value=fp_text, inline=False)
+
+        # OpenSkill Rating (Fantasy-Weighted)
+        os_data = self.player_repo.get_openskill_rating(user.id) if self.player_repo else None
+        if os_data:
+            os_mu, os_sigma = os_data
+            os_ordinal = os_system.ordinal(os_mu, os_sigma)
+            os_calibrated = os_system.is_calibrated(os_sigma)
+            os_certainty = os_system.get_certainty_percentage(os_sigma)
+            os_display = os_system.mu_to_display(os_mu)
+
+            os_text = (
+                f"**Skill (μ):** {os_mu:.2f} → **{os_display}** display\n"
+                f"**Uncertainty (σ):** {os_sigma:.3f} ({os_certainty:.0f}% certain)\n"
+                f"**Ordinal** (μ-3σ): {os_ordinal:.2f}\n"
+                f"**Calibrated:** {'Yes' if os_calibrated else 'No'}"
+            )
+            embed.add_field(name="🎲 OpenSkill Rating (Fantasy-Weighted)", value=os_text, inline=False)
 
         # Record
         record_text = f"**W-L:** {player.wins}-{player.losses}"

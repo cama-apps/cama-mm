@@ -435,10 +435,12 @@ class TestEnrichmentServiceSource:
             "players": [],
         }
 
+        match_repo.get_match.return_value = {"match_id": 1, "winning_team": 1}
         match_repo.get_match_participants.return_value = []
 
         service = MatchEnrichmentService(match_repo, player_repo, mock_opendota_api)
-        service.enrich_match(1, 99999)
+        # Use skip_validation since this test is checking source/confidence, not validation
+        service.enrich_match(1, 99999, skip_validation=True)
 
         # Check that update_match_enrichment was called with source='manual'
         match_repo.update_match_enrichment.assert_called_once()
@@ -462,11 +464,335 @@ class TestEnrichmentServiceSource:
             "players": [],
         }
 
+        match_repo.get_match.return_value = {"match_id": 1, "winning_team": 1}
         match_repo.get_match_participants.return_value = []
 
         service = MatchEnrichmentService(match_repo, player_repo, mock_opendota_api)
-        service.enrich_match(1, 99999, source="auto", confidence=0.9)
+        # Use skip_validation since this test is checking source/confidence, not validation
+        service.enrich_match(1, 99999, source="auto", confidence=0.9, skip_validation=True)
 
         call_kwargs = match_repo.update_match_enrichment.call_args[1]
         assert call_kwargs["enrichment_source"] == "auto"
         assert call_kwargs["enrichment_confidence"] == 0.9
+
+
+class TestFantasyPointCalculation:
+    """Tests for fantasy point calculation."""
+
+    def test_calculate_fantasy_points_basic(self):
+        """Test basic fantasy point calculation."""
+        from services.match_enrichment_service import calculate_fantasy_points
+
+        player_data = {
+            "kills": 10,
+            "deaths": 5,
+            "assists": 15,
+            "last_hits": 200,
+            "denies": 10,
+            "gold_per_min": 500,
+            "xp_per_min": 450,
+        }
+
+        points = calculate_fantasy_points(player_data)
+
+        # kills: 10 * 0.3 = 3.0
+        # deaths: 5 * -0.3 = -1.5
+        # assists: 15 * 0.15 = 2.25
+        # last_hits: 200 * 0.003 = 0.6
+        # denies: 10 * 0.02 = 0.2
+        # gpm: 500 * 0.002 = 1.0
+        # xpm: 450 * 0.002 = 0.9
+        # Total: 6.45
+        assert points == 6.45
+
+    def test_calculate_fantasy_points_with_objectives(self):
+        """Test fantasy points with tower/roshan kills."""
+        from services.match_enrichment_service import calculate_fantasy_points
+
+        player_data = {
+            "kills": 5,
+            "deaths": 2,
+            "assists": 10,
+            "last_hits": 100,
+            "denies": 5,
+            "gold_per_min": 400,
+            "xp_per_min": 350,
+            "tower_damage": 3000,
+            "towers_killed": 3,
+            "roshans_killed": 1,
+        }
+
+        points = calculate_fantasy_points(player_data)
+
+        # kills: 5 * 0.3 = 1.5
+        # deaths: 2 * -0.3 = -0.6
+        # assists: 10 * 0.15 = 1.5
+        # last_hits: 100 * 0.003 = 0.3
+        # denies: 5 * 0.02 = 0.1
+        # gpm: 400 * 0.002 = 0.8
+        # xpm: 350 * 0.002 = 0.7
+        # tower_damage: 3000 * 0.0001 = 0.3
+        # towers: 3 * 1.0 = 3.0
+        # roshans: 1 * 1.0 = 1.0
+        # Total: 8.6
+        assert points == 8.6
+
+    def test_calculate_fantasy_points_support_style(self):
+        """Test fantasy points for support-style performance."""
+        from services.match_enrichment_service import calculate_fantasy_points
+
+        player_data = {
+            "kills": 2,
+            "deaths": 8,
+            "assists": 25,
+            "last_hits": 50,
+            "gold_per_min": 250,
+            "xp_per_min": 300,
+            "tower_damage": 500,
+            "obs_placed": 15,
+            "sen_placed": 10,
+            "camps_stacked": 8,
+            "teamfight_participation": 0.85,
+            "hero_healing": 5000,
+        }
+
+        points = calculate_fantasy_points(player_data)
+
+        # kills: 2 * 0.3 = 0.6
+        # deaths: 8 * -0.3 = -2.4
+        # assists: 25 * 0.15 = 3.75
+        # last_hits: 50 * 0.003 = 0.15
+        # gpm: 250 * 0.002 = 0.5
+        # xpm: 300 * 0.002 = 0.6
+        # tower_damage: 500 * 0.0001 = 0.05
+        # wards: (15 + 10) * 0.5 = 12.5
+        # camps: 8 * 0.5 = 4.0
+        # teamfight: 0.85 * 3.0 = 2.55
+        # hero_healing: 5000 * 0.0004 = 2.0
+        # Total: 24.3
+        assert points == 24.3
+
+    def test_calculate_fantasy_points_first_blood(self):
+        """Test fantasy points with first blood bonus."""
+        from services.match_enrichment_service import calculate_fantasy_points
+
+        player_data = {
+            "kills": 1,
+            "deaths": 0,
+            "assists": 0,
+            "last_hits": 0,
+            "gold_per_min": 0,
+            "firstblood_claimed": True,
+        }
+
+        points = calculate_fantasy_points(player_data)
+
+        # kills: 1 * 0.3 = 0.3
+        # firstblood: 4.0
+        # Total: 4.3
+        assert points == 4.3
+
+    def test_calculate_fantasy_points_stuns(self):
+        """Test fantasy points with stun duration."""
+        from services.match_enrichment_service import calculate_fantasy_points
+
+        player_data = {
+            "kills": 0,
+            "deaths": 0,
+            "assists": 0,
+            "last_hits": 0,
+            "gold_per_min": 0,
+            "stuns": 100.0,  # 100 seconds of stun
+        }
+
+        points = calculate_fantasy_points(player_data)
+
+        # stuns: 100 * 0.07 = 7.0
+        assert points == 7.0
+
+    def test_calculate_fantasy_points_offlane_style(self):
+        """Test fantasy points for offlane-style performance (initiator/splitpush)."""
+        from services.match_enrichment_service import calculate_fantasy_points
+
+        player_data = {
+            "kills": 4,
+            "deaths": 6,
+            "assists": 18,
+            "last_hits": 150,
+            "denies": 8,
+            "gold_per_min": 380,
+            "xp_per_min": 550,
+            "tower_damage": 5000,
+            "towers_killed": 2,
+            "stuns": 85.0,  # Initiator hero like Slardar/Tide
+            "teamfight_participation": 0.75,
+        }
+
+        points = calculate_fantasy_points(player_data)
+
+        # kills: 4 * 0.3 = 1.2
+        # deaths: 6 * -0.3 = -1.8
+        # assists: 18 * 0.15 = 2.7
+        # last_hits: 150 * 0.003 = 0.45
+        # denies: 8 * 0.02 = 0.16
+        # gpm: 380 * 0.002 = 0.76
+        # xpm: 550 * 0.002 = 1.1
+        # tower_damage: 5000 * 0.0001 = 0.5
+        # towers: 2 * 1.0 = 2.0
+        # stuns: 85 * 0.07 = 5.95
+        # teamfight: 0.75 * 3.0 = 2.25
+        # Total: 15.27
+        assert points == 15.27
+
+    def test_calculate_fantasy_points_empty(self):
+        """Test fantasy points with empty data."""
+        from services.match_enrichment_service import calculate_fantasy_points
+
+        player_data = {}
+        points = calculate_fantasy_points(player_data)
+        assert points == 0.0
+
+
+class TestEnrichmentValidation:
+    """Tests for enrichment validation logic."""
+
+    @pytest.fixture
+    def mock_repos(self):
+        match_repo = Mock()
+        player_repo = Mock()
+        return match_repo, player_repo
+
+    @pytest.fixture
+    def mock_opendota_api(self):
+        return Mock()
+
+    def test_validation_winning_team_mismatch(self, mock_repos, mock_opendota_api, monkeypatch):
+        """Test validation fails when winning team doesn't match."""
+        from services.match_enrichment_service import MatchEnrichmentService
+
+        # Temporarily lower the min player match requirement for this test
+        import services.match_enrichment_service as mes
+        original_min = mes.ENRICHMENT_MIN_PLAYER_MATCH
+        monkeypatch.setattr(mes, "ENRICHMENT_MIN_PLAYER_MATCH", 0)
+
+        match_repo, player_repo = mock_repos
+
+        # Internal match: Radiant won
+        match_repo.get_match.return_value = {"match_id": 1, "winning_team": 1}
+        match_repo.get_match_participants.return_value = []
+
+        # OpenDota: Dire won
+        mock_opendota_api.get_match_details.return_value = {
+            "match_id": 99999,
+            "duration": 2400,
+            "radiant_win": False,  # Dire won
+            "radiant_score": 22,
+            "dire_score": 35,
+            "game_mode": 2,
+            "players": [],
+        }
+
+        service = MatchEnrichmentService(match_repo, player_repo, mock_opendota_api)
+        result = service.enrich_match(1, 99999)
+
+        assert result["success"] is False
+        assert "Winning team mismatch" in result["error"]
+
+    def test_validation_player_side_mismatch(self, mock_repos, mock_opendota_api, monkeypatch):
+        """Test validation fails when player is on wrong team."""
+        from services.match_enrichment_service import MatchEnrichmentService
+
+        # Temporarily lower the min player match requirement for this test
+        import services.match_enrichment_service as mes
+        monkeypatch.setattr(mes, "ENRICHMENT_MIN_PLAYER_MATCH", 1)
+
+        match_repo, player_repo = mock_repos
+
+        # Internal match: Player 123 on Radiant
+        match_repo.get_match.return_value = {"match_id": 1, "winning_team": 1}
+        match_repo.get_match_participants.return_value = [
+            {"discord_id": 123, "side": "radiant"},
+        ]
+        # Use bulk method
+        player_repo.get_steam_ids_bulk.return_value = {123: 12345678}
+
+        # OpenDota: Player 12345678 on Dire (slot 128+)
+        mock_opendota_api.get_match_details.return_value = {
+            "match_id": 99999,
+            "duration": 2400,
+            "radiant_win": True,
+            "radiant_score": 35,
+            "dire_score": 22,
+            "game_mode": 2,
+            "players": [
+                {"account_id": 12345678, "player_slot": 128},  # Dire slot
+            ],
+        }
+
+        service = MatchEnrichmentService(match_repo, player_repo, mock_opendota_api)
+        result = service.enrich_match(1, 99999)
+
+        assert result["success"] is False
+        assert "wrong team" in result["error"]
+
+    def test_validation_success_with_full_match(self, mock_repos, mock_opendota_api):
+        """Test validation succeeds with proper 10-player match."""
+        from services.match_enrichment_service import MatchEnrichmentService
+
+        match_repo, player_repo = mock_repos
+
+        # Create 10 participants (5 Radiant, 5 Dire)
+        participants = []
+        for i in range(5):
+            participants.append({"discord_id": i, "side": "radiant"})
+        for i in range(5, 10):
+            participants.append({"discord_id": i, "side": "dire"})
+
+        match_repo.get_match.return_value = {"match_id": 1, "winning_team": 1}
+        match_repo.get_match_participants.return_value = participants
+
+        # Map discord_id to steam_id using bulk method (discord_id + 1000)
+        player_repo.get_steam_ids_bulk.return_value = {i: i + 1000 for i in range(10)}
+
+        # Create OpenDota players
+        od_players = []
+        for i in range(5):
+            od_players.append({
+                "account_id": i + 1000,
+                "player_slot": i,  # Radiant slots 0-4
+                "kills": 5,
+                "deaths": 2,
+                "assists": 10,
+                "last_hits": 100,
+                "gold_per_min": 400,
+                "hero_id": i + 1,
+            })
+        for i in range(5, 10):
+            od_players.append({
+                "account_id": i + 1000,
+                "player_slot": 128 + (i - 5),  # Dire slots 128-132
+                "kills": 3,
+                "deaths": 4,
+                "assists": 8,
+                "last_hits": 80,
+                "gold_per_min": 350,
+                "hero_id": i + 1,
+            })
+
+        mock_opendota_api.get_match_details.return_value = {
+            "match_id": 99999,
+            "duration": 2400,
+            "radiant_win": True,
+            "radiant_score": 35,
+            "dire_score": 22,
+            "game_mode": 2,
+            "players": od_players,
+        }
+
+        service = MatchEnrichmentService(match_repo, player_repo, mock_opendota_api)
+        result = service.enrich_match(1, 99999)
+
+        assert result["success"] is True
+        assert result["players_enriched"] == 10
+        assert result["fantasy_points_calculated"] is True
+        assert "total_fantasy_points" in result

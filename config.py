@@ -70,10 +70,9 @@ MMR_WEIGHT = _parse_float("MMR_WEIGHT", 1.0)
 USE_GLICKO = _parse_bool("USE_GLICKO", True)
 
 SHUFFLER_SETTINGS: dict[str, Any] = {
-    "role_penalty_weight": _parse_float("ROLE_PENALTY_WEIGHT", 0.1),
     "off_role_multiplier": _parse_float("OFF_ROLE_MULTIPLIER", 0.95),
-    "off_role_flat_penalty": _parse_float("OFF_ROLE_FLAT_PENALTY", 180.0),
-    "role_matchup_delta_weight": _parse_float("ROLE_MATCHUP_DELTA_WEIGHT", 0.2),
+    "off_role_flat_penalty": _parse_float("OFF_ROLE_FLAT_PENALTY", 350.0),
+    "role_matchup_delta_weight": _parse_float("ROLE_MATCHUP_DELTA_WEIGHT", 0.18),
     "exclusion_penalty_weight": _parse_float("EXCLUSION_PENALTY_WEIGHT", 45.0),
 }
 
@@ -154,3 +153,8 @@ STAKE_WIN_PROB_MAX = _parse_float("STAKE_WIN_PROB_MAX", 0.90)
 
 # Spectator Pool configuration
 SPECTATOR_POOL_PLAYER_CUT = _parse_float("SPECTATOR_POOL_PLAYER_CUT", 0.10)  # 10% to winning players
+
+# Match Enrichment configuration
+ENRICHMENT_DISCOVERY_TIME_WINDOW = _parse_int("ENRICHMENT_DISCOVERY_TIME_WINDOW", 7200)  # 2 hours (seconds)
+ENRICHMENT_MIN_PLAYER_MATCH = _parse_int("ENRICHMENT_MIN_PLAYER_MATCH", 10)  # All 10 players required for strict validation
+ENRICHMENT_RETRY_DELAYS = _parse_int_list("ENRICHMENT_RETRY_DELAYS", [1, 5, 20, 60, 180])  # Exponential backoff delays (seconds)
