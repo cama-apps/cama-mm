@@ -13,6 +13,8 @@ from repositories.base_repository import BaseRepository
 from repositories.player_repository import PlayerRepository
 from services.result import Result
 from services import error_codes
+from services.interfaces import ILoanService
+from utils.guild import normalize_guild_id
 
 
 @dataclass
@@ -152,12 +154,12 @@ class LoanRepository(BaseRepository):
 
     def get_nonprofit_fund(self, guild_id: int | None) -> int:
         """Get the total collected in the nonprofit fund for a guild."""
-        normalized_guild_id = guild_id if guild_id is not None else 0
+        normalized_id = normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 "SELECT total_collected FROM nonprofit_fund WHERE guild_id = ?",
-                (normalized_guild_id,),
+                (normalized_id,),
             )
             row = cursor.fetchone()
             return row["total_collected"] if row else 0
@@ -168,7 +170,7 @@ class LoanRepository(BaseRepository):
 
         Returns the new total.
         """
-        normalized_guild_id = guild_id if guild_id is not None else 0
+        normalized_id = normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -179,11 +181,11 @@ class LoanRepository(BaseRepository):
                     total_collected = total_collected + excluded.total_collected,
                     updated_at = CURRENT_TIMESTAMP
                 """,
-                (normalized_guild_id, amount),
+                (normalized_id, amount),
             )
             cursor.execute(
                 "SELECT total_collected FROM nonprofit_fund WHERE guild_id = ?",
-                (normalized_guild_id,),
+                (normalized_id,),
             )
             row = cursor.fetchone()
             return row["total_collected"] if row else amount
@@ -209,7 +211,7 @@ class LoanRepository(BaseRepository):
         if not distributions:
             return 0
 
-        normalized_guild_id = guild_id if guild_id is not None else 0
+        normalized_id = normalize_guild_id(guild_id)
         total = sum(amount for _, amount in distributions)
 
         with self.atomic_transaction() as conn:
@@ -218,7 +220,7 @@ class LoanRepository(BaseRepository):
             # Verify sufficient funds
             cursor.execute(
                 "SELECT total_collected FROM nonprofit_fund WHERE guild_id = ?",
-                (normalized_guild_id,),
+                (normalized_id,),
             )
             row = cursor.fetchone()
             if not row or row["total_collected"] < total:
@@ -234,7 +236,7 @@ class LoanRepository(BaseRepository):
                 SET total_collected = total_collected - ?, updated_at = CURRENT_TIMESTAMP
                 WHERE guild_id = ?
                 """,
-                (total, normalized_guild_id),
+                (total, normalized_id),
             )
 
             # Credit players
@@ -250,7 +252,7 @@ class LoanRepository(BaseRepository):
             return total
 
 
-class LoanService:
+class LoanService(ILoanService):
     """
     Handles loan applications and fee collection.
 

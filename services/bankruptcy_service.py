@@ -18,6 +18,7 @@ from repositories.base_repository import BaseRepository
 from repositories.player_repository import PlayerRepository
 from services.result import Result
 from services import error_codes
+from services.interfaces import IBankruptcyService
 
 
 @dataclass
@@ -175,7 +176,7 @@ class BankruptcyRepository(BaseRepository):
             return row["penalty_games_remaining"] if row else 0
 
 
-class BankruptcyService:
+class BankruptcyService(IBankruptcyService):
     """
     Handles bankruptcy declarations and penalties.
 

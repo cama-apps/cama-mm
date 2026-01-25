@@ -73,6 +73,8 @@ def make_lobby_service():
 def make_bot(match_service=None):
     bot = SimpleNamespace()
     bot.match_service = match_service
+    bot.user = SimpleNamespace(id=999999)  # Mock bot user
+    bot.get_channel = lambda x: None  # Return None to use interaction channel
     return bot
 
 
