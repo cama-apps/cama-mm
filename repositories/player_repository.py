@@ -1432,6 +1432,46 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 for row in cursor.fetchall()
             }
 
+    def get_last_wheel_spin(self, discord_id: int) -> int | None:
+        """
+        Get the timestamp of a player's last wheel spin.
+
+        Args:
+            discord_id: Player's Discord ID
+
+        Returns:
+            Unix timestamp of last spin, or None if never spun
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT last_wheel_spin FROM players WHERE discord_id = ?",
+                (discord_id,),
+            )
+            row = cursor.fetchone()
+            if not row or row["last_wheel_spin"] is None:
+                return None
+            return int(row["last_wheel_spin"])
+
+    def set_last_wheel_spin(self, discord_id: int, timestamp: int) -> None:
+        """
+        Set the timestamp of a player's last wheel spin.
+
+        Args:
+            discord_id: Player's Discord ID
+            timestamp: Unix timestamp of the spin
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE players
+                SET last_wheel_spin = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE discord_id = ?
+                """,
+                (timestamp, discord_id),
+            )
+
     def _row_to_player(self, row) -> Player:
         """Convert database row to Player object."""
         preferred_roles = json.loads(row["preferred_roles"]) if row["preferred_roles"] else None

@@ -208,6 +208,7 @@ class SchemaManager:
             ("add_openskill_columns", self._migration_add_openskill_columns),
             ("create_tip_transactions_table", self._migration_create_tip_transactions_table),
             ("add_origin_channel_id_to_lobby", self._migration_add_origin_channel_id_to_lobby),
+            ("add_last_wheel_spin_to_players", self._migration_add_last_wheel_spin_to_players),
         ]
 
     # --- Migrations ---
@@ -894,3 +895,7 @@ class SchemaManager:
     def _migration_add_origin_channel_id_to_lobby(self, cursor) -> None:
         """Add origin_channel_id column to lobby_state for dedicated lobby channel support."""
         self._add_column_if_not_exists(cursor, "lobby_state", "origin_channel_id", "INTEGER")
+
+    def _migration_add_last_wheel_spin_to_players(self, cursor) -> None:
+        """Add last_wheel_spin column to players for persisting gamba cooldown."""
+        self._add_column_if_not_exists(cursor, "players", "last_wheel_spin", "INTEGER")

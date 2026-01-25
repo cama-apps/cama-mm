@@ -6,7 +6,7 @@ import discord
 import pytest
 
 from commands.betting import BettingCommands, WHEEL_WEDGES
-from config import WHEEL_COOLDOWN_SECONDS
+from config import WHEEL_COOLDOWN_SECONDS, WHEEL_ANIMATION_FRAMES
 
 
 @pytest.mark.asyncio
@@ -412,11 +412,13 @@ async def test_wheel_animation_frame_count():
         with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
             await commands.gamba.callback(commands, interaction)
 
-    # Should have 5 animation frame sleeps + 1 final result sleep
-    assert mock_sleep.await_count == 6
+    # Should have N animation frame sleeps + 1 linger (2s) + 1 final result sleep
+    expected_sleeps = WHEEL_ANIMATION_FRAMES + 2
+    assert mock_sleep.await_count == expected_sleeps
 
-    # Should edit the message 5 times for animation + 1 for final result
-    assert message.edit.await_count == 6
+    # Should edit the message N times for animation + 1 for final result
+    expected_edits = WHEEL_ANIMATION_FRAMES + 1
+    assert message.edit.await_count == expected_edits
 
 
 @pytest.mark.asyncio

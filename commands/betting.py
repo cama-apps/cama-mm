@@ -27,10 +27,8 @@ from config import (
     LOAN_FEE_RATE,
     MAX_DEBT,
     TIP_FEE_RATE,
-    WHEEL_ANIMATION_FRAMES,
     WHEEL_BANKRUPT_PENALTY,
     WHEEL_COOLDOWN_SECONDS,
-    WHEEL_FRAME_DELAY_MS,
 )
 from config import DISBURSE_MIN_FUND
 from services.bankruptcy_service import BankruptcyService
@@ -45,6 +43,11 @@ from repositories.tip_repository import TipRepository
 from utils.formatting import JOPACOIN_EMOTE, TOMBSTONE_EMOJI, format_betting_display
 from utils.interaction_safety import safe_defer
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
+from utils.wheel_drawing import (
+    WHEEL_WEDGES,
+    create_wheel_gif,
+    get_wedge_at_index,
+)
 
 logger = logging.getLogger("cama_bot.commands.betting")
 
@@ -121,23 +124,6 @@ NEGATIVE_LOAN_MESSAGES = [
 
 GAMBA_GIF_URL = "https://tenor.com/view/uncut-gems-sports-betting-sports-acting-adam-sandler-gif-11474547316651780959"
 
-# Wheel of Fortune wedges: (label, value, emoji)
-# Distribution: 2 Bankrupt (-100), 1 Lose a Turn (0), 4 Small (5-10), 6 Medium (15-25),
-#               6 Good (30-50), 3 Great (60-80), 2 Jackpot (100)
-# Expected value: ~25 JC per spin (positive to encourage engagement)
-WHEEL_WEDGES = [
-    ("BANKRUPT", -100, "💀"), ("BANKRUPT", -100, "💀"),
-    ("LOSE A TURN", 0, "😐"),
-    ("5 JC", 5, "💵"), ("5 JC", 5, "💵"), ("10 JC", 10, "💵"), ("10 JC", 10, "💵"),
-    ("15 JC", 15, "💰"), ("15 JC", 15, "💰"), ("20 JC", 20, "💰"),
-    ("20 JC", 20, "💰"), ("25 JC", 25, "💰"), ("25 JC", 25, "💰"),
-    ("30 JC", 30, "💎"), ("35 JC", 35, "💎"), ("40 JC", 40, "💎"),
-    ("45 JC", 45, "💎"), ("50 JC", 50, "💎"), ("50 JC", 50, "💎"),
-    ("60 JC", 60, "🔥"), ("70 JC", 70, "🔥"), ("80 JC", 80, "🔥"),
-    ("JACKPOT!", 100, "🌟"), ("JACKPOT!", 100, "🌟"),
-]
-
-
 class BettingCommands(commands.Cog):
     """Slash commands to place and view wagers."""
 
@@ -164,7 +150,6 @@ class BettingCommands(commands.Cog):
         self.loan_service = loan_service
         self.disburse_service = disburse_service
         self.tip_repository = tip_repository
-        self._gamba_cooldowns: dict[int, float] = {}  # user_id -> last use timestamp
 
     async def _update_shuffle_message_wagers(self, guild_id: int | None) -> None:
         """
@@ -317,84 +302,27 @@ class BettingCommands(commands.Cog):
             except Exception as exc:
                 logger.warning(f"Failed to send betting reminder to thread: {exc}", exc_info=True)
 
-    def _wheel_frame_embed(self, frame: int, center_idx: int, spinning: bool) -> discord.Embed:
-        """Build an embed showing the wheel animation frame.
-
-        Shows full wheel with all 24 wedges in a code block for monospace alignment.
-        """
-        num_wedges = len(WHEEL_WEDGES)
-
-        def fmt(offset: int) -> str:
-            """Format a wedge. offset 0 = selected wedge at top."""
-            idx = (center_idx + offset) % num_wedges
-            label, value, emoji = WHEEL_WEDGES[idx]
-
-            if value == -100:
-                txt = "BNKR"
-            elif value == 0:
-                txt = "LOSE"
-            elif value == 100:
-                txt = "100!"
-            else:
-                txt = f"{value:>4}"
-
-            # 8 visible chars: marker(1) + emoji(2) + txt(4) + marker(1)
-            if offset == 0:
-                return f"»{emoji}{txt}«"
-            else:
-                return f" {emoji}{txt} "
-
-        # Build the wheel ASCII art
-        # Layout: Top 5 + Right 7 + Bottom 5 + Left 7 = 24 wedges
-        lines = []
-        lines.append("                              ▼")
-        lines.append(f"              {fmt(-2)}{fmt(-1)}{fmt(0)}{fmt(1)}{fmt(2)}")
-        lines.append("      ╭────────────────────────────────────────────────╮")
-        lines.append(f"   {fmt(-3)} │                                          │ {fmt(3)}")
-        lines.append(f"   {fmt(-4)} │    ╭────────────────────────────╮        │ {fmt(4)}")
-        lines.append(f"   {fmt(-5)} │    │                            │        │ {fmt(5)}")
-        lines.append(f"   {fmt(-6)} │    │      WHEEL OF FORTUNE      │        │ {fmt(6)}")
-        lines.append(f"   {fmt(-7)} │    │                            │        │ {fmt(7)}")
-        lines.append(f"   {fmt(-8)} │    │       Free Daily Spin      │        │ {fmt(8)}")
-        lines.append(f"   {fmt(-9)} │    ╰────────────────────────────╯        │ {fmt(9)}")
-        lines.append("      ╰────────────────────────────────────────────────╯")
-        lines.append(f"              {fmt(-10)}{fmt(-11)}{fmt(12)}{fmt(11)}{fmt(10)}")
-
-        wheel_art = "\n".join(lines)
-
-        if spinning:
-            title = "🎡 Wheel of Fortune - SPINNING!"
-            color = discord.Color.gold()
-            description = f"```\n{wheel_art}\n```\n*The wheel is spinning...*"
-        else:
-            title = "🎡 Wheel of Fortune"
-            color = discord.Color.green()
-            description = f"```\n{wheel_art}\n```"
-
-        embed = discord.Embed(
-            title=title,
-            description=description,
-            color=color,
-        )
-
-        return embed
+    def _create_wheel_gif_file(self, target_idx: int) -> discord.File:
+        """Create a wheel animation GIF and return as discord.File."""
+        buffer = create_wheel_gif(target_idx=target_idx, size=400)
+        return discord.File(buffer, filename="wheel.gif")
 
     def _wheel_result_embed(
         self, result: tuple, new_balance: int, garnished: int
     ) -> discord.Embed:
         """Build the final result embed after the wheel stops."""
-        label, value, emoji = result
+        label, value, _color = result  # (label, value, color) from wheel_drawing
 
         if value > 0:
             # Win
             if value == 100:
                 title = "🌟 JACKPOT! 🌟"
                 color = discord.Color.gold()
-                description = f"**{emoji} {label}**\n\nYou won **{value}** {JOPACOIN_EMOTE}!"
+                description = f"**{label}**\n\nYou won **{value}** {JOPACOIN_EMOTE}!"
             else:
                 title = "🎉 Winner!"
                 color = discord.Color.green()
-                description = f"**{emoji} {label}**\n\nYou won **{value}** {JOPACOIN_EMOTE}!"
+                description = f"**+{value} JC**\n\nYou won **{value}** {JOPACOIN_EMOTE}!"
 
             if garnished > 0:
                 description += f"\n\n*{garnished} {JOPACOIN_EMOTE} went to debt repayment.*"
@@ -404,7 +332,7 @@ class BettingCommands(commands.Cog):
             title = "💀 BANKRUPT! 💀"
             color = discord.Color.red()
             description = (
-                f"**{emoji} {label}**\n\n"
+                f"**{label}**\n\n"
                 f"You lost **{abs(value)}** {JOPACOIN_EMOTE}!\n\n"
                 f"*The wheel shows no mercy...*"
             )
@@ -413,7 +341,7 @@ class BettingCommands(commands.Cog):
             title = "😐 Lose a Turn"
             color = discord.Color.light_gray()
             description = (
-                f"**{emoji} {label}**\n\n"
+                f"**{label}**\n\n"
                 f"No change to your balance.\n"
                 f"*Better luck next time!*"
             )
@@ -918,52 +846,44 @@ class BettingCommands(commands.Cog):
             )
             return
 
-        # Check cooldown
-        last_use = self._gamba_cooldowns.get(user_id, 0)
-        time_since_last = now - last_use
-
-        if time_since_last < WHEEL_COOLDOWN_SECONDS:
-            remaining = WHEEL_COOLDOWN_SECONDS - time_since_last
-            hours = int(remaining // 3600)
-            minutes = int((remaining % 3600) // 60)
-            await interaction.response.send_message(
-                f"You already spun the wheel today! Try again in **{hours}h {minutes}m**.",
-                ephemeral=True,
-            )
-            return
+        # Check cooldown (persisted in database) - admins bypass cooldown
+        is_admin = has_admin_permission(interaction)
+        if not is_admin:
+            last_spin = self.player_service.player_repo.get_last_wheel_spin(user_id)
+            if last_spin:
+                time_since_last = now - last_spin
+                if time_since_last < WHEEL_COOLDOWN_SECONDS:
+                    remaining = WHEEL_COOLDOWN_SECONDS - time_since_last
+                    hours = int(remaining // 3600)
+                    minutes = int((remaining % 3600) // 60)
+                    await interaction.response.send_message(
+                        f"You already spun the wheel today! Try again in **{hours}h {minutes}m**.",
+                        ephemeral=True,
+                    )
+                    return
 
         # Pre-determine the result
         result_idx = random.randint(0, len(WHEEL_WEDGES) - 1)
-        result_wedge = WHEEL_WEDGES[result_idx]
+        result_wedge = get_wedge_at_index(result_idx)
 
-        # Update cooldown immediately (prevents double-spinning)
-        self._gamba_cooldowns[user_id] = now
+        # Update cooldown in database immediately (prevents double-spinning)
+        self.player_service.player_repo.set_last_wheel_spin(user_id, int(now))
 
-        # Send initial "spinning" embed
-        initial_embed = self._wheel_frame_embed(0, 0, spinning=True)
-        await interaction.response.send_message(embed=initial_embed)
+        # Generate the complete animation GIF (plays once, ~20 seconds)
+        gif_file = self._create_wheel_gif_file(result_idx)
+
+        # Send just the GIF without embed wrapper for cleaner display
+        await interaction.response.send_message(file=gif_file)
         message = await interaction.original_response()
 
-        # Animation: configurable frames and delay
-        # Each frame moves forward by a varying amount, final frame lands on result
-        num_frames = WHEEL_ANIMATION_FRAMES
-        frame_delay = WHEEL_FRAME_DELAY_MS / 1000.0  # Convert ms to seconds
-
-        for frame in range(num_frames):
-            await asyncio.sleep(frame_delay)
-
-            if frame < num_frames - 1:
-                # During animation: show random positions spinning fast
-                # Move progressively closer to the result with each frame
-                spin_offset = random.randint(3, 8)
-                remaining = num_frames - 1 - frame
-                current_pos = (result_idx + remaining * spin_offset) % len(WHEEL_WEDGES)
-                embed = self._wheel_frame_embed(frame + 1, current_pos, spinning=True)
-            else:
-                # Final frame: land on the result
-                embed = self._wheel_frame_embed(frame + 1, result_idx, spinning=False)
-
-            await message.edit(embed=embed)
+        # Wait for GIF animation to complete before showing result
+        # Animation timing:
+        # - Fast spin: 45 frames * 50ms = 2.25s
+        # - Medium: 15 frames * 100ms = 1.5s
+        # - Slow crawl: 20 frames * 250ms = 5s
+        # - Creep: 14 frames * ~1000ms avg = 14s
+        # Total spinning: ~23s (then 60s hold on result)
+        await asyncio.sleep(23.0)
 
         # Apply the result
         guild_id = interaction.guild.id if interaction.guild else None
