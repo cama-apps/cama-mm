@@ -33,6 +33,7 @@ class BalancedShuffler:
         role_matchup_delta_weight: float | None = None,
         exclusion_penalty_weight: float | None = None,
         rd_priority_weight: float | None = None,
+        use_openskill: bool = False,
     ):
         """
         Initialize the shuffler.
@@ -44,9 +45,11 @@ class BalancedShuffler:
             off_role_flat_penalty: Flat penalty per off-role player added to team value difference (default 350)
             role_matchup_delta_weight: Weight applied to lane matchup delta when scoring teams
             exclusion_penalty_weight: Penalty per exclusion count for excluded players (default 50.0)
+            use_openskill: Whether to use OpenSkill ratings instead of Glicko-2 (default False)
         """
         self.use_glicko = use_glicko
         self.consider_roles = consider_roles
+        self.use_openskill = use_openskill
         settings = SHUFFLER_SETTINGS
         self.off_role_multiplier = (
             off_role_multiplier
@@ -92,23 +95,23 @@ class BalancedShuffler:
         """
         # Get players and their effective values for each role
         team1_carry_player, team1_carry_value = team1.get_player_by_role(
-            "1", self.use_glicko, self.off_role_multiplier
+            "1", self.use_glicko, self.off_role_multiplier, use_openskill=self.use_openskill
         )
         team1_offlane_player, team1_offlane_value = team1.get_player_by_role(
-            "3", self.use_glicko, self.off_role_multiplier
+            "3", self.use_glicko, self.off_role_multiplier, use_openskill=self.use_openskill
         )
         team1_mid_player, team1_mid_value = team1.get_player_by_role(
-            "2", self.use_glicko, self.off_role_multiplier
+            "2", self.use_glicko, self.off_role_multiplier, use_openskill=self.use_openskill
         )
 
         team2_carry_player, team2_carry_value = team2.get_player_by_role(
-            "1", self.use_glicko, self.off_role_multiplier
+            "1", self.use_glicko, self.off_role_multiplier, use_openskill=self.use_openskill
         )
         team2_offlane_player, team2_offlane_value = team2.get_player_by_role(
-            "3", self.use_glicko, self.off_role_multiplier
+            "3", self.use_glicko, self.off_role_multiplier, use_openskill=self.use_openskill
         )
         team2_mid_player, team2_mid_value = team2.get_player_by_role(
-            "2", self.use_glicko, self.off_role_multiplier
+            "2", self.use_glicko, self.off_role_multiplier, use_openskill=self.use_openskill
         )
 
         # Calculate the three critical matchups
@@ -144,7 +147,11 @@ class BalancedShuffler:
         exclusion_counts = exclusion_counts or {}
 
         # Sort by rating descending
-        sorted_players = sorted(players, key=lambda p: p.get_value(self.use_glicko), reverse=True)
+        sorted_players = sorted(
+            players,
+            key=lambda p: p.get_value(self.use_glicko, use_openskill=self.use_openskill),
+            reverse=True,
+        )
 
         # For >10 players, exclude those with lowest exclusion counts first (greedily)
         if len(players) > 10:
@@ -156,7 +163,11 @@ class BalancedShuffler:
             selected = sorted_players[:10]
             excluded = list(excluded_candidates[: len(players) - 10])
             # Re-sort selected by rating
-            selected = sorted(selected, key=lambda p: p.get_value(self.use_glicko), reverse=True)
+            selected = sorted(
+                selected,
+                key=lambda p: p.get_value(self.use_glicko, use_openskill=self.use_openskill),
+                reverse=True,
+            )
         else:
             selected = sorted_players
             excluded = []
@@ -294,8 +305,12 @@ class BalancedShuffler:
                 team1 = Team(team1_players, role_assignments=t1_roles)
                 team2 = Team(team2_players, role_assignments=t2_roles)
 
-                team1_value = team1.get_team_value(self.use_glicko, self.off_role_multiplier)
-                team2_value = team2.get_team_value(self.use_glicko, self.off_role_multiplier)
+                team1_value = team1.get_team_value(
+                    self.use_glicko, self.off_role_multiplier, use_openskill=self.use_openskill
+                )
+                team2_value = team2.get_team_value(
+                    self.use_glicko, self.off_role_multiplier, use_openskill=self.use_openskill
+                )
                 value_diff = abs(team1_value - team2_value)
 
                 team1_off_roles = team1.get_off_role_count()
@@ -365,8 +380,12 @@ class BalancedShuffler:
                 team1_players, team2_players
             )
 
-            team1_value = team1.get_team_value(self.use_glicko, self.off_role_multiplier)
-            team2_value = team2.get_team_value(self.use_glicko, self.off_role_multiplier)
+            team1_value = team1.get_team_value(
+                self.use_glicko, self.off_role_multiplier, use_openskill=self.use_openskill
+            )
+            team2_value = team2.get_team_value(
+                self.use_glicko, self.off_role_multiplier, use_openskill=self.use_openskill
+            )
             value_diff = abs(team1_value - team2_value)
             team1_off_roles = team1.get_off_role_count()
             team2_off_roles = team2.get_off_role_count()
@@ -593,8 +612,12 @@ class BalancedShuffler:
                 total_score = base_score + exclusion_penalty
 
                 # Extract components for logging
-                team1_value = team1.get_team_value(self.use_glicko, self.off_role_multiplier)
-                team2_value = team2.get_team_value(self.use_glicko, self.off_role_multiplier)
+                team1_value = team1.get_team_value(
+                    self.use_glicko, self.off_role_multiplier, use_openskill=self.use_openskill
+                )
+                team2_value = team2.get_team_value(
+                    self.use_glicko, self.off_role_multiplier, use_openskill=self.use_openskill
+                )
                 value_diff = abs(team1_value - team2_value)
                 team1_off_roles = team1.get_off_role_count()
                 team2_off_roles = team2.get_off_role_count()
@@ -752,7 +775,10 @@ class BalancedShuffler:
         logger.info(f"Branch & bound: greedy upper bound = {best_score:.1f}")
 
         # Precompute player values for fast lower bound calculations
-        player_values = {p.name: p.get_value(self.use_glicko) for p in players}
+        player_values = {
+            p.name: p.get_value(self.use_glicko, use_openskill=self.use_openskill)
+            for p in players
+        }
 
         # Track pruning statistics
         pruned_player_selections = 0
@@ -868,8 +894,12 @@ class BalancedShuffler:
             team1 = Team(team1_players)
             team2 = Team(team2_players)
 
-            team1_value = team1.get_team_value(self.use_glicko, self.off_role_multiplier)
-            team2_value = team2.get_team_value(self.use_glicko, self.off_role_multiplier)
+            team1_value = team1.get_team_value(
+                self.use_glicko, self.off_role_multiplier, use_openskill=self.use_openskill
+            )
+            team2_value = team2.get_team_value(
+                self.use_glicko, self.off_role_multiplier, use_openskill=self.use_openskill
+            )
             value_diff = abs(team1_value - team2_value)
 
             team_combinations.append((value_diff, team1, team2))

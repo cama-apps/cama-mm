@@ -145,6 +145,37 @@ class CamaOpenSkillSystem:
 
         return results
 
+    def update_ratings_equal_weight(
+        self,
+        team1_data: list[tuple[int, float | None, float | None]],
+        team2_data: list[tuple[int, float | None, float | None]],
+        winning_team: int,
+    ) -> dict[int, tuple[float, float]]:
+        """
+        Update ratings using Plackett-Luce with equal weights (1.0) for all players.
+
+        This is used for Phase 1 (immediate) updates when fantasy data is not yet available.
+
+        Args:
+            team1_data: List of (discord_id, mu, sigma) for Radiant
+            team2_data: List of (discord_id, mu, sigma) for Dire
+            winning_team: 1 for Radiant, 2 for Dire
+
+        Returns:
+            Dict mapping discord_id -> (new_mu, new_sigma)
+        """
+        # Convert to the format expected by update_ratings_after_match
+        # by adding None for fantasy_points
+        team1_with_weights = [(pid, mu, sigma, None) for pid, mu, sigma in team1_data]
+        team2_with_weights = [(pid, mu, sigma, None) for pid, mu, sigma in team2_data]
+
+        results = self.update_ratings_after_match(
+            team1_with_weights, team2_with_weights, winning_team
+        )
+
+        # Return only (mu, sigma), dropping the fantasy_weight field
+        return {pid: (mu, sigma) for pid, (mu, sigma, _) in results.items()}
+
     def ordinal(self, mu: float, sigma: float, z: float = 3.0) -> float:
         """
         Get conservative skill estimate (99.7% confidence lower bound).

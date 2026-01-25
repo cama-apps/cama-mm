@@ -307,19 +307,19 @@ class MatchCommands(commands.Cog):
         }
 
     @app_commands.command(name="shuffle", description="Create balanced teams from lobby")
-    # @app_commands.describe(
-    #     betting_mode="Betting mode: Pool (user-determined odds) or House (1:1 fixed odds)",
-    # )
-    # @app_commands.choices(
-    #     betting_mode=[
-    #         app_commands.Choice(name="Pool (user odds)", value="pool"),
-    #         app_commands.Choice(name="House (1:1)", value="house"),
-    #     ]
-    # )
+    @app_commands.describe(
+        rating_system="Rating system for team balancing (experimental)",
+    )
+    @app_commands.choices(
+        rating_system=[
+            app_commands.Choice(name="Glicko-2 (default)", value="glicko"),
+            app_commands.Choice(name="OpenSkill (experimental)", value="openskill"),
+        ]
+    )
     async def shuffle(
         self,
         interaction: discord.Interaction,
-        # betting_mode: app_commands.Choice[str] = None,
+        rating_system: app_commands.Choice[str] | None = None,
     ):
         logger.info(f"Shuffle command: User {interaction.user.id} ({interaction.user})")
         guild = interaction.guild if hasattr(interaction, "guild") else None
@@ -424,9 +424,10 @@ class MatchCommands(commands.Cog):
             excluded_conditional_ids = list(all_conditional_ids)
         # `guild` and `guild_id` already computed before the match check
         mode = "pool"  # betting_mode.value if betting_mode else "pool"
+        rs = rating_system.value if rating_system else "glicko"
         try:
             result = self.match_service.shuffle_players(
-                player_ids, guild_id=guild_id, betting_mode=mode
+                player_ids, guild_id=guild_id, betting_mode=mode, rating_system=rs
             )
         except ValueError as exc:
             logger.warning(f"Shuffle validation error: {exc}", exc_info=True)
@@ -446,11 +447,14 @@ class MatchCommands(commands.Cog):
         value_diff = result["value_diff"]
         goodness_score = result.get("goodness_score")
         # Sum of raw ratings (without off-role multipliers) for display
+        use_os = rs == "openskill"
         radiant_sum = sum(
-            player.get_value(self.match_service.use_glicko) for player in radiant_team.players
+            player.get_value(self.match_service.use_glicko, use_openskill=use_os)
+            for player in radiant_team.players
         )
         dire_sum = sum(
-            player.get_value(self.match_service.use_glicko) for player in dire_team.players
+            player.get_value(self.match_service.use_glicko, use_openskill=use_os)
+            for player in dire_team.players
         )
         first_pick_team = result["first_pick_team"]
         excluded_ids = result["excluded_ids"]
@@ -503,7 +507,16 @@ class MatchCommands(commands.Cog):
         radiant_off = radiant_team.get_off_role_count()
         dire_off = dire_team.get_off_role_count()
         goodness_display = f"{goodness_score:.1f}" if goodness_score is not None else "N/A"
+
+        # Show which rating system was used for balancing
+        balancing_system = result.get("balancing_rating_system", "glicko")
+        if balancing_system == "openskill":
+            rating_system_display = "⚗️ OpenSkill (experimental)"
+        else:
+            rating_system_display = "📊 Glicko-2"
+
         balance_info = (
+            f"**Balanced with:** {rating_system_display}\n"
             f"**Goodness score:** {goodness_display} (lower = better)\n"
             f"**Value diff:** {value_diff:.0f}\n"
             f"**Off-role players:** Radiant: {radiant_off}, Dire: {dire_off} (Total: {radiant_off + dire_off})"

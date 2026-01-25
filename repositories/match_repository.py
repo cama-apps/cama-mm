@@ -31,6 +31,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
         dotabuff_match_id: str | None = None,
         notes: str | None = None,
         lobby_type: str = "shuffle",
+        balancing_rating_system: str = "glicko",
     ) -> int:
         """
         Record a match result.
@@ -46,6 +47,8 @@ class MatchRepository(BaseRepository, IMatchRepository):
             dire_team_ids: Deprecated; ignored (team2 is Dire)
             dotabuff_match_id: Optional external match ID
             notes: Optional match notes
+            lobby_type: 'shuffle' or 'draft'
+            balancing_rating_system: 'glicko' or 'openskill' (for experiment tracking)
 
         Returns:
             Match ID
@@ -57,8 +60,8 @@ class MatchRepository(BaseRepository, IMatchRepository):
             cursor.execute(
                 """
                 INSERT INTO matches (team1_players, team2_players, winning_team,
-                                    dotabuff_match_id, notes, lobby_type)
-                VALUES (?, ?, ?, ?, ?, ?)
+                                    dotabuff_match_id, notes, lobby_type, balancing_rating_system)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
                 (
                     json.dumps(team1_ids),
@@ -67,6 +70,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     dotabuff_match_id,
                     notes,
                     lobby_type,
+                    balancing_rating_system,
                 ),
             )
 
@@ -228,6 +232,9 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 "dire_score": row["dire_score"] if "dire_score" in row.keys() else None,
                 "game_mode": row["game_mode"] if "game_mode" in row.keys() else None,
                 "lobby_type": row["lobby_type"] if "lobby_type" in row.keys() else "shuffle",
+                "balancing_rating_system": row["balancing_rating_system"]
+                if "balancing_rating_system" in row.keys()
+                else "glicko",
             }
 
     def get_player_matches(self, discord_id: int, limit: int = 10) -> list[dict]:
@@ -1574,3 +1581,36 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 ],
             )
             return cursor.rowcount
+
+    def get_os_baseline_for_match(self, match_id: int) -> dict[int, tuple[float, float]]:
+        """
+        Get os_mu_before/os_sigma_before from rating_history for Phase 2 recalculation.
+
+        This retrieves the baseline OpenSkill values that were stored during Phase 1
+        (equal-weight update at match recording). Phase 2 uses these as the starting
+        point for fantasy-weighted recalculation.
+
+        Args:
+            match_id: The match ID to look up
+
+        Returns:
+            Dict mapping discord_id -> (os_mu_before, os_sigma_before)
+            Empty dict if no baseline data exists
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT discord_id, os_mu_before, os_sigma_before
+                FROM rating_history
+                WHERE match_id = ?
+                  AND os_mu_before IS NOT NULL
+                  AND os_sigma_before IS NOT NULL
+                """,
+                (match_id,),
+            )
+            rows = cursor.fetchall()
+            return {
+                row["discord_id"]: (row["os_mu_before"], row["os_sigma_before"])
+                for row in rows
+            }

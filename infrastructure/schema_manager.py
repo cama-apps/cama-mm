@@ -210,6 +210,7 @@ class SchemaManager:
             ("add_origin_channel_id_to_lobby", self._migration_add_origin_channel_id_to_lobby),
             ("add_last_wheel_spin_to_players", self._migration_add_last_wheel_spin_to_players),
             ("create_wheel_spins_table", self._migration_create_wheel_spins_table),
+            ("add_balancing_rating_system_column", self._migration_add_balancing_rating_system_column),
         ]
 
     # --- Migrations ---
@@ -921,4 +922,10 @@ class SchemaManager:
         )
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_wheel_spins_spin_time ON wheel_spins(spin_time)"
+        )
+
+    def _migration_add_balancing_rating_system_column(self, cursor) -> None:
+        """Track which rating system was used for team balancing (experiment)."""
+        self._add_column_if_not_exists(
+            cursor, "matches", "balancing_rating_system", "TEXT DEFAULT 'glicko'"
         )

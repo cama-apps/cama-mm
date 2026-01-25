@@ -320,7 +320,11 @@ class MatchService:
         return self.get_pending_record_result(guild_id) is not None
 
     def shuffle_players(
-        self, player_ids: list[int], guild_id: int | None = None, betting_mode: str = "pool"
+        self,
+        player_ids: list[int],
+        guild_id: int | None = None,
+        betting_mode: str = "pool",
+        rating_system: str = "glicko",
     ) -> dict:
         """
         Shuffle players into balanced teams.
@@ -329,11 +333,14 @@ class MatchService:
             player_ids: List of Discord user IDs to shuffle
             guild_id: Guild ID for multi-guild support
             betting_mode: "pool" for parimutuel betting, "house" for 1:1 payouts
+            rating_system: "glicko" or "openskill" - determines which rating system is used for balancing
 
         Returns a payload containing teams, role assignments, and Radiant/Dire mapping.
         """
         if betting_mode not in ("house", "pool"):
             raise ValueError("betting_mode must be 'house' or 'pool'")
+        if rating_system not in ("glicko", "openskill"):
+            raise ValueError("rating_system must be 'glicko' or 'openskill'")
         players = self.player_repo.get_by_ids(player_ids)
         if len(players) != len(player_ids):
             raise ValueError(
@@ -371,22 +378,33 @@ class MatchService:
             pl.name: exclusion_counts_by_id.get(pid, 0) for pid, pl in zip(player_ids, players)
         }
 
+        # Create a shuffler configured for the requested rating system
+        use_openskill = rating_system == "openskill"
+        shuffler = BalancedShuffler(
+            use_glicko=self.use_glicko,
+            use_openskill=use_openskill,
+        )
+
         if len(players) > 10:
-            team1, team2, excluded_players = self.shuffler.shuffle_from_pool(
+            team1, team2, excluded_players = shuffler.shuffle_from_pool(
                 players, exclusion_counts
             )
         else:
-            team1, team2 = self.shuffler.shuffle(players)
+            team1, team2 = shuffler.shuffle(players)
             excluded_players = []
 
-        off_role_mult = self.shuffler.off_role_multiplier
-        team1_value = team1.get_team_value(self.use_glicko, off_role_mult)
-        team2_value = team2.get_team_value(self.use_glicko, off_role_mult)
+        off_role_mult = shuffler.off_role_multiplier
+        team1_value = team1.get_team_value(
+            self.use_glicko, off_role_mult, use_openskill=use_openskill
+        )
+        team2_value = team2.get_team_value(
+            self.use_glicko, off_role_mult, use_openskill=use_openskill
+        )
         value_diff = abs(team1_value - team2_value)
 
         team1_off_roles = team1.get_off_role_count()
         team2_off_roles = team2.get_off_role_count()
-        off_role_penalty = (team1_off_roles + team2_off_roles) * self.shuffler.off_role_flat_penalty
+        off_role_penalty = (team1_off_roles + team2_off_roles) * shuffler.off_role_flat_penalty
         role_matchup_delta = self.team_balancing_service.calculate_role_matchup_delta(team1, team2)
         weighted_role_matchup_delta = (
             role_matchup_delta * self.team_balancing_service.role_matchup_delta_weight
@@ -431,7 +449,7 @@ class MatchService:
         if excluded_players:
             excluded_names = [p.name for p in excluded_players]
             exclusion_sum = sum(exclusion_counts.get(name, 0) for name in excluded_names)
-            excluded_penalty = exclusion_sum * self.shuffler.exclusion_penalty_weight
+            excluded_penalty = exclusion_sum * shuffler.exclusion_penalty_weight
 
         goodness_score = (
             value_diff + off_role_penalty + weighted_role_matchup_delta + excluded_penalty
@@ -504,6 +522,7 @@ class MatchService:
             "shuffle_channel_id": None,
             "betting_mode": betting_mode,
             "is_draft": False,
+            "balancing_rating_system": rating_system,
         }
         self.set_last_shuffle(guild_id, shuffle_state)
         self._persist_match_state(guild_id, shuffle_state)
@@ -521,6 +540,7 @@ class MatchService:
             "excluded_ids": excluded_ids,
             "glicko_radiant_win_prob": glicko_radiant_win_prob,
             "openskill_radiant_win_prob": openskill_radiant_win_prob,
+            "balancing_rating_system": rating_system,
         }
 
     def _load_glicko_player(self, player_id: int) -> tuple[Player, int]:
@@ -606,6 +626,7 @@ class MatchService:
 
             # Determine lobby type from pending state (draft sets is_draft=True)
             lobby_type = "draft" if last_shuffle.get("is_draft") else "shuffle"
+            balancing_rating_system = last_shuffle.get("balancing_rating_system", "glicko")
 
             match_id = self.match_repo.record_match(
                 team1_ids=radiant_team_ids,
@@ -613,6 +634,7 @@ class MatchService:
                 winning_team=1 if winning_team == "radiant" else 2,
                 dotabuff_match_id=dotabuff_match_id,
                 lobby_type=lobby_type,
+                balancing_rating_system=balancing_rating_system,
             )
 
             # Persist win/loss counters for all players in the match (prefer single transaction).
@@ -760,6 +782,42 @@ class MatchService:
                     expected_radiant_win_prob=expected_radiant_win_prob,
                 )
 
+            # === Phase 1: OpenSkill update with equal weights ===
+            # This runs immediately at match record to keep OpenSkill ratings fresh.
+            # Phase 2 (update_openskill_ratings_for_match) will recalculate with
+            # fantasy weights after enrichment, using the baseline stored here.
+            all_player_ids = radiant_team_ids + dire_team_ids
+            os_ratings = self.player_repo.get_openskill_ratings_bulk(all_player_ids)
+
+            radiant_os_data = [
+                (pid, *os_ratings.get(pid, (None, None)))
+                for pid in radiant_team_ids
+            ]
+            dire_os_data = [
+                (pid, *os_ratings.get(pid, (None, None)))
+                for pid in dire_team_ids
+            ]
+
+            os_results = self.openskill_system.update_ratings_equal_weight(
+                radiant_os_data, dire_os_data,
+                winning_team=1 if winning_team == "radiant" else 2
+            )
+
+            # Update player OpenSkill ratings immediately
+            os_updates = [(pid, mu, sigma) for pid, (mu, sigma) in os_results.items()]
+            self.player_repo.update_openskill_ratings_bulk(os_updates)
+
+            # Store os_* data in pre_match dict for rating_history
+            DEFAULT_MU = CamaOpenSkillSystem.DEFAULT_MU
+            DEFAULT_SIGMA = CamaOpenSkillSystem.DEFAULT_SIGMA
+            for pid, (new_mu, new_sigma) in os_results.items():
+                old_mu, old_sigma = os_ratings.get(pid, (None, None))
+                if pid in pre_match:
+                    pre_match[pid]["os_mu_before"] = old_mu if old_mu is not None else DEFAULT_MU
+                    pre_match[pid]["os_mu_after"] = new_mu
+                    pre_match[pid]["os_sigma_before"] = old_sigma if old_sigma is not None else DEFAULT_SIGMA
+                    pre_match[pid]["os_sigma_after"] = new_sigma
+
             # Record rating history snapshots per player
             for pid, rating, rd, vol in updates:
                 pre = pre_match.get(pid)
@@ -777,6 +835,10 @@ class MatchService:
                     expected_team_win_prob=expected_team_win_prob.get(pre["team_number"]),
                     team_number=pre["team_number"],
                     won=pre["won"],
+                    os_mu_before=pre.get("os_mu_before"),
+                    os_mu_after=pre.get("os_mu_after"),
+                    os_sigma_before=pre.get("os_sigma_before"),
+                    os_sigma_after=pre.get("os_sigma_after"),
                 )
 
             # Update pairwise player statistics
@@ -872,9 +934,21 @@ class MatchService:
                 "reason": "No fantasy data available",
             }
 
-        # Get current OpenSkill ratings for all players
+        # === Phase 2: Get baseline from rating_history (Phase 1 values) ===
+        # This retrieves the pre-match OpenSkill ratings that were stored during
+        # Phase 1, allowing us to recalculate with fantasy weights from the same
+        # starting point.
         discord_ids = [p["discord_id"] for p in participants]
-        os_ratings = self.player_repo.get_openskill_ratings_bulk(discord_ids)
+        os_baseline = self.match_repo.get_os_baseline_for_match(match_id)
+
+        if os_baseline:
+            # Use Phase 1 baseline (os_mu_before/os_sigma_before from rating_history)
+            os_ratings = os_baseline
+            logger.debug(f"Match {match_id}: using Phase 1 baseline for {len(os_baseline)} players")
+        else:
+            # Legacy fallback: use current player ratings (pre-Phase 1 matches)
+            os_ratings = self.player_repo.get_openskill_ratings_bulk(discord_ids)
+            logger.debug(f"Match {match_id}: no Phase 1 baseline, using current ratings")
 
         # Build team data for OpenSkill update
         # Format: (discord_id, mu, sigma, fantasy_points)
