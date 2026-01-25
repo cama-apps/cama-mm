@@ -1529,6 +1529,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         # Handle os_mu and os_sigma which may not exist in older schemas
         os_mu = row["os_mu"] if "os_mu" in row.keys() else None
         os_sigma = row["os_sigma"] if "os_sigma" in row.keys() else None
+        steam_id = row["steam_id"] if "steam_id" in row.keys() else None
 
         return Player(
             name=row["discord_username"],
@@ -1545,4 +1546,5 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             os_sigma=os_sigma,
             discord_id=row["discord_id"],
             jopacoin_balance=row["jopacoin_balance"] if row["jopacoin_balance"] else 0,
+            steam_id=steam_id,
         )

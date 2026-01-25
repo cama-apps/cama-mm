@@ -58,13 +58,19 @@ class Team:
         self.players = players
         self.role_assignments = role_assignments
 
-    def get_team_value(self, use_glicko: bool = True, off_role_multiplier: float = 0.9) -> float:
+    def get_team_value(
+        self,
+        use_glicko: bool = True,
+        off_role_multiplier: float = 0.9,
+        use_openskill: bool = False,
+    ) -> float:
         """
         Calculate total team value with off-role penalties.
 
         Args:
             use_glicko: Whether to use Glicko-2 ratings
             off_role_multiplier: Multiplier for rating when playing off-role
+            use_openskill: Whether to use OpenSkill ratings (overrides use_glicko if True)
 
         Returns:
             Sum of all player values adjusted for role assignments
@@ -74,7 +80,7 @@ class Team:
 
         total_value = 0
         for player, assigned_role in zip(self.players, self.role_assignments):
-            base_value = player.get_value(use_glicko)
+            base_value = player.get_value(use_glicko, use_openskill=use_openskill)
 
             if player.preferred_roles and assigned_role in player.preferred_roles:
                 total_value += base_value
@@ -181,7 +187,11 @@ class Team:
         return penalty
 
     def get_player_by_role(
-        self, role: str, use_glicko: bool = True, off_role_multiplier: float = 0.9
+        self,
+        role: str,
+        use_glicko: bool = True,
+        off_role_multiplier: float = 0.9,
+        use_openskill: bool = False,
     ) -> tuple[Player, float]:
         """
         Get the player assigned to a specific role and their effective value.
@@ -190,6 +200,7 @@ class Team:
             role: Role to get (1-5)
             use_glicko: Whether to use Glicko-2 ratings
             off_role_multiplier: Multiplier for rating when playing off-role
+            use_openskill: Whether to use OpenSkill ratings (overrides use_glicko if True)
 
         Returns:
             Tuple of (player, effective_value)
@@ -200,7 +211,7 @@ class Team:
         # Find the player assigned to this role
         for player, assigned_role in zip(self.players, self.role_assignments):
             if assigned_role == role:
-                base_value = player.get_value(use_glicko)
+                base_value = player.get_value(use_glicko, use_openskill=use_openskill)
                 if player.preferred_roles and role in player.preferred_roles:
                     effective_value = base_value
                 else:
@@ -210,7 +221,7 @@ class Team:
         # Should never happen if team is valid, but return first player as fallback
         if self.players:
             player = self.players[0]
-            base_value = player.get_value(use_glicko)
+            base_value = player.get_value(use_glicko, use_openskill=use_openskill)
             return (player, base_value * off_role_multiplier)
 
         raise ValueError(f"No player found for role {role}")
