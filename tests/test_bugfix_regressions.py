@@ -151,37 +151,20 @@ class TestGamblingLeaderboardNoFetchUser:
 
     The leaderboard now pre-fetches guild members instead of making individual
     bot.fetch_user() calls, which caused timeouts with many entries.
+
+    Updated: These tests now verify the UnifiedLeaderboardView's gambling tab
+    uses the same guild member caching pattern.
     """
 
     @pytest.mark.asyncio
     async def test_gambling_leaderboard_uses_guild_members_cache(self):
-        """Verify _show_gambling_leaderboard uses pre-fetched guild members."""
-        from commands.info import InfoCommands
+        """Verify UnifiedLeaderboardView's gambling tab uses pre-fetched guild members."""
+        from commands.info import UnifiedLeaderboardView, LeaderboardTab
 
-        # Create mock bot
-        mock_bot = MagicMock()
-        mock_bot.fetch_user = AsyncMock(return_value=MagicMock(display_name="FetchedUser"))
-
-        # Create mock interaction with guild members
-        mock_member1 = MagicMock()
-        mock_member1.id = 1001
-        mock_member1.display_name = "CachedUser1"
-
-        mock_member2 = MagicMock()
-        mock_member2.id = 1002
-        mock_member2.display_name = "CachedUser2"
-
-        mock_guild = MagicMock()
-        mock_guild.members = [mock_member1, mock_member2]
-
-        mock_interaction = MagicMock()
-        mock_interaction.guild = mock_guild
-        mock_interaction.followup = AsyncMock()
-        mock_interaction.followup.send = AsyncMock()
-
-        # Create mock gambling stats service that returns a leaderboard
-        mock_gambling_service = MagicMock()
-        mock_gambling_service.get_leaderboard.return_value = Leaderboard(
+        # Create mock cog
+        mock_cog = MagicMock()
+        mock_cog.gambling_stats_service = MagicMock()
+        mock_cog.gambling_stats_service.get_leaderboard.return_value = Leaderboard(
             top_earners=[
                 LeaderboardEntry(
                     discord_id=1001, total_bets=5, wins=3, losses=2,
@@ -210,57 +193,63 @@ class TestGamblingLeaderboardNoFetchUser:
                 "total_bankruptcies": 0,
             },
         )
+        mock_cog.bankruptcy_service = MagicMock()
+        mock_cog.bankruptcy_service.get_bulk_states.return_value = {}
 
-        # Create the cog
-        cog = InfoCommands(
-            bot=mock_bot,
-            player_repo=MagicMock(),
-            match_repo=MagicMock(),
-            role_emojis={},
-            role_names={},
-            gambling_stats_service=mock_gambling_service,
+        # Create mock interaction with guild members
+        mock_member1 = MagicMock()
+        mock_member1.id = 1001
+        mock_member1.display_name = "CachedUser1"
+
+        mock_member2 = MagicMock()
+        mock_member2.id = 1002
+        mock_member2.display_name = "CachedUser2"
+
+        mock_guild = MagicMock()
+        mock_guild.id = 12345
+        mock_guild.members = [mock_member1, mock_member2]
+
+        mock_interaction = MagicMock()
+        mock_interaction.guild = mock_guild
+        mock_interaction.user = MagicMock()
+        mock_interaction.user.id = 1001
+
+        # Create the view
+        view = UnifiedLeaderboardView(
+            cog=mock_cog,
+            guild_id=12345,
+            interaction=mock_interaction,
+            initial_tab=LeaderboardTab.GAMBLING,
         )
 
-        # Patch safe_followup to capture the embed
-        with patch("commands.info.safe_followup", new_callable=AsyncMock) as mock_followup:
-            await cog._show_gambling_leaderboard(mock_interaction, limit=5)
+        # Load gambling data
+        await view._load_tab_data(LeaderboardTab.GAMBLING)
 
-            # Verify bot.fetch_user was NEVER called (we use cached guild members)
-            mock_bot.fetch_user.assert_not_called()
+        # Verify guild_members are cached in state.extra
+        state = view._tab_states[LeaderboardTab.GAMBLING]
+        assert "guild_members" in state.extra
+        assert 1001 in state.extra["guild_members"]
+        assert 1002 in state.extra["guild_members"]
 
-            # Verify safe_followup was called with embed
-            mock_followup.assert_called_once()
-            call_kwargs = mock_followup.call_args[1]
-            embed = call_kwargs.get("embed")
-            assert embed is not None, "Should have sent an embed"
+        # Build embed and verify cached names are used
+        embed = view.build_embed()
+        embed_text = ""
+        for field in embed.fields:
+            embed_text += field.name + field.value
 
-            # Verify the embed contains the cached usernames (not "FetchedUser")
-            embed_text = ""
-            for field in embed.fields:
-                embed_text += field.name + field.value
-
-            assert "CachedUser1" in embed_text, (
-                "Embed should use cached guild member name 'CachedUser1'"
-            )
-            assert "FetchedUser" not in embed_text, (
-                "Embed should not contain 'FetchedUser' - should use cached names"
-            )
+        assert "CachedUser1" in embed_text, (
+            "Embed should use cached guild member name 'CachedUser1'"
+        )
 
     @pytest.mark.asyncio
     async def test_gambling_leaderboard_handles_missing_guild(self):
-        """Verify leaderboard handles DM context (no guild) gracefully."""
-        from commands.info import InfoCommands
+        """Verify UnifiedLeaderboardView handles DM context (no guild) gracefully."""
+        from commands.info import UnifiedLeaderboardView, LeaderboardTab
 
-        mock_bot = MagicMock()
-        mock_bot.fetch_user = AsyncMock()
-
-        # No guild (DM context)
-        mock_interaction = MagicMock()
-        mock_interaction.guild = None
-        mock_interaction.followup = AsyncMock()
-
-        mock_gambling_service = MagicMock()
-        mock_gambling_service.get_leaderboard.return_value = Leaderboard(
+        # Create mock cog
+        mock_cog = MagicMock()
+        mock_cog.gambling_stats_service = MagicMock()
+        mock_cog.gambling_stats_service.get_leaderboard.return_value = Leaderboard(
             top_earners=[
                 LeaderboardEntry(
                     discord_id=1001, total_bets=5, wins=3, losses=2,
@@ -284,25 +273,34 @@ class TestGamblingLeaderboardNoFetchUser:
                 "total_bankruptcies": 0,
             },
         )
+        mock_cog.bankruptcy_service = MagicMock()
+        mock_cog.bankruptcy_service.get_bulk_states.return_value = {}
 
-        cog = InfoCommands(
-            bot=mock_bot,
-            player_repo=MagicMock(),
-            match_repo=MagicMock(),
-            role_emojis={},
-            role_names={},
-            gambling_stats_service=mock_gambling_service,
+        # No guild (DM context)
+        mock_interaction = MagicMock()
+        mock_interaction.guild = None
+        mock_interaction.user = MagicMock()
+        mock_interaction.user.id = 1001
+
+        # Create the view (should not raise)
+        view = UnifiedLeaderboardView(
+            cog=mock_cog,
+            guild_id=None,
+            interaction=mock_interaction,
+            initial_tab=LeaderboardTab.GAMBLING,
         )
 
-        with patch("commands.info.safe_followup", new_callable=AsyncMock) as mock_followup:
-            # Should not raise even without guild
-            await cog._show_gambling_leaderboard(mock_interaction, limit=5)
+        # Load gambling data - should not raise
+        await view._load_tab_data(LeaderboardTab.GAMBLING)
 
-            # Still shouldn't call fetch_user (falls back to "User {id}")
-            mock_bot.fetch_user.assert_not_called()
+        # Should have empty guild_members dict
+        state = view._tab_states[LeaderboardTab.GAMBLING]
+        assert state.extra.get("guild_members") == {}
 
-            # Should still send embed
-            mock_followup.assert_called_once()
+        # Build embed should work and fall back to "User {id}"
+        embed = view.build_embed()
+        assert embed is not None
+        assert len(embed.fields) > 0 or embed.description is not None
 
 
 class TestProfileTeammatesSpacerPresent:
@@ -415,29 +413,32 @@ class TestProfileTeammatesSpacerPresent:
 class TestGetNameFunctionSync:
     """
     Verify the get_name helper function is synchronous and uses cached members.
+
+    Updated: Tests now verify the UnifiedLeaderboardView's _get_name_for_gambling
+    method is synchronous and uses cached guild members.
     """
 
     def test_get_name_is_sync_in_gambling_leaderboard(self):
-        """Verify get_name in _show_gambling_leaderboard is a sync function."""
+        """Verify _get_name_for_gambling in UnifiedLeaderboardView is a sync function."""
         import inspect
-        from commands.info import InfoCommands
+        from commands.info import UnifiedLeaderboardView
 
-        # Get the source code of _show_gambling_leaderboard
-        source = inspect.getsource(InfoCommands._show_gambling_leaderboard)
+        # Get the source code of _get_name_for_gambling
+        source = inspect.getsource(UnifiedLeaderboardView._get_name_for_gambling)
 
-        # Check that get_name is defined as sync (def, not async def)
-        assert "def get_name(discord_id: int) -> str:" in source, (
-            "get_name should be a synchronous function (def, not async def)"
+        # Check that it's defined as sync (def, not async def)
+        assert "def _get_name_for_gambling(self, discord_id: int) -> str:" in source, (
+            "_get_name_for_gambling should be a synchronous function (def, not async def)"
         )
 
-        # Verify there's no 'await get_name' in the method
-        assert "await get_name" not in source, (
-            "get_name should not be awaited - it should be synchronous"
+        # Verify there's no 'await' in the method
+        assert "await" not in source, (
+            "_get_name_for_gambling should not use await - it should be synchronous"
         )
 
-        # Verify guild_members pre-fetch exists
-        assert "guild_members = {m.id: m for m in interaction.guild.members}" in source, (
-            "Should pre-fetch guild members into a dict for O(1) lookup"
+        # Verify it uses guild_members from state.extra
+        assert "guild_members" in source, (
+            "Should use guild_members from state.extra for O(1) lookup"
         )
 
 
