@@ -1502,6 +1502,32 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             # If rowcount > 0, the update happened (cooldown passed)
             return cursor.rowcount > 0
 
+    def get_wheel_spin_history(self, discord_id: int) -> list[dict]:
+        """
+        Get wheel spin history for a player.
+
+        Args:
+            discord_id: Player's Discord ID
+
+        Returns:
+            List of dicts with 'result' and 'spin_time' keys, sorted by spin_time
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT result, spin_time
+                FROM wheel_spins
+                WHERE discord_id = ?
+                ORDER BY spin_time ASC
+                """,
+                (discord_id,),
+            )
+            return [
+                {"result": row["result"], "spin_time": row["spin_time"]}
+                for row in cursor.fetchall()
+            ]
+
     def _row_to_player(self, row) -> Player:
         """Convert database row to Player object."""
         preferred_roles = json.loads(row["preferred_roles"]) if row["preferred_roles"] else None
