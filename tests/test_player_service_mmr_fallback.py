@@ -24,6 +24,8 @@ class FakeRepo:
         glicko_rating=None,
         glicko_rd=None,
         glicko_volatility=None,
+        os_mu=None,
+        os_sigma=None,
     ):
         self.add_calls.append(
             {
@@ -35,6 +37,8 @@ class FakeRepo:
                 "glicko_rating": glicko_rating,
                 "glicko_rd": glicko_rd,
                 "glicko_volatility": glicko_volatility,
+                "os_mu": os_mu,
+                "os_sigma": os_sigma,
             }
         )
 

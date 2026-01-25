@@ -4,6 +4,7 @@ Player-facing business logic (registration, roles, stats).
 
 from domain.models.player import Player
 from opendota_integration import OpenDotaAPI
+from openskill_rating_system import CamaOpenSkillSystem
 from rating_system import CamaRatingSystem
 from repositories.interfaces import IPlayerRepository
 
@@ -16,6 +17,7 @@ class PlayerService:
     def __init__(self, player_repo: IPlayerRepository):
         self.player_repo = player_repo
         self.rating_system = CamaRatingSystem()
+        self.openskill_system = CamaOpenSkillSystem()
 
     @staticmethod
     def _validate_steam_id(steam_id: int):
@@ -71,6 +73,10 @@ class PlayerService:
             raise ValueError("MMR not available; please provide your MMR.")
         glicko_player = self.rating_system.create_player_from_mmr(mmr)
 
+        # Initialize OpenSkill from MMR (same scale alignment as Glicko)
+        os_mu = self.openskill_system.mmr_to_os_mu(mmr)
+        os_sigma = CamaOpenSkillSystem.DEFAULT_SIGMA  # High uncertainty for new players
+
         steam_id64 = steam_id + STEAM_ID64_OFFSET
         dotabuff_url = f"https://www.dotabuff.com/players/{steam_id64}"
 
@@ -83,6 +89,8 @@ class PlayerService:
             glicko_rating=glicko_player.rating,
             glicko_rd=glicko_player.rd,
             glicko_volatility=glicko_player.vol,
+            os_mu=os_mu,
+            os_sigma=os_sigma,
         )
 
         cama_rating = self.rating_system.rating_to_display(glicko_player.rating)

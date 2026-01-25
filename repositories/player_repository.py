@@ -36,6 +36,8 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         glicko_rating: float | None = None,
         glicko_rd: float | None = None,
         glicko_volatility: float | None = None,
+        os_mu: float | None = None,
+        os_sigma: float | None = None,
     ) -> None:
         """
         Add a new player to the database.
@@ -51,6 +53,8 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             glicko_rating: Optional initial Glicko rating
             glicko_rd: Optional initial rating deviation
             glicko_volatility: Optional initial volatility
+            os_mu: Optional initial OpenSkill mu
+            os_sigma: Optional initial OpenSkill sigma
 
         Raises:
             ValueError: If player with this discord_id already exists
@@ -70,8 +74,8 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 INSERT INTO players
                 (discord_id, discord_username, dotabuff_url, steam_id, initial_mmr, current_mmr,
                  preferred_roles, main_role, glicko_rating, glicko_rd, glicko_volatility,
-                 exclusion_count, jopacoin_balance, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 3, CURRENT_TIMESTAMP)
+                 os_mu, os_sigma, exclusion_count, jopacoin_balance, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 3, CURRENT_TIMESTAMP)
             """,
                 (
                     discord_id,
@@ -85,6 +89,8 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                     glicko_rating,
                     glicko_rd,
                     glicko_volatility,
+                    os_mu,
+                    os_sigma,
                     NEW_PLAYER_EXCLUSION_BOOST,
                 ),
             )
