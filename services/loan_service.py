@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from config import LOAN_COOLDOWN_SECONDS, LOAN_FEE_RATE, LOAN_MAX_AMOUNT, MAX_DEBT
 from repositories.base_repository import BaseRepository
 from repositories.player_repository import PlayerRepository
+from services.result import Result
+from services import error_codes
 
 
 @dataclass
@@ -36,6 +38,40 @@ class LoanState:
     def outstanding_total(self) -> int:
         """Total amount owed (principal + fee)."""
         return self.outstanding_principal + self.outstanding_fee
+
+
+@dataclass
+class LoanApproval:
+    """Details of an approved loan request."""
+
+    amount: int
+    fee: int
+    total_owed: int
+    new_balance: int
+
+
+@dataclass
+class LoanResult:
+    """Result of taking a loan."""
+
+    amount: int
+    fee: int
+    total_owed: int
+    new_balance: int
+    total_loans_taken: int
+    was_negative_loan: bool  # True if taken while already in debt
+
+
+@dataclass
+class RepaymentResult:
+    """Result of repaying a loan."""
+
+    principal: int
+    fee: int
+    total_repaid: int
+    balance_before: int
+    new_balance: int
+    nonprofit_total: int
 
 
 class LoanRepository(BaseRepository):
@@ -437,3 +473,180 @@ class LoanService:
     def add_to_nonprofit_fund(self, guild_id: int | None, amount: int) -> int:
         """Add amount to the nonprofit fund. Returns the new total."""
         return self.loan_repo.add_to_nonprofit_fund(guild_id, amount)
+
+    # =========================================================================
+    # Result-returning methods (new API)
+    # These methods return Result types for cleaner error handling.
+    # The old dict-returning methods are kept for backward compatibility.
+    # =========================================================================
+
+    def validate_loan(self, discord_id: int, amount: int) -> Result[LoanApproval]:
+        """
+        Check if a player can take a loan.
+
+        Returns:
+            Result.ok(LoanApproval) if allowed
+            Result.fail(error_message, code) if not allowed
+
+        Error codes:
+            - LOAN_ALREADY_EXISTS: Player has an outstanding loan
+            - COOLDOWN_ACTIVE: Loan cooldown hasn't expired
+            - VALIDATION_ERROR: Invalid amount
+            - LOAN_AMOUNT_EXCEEDED: Amount exceeds maximum
+        """
+        state = self.get_state(discord_id)
+        balance = self.player_repo.get_balance(discord_id)
+
+        # Check if player already has an outstanding loan
+        if state.has_outstanding_loan:
+            return Result.fail(
+                f"You have an outstanding loan of {state.outstanding_total} "
+                f"(principal: {state.outstanding_principal}, fee: {state.outstanding_fee}). "
+                "Repay it by playing in a match first!",
+                code=error_codes.LOAN_ALREADY_EXISTS,
+            )
+
+        if state.is_on_cooldown:
+            remaining = state.cooldown_ends_at - int(time.time())
+            hours = remaining // 3600
+            minutes = (remaining % 3600) // 60
+            return Result.fail(
+                f"Loan cooldown active. Try again in {hours}h {minutes}m.",
+                code=error_codes.COOLDOWN_ACTIVE,
+            )
+
+        if amount <= 0:
+            return Result.fail(
+                "Loan amount must be positive.",
+                code=error_codes.VALIDATION_ERROR,
+            )
+
+        if amount > self.max_amount:
+            return Result.fail(
+                f"Maximum loan amount is {self.max_amount}.",
+                code=error_codes.LOAN_AMOUNT_EXCEEDED,
+            )
+
+        # Calculate loan details
+        fee = int(amount * self.fee_rate)
+        total_owed = amount + fee
+        new_balance = balance + amount
+
+        return Result.ok(
+            LoanApproval(
+                amount=amount,
+                fee=fee,
+                total_owed=total_owed,
+                new_balance=new_balance,
+            )
+        )
+
+    def execute_loan(
+        self, discord_id: int, amount: int, guild_id: int | None = None
+    ) -> Result[LoanResult]:
+        """
+        Take out a loan with deferred repayment.
+
+        The player receives the full loan amount immediately.
+        Repayment (principal + fee) happens when they play in a recorded match.
+
+        Returns:
+            Result.ok(LoanResult) on success
+            Result.fail(error_message, code) on failure
+        """
+        # Validate first
+        validation = self.validate_loan(discord_id, amount)
+        if not validation.success:
+            return Result.fail(validation.error, code=validation.error_code)
+
+        approval = validation.value
+        now = int(time.time())
+
+        # Check if taking loan while already in debt (peak degen behavior)
+        balance_before = self.player_repo.get_balance(discord_id)
+        was_negative_loan = balance_before < 0
+
+        # Get current state for updating totals
+        state = self.get_state(discord_id)
+
+        # Credit the full loan amount
+        self.player_repo.add_balance(discord_id, amount)
+
+        # Update loan state with outstanding amounts
+        new_negative_loans = state.negative_loans_taken + (1 if was_negative_loan else 0)
+        self.loan_repo.upsert_state(
+            discord_id=discord_id,
+            last_loan_at=now,
+            total_loans_taken=state.total_loans_taken + 1,
+            total_fees_paid=state.total_fees_paid,
+            negative_loans_taken=new_negative_loans,
+            outstanding_principal=amount,
+            outstanding_fee=approval.fee,
+        )
+
+        new_balance = self.player_repo.get_balance(discord_id)
+
+        return Result.ok(
+            LoanResult(
+                amount=amount,
+                fee=approval.fee,
+                total_owed=approval.total_owed,
+                new_balance=new_balance,
+                total_loans_taken=state.total_loans_taken + 1,
+                was_negative_loan=was_negative_loan,
+            )
+        )
+
+    def execute_repayment(
+        self, discord_id: int, guild_id: int | None = None
+    ) -> Result[RepaymentResult]:
+        """
+        Repay an outstanding loan.
+
+        Called when a player participates in a recorded match.
+        Deducts principal + fee from balance, adds fee to nonprofit fund.
+
+        Returns:
+            Result.ok(RepaymentResult) on success
+            Result.fail(error_message, code) if no outstanding loan
+        """
+        state = self.get_state(discord_id)
+
+        if not state.has_outstanding_loan:
+            return Result.fail(
+                "No outstanding loan to repay.",
+                code=error_codes.NO_OUTSTANDING_LOAN,
+            )
+
+        principal = state.outstanding_principal
+        fee = state.outstanding_fee
+        total_owed = principal + fee
+
+        balance_before = self.player_repo.get_balance(discord_id)
+
+        # Deduct the total owed from balance (can push into debt)
+        self.player_repo.add_balance(discord_id, -total_owed)
+
+        # Add fee to nonprofit fund
+        nonprofit_total = self.loan_repo.add_to_nonprofit_fund(guild_id, fee)
+
+        # Update loan state: clear outstanding, add fee to total_fees_paid
+        self.loan_repo.upsert_state(
+            discord_id=discord_id,
+            total_fees_paid=state.total_fees_paid + fee,
+            outstanding_principal=0,
+            outstanding_fee=0,
+        )
+
+        new_balance = self.player_repo.get_balance(discord_id)
+
+        return Result.ok(
+            RepaymentResult(
+                principal=principal,
+                fee=fee,
+                total_repaid=total_owed,
+                balance_before=balance_before,
+                new_balance=new_balance,
+                nonprofit_total=nonprofit_total,
+            )
+        )
