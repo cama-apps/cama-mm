@@ -58,6 +58,7 @@ async def test_wheel_cooldown_enforced():
     interaction.guild.id = 123
     interaction.user.id = 789
     interaction.response.send_message = AsyncMock()
+    interaction.response.defer = AsyncMock()
 
     commands = BettingCommands(bot, betting_service, match_service, player_service)
 
