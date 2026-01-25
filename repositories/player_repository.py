@@ -36,8 +36,6 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         glicko_rating: float | None = None,
         glicko_rd: float | None = None,
         glicko_volatility: float | None = None,
-        os_mu: float | None = None,
-        os_sigma: float | None = None,
     ) -> None:
         """
         Add a new player to the database.
@@ -53,8 +51,6 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             glicko_rating: Optional initial Glicko rating
             glicko_rd: Optional initial rating deviation
             glicko_volatility: Optional initial volatility
-            os_mu: Optional initial OpenSkill mu
-            os_sigma: Optional initial OpenSkill sigma
 
         Raises:
             ValueError: If player with this discord_id already exists
@@ -74,8 +70,8 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 INSERT INTO players
                 (discord_id, discord_username, dotabuff_url, steam_id, initial_mmr, current_mmr,
                  preferred_roles, main_role, glicko_rating, glicko_rd, glicko_volatility,
-                 os_mu, os_sigma, exclusion_count, jopacoin_balance, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 3, CURRENT_TIMESTAMP)
+                 exclusion_count, jopacoin_balance, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 3, CURRENT_TIMESTAMP)
             """,
                 (
                     discord_id,
@@ -89,8 +85,6 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                     glicko_rating,
                     glicko_rd,
                     glicko_volatility,
-                    os_mu,
-                    os_sigma,
                     NEW_PLAYER_EXCLUSION_BOOST,
                 ),
             )
@@ -1478,55 +1472,35 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 (timestamp, discord_id),
             )
 
-    def log_wheel_spin(
-        self, discord_id: int, guild_id: int | None, result: int, spin_time: int
-    ) -> int:
+    def try_claim_wheel_spin(self, discord_id: int, now: int, cooldown_seconds: int) -> bool:
         """
-        Log a wheel spin result for gambling history tracking.
+        Atomically check cooldown and claim a wheel spin.
+
+        This prevents race conditions where concurrent requests could both pass
+        the cooldown check before either sets the new timestamp.
 
         Args:
             discord_id: Player's Discord ID
-            guild_id: Guild ID (None for DMs)
-            result: Spin result (positive for win, negative for bankrupt, 0 for lose turn)
-            spin_time: Unix timestamp of the spin
+            now: Current Unix timestamp
+            cooldown_seconds: Required cooldown between spins
 
         Returns:
-            The spin_id of the created record
-        """
-        normalized_guild_id = guild_id if guild_id is not None else 0
-        with self.connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                INSERT INTO wheel_spins (guild_id, discord_id, result, spin_time)
-                VALUES (?, ?, ?, ?)
-                """,
-                (normalized_guild_id, discord_id, result, spin_time),
-            )
-            return cursor.lastrowid
-
-    def get_wheel_spin_history(self, discord_id: int) -> list[dict]:
-        """
-        Get a player's wheel spin history ordered by spin time.
-
-        Args:
-            discord_id: Player's Discord ID
-
-        Returns:
-            List of dicts with spin_id, guild_id, result, spin_time
+            True if spin was claimed (cooldown passed), False if still on cooldown
         """
         with self.connection() as conn:
             cursor = conn.cursor()
+            # Atomic check-and-set: only update if cooldown has passed
             cursor.execute(
                 """
-                SELECT spin_id, guild_id, result, spin_time
-                FROM wheel_spins
+                UPDATE players
+                SET last_wheel_spin = ?, updated_at = CURRENT_TIMESTAMP
                 WHERE discord_id = ?
-                ORDER BY spin_time ASC
+                  AND (last_wheel_spin IS NULL OR last_wheel_spin < ?)
                 """,
-                (discord_id,),
+                (now, discord_id, now - cooldown_seconds),
             )
-            return [dict(row) for row in cursor.fetchall()]
+            # If rowcount > 0, the update happened (cooldown passed)
+            return cursor.rowcount > 0
 
     def _row_to_player(self, row) -> Player:
         """Convert database row to Player object."""
@@ -1535,7 +1509,6 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         # Handle os_mu and os_sigma which may not exist in older schemas
         os_mu = row["os_mu"] if "os_mu" in row.keys() else None
         os_sigma = row["os_sigma"] if "os_sigma" in row.keys() else None
-        steam_id = row["steam_id"] if "steam_id" in row.keys() else None
 
         return Player(
             name=row["discord_username"],
@@ -1552,5 +1525,4 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             os_sigma=os_sigma,
             discord_id=row["discord_id"],
             jopacoin_balance=row["jopacoin_balance"] if row["jopacoin_balance"] else 0,
-            steam_id=steam_id,
         )

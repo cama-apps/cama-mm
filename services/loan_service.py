@@ -190,6 +190,142 @@ class LoanRepository(BaseRepository):
             row = cursor.fetchone()
             return row["total_collected"] if row else amount
 
+    def execute_loan_atomic(
+        self,
+        discord_id: int,
+        amount: int,
+        fee: int,
+        cooldown_seconds: int,
+        max_amount: int,
+    ) -> dict:
+        """
+        Atomically validate and execute a loan.
+
+        Prevents race condition where concurrent requests could both pass
+        validation before either records the loan.
+
+        Args:
+            discord_id: Player's Discord ID
+            amount: Loan amount requested
+            fee: Calculated fee for the loan
+            cooldown_seconds: Required cooldown between loans
+            max_amount: Maximum allowed loan amount
+
+        Returns:
+            Dict with loan details on success
+
+        Raises:
+            ValueError with specific message on failure
+        """
+        now = int(time.time())
+
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+
+            # Check for existing outstanding loan
+            cursor.execute(
+                """
+                SELECT outstanding_principal, outstanding_fee, last_loan_at,
+                       COALESCE(total_loans_taken, 0) as total_loans_taken,
+                       COALESCE(total_fees_paid, 0) as total_fees_paid,
+                       COALESCE(negative_loans_taken, 0) as negative_loans_taken
+                FROM loan_state
+                WHERE discord_id = ?
+                """,
+                (discord_id,),
+            )
+            state_row = cursor.fetchone()
+
+            outstanding_principal = 0
+            outstanding_fee = 0
+            last_loan_at = None
+            total_loans_taken = 0
+            total_fees_paid = 0
+            negative_loans_taken = 0
+
+            if state_row:
+                outstanding_principal = state_row["outstanding_principal"] or 0
+                outstanding_fee = state_row["outstanding_fee"] or 0
+                last_loan_at = state_row["last_loan_at"]
+                total_loans_taken = state_row["total_loans_taken"]
+                total_fees_paid = state_row["total_fees_paid"]
+                negative_loans_taken = state_row["negative_loans_taken"]
+
+            # Validate: no outstanding loan
+            if outstanding_principal > 0:
+                total_owed = outstanding_principal + outstanding_fee
+                raise ValueError(
+                    f"You have an outstanding loan of {total_owed} "
+                    f"(principal: {outstanding_principal}, fee: {outstanding_fee}). "
+                    "Repay it by playing in a match first!"
+                )
+
+            # Validate: cooldown check
+            if last_loan_at and (now - last_loan_at) < cooldown_seconds:
+                remaining = cooldown_seconds - (now - last_loan_at)
+                hours = remaining // 3600
+                minutes = (remaining % 3600) // 60
+                raise ValueError(f"Loan cooldown active. Try again in {hours}h {minutes}m.")
+
+            # Validate: amount bounds
+            if amount <= 0:
+                raise ValueError("Loan amount must be positive.")
+            if amount > max_amount:
+                raise ValueError(f"Maximum loan amount is {max_amount}.")
+
+            # Get current balance to check if this is a "negative loan" (degen behavior)
+            cursor.execute(
+                "SELECT COALESCE(jopacoin_balance, 0) as balance FROM players WHERE discord_id = ?",
+                (discord_id,),
+            )
+            balance_row = cursor.fetchone()
+            if not balance_row:
+                raise ValueError("Player not found.")
+
+            balance_before = balance_row["balance"]
+            was_negative_loan = balance_before < 0
+
+            # Credit the loan amount to player
+            cursor.execute(
+                """
+                UPDATE players
+                SET jopacoin_balance = COALESCE(jopacoin_balance, 0) + ?, updated_at = CURRENT_TIMESTAMP
+                WHERE discord_id = ?
+                """,
+                (amount, discord_id),
+            )
+
+            # Update/insert loan state
+            new_negative_loans = negative_loans_taken + (1 if was_negative_loan else 0)
+            cursor.execute(
+                """
+                INSERT INTO loan_state (discord_id, last_loan_at, total_loans_taken, total_fees_paid,
+                                        negative_loans_taken, outstanding_principal, outstanding_fee,
+                                        updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(discord_id) DO UPDATE SET
+                    last_loan_at = excluded.last_loan_at,
+                    total_loans_taken = excluded.total_loans_taken,
+                    negative_loans_taken = excluded.negative_loans_taken,
+                    outstanding_principal = excluded.outstanding_principal,
+                    outstanding_fee = excluded.outstanding_fee,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (discord_id, now, total_loans_taken + 1, total_fees_paid,
+                 new_negative_loans, amount, fee),
+            )
+
+            new_balance = balance_before + amount
+
+            return {
+                "amount": amount,
+                "fee": fee,
+                "total_owed": amount + fee,
+                "new_balance": new_balance,
+                "total_loans_taken": total_loans_taken + 1,
+                "was_negative_loan": was_negative_loan,
+            }
+
     def disburse_fund_atomic(
         self,
         guild_id: int | None,
@@ -552,52 +688,52 @@ class LoanService(ILoanService):
         The player receives the full loan amount immediately.
         Repayment (principal + fee) happens when they play in a recorded match.
 
+        This method uses atomic validation + execution to prevent race conditions
+        where concurrent requests could both pass validation before either records
+        the loan.
+
         Returns:
             Result.ok(LoanResult) on success
             Result.fail(error_message, code) on failure
         """
-        # Validate first
-        validation = self.validate_loan(discord_id, amount)
-        if not validation.success:
-            return Result.fail(validation.error, code=validation.error_code)
+        # Calculate fee for the atomic operation
+        fee = int(amount * self.fee_rate)
 
-        approval = validation.value
-        now = int(time.time())
-
-        # Check if taking loan while already in debt (peak degen behavior)
-        balance_before = self.player_repo.get_balance(discord_id)
-        was_negative_loan = balance_before < 0
-
-        # Get current state for updating totals
-        state = self.get_state(discord_id)
-
-        # Credit the full loan amount
-        self.player_repo.add_balance(discord_id, amount)
-
-        # Update loan state with outstanding amounts
-        new_negative_loans = state.negative_loans_taken + (1 if was_negative_loan else 0)
-        self.loan_repo.upsert_state(
-            discord_id=discord_id,
-            last_loan_at=now,
-            total_loans_taken=state.total_loans_taken + 1,
-            total_fees_paid=state.total_fees_paid,
-            negative_loans_taken=new_negative_loans,
-            outstanding_principal=amount,
-            outstanding_fee=approval.fee,
-        )
-
-        new_balance = self.player_repo.get_balance(discord_id)
-
-        return Result.ok(
-            LoanResult(
+        try:
+            # Atomic validation + execution in single transaction
+            result = self.loan_repo.execute_loan_atomic(
+                discord_id=discord_id,
                 amount=amount,
-                fee=approval.fee,
-                total_owed=approval.total_owed,
-                new_balance=new_balance,
-                total_loans_taken=state.total_loans_taken + 1,
-                was_negative_loan=was_negative_loan,
+                fee=fee,
+                cooldown_seconds=self.cooldown_seconds,
+                max_amount=self.max_amount,
             )
-        )
+
+            return Result.ok(
+                LoanResult(
+                    amount=result["amount"],
+                    fee=result["fee"],
+                    total_owed=result["total_owed"],
+                    new_balance=result["new_balance"],
+                    total_loans_taken=result["total_loans_taken"],
+                    was_negative_loan=result["was_negative_loan"],
+                )
+            )
+        except ValueError as e:
+            error_msg = str(e)
+            # Map error messages to error codes
+            if "outstanding loan" in error_msg.lower():
+                return Result.fail(error_msg, code=error_codes.LOAN_ALREADY_EXISTS)
+            elif "cooldown" in error_msg.lower():
+                return Result.fail(error_msg, code=error_codes.COOLDOWN_ACTIVE)
+            elif "must be positive" in error_msg.lower():
+                return Result.fail(error_msg, code=error_codes.VALIDATION_ERROR)
+            elif "maximum loan amount" in error_msg.lower():
+                return Result.fail(error_msg, code=error_codes.LOAN_AMOUNT_EXCEEDED)
+            elif "not found" in error_msg.lower():
+                return Result.fail(error_msg, code=error_codes.PLAYER_NOT_FOUND)
+            else:
+                return Result.fail(error_msg, code=error_codes.VALIDATION_ERROR)
 
     def execute_repayment(
         self, discord_id: int, guild_id: int | None = None
