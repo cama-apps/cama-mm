@@ -117,12 +117,12 @@ class TestSafeUnpinAllBotMessages:
         bot_msg2.unpin.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_handles_generic_exception_on_unpin(self, bot_user, make_pinned_message):
-        """Should continue unpinning other messages when one fails with generic error."""
+    async def test_handles_discord_exception_on_unpin(self, bot_user, make_pinned_message):
+        """Should continue unpinning other messages when one fails with Discord error."""
         from utils.pin_helpers import safe_unpin_all_bot_messages
 
         bot_msg1 = make_pinned_message(bot_user.id, 100)
-        bot_msg1.unpin = AsyncMock(side_effect=Exception("Random error"))
+        bot_msg1.unpin = AsyncMock(side_effect=discord.DiscordException("Discord API error"))
         bot_msg2 = make_pinned_message(bot_user.id, 101)
 
         channel = AsyncMock()

@@ -29,7 +29,7 @@ async def safe_unpin_all_bot_messages(
 
     try:
         pinned_messages = await channel.pins()
-    except Exception as exc:
+    except discord.DiscordException as exc:
         logger.warning(f"Failed to fetch pins: {exc}")
         return 0
 
@@ -41,7 +41,7 @@ async def safe_unpin_all_bot_messages(
                 unpinned += 1
             except discord.Forbidden:
                 logger.warning("Cannot unpin: missing Manage Messages permission")
-            except Exception as exc:
+            except discord.DiscordException as exc:
                 logger.warning(f"Failed to unpin message {msg.id}: {exc}")
 
     return unpinned
