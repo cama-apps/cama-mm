@@ -16,6 +16,8 @@ from config import (
 )
 from repositories.base_repository import BaseRepository
 from repositories.player_repository import PlayerRepository
+from services.result import Result
+from services import error_codes
 
 
 @dataclass
@@ -27,6 +29,25 @@ class BankruptcyState:
     penalty_games_remaining: int
     is_on_cooldown: bool
     cooldown_ends_at: int | None  # Unix timestamp
+
+
+@dataclass
+class BankruptcyDeclaration:
+    """Result of declaring bankruptcy."""
+
+    debt_cleared: int
+    penalty_games: int
+    penalty_rate: float
+    new_balance: int
+
+
+@dataclass
+class PenaltyApplication:
+    """Result of applying penalty to winnings."""
+
+    original: int
+    penalized: int
+    penalty_applied: int
 
 
 class BankruptcyRepository(BaseRepository):
@@ -341,3 +362,112 @@ class BankruptcyService:
         Returns the remaining penalty games.
         """
         return self.bankruptcy_repo.decrement_penalty_games(discord_id)
+
+    # =========================================================================
+    # Result-returning methods (new API)
+    # These methods return Result types for cleaner error handling.
+    # The old dict-returning methods are kept for backward compatibility.
+    # =========================================================================
+
+    def validate_bankruptcy(self, discord_id: int) -> Result[int]:
+        """
+        Check if a player can declare bankruptcy.
+
+        Returns:
+            Result.ok(debt_amount) if allowed
+            Result.fail(error_message, code) if not allowed
+
+        Error codes:
+            - NOT_IN_DEBT: Player has non-negative balance
+            - BANKRUPTCY_COOLDOWN: Cooldown hasn't expired
+        """
+        balance = self.player_repo.get_balance(discord_id)
+        state = self.get_state(discord_id)
+
+        if balance >= 0:
+            return Result.fail(
+                f"You're not in debt (balance: {balance}). Only players in debt can declare bankruptcy.",
+                code=error_codes.NOT_IN_DEBT,
+            )
+
+        if state.is_on_cooldown:
+            remaining = state.cooldown_ends_at - int(time.time())
+            days = remaining // 86400
+            hours = (remaining % 86400) // 3600
+            return Result.fail(
+                f"Bankruptcy cooldown active. Try again in {days}d {hours}h.",
+                code=error_codes.BANKRUPTCY_COOLDOWN,
+            )
+
+        return Result.ok(abs(balance))
+
+    def execute_bankruptcy(self, discord_id: int) -> Result[BankruptcyDeclaration]:
+        """
+        Declare bankruptcy for a player.
+
+        Clears their debt and applies the penalty.
+
+        Returns:
+            Result.ok(BankruptcyDeclaration) on success
+            Result.fail(error_message, code) on failure
+        """
+        validation = self.validate_bankruptcy(discord_id)
+        if not validation.success:
+            return Result.fail(validation.error, code=validation.error_code)
+
+        debt_cleared = validation.value
+        now = int(time.time())
+
+        # Clear debt and give fresh start balance
+        self.player_repo.update_balance(discord_id, BANKRUPTCY_FRESH_START_BALANCE)
+
+        # Record bankruptcy and set penalty
+        self.bankruptcy_repo.upsert_state(
+            discord_id=discord_id,
+            last_bankruptcy_at=now,
+            penalty_games_remaining=self.penalty_games,
+        )
+
+        return Result.ok(
+            BankruptcyDeclaration(
+                debt_cleared=debt_cleared,
+                penalty_games=self.penalty_games,
+                penalty_rate=self.penalty_rate,
+                new_balance=BANKRUPTCY_FRESH_START_BALANCE,
+            )
+        )
+
+    def calculate_penalized_winnings(
+        self, discord_id: int, amount: int
+    ) -> Result[PenaltyApplication]:
+        """
+        Calculate penalized winnings for a player under bankruptcy penalty.
+
+        This does NOT apply the penalty - just calculates what it would be.
+        Use this for display purposes or before actually applying.
+
+        Returns:
+            Result.ok(PenaltyApplication) - always succeeds
+        """
+        penalty_games = self.bankruptcy_repo.get_penalty_games(discord_id)
+
+        if penalty_games <= 0:
+            return Result.ok(
+                PenaltyApplication(
+                    original=amount,
+                    penalized=amount,
+                    penalty_applied=0,
+                )
+            )
+
+        # Apply penalty rate (e.g., 0.5 means they get half)
+        penalized = int(amount * self.penalty_rate)
+        penalty_applied = amount - penalized
+
+        return Result.ok(
+            PenaltyApplication(
+                original=amount,
+                penalized=penalized,
+                penalty_applied=penalty_applied,
+            )
+        )
