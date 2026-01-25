@@ -49,9 +49,13 @@ async def test_wheel_cooldown_enforced():
     # User is registered
     player_service.get_player.return_value = MagicMock(name="TestPlayer")
 
-    # Mock repository - cooldown was just set
+    # Use fixed timestamps to avoid timing issues in CI
+    fixed_now = 1700000000.0  # Fixed "current" time
+    last_spin_time = 1700000000 - 3600  # 1 hour ago (within 24h cooldown)
+
+    # Mock repository - cooldown was recently set
     player_service.player_repo = MagicMock()
-    player_service.player_repo.get_last_wheel_spin.return_value = int(time.time())
+    player_service.player_repo.get_last_wheel_spin.return_value = last_spin_time
 
     interaction = MagicMock()
     interaction.guild = MagicMock()
@@ -59,19 +63,26 @@ async def test_wheel_cooldown_enforced():
     interaction.user.id = 789
     interaction.response.send_message = AsyncMock()
     interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock()  # In case cooldown check fails
 
     commands = BettingCommands(bot, betting_service, match_service, player_service)
 
-    # Mock admin check to return False (non-admin user)
-    with patch("commands.betting.has_admin_permission", return_value=False):
+    # Mock admin check and time.time() for deterministic behavior
+    with (
+        patch("commands.betting.has_admin_permission", return_value=False),
+        patch("commands.betting.time.time", return_value=fixed_now),
+    ):
         await commands.gamba.callback(commands, interaction)
 
-    # Should reject with cooldown message
+    # Should reject with cooldown message (NOT proceed to defer/followup)
     interaction.response.send_message.assert_awaited_once()
     call_kwargs = interaction.response.send_message.call_args.kwargs
     message = call_kwargs.get("content", interaction.response.send_message.call_args.args[0])
     assert "already" in message.lower() or "spun" in message.lower()
     assert call_kwargs.get("ephemeral") is True
+    # Verify we did NOT proceed past the cooldown check
+    interaction.response.defer.assert_not_awaited()
+    interaction.followup.send.assert_not_awaited()
 
 
 @pytest.mark.asyncio
