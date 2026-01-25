@@ -5,7 +5,7 @@ This module centralizes service creation and wiring, replacing the
 scattered initialization logic in bot.py.
 
 Usage:
-    container = ServiceContainer(db_path, config)
+    container = ServiceContainer(config)
     await container.initialize()
 
     # Access services
@@ -15,7 +15,24 @@ Usage:
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from services.bankruptcy_service import BankruptcyService
+    from services.betting_service import BettingService
+    from services.disburse_service import DisburseService
+    from services.gambling_stats_service import GamblingStatsService
+    from services.garnishment_service import GarnishmentService
+    from services.guild_config_service import GuildConfigService
+    from services.loan_service import LoanService
+    from services.lobby_service import LobbyService
+    from services.lobby_manager_service import LobbyManagerService
+    from services.match_discovery_service import MatchDiscoveryService
+    from services.match_enrichment_service import MatchEnrichmentService
+    from services.match_service import MatchService
+    from services.player_service import PlayerService
+    from services.prediction_service import PredictionService
+    from services.recalibration_service import RecalibrationService
 
 from database import Database
 from infrastructure.schema_manager import SchemaManager
@@ -67,6 +84,7 @@ class ServiceConfig:
     jopacoin_participation_reward: int = 1
     jopacoin_win_reward: int = 2
     jopacoin_exclusion_bonus: int = 1
+    leverage_tiers: list[int] = field(default_factory=lambda: [2, 3, 5])
 
     # Loan settings
     loan_cooldown_seconds: int = 259200  # 3 days
@@ -229,6 +247,7 @@ class ServiceContainer:
             garnishment_service=self._services["garnishment"],
             bankruptcy_service=self._services["bankruptcy"],
             max_debt=self.config.max_debt,
+            leverage_tiers=self.config.leverage_tiers,
         )
 
         # Disbursement
@@ -244,6 +263,7 @@ class ServiceContainer:
             player_repo=self._repos.player,
             match_repo=self._repos.match,
             bankruptcy_service=self._services["bankruptcy"],
+            loan_service=self._services["loan"],
         )
 
         # Predictions
@@ -362,77 +382,77 @@ class ServiceContainer:
         return self._repos.prediction
 
     @property
-    def player_service(self):
+    def player_service(self) -> "PlayerService | None":
         """Get player service."""
         return self._services.get("player")
 
     @property
-    def match_service(self):
+    def match_service(self) -> "MatchService | None":
         """Get match service."""
         return self._services.get("match")
 
     @property
-    def betting_service(self):
+    def betting_service(self) -> "BettingService | None":
         """Get betting service."""
         return self._services.get("betting")
 
     @property
-    def loan_service(self):
+    def loan_service(self) -> "LoanService | None":
         """Get loan service."""
         return self._services.get("loan")
 
     @property
-    def bankruptcy_service(self):
+    def bankruptcy_service(self) -> "BankruptcyService | None":
         """Get bankruptcy service."""
         return self._services.get("bankruptcy")
 
     @property
-    def prediction_service(self):
+    def prediction_service(self) -> "PredictionService | None":
         """Get prediction service."""
         return self._services.get("prediction")
 
     @property
-    def lobby_service(self):
+    def lobby_service(self) -> "LobbyService | None":
         """Get lobby service."""
         return self._services.get("lobby")
 
     @property
-    def lobby_manager(self):
+    def lobby_manager(self) -> "LobbyManagerService | None":
         """Get lobby manager service."""
         return self._services.get("lobby_manager")
 
     @property
-    def gambling_stats_service(self):
+    def gambling_stats_service(self) -> "GamblingStatsService | None":
         """Get gambling stats service."""
         return self._services.get("gambling_stats")
 
     @property
-    def garnishment_service(self):
+    def garnishment_service(self) -> "GarnishmentService | None":
         """Get garnishment service."""
         return self._services.get("garnishment")
 
     @property
-    def guild_config_service(self):
+    def guild_config_service(self) -> "GuildConfigService | None":
         """Get guild config service."""
         return self._services.get("guild_config")
 
     @property
-    def recalibration_service(self):
+    def recalibration_service(self) -> "RecalibrationService | None":
         """Get recalibration service."""
         return self._services.get("recalibration")
 
     @property
-    def disburse_service(self):
+    def disburse_service(self) -> "DisburseService | None":
         """Get disburse service."""
         return self._services.get("disburse")
 
     @property
-    def match_enrichment_service(self):
+    def match_enrichment_service(self) -> "MatchEnrichmentService | None":
         """Get match enrichment service."""
         return self._services.get("match_enrichment")
 
     @property
-    def match_discovery_service(self):
+    def match_discovery_service(self) -> "MatchDiscoveryService | None":
         """Get match discovery service."""
         return self._services.get("match_discovery")
 

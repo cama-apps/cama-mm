@@ -5,10 +5,7 @@ Provides utilities for ensuring Discord embed content stays within limits.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    import discord
+import discord
 
 EMBED_LIMITS = {
     "title": 256,
