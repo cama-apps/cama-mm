@@ -29,6 +29,7 @@ from config import (
     TIP_FEE_RATE,
     WHEEL_BANKRUPT_PENALTY,
     WHEEL_COOLDOWN_SECONDS,
+    WHEEL_LOSE_PENALTY_COOLDOWN,
 )
 from config import DISBURSE_MIN_FUND
 from services.bankruptcy_service import BankruptcyService
@@ -308,7 +309,7 @@ class BettingCommands(commands.Cog):
         return discord.File(buffer, filename="wheel.gif")
 
     def _wheel_result_embed(
-        self, result: tuple, new_balance: int, garnished: int
+        self, result: tuple, new_balance: int, garnished: int, next_spin_at: int
     ) -> discord.Embed:
         """Build the final result embed after the wheel stops."""
         label, value, _color = result  # (label, value, color) from wheel_drawing
@@ -337,13 +338,13 @@ class BettingCommands(commands.Cog):
                 f"*The wheel shows no mercy...*"
             )
         else:
-            # Lose a Turn (0)
+            # Lose a Turn (0) - penalty: 1 week cooldown
             title = "😐 Lose a Turn"
             color = discord.Color.light_gray()
             description = (
                 f"**{label}**\n\n"
-                f"No change to your balance.\n"
-                f"*Better luck next time!*"
+                f"No change to your balance, but your cooldown has been extended to **1 week**!\n\n"
+                f"*The wheel punishes the unlucky...*"
             )
 
         embed = discord.Embed(
@@ -358,7 +359,12 @@ class BettingCommands(commands.Cog):
             inline=False,
         )
 
-        embed.set_footer(text="Come back tomorrow for another spin!")
+        # Discord timestamp for next spin
+        embed.add_field(
+            name="Next Spin Available",
+            value=f"<t:{next_spin_at}:R> (<t:{next_spin_at}:f>)",
+            inline=False,
+        )
 
         return embed
 
@@ -909,11 +915,33 @@ class BettingCommands(commands.Cog):
             # Bankrupt: subtract penalty (ignores MAX_DEBT floor - can go deeper into debt)
             self.player_service.player_repo.add_balance(user_id, result_value)
             new_balance = self.player_service.get_balance(user_id)
-        # result_value == 0: "Lose a Turn" - no balance change
+            # Add losses to nonprofit fund
+            if self.loan_service:
+                self.loan_service.add_to_nonprofit_fund(guild_id, abs(result_value))
+        # result_value == 0: "Lose a Turn" - penalty: extend cooldown to 1 week
+
+        # Calculate next spin time based on result
+        if result_value == 0:
+            # LOSE: extend cooldown to 1 week
+            # Adjust stored timestamp so normal cooldown check (last_spin + COOLDOWN_SECONDS) equals 1 week from now
+            adjusted_timestamp = int(now) + (WHEEL_LOSE_PENALTY_COOLDOWN - WHEEL_COOLDOWN_SECONDS)
+            self.player_service.player_repo.set_last_wheel_spin(user_id, adjusted_timestamp)
+            next_spin_at = int(now) + WHEEL_LOSE_PENALTY_COOLDOWN
+        else:
+            # Normal cooldown (already set earlier at line 876)
+            next_spin_at = int(now) + WHEEL_COOLDOWN_SECONDS
+
+        # Log wheel spin for gambling history (gambachart)
+        self.player_service.player_repo.log_wheel_spin(
+            discord_id=user_id,
+            guild_id=guild_id,
+            result=result_value,
+            spin_time=int(now),
+        )
 
         # Send final result embed
         await asyncio.sleep(0.5)  # Brief pause before result reveal
-        result_embed = self._wheel_result_embed(result_wedge, new_balance, garnished_amount)
+        result_embed = self._wheel_result_embed(result_wedge, new_balance, garnished_amount, next_spin_at)
         await message.edit(embed=result_embed)
 
     @app_commands.command(name="tip", description="Give jopacoin to another player")

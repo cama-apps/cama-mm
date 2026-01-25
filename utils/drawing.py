@@ -734,36 +734,63 @@ def draw_gamba_chart(
                 color = DISCORD_RED
             draw.line([line_points[i], line_points[i + 1]], fill=color, width=2)
 
-    # Draw bet markers
-    max_bet_size = max(b["effective_bet"] for b in bet_infos) if bet_infos else 1
+    # Draw bet/wheel markers
+    # Calculate max bet size for scaling (only consider bets, not wheel spins)
+    bet_sizes = [b["effective_bet"] for b in bet_infos if b.get("source", "bet") == "bet" and b["effective_bet"] > 0]
+    max_bet_size = max(bet_sizes) if bet_sizes else 1
+
     for bet_num, pnl, info in pnl_series:
         px, py = to_pixel(bet_num, pnl)
-
-        # Size based on bet amount (3-8 pixels)
-        size = 3 + int((info["effective_bet"] / max_bet_size) * 5)
+        source = info.get("source", "bet")
 
         # Color based on outcome
         if info["outcome"] == "won":
             color = DISCORD_GREEN
+        elif info["outcome"] == "neutral":
+            color = DISCORD_GREY  # Neutral (wheel lose-a-turn)
         else:
             color = DISCORD_RED
 
-        # Diamond shape for leveraged bets, circle for normal
-        if info["leverage"] > 1:
-            # Diamond
-            points = [
-                (px, py - size),
-                (px + size, py),
-                (px, py + size),
-                (px - size, py),
-            ]
-            draw.polygon(points, fill=color, outline=DISCORD_WHITE)
-        else:
-            # Circle
+        if source == "wheel":
+            # Wheel icon: a circle with spokes (like a wheel of fortune)
+            size = 6  # Fixed size for wheel icons
+            # Outer circle
             draw.ellipse(
                 [(px - size, py - size), (px + size, py + size)],
                 fill=color,
+                outline=DISCORD_WHITE,
             )
+            # Draw spokes (4 lines through center)
+            spoke_len = size - 1
+            for angle in [0, 45, 90, 135]:
+                import math as m
+                rad = m.radians(angle)
+                x1 = px + int(spoke_len * m.cos(rad))
+                y1 = py + int(spoke_len * m.sin(rad))
+                x2 = px - int(spoke_len * m.cos(rad))
+                y2 = py - int(spoke_len * m.sin(rad))
+                draw.line([(x1, y1), (x2, y2)], fill=DISCORD_WHITE, width=1)
+        else:
+            # Regular bet marker
+            # Size based on bet amount (3-8 pixels)
+            size = 3 + int((info["effective_bet"] / max_bet_size) * 5)
+
+            # Diamond shape for leveraged bets, circle for normal
+            if info["leverage"] > 1:
+                # Diamond
+                points = [
+                    (px, py - size),
+                    (px + size, py),
+                    (px, py + size),
+                    (px - size, py),
+                ]
+                draw.polygon(points, fill=color, outline=DISCORD_WHITE)
+            else:
+                # Circle
+                draw.ellipse(
+                    [(px - size, py - size), (px + size, py + size)],
+                    fill=color,
+                )
 
     # Annotate peak and trough
     peak_idx = pnl_values.index(max(pnl_values))

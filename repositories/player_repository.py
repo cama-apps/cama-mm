@@ -1472,6 +1472,56 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 (timestamp, discord_id),
             )
 
+    def log_wheel_spin(
+        self, discord_id: int, guild_id: int | None, result: int, spin_time: int
+    ) -> int:
+        """
+        Log a wheel spin result for gambling history tracking.
+
+        Args:
+            discord_id: Player's Discord ID
+            guild_id: Guild ID (None for DMs)
+            result: Spin result (positive for win, negative for bankrupt, 0 for lose turn)
+            spin_time: Unix timestamp of the spin
+
+        Returns:
+            The spin_id of the created record
+        """
+        normalized_guild_id = guild_id if guild_id is not None else 0
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO wheel_spins (guild_id, discord_id, result, spin_time)
+                VALUES (?, ?, ?, ?)
+                """,
+                (normalized_guild_id, discord_id, result, spin_time),
+            )
+            return cursor.lastrowid
+
+    def get_wheel_spin_history(self, discord_id: int) -> list[dict]:
+        """
+        Get a player's wheel spin history ordered by spin time.
+
+        Args:
+            discord_id: Player's Discord ID
+
+        Returns:
+            List of dicts with spin_id, guild_id, result, spin_time
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT spin_id, guild_id, result, spin_time
+                FROM wheel_spins
+                WHERE discord_id = ?
+                ORDER BY spin_time ASC
+                """,
+                (discord_id,),
+            )
+            return [dict(row) for row in cursor.fetchall()]
+
     def _row_to_player(self, row) -> Player:
         """Convert database row to Player object."""
         preferred_roles = json.loads(row["preferred_roles"]) if row["preferred_roles"] else None

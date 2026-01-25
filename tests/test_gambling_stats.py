@@ -405,7 +405,7 @@ class TestPnlSeries:
         series = gambling_stats_service.get_cumulative_pnl_series(discord_id)
 
         assert len(series) == 3
-        assert series[0] == (1, 10, pytest.approx({"amount": 10, "leverage": 1, "effective_bet": 10, "outcome": "won", "profit": 10, "team": "radiant"}, rel=1e-2))
+        assert series[0] == (1, 10, pytest.approx({"amount": 10, "leverage": 1, "effective_bet": 10, "outcome": "won", "profit": 10, "team": "radiant", "source": "bet"}, rel=1e-2))
         assert series[1][1] == 0  # 10 - 10 = 0
         assert series[2][1] == 10  # 0 + 10 = 10
 

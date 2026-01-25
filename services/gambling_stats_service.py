@@ -829,26 +829,76 @@ class GamblingStatsService:
         """
         Get cumulative P&L series for charting.
 
-        Returns list of (bet_number, cumulative_pnl, bet_info) tuples.
-        bet_info contains: amount, leverage, outcome, profit
+        Returns list of (event_number, cumulative_pnl, event_info) tuples.
+        event_info contains: amount, leverage, outcome, profit, source ('bet' or 'wheel')
+        Events are sorted by time (bet_time for bets, spin_time for wheel spins).
         """
-        history = self.bet_repo.get_player_bet_history(discord_id)
+        # Get bet history
+        bet_history = self.bet_repo.get_player_bet_history(discord_id)
+
+        # Get wheel spin history
+        wheel_history = self.player_repo.get_wheel_spin_history(discord_id)
+
+        # Convert to unified format with timestamps for sorting
+        events = []
+
+        for bet in bet_history:
+            events.append({
+                "time": bet["bet_time"],
+                "amount": bet["amount"],
+                "leverage": bet["leverage"],
+                "effective_bet": bet["effective_bet"],
+                "outcome": bet["outcome"],
+                "profit": bet["profit"],
+                "team": bet["team_bet_on"],
+                "source": "bet",
+            })
+
+        for spin in wheel_history:
+            result = spin["result"]
+            # Wheel outcome: positive=win, negative=bankrupt (loss), 0=lose turn (neutral)
+            if result > 0:
+                outcome = "won"
+                profit = result
+            elif result < 0:
+                outcome = "lost"
+                profit = result  # Already negative
+            else:
+                outcome = "neutral"
+                profit = 0
+
+            events.append({
+                "time": spin["spin_time"],
+                "amount": abs(result) if result != 0 else 0,
+                "leverage": 1,  # Wheel has no leverage concept
+                "effective_bet": 0,  # No bet placed for wheel
+                "outcome": outcome,
+                "profit": profit,
+                "team": None,  # No team for wheel
+                "source": "wheel",
+            })
+
+        # Sort by time
+        events.sort(key=lambda e: e["time"])
+
+        # Build cumulative series
         series = []
         cumulative = 0
 
-        for i, bet in enumerate(history, 1):
-            cumulative += bet["profit"]
+        for i, event in enumerate(events, 1):
+            cumulative += event["profit"]
             series.append(
                 (
                     i,
                     cumulative,
                     {
-                        "amount": bet["amount"],
-                        "leverage": bet["leverage"],
-                        "effective_bet": bet["effective_bet"],
-                        "outcome": bet["outcome"],
-                        "profit": bet["profit"],
-                        "team": bet["team_bet_on"],
+                        "amount": event["amount"],
+                        "leverage": event["leverage"],
+                        "effective_bet": event["effective_bet"],
+                        "outcome": event["outcome"],
+                        "profit": event["profit"],
+                        "team": event["team"],
+                        "source": event["source"],
                     },
                 )
             )
