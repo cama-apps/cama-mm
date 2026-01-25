@@ -45,8 +45,8 @@ def player_with_balance(player_repo):
         discord_username="TestPlayer",
         glicko_rating=1500,
         glicko_rd=350,
-        jopacoin_balance=100,
     )
+    player_repo.update_balance(discord_id, 100)
     return discord_id
 
 
@@ -59,8 +59,8 @@ def player_in_debt(player_repo):
         discord_username="DebtPlayer",
         glicko_rating=1500,
         glicko_rd=350,
-        jopacoin_balance=-50,
     )
+    player_repo.update_balance(discord_id, -50)
     return discord_id
 
 

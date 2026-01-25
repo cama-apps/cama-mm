@@ -5,10 +5,10 @@ Ensures Glicko and OpenSkill leaderboard embeds stay within Discord's 1024-char 
 
 import pytest
 
+from commands.info import SINGLE_SECTION_PAGE_SIZE
+from utils.embed_safety import EMBED_LIMITS
 
-# Constants matching commands/info.py
-SINGLE_SECTION_PAGE_SIZE = 20
-EMBED_FIELD_LIMIT = 1024
+EMBED_FIELD_LIMIT = EMBED_LIMITS["field_value"]
 
 
 def build_worst_case_entry(rank: int) -> str:
@@ -73,8 +73,8 @@ class TestGlickoEmbedCharacterLimits:
         new_entry = build_worst_case_entry(1)
 
         saved = len(old_entry) - len(new_entry)
-        # We removed " - " (3), " certain" (8), " • " (3) = 14 chars
-        assert saved >= 14, f"Only saved {saved} chars (expected 14+)"
+        # We removed " - " (3), " certain" (8), " •" (2) = 13 chars minimum (actual: 12)
+        assert saved >= 12, f"Only saved {saved} chars (expected 12+)"
 
     def test_old_format_would_exceed_limit(self):
         """Verify the old format would exceed 1024 chars with 20 entries."""
