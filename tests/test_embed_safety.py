@@ -66,6 +66,7 @@ class MockEmbed:
     """Mock Discord embed for testing."""
 
     def __init__(self):
+        self.title = None
         self.description = None
         self.fields = []
         self.footer = None
@@ -80,10 +81,19 @@ class TestValidateEmbed:
     def test_valid_embed_no_errors(self):
         """Valid embed should return no errors."""
         embed = MockEmbed()
+        embed.title = "Short title"
         embed.description = "Short description"
         embed.add_field("Field", "Value")
         errors = validate_embed(embed)
         assert errors == []
+
+    def test_title_too_long(self):
+        """Over-long title should return error."""
+        embed = MockEmbed()
+        embed.title = "x" * (EMBED_LIMITS["title"] + 1)
+        errors = validate_embed(embed)
+        assert len(errors) == 1
+        assert "Title" in errors[0]
 
     def test_description_too_long(self):
         """Over-long description should return error."""

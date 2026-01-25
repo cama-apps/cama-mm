@@ -220,6 +220,7 @@ class ServiceContainer:
         from services.gambling_stats_service import GamblingStatsService
         from services.prediction_service import PredictionService
         from services.recalibration_service import RecalibrationService
+        from repositories.recalibration_repository import RecalibrationRepository
 
         # Betting
         self._services["betting"] = BettingService(
@@ -241,6 +242,7 @@ class ServiceContainer:
         self._services["gambling_stats"] = GamblingStatsService(
             bet_repo=self._repos.bet,
             player_repo=self._repos.player,
+            match_repo=self._repos.match,
             bankruptcy_service=self._services["bankruptcy"],
         )
 
@@ -251,7 +253,9 @@ class ServiceContainer:
         )
 
         # Recalibration
+        recalibration_repo = RecalibrationRepository(self.config.db_path)
         self._services["recalibration"] = RecalibrationService(
+            recalibration_repo=recalibration_repo,
             player_repo=self._repos.player,
         )
 
@@ -301,13 +305,13 @@ class ServiceContainer:
         # Match enrichment
         self._services["match_enrichment"] = MatchEnrichmentService(
             match_repo=self._repos.match,
+            player_repo=self._repos.player,
         )
 
         # Match discovery
         self._services["match_discovery"] = MatchDiscoveryService(
             match_repo=self._repos.match,
             player_repo=self._repos.player,
-            guild_config_repo=self._repos.guild_config,
         )
 
     def _wire_dependencies(self) -> None:

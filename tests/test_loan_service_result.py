@@ -63,8 +63,8 @@ def registered_player(services):
         discord_username="TestPlayer",
         glicko_rating=1500,
         glicko_rd=350,
-        jopacoin_balance=10,
     )
+    player_repo.update_balance(discord_id, 10)
     return discord_id
 
 

@@ -3,7 +3,16 @@
 Provides utilities for ensuring Discord embed content stays within limits.
 """
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import discord
+
 EMBED_LIMITS = {
+    "title": 256,
+    "author_name": 256,
     "field_value": 1024,
     "field_name": 256,
     "description": 4096,
@@ -28,8 +37,12 @@ def truncate_field(text: str, max_len: int = 1024) -> str:
     return text[: max_len - 3] + "..."
 
 
-def validate_embed(embed) -> list[str]:
+def validate_embed(embed: discord.Embed) -> list[str]:
     """Return list of validation errors, empty if valid.
+
+    This is a debugging/testing utility for verifying embed content
+    stays within Discord's limits. Use during development to catch
+    potential issues before they reach Discord's API.
 
     Args:
         embed: A discord.Embed object to validate
@@ -38,6 +51,12 @@ def validate_embed(embed) -> list[str]:
         List of error messages, empty if embed is valid
     """
     errors = []
+
+    # Check title
+    if embed.title and len(embed.title) > EMBED_LIMITS["title"]:
+        errors.append(
+            f"Title exceeds {EMBED_LIMITS['title']} chars ({len(embed.title)})"
+        )
 
     # Check description
     if embed.description and len(embed.description) > EMBED_LIMITS["description"]:
