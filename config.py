@@ -133,6 +133,7 @@ WHEEL_BANKRUPT_PENALTY = _parse_int("WHEEL_BANKRUPT_PENALTY", 100)
 WHEEL_MAX_REWARD = _parse_int("WHEEL_MAX_REWARD", 100)
 WHEEL_ANIMATION_FRAMES = _parse_int("WHEEL_ANIMATION_FRAMES", 5)  # Number of spin frames
 WHEEL_FRAME_DELAY_MS = _parse_int("WHEEL_FRAME_DELAY_MS", 1000)  # Delay between frames (ms)
+WHEEL_TARGET_EV = _parse_float("WHEEL_TARGET_EV", -10.0)  # Target expected value per spin
 
 # Tip transaction fee (clamped to 0.0 - 0.5 to prevent economy-breaking values)
 _raw_tip_fee_rate = _parse_float("TIP_FEE_RATE", 0.01)
