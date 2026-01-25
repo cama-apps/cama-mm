@@ -23,8 +23,17 @@ if TYPE_CHECKING:
     from domain.models.player import Player
     from domain.models.lobby import Lobby
     from services.result import Result
-    from services.loan_service import LoanState
-    from services.bankruptcy_service import BankruptcyState
+    from services.loan_service import (
+        LoanState,
+        LoanApproval,
+        LoanResult,
+        RepaymentResult,
+    )
+    from services.bankruptcy_service import (
+        BankruptcyState,
+        BankruptcyDeclaration,
+        PenaltyApplication,
+    )
     from services.gambling_stats_service import (
         GambaStats,
         DegenScoreBreakdown,
@@ -224,9 +233,11 @@ class ILoanService(ABC):
         """Get the loan state for a player."""
         ...
 
+    # Legacy dict-returning methods (kept for backward compatibility)
+
     @abstractmethod
     def can_take_loan(self, discord_id: int, amount: int) -> dict:
-        """Check if a player can take a loan."""
+        """Check if a player can take a loan (legacy)."""
         ...
 
     @abstractmethod
@@ -236,7 +247,7 @@ class ILoanService(ABC):
         amount: int,
         guild_id: int | None = None,
     ) -> dict:
-        """Take a loan (adds amount to balance, creates debt)."""
+        """Take a loan (legacy)."""
         ...
 
     @abstractmethod
@@ -245,12 +256,50 @@ class ILoanService(ABC):
         discord_id: int,
         guild_id: int | None = None,
     ) -> dict:
-        """Repay an outstanding loan."""
+        """Repay an outstanding loan (legacy)."""
         ...
 
     @abstractmethod
     def get_nonprofit_fund(self, guild_id: int | None) -> int:
         """Get the nonprofit fund balance."""
+        ...
+
+    # Result-returning methods (new API)
+
+    @abstractmethod
+    def validate_loan(self, discord_id: int, amount: int) -> "Result[LoanApproval]":
+        """
+        Check if a player can take a loan.
+
+        Returns Result.ok(LoanApproval) if allowed, Result.fail otherwise.
+        """
+        ...
+
+    @abstractmethod
+    def execute_loan(
+        self,
+        discord_id: int,
+        amount: int,
+        guild_id: int | None = None,
+    ) -> "Result[LoanResult]":
+        """
+        Take out a loan with deferred repayment.
+
+        Returns Result.ok(LoanResult) on success.
+        """
+        ...
+
+    @abstractmethod
+    def execute_repayment(
+        self,
+        discord_id: int,
+        guild_id: int | None = None,
+    ) -> "Result[RepaymentResult]":
+        """
+        Repay an outstanding loan.
+
+        Returns Result.ok(RepaymentResult) on success.
+        """
         ...
 
 
@@ -270,14 +319,16 @@ class IBankruptcyService(ABC):
         """Get bankruptcy states for multiple players."""
         ...
 
+    # Legacy dict-returning methods (kept for backward compatibility)
+
     @abstractmethod
     def can_declare_bankruptcy(self, discord_id: int) -> dict:
-        """Check if a player can declare bankruptcy."""
+        """Check if a player can declare bankruptcy (legacy)."""
         ...
 
     @abstractmethod
     def declare_bankruptcy(self, discord_id: int) -> dict:
-        """Declare bankruptcy (clears debt, applies penalty)."""
+        """Declare bankruptcy (legacy)."""
         ...
 
     @abstractmethod
@@ -292,6 +343,39 @@ class IBankruptcyService(ABC):
     @abstractmethod
     def on_game_played(self, discord_id: int) -> int:
         """Decrement penalty games after playing."""
+        ...
+
+    # Result-returning methods (new API)
+
+    @abstractmethod
+    def validate_bankruptcy(self, discord_id: int) -> "Result[int]":
+        """
+        Check if a player can declare bankruptcy.
+
+        Returns Result.ok(debt_amount) if allowed, Result.fail otherwise.
+        """
+        ...
+
+    @abstractmethod
+    def execute_bankruptcy(self, discord_id: int) -> "Result[BankruptcyDeclaration]":
+        """
+        Declare bankruptcy for a player.
+
+        Returns Result.ok(BankruptcyDeclaration) on success.
+        """
+        ...
+
+    @abstractmethod
+    def calculate_penalized_winnings(
+        self,
+        discord_id: int,
+        amount: int,
+    ) -> "Result[PenaltyApplication]":
+        """
+        Calculate penalized winnings for a player under bankruptcy penalty.
+
+        Returns Result.ok(PenaltyApplication) - always succeeds.
+        """
         ...
 
 

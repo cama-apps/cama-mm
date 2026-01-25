@@ -22,6 +22,7 @@ from utils.drawing import draw_rating_distribution
 from utils.formatting import JOPACOIN_EMOTE, TOMBSTONE_EMOJI
 from utils.hero_lookup import get_hero_short_name, classify_hero_role
 from utils.interaction_safety import safe_defer, safe_followup
+from utils.embed_safety import truncate_field
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
 from utils.rating_insights import compute_calibration_stats, rd_to_certainty
 
@@ -561,9 +562,10 @@ class UnifiedLeaderboardView(discord.ui.View):
             rating = entry["rating_display"]
             certainty = entry["certainty"]
             record = f"{entry['wins']}-{entry['losses']}"
-            lines.append(f"{medal} **{display_name}** - {rating} ({certainty:.0f}% certain) • {record}")
+            lines.append(f"{medal} **{display_name}** {rating} ({certainty:.0f}%) {record}")
 
-        embed.add_field(name="Rankings", value="\n".join(lines) if lines else "No players.", inline=False)
+        field_content = "\n".join(lines) if lines else "No players."
+        embed.add_field(name="Rankings", value=truncate_field(field_content), inline=False)
 
         # Footer
         page_info = f"Page {state.current_page + 1}/{state.max_page + 1}"
@@ -600,9 +602,10 @@ class UnifiedLeaderboardView(discord.ui.View):
             rating = entry["rating_display"]
             certainty = entry["certainty"]
             record = f"{entry['wins']}-{entry['losses']}"
-            lines.append(f"{medal} **{display_name}** - {rating} ({certainty:.0f}% certain) • {record}")
+            lines.append(f"{medal} **{display_name}** {rating} ({certainty:.0f}%) {record}")
 
-        embed.add_field(name="Rankings", value="\n".join(lines) if lines else "No players.", inline=False)
+        field_content = "\n".join(lines) if lines else "No players."
+        embed.add_field(name="Rankings", value=truncate_field(field_content), inline=False)
 
         # Footer
         page_info = f"Page {state.current_page + 1}/{state.max_page + 1}"
