@@ -699,21 +699,13 @@ class InfoCommands(commands.Cog):
         )
 
     @app_commands.command(
-        name="calibration", description="View rating system stats (admin only)"
+        name="calibration", description="View rating system stats and calibration progress"
     )
     @app_commands.describe(user="Optional: View detailed stats for a specific player")
     async def calibration(
         self, interaction: discord.Interaction, user: discord.Member | None = None
     ):
-        """Show rating system health and calibration stats. Admin only."""
-        # Admin check
-        if not has_admin_permission(interaction):
-            await interaction.response.send_message(
-                "❌ This command is admin-only.",
-                ephemeral=True,
-            )
-            return
-
+        """Show rating system health and calibration stats."""
         target_user = user or interaction.user
         logger.info(f"Calibration command: User {interaction.user.id}, target={target_user.id}")
         guild = interaction.guild if hasattr(interaction, "guild") else None

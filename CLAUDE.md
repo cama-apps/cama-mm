@@ -409,7 +409,7 @@ payout INTEGER
 | `/linksteam` | Link Steam account if registered | `steam_id`: Steam32 ID |
 | `/setroles` | Set role preferences | `roles`: "1,2,3" or "123" |
 | `/profile` | Unified player profile with 7 tabs | `user`: optional target |
-| `/calibration` | Rating system stats (admin) | `user`: optional target |
+| `/calibration` | Rating system stats and calibration progress | `user`: optional target |
 | `/leaderboard` | Rankings (balance, gambling, predictions) | `type`, `limit` |
 | `/bet` | Place jopacoin bet | `team`, `amount`, `leverage` |
 | `/mybets` | Show active bets | - |
@@ -513,7 +513,7 @@ def test_full_match_workflow(test_db, mock_lobby_manager):
 **Tests**
 - `commands/predictions.py` slash-command flows are not directly tested (service/repo only).
 - `commands/enrichment.py` admin config commands (`/setleague`, `/showconfig`, `/backfillsteamid`) are untested.
-- `commands/info.py` `/help` and `/calibration` formatting lacks direct command tests.
+- `commands/info.py` `/help` formatting lacks direct command tests.
 - `remove_fake_users.py` CLI wrapper is not smoke-tested.
 
 **Docs**
