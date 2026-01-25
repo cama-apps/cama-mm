@@ -5,8 +5,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import discord
 import pytest
 
-from commands.betting import BettingCommands, WHEEL_WEDGES
-from config import WHEEL_COOLDOWN_SECONDS, WHEEL_ANIMATION_FRAMES
+from commands.betting import BettingCommands
+from utils.wheel_drawing import WHEEL_WEDGES
+from config import WHEEL_COOLDOWN_SECONDS, WHEEL_TARGET_EV
 
 
 @pytest.mark.asyncio
@@ -39,7 +40,7 @@ async def test_wheel_requires_registration():
 
 @pytest.mark.asyncio
 async def test_wheel_cooldown_enforced():
-    """Verify /gamba enforces 24-hour cooldown."""
+    """Verify /gamba enforces 24-hour cooldown (via database)."""
     bot = MagicMock()
     betting_service = MagicMock()
     match_service = MagicMock()
@@ -47,6 +48,10 @@ async def test_wheel_cooldown_enforced():
 
     # User is registered
     player_service.get_player.return_value = MagicMock(name="TestPlayer")
+
+    # Mock repository - cooldown was just set
+    player_service.player_repo = MagicMock()
+    player_service.player_repo.get_last_wheel_spin.return_value = int(time.time())
 
     interaction = MagicMock()
     interaction.guild = MagicMock()
@@ -56,10 +61,9 @@ async def test_wheel_cooldown_enforced():
 
     commands = BettingCommands(bot, betting_service, match_service, player_service)
 
-    # Set cooldown to "just used"
-    commands._gamba_cooldowns[789] = time.time()
-
-    await commands.gamba.callback(commands, interaction)
+    # Mock admin check to return False (non-admin user)
+    with patch("commands.betting.has_admin_permission", return_value=False):
+        await commands.gamba.callback(commands, interaction)
 
     # Should reject with cooldown message
     interaction.response.send_message.assert_awaited_once()
@@ -81,9 +85,11 @@ async def test_wheel_cooldown_expired_allows_spin():
     player_service.get_player.return_value = MagicMock(name="TestPlayer")
     player_service.get_balance.return_value = 50
 
-    # Mock repository
+    # Mock repository - cooldown expired
     player_service.player_repo = MagicMock()
+    player_service.player_repo.get_last_wheel_spin.return_value = int(time.time()) - WHEEL_COOLDOWN_SECONDS - 1
     player_service.player_repo.add_balance = MagicMock()
+    player_service.player_repo.set_last_wheel_spin = MagicMock()
 
     message = MagicMock()
     message.edit = AsyncMock()
@@ -97,19 +103,16 @@ async def test_wheel_cooldown_expired_allows_spin():
 
     commands = BettingCommands(bot, betting_service, match_service, player_service)
 
-    # Set cooldown to expired (more than 24 hours ago)
-    commands._gamba_cooldowns[1001] = time.time() - WHEEL_COOLDOWN_SECONDS - 1
-
-    # Mock random to get a predictable result (index 3 = "5 JC")
+    # Mock random to get a predictable result (index 3 = "5")
     with patch("commands.betting.random.randint", return_value=3):
         with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
             await commands.gamba.callback(commands, interaction)
 
     # Should respond (not reject)
     interaction.response.send_message.assert_awaited_once()
+    # Should have a file attachment (GIF)
     call_kwargs = interaction.response.send_message.call_args.kwargs
-    # Should have an embed, not ephemeral rejection
-    assert "embed" in call_kwargs
+    assert "file" in call_kwargs
 
 
 @pytest.mark.asyncio
@@ -124,6 +127,11 @@ async def test_wheel_positive_applies_garnishment():
     # User is registered and in debt
     player_service.get_player.return_value = MagicMock(name="TestPlayer")
     player_service.get_balance.return_value = -100  # In debt
+
+    # Mock repository
+    player_service.player_repo = MagicMock()
+    player_service.player_repo.get_last_wheel_spin.return_value = None
+    player_service.player_repo.set_last_wheel_spin = MagicMock()
 
     # Set up garnishment service
     garnishment_service.add_income.return_value = {
@@ -144,8 +152,7 @@ async def test_wheel_positive_applies_garnishment():
 
     commands = BettingCommands(bot, betting_service, match_service, player_service)
 
-    # Mock random to get a positive result (index 13 = "30 JC")
-    # WHEEL_WEDGES[13] = ("30 JC", 30, "💎")
+    # Mock random to get a positive result (index 13 = "30")
     with patch("commands.betting.random.randint", return_value=13):
         with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
             await commands.gamba.callback(commands, interaction)
@@ -168,6 +175,8 @@ async def test_wheel_positive_no_debt_adds_directly():
 
     # Mock repository
     player_service.player_repo = MagicMock()
+    player_service.player_repo.get_last_wheel_spin.return_value = None
+    player_service.player_repo.set_last_wheel_spin = MagicMock()
     player_service.player_repo.add_balance = MagicMock()
 
     # No garnishment service on bot
@@ -185,7 +194,7 @@ async def test_wheel_positive_no_debt_adds_directly():
 
     commands = BettingCommands(bot, betting_service, match_service, player_service)
 
-    # Mock random to get a positive result (index 3 = "5 JC")
+    # Mock random to get a positive result (index 3 = "5")
     with patch("commands.betting.random.randint", return_value=3):
         with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
             await commands.gamba.callback(commands, interaction)
@@ -196,7 +205,7 @@ async def test_wheel_positive_no_debt_adds_directly():
 
 @pytest.mark.asyncio
 async def test_wheel_bankrupt_subtracts_balance():
-    """Verify Bankrupt wedge subtracts 100 JC from balance."""
+    """Verify Bankrupt wedge subtracts from balance (value based on EV config)."""
     bot = MagicMock()
     betting_service = MagicMock()
     match_service = MagicMock()
@@ -208,6 +217,8 @@ async def test_wheel_bankrupt_subtracts_balance():
 
     # Mock repository
     player_service.player_repo = MagicMock()
+    player_service.player_repo.get_last_wheel_spin.return_value = None
+    player_service.player_repo.set_last_wheel_spin = MagicMock()
     player_service.player_repo.add_balance = MagicMock()
 
     message = MagicMock()
@@ -223,13 +234,14 @@ async def test_wheel_bankrupt_subtracts_balance():
     commands = BettingCommands(bot, betting_service, match_service, player_service)
 
     # Mock random to get Bankrupt (index 0)
-    # WHEEL_WEDGES[0] = ("BANKRUPT", -100, "💀")
     with patch("commands.betting.random.randint", return_value=0):
         with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
             await commands.gamba.callback(commands, interaction)
 
-    # Should subtract 100 (ignoring MAX_DEBT floor)
-    player_service.player_repo.add_balance.assert_called_once_with(1004, -100)
+    # Should subtract the bankrupt value (negative)
+    bankrupt_value = WHEEL_WEDGES[0][1]
+    assert bankrupt_value < 0, "Bankrupt should have negative value"
+    player_service.player_repo.add_balance.assert_called_once_with(1004, bankrupt_value)
 
 
 @pytest.mark.asyncio
@@ -242,11 +254,14 @@ async def test_wheel_bankrupt_ignores_max_debt():
 
     # User is registered and already at -400 (near MAX_DEBT of 500)
     player_service.get_player.return_value = MagicMock(name="TestPlayer")
-    # Balance will be -400, then -500 after bankrupt
-    player_service.get_balance.side_effect = [-400, -500]
+    bankrupt_value = WHEEL_WEDGES[0][1]
+    # Balance will be -400, then more negative after bankrupt
+    player_service.get_balance.side_effect = [-400, -400 + bankrupt_value]
 
     # Mock repository
     player_service.player_repo = MagicMock()
+    player_service.player_repo.get_last_wheel_spin.return_value = None
+    player_service.player_repo.set_last_wheel_spin = MagicMock()
     player_service.player_repo.add_balance = MagicMock()
 
     message = MagicMock()
@@ -266,8 +281,8 @@ async def test_wheel_bankrupt_ignores_max_debt():
         with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
             await commands.gamba.callback(commands, interaction)
 
-    # Should subtract 100 regardless of MAX_DEBT
-    player_service.player_repo.add_balance.assert_called_once_with(1005, -100)
+    # Should subtract bankrupt value regardless of MAX_DEBT
+    player_service.player_repo.add_balance.assert_called_once_with(1005, bankrupt_value)
 
 
 @pytest.mark.asyncio
@@ -284,6 +299,8 @@ async def test_wheel_lose_turn_no_change():
 
     # Mock repository
     player_service.player_repo = MagicMock()
+    player_service.player_repo.get_last_wheel_spin.return_value = None
+    player_service.player_repo.set_last_wheel_spin = MagicMock()
     player_service.player_repo.add_balance = MagicMock()
 
     message = MagicMock()
@@ -299,7 +316,6 @@ async def test_wheel_lose_turn_no_change():
     commands = BettingCommands(bot, betting_service, match_service, player_service)
 
     # Mock random to get "Lose a Turn" (index 2)
-    # WHEEL_WEDGES[2] = ("LOSE A TURN", 0, "😐")
     with patch("commands.betting.random.randint", return_value=2):
         with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
             await commands.gamba.callback(commands, interaction)
@@ -322,6 +338,8 @@ async def test_wheel_jackpot_result():
 
     # Mock repository
     player_service.player_repo = MagicMock()
+    player_service.player_repo.get_last_wheel_spin.return_value = None
+    player_service.player_repo.set_last_wheel_spin = MagicMock()
     player_service.player_repo.add_balance = MagicMock()
 
     message = MagicMock()
@@ -337,7 +355,6 @@ async def test_wheel_jackpot_result():
     commands = BettingCommands(bot, betting_service, match_service, player_service)
 
     # Mock random to get Jackpot (index 22)
-    # WHEEL_WEDGES[22] = ("JACKPOT!", 100, "🌟")
     with patch("commands.betting.random.randint", return_value=22):
         with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
             await commands.gamba.callback(commands, interaction)
@@ -353,7 +370,8 @@ def test_wheel_wedges_has_correct_count():
 
 def test_wheel_wedges_distribution():
     """Verify the distribution of wheel wedges matches spec."""
-    bankrupt_count = sum(1 for w in WHEEL_WEDGES if w[1] == -100)
+    # Bankrupt wedges have negative values
+    bankrupt_count = sum(1 for w in WHEEL_WEDGES if w[1] < 0)
     lose_turn_count = sum(1 for w in WHEEL_WEDGES if w[1] == 0)
     small_count = sum(1 for w in WHEEL_WEDGES if 5 <= w[1] <= 10)
     medium_count = sum(1 for w in WHEEL_WEDGES if 15 <= w[1] <= 25)
@@ -370,19 +388,26 @@ def test_wheel_wedges_distribution():
     assert jackpot_count == 2, f"Expected 2 Jackpot wedges, got {jackpot_count}"
 
 
-def test_wheel_expected_value_is_positive():
-    """Verify the expected value of the wheel is positive (~25 JC)."""
+def test_wheel_expected_value_matches_config():
+    """Verify the expected value of the wheel matches WHEEL_TARGET_EV config."""
     total_value = sum(w[1] for w in WHEEL_WEDGES)
     expected_value = total_value / len(WHEEL_WEDGES)
 
-    # Expected value should be around 25 JC (positive)
-    assert expected_value > 0, f"Expected positive EV, got {expected_value}"
-    assert 20 <= expected_value <= 30, f"Expected EV around 25, got {expected_value}"
+    # EV should be close to the configured target (within 1 due to integer rounding)
+    assert abs(expected_value - WHEEL_TARGET_EV) <= 1, f"Expected EV ~{WHEEL_TARGET_EV}, got {expected_value}"
+
+
+def test_wheel_bankrupt_always_negative():
+    """Verify BANKRUPT wedges are always negative (capped at -1 minimum)."""
+    bankrupt_wedges = [w for w in WHEEL_WEDGES if w[1] < 0]
+    assert len(bankrupt_wedges) == 2, "Should have exactly 2 bankrupt wedges"
+    for w in bankrupt_wedges:
+        assert w[1] <= -1, f"Bankrupt value {w[1]} should be <= -1"
 
 
 @pytest.mark.asyncio
-async def test_wheel_animation_frame_count():
-    """Verify the wheel animation has 5 frame edits."""
+async def test_wheel_animation_uses_gif():
+    """Verify the wheel animation uses a single GIF upload."""
     bot = MagicMock()
     betting_service = MagicMock()
     match_service = MagicMock()
@@ -394,6 +419,8 @@ async def test_wheel_animation_frame_count():
 
     # Mock repository
     player_service.player_repo = MagicMock()
+    player_service.player_repo.get_last_wheel_spin.return_value = None
+    player_service.player_repo.set_last_wheel_spin = MagicMock()
     player_service.player_repo.add_balance = MagicMock()
 
     message = MagicMock()
@@ -412,18 +439,16 @@ async def test_wheel_animation_frame_count():
         with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
             await commands.gamba.callback(commands, interaction)
 
-    # Should have N animation frame sleeps + 1 linger (2s) + 1 final result sleep
-    expected_sleeps = WHEEL_ANIMATION_FRAMES + 2
-    assert mock_sleep.await_count == expected_sleeps
+    # GIF animation: 1 sleep for animation + 1 sleep before result
+    assert mock_sleep.await_count == 2
 
-    # Should edit the message N times for animation + 1 for final result
-    expected_edits = WHEEL_ANIMATION_FRAMES + 1
-    assert message.edit.await_count == expected_edits
+    # Should only edit once (for final result embed)
+    assert message.edit.await_count == 1
 
 
 @pytest.mark.asyncio
-async def test_wheel_updates_cooldown():
-    """Verify the wheel updates cooldown on spin."""
+async def test_wheel_updates_cooldown_in_database():
+    """Verify the wheel updates cooldown in database on spin."""
     bot = MagicMock()
     betting_service = MagicMock()
     match_service = MagicMock()
@@ -433,8 +458,10 @@ async def test_wheel_updates_cooldown():
     player_service.get_player.return_value = MagicMock(name="TestPlayer")
     player_service.get_balance.return_value = 50
 
-    # Mock repository
+    # Mock repository - no previous spin
     player_service.player_repo = MagicMock()
+    player_service.player_repo.get_last_wheel_spin.return_value = None
+    player_service.player_repo.set_last_wheel_spin = MagicMock()
     player_service.player_repo.add_balance = MagicMock()
 
     message = MagicMock()
@@ -449,17 +476,57 @@ async def test_wheel_updates_cooldown():
 
     commands = BettingCommands(bot, betting_service, match_service, player_service)
 
-    # No cooldown set initially
-    assert 1009 not in commands._gamba_cooldowns
-
-    before_time = time.time()
+    before_time = int(time.time())
 
     with patch("commands.betting.random.randint", return_value=5):
         with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
             await commands.gamba.callback(commands, interaction)
 
-    after_time = time.time()
+    after_time = int(time.time())
 
-    # Cooldown should now be set
-    assert 1009 in commands._gamba_cooldowns
-    assert before_time <= commands._gamba_cooldowns[1009] <= after_time
+    # Should have called set_last_wheel_spin with a timestamp
+    player_service.player_repo.set_last_wheel_spin.assert_called_once()
+    call_args = player_service.player_repo.set_last_wheel_spin.call_args[0]
+    assert call_args[0] == 1009  # user_id
+    assert before_time <= call_args[1] <= after_time  # timestamp
+
+
+@pytest.mark.asyncio
+async def test_wheel_admin_bypasses_cooldown():
+    """Verify admins can bypass wheel cooldown."""
+    bot = MagicMock()
+    betting_service = MagicMock()
+    match_service = MagicMock()
+    player_service = MagicMock()
+
+    # User is registered
+    player_service.get_player.return_value = MagicMock(name="TestPlayer")
+    player_service.get_balance.return_value = 50
+
+    # Mock repository - cooldown was just set
+    player_service.player_repo = MagicMock()
+    player_service.player_repo.get_last_wheel_spin.return_value = int(time.time())
+    player_service.player_repo.set_last_wheel_spin = MagicMock()
+    player_service.player_repo.add_balance = MagicMock()
+
+    message = MagicMock()
+    message.edit = AsyncMock()
+
+    interaction = MagicMock()
+    interaction.guild = MagicMock()
+    interaction.guild.id = 123
+    interaction.user.id = 789
+    interaction.response.send_message = AsyncMock()
+    interaction.original_response = AsyncMock(return_value=message)
+
+    commands = BettingCommands(bot, betting_service, match_service, player_service)
+
+    # Mock admin check to return True
+    with patch("commands.betting.has_admin_permission", return_value=True):
+        with patch("commands.betting.random.randint", return_value=5):
+            with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
+                await commands.gamba.callback(commands, interaction)
+
+    # Admin should be able to spin despite cooldown - file attachment means spin happened
+    call_kwargs = interaction.response.send_message.call_args.kwargs
+    assert "file" in call_kwargs
