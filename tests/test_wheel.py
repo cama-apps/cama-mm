@@ -98,8 +98,8 @@ async def test_wheel_cooldown_expired_allows_spin():
     interaction.guild = MagicMock()
     interaction.guild.id = 123
     interaction.user.id = 1001
-    interaction.response.send_message = AsyncMock()
-    interaction.original_response = AsyncMock(return_value=message)
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock(return_value=message)
 
     commands = BettingCommands(bot, betting_service, match_service, player_service)
 
@@ -108,10 +108,11 @@ async def test_wheel_cooldown_expired_allows_spin():
         with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
             await commands.gamba.callback(commands, interaction)
 
-    # Should respond (not reject)
-    interaction.response.send_message.assert_awaited_once()
+    # Should defer then send via followup
+    interaction.response.defer.assert_awaited_once()
+    interaction.followup.send.assert_awaited_once()
     # Should have a file attachment (GIF)
-    call_kwargs = interaction.response.send_message.call_args.kwargs
+    call_kwargs = interaction.followup.send.call_args.kwargs
     assert "file" in call_kwargs
 
 
@@ -147,8 +148,8 @@ async def test_wheel_positive_applies_garnishment():
     interaction.guild = MagicMock()
     interaction.guild.id = 123
     interaction.user.id = 1002
-    interaction.response.send_message = AsyncMock()
-    interaction.original_response = AsyncMock(return_value=message)
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock(return_value=message)
 
     commands = BettingCommands(bot, betting_service, match_service, player_service)
 
@@ -189,8 +190,8 @@ async def test_wheel_positive_no_debt_adds_directly():
     interaction.guild = MagicMock()
     interaction.guild.id = 123
     interaction.user.id = 1003
-    interaction.response.send_message = AsyncMock()
-    interaction.original_response = AsyncMock(return_value=message)
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock(return_value=message)
 
     commands = BettingCommands(bot, betting_service, match_service, player_service)
 
@@ -228,8 +229,8 @@ async def test_wheel_bankrupt_subtracts_balance():
     interaction.guild = MagicMock()
     interaction.guild.id = 123
     interaction.user.id = 1004
-    interaction.response.send_message = AsyncMock()
-    interaction.original_response = AsyncMock(return_value=message)
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock(return_value=message)
 
     commands = BettingCommands(bot, betting_service, match_service, player_service)
 
@@ -271,8 +272,8 @@ async def test_wheel_bankrupt_ignores_max_debt():
     interaction.guild = MagicMock()
     interaction.guild.id = 123
     interaction.user.id = 1005
-    interaction.response.send_message = AsyncMock()
-    interaction.original_response = AsyncMock(return_value=message)
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock(return_value=message)
 
     commands = BettingCommands(bot, betting_service, match_service, player_service)
 
@@ -310,8 +311,8 @@ async def test_wheel_lose_turn_no_change():
     interaction.guild = MagicMock()
     interaction.guild.id = 123
     interaction.user.id = 1006
-    interaction.response.send_message = AsyncMock()
-    interaction.original_response = AsyncMock(return_value=message)
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock(return_value=message)
 
     commands = BettingCommands(bot, betting_service, match_service, player_service)
 
@@ -349,8 +350,8 @@ async def test_wheel_jackpot_result():
     interaction.guild = MagicMock()
     interaction.guild.id = 123
     interaction.user.id = 1007
-    interaction.response.send_message = AsyncMock()
-    interaction.original_response = AsyncMock(return_value=message)
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock(return_value=message)
 
     commands = BettingCommands(bot, betting_service, match_service, player_service)
 
@@ -430,8 +431,8 @@ async def test_wheel_animation_uses_gif():
     interaction.guild = MagicMock()
     interaction.guild.id = 123
     interaction.user.id = 1008
-    interaction.response.send_message = AsyncMock()
-    interaction.original_response = AsyncMock(return_value=message)
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock(return_value=message)
 
     commands = BettingCommands(bot, betting_service, match_service, player_service)
 
@@ -471,8 +472,8 @@ async def test_wheel_updates_cooldown_in_database():
     interaction.guild = MagicMock()
     interaction.guild.id = 123
     interaction.user.id = 1009
-    interaction.response.send_message = AsyncMock()
-    interaction.original_response = AsyncMock(return_value=message)
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock(return_value=message)
 
     commands = BettingCommands(bot, betting_service, match_service, player_service)
 
@@ -516,8 +517,8 @@ async def test_wheel_admin_bypasses_cooldown():
     interaction.guild = MagicMock()
     interaction.guild.id = 123
     interaction.user.id = 789
-    interaction.response.send_message = AsyncMock()
-    interaction.original_response = AsyncMock(return_value=message)
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock(return_value=message)
 
     commands = BettingCommands(bot, betting_service, match_service, player_service)
 
@@ -528,5 +529,5 @@ async def test_wheel_admin_bypasses_cooldown():
                 await commands.gamba.callback(commands, interaction)
 
     # Admin should be able to spin despite cooldown - file attachment means spin happened
-    call_kwargs = interaction.response.send_message.call_args.kwargs
+    call_kwargs = interaction.followup.send.call_args.kwargs
     assert "file" in call_kwargs

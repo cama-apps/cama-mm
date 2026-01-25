@@ -869,12 +869,14 @@ class BettingCommands(commands.Cog):
         # Update cooldown in database immediately (prevents double-spinning)
         self.player_service.player_repo.set_last_wheel_spin(user_id, int(now))
 
+        # Defer first - GIF generation can take a few seconds
+        await interaction.response.defer()
+
         # Generate the complete animation GIF (plays once, ~20 seconds)
         gif_file = self._create_wheel_gif_file(result_idx)
 
-        # Send just the GIF without embed wrapper for cleaner display
-        await interaction.response.send_message(file=gif_file)
-        message = await interaction.original_response()
+        # Send via followup (since we deferred)
+        message = await interaction.followup.send(file=gif_file, wait=True)
 
         # Wait for GIF animation to complete before showing result
         # Animation timing:
