@@ -492,13 +492,20 @@ class AdminCommands(commands.Cog):
                 ephemeral=True,
             )
 
-    @app_commands.command(name="givecoin", description="Give jopacoin to a user (Admin only)")
+    @app_commands.command(name="givecoin", description="Give jopacoin to a user or nonprofit (Admin only)")
     @app_commands.describe(
-        user="The user to give coins to",
+        user="The user to give coins to (leave empty if targeting nonprofit)",
         amount="Amount to give (can be negative to take)",
+        nonprofit="Give to the nonprofit fund instead of a user",
     )
-    async def givecoin(self, interaction: discord.Interaction, user: discord.Member, amount: int):
-        """Admin command to give or take jopacoin from a user."""
+    async def givecoin(
+        self,
+        interaction: discord.Interaction,
+        amount: int,
+        user: discord.Member | None = None,
+        nonprofit: bool = False,
+    ):
+        """Admin command to give or take jopacoin from a user or nonprofit fund."""
         if not has_admin_permission(interaction):
             await interaction.response.send_message(
                 "❌ Admin only! You need Administrator or Manage Server permissions.",
@@ -506,6 +513,66 @@ class AdminCommands(commands.Cog):
             )
             return
 
+        # Validate target - must specify exactly one
+        if nonprofit and user:
+            await interaction.response.send_message(
+                "❌ Cannot specify both a user and nonprofit. Choose one target.",
+                ephemeral=True,
+            )
+            return
+
+        if not nonprofit and not user:
+            await interaction.response.send_message(
+                "❌ Must specify either a user or set nonprofit=True.",
+                ephemeral=True,
+            )
+            return
+
+        # Handle nonprofit fund target
+        if nonprofit:
+            if not self.loan_service:
+                await interaction.response.send_message(
+                    "❌ Loan service not available.",
+                    ephemeral=True,
+                )
+                return
+
+            guild_id = interaction.guild.id if interaction.guild else None
+            old_balance = self.loan_service.get_nonprofit_fund(guild_id)
+
+            if amount >= 0:
+                self.loan_service.add_to_nonprofit_fund(guild_id, amount)
+                new_balance = self.loan_service.get_nonprofit_fund(guild_id)
+                await interaction.response.send_message(
+                    f"✅ Added **{amount}** jopacoin to the nonprofit fund\n"
+                    f"Fund balance: {old_balance} → {new_balance}",
+                    ephemeral=True,
+                )
+            else:
+                # Taking from nonprofit - need to use the repo directly
+                abs_amount = abs(amount)
+                if old_balance < abs_amount:
+                    await interaction.response.send_message(
+                        f"❌ Nonprofit fund only has {old_balance} jopacoin. Cannot take {abs_amount}.",
+                        ephemeral=True,
+                    )
+                    return
+                # Negative add to subtract
+                self.loan_service.loan_repo.add_to_nonprofit_fund(guild_id, amount)
+                new_balance = self.loan_service.get_nonprofit_fund(guild_id)
+                await interaction.response.send_message(
+                    f"✅ Took **{abs_amount}** jopacoin from the nonprofit fund\n"
+                    f"Fund balance: {old_balance} → {new_balance}",
+                    ephemeral=True,
+                )
+
+            logger.info(
+                f"Admin {interaction.user.id} ({interaction.user}) modified nonprofit fund by {amount}. "
+                f"Balance: {old_balance} → {new_balance}"
+            )
+            return
+
+        # Handle user target (original behavior)
         player = self.player_repo.get_by_id(user.id)
         if not player:
             await interaction.response.send_message(

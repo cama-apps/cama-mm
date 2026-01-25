@@ -209,6 +209,7 @@ class SchemaManager:
             ("create_tip_transactions_table", self._migration_create_tip_transactions_table),
             ("add_origin_channel_id_to_lobby", self._migration_add_origin_channel_id_to_lobby),
             ("add_last_wheel_spin_to_players", self._migration_add_last_wheel_spin_to_players),
+            ("create_wheel_spins_table", self._migration_create_wheel_spins_table),
         ]
 
     # --- Migrations ---
@@ -899,3 +900,25 @@ class SchemaManager:
     def _migration_add_last_wheel_spin_to_players(self, cursor) -> None:
         """Add last_wheel_spin column to players for persisting gamba cooldown."""
         self._add_column_if_not_exists(cursor, "players", "last_wheel_spin", "INTEGER")
+
+    def _migration_create_wheel_spins_table(self, cursor) -> None:
+        """Create wheel_spins table to track /gamba results for gambachart."""
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS wheel_spins (
+                spin_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL DEFAULT 0,
+                discord_id INTEGER NOT NULL,
+                result INTEGER NOT NULL,
+                spin_time INTEGER NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (discord_id) REFERENCES players(discord_id)
+            )
+            """
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_wheel_spins_discord_id ON wheel_spins(discord_id)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_wheel_spins_spin_time ON wheel_spins(spin_time)"
+        )
