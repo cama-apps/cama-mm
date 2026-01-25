@@ -48,10 +48,19 @@ class Player:
         Returns:
             Player value for balancing (in rating units)
         """
-        if use_openskill and self.os_mu is not None:
-            # Convert OpenSkill mu to comparable scale with Glicko/MMR
-            # OpenSkill mu ~10-40 maps to ~0-3000 (same as Glicko display)
-            return max(0, (self.os_mu - 10) * 100)
+        if use_openskill:
+            if self.os_mu is not None:
+                # Convert OpenSkill mu to comparable scale with Glicko/MMR
+                # OpenSkill mu ~10-40 maps to ~0-3000 (same as Glicko display)
+                return max(0, (self.os_mu - 10) * 100)
+            # No os_mu stored - derive from Glicko or MMR using same scale
+            # This ensures consistent balancing when some players lack OpenSkill data
+            if self.glicko_rating is not None:
+                return self.glicko_rating
+            if self.mmr is not None:
+                # MMR → Glicko scale (0-12000 → 0-3000)
+                return self.mmr * 0.25
+            return 0
 
         if use_glicko and self.glicko_rating is not None:
             return self.glicko_rating
