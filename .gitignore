@@ -35,6 +35,7 @@ ENV/
 *~
 
 # AI/Development artifacts
+.serena/
 plans/
 *.plan.md
 *.plan.txt

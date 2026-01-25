@@ -360,7 +360,7 @@ class LobbyCommands(commands.Cog):
                 logger.exception(f"Error creating lobby thread: {exc}")
                 await channel_msg.delete()
                 await interaction.followup.send(
-                    f"❌ Failed to create lobby thread: {exc}",
+                    "❌ Failed to create lobby thread. Please try again or contact an admin.",
                     ephemeral=True,
                 )
 

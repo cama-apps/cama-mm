@@ -39,6 +39,7 @@ python_classes = "Test*"
 python_functions = "test_*"
 markers = [
     "timeout: mark test with a timeout",
+    "forceserial: mark test to run in isolation (avoid parallel test state pollution)",
 ]
 filterwarnings = [
     "ignore:'asyncio\\.iscoroutinefunction' is deprecated:DeprecationWarning:discord\\..*",
