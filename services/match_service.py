@@ -437,6 +437,44 @@ class MatchService:
             value_diff + off_role_penalty + weighted_role_matchup_delta + excluded_penalty
         )
 
+        # Calculate Glicko-2 win probability for Radiant
+        radiant_glicko_rating, radiant_glicko_rd, _ = self.rating_system.aggregate_team_stats(
+            [
+                self.rating_system.create_player_from_rating(
+                    p.glicko_rating or self.rating_system.mmr_to_rating(p.mmr or 4000),
+                    p.glicko_rd or 350.0,
+                    p.glicko_volatility or 0.06,
+                )
+                for p in radiant_team.players
+            ]
+        )
+        dire_glicko_rating, dire_glicko_rd, _ = self.rating_system.aggregate_team_stats(
+            [
+                self.rating_system.create_player_from_rating(
+                    p.glicko_rating or self.rating_system.mmr_to_rating(p.mmr or 4000),
+                    p.glicko_rd or 350.0,
+                    p.glicko_volatility or 0.06,
+                )
+                for p in dire_team.players
+            ]
+        )
+        glicko_radiant_win_prob = self.rating_system.expected_outcome(
+            radiant_glicko_rating, radiant_glicko_rd, dire_glicko_rating, dire_glicko_rd
+        )
+
+        # Calculate OpenSkill win probability for Radiant
+        radiant_os_ratings = [
+            (p.os_mu or self.openskill_system.DEFAULT_MU, p.os_sigma or self.openskill_system.DEFAULT_SIGMA)
+            for p in radiant_team.players
+        ]
+        dire_os_ratings = [
+            (p.os_mu or self.openskill_system.DEFAULT_MU, p.os_sigma or self.openskill_system.DEFAULT_SIGMA)
+            for p in dire_team.players
+        ]
+        openskill_radiant_win_prob = self.openskill_system.os_predict_win_probability(
+            radiant_os_ratings, dire_os_ratings
+        )
+
         # Update exclusion counts
         included_player_ids = set(radiant_team_ids + dire_team_ids)
         for pid in excluded_ids:
@@ -481,6 +519,8 @@ class MatchService:
             "goodness_score": goodness_score,
             "first_pick_team": first_pick_team,
             "excluded_ids": excluded_ids,
+            "glicko_radiant_win_prob": glicko_radiant_win_prob,
+            "openskill_radiant_win_prob": openskill_radiant_win_prob,
         }
 
     def _load_glicko_player(self, player_id: int) -> tuple[Player, int]:

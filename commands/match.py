@@ -592,6 +592,11 @@ class MatchCommands(commands.Cog):
         )
         embed.add_field(name=wager_field_name, value=wager_field_value, inline=False)
 
+        # Add match quality indicators to footer (subtle display)
+        glicko_prob = result.get("glicko_radiant_win_prob", 0.5)
+        os_prob = result.get("openskill_radiant_win_prob", 0.5)
+        embed.set_footer(text=f"{glicko_prob:.2f} {os_prob:.2f}")
+
         # Post shuffle embed to the lobby channel (dedicated channel where embed lives)
         lobby_channel_id = self.lobby_service.get_lobby_channel_id()
         message = None
