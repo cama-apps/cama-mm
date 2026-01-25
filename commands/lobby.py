@@ -16,6 +16,7 @@ from services.lobby_service import LobbyService
 from services.permissions import has_admin_permission
 from utils.formatting import FROGLING_EMOJI_ID, JOPACOIN_EMOJI_ID
 from utils.interaction_safety import safe_defer
+from utils.pin_helpers import safe_unpin_all_bot_messages
 
 if TYPE_CHECKING:
     from services.player_service import PlayerService
@@ -84,24 +85,6 @@ class LobbyCommands(commands.Cog):
         except Exception as exc:
             logger.warning(f"Failed to pin lobby message: {exc}")
 
-    async def _safe_unpin(
-        self, channel: discord.abc.Messageable | None, message_id: int | None
-    ) -> None:
-        """Unpin the lobby message safely, tolerating missing perms or missing message."""
-        if not channel or not message_id:
-            return
-        try:
-            message = await channel.fetch_message(message_id)
-        except Exception as exc:
-            logger.warning(f"Failed to fetch lobby message for unpin: {exc}")
-            return
-
-        try:
-            await message.unpin(reason="Cama lobby closed")
-        except discord.Forbidden:
-            logger.warning("Cannot unpin lobby message: missing Manage Messages permission.")
-        except Exception as exc:
-            logger.warning(f"Failed to unpin lobby message: {exc}")
 
     async def _remove_user_lobby_reactions(self, user: discord.User | discord.Member) -> None:
         """Remove a user's lobby reactions (sword and frogling) from the channel lobby message."""
@@ -650,7 +633,7 @@ class LobbyCommands(commands.Cog):
                 lobby_channel = interaction.channel
         else:
             lobby_channel = interaction.channel
-        await self._safe_unpin(lobby_channel, self.lobby_service.get_lobby_message_id())
+        await safe_unpin_all_bot_messages(lobby_channel, self.bot.user)
         self.lobby_service.reset_lobby()
 
         # Clear lobby rally cooldowns

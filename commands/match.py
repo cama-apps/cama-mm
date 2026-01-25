@@ -27,6 +27,7 @@ from utils.formatting import (
     get_player_display_name,
 )
 from utils.interaction_safety import safe_defer
+from utils.pin_helpers import safe_unpin_all_bot_messages
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
 
 logger = logging.getLogger("cama_bot.commands.match")
@@ -60,24 +61,6 @@ class MatchCommands(commands.Cog):
         # Track scheduled betting reminder tasks per guild for cleanup
         self._betting_tasks_by_guild = {}
 
-    async def _safe_unpin(
-        self, channel: discord.abc.Messageable | None, message_id: int | None
-    ) -> None:
-        """Unpin the lobby message safely, tolerating missing perms or missing message."""
-        if not channel or not message_id:
-            return
-        try:
-            message = await channel.fetch_message(message_id)
-        except Exception as exc:
-            logger.warning(f"Failed to fetch lobby message for unpin: {exc}")
-            return
-
-        try:
-            await message.unpin(reason="Cama lobby closed")
-        except discord.Forbidden:
-            logger.warning("Cannot unpin lobby message: missing Manage Messages permission.")
-        except Exception as exc:
-            logger.warning(f"Failed to unpin lobby message: {exc}")
 
     async def _update_channel_message_closed(self, reason: str = "Match Aborted") -> None:
         """Update the channel message embed to show lobby/match is closed."""
@@ -674,7 +657,7 @@ class MatchCommands(commands.Cog):
                 lobby_channel = interaction.channel
         else:
             lobby_channel = interaction.channel
-        await self._safe_unpin(lobby_channel, self.lobby_service.get_lobby_message_id())
+        await safe_unpin_all_bot_messages(lobby_channel, self.bot.user)
         self.lobby_service.reset_lobby()
 
         # Clear lobby rally cooldowns
@@ -1200,7 +1183,7 @@ class MatchCommands(commands.Cog):
         await self._abort_lobby_thread(guild_id)
 
         self.match_service.clear_last_shuffle(guild_id)
-        await self._safe_unpin(interaction.channel, self.lobby_service.get_lobby_message_id())
+        await safe_unpin_all_bot_messages(interaction.channel, self.bot.user)
         self.lobby_service.reset_lobby()
 
         # Clear lobby rally cooldowns
