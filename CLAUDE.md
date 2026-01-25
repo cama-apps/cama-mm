@@ -10,14 +10,18 @@ When committing, do not include the Co-Authored-By trailer.
 
 Cama Balanced Shuffle is a Discord bot for Dota 2 inhouse leagues. It implements:
 - **Balanced team shuffling** using Glicko-2 ratings with role-aware optimization
+- **Captain's Draft mode** with coinflip, side/pick selection, and snake draft
+- **Dual rating systems**: Glicko-2 (primary) and OpenSkill Plackett-Luce (fantasy-weighted)
 - **Player registration** with OpenDota MMR integration
-- **Match recording** with rating updates and pairwise statistics
+- **Match recording** with rating updates, pairwise statistics, and fantasy points
 - **Jopacoin betting system** with house/pool modes, leverage (2x-5x), debt, and bankruptcy
+- **Draft betting**: Player stakes (auto-liquidity), spectator pools, player pool bets
 - **Prediction markets** for yes/no outcomes with resolution voting and payouts
-- **Jopacoin economy extensions** with loans, nonprofit disbursements, and shop purchases
-- **Match enrichment** via OpenDota API for detailed stats (K/D/A, heroes, GPM, lane outcomes)
+- **Jopacoin economy**: Loans, nonprofit disbursements, shop purchases, tipping, Wheel of Fortune
+- **Match enrichment** via OpenDota/Valve APIs for detailed stats (K/D/A, heroes, GPM, lane outcomes, fantasy)
 - **Dota 2 reference** commands for hero/ability lookup (via dotabase)
-- **Stats visualization** with image generation (radar graphs, bar charts, match tables)
+- **Stats visualization** with image generation (radar graphs, bar charts, match tables, wheel animations)
+- **AI features** (optional): Flavor text generation, natural language SQL queries via Cerebras LLM
 
 ## Commands
 
@@ -55,78 +59,104 @@ config.py                 # Environment configuration (all settings centralized 
 database.py               # SQLite wrapper + schema initialization
 shuffler.py               # BalancedShuffler - team balancing algorithm
 rating_system.py          # CamaRatingSystem - Glicko-2 rating management
+openskill_rating_system.py # CamaOpenSkillSystem - OpenSkill Plackett-Luce (fantasy-weighted)
 opendota_integration.py   # OpenDotaAPI - rate-limited external API client
 steam_api.py              # Valve Web API client + rate limiter
 player_queue.py           # In-memory queue helper (not wired into commands yet)
 remove_fake_users.py      # CLI script to delete fake users
 
-commands/                 # Discord slash commands (12 cog modules)
+commands/                 # Discord slash commands (15 cog modules)
 ├── match.py              # /shuffle, /record
-├── registration.py       # /register, /setroles, /stats
-├── lobby.py              # /lobby, /kick, /resetlobby
-├── betting.py            # /bet, /mybets, /balance, /paydebt, /bankruptcy, /loan,
-│                         # /nonprofit, /disburse, /gambastats, /gambachart, /gambaleaderboard
+├── registration.py       # /register, /linksteam, /setroles
+├── lobby.py              # /lobby, /join, /leave, /kick, /resetlobby
+├── betting.py            # /bet, /mybets, /bets, /balance, /tip, /paydebt, /bankruptcy,
+│                         # /loan, /nonprofit, /disburse, /gamba
 ├── info.py               # /help, /leaderboard, /calibration
-├── advstats.py           # /pairwise, /matchup, /rebuildpairings
+├── advstats.py           # /matchup, /rebuildpairings
 ├── enrichment.py         # /setleague, /showconfig, /backfillsteamid, /enrichmatch,
-│                         # /matchhistory, /viewmatch, /dotastats, /recent, /rolesgraph,
-│                         # /lanegraph, /autodiscover
+│                         # /matchhistory, /viewmatch, /recent, /autodiscover,
+│                         # /wipematch, /wipediscovered
 ├── dota_info.py          # /hero, /ability (dotabase reference commands)
 ├── predictions.py        # /prediction, /predictions, /mypredictions, /predictionresolve,
-│                         # /predictioncancel, /predictionclose, /predictionstats, /predictionleaderboard
+│                         # /predictioncancel, /predictionclose
 ├── profile.py            # /profile (unified player profile with tabbed navigation)
 ├── shop.py               # /shop
-└── admin.py              # /addfake, /resetuser, /givecoin, /resetloancooldown,
-                          # /resetbankruptcycooldown, /setinitialrating, /sync,
-                          # /recalibrate, /resetrecalibrationcooldown
+├── draft.py              # /startdraft, /setcaptain, /restartdraft
+├── rating_analysis.py    # /ratinganalysis (compare, calibration, trend, backfill, player)
+├── ask.py                # /ask (AI-powered Q&A)
+└── admin.py              # /addfake, /filllobbytest, /resetuser, /registeruser, /givecoin,
+                          # /resetloancooldown, /resetbankruptcycooldown, /setinitialrating,
+                          # /recalibrate, /resetrecalibrationcooldown, /extendbetting, /sync
 
 domain/
 ├── models/               # Pure domain models (no DB dependencies)
 │   ├── player.py         # Player dataclass with ratings, roles, balance
 │   ├── team.py           # Team with 5 players, role assignments, value calc
-│   └── lobby.py          # Lobby state + LobbyManager for lifecycle
+│   ├── lobby.py          # Lobby state with regular and conditional players
+│   └── draft.py          # DraftState, DraftPhase for captain's draft
 └── services/             # Pure domain logic (no side effects)
     ├── role_assignment_service.py   # Optimal role assignment algorithms
-    └── team_balancing_service.py    # Team value and matchup scoring
+    ├── team_balancing_service.py    # Team value and matchup scoring
+    └── draft_service.py             # Captain selection, player pool, coinflip
 
 services/                 # Application services (orchestrate repos + domain)
-├── match_service.py      # Core: shuffle, record, voting, rating updates
+├── match_service.py      # Core: shuffle, record, voting, rating updates (Glicko-2 + OpenSkill)
 ├── player_service.py     # Registration, role management, stats
-├── betting_service.py    # Bet placement, settlement, rewards
+├── betting_service.py    # Bet placement, settlement, rewards, auto-blind
 ├── loan_service.py       # Loans + nonprofit fund tracking
 ├── disburse_service.py   # Nonprofit disbursement voting + payouts
-├── gambling_stats_service.py # Degen score, gamba stats, leaderboards
+├── gambling_stats_service.py   # Degen score, gamba stats, leaderboards
 ├── prediction_service.py # Prediction markets and payouts
-├── lobby_service.py      # Lobby management, embed generation
-├── garnishment_service.py    # Debt repayment from winnings
-├── bankruptcy_service.py     # Bankruptcy declaration and penalties
-├── match_enrichment_service.py   # OpenDota match data enrichment
-├── match_discovery_service.py    # Auto-discover Dota match IDs
-├── opendota_player_service.py    # Player profile fetching
-├── match_state_manager.py        # In-memory pending match state
-└── permissions.py        # Admin permission checking
+├── lobby_service.py      # Lobby embed generation, player formatting
+├── lobby_manager_service.py    # Lobby lifecycle with persistence
+├── garnishment_service.py      # Debt repayment from winnings
+├── bankruptcy_service.py       # Bankruptcy declaration and penalties
+├── recalibration_service.py    # Rating RD reset with cooldown
+├── match_enrichment_service.py # OpenDota match data enrichment + fantasy points
+├── match_discovery_service.py  # Auto-discover Dota match IDs
+├── opendota_player_service.py  # Player profile fetching
+├── match_state_manager.py      # In-memory pending match state
+├── draft_state_manager.py      # In-memory draft state management
+├── stake_service.py            # Draft mode player auto-liquidity stakes
+├── spectator_pool_service.py   # Draft mode spectator parimutuel pool
+├── guild_config_service.py     # Per-guild configuration management
+├── rating_comparison_service.py # Glicko-2 vs OpenSkill analysis
+├── ai_service.py               # LiteLLM/Cerebras integration
+├── flavor_text_service.py      # AI-generated flavor text for events
+├── sql_query_service.py        # Natural language to SQL queries
+└── permissions.py              # Admin permission checking
 
 repositories/             # Data access layer
 ├── interfaces.py         # Abstract interfaces (IPlayerRepository, etc.)
 ├── base_repository.py    # Connection management, context managers
-├── player_repository.py  # Player CRUD, balance, ratings, steam_id
-├── match_repository.py   # Match recording, enrichment, participants
+├── player_repository.py  # Player CRUD, balance, ratings, steam_id, OpenSkill
+├── match_repository.py   # Match recording, enrichment, participants, fantasy
 ├── bet_repository.py     # Bet placement, settlement (atomic operations)
 ├── disburse_repository.py    # Nonprofit disbursement proposals/votes/history
-├── lobby_repository.py   # Lobby state persistence
+├── lobby_repository.py   # Lobby state persistence (regular + conditional players)
 ├── pairings_repository.py    # Pairwise teammate/opponent stats
 ├── prediction_repository.py   # Prediction markets data access
-└── guild_config_repository.py    # Per-guild configuration
+├── guild_config_repository.py    # Per-guild configuration
+├── recalibration_repository.py   # Recalibration state tracking
+├── stake_repository.py       # Player stakes for draft mode
+├── spectator_bet_repository.py   # Spectator bets (parimutuel + player cut)
+├── player_pool_bet_repository.py # Player pool bets (participants)
+├── tip_repository.py         # Tip transaction history
+└── ai_query_repository.py    # AI query caching
 
 infrastructure/
-└── schema_manager.py     # SQLite schema creation and 19 migrations
+└── schema_manager.py     # SQLite schema creation and 49 migrations
 
 utils/
 ├── embeds.py             # Discord embed builders (lobby, match, enriched stats)
-├── formatting.py         # Role emojis, betting display, pool odds
+├── formatting.py         # Role emojis, betting display, pool odds, constants
 ├── rate_limiter.py       # Token-bucket rate limiting for commands
-├── hero_lookup.py        # Hero ID → name, image URL, color (via dotabase)
+├── hero_lookup.py        # Hero ID → name, image URL (via heroes.json)
 ├── drawing.py            # Image generation (Pillow): match tables, radar graphs, bar charts
+├── wheel_drawing.py      # Wheel of Fortune GIF animation for /gamba
+├── draft_embeds.py       # Draft mode embed formatting
+├── rating_insights.py    # Rating system analytics and calibration stats
+├── role_assignment_cache.py  # LRU cache for role assignment optimization
 ├── interaction_safety.py # Safe defer/followup for Discord interactions
 └── debug_logging.py      # JSONL debug tracing (optional)
 
@@ -163,6 +193,7 @@ Critical operations use `BEGIN IMMEDIATE` for write locks:
 - `place_bet_atomic()` - prevents double-spending
 - `settle_pending_bets_atomic()` - ensures consistent payouts
 - `pay_debt_atomic()` - atomic fund transfers
+- `tip_atomic()` - atomic tipping with fees
 
 ### Service Dependencies
 ```
@@ -170,13 +201,15 @@ MatchService
 ├── IPlayerRepository
 ├── IMatchRepository
 ├── TeamBalancingService → RoleAssignmentService
-├── CamaRatingSystem
+├── CamaRatingSystem (Glicko-2)
+├── CamaOpenSkillSystem (OpenSkill Plackett-Luce)
 ├── BalancedShuffler
 ├── BettingService (optional)
 │   ├── BetRepository
 │   ├── PlayerRepository
 │   ├── GarnishmentService
 │   └── BankruptcyService
+├── StakeService (draft mode)
 └── IPairingsRepository (optional)
 ```
 
@@ -188,6 +221,7 @@ MatchService
 class Player:
     name: str
     mmr: int | None              # OpenDota MMR (0-12000)
+    initial_mmr: int | None      # Starting MMR
     wins: int = 0
     losses: int = 0
     preferred_roles: list[str]   # ["1", "2", "3", "4", "5"]
@@ -195,11 +229,14 @@ class Player:
     glicko_rating: float | None  # Cama rating (0-3000)
     glicko_rd: float | None      # Rating deviation (uncertainty)
     glicko_volatility: float | None
+    os_mu: float | None          # OpenSkill mean (fantasy-weighted)
+    os_sigma: float | None       # OpenSkill sigma
     discord_id: int | None
     jopacoin_balance: int = 0
 
     def get_value(use_glicko=True) -> float  # For team balancing
     def has_role(role: str) -> bool          # Check role preference
+    def get_win_rate() -> float | None       # Win percentage
 ```
 
 ### Team (`domain/models/team.py`)
@@ -214,24 +251,43 @@ class Team:
     def get_team_value(use_glicko, off_role_multiplier) -> float
     def get_all_optimal_role_assignments() -> list[list[str]]  # LRU cached
     def get_off_role_count() -> int
+    def get_player_by_role(role) -> tuple[Player, float]
 ```
 
 ### Lobby (`domain/models/lobby.py`)
 ```python
 class Lobby:
     lobby_id: int
-    players: set[int]         # Discord IDs
-    status: str               # "open" or "closed"
+    players: set[int]              # Regular queue Discord IDs
+    conditional_players: set[int]  # "Frogling" conditional players
+    status: str                    # "open" or "closed"
 
     def is_ready(min_players=10) -> bool
     def add_player(discord_id) -> bool
-    def remove_player(discord_id) -> bool
+    def add_conditional_player(discord_id) -> bool
+    def get_total_count() -> int
+```
 
-class LobbyManager:
-    # Manages lobby lifecycle with persistence via ILobbyRepository
-    def get_or_create_lobby(creator_id) -> Lobby
-    def join_lobby(discord_id, max_players=12) -> bool
-    def reset_lobby() -> None
+### DraftState (`domain/models/draft.py`)
+```python
+class DraftPhase(Enum):
+    COINFLIP, WINNER_CHOICE, WINNER_SIDE_CHOICE, WINNER_HERO_CHOICE,
+    LOSER_CHOICE, PLAYER_DRAFT_ORDER, DRAFTING, COMPLETE
+
+class DraftState:
+    guild_id: int
+    player_pool_ids: list[int]       # 10 selected players
+    excluded_player_ids: list[int]   # Excluded from shuffle
+    captain1_id, captain2_id: int | None
+    radiant_captain_id, dire_captain_id: int | None
+    coinflip_winner_id: int | None
+    winner_choice_type: str | None   # "side" or "hero_pick"
+    radiant_player_ids, dire_player_ids: list[int]
+    phase: DraftPhase
+
+    def pick_player(player_id) -> bool
+    def available_player_ids -> list[int]
+    def is_draft_complete -> bool
 ```
 
 ## Key Services
@@ -246,21 +302,31 @@ shuffle_players(player_ids, guild_id, betting_mode) -> dict
 # Record match result (handles voting, ratings, bets)
 record_match(winning_team, guild_id, dotabuff_match_id) -> dict
 
-# Voting system for non-admin match recording
-add_record_submission(guild_id, user_id, result, is_admin) -> dict
-can_record_match(guild_id) -> bool  # Checks vote threshold
+# OpenSkill rating updates
+update_openskill_ratings_for_match(match_id, radiant_won, fantasy_weights) -> dict
+backfill_openskill_ratings() -> dict
 ```
 
 ### BettingService (`services/betting_service.py`)
 Handles jopacoin wagering with two modes:
 - **House mode**: 1:1 fixed odds
-- **Pool mode**: Parimutuel (odds from bet distribution)
+- **Pool mode**: Parimutuel (odds from bet distribution) with auto-blind
 
 ```python
 place_bet(guild_id, discord_id, team, amount, pending_state, leverage) -> None
 settle_bets(match_id, guild_id, winning_team, pending_state) -> dict
+create_auto_blind_bets(pending_state, guild_id) -> list  # Auto-liquidity
 award_participation(player_ids) -> dict  # 1 jopacoin per game
 award_win_bonus(winning_ids) -> dict     # JOPACOIN_WIN_REWARD per win
+```
+
+### StakeService (`services/stake_service.py`)
+Draft mode auto-liquidity for players.
+
+```python
+create_auto_liquidity(guild_id, radiant_ids, dire_ids, excluded_ids, ratings) -> PoolState
+settle_stakes(match_id, guild_id, winning_team) -> dict
+get_pool_odds(guild_id) -> dict
 ```
 
 ### LoanService (`services/loan_service.py`)
@@ -270,34 +336,26 @@ Handles loans, cooldowns, and nonprofit fund accounting.
 can_take_loan(discord_id, amount) -> dict
 take_loan(discord_id, amount, guild_id=None) -> dict
 repay_loan(discord_id, guild_id=None) -> dict
-get_state(discord_id) -> LoanState
-```
-
-### DisburseService (`services/disburse_service.py`)
-Manages nonprofit disbursement proposals and voting.
-
-```python
-can_propose(guild_id) -> tuple[bool, str]
-create_proposal(guild_id) -> DisburseProposal
-add_vote(guild_id, user_id, method) -> dict
-execute_disbursement(guild_id) -> dict
+get_nonprofit_fund(guild_id) -> int
 ```
 
 ### PredictionService (`services/prediction_service.py`)
 Prediction market lifecycle, voting, and settlement.
 
 ```python
-create_prediction(guild_id, creator_id, question, closes_at, channel_id=None) -> dict
+create_prediction(guild_id, creator_id, question, closes_at) -> dict
 place_bet(prediction_id, discord_id, position, amount) -> dict
-add_resolution_vote(prediction_id, user_id, outcome, is_admin=None) -> dict
-resolve(prediction_id, outcome, resolved_by) -> dict
+add_resolution_vote(prediction_id, user_id, outcome) -> dict
+resolve_prediction(prediction_id, outcome, resolved_by) -> dict
 ```
 
-### PlayerService (`services/player_service.py`)
+### AIService (`services/ai_service.py`)
+Optional LLM integration via Cerebras.
+
 ```python
-register_player(discord_id, username, steam_id) -> dict  # Fetches MMR from OpenDota
-set_roles(discord_id, roles) -> None
-get_stats(discord_id) -> dict  # rating, uncertainty, win_rate, balance
+call_model(prompt, system_prompt=None) -> str
+generate_flavor_text(event, context) -> str
+execute_sql_query(question) -> dict
 ```
 
 ## Database Schema (Key Tables)
@@ -307,10 +365,13 @@ get_stats(discord_id) -> dict  # rating, uncertainty, win_rate, balance
 discord_id INTEGER PRIMARY KEY
 discord_username TEXT NOT NULL
 glicko_rating REAL, glicko_rd REAL, glicko_volatility REAL
+os_mu REAL, os_sigma REAL  -- OpenSkill Plackett-Luce
 preferred_roles TEXT  -- JSON array ["1", "2"]
 jopacoin_balance INTEGER DEFAULT 3
 exclusion_count INTEGER DEFAULT 0
 steam_id INTEGER UNIQUE
+last_wheel_spin INTEGER  -- Unix timestamp for /gamba cooldown
+lowest_balance_ever INTEGER  -- For degen scoring
 ```
 
 ### matches
@@ -318,8 +379,20 @@ steam_id INTEGER UNIQUE
 match_id INTEGER PRIMARY KEY AUTOINCREMENT
 team1_players TEXT, team2_players TEXT  -- JSON arrays (Radiant/Dire)
 winning_team INTEGER  -- 1=Radiant, 2=Dire
+lobby_type TEXT  -- 'shuffle' or 'draft'
 valve_match_id INTEGER  -- For enrichment
-enrichment_source TEXT  -- 'manual' or 'auto'
+duration_seconds INTEGER, radiant_score INTEGER, dire_score INTEGER
+enrichment_data TEXT  -- JSON blob for detailed stats
+```
+
+### match_participants
+```sql
+match_id INTEGER, discord_id INTEGER  -- Composite PK
+team_number INTEGER, side TEXT, won INTEGER
+hero_id INTEGER, kills INTEGER, deaths INTEGER, assists INTEGER
+gpm INTEGER, xpm INTEGER, net_worth INTEGER
+lane_role INTEGER, lane_efficiency INTEGER  -- Laning phase
+fantasy_points REAL  -- Calculated fantasy score
 ```
 
 ### bets
@@ -327,70 +400,33 @@ enrichment_source TEXT  -- 'manual' or 'auto'
 guild_id INTEGER NOT NULL DEFAULT 0
 discord_id INTEGER NOT NULL
 team_bet_on TEXT  -- 'radiant' or 'dire'
-amount INTEGER
-leverage INTEGER DEFAULT 1  -- 2x, 3x, 5x multipliers
-bet_time INTEGER  -- Unix timestamp (indexed)
-payout INTEGER    -- NULL for pending/lost, value for won (for stats)
+amount INTEGER, leverage INTEGER DEFAULT 1
+is_blind INTEGER DEFAULT 0  -- Auto-blind flag
+odds_at_placement REAL  -- Historical odds
+payout INTEGER  -- NULL for pending/lost
 ```
 
-### player_pairings
+### player_stakes (Draft mode)
 ```sql
-player1_id INTEGER, player2_id INTEGER  -- Canonical: player1_id < player2_id
-games_together INTEGER, wins_together INTEGER
-games_against INTEGER, player1_wins_against INTEGER
-PRIMARY KEY (player1_id, player2_id)
+guild_id INTEGER, match_id INTEGER, discord_id INTEGER
+team TEXT, is_excluded INTEGER, payout INTEGER
 ```
 
-### guild_config
+### wheel_spins
 ```sql
-guild_id INTEGER PRIMARY KEY
-league_id INTEGER
-auto_enrich_matches INTEGER DEFAULT 1
-```
-
-### loan_state
-```sql
-discord_id INTEGER PRIMARY KEY
-last_loan_at INTEGER
-total_loans_taken INTEGER
-total_fees_paid INTEGER
-outstanding_principal INTEGER
-outstanding_fee INTEGER
-```
-
-### nonprofit_fund
-```sql
-guild_id INTEGER PRIMARY KEY
-total_collected INTEGER
-```
-
-### disburse_proposals
-```sql
-guild_id INTEGER
-proposal_id INTEGER PRIMARY KEY
-fund_amount INTEGER
-quorum_required INTEGER
-status TEXT
+spin_id INTEGER PRIMARY KEY AUTOINCREMENT
+guild_id INTEGER, discord_id INTEGER
+result TEXT  -- WIN/LOSE/BANKRUPT/value
+spin_time INTEGER
 ```
 
 ### predictions
 ```sql
 prediction_id INTEGER PRIMARY KEY AUTOINCREMENT
-guild_id INTEGER NOT NULL DEFAULT 0
-question TEXT NOT NULL
-status TEXT NOT NULL DEFAULT 'open'
-outcome TEXT
-closes_at INTEGER
-```
-
-### prediction_bets
-```sql
-prediction_id INTEGER NOT NULL
-discord_id INTEGER NOT NULL
-position TEXT NOT NULL
-amount INTEGER NOT NULL
-bet_time INTEGER NOT NULL
-payout INTEGER
+guild_id INTEGER, question TEXT
+status TEXT  -- open/closed/resolved
+outcome TEXT, closes_at INTEGER
+resolution_votes TEXT  -- JSON {discord_id: outcome}
 ```
 
 ## Slash Commands Quick Reference
@@ -403,51 +439,56 @@ payout INTEGER
 | `/leave` | Leave the matchmaking lobby | - |
 | `/kick` | Remove a user from lobby | `user` |
 | `/resetlobby` | Reset lobby state | Admin only |
-| `/shuffle` | Create balanced teams | `betting_mode`: house/pool |
+| `/shuffle` | Create balanced teams (pool betting) | - |
 | `/record` | Record match result | `result`: Radiant/Dire/Abort |
+| `/startdraft` | Start captain's draft | - |
+| `/setcaptain` | Set your team's captain | - |
+| `/restartdraft` | Restart current draft | Admin only |
 | `/register` | Register player | `steam_id`: Steam32 ID |
 | `/linksteam` | Link Steam account if registered | `steam_id`: Steam32 ID |
 | `/setroles` | Set role preferences | `roles`: "1,2,3" or "123" |
-| `/profile` | Unified player profile with 7 tabs | `user`: optional target |
-| `/calibration` | Rating system stats and calibration progress | `user`: optional target |
-| `/leaderboard` | Rankings (balance, gambling, predictions) | `type`, `limit` |
+| `/profile` | Unified player profile (7 tabs) | `user`: optional |
+| `/calibration` | Rating system stats | `user`: optional |
+| `/leaderboard` | Rankings | `type`: balance/gambling/predictions/glicko/openskill |
 | `/bet` | Place jopacoin bet | `team`, `amount`, `leverage` |
 | `/mybets` | Show active bets | - |
+| `/bets` | Show all pool bets | Admin only |
 | `/balance` | Check balance/debt | - |
-| `/tip` | Give jopacoin to another player | `player`, `amount` |
-| `/paydebt` | Help another player pay debt | `user`, `amount` |
+| `/tip` | Give jopacoin to player | `player`, `amount` |
+| `/paydebt` | Help pay another's debt | `user`, `amount` |
 | `/bankruptcy` | Clear debt (1wk cooldown) | - |
-| `/loan` | Borrow jopacoin (with fee) | `amount` |
+| `/loan` | Borrow jopacoin | `amount` |
 | `/nonprofit` | View nonprofit fund | - |
-| `/disburse` | Propose/manage fund distribution | `action`: propose/status/reset |
-| `/shop` | Spend jopacoin in the shop | `item`, `target` |
+| `/disburse` | Manage fund distribution | `action`: propose/status/reset |
+| `/gamba` | Spin Wheel of Fortune | Daily cooldown |
+| `/shop` | Spend jopacoin | `item`, `target` |
 | `/prediction` | Create prediction market | `question`, `closes_in` |
 | `/predictions` | List active predictions | - |
-| `/mypredictions` | View prediction positions | - |
-| `/predictionresolve` | Vote to resolve prediction | `prediction_id`, `outcome` |
-| `/predictionclose` | Close prediction betting early | Admin only |
+| `/mypredictions` | View your positions | - |
+| `/predictionresolve` | Vote to resolve | `prediction_id`, `outcome` |
+| `/predictionclose` | Close betting early | Admin only |
 | `/predictioncancel` | Cancel a prediction | Admin only |
 | `/matchup` | Head-to-head stats | `user1`, `user2` |
 | `/rebuildpairings` | Rebuild pairings table | Admin only |
 | `/setleague` | Set Valve league ID | `league_id` |
-| `/showconfig` | Show server configuration | - |
-| `/backfillsteamid` | Backfill steam_id from dotabuff URLs | Admin only |
+| `/showconfig` | Show server config | Admin only |
 | `/enrichmatch` | Enrich with Valve data | Admin only |
-| `/autodiscover` | Auto-discover matches for league | Admin only |
-| `/matchhistory` | Recent matches with stats | `user`, `limit` |
-| `/viewmatch` | Detailed match embed | `match_id`, `user` |
+| `/autodiscover` | Auto-discover matches | Admin only |
+| `/wipematch` | Delete match enrichment | Admin only |
+| `/matchhistory` | Recent matches | `user`, `limit` |
+| `/viewmatch` | Detailed match embed | `match_id` |
 | `/recent` | Match table as image | `user`, `limit` |
-| `/hero` | Hero reference lookup | `hero_name` (autocomplete) |
-| `/ability` | Ability reference lookup | `ability_name` (autocomplete) |
-| `/addfake` | Add fake users to lobby | `count` |
-| `/resetuser` | Reset a user's account | `user` |
-| `/registeruser` | Register another user | `user`, `steam_id`, `mmr` (optional) | Admin only
-| `/givecoin` | Give or take jopacoin | `user`, `amount` |
-| `/resetloancooldown` | Reset loan cooldown | `user` |
-| `/resetbankruptcycooldown` | Reset bankruptcy cooldown | `user` |
+| `/hero` | Hero reference | `hero_name` (autocomplete) |
+| `/ability` | Ability reference | `ability_name` (autocomplete) |
+| `/ratinganalysis` | Rating system analysis | Subcommands: compare/calibration/trend/backfill/player |
+| `/ask` | AI-powered Q&A | `question` (modal) |
+| `/addfake` | Add fake users | `count` |
+| `/filllobbytest` | Fill lobby with test players | Admin only |
+| `/resetuser` | Reset user account | `user` |
+| `/registeruser` | Register another user | `user`, `steam_id` |
+| `/givecoin` | Give/take jopacoin | `user`, `amount` |
 | `/setinitialrating` | Set initial rating | `user`, `rating` |
-| `/recalibrate` | Reset rating uncertainty for a player | `user` (Admin only) |
-| `/resetrecalibrationcooldown` | Reset recalibration cooldown | `user` (Admin only) |
+| `/recalibrate` | Reset rating uncertainty | `user` (Admin) |
 | `/extendbetting` | Extend betting window | `minutes`: 1-60 |
 | `/sync` | Force sync commands | Admin only |
 
@@ -484,40 +525,10 @@ def sample_players():
     """12 Player objects for shuffler tests"""
 ```
 
-### Test Patterns
-```python
-# Unit test - mock dependencies
-def test_add_player(player_repository):
-    player_repository.add(discord_id=123, discord_username="Test", ...)
-    assert player_repository.get_by_id(123).name == "Test"
-
-# Integration test - real DB, test service interaction
-def test_settle_bets(services):
-    match_service = services["match_service"]
-    betting_service = services["betting_service"]
-    # Full workflow through multiple services
-
-# E2E test - complete user journey
-def test_full_match_workflow(test_db, mock_lobby_manager):
-    # Register → set roles → join lobby → shuffle → record
-```
-
 ### Conventions
 - Use `repo_db_path` fixture (not `temp_db_path`) for repository tests
 - Use `guild_id=None` or `guild_id=0` for single-guild tests
 - Mock external APIs (OpenDota, Discord) in integration tests
-- Use `time.sleep(0.1)` before cleanup on Windows (file locking)
-
-## Coverage Gaps (keep updated)
-
-**Tests**
-- `commands/predictions.py` slash-command flows are not directly tested (service/repo only).
-- `commands/enrichment.py` admin config commands (`/setleague`, `/showconfig`, `/backfillsteamid`) are untested.
-- `commands/info.py` `/help` formatting lacks direct command tests.
-- `remove_fake_users.py` CLI wrapper is not smoke-tested.
-
-**Docs**
-- Prediction markets and disbursement voting flows lack dedicated docs under `docs/`.
 
 ## Configuration
 
@@ -539,23 +550,25 @@ def test_full_match_workflow(test_db, mock_lobby_manager):
 | `MAX_DEBT` | 500 | Maximum negative balance |
 | `GARNISHMENT_PERCENTAGE` | 1.0 | Portion of winnings to debt (100%) |
 | `BANKRUPTCY_COOLDOWN_SECONDS` | 604800 | 1 week between declarations |
-| `BANKRUPTCY_PENALTY_GAMES` | 5 | Win reward penalty games after bankruptcy |
-| `BANKRUPTCY_PENALTY_RATE` | 0.5 | Win reward reduction during penalty |
-| `LOAN_COOLDOWN_SECONDS` | 259200 | Loan cooldown (seconds) |
-| `LOAN_MAX_AMOUNT` | 100 | Max loan amount |
-| `LOAN_FEE_RATE` | 0.20 | Loan fee rate (flat) |
-| `DISBURSE_MIN_FUND` | 250 | Min nonprofit fund to propose disbursement |
-| `DISBURSE_QUORUM_PERCENTAGE` | 0.40 | Vote quorum for disbursement proposals |
-| `SHOP_ANNOUNCE_COST` | 10 | Shop cost for balance announcement |
-| `SHOP_ANNOUNCE_TARGET_COST` | 100 | Shop cost for targeted announcement |
-| `ADMIN_RATING_ADJUSTMENT_MAX_GAMES` | 5 | Max games allowed for /setinitialrating |
-| `RD_DECAY_CONSTANT` | 50 | Glicko-2 RD decay constant |
-| `RD_DECAY_GRACE_PERIOD_WEEKS` | 2 | No RD decay for this grace period |
-| `MMR_MODAL_TIMEOUT_MINUTES` | 5 | Timeout for MMR input modal |
-| `MMR_MODAL_RETRY_LIMIT` | 3 | Max retries for invalid MMR input |
+| `BANKRUPTCY_PENALTY_GAMES` | 5 | Win reward penalty games |
+| `LOAN_COOLDOWN_SECONDS` | 259200 | 3 days between loans |
+| `LOAN_MAX_AMOUNT` | 100 | Max loan size |
+| `LOAN_FEE_RATE` | 0.20 | Loan fee rate (20%) |
+| `DISBURSE_MIN_FUND` | 250 | Min nonprofit fund to propose |
+| `DISBURSE_QUORUM_PERCENTAGE` | 0.40 | Vote quorum (40%) |
+| `TIP_FEE_RATE` | 0.01 | Tipping fee rate (1%) |
+| `WHEEL_COOLDOWN_SECONDS` | 86400 | 24 hours between /gamba spins |
+| `WHEEL_TARGET_EV` | -10.0 | Target expected value per spin |
+| `AUTO_BLIND_ENABLED` | True | Auto-blind in pool mode |
+| `AUTO_BLIND_THRESHOLD` | 50 | Min balance for auto-blind |
+| `AUTO_BLIND_PERCENTAGE` | 0.05 | Bet size as % of balance |
+| `PLAYER_STAKE_POOL_SIZE` | 50 | Draft mode auto-liquidity total |
+| `SPECTATOR_POOL_PLAYER_CUT` | 0.10 | Winner share of spectator pool |
+| `CEREBRAS_API_KEY` | None | AI service API key |
+| `AI_FEATURES_ENABLED` | False | Global AI toggle |
 | `RECALIBRATION_COOLDOWN_SECONDS` | 7776000 | 90 days between recalibrations |
 
-See `config.py` for the full list and defaults.
+See `config.py` for the full list (50+ options).
 
 ## Common Modification Patterns
 
@@ -587,30 +600,27 @@ See `config.py` for the full list and defaults.
 
 ## Important Notes
 
-- **Rating System**: Glicko-2, not simple MMR. Initial RD=350.0, volatility=0.06
+- **Dual Rating Systems**: Glicko-2 (primary, probabilistic) and OpenSkill Plackett-Luce (fantasy-weighted alternative)
 - **5 Roles**: 1=Carry, 2=Mid, 3=Offlane, 4=Soft Support, 5=Hard Support (stored as strings)
 - **Team Convention**: team1=Radiant, team2=Dire, winning_team: 1 or 2
+- **Match Types**: `lobby_type` = "shuffle" (random balanced) or "draft" (captain's pick)
 - **Betting Window**: 15 minutes (BET_LOCK_SECONDS=900) after shuffle; admins can extend via `/extendbetting`
 - **Voting Threshold**: 2 non-admin votes OR 1 admin vote to record match
 - **Leverage**: Multiplies effective bet; losses can cause debt up to MAX_DEBT
 - **Garnishment**: 100% of winnings go to debt repayment until balance >= 0
-- **Loans**: One outstanding loan at a time; repayment (principal + fee) runs on match record; fees fund nonprofit
-- **Disbursement**: Requires quorum; methods are even/proportional/neediest among debtors
-- **Predictions**: Resolution threshold is 3 matching votes or 1 admin vote (yes/no outcomes)
-- **Degen Score**: 0-100 score based on leverage addiction (40%), bet frequency (20%), bankruptcies (20%), loss chasing (10%), paper hands (10%)
-- **Gambling Leaderboard** (`/leaderboard type:gambling`): 4 sections + footer stats
-  - 💰 **Top Earners**: Sorted by net P&L descending
-  - 📉 **Down Bad**: Only players with negative P&L, sorted ascending
-  - 🎰 **Hall of Degen**: Sorted by degen score descending (score + emoji + title)
-  - 🎰 **Biggest Gamblers**: Sorted by total wagered descending
-  - **Footer**: total_bets, total_wagered, unique_gamblers, avg_bet_size, total_bankruptcies
-  - Players need min 3 bets to appear; players can appear in multiple sections
-- **Recalibration**: Admins can reset a player's RD to 350 (high uncertainty) while preserving their rating. 90-day cooldown. Player must have played at least 5 games.
+- **Auto-Blind**: Pool mode auto-generates blind bets for liquidity (5% of balance for players with 50+ JC)
+- **Draft Stakes**: Players auto-contribute to draft pool; excluded players get consolation payout
+- **Spectator Pool**: 90% to winning bettors, 10% to winning team players
+- **Loans**: One outstanding loan at a time; repayment runs on match record; fees fund nonprofit
+- **Disbursement**: Requires quorum; methods are even/proportional/neediest/stimulus
+- **Predictions**: Resolution threshold is 3 matching votes or 1 admin vote
+- **Wheel of Fortune**: Daily spin with WIN/LOSE/BANKRUPT outcomes; target EV of -10 JC
+- **Degen Score**: 0-100 based on leverage addiction (40%), bet frequency (20%), bankruptcies (20%), loss chasing (10%), paper hands (10%)
+- **Fantasy Points**: Calculated from OpenDota stats (kills, deaths, gpm, towers, runes, etc.)
+- **Conditional Players**: "Froglings" who only play if needed to reach 10 players
+- **Recalibration**: Admins can reset a player's RD to 350 (90-day cooldown, min 5 games)
 - **Pairings Storage**: Canonical pairs with player1_id < player2_id to avoid duplicates
-- **Lane Outcomes**: W/L/D determined by comparing avg lane_efficiency (parsed matches only)
-- **Lane Matchups**: Safe vs Off, Mid vs Mid - 5% threshold for win determination
-- **Dotabase**: SQLite database of Dota 2 game data (heroes, abilities, talents, facets)
-- **Hero Images**: Steam CDN URLs via `get_hero_image_url()` in `utils/hero_lookup.py`
+- **Schema**: 49 migrations total
 
 ## Key Dependencies
 
@@ -618,7 +628,8 @@ See `config.py` for the full list and defaults.
 |---------|---------|
 | `discord.py` | Discord bot framework |
 | `glicko2` | Glicko-2 rating calculations |
+| `openskill` | OpenSkill Plackett-Luce ratings |
 | `dotabase` | Dota 2 game data (heroes, abilities) |
 | `pillow` | Image generation for stats visualization |
-| `sqlalchemy-utils` | Required by dotabase |
 | `aiohttp` | Async HTTP for OpenDota API |
+| `litellm` | LLM abstraction for AI features |
