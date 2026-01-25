@@ -7,6 +7,7 @@ Handles in-memory state for pending matches, separated from business logic.
 from typing import Any
 
 from domain.models.team import Team
+from utils.guild import normalize_guild_id
 
 
 class MatchState:
@@ -105,10 +106,6 @@ class MatchStateManager:
     def __init__(self):
         self._states: dict[int, MatchState] = {}
 
-    def _normalize_guild_id(self, guild_id: int | None) -> int:
-        """Normalize guild ID (0 for DMs/None)."""
-        return guild_id if guild_id is not None else 0
-
     def get_state(self, guild_id: int | None = None) -> MatchState | None:
         """
         Get the current match state for a guild.
@@ -119,7 +116,7 @@ class MatchStateManager:
         Returns:
             MatchState or None if no pending match
         """
-        return self._states.get(self._normalize_guild_id(guild_id))
+        return self._states.get(normalize_guild_id(guild_id))
 
     def set_state(self, guild_id: int | None, state: MatchState) -> None:
         """
@@ -129,7 +126,7 @@ class MatchStateManager:
             guild_id: Guild ID (or None for DMs)
             state: Match state to store
         """
-        self._states[self._normalize_guild_id(guild_id)] = state
+        self._states[normalize_guild_id(guild_id)] = state
 
     def clear_state(self, guild_id: int | None) -> None:
         """
@@ -138,11 +135,11 @@ class MatchStateManager:
         Args:
             guild_id: Guild ID (or None for DMs)
         """
-        self._states.pop(self._normalize_guild_id(guild_id), None)
+        self._states.pop(normalize_guild_id(guild_id), None)
 
     def has_pending_match(self, guild_id: int | None = None) -> bool:
         """Check if there's a pending match for the guild."""
-        return self._normalize_guild_id(guild_id) in self._states
+        return normalize_guild_id(guild_id) in self._states
 
     # Legacy compatibility methods
     def get_last_shuffle(self, guild_id: int | None = None) -> dict | None:
