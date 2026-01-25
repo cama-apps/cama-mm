@@ -68,6 +68,7 @@ class MockInteraction:
         self.guild = MagicMock()
         self.guild.id = guild_id
         self.guild.get_member = MagicMock(return_value=None)
+        self.guild.members = []  # Required for UnifiedLeaderboardView
         self.response = MagicMock()
         self.response.is_done = MagicMock(return_value=False)
         self.response.send_message = AsyncMock()
@@ -151,6 +152,7 @@ class TestLeaderboardTypeRouting:
         """Test that leaderboard with no type defaults to balance."""
         register_players(player_repo, [1, 2, 3, 4, 5])
         interaction = MockInteraction()
+        interaction.guild.members = []  # Add members list for unified view
 
         await info_cog.leaderboard.callback(info_cog, interaction, type=None, limit=20)
 
@@ -158,7 +160,8 @@ class TestLeaderboardTypeRouting:
         mock_followup.assert_called_once()
         call_kwargs = mock_followup.call_args.kwargs
         assert "embed" in call_kwargs
-        assert "Leaderboard" in call_kwargs["embed"].title
+        # Unified view uses "LEADERBOARD > Balance" format
+        assert "LEADERBOARD" in call_kwargs["embed"].title.upper()
 
     @pytest.mark.asyncio
     async def test_leaderboard_type_balance(
@@ -167,6 +170,7 @@ class TestLeaderboardTypeRouting:
         """Test that type=balance routes to balance leaderboard."""
         register_players(player_repo, [1, 2, 3, 4, 5])
         interaction = MockInteraction()
+        interaction.guild.members = []  # Add members list for unified view
 
         await info_cog.leaderboard.callback(
             info_cog, interaction, type=MockChoice("balance"), limit=20
@@ -176,7 +180,8 @@ class TestLeaderboardTypeRouting:
         mock_followup.assert_called_once()
         call_kwargs = mock_followup.call_args.kwargs
         assert "embed" in call_kwargs
-        assert "Leaderboard" in call_kwargs["embed"].title
+        # Unified view uses "LEADERBOARD > Balance" format
+        assert "LEADERBOARD" in call_kwargs["embed"].title.upper()
 
     @pytest.mark.asyncio
     async def test_leaderboard_type_gambling_routes_correctly(
@@ -236,6 +241,7 @@ class TestLeaderboardTypeRouting:
         )
 
         interaction = MockInteraction()
+        interaction.guild.members = []  # Add members list for unified view
 
         await info_cog.leaderboard.callback(
             info_cog, interaction, type=MockChoice("gambling"), limit=20
@@ -244,8 +250,9 @@ class TestLeaderboardTypeRouting:
         mock_followup = mock_discord_helpers["followup"]
         mock_followup.assert_called_once()
         call_kwargs = mock_followup.call_args.kwargs
-        assert "content" in call_kwargs
-        assert "not available" in call_kwargs["content"].lower()
+        # Unified view uses embed.description for "not available" message
+        assert "embed" in call_kwargs
+        assert "not available" in call_kwargs["embed"].description.lower()
 
     @pytest.mark.asyncio
     async def test_predictions_leaderboard_unavailable_service(
@@ -265,6 +272,7 @@ class TestLeaderboardTypeRouting:
         )
 
         interaction = MockInteraction()
+        interaction.guild.members = []  # Add members list for unified view
 
         await info_cog.leaderboard.callback(
             info_cog, interaction, type=MockChoice("predictions"), limit=20
@@ -273,12 +281,17 @@ class TestLeaderboardTypeRouting:
         mock_followup = mock_discord_helpers["followup"]
         mock_followup.assert_called_once()
         call_kwargs = mock_followup.call_args.kwargs
-        assert "content" in call_kwargs
-        assert "not available" in call_kwargs["content"].lower()
+        # Unified view uses embed.description for "not available" message
+        assert "embed" in call_kwargs
+        assert "not available" in call_kwargs["embed"].description.lower()
 
 
 class TestLeaderboardLimitParameter:
-    """Tests for the limit parameter validation."""
+    """Tests for the limit parameter validation.
+
+    Updated: The unified leaderboard view now silently clamps limits to 1-100
+    instead of rejecting them with error messages.
+    """
 
     @pytest.fixture
     def info_cog(self, player_repo):
@@ -294,34 +307,38 @@ class TestLeaderboardLimitParameter:
         )
 
     @pytest.mark.asyncio
-    async def test_leaderboard_invalid_limit_rejected(
+    async def test_leaderboard_invalid_limit_clamped(
         self, info_cog, mock_rate_limiter, mock_discord_helpers
     ):
-        """Test that invalid limits are rejected."""
+        """Test that invalid limits are clamped to valid range."""
         interaction = MockInteraction()
+        interaction.guild.members = []  # Add members list for unified view
 
         await info_cog.leaderboard.callback(info_cog, interaction, type=None, limit=150)
 
         mock_followup = mock_discord_helpers["followup"]
         mock_followup.assert_called_once()
         call_kwargs = mock_followup.call_args.kwargs
-        assert "content" in call_kwargs
-        assert "between 1 and 100" in call_kwargs["content"].lower()
+        # Should succeed with embed (limit clamped to 100)
+        assert "embed" in call_kwargs
+        assert "LEADERBOARD" in call_kwargs["embed"].title.upper()
 
     @pytest.mark.asyncio
-    async def test_leaderboard_limit_zero_rejected(
+    async def test_leaderboard_limit_zero_clamped(
         self, info_cog, mock_rate_limiter, mock_discord_helpers
     ):
-        """Test that limit=0 is rejected."""
+        """Test that limit=0 is clamped to 1."""
         interaction = MockInteraction()
+        interaction.guild.members = []  # Add members list for unified view
 
         await info_cog.leaderboard.callback(info_cog, interaction, type=None, limit=0)
 
         mock_followup = mock_discord_helpers["followup"]
         mock_followup.assert_called_once()
         call_kwargs = mock_followup.call_args.kwargs
-        assert "content" in call_kwargs
-        assert "between 1 and 100" in call_kwargs["content"].lower()
+        # Should succeed with embed (limit clamped to 1)
+        assert "embed" in call_kwargs
+        assert "LEADERBOARD" in call_kwargs["embed"].title.upper()
 
 
 class TestLeaderboardGamblingContent:

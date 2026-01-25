@@ -2,7 +2,12 @@
 Information commands for the bot: /help, /leaderboard
 """
 
+import asyncio
 import logging
+import time
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any
 
 import discord
 from discord import app_commands
@@ -14,7 +19,7 @@ from rating_system import CamaRatingSystem
 from services.permissions import has_admin_permission
 from utils.debug_logging import debug_log as _dbg_log
 from utils.drawing import draw_rating_distribution
-from utils.formatting import JOPACOIN_EMOTE
+from utils.formatting import JOPACOIN_EMOTE, TOMBSTONE_EMOJI
 from utils.hero_lookup import get_hero_short_name, classify_hero_role
 from utils.interaction_safety import safe_defer, safe_followup
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
@@ -22,44 +27,340 @@ from utils.rating_insights import compute_calibration_stats, rd_to_certainty
 
 logger = logging.getLogger("cama_bot.commands.info")
 
-LEADERBOARD_PAGE_SIZE = 20  # Players per page (fits within 4096 char embed limit)
+# Page sizes differ by tab type due to Discord embed field limits (1024 chars)
+SINGLE_SECTION_PAGE_SIZE = 20  # Balance, Glicko, OpenSkill (single list)
+MULTI_SECTION_PAGE_SIZE = 8  # Gambling (4 sections), Predictions (3 sections)
+LEADERBOARD_PAGE_SIZE = 20  # Legacy alias
+GAMBLING_PAGE_SIZE = 8  # Legacy alias
 
 
-class LeaderboardView(discord.ui.View):
-    """Paginated view for leaderboard with Previous/Next buttons."""
+class LeaderboardTab(Enum):
+    """Available leaderboard tabs."""
+    BALANCE = "balance"
+    GAMBLING = "gambling"
+    PREDICTIONS = "predictions"
+    GLICKO = "glicko"
+    OPENSKILL = "openskill"
+
+
+@dataclass
+class TabState:
+    """Per-tab state for lazy loading and pagination."""
+    data: Any = None
+    current_page: int = 0
+    max_page: int = 0
+    loaded: bool = False
+    # For gambling tab, we need to store extra metadata
+    extra: dict = field(default_factory=dict)
+
+
+class UnifiedLeaderboardView(discord.ui.View):
+    """Unified tabbed leaderboard view with pagination per tab."""
 
     def __init__(
         self,
-        players_with_stats: list[dict],
-        total_player_count: int,
-        rating_system: "CamaRatingSystem",
-        debtors: list[dict] | None = None,
-        timeout: float = 840.0,  # 14 minutes (max is 15)
+        cog: "InfoCommands",
+        guild_id: int | None,
+        interaction: discord.Interaction,
+        initial_tab: LeaderboardTab = LeaderboardTab.BALANCE,
+        limit: int = 100,
+        timeout: float = 840.0,  # 14 minutes
     ):
         super().__init__(timeout=timeout)
-        self.players = players_with_stats
-        self.total_player_count = total_player_count
-        self.rating_system = rating_system
-        self.debtors = debtors or []
-        self.current_page = 0
-        self.max_page = (len(players_with_stats) - 1) // LEADERBOARD_PAGE_SIZE
-        self.message: discord.Message | None = None  # Store message reference for deletion
-        self._update_buttons()
+        self.cog = cog
+        self.guild_id = guild_id
+        self.interaction = interaction
+        self.current_tab = initial_tab
+        self.limit = limit
+        self.message: discord.Message | None = None
 
-    def _update_buttons(self) -> None:
-        """Enable/disable buttons based on current page."""
-        self.prev_button.disabled = self.current_page == 0
-        self.next_button.disabled = self.current_page >= self.max_page
+        # Per-tab state for lazy loading and independent pagination
+        self._tab_states: dict[LeaderboardTab, TabState] = {
+            tab: TabState() for tab in LeaderboardTab
+        }
+
+        # Concurrency control
+        self._update_lock = asyncio.Lock()
+        self._last_interaction_time: dict[int, float] = {}
+
+        self._update_button_styles()
+
+    def _update_button_styles(self) -> None:
+        """Update button styles based on current tab."""
+        tab_buttons = {
+            LeaderboardTab.BALANCE: self.balance_btn,
+            LeaderboardTab.GAMBLING: self.gambling_btn,
+            LeaderboardTab.PREDICTIONS: self.predictions_btn,
+            LeaderboardTab.GLICKO: self.glicko_btn,
+            LeaderboardTab.OPENSKILL: self.openskill_btn,
+        }
+        for tab, button in tab_buttons.items():
+            if tab == self.current_tab:
+                button.style = discord.ButtonStyle.primary
+            else:
+                button.style = discord.ButtonStyle.secondary
+
+    def _update_pagination_buttons(self) -> None:
+        """Enable/disable pagination buttons based on current tab's page state."""
+        state = self._tab_states[self.current_tab]
+        self.prev_button.disabled = state.current_page == 0
+        self.next_button.disabled = state.current_page >= state.max_page
+
+    async def _load_tab_data(self, tab: LeaderboardTab) -> None:
+        """Load data for a tab if not already loaded."""
+        state = self._tab_states[tab]
+        if state.loaded:
+            return
+
+        if tab == LeaderboardTab.BALANCE:
+            await self._fetch_balance_data(state)
+        elif tab == LeaderboardTab.GAMBLING:
+            await self._fetch_gambling_data(state)
+        elif tab == LeaderboardTab.PREDICTIONS:
+            await self._fetch_predictions_data(state)
+        elif tab == LeaderboardTab.GLICKO:
+            await self._fetch_glicko_data(state)
+        elif tab == LeaderboardTab.OPENSKILL:
+            await self._fetch_openskill_data(state)
+
+        state.loaded = True
+
+    async def _fetch_balance_data(self, state: TabState) -> None:
+        """Fetch balance leaderboard data."""
+        rating_system = CamaRatingSystem()
+        players = self.cog.player_repo.get_leaderboard(limit=self.limit)
+        total_count = self.cog.player_repo.get_player_count()
+        debtors = self.cog.player_repo.get_players_with_negative_balance()
+
+        players_with_stats = []
+        for player in players:
+            if player.discord_id is None:
+                continue
+            wins = player.wins or 0
+            losses = player.losses or 0
+            total_games = wins + losses
+            win_rate = (wins / total_games * 100) if total_games > 0 else 0.0
+            rating_value = player.glicko_rating
+            cama_rating = (
+                rating_system.rating_to_display(rating_value)
+                if rating_value is not None
+                else None
+            )
+            players_with_stats.append({
+                "discord_id": player.discord_id,
+                "username": player.name,
+                "wins": wins,
+                "losses": losses,
+                "win_rate": win_rate,
+                "rating": cama_rating,
+                "jopacoin_balance": player.jopacoin_balance or 0,
+            })
+
+        state.data = {
+            "players": players_with_stats,
+            "total_count": total_count,
+            "debtors": debtors,
+        }
+        state.max_page = max(0, (len(players_with_stats) - 1) // SINGLE_SECTION_PAGE_SIZE)
+
+    async def _fetch_gambling_data(self, state: TabState) -> None:
+        """Fetch gambling leaderboard data."""
+        if not self.cog.gambling_stats_service:
+            state.data = None
+            return
+
+        leaderboard = self.cog.gambling_stats_service.get_leaderboard(
+            self.guild_id, limit=self.limit
+        )
+
+        # Pre-fetch guild members
+        guild = self.interaction.guild
+        guild_members = {m.id: m for m in guild.members} if guild else {}
+
+        # Collect all unique discord_ids
+        all_discord_ids = set()
+        for entry in leaderboard.top_earners:
+            all_discord_ids.add(entry.discord_id)
+        for entry in leaderboard.down_bad:
+            all_discord_ids.add(entry.discord_id)
+        for entry in leaderboard.hall_of_degen:
+            all_discord_ids.add(entry.discord_id)
+        for entry in leaderboard.biggest_gamblers:
+            all_discord_ids.add(entry.discord_id)
+
+        # Batch fetch bankruptcy states
+        bankruptcy_states = {}
+        if self.cog.bankruptcy_service and all_discord_ids:
+            bankruptcy_states = self.cog.bankruptcy_service.get_bulk_states(list(all_discord_ids))
+
+        state.data = leaderboard
+        state.extra = {
+            "guild_members": guild_members,
+            "bankruptcy_states": bankruptcy_states,
+        }
+
+        # Calculate max pages based on longest section
+        max_entries = max(
+            len(leaderboard.top_earners),
+            len(leaderboard.down_bad),
+            len(leaderboard.hall_of_degen),
+            len(leaderboard.biggest_gamblers),
+            1,  # Prevent division by zero
+        )
+        state.max_page = max(0, (max_entries - 1) // MULTI_SECTION_PAGE_SIZE)
+
+    async def _fetch_predictions_data(self, state: TabState) -> None:
+        """Fetch predictions leaderboard data."""
+        if not self.cog.prediction_service:
+            state.data = None
+            return
+
+        leaderboard = self.cog.prediction_service.prediction_repo.get_prediction_leaderboard(
+            self.guild_id, self.limit
+        )
+        server_stats = self.cog.prediction_service.prediction_repo.get_server_prediction_stats(
+            self.guild_id
+        )
+
+        # Pre-fetch guild members
+        guild = self.interaction.guild
+        guild_members = {m.id: m for m in guild.members} if guild else {}
+
+        state.data = {
+            "leaderboard": leaderboard,
+            "server_stats": server_stats,
+        }
+        state.extra = {"guild_members": guild_members}
+
+        # Calculate max pages based on longest section
+        max_entries = max(
+            len(leaderboard.get("top_earners", [])),
+            len(leaderboard.get("down_bad", [])),
+            len(leaderboard.get("most_accurate", [])),
+            1,
+        )
+        state.max_page = max(0, (max_entries - 1) // MULTI_SECTION_PAGE_SIZE)
+
+    async def _fetch_glicko_data(self, state: TabState) -> None:
+        """Fetch Glicko-2 rating leaderboard data."""
+        rating_system = CamaRatingSystem()
+        players = self.cog.player_repo.get_leaderboard_by_glicko(limit=self.limit)
+        total_rated = self.cog.player_repo.get_rated_player_count(rating_type="glicko")
+
+        players_with_stats = []
+        for player in players:
+            if player.glicko_rating is None:
+                continue
+            rating_display = rating_system.rating_to_display(player.glicko_rating)
+            rd = player.glicko_rd or 350.0
+            certainty = rd_to_certainty(rd)
+            players_with_stats.append({
+                "discord_id": player.discord_id,
+                "username": player.name,
+                "rating_display": rating_display,
+                "certainty": certainty,
+                "wins": player.wins or 0,
+                "losses": player.losses or 0,
+            })
+
+        state.data = {
+            "players": players_with_stats,
+            "total_rated": total_rated,
+        }
+        state.max_page = max(0, (len(players_with_stats) - 1) // SINGLE_SECTION_PAGE_SIZE)
+
+    async def _fetch_openskill_data(self, state: TabState) -> None:
+        """Fetch OpenSkill rating leaderboard data."""
+        os_system = CamaOpenSkillSystem()
+        players = self.cog.player_repo.get_leaderboard_by_openskill(limit=self.limit)
+        total_rated = self.cog.player_repo.get_rated_player_count(rating_type="openskill")
+
+        players_with_stats = []
+        for player in players:
+            if player.os_mu is None:
+                continue
+            rating_display = os_system.mu_to_display(player.os_mu)
+            sigma = player.os_sigma or os_system.DEFAULT_SIGMA
+            certainty = os_system.get_certainty_percentage(sigma)
+            players_with_stats.append({
+                "discord_id": player.discord_id,
+                "username": player.name,
+                "rating_display": rating_display,
+                "certainty": certainty,
+                "wins": player.wins or 0,
+                "losses": player.losses or 0,
+            })
+
+        state.data = {
+            "players": players_with_stats,
+            "total_rated": total_rated,
+        }
+        state.max_page = max(0, (len(players_with_stats) - 1) // SINGLE_SECTION_PAGE_SIZE)
+
+    def _get_name_for_gambling(self, discord_id: int) -> str:
+        """Get display name for gambling leaderboard entries."""
+        state = self._tab_states[LeaderboardTab.GAMBLING]
+        guild_members = state.extra.get("guild_members", {})
+        bankruptcy_states = state.extra.get("bankruptcy_states", {})
+
+        member = guild_members.get(discord_id)
+        if member:
+            name = member.display_name
+        else:
+            name = f"User {discord_id}"
+
+        # Add tombstone if in bankruptcy penalty
+        bankruptcy_state = bankruptcy_states.get(discord_id)
+        if bankruptcy_state and bankruptcy_state.penalty_games_remaining > 0:
+            name = f"{TOMBSTONE_EMOJI} {name}"
+
+        return name
+
+    def _get_name_for_predictions(self, discord_id: int) -> str:
+        """Get display name for predictions leaderboard entries."""
+        state = self._tab_states[LeaderboardTab.PREDICTIONS]
+        guild_members = state.extra.get("guild_members", {})
+        member = guild_members.get(discord_id)
+        return member.display_name if member else f"User {discord_id}"
 
     def build_embed(self) -> discord.Embed:
-        """Build the embed for the current page."""
-        embed = discord.Embed(title="🏆 Leaderboard", color=discord.Color.gold())
+        """Build embed for current tab and page."""
+        state = self._tab_states[self.current_tab]
 
-        start_idx = self.current_page * LEADERBOARD_PAGE_SIZE
-        end_idx = start_idx + LEADERBOARD_PAGE_SIZE
-        page_players = self.players[start_idx:end_idx]
+        if self.current_tab == LeaderboardTab.BALANCE:
+            return self._build_balance_embed(state)
+        elif self.current_tab == LeaderboardTab.GAMBLING:
+            return self._build_gambling_embed(state)
+        elif self.current_tab == LeaderboardTab.PREDICTIONS:
+            return self._build_predictions_embed(state)
+        elif self.current_tab == LeaderboardTab.GLICKO:
+            return self._build_glicko_embed(state)
+        elif self.current_tab == LeaderboardTab.OPENSKILL:
+            return self._build_openskill_embed(state)
 
-        leaderboard_text = ""
+        # Fallback
+        return discord.Embed(title="Leaderboard", description="Unknown tab")
+
+    def _build_balance_embed(self, state: TabState) -> discord.Embed:
+        """Build Balance tab embed."""
+        embed = discord.Embed(
+            title="LEADERBOARD > Balance",
+            color=discord.Color.gold(),
+        )
+
+        if not state.data or not state.data.get("players"):
+            embed.description = "No players registered yet!"
+            return embed
+
+        players = state.data["players"]
+        total_count = state.data["total_count"]
+        debtors = state.data.get("debtors", [])
+
+        start_idx = state.current_page * SINGLE_SECTION_PAGE_SIZE
+        end_idx = start_idx + SINGLE_SECTION_PAGE_SIZE
+        page_players = players[start_idx:end_idx]
+
+        lines = []
         for i, entry in enumerate(page_players, start=start_idx + 1):
             medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"{i}."
             stats = f"{entry['wins']}-{entry['losses']}"
@@ -68,47 +369,323 @@ class LeaderboardView(discord.ui.View):
             rating_display = f" [{entry['rating']}]" if entry["rating"] is not None else ""
             is_real_user = entry["discord_id"] and entry["discord_id"] > 0
             display_name = f"<@{entry['discord_id']}>" if is_real_user else entry["username"]
-            jopacoin_balance = entry.get("jopacoin_balance", 0) or 0
-            jopacoin_display = f"{jopacoin_balance} {JOPACOIN_EMOTE}"
-            line = f"{medal} **{display_name}** - {jopacoin_display} - {stats}{rating_display}\n"
-            leaderboard_text += line
+            jopacoin = entry.get("jopacoin_balance", 0)
+            lines.append(f"{medal} **{display_name}** - {jopacoin} {JOPACOIN_EMOTE} - {stats}{rating_display}")
 
-        embed.description = leaderboard_text
+        embed.description = "\n".join(lines) if lines else "No players on this page."
 
-        # Footer with page info
-        page_info = f"Page {self.current_page + 1}/{self.max_page + 1}"
-        if self.total_player_count > len(self.players):
-            page_info += f" • Showing {len(self.players)} of {self.total_player_count} players"
-        embed.set_footer(text=page_info)
-
-        # Add Wall of Shame on first page only (uses separately-fetched debtors)
-        if self.current_page == 0 and self.debtors:
-            shame_text = ""
-            for i, debtor in enumerate(self.debtors[:10], 1):
+        # Wall of Shame on first page only
+        if state.current_page == 0 and debtors:
+            shame_lines = []
+            for i, debtor in enumerate(debtors[:10], 1):
                 is_real_user = debtor["discord_id"] and debtor["discord_id"] > 0
-                display_name = (
-                    f"<@{debtor['discord_id']}>" if is_real_user else debtor["username"]
-                )
-                shame_text += (
-                    f"{i}. {display_name} - {debtor['balance']} {JOPACOIN_EMOTE}\n"
-                )
-            embed.add_field(name="Wall of Shame", value=shame_text, inline=False)
+                display_name = f"<@{debtor['discord_id']}>" if is_real_user else debtor["username"]
+                shame_lines.append(f"{i}. {display_name} - {debtor['balance']} {JOPACOIN_EMOTE}")
+            embed.add_field(name="Wall of Shame", value="\n".join(shame_lines), inline=False)
+
+        # Footer
+        page_info = f"Page {state.current_page + 1}/{state.max_page + 1}"
+        if total_count > len(players):
+            page_info += f" • Showing {len(players)} of {total_count} players"
+        embed.set_footer(text=page_info)
 
         return embed
 
-    @discord.ui.button(label="◀ Previous", style=discord.ButtonStyle.secondary)
-    async def prev_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        """Go to previous page."""
-        self.current_page = max(0, self.current_page - 1)
-        self._update_buttons()
-        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+    def _build_gambling_embed(self, state: TabState) -> discord.Embed:
+        """Build Gambling tab embed."""
+        embed = discord.Embed(
+            title="LEADERBOARD > Gambling",
+            color=0xFFD700,
+        )
 
-    @discord.ui.button(label="Next ▶", style=discord.ButtonStyle.secondary)
+        if not state.data:
+            embed.description = "Gambling stats service is not available."
+            return embed
+
+        leaderboard = state.data
+
+        if not leaderboard.top_earners and not leaderboard.hall_of_degen:
+            embed.description = "No gambling data yet! Players need at least 3 settled bets to appear."
+            return embed
+
+        start = state.current_page * MULTI_SECTION_PAGE_SIZE
+        end = start + MULTI_SECTION_PAGE_SIZE
+
+        # Top earners
+        if leaderboard.top_earners:
+            page_entries = leaderboard.top_earners[start:end]
+            if page_entries:
+                lines = []
+                for i, entry in enumerate(page_entries, start + 1):
+                    name = self._get_name_for_gambling(entry.discord_id)
+                    pnl = entry.net_pnl
+                    pnl_str = f"+{pnl}" if pnl >= 0 else str(pnl)
+                    lines.append(f"{i}. **{name}** {pnl_str} {JOPACOIN_EMOTE} ({entry.win_rate:.0%})")
+                embed.add_field(name=" Top Earners", value="\n".join(lines), inline=False)
+
+        # Down bad
+        down_bad = [e for e in leaderboard.down_bad if e.net_pnl < 0]
+        if down_bad:
+            page_entries = down_bad[start:end]
+            if page_entries:
+                lines = []
+                for i, entry in enumerate(page_entries, start + 1):
+                    name = self._get_name_for_gambling(entry.discord_id)
+                    lines.append(f"{i}. **{name}** {entry.net_pnl} {JOPACOIN_EMOTE} ({entry.win_rate:.0%})")
+                embed.add_field(name=" Down Bad", value="\n".join(lines), inline=False)
+
+        # Hall of Degen
+        if leaderboard.hall_of_degen:
+            page_entries = leaderboard.hall_of_degen[start:end]
+            if page_entries:
+                lines = []
+                for i, entry in enumerate(page_entries, start + 1):
+                    name = self._get_name_for_gambling(entry.discord_id)
+                    lines.append(f"{i}. **{name}** {entry.degen_score} {entry.degen_emoji} {entry.degen_title}")
+                embed.add_field(name=" Hall of Degen", value="\n".join(lines), inline=False)
+
+        # Biggest gamblers
+        if leaderboard.biggest_gamblers:
+            page_entries = leaderboard.biggest_gamblers[start:end]
+            if page_entries:
+                lines = []
+                for i, entry in enumerate(page_entries, start + 1):
+                    name = self._get_name_for_gambling(entry.discord_id)
+                    lines.append(f"{i}. **{name}** {entry.total_wagered}{JOPACOIN_EMOTE} wagered")
+                embed.add_field(name=" Biggest Gamblers", value="\n".join(lines), inline=False)
+
+        # Footer
+        footer_parts = []
+        if leaderboard.server_stats:
+            s = leaderboard.server_stats
+            footer_parts.append(
+                f" {s['total_bets']} bets • {s['total_wagered']}{JOPACOIN_EMOTE} wagered • "
+                f"{s['unique_gamblers']} players • {s['total_bankruptcies']} bankruptcies"
+            )
+        footer_parts.append(f"Page {state.current_page + 1}/{state.max_page + 1}")
+        embed.set_footer(text=" | ".join(footer_parts))
+
+        return embed
+
+    def _build_predictions_embed(self, state: TabState) -> discord.Embed:
+        """Build Predictions tab embed."""
+        embed = discord.Embed(
+            title="LEADERBOARD > Predictions",
+            color=0xFFD700,
+        )
+
+        if not state.data:
+            embed.description = "Prediction service is not available."
+            return embed
+
+        leaderboard = state.data["leaderboard"]
+        server_stats = state.data["server_stats"]
+
+        if not leaderboard.get("top_earners") and not leaderboard.get("most_accurate"):
+            embed.description = "No prediction data yet! Users need at least 2 resolved predictions to appear."
+            return embed
+
+        start = state.current_page * MULTI_SECTION_PAGE_SIZE
+        end = start + MULTI_SECTION_PAGE_SIZE
+
+        # Top earners
+        if leaderboard.get("top_earners"):
+            page_entries = leaderboard["top_earners"][start:end]
+            if page_entries:
+                lines = []
+                for i, entry in enumerate(page_entries, start + 1):
+                    name = self._get_name_for_predictions(entry["discord_id"])
+                    pnl = entry["net_pnl"]
+                    pnl_str = f"+{pnl}" if pnl >= 0 else str(pnl)
+                    lines.append(f"{i}. **{name}** {pnl_str} {JOPACOIN_EMOTE} ({entry['win_rate']:.0%})")
+                embed.add_field(name=" Top Earners", value="\n".join(lines), inline=False)
+
+        # Down bad
+        down_bad = [e for e in leaderboard.get("down_bad", []) if e["net_pnl"] < 0]
+        if down_bad:
+            page_entries = down_bad[start:end]
+            if page_entries:
+                lines = []
+                for i, entry in enumerate(page_entries, start + 1):
+                    name = self._get_name_for_predictions(entry["discord_id"])
+                    lines.append(f"{i}. **{name}** {entry['net_pnl']} {JOPACOIN_EMOTE} ({entry['win_rate']:.0%})")
+                embed.add_field(name=" Down Bad", value="\n".join(lines), inline=False)
+
+        # Most accurate
+        if leaderboard.get("most_accurate"):
+            page_entries = leaderboard["most_accurate"][start:end]
+            if page_entries:
+                lines = []
+                for i, entry in enumerate(page_entries, start + 1):
+                    name = self._get_name_for_predictions(entry["discord_id"])
+                    lines.append(f"{i}. **{name}** {entry['win_rate']:.0%} ({entry['wins']}W-{entry['losses']}L)")
+                embed.add_field(name=" Most Accurate", value="\n".join(lines), inline=False)
+
+        # Footer
+        footer_parts = []
+        if server_stats and server_stats.get("total_predictions"):
+            footer_parts.append(
+                f" {server_stats['total_predictions']} predictions • "
+                f"{server_stats['total_bets'] or 0} bets • "
+                f"{server_stats['total_wagered'] or 0} wagered"
+            )
+        footer_parts.append(f"Page {state.current_page + 1}/{state.max_page + 1}")
+        embed.set_footer(text=" | ".join(footer_parts))
+
+        return embed
+
+    def _build_glicko_embed(self, state: TabState) -> discord.Embed:
+        """Build Glicko-2 tab embed."""
+        embed = discord.Embed(
+            title="LEADERBOARD > Glicko-2 Rating",
+            description="Primary inhouse skill rating",
+            color=discord.Color.gold(),
+        )
+
+        if not state.data or not state.data.get("players"):
+            embed.description = "No players with Glicko-2 ratings yet!"
+            return embed
+
+        players = state.data["players"]
+        total_rated = state.data["total_rated"]
+
+        start_idx = state.current_page * SINGLE_SECTION_PAGE_SIZE
+        end_idx = start_idx + SINGLE_SECTION_PAGE_SIZE
+        page_players = players[start_idx:end_idx]
+
+        lines = []
+        for i, entry in enumerate(page_players, start=start_idx + 1):
+            medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"{i}."
+            is_real_user = entry["discord_id"] and entry["discord_id"] > 0
+            display_name = f"<@{entry['discord_id']}>" if is_real_user else entry["username"]
+            rating = entry["rating_display"]
+            certainty = entry["certainty"]
+            record = f"{entry['wins']}-{entry['losses']}"
+            lines.append(f"{medal} **{display_name}** - {rating} ({certainty:.0f}% certain) • {record}")
+
+        embed.add_field(name="Rankings", value="\n".join(lines) if lines else "No players.", inline=False)
+
+        # Footer
+        page_info = f"Page {state.current_page + 1}/{state.max_page + 1}"
+        if total_rated > len(players):
+            page_info += f" • Showing {len(players)} of {total_rated} rated players"
+        embed.set_footer(text=page_info)
+
+        return embed
+
+    def _build_openskill_embed(self, state: TabState) -> discord.Embed:
+        """Build OpenSkill tab embed."""
+        embed = discord.Embed(
+            title="LEADERBOARD > OpenSkill Rating",
+            description="Fantasy-weighted performance rating",
+            color=discord.Color.gold(),
+        )
+
+        if not state.data or not state.data.get("players"):
+            embed.description = "No players with OpenSkill ratings yet!"
+            return embed
+
+        players = state.data["players"]
+        total_rated = state.data["total_rated"]
+
+        start_idx = state.current_page * SINGLE_SECTION_PAGE_SIZE
+        end_idx = start_idx + SINGLE_SECTION_PAGE_SIZE
+        page_players = players[start_idx:end_idx]
+
+        lines = []
+        for i, entry in enumerate(page_players, start=start_idx + 1):
+            medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"{i}."
+            is_real_user = entry["discord_id"] and entry["discord_id"] > 0
+            display_name = f"<@{entry['discord_id']}>" if is_real_user else entry["username"]
+            rating = entry["rating_display"]
+            certainty = entry["certainty"]
+            record = f"{entry['wins']}-{entry['losses']}"
+            lines.append(f"{medal} **{display_name}** - {rating} ({certainty:.0f}% certain) • {record}")
+
+        embed.add_field(name="Rankings", value="\n".join(lines) if lines else "No players.", inline=False)
+
+        # Footer
+        page_info = f"Page {state.current_page + 1}/{state.max_page + 1}"
+        if total_rated > len(players):
+            page_info += f" • Showing {len(players)} of {total_rated} rated players"
+        embed.set_footer(text=page_info)
+
+        return embed
+
+    async def _handle_tab_switch(self, interaction: discord.Interaction, tab: LeaderboardTab) -> None:
+        """Handle tab button click with rate limiting and concurrency control."""
+        # Rate limiting: 1.5s cooldown between tab switches per user
+        now = time.time()
+        last_time = self._last_interaction_time.get(interaction.user.id, 0)
+        if now - last_time < 1.5:
+            await interaction.response.defer()
+            return
+        self._last_interaction_time[interaction.user.id] = now
+
+        # Defer if data not loaded yet (may take a moment)
+        if not self._tab_states[tab].loaded:
+            await interaction.response.defer()
+
+        async with self._update_lock:
+            self.current_tab = tab
+            self._update_button_styles()
+
+            # Load data if not already loaded
+            await self._load_tab_data(tab)
+
+            self._update_pagination_buttons()
+            embed = self.build_embed()
+
+            if interaction.response.is_done():
+                await interaction.edit_original_response(embed=embed, view=self)
+            else:
+                await interaction.response.edit_message(embed=embed, view=self)
+
+    async def _handle_pagination(self, interaction: discord.Interaction, delta: int) -> None:
+        """Handle pagination button click."""
+        async with self._update_lock:
+            state = self._tab_states[self.current_tab]
+            new_page = state.current_page + delta
+            new_page = max(0, min(new_page, state.max_page))
+
+            if new_page == state.current_page:
+                await interaction.response.defer()
+                return
+
+            state.current_page = new_page
+            self._update_pagination_buttons()
+            embed = self.build_embed()
+            await interaction.response.edit_message(embed=embed, view=self)
+
+    # Row 0: Tab buttons
+    @discord.ui.button(label="Balance", style=discord.ButtonStyle.primary, row=0)
+    async def balance_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._handle_tab_switch(interaction, LeaderboardTab.BALANCE)
+
+    @discord.ui.button(label="Gambling", style=discord.ButtonStyle.secondary, row=0)
+    async def gambling_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._handle_tab_switch(interaction, LeaderboardTab.GAMBLING)
+
+    @discord.ui.button(label="Predictions", style=discord.ButtonStyle.secondary, row=0)
+    async def predictions_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._handle_tab_switch(interaction, LeaderboardTab.PREDICTIONS)
+
+    @discord.ui.button(label="Glicko", style=discord.ButtonStyle.secondary, row=0)
+    async def glicko_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._handle_tab_switch(interaction, LeaderboardTab.GLICKO)
+
+    @discord.ui.button(label="OpenSkill", style=discord.ButtonStyle.secondary, row=0)
+    async def openskill_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._handle_tab_switch(interaction, LeaderboardTab.OPENSKILL)
+
+    # Row 1: Pagination buttons
+    @discord.ui.button(label=" Previous", style=discord.ButtonStyle.secondary, row=1)
+    async def prev_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._handle_pagination(interaction, -1)
+
+    @discord.ui.button(label="Next ", style=discord.ButtonStyle.secondary, row=1)
     async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        """Go to next page."""
-        self.current_page = min(self.max_page, self.current_page + 1)
-        self._update_buttons()
-        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+        await self._handle_pagination(interaction, 1)
 
     async def on_timeout(self) -> None:
         """Delete the message when view times out."""
@@ -117,7 +694,7 @@ class LeaderboardView(discord.ui.View):
                 await self.message.delete()
                 logger.info(f"Leaderboard message {self.message.id} deleted after timeout")
             except discord.NotFound:
-                pass  # Already deleted
+                pass
             except discord.HTTPException as e:
                 logger.warning(f"Failed to delete leaderboard message: {e}")
 
@@ -241,6 +818,8 @@ class InfoCommands(commands.Cog):
             name="🏆 Leaderboard",
             value=(
                 "`/leaderboard` - View leaderboard (default: balance)\n"
+                "`/leaderboard type:glicko` - Glicko-2 rating rankings\n"
+                "`/leaderboard type:openskill` - OpenSkill (fantasy-weighted) rankings\n"
                 "`/leaderboard type:gambling` - Gambling rankings & Hall of Degen\n"
                 "`/leaderboard type:predictions` - Prediction market rankings\n"
                 "`/calibration` - Rating system health & calibration stats"
@@ -271,10 +850,12 @@ class InfoCommands(commands.Cog):
     @app_commands.command(name="leaderboard", description="View leaderboard (balance, gambling, or predictions)")
     @app_commands.describe(
         type="Leaderboard type (default: balance)",
-        limit="Number of entries to show (default: 20, max: 100)",
+        limit="Number of entries to show (default: 100, max: 100)",
     )
     @app_commands.choices(type=[
         app_commands.Choice(name="Balance", value="balance"),
+        app_commands.Choice(name="Glicko-2 Rating", value="glicko"),
+        app_commands.Choice(name="OpenSkill Rating", value="openskill"),
         app_commands.Choice(name="Gambling", value="gambling"),
         app_commands.Choice(name="Predictions", value="predictions"),
     ])
@@ -282,9 +863,9 @@ class InfoCommands(commands.Cog):
         self,
         interaction: discord.Interaction,
         type: app_commands.Choice[str] | None = None,
-        limit: int = 20,
+        limit: int = 100,
     ):
-        """Show leaderboard - balance (default), gambling, or predictions."""
+        """Show unified leaderboard with tabs for all leaderboard types."""
         leaderboard_type = type.value if type else "balance"
         logger.info(f"Leaderboard command: User {interaction.user.id} ({interaction.user}), type={leaderboard_type}")
         guild = interaction.guild if hasattr(interaction, "guild") else None
@@ -314,144 +895,36 @@ class InfoCommands(commands.Cog):
             logger.warning("Leaderboard: defer failed, proceeding to send fallback response")
 
         # Validate limit to stay within safe Discord embed boundaries
-        if limit < 1 or limit > 100:
-            await safe_followup(
-                interaction,
-                content="Please provide a limit between 1 and 100.",
-                ephemeral=True,
-            )
-            return
+        limit = max(1, min(limit, 100))
 
-        # Route to appropriate leaderboard handler
-        if leaderboard_type == "gambling":
-            await self._show_gambling_leaderboard(interaction, limit)
-            return
-        elif leaderboard_type == "predictions":
-            await self._show_predictions_leaderboard(interaction, limit)
-            return
-
-        # Default: balance leaderboard
         try:
-            rating_system = CamaRatingSystem()
+            # Map type string to LeaderboardTab enum
+            tab_mapping = {
+                "balance": LeaderboardTab.BALANCE,
+                "gambling": LeaderboardTab.GAMBLING,
+                "predictions": LeaderboardTab.PREDICTIONS,
+                "glicko": LeaderboardTab.GLICKO,
+                "openskill": LeaderboardTab.OPENSKILL,
+            }
+            initial_tab = tab_mapping.get(leaderboard_type, LeaderboardTab.BALANCE)
 
-            # Use optimized leaderboard query with SQL sorting
-            # Fetch limit + extra for Wall of Shame section (debtors)
-            leaderboard_players = self.player_repo.get_leaderboard(limit=limit)
-            total_player_count = self.player_repo.get_player_count()
-
-            logger.info(f"Leaderboard query returned {len(leaderboard_players)} players (total: {total_player_count})")
-            # Log sample jopacoin values
-            if leaderboard_players:
-                sample = leaderboard_players[:3]
-                for player in sample:
-                    logger.info(f"  Sample: {player.name} - jopacoin={player.jopacoin_balance}")
-            _dbg_log(
-                "H2",
-                "commands/info.py:leaderboard:query",
-                "query rows",
-                {
-                    "row_count": len(leaderboard_players),
-                    "total_players": total_player_count,
-                    "samples": [
-                        {
-                            "id": int(p.discord_id) if p.discord_id else 0,
-                            "name": p.name,
-                            "jopacoin": int(p.jopacoin_balance),
-                            "wins": int(p.wins),
-                            "losses": int(p.losses),
-                        }
-                        for p in leaderboard_players[:3]
-                    ],
-                },
-                run_id="run1",
+            # Create unified view
+            view = UnifiedLeaderboardView(
+                cog=self,
+                guild_id=guild.id if guild else None,
+                interaction=interaction,
+                initial_tab=initial_tab,
+                limit=limit,
             )
 
-            if not leaderboard_players:
-                await safe_followup(
-                    interaction,
-                    content="No players registered yet!",
-                    ephemeral=True,
-                )
-                return
+            # Load initial tab data
+            await view._load_tab_data(initial_tab)
+            view._update_pagination_buttons()
 
-            # Build stats from already-sorted player objects
-            players_with_stats = []
-            for player in leaderboard_players:
-                discord_id = player.discord_id
-                if discord_id is None:
-                    continue
-
-                wins = player.wins or 0
-                losses = player.losses or 0
-                total_games = wins + losses
-                win_rate = (wins / total_games * 100) if total_games > 0 else 0.0
-                rating_value = player.glicko_rating
-                cama_rating = (
-                    rating_system.rating_to_display(rating_value)
-                    if rating_value is not None
-                    else None
-                )
-                jopacoin_balance = player.jopacoin_balance or 0
-
-                players_with_stats.append(
-                    {
-                        "discord_id": discord_id,
-                        "username": player.name,
-                        "wins": wins,
-                        "losses": losses,
-                        "win_rate": win_rate,
-                        "rating": cama_rating,
-                        "jopacoin_balance": jopacoin_balance,
-                    }
-                )
-            _dbg_log(
-                "H3",
-                "commands/info.py:leaderboard:stats_built",
-                "built stats",
-                {
-                    "count": len(players_with_stats),
-                    "first": players_with_stats[:1],
-                },
-            )
-
-            # No need to sort - already sorted by SQL query
-
-            # Log top 3 players
-            logger.info("Top 3 players from SQL-sorted leaderboard:")
-            for i, entry in enumerate(players_with_stats[:3], 1):
-                logger.info(
-                    f"  {i}. {entry['username']} - jopacoin={entry['jopacoin_balance']}, wins={entry['wins']}, rating={entry['rating']}"
-                )
-            _dbg_log(
-                "H4",
-                "commands/info.py:leaderboard:sorted",
-                "sorted stats",
-                {
-                    "top3": players_with_stats[:3],
-                },
-            )
-
-            if not players_with_stats:
-                await safe_followup(
-                    interaction,
-                    content="No players registered yet!",
-                    ephemeral=True,
-                )
-                return
-
-            # Fetch debtors separately for Wall of Shame (always shown regardless of limit)
-            debtors = self.player_repo.get_players_with_negative_balance()
-
-            # Use paginated view for leaderboard
-            view = LeaderboardView(
-                players_with_stats=players_with_stats,
-                total_player_count=total_player_count,
-                rating_system=rating_system,
-                debtors=debtors,
-            )
+            # Build initial embed
             embed = view.build_embed()
 
-            logger.info(f"Leaderboard embed created with {len(players_with_stats)} entries, {view.max_page + 1} pages")
+            logger.info(f"Leaderboard embed created for tab={leaderboard_type}")
 
             message = await safe_followup(
                 interaction,
@@ -473,230 +946,6 @@ class InfoCommands(commands.Cog):
                 )
             except Exception:
                 logger.error("Failed to send error message for leaderboard command")
-
-    async def _show_gambling_leaderboard(self, interaction: discord.Interaction, limit: int):
-        """Show the gambling leaderboard."""
-        if not self.gambling_stats_service:
-            await safe_followup(
-                interaction,
-                content="Gambling stats service is not available.",
-                ephemeral=True,
-            )
-            return
-
-        guild_id = interaction.guild.id if interaction.guild else None
-        limit = max(1, min(limit, 20))  # Clamp between 1 and 20
-
-        leaderboard = self.gambling_stats_service.get_leaderboard(guild_id, limit=limit)
-
-        if not leaderboard.top_earners and not leaderboard.hall_of_degen:
-            await safe_followup(
-                interaction,
-                content="No gambling data yet! Players need at least 3 settled bets to appear.",
-                ephemeral=True,
-            )
-            return
-
-        embed = discord.Embed(
-            title="🏆 GAMBLING LEADERBOARD",
-            color=0xFFD700,  # Gold
-        )
-
-        # Pre-fetch guild members to avoid individual API calls
-        guild_members = {m.id: m for m in interaction.guild.members} if interaction.guild else {}
-
-        # Collect all unique discord_ids from all leaderboard sections
-        all_discord_ids = set()
-        for entry in leaderboard.top_earners:
-            all_discord_ids.add(entry.discord_id)
-        for entry in leaderboard.down_bad:
-            all_discord_ids.add(entry.discord_id)
-        for entry in leaderboard.hall_of_degen:
-            all_discord_ids.add(entry.discord_id)
-        for entry in leaderboard.biggest_gamblers:
-            all_discord_ids.add(entry.discord_id)
-
-        # Batch fetch bankruptcy states ONCE (replaces up to 80 individual calls)
-        bankruptcy_states = {}
-        if self.bankruptcy_service and all_discord_ids:
-            bankruptcy_states = self.bankruptcy_service.get_bulk_states(list(all_discord_ids))
-
-        # Helper to get username with tombstone if bankrupt
-        def get_name(discord_id: int) -> str:
-            member = guild_members.get(discord_id)
-            if member:
-                name = member.display_name
-            else:
-                name = f"User {discord_id}"
-
-            # Use pre-fetched bankruptcy state instead of individual DB call
-            state = bankruptcy_states.get(discord_id)
-            if state and state.penalty_games_remaining > 0:
-                from utils.formatting import TOMBSTONE_EMOJI
-                name = f"{TOMBSTONE_EMOJI} {name}"
-
-            return name
-
-        # Top earners
-        if leaderboard.top_earners:
-            lines = []
-            for i, entry in enumerate(leaderboard.top_earners, 1):
-                name = get_name(entry.discord_id)
-                pnl = entry.net_pnl
-                pnl_str = f"+{pnl}" if pnl >= 0 else str(pnl)
-                lines.append(f"{i}. **{name}** {pnl_str} {JOPACOIN_EMOTE} ({entry.win_rate:.0%})")
-            embed.add_field(
-                name="💰 Top Earners",
-                value="\n".join(lines),
-                inline=False,
-            )
-
-        # Down bad (only show if negative)
-        down_bad = [e for e in leaderboard.down_bad if e.net_pnl < 0]
-        if down_bad:
-            lines = []
-            for i, entry in enumerate(down_bad[:limit], 1):
-                name = get_name(entry.discord_id)
-                lines.append(f"{i}. **{name}** {entry.net_pnl} {JOPACOIN_EMOTE} ({entry.win_rate:.0%})")
-            embed.add_field(
-                name="📉 Down Bad",
-                value="\n".join(lines),
-                inline=False,
-            )
-
-        # Hall of Degen (highest degen scores)
-        if leaderboard.hall_of_degen:
-            lines = []
-            for i, entry in enumerate(leaderboard.hall_of_degen, 1):
-                name = get_name(entry.discord_id)
-                lines.append(f"{i}. **{name}** {entry.degen_score} {entry.degen_emoji} {entry.degen_title}")
-            embed.add_field(
-                name="🎰 Hall of Degen",
-                value="\n".join(lines),
-                inline=False,
-            )
-
-        # Biggest gamblers (sorted by total wagered)
-        if leaderboard.biggest_gamblers:
-            lines = []
-            for i, entry in enumerate(leaderboard.biggest_gamblers, 1):
-                name = get_name(entry.discord_id)
-                lines.append(f"{i}. **{name}** {entry.total_wagered}{JOPACOIN_EMOTE} wagered")
-            embed.add_field(
-                name="🎰 Biggest Gamblers",
-                value="\n".join(lines),
-                inline=False,
-            )
-
-        # Server stats footer (compact single line)
-        if leaderboard.server_stats:
-            embed.set_footer(
-                text=f"📊 {leaderboard.server_stats['total_bets']} bets • "
-                f"{leaderboard.server_stats['total_wagered']}{JOPACOIN_EMOTE} wagered • "
-                f"{leaderboard.server_stats['unique_gamblers']} players • "
-                f"{leaderboard.server_stats['avg_bet_size']}{JOPACOIN_EMOTE} avg • "
-                f"{leaderboard.server_stats['total_bankruptcies']} bankruptcies"
-            )
-
-        await safe_followup(
-            interaction,
-            embed=embed,
-            allowed_mentions=discord.AllowedMentions(users=True),
-        )
-
-    async def _show_predictions_leaderboard(self, interaction: discord.Interaction, limit: int):
-        """Show the predictions leaderboard."""
-        if not self.prediction_service:
-            await safe_followup(
-                interaction,
-                content="Prediction service is not available.",
-                ephemeral=True,
-            )
-            return
-
-        guild_id = interaction.guild.id if interaction.guild else None
-        limit = max(1, min(limit, 20))  # Clamp between 1 and 20
-
-        leaderboard = self.prediction_service.prediction_repo.get_prediction_leaderboard(
-            guild_id, limit
-        )
-
-        if not leaderboard["top_earners"] and not leaderboard["most_accurate"]:
-            await safe_followup(
-                interaction,
-                content="No prediction data yet! Users need at least 2 resolved predictions to appear.",
-                ephemeral=True,
-            )
-            return
-
-        embed = discord.Embed(
-            title="🔮 PREDICTION LEADERBOARD",
-            color=0xFFD700,  # Gold
-        )
-
-        async def get_name(discord_id: int) -> str:
-            try:
-                member = interaction.guild.get_member(discord_id) if interaction.guild else None
-                if member:
-                    return member.display_name
-                fetched = await self.bot.fetch_user(discord_id)
-                return fetched.display_name if fetched else f"User {discord_id}"
-            except Exception:
-                return f"User {discord_id}"
-
-        # Top earners
-        if leaderboard["top_earners"]:
-            lines = []
-            for i, entry in enumerate(leaderboard["top_earners"], 1):
-                name = await get_name(entry["discord_id"])
-                pnl = entry["net_pnl"]
-                pnl_str = f"+{pnl}" if pnl >= 0 else str(pnl)
-                lines.append(f"{i}. **{name}** {pnl_str} {JOPACOIN_EMOTE} ({entry['win_rate']:.0%})")
-            embed.add_field(
-                name="💰 Top Earners",
-                value="\n".join(lines),
-                inline=False,
-            )
-
-        # Down bad (only show if negative)
-        down_bad = [e for e in leaderboard["down_bad"] if e["net_pnl"] < 0]
-        if down_bad:
-            lines = []
-            for i, entry in enumerate(down_bad[:limit], 1):
-                name = await get_name(entry["discord_id"])
-                lines.append(f"{i}. **{name}** {entry['net_pnl']} {JOPACOIN_EMOTE} ({entry['win_rate']:.0%})")
-            embed.add_field(
-                name="📉 Down Bad",
-                value="\n".join(lines),
-                inline=False,
-            )
-
-        # Most accurate
-        if leaderboard["most_accurate"]:
-            lines = []
-            for i, entry in enumerate(leaderboard["most_accurate"], 1):
-                name = await get_name(entry["discord_id"])
-                lines.append(f"{i}. **{name}** {entry['win_rate']:.0%} ({entry['wins']}W-{entry['losses']}L)")
-            embed.add_field(
-                name="🎯 Most Accurate",
-                value="\n".join(lines),
-                inline=False,
-            )
-
-        # Server stats
-        server_stats = self.prediction_service.prediction_repo.get_server_prediction_stats(guild_id)
-        if server_stats["total_predictions"]:
-            embed.set_footer(
-                text=f"📊 {server_stats['total_predictions']} predictions • "
-                f"{server_stats['total_bets'] or 0} bets • "
-                f"{server_stats['total_wagered'] or 0} wagered"
-            )
-
-        await safe_followup(
-            interaction,
-            embed=embed,
-            allowed_mentions=discord.AllowedMentions(users=True),
-        )
 
     @app_commands.command(
         name="calibration", description="View rating system stats and calibration progress"

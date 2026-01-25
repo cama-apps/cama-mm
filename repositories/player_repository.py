@@ -210,6 +210,115 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             rows = cursor.fetchall()
             return [self._row_to_player(row) for row in rows]
 
+    def get_leaderboard_by_glicko(
+        self, limit: int = 20, offset: int = 0, min_games: int = 0
+    ) -> list[Player]:
+        """
+        Get players for leaderboard, sorted by Glicko-2 rating descending.
+
+        Args:
+            limit: Maximum number of players to return
+            offset: Number of players to skip (for pagination)
+            min_games: Minimum games played (wins + losses) to be included
+
+        Returns:
+            List of Player objects sorted by glicko_rating DESC (NULLs last)
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            if min_games > 0:
+                cursor.execute(
+                    """
+                    SELECT * FROM players
+                    WHERE (COALESCE(wins, 0) + COALESCE(losses, 0)) >= ?
+                    ORDER BY
+                        CASE WHEN glicko_rating IS NULL THEN 1 ELSE 0 END,
+                        glicko_rating DESC,
+                        COALESCE(wins, 0) DESC
+                    LIMIT ? OFFSET ?
+                    """,
+                    (min_games, limit, offset),
+                )
+            else:
+                cursor.execute(
+                    """
+                    SELECT * FROM players
+                    ORDER BY
+                        CASE WHEN glicko_rating IS NULL THEN 1 ELSE 0 END,
+                        glicko_rating DESC,
+                        COALESCE(wins, 0) DESC
+                    LIMIT ? OFFSET ?
+                    """,
+                    (limit, offset),
+                )
+            rows = cursor.fetchall()
+            return [self._row_to_player(row) for row in rows]
+
+    def get_leaderboard_by_openskill(
+        self, limit: int = 20, offset: int = 0, min_games: int = 0
+    ) -> list[Player]:
+        """
+        Get players for leaderboard, sorted by OpenSkill mu descending.
+
+        Args:
+            limit: Maximum number of players to return
+            offset: Number of players to skip (for pagination)
+            min_games: Minimum games played (wins + losses) to be included
+
+        Returns:
+            List of Player objects sorted by os_mu DESC (NULLs last)
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            if min_games > 0:
+                cursor.execute(
+                    """
+                    SELECT * FROM players
+                    WHERE (COALESCE(wins, 0) + COALESCE(losses, 0)) >= ?
+                    ORDER BY
+                        CASE WHEN os_mu IS NULL THEN 1 ELSE 0 END,
+                        os_mu DESC,
+                        COALESCE(wins, 0) DESC
+                    LIMIT ? OFFSET ?
+                    """,
+                    (min_games, limit, offset),
+                )
+            else:
+                cursor.execute(
+                    """
+                    SELECT * FROM players
+                    ORDER BY
+                        CASE WHEN os_mu IS NULL THEN 1 ELSE 0 END,
+                        os_mu DESC,
+                        COALESCE(wins, 0) DESC
+                    LIMIT ? OFFSET ?
+                    """,
+                    (limit, offset),
+                )
+            rows = cursor.fetchall()
+            return [self._row_to_player(row) for row in rows]
+
+    def get_rated_player_count(self, rating_type: str = "glicko") -> int:
+        """
+        Get total count of players with ratings.
+
+        Args:
+            rating_type: "glicko" for Glicko-2, "openskill" for OpenSkill
+
+        Returns:
+            Count of players with non-null ratings
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            if rating_type == "openskill":
+                cursor.execute("SELECT COUNT(*) as count FROM players WHERE os_mu IS NOT NULL")
+            else:
+                cursor.execute(
+                    "SELECT COUNT(*) as count FROM players WHERE glicko_rating IS NOT NULL"
+                )
+            row = cursor.fetchone()
+            return row["count"] if row else 0
+
     def get_player_count(self) -> int:
         """Get total number of players."""
         with self.connection() as conn:
