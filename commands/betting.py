@@ -918,6 +918,14 @@ class BettingCommands(commands.Cog):
             new_balance = self.player_service.get_balance(user_id)
         # result_value == 0: "Lose a Turn" - no balance change
 
+        # Log the wheel spin for history tracking
+        self.player_service.player_repo.log_wheel_spin(
+            discord_id=user_id,
+            guild_id=guild_id,
+            result=result_value,
+            spin_time=int(now),
+        )
+
         # Send final result embed
         await asyncio.sleep(0.5)  # Brief pause before result reveal
         result_embed = self._wheel_result_embed(result_wedge, new_balance, garnished_amount)
