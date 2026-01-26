@@ -89,7 +89,7 @@ class AIService:
         self,
         model: str,
         api_key: str,
-        timeout: float = 30.0,
+        timeout: float = 3.0,
         max_tokens: int = 500,
     ):
         """
@@ -98,7 +98,7 @@ class AIService:
         Args:
             model: LiteLLM model identifier (e.g., "cerebras/zai-glm-4.7")
             api_key: API key for the model provider
-            timeout: Request timeout in seconds
+            timeout: Request timeout in seconds (default 3s to avoid Discord interaction timeout)
             max_tokens: Maximum tokens in response
         """
         self.model = model
@@ -111,6 +111,9 @@ class AIService:
         import os
 
         os.environ["CEREBRAS_API_KEY"] = api_key
+
+        # Disable LiteLLM's automatic retries - we want to fail fast
+        litellm.num_retries = 0
 
         logger.info(f"AIService initialized with model: {model}")
 
@@ -145,10 +148,17 @@ class AIService:
                 temperature=temperature,
                 timeout=self.timeout,
                 max_tokens=max_tokens or self.max_tokens,
+                num_retries=0,  # No retries - fail fast
             )
             message = response.choices[0].message
             # Only use content field - never use reasoning_content (thinking chain)
             return message.content
+        except litellm.RateLimitError as e:
+            logger.warning(f"AI rate limited (failing fast): {e}")
+            return None
+        except litellm.Timeout as e:
+            logger.warning(f"AI timeout (failing fast): {e}")
+            return None
         except Exception as e:
             logger.error(f"AI completion failed: {e}")
             return None
@@ -178,6 +188,7 @@ class AIService:
                 tool_choice=tool_choice,
                 timeout=self.timeout,
                 max_tokens=2000,  # Reasoning models need more tokens for thinking + tool call
+                num_retries=0,  # No retries - fail fast
             )
 
             message = response.choices[0].message
@@ -204,6 +215,20 @@ class AIService:
                 raw_response=response,
             )
 
+        except litellm.RateLimitError as e:
+            logger.warning(f"AI rate limited (failing fast): {e}")
+            return ToolCallResult(
+                tool_name=None,
+                tool_args={},
+                content=None,
+            )
+        except litellm.Timeout as e:
+            logger.warning(f"AI timeout (failing fast): {e}")
+            return ToolCallResult(
+                tool_name=None,
+                tool_args={},
+                content=None,
+            )
         except Exception as e:
             logger.error(f"AI tool call failed: {e}")
             return ToolCallResult(
