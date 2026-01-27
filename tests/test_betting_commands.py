@@ -103,14 +103,22 @@ async def test_send_betting_reminder_warning_formats_totals():
     match_service.get_shuffle_message_info.return_value = {
         "message_id": 42,
         "channel_id": 55,
+        "thread_message_id": 100,
+        "thread_id": 200,
         "jump_url": "https://example.com",
     }
 
     betting_service.get_pot_odds.return_value = {"radiant": 12, "dire": 8}
 
+    # Mock lobby_service to return None for origin_channel_id (falls back to channel_id)
+    lobby_service = MagicMock()
+    lobby_service.get_origin_channel_id.return_value = None
+    bot.lobby_service = lobby_service
+
     message = MagicMock()
     message.reply = AsyncMock()
     channel = MagicMock()
+    channel.send = AsyncMock()
     channel.fetch_message = AsyncMock(return_value=message)
     bot.get_channel.return_value = channel
     bot.fetch_channel = AsyncMock(return_value=channel)
@@ -123,13 +131,13 @@ async def test_send_betting_reminder_warning_formats_totals():
         lock_until=lock_until,
     )
 
-    message.reply.assert_awaited_once()
-    # reply content is the first positional arg
-    reply_text = message.reply.call_args.args[0]
-    assert "5 minutes" in reply_text
-    assert f"<t:{lock_until}:R>" in reply_text
-    assert "Radiant: 12" in reply_text
-    assert "Dire: 8" in reply_text
+    # Now sends to channel instead of replying to message
+    channel.send.assert_awaited_once()
+    send_text = channel.send.call_args.args[0]
+    assert "5 minutes" in send_text
+    assert f"<t:{lock_until}:R>" in send_text
+    assert "Radiant: 12" in send_text
+    assert "Dire: 8" in send_text
 
 
 @pytest.mark.asyncio
@@ -146,14 +154,22 @@ async def test_send_betting_reminder_closed_formats_totals():
     match_service.get_shuffle_message_info.return_value = {
         "message_id": 42,
         "channel_id": 55,
+        "thread_message_id": 100,
+        "thread_id": 200,
         "jump_url": "https://example.com",
     }
 
     betting_service.get_pot_odds.return_value = {"radiant": 3, "dire": 9}
 
+    # Mock lobby_service to return None for origin_channel_id (falls back to channel_id)
+    lobby_service = MagicMock()
+    lobby_service.get_origin_channel_id.return_value = None
+    bot.lobby_service = lobby_service
+
     message = MagicMock()
     message.reply = AsyncMock()
     channel = MagicMock()
+    channel.send = AsyncMock()
     channel.fetch_message = AsyncMock(return_value=message)
     bot.get_channel.return_value = channel
     bot.fetch_channel = AsyncMock(return_value=channel)
@@ -166,11 +182,12 @@ async def test_send_betting_reminder_closed_formats_totals():
         lock_until=pending_state["bet_lock_until"],
     )
 
-    message.reply.assert_awaited_once()
-    reply_text = message.reply.call_args.args[0]
-    assert "Betting is now closed" in reply_text
-    assert "Radiant: 3" in reply_text
-    assert "Dire: 9" in reply_text
+    # Now sends to channel instead of replying to message
+    channel.send.assert_awaited_once()
+    send_text = channel.send.call_args.args[0]
+    assert "Betting is now closed" in send_text
+    assert "Radiant: 3" in send_text
+    assert "Dire: 9" in send_text
 
 
 @pytest.mark.asyncio
