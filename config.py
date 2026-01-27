@@ -139,5 +139,10 @@ MMR_MODAL_RETRY_LIMIT = _parse_int("MMR_MODAL_RETRY_LIMIT", 3)  # Maximum retrie
 
 # AFK Detection configuration
 AFK_CHECK_ACTIVITY_WINDOW_SECONDS = _parse_int("AFK_CHECK_ACTIVITY_WINDOW_SECONDS", 120)  # 2 minutes
-AFK_CHECK_DEFAULT_WAIT_TIME = _parse_int("AFK_CHECK_DEFAULT_WAIT_TIME", 30)  # 30 seconds
+AFK_CHECK_DEFAULT_WAIT_TIME = _parse_int("AFK_CHECK_DEFAULT_WAIT_TIME", 30)  # 30 seconds (DEPRECATED - not used by continuous monitoring)
 AFK_CHECK_TRACK_TYPING = _parse_bool("AFK_CHECK_TRACK_TYPING", True)  # Enable typing detection
+
+# RC Monitoring (Continuous Real-Time) configuration
+RC_MONITORING_DEFAULT_DURATION_MINUTES = _parse_int("RC_MONITORING_DEFAULT_DURATION_MINUTES", 5)  # 5 minutes default
+RC_MONITORING_MAX_DURATION_MINUTES = _parse_int("RC_MONITORING_MAX_DURATION_MINUTES", 10)  # 10 minutes max
+RC_MONITORING_REFRESH_INTERVAL_SECONDS = _parse_int("RC_MONITORING_REFRESH_INTERVAL_SECONDS", 5)  # Update every 5 seconds

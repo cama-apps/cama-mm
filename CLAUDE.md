@@ -423,7 +423,7 @@ payout INTEGER
 | `/lobby` | Create/view lobby | - |
 | `/kick` | Remove a user from lobby | `user` |
 | `/resetlobby` | Reset lobby state | Admin only |
-| `/rc` | Check for AFK players | `wait_time`: seconds (10-60, default 30) |
+| `/rc` | Monitor player activity in real-time | `duration`: minutes (1-10, default 5) |
 | `/shuffle` | Create balanced teams | `betting_mode`: house/pool |
 | `/record` | Record match result | `result`: Radiant/Dire/Abort |
 | `/register` | Register player | `steam_id`: Steam32 ID |
@@ -555,8 +555,11 @@ def test_full_match_workflow(test_db, mock_lobby_manager):
 | `LOBBY_READY_THRESHOLD` | 10 | Min players to shuffle |
 | `LOBBY_MAX_PLAYERS` | 14 | Max players in lobby |
 | `AFK_CHECK_ACTIVITY_WINDOW_SECONDS` | 120 | Activity window for /rc (2 minutes) |
-| `AFK_CHECK_DEFAULT_WAIT_TIME` | 30 | Default wait time for /rc command |
+| `AFK_CHECK_DEFAULT_WAIT_TIME` | 30 | DEPRECATED - not used by continuous monitoring |
 | `AFK_CHECK_TRACK_TYPING` | True | Enable typing detection |
+| `RC_MONITORING_DEFAULT_DURATION_MINUTES` | 5 | Default monitoring duration for /rc |
+| `RC_MONITORING_MAX_DURATION_MINUTES` | 10 | Maximum monitoring duration for /rc |
+| `RC_MONITORING_REFRESH_INTERVAL_SECONDS` | 5 | Update interval for /rc live embed |
 | `OFF_ROLE_MULTIPLIER` | 0.95 | Rating effectiveness off-role |
 | `OFF_ROLE_FLAT_PENALTY` | 100.0 | Penalty per off-role player |
 | `LEVERAGE_TIERS` | 2,3,5 | Available bet leverage options |
@@ -614,7 +617,7 @@ See `config.py` for the full list and defaults.
 - **Rating System**: Glicko-2, not simple MMR. Initial RD=350.0, volatility=0.06
 - **5 Roles**: 1=Carry, 2=Mid, 3=Offlane, 4=Soft Support, 5=Hard Support (stored as strings)
 - **Team Convention**: team1=Radiant, team2=Dire, winning_team: 1 or 2
-- **/rc Command**: Standalone AFK check; checks 5 activity signals (status, voice, messages, reactions, typing); pings potentially AFK players; waits 10-60s (default 30s); reports who's active vs AFK; no kicks (report-only)
+- **/rc Command**: Real-time activity monitor; continuously updates embed every 5s for 1-10 minutes (default 5 min); checks 5 activity signals (status, voice, messages, reactions, typing); shows live countdown timer; report-only (no kicks); can run multiple times (cancels previous)
 - **Betting Window**: 15 minutes (BET_LOCK_SECONDS=900) after shuffle; admins can extend via `/extendbetting`
 - **Voting Threshold**: 2 non-admin votes OR 1 admin vote to record match
 - **Leverage**: Multiplies effective bet; losses can cause debt up to MAX_DEBT

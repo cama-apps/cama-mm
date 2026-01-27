@@ -12,7 +12,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from config import AFK_CHECK_ACTIVITY_WINDOW_SECONDS, AFK_CHECK_DEFAULT_WAIT_TIME
+from config import AFK_CHECK_ACTIVITY_WINDOW_SECONDS
 from services.lobby_service import LobbyService
 from services.permissions import has_admin_permission
 from utils.formatting import get_player_display_name
@@ -31,6 +31,7 @@ class LobbyCommands(commands.Cog):
         self.bot = bot
         self.lobby_service = lobby_service
         self.player_service = player_service
+        self._rc_tasks = {}  # guild_id -> asyncio.Task for continuous monitoring
 
     async def _safe_pin(self, message: discord.Message) -> None:
         """Pin the lobby message, logging but not raising on failure (e.g., missing perms)."""
@@ -153,6 +154,23 @@ class LobbyCommands(commands.Cog):
         except Exception as exc:
             logger.warning(f"Failed to post leave activity: {exc}")
 
+    def _cancel_rc_task(self, guild_id: int | None) -> None:
+        """Cancel any running /rc monitoring task for the guild."""
+        normalized = 0 if guild_id is None else guild_id
+        task = self._rc_tasks.pop(normalized, None)
+        if task and not task.done():
+            try:
+                task.cancel()
+                logger.info(f"Cancelled RC monitoring task for guild {guild_id}")
+            except Exception as exc:
+                logger.warning(f"Failed to cancel RC task: {exc}")
+
+    def _register_rc_task(self, guild_id: int | None, task) -> None:
+        """Store /rc monitoring task for the guild (cancels any existing task first)."""
+        self._cancel_rc_task(guild_id)  # Cancel any existing task first
+        normalized = 0 if guild_id is None else guild_id
+        self._rc_tasks[normalized] = task
+        logger.debug(f"Registered RC monitoring task for guild {guild_id}")
 
     async def _update_channel_message_closed(self, reason: str = "Lobby Closed") -> None:
         """Update the channel message embed to show lobby is closed."""
@@ -434,39 +452,264 @@ class LobbyCommands(commands.Cog):
                 "✅ Lobby reset. You can create a new lobby with `/lobby`.", ephemeral=True
             )
 
-    @app_commands.command(
-        name="rc",
-        description="Check which lobby players might be AFK based on activity signals",
-    )
-    @app_commands.describe(
-        wait_time="Seconds to wait before final report (default: 30s, max: 60s)"
-    )
-    async def ready_check(
-        self, interaction: discord.Interaction, wait_time: int = AFK_CHECK_DEFAULT_WAIT_TIME
+    async def _run_continuous_activity_monitoring(
+        self,
+        *,
+        guild_id: int | None,
+        guild: discord.Guild,
+        player_ids: list[int],
+        players: list,
+        lobby_message_id: int | None,
+        lobby_thread: discord.Thread,
+        duration_seconds: int = 300,
+        refresh_interval: int = 5,
     ):
         """
-        Run an activity-based ready check to detect AFK players.
+        Continuously monitor and update activity status for duration_seconds.
 
-        Checks for multiple activity signals:
-        - Discord online/DND status
-        - In voice channel (not deafened)
-        - Recent messages in lobby thread
-        - Recent ⚔️ reactions on lobby message
-        - Typing indicator
-
-        Players with no activity signals are pinged, then re-checked after wait_time.
+        Flow:
+        1. Post initial embed with activity status
+        2. Every refresh_interval seconds:
+           - Check all player activity
+           - Update embed in place
+           - Show countdown timer
+        3. Stop after duration_seconds or when task is cancelled
         """
-        logger.info(f"/rc command invoked by user {interaction.user.id}, wait_time={wait_time}")
+        import time
+
+        try:
+            afk_service = getattr(self.bot, "afk_detection_service", None)
+            if not afk_service:
+                logger.warning("AFK detection service not available for RC monitoring")
+                return
+
+            # Post initial embed
+            initial_embed = self._build_live_activity_embed(
+                activity_results={},
+                players=players,
+                player_ids=player_ids,
+                guild=guild,
+                time_remaining=duration_seconds,
+                is_initial=True,
+            )
+
+            monitor_message = await lobby_thread.send(embed=initial_embed)
+            logger.info(f"Started RC monitoring for guild {guild_id}, duration={duration_seconds}s")
+
+            # Calculate end time
+            end_time = time.time() + duration_seconds
+            iterations = 0
+            activity_results = {}
+
+            while True:
+                now = time.time()
+                time_remaining = int(end_time - now)
+
+                # Stop if time expired
+                if time_remaining <= 0:
+                    break
+
+                # Check all player activity
+                activity_results = {}
+                for pid in player_ids:
+                    status = await afk_service.check_player_activity(
+                        player_id=pid,
+                        guild=guild,
+                        lobby_message_id=lobby_message_id,
+                        lobby_thread=lobby_thread,
+                        activity_window_seconds=AFK_CHECK_ACTIVITY_WINDOW_SECONDS,
+                    )
+                    activity_results[pid] = status
+
+                # Update embed
+                updated_embed = self._build_live_activity_embed(
+                    activity_results=activity_results,
+                    players=players,
+                    player_ids=player_ids,
+                    guild=guild,
+                    time_remaining=time_remaining,
+                    is_initial=False,
+                )
+
+                try:
+                    await monitor_message.edit(embed=updated_embed)
+                except discord.HTTPException as exc:
+                    logger.warning(f"Failed to edit RC monitor message: {exc}")
+                except Exception as exc:
+                    logger.warning(f"Error editing RC monitor message: {exc}")
+
+                iterations += 1
+                logger.debug(f"RC monitoring iteration {iterations}, {time_remaining}s remaining")
+
+                # Sleep until next update (or until cancelled)
+                await asyncio.sleep(refresh_interval)
+
+            # Final update (monitoring complete)
+            final_embed = self._build_live_activity_embed(
+                activity_results=activity_results,
+                players=players,
+                player_ids=player_ids,
+                guild=guild,
+                time_remaining=0,
+                is_initial=False,
+            )
+
+            try:
+                await monitor_message.edit(embed=final_embed)
+            except Exception as exc:
+                logger.warning(f"Failed to send final RC embed: {exc}")
+
+            logger.info(f"RC monitoring completed for guild {guild_id} after {iterations} iterations")
+
+        except asyncio.CancelledError:
+            logger.info(f"RC monitoring cancelled for guild {guild_id}")
+            return
+
+        except Exception as exc:
+            logger.warning(f"Error in RC monitoring: {exc}", exc_info=True)
+
+        finally:
+            # Clean up task from registry
+            normalized = 0 if guild_id is None else guild_id
+            self._rc_tasks.pop(normalized, None)
+
+    def _build_live_activity_embed(
+        self,
+        activity_results: dict,
+        players: list,
+        player_ids: list[int],
+        guild: discord.Guild | None,
+        time_remaining: int,
+        is_initial: bool = False,
+    ) -> discord.Embed:
+        """
+        Build the live-updating activity embed.
+
+        Shows:
+        - Title with countdown timer
+        - Active players count
+        - Active players list with signals
+        - AFK players list
+        - Last updated timestamp
+        """
+        if is_initial:
+            # Initial message before first check
+            embed = discord.Embed(
+                title="🔄 Activity Monitor Starting...",
+                description=f"Monitoring for {time_remaining}s. Updates every 5s.",
+                color=discord.Color.blue(),
+            )
+            embed.set_footer(text="🟢 online | 🎙️ voice | 💬 message | ⚔️ reaction | ⌨️ typing")
+            return embed
+
+        # Categorize players
+        active_players = [
+            (pid, status)
+            for pid, status in activity_results.items()
+            if status.is_active
+        ]
+        afk_players = [
+            (pid, status)
+            for pid, status in activity_results.items()
+            if not status.is_active
+        ]
+
+        total = len(activity_results)
+        active_count = len(active_players)
+        afk_count = len(afk_players)
+
+        # Format time remaining
+        minutes = time_remaining // 60
+        seconds = time_remaining % 60
+        time_str = f"{minutes}:{seconds:02d}" if minutes > 0 else f"{seconds}s"
+
+        # Determine color based on status
+        if time_remaining <= 0:
+            color = discord.Color.green()
+            title = "✅ Activity Monitoring Complete"
+        elif afk_count == 0:
+            color = discord.Color.green()
+            title = f"✅ All Active • {time_str} remaining"
+        else:
+            color = discord.Color.orange()
+            title = f"📊 Activity Monitor • {time_str} remaining"
+
+        embed = discord.Embed(
+            title=title,
+            description=f"{active_count}/{total} players active",
+            color=color,
+        )
+
+        # Active players section
+        if active_players:
+            active_lines = []
+            for pid, status in active_players[:25]:  # Discord field limit
+                player = next((p for p in players if p.discord_id == pid), None)
+                if player:
+                    display_name = get_player_display_name(player, pid, guild)
+                    afk_service = getattr(self.bot, "afk_detection_service", None)
+                    signals_str = afk_service.format_activity_status(status) if afk_service else ""
+                    active_lines.append(f"• {display_name} {signals_str}")
+
+            embed.add_field(
+                name=f"✅ Active ({active_count})",
+                value="\n".join(active_lines) if active_lines else "None",
+                inline=False,
+            )
+
+        # AFK players section
+        if afk_players:
+            afk_lines = []
+            for pid, status in afk_players[:25]:  # Discord field limit
+                player = next((p for p in players if p.discord_id == pid), None)
+                if player:
+                    display_name = get_player_display_name(player, pid, guild)
+                    afk_service = getattr(self.bot, "afk_detection_service", None)
+                    signals_str = afk_service.format_activity_status(status) if afk_service else ""
+                    afk_lines.append(f"• {display_name} {signals_str}")
+
+            embed.add_field(
+                name=f"⚠️ No Activity ({afk_count})",
+                value="\n".join(afk_lines) if afk_lines else "None",
+                inline=False,
+            )
+
+        # Footer with timestamp
+        from datetime import datetime
+        now = datetime.now().strftime("%H:%M:%S")
+        embed.set_footer(text=f"🟢 online | 🎙️ voice | 💬 message | ⚔️ reaction | ⌨️ typing • Updated: {now}")
+
+        return embed
+
+    @app_commands.command(
+        name="rc",
+        description="Monitor lobby player activity in real-time",
+    )
+    @app_commands.describe(
+        duration="Monitoring duration in minutes (default: 5, max: 10)"
+    )
+    async def ready_check(
+        self, interaction: discord.Interaction, duration: int = 5
+    ):
+        """
+        Run continuous activity monitoring for all lobby players.
+
+        Posts a live-updating embed that refreshes every 5 seconds,
+        showing real-time activity status for each player.
+        """
+        logger.info(f"/rc command invoked by user {interaction.user.id}, duration={duration}m")
 
         if not await safe_defer(interaction, ephemeral=True):
             return
 
-        # Validate wait time
-        if wait_time < 10 or wait_time > 60:
+        # Validate duration
+        if duration < 1 or duration > 10:
             await interaction.followup.send(
-                "❌ Wait time must be between 10 and 60 seconds.", ephemeral=True
+                "❌ Duration must be between 1 and 10 minutes.", ephemeral=True
             )
             return
+
+        duration_seconds = duration * 60
 
         # Check if lobby exists
         lobby = self.lobby_service.get_lobby()
@@ -495,8 +738,7 @@ class LobbyCommands(commands.Cog):
             )
             return
 
-        # Get lobby message and thread
-        lobby_message_id = self.lobby_service.get_lobby_message_id()
+        # Get lobby thread
         thread_id = self.lobby_service.get_lobby_thread_id()
         lobby_thread = None
 
@@ -506,75 +748,42 @@ class LobbyCommands(commands.Cog):
             except Exception as exc:
                 logger.warning(f"Could not fetch lobby thread {thread_id}: {exc}")
 
-        # Initial activity check
-        await interaction.followup.send("🔍 Checking player activity...", ephemeral=True)
-
-        activity_results = {}
-        for pid in player_ids:
-            status = await afk_service.check_player_activity(
-                player_id=pid,
-                guild=guild,
-                lobby_message_id=lobby_message_id,
-                lobby_thread=lobby_thread,
-                activity_window_seconds=AFK_CHECK_ACTIVITY_WINDOW_SECONDS,
+        if not lobby_thread:
+            await interaction.followup.send(
+                "❌ Could not find lobby thread. Make sure the lobby is created properly.",
+                ephemeral=True
             )
-            activity_results[pid] = status
-
-        # Identify AFK players
-        afk_players = [pid for pid, status in activity_results.items() if not status.is_active]
-        active_players = [pid for pid, status in activity_results.items() if status.is_active]
-
-        # If everyone is active, report immediately
-        if not afk_players:
-            embed = self._build_activity_report_embed(
-                activity_results, players, player_ids, guild, all_active=True
-            )
-            if lobby_thread:
-                await lobby_thread.send(embed=embed)
-            else:
-                await interaction.channel.send(embed=embed)
             return
 
-        # Ping AFK players and wait
-        if lobby_thread:
-            afk_mentions = " ".join(f"<@{pid}>" for pid in afk_players)
-            await lobby_thread.send(
-                f"⚠️ **AFK Check:** {afk_mentions} - Please confirm you're here! "
-                f"Checking again in {wait_time} seconds..."
-            )
+        # Get lobby message ID
+        lobby_message_id = self.lobby_service.get_lobby_message_id()
 
-        await interaction.followup.send(
-            f"⏳ Pinged {len(afk_players)} potentially AFK players. "
-            f"Waiting {wait_time} seconds...",
-            ephemeral=True,
-        )
+        # Cancel any existing monitoring task for this guild
+        self._cancel_rc_task(guild_id)
 
-        # Wait before re-checking
-        await asyncio.sleep(wait_time)
-
-        # Re-check activity
-        final_results = {}
-        for pid in player_ids:
-            status = await afk_service.check_player_activity(
-                player_id=pid,
+        # Start continuous monitoring task
+        task = asyncio.create_task(
+            self._run_continuous_activity_monitoring(
+                guild_id=guild_id,
                 guild=guild,
+                player_ids=player_ids,
+                players=players,
                 lobby_message_id=lobby_message_id,
                 lobby_thread=lobby_thread,
-                activity_window_seconds=AFK_CHECK_ACTIVITY_WINDOW_SECONDS,
+                duration_seconds=duration_seconds,
+                refresh_interval=5,  # Update every 5 seconds
             )
-            final_results[pid] = status
-
-        # Build and send final report
-        embed = self._build_activity_report_embed(
-            final_results, players, player_ids, guild, all_active=False
         )
 
-        if lobby_thread:
-            await lobby_thread.send(embed=embed)
-        else:
-            await interaction.channel.send(embed=embed)
+        self._register_rc_task(guild_id, task)
 
-        logger.info(f"Ready check completed for guild {guild_id}")
+        await interaction.followup.send(
+            f"✅ Started activity monitoring for {duration} minute(s). "
+            f"Check the lobby thread for live updates!",
+            ephemeral=True
+        )
+
+        logger.info(f"RC monitoring started for guild {guild_id}, duration={duration}m")
 
     def _build_activity_report_embed(
         self,
