@@ -114,9 +114,9 @@ class DisburseRepository(BaseRepository):
             guild_id: Guild ID
             proposal_id: Proposal ID to vote on
             discord_id: Voter's Discord ID
-            method: 'even', 'proportional', 'neediest', or 'stimulus'
+            method: 'even', 'proportional', 'neediest', 'stimulus', 'lottery', 'social_security', or 'cancel'
         """
-        if method not in ("even", "proportional", "neediest", "stimulus"):
+        if method not in ("even", "proportional", "neediest", "stimulus", "lottery", "social_security", "cancel"):
             raise ValueError(f"Invalid vote method: {method}")
 
         normalized_guild = self.normalize_guild_id(guild_id)
@@ -138,7 +138,7 @@ class DisburseRepository(BaseRepository):
         Get vote counts for each method for the active proposal.
 
         Returns:
-            dict with counts: {"even": n, "proportional": n, "neediest": n}
+            dict with counts for all methods
         """
         normalized_guild = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
@@ -150,7 +150,10 @@ class DisburseRepository(BaseRepository):
             )
             row = cursor.fetchone()
             if not row:
-                return {"even": 0, "proportional": 0, "neediest": 0}
+                return {
+                    "even": 0, "proportional": 0, "neediest": 0, "stimulus": 0,
+                    "lottery": 0, "social_security": 0, "cancel": 0
+                }
 
             proposal_id = row["proposal_id"]
 
@@ -164,7 +167,10 @@ class DisburseRepository(BaseRepository):
                 (normalized_guild, proposal_id),
             )
 
-            counts = {"even": 0, "proportional": 0, "neediest": 0}
+            counts = {
+                "even": 0, "proportional": 0, "neediest": 0, "stimulus": 0,
+                "lottery": 0, "social_security": 0, "cancel": 0
+            }
             for row in cursor.fetchall():
                 counts[row["vote_method"]] = row["count"]
             return counts
