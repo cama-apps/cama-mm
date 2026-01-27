@@ -530,7 +530,11 @@ class BetRepository(BaseRepository, IBetRepository):
         return distributions, balance_deltas, payout_updates
 
     def _calculate_pool_payouts(self, rows: list, winning_team: str) -> tuple:
-        """Calculate pool mode payouts (proportional from total pool) with leverage support."""
+        """Calculate pool mode payouts (proportional from total pool) with leverage support.
+
+        Payouts are aggregated per user before applying ceiling to prevent exploits
+        where splitting bets into many small wagers gains extra coins from rounding.
+        """
         distributions: dict[str, list[dict]] = {"winners": [], "losers": []}
         balance_deltas: dict[int, int] = {}
         payout_updates: list[tuple[int, int]] = []  # (payout, bet_id)
@@ -570,6 +574,10 @@ class BetRepository(BaseRepository, IBetRepository):
 
         multiplier = total_pool / winner_pool
 
+        # First pass: calculate raw payouts and group winning bets by user
+        winning_bets_by_user: dict[int, list[dict]] = {}
+        raw_payout_by_user: dict[int, float] = {}
+
         for row in rows:
             bet = dict(row)
             leverage = bet.get("leverage", 1) or 1
@@ -588,14 +596,40 @@ class BetRepository(BaseRepository, IBetRepository):
                 distributions["losers"].append(entry)
                 continue
 
-            # Proportional payout: (effective_bet / winner_pool) * total_pool
-            # Round up to ensure winners never lose fractional coins
-            payout = math.ceil((effective_bet / winner_pool) * total_pool)
-            balance_deltas[bet["discord_id"]] = balance_deltas.get(bet["discord_id"], 0) + payout
-            payout_updates.append((payout, bet["bet_id"]))
-            entry["payout"] = payout
+            # Calculate raw (unrounded) payout for this bet
+            raw_payout = (effective_bet / winner_pool) * total_pool
+            entry["raw_payout"] = raw_payout
             entry["multiplier"] = multiplier
-            distributions["winners"].append(entry)
+
+            discord_id = bet["discord_id"]
+            if discord_id not in winning_bets_by_user:
+                winning_bets_by_user[discord_id] = []
+                raw_payout_by_user[discord_id] = 0.0
+            winning_bets_by_user[discord_id].append(entry)
+            raw_payout_by_user[discord_id] += raw_payout
+
+        # Second pass: apply ceiling once per user and distribute to individual bets
+        for discord_id, bets in winning_bets_by_user.items():
+            user_raw_total = raw_payout_by_user[discord_id]
+            user_final_payout = math.ceil(user_raw_total)
+            balance_deltas[discord_id] = user_final_payout
+
+            # Distribute payout proportionally across user's bets
+            # Use floor for all but the last bet to avoid over-allocation
+            allocated = 0
+            for i, entry in enumerate(bets):
+                if i == len(bets) - 1:
+                    # Last bet gets the remainder to ensure exact total
+                    bet_payout = user_final_payout - allocated
+                else:
+                    # Proportional share, floored
+                    bet_payout = int((entry["raw_payout"] / user_raw_total) * user_final_payout)
+                    allocated += bet_payout
+
+                entry["payout"] = bet_payout
+                payout_updates.append((bet_payout, entry["bet_id"]))
+                del entry["raw_payout"]  # Clean up internal field
+                distributions["winners"].append(entry)
 
         return distributions, balance_deltas, payout_updates
 

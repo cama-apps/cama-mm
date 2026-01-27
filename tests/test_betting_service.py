@@ -682,6 +682,73 @@ class TestPoolBetting:
         total_paid = sum(w["payout"] for w in distributions["winners"])
         assert total_paid == 102
 
+    def test_split_bets_no_rounding_exploit(self, services):
+        """Splitting bets into many small wagers should not yield more than one equivalent bet.
+
+        This prevents an exploit where placing 10x 1 JC bets at 5x leverage yields more
+        than a single 10 JC bet at 5x leverage due to per-bet ceiling rounding.
+        """
+        match_service = services["match_service"]
+        betting_service = services["betting_service"]
+        player_repo = services["player_repo"]
+
+        player_ids = list(range(9800, 9810))
+        for pid in player_ids:
+            player_repo.add(
+                discord_id=pid,
+                discord_username=f"Player{pid}",
+                dotabuff_url=f"https://dotabuff.com/players/{pid}",
+                initial_mmr=1500,
+                glicko_rating=1500.0,
+                glicko_rd=350.0,
+                glicko_volatility=0.06,
+            )
+
+        # Two spectators: one places a single bet, one splits into many small bets
+        single_bettor = 9850
+        split_bettor = 9851
+        opposing_bettor = 9852
+
+        for spec_id in [single_bettor, split_bettor, opposing_bettor]:
+            player_repo.add(
+                discord_id=spec_id,
+                discord_username=f"Spectator{spec_id}",
+                dotabuff_url=f"https://dotabuff.com/players/{spec_id}",
+            )
+            player_repo.add_balance(spec_id, 1000)
+
+        match_service.shuffle_players(player_ids, guild_id=1, betting_mode="pool")
+        pending = match_service.get_last_shuffle(1)
+        pending["bet_lock_until"] = int(time.time()) + 600
+
+        # Single bettor: one 50 JC bet (equivalent to 10x 5 JC)
+        betting_service.place_bet(1, single_bettor, "radiant", 50, pending)
+
+        # Split bettor: ten 5 JC bets (same total effective as single bettor)
+        for _ in range(10):
+            betting_service.place_bet(1, split_bettor, "radiant", 5, pending)
+
+        # Opposing bettor to create odds
+        betting_service.place_bet(1, opposing_bettor, "dire", 100, pending)
+
+        distributions = betting_service.settle_bets(300, 1, "radiant", pending_state=pending)
+
+        # Group payouts by user
+        payout_by_user = {}
+        for winner in distributions["winners"]:
+            uid = winner["discord_id"]
+            payout_by_user[uid] = payout_by_user.get(uid, 0) + winner["payout"]
+
+        single_payout = payout_by_user[single_bettor]
+        split_payout = payout_by_user[split_bettor]
+
+        # Key assertion: split bets should NOT yield more than a single equivalent bet
+        # They should yield exactly the same (both have 50 JC effective, same multiplier)
+        assert split_payout == single_payout, (
+            f"Split bets yielded {split_payout} vs single bet {single_payout}. "
+            f"Splitting should not be exploitable for extra coins."
+        )
+
 
 class TestMultipleBets:
     """Tests for placing multiple bets on the same team."""
