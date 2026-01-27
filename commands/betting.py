@@ -306,7 +306,7 @@ class BettingCommands(commands.Cog):
                 logger.warning(f"Failed to send betting reminder to thread: {exc}", exc_info=True)
 
     def _create_wheel_gif_file(self, target_idx: int) -> discord.File:
-        """Create a wheel animation GIF and return as discord.File."""
+        """Create a wheel animation and return as discord.File."""
         buffer = create_wheel_gif(target_idx=target_idx, size=400)
         return discord.File(buffer, filename="wheel.gif")
 
@@ -314,7 +314,7 @@ class BettingCommands(commands.Cog):
         self, result: tuple, new_balance: int, garnished: int, next_spin_time: int
     ) -> discord.Embed:
         """Build the final result embed after the wheel stops."""
-        label, value, _color = result  # (label, value, color) from wheel_drawing
+        label, value = result[0], result[1]  # (label, value, main_color, accent_color)
 
         if value > 0:
             # Win

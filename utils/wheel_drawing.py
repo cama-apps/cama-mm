@@ -6,6 +6,84 @@ from PIL import Image, ImageDraw, ImageFont
 
 from config import WHEEL_TARGET_EV
 
+# Cached fonts for performance (loaded once, not per frame)
+_CACHED_FONTS: dict[str, ImageFont.FreeTypeFont | ImageFont.ImageFont] = {}
+
+
+def _get_cached_font(size: int, font_key: str, bold: bool = False) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    """Get a cached font, loading it only on first access."""
+    cache_key = f"{font_key}_{size}_{'bold' if bold else 'regular'}"
+    if cache_key not in _CACHED_FONTS:
+        try:
+            font_name = "DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf"
+            font_path = f"/usr/share/fonts/truetype/dejavu/{font_name}"
+            _CACHED_FONTS[cache_key] = ImageFont.truetype(font_path, size)
+        except OSError:
+            _CACHED_FONTS[cache_key] = ImageFont.load_default()
+    return _CACHED_FONTS[cache_key]
+
+
+# Cached static overlay (pointer, center circle, center text) - drawn once per size
+_CACHED_STATIC_OVERLAY: dict[int, Image.Image] = {}
+
+
+def _get_static_overlay(size: int) -> Image.Image:
+    """Get cached static overlay with pointer and center elements."""
+    if size not in _CACHED_STATIC_OVERLAY:
+        _CACHED_STATIC_OVERLAY[size] = _create_static_overlay(size)
+    return _CACHED_STATIC_OVERLAY[size]
+
+
+def _create_static_overlay(size: int) -> Image.Image:
+    """Create the static overlay (pointer, center circle, text) once."""
+    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+
+    center = size // 2
+    radius = size // 2 - 50
+    inner_radius = radius // 3
+
+    title_font = _get_cached_font(max(9, size // 45), "title")
+
+    # Draw center circle
+    draw.ellipse(
+        [
+            center - inner_radius,
+            center - inner_radius,
+            center + inner_radius,
+            center + inner_radius,
+        ],
+        fill="#2c3e50",
+        outline="#f1c40f",
+        width=4,
+    )
+
+    # Center text
+    for i, text in enumerate(["WHEEL OF", "FORTUNE"]):
+        bbox = draw.textbbox((0, 0), text, font=title_font)
+        text_w = bbox[2] - bbox[0]
+        draw.text(
+            (center - text_w / 2, center - 12 + i * 16),
+            text,
+            fill="#f1c40f",
+            font=title_font,
+        )
+
+    # Draw pointer
+    pointer_y = center - radius - 5
+    pointer_points = [
+        (center, pointer_y + 35),
+        (center - 18, pointer_y - 8),
+        (center - 6, pointer_y + 2),
+        (center, pointer_y + 18),
+        (center + 6, pointer_y + 2),
+        (center + 18, pointer_y - 8),
+    ]
+    draw.polygon(pointer_points, fill="#e74c3c", outline="#ffffff", width=2)
+
+    return img
+
+
 # Base wheel wedge configuration: (label, base_value, color)
 # BANKRUPT value will be adjusted based on WHEEL_TARGET_EV
 _BASE_WHEEL_WEDGES = [
@@ -360,26 +438,19 @@ def create_wheel_frame_for_gif(
 ) -> Image.Image:
     """
     Create a single wheel frame optimized for GIF animation.
-    No motion trails (since GIF provides temporal motion), cleaner for compression.
+    Uses cached static overlay for pointer/center to avoid redrawing each frame.
     """
     img = Image.new("RGBA", (size, size), (30, 30, 35, 255))
     draw = ImageDraw.Draw(img)
 
     center = size // 2
     radius = size // 2 - 50
-    inner_radius = radius // 3
 
     num_wedges = len(WHEEL_WEDGES)
     angle_per_wedge = 360 / num_wedges
 
-    # Load fonts
-    try:
-        font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-        small_font = ImageFont.truetype(font_path, max(12, size // 35))
-        title_font = ImageFont.truetype(font_path, max(10, size // 40))
-    except OSError:
-        small_font = ImageFont.load_default()
-        title_font = small_font
+    # Use cached regular font (not bold) at smaller size
+    small_font = _get_cached_font(max(12, size // 32), "small", bold=True)
 
     # Draw outer glow ring
     for glow in range(5, 0, -1):
@@ -407,9 +478,9 @@ def create_wheel_frame_for_gif(
 
         if selected_idx is not None and i == selected_idx:
             rgb = hex_to_rgb(color)
-            wedge_color = tuple(min(255, c + 50) for c in rgb)
-            outline_color = "#f1c40f"
-            outline_width = 4
+            wedge_color = tuple(min(255, c + 120) for c in rgb)
+            outline_color = "#ffff00"  # Bright yellow
+            outline_width = 12  # Thicc outline
 
         draw.pieslice(
             [center - radius, center - radius, center + radius, center + radius],
@@ -445,41 +516,24 @@ def create_wheel_frame_for_gif(
             font=small_font,
         )
 
-    # Draw center circle
-    draw.ellipse(
-        [
-            center - inner_radius,
-            center - inner_radius,
-            center + inner_radius,
-            center + inner_radius,
-        ],
-        fill="#2c3e50",
-        outline="#f1c40f",
-        width=4,
-    )
+    # Draw winner glow effect AFTER all wedges (so it's on top)
+    if selected_idx is not None:
+        win_angle = selected_idx * angle_per_wedge + rotation - 90
+        # Redraw winning wedge outline extra thick for emphasis
+        for glow_offset in range(3, 0, -1):
+            glow_width = 12 + glow_offset * 4
+            glow_alpha = 200 - glow_offset * 50
+            draw.arc(
+                [center - radius - 2, center - radius - 2,
+                 center + radius + 2, center + radius + 2],
+                win_angle, win_angle + angle_per_wedge,
+                fill=(255, 255, 0, glow_alpha),
+                width=glow_width,
+            )
 
-    # Center text
-    for i, text in enumerate(["WHEEL OF", "FORTUNE"]):
-        bbox = draw.textbbox((0, 0), text, font=title_font)
-        text_w = bbox[2] - bbox[0]
-        draw.text(
-            (center - text_w / 2, center - 15 + i * 18),
-            text,
-            fill="#f1c40f",
-            font=title_font,
-        )
-
-    # Draw pointer
-    pointer_y = center - radius - 5
-    pointer_points = [
-        (center, pointer_y + 35),
-        (center - 18, pointer_y - 8),
-        (center - 6, pointer_y + 2),
-        (center, pointer_y + 18),
-        (center + 6, pointer_y + 2),
-        (center + 18, pointer_y - 8),
-    ]
-    draw.polygon(pointer_points, fill="#e74c3c", outline="#ffffff", width=2)
+    # Composite cached static overlay (center circle, text, pointer)
+    static_overlay = _get_static_overlay(size)
+    img = Image.alpha_composite(img, static_overlay)
 
     return img
 
@@ -516,56 +570,131 @@ def create_wheel_gif(target_idx: int, size: int = 400) -> io.BytesIO:
     # The wheel spins, slows down, almost stops some distance before target,
     # then creeps forward to land on the final position
 
-    num_frames = 95
+    num_frames = 150
 
-    # Phase boundaries
-    fast_end = 45       # End of fast spin
-    medium_end = 60     # End of medium spin
-    slow_end = 80       # End of slow crawl (near-miss point)
-    creep_end = 94      # End of creep to final
+    # Phase boundaries (optimized for smooth 8-18 second animation)
+    fast_end = 60       # End of fast spin (frames 0-59)
+    medium_end = 90     # End of medium spin (frames 60-89)
+    slow_end = 125      # End of slow crawl (frames 90-124)
+    creep_end = 148     # End of creep to final (frames 125-147)
+    # Frame 148 is second-to-last, frame 149 is final
 
-    # Randomize the ending style:
-    # 25% - "Clean landing": stops right on target, no creep needed
-    # 35% - "Full stop then creep": stops short, pauses dramatically, then creeps
-    # 40% - "Smooth creep": slows into a creep without full stop
-    ending_roll = random.random()
+    # Ending styles with varied physics (20 items for easy % math)
+    ending_styles = [
+        "clean",        # 5% - Stops exactly on target
+        "full_stop",    # 20% - Stops short, dramatic pause, then creeps
+        "full_stop",
+        "full_stop",
+        "full_stop",
+        "smooth",       # 20% - Gradual deceleration into target
+        "smooth",
+        "smooth",
+        "smooth",
+        "overshoot",    # 15% - Goes past, settles back
+        "overshoot",
+        "overshoot",
+        "stutter",      # 15% - Mini-pauses as it crawls
+        "stutter",
+        "stutter",
+        "tease",        # 10% - Almost stops on adjacent wedge, then moves
+        "tease",
+        "double_pump",  # 10% - Slows, tiny acceleration, then final slow
+        "double_pump",
+        "reverse",      # 5% - Spins forward, then REVERSES, then forward to target
+    ]
+    ending_style = random.choice(ending_styles)
 
-    if ending_roll < 0.25:
-        # Clean landing - stops right on target
+    # Configure physics based on ending style
+    if ending_style == "clean":
         near_miss_wedges = 0
-        do_full_stop = False
         full_stop_duration = 0
-    elif ending_roll < 0.60:
-        # Full stop then creep - dramatic pause before creeping
-        near_miss_wedges = random.uniform(0.3, 2.0)
-        do_full_stop = True
-        full_stop_duration = random.randint(1000, 2500)
-    else:
-        # Smooth creep - no full stop, just gradual creep
+    elif ending_style == "full_stop":
+        near_miss_wedges = random.uniform(0.4, 2.5)
+        full_stop_duration = random.randint(600, 1800)
+    elif ending_style == "smooth":
         near_miss_wedges = random.uniform(0.1, 1.5)
-        do_full_stop = False
         full_stop_duration = 0
+    elif ending_style == "overshoot":
+        near_miss_wedges = random.uniform(-1.2, -0.3)  # Negative = past target
+        full_stop_duration = random.randint(400, 900)
+    elif ending_style == "stutter":
+        near_miss_wedges = random.uniform(0.6, 2.5)
+        full_stop_duration = random.randint(0, 300)
+    elif ending_style == "tease":
+        # Stop on adjacent wedge briefly, then move to target
+        near_miss_wedges = random.choice([-1, 1]) * random.uniform(0.9, 1.5)
+        full_stop_duration = random.randint(800, 2000)
+    elif ending_style == "double_pump":
+        near_miss_wedges = random.uniform(0.3, 1.8)
+        full_stop_duration = random.randint(200, 500)
+    else:  # reverse - the unhinged one
+        near_miss_wedges = random.uniform(1.0, 3.0)  # Go past, then reverse back
+        full_stop_duration = random.randint(300, 600)
 
     near_miss_rotation = total_spin - (angle_per_wedge * near_miss_wedges)
 
-    # Randomize creep speed: how long each creep frame takes
-    # Base duration 600-1000ms, multiplied by random factor 0.7-1.5
-    creep_base_duration = random.randint(600, 1000)
-    creep_speed_factor = random.uniform(0.7, 1.5)
+    # Timing parameters
+    creep_base_duration = random.randint(100, 180)
+    creep_speed_factor = random.uniform(0.9, 1.2)
+
+    # CHAOS MODE: precompute wild direction changes
+    if ending_style == "reverse":
+        # Generate chaotic keyframes: forward, REVERSE, forward, reverse, settle
+        chaos_keyframes = []
+        pos = 0
+        # Initial forward burst
+        pos += 360 * random.uniform(2.5, 4.0)
+        chaos_keyframes.append(pos)
+        # HARD REVERSE
+        pos -= 360 * random.uniform(1.5, 2.5)
+        chaos_keyframes.append(pos)
+        # Forward again!
+        pos += 360 * random.uniform(1.0, 2.0)
+        chaos_keyframes.append(pos)
+        # Another reverse!
+        pos -= 360 * random.uniform(0.5, 1.2)
+        chaos_keyframes.append(pos)
+        # Final push to target
+        chaos_keyframes.append(total_spin)
 
     for i in range(num_frames):
-        progress = i / (num_frames - 1)
+        # Calculate rotation based on frame
+        if ending_style == "reverse":
+            # CHAOS: interpolate through wild keyframes
+            chaos_progress = i / (num_frames - 1)
+            num_segments = len(chaos_keyframes)
+            segment_idx = min(int(chaos_progress * num_segments), num_segments - 1)
+            segment_progress = (chaos_progress * num_segments) - segment_idx
 
-        if i <= slow_end:
-            # Main spin: fast -> medium -> slow, stopping at near-miss point
+            if segment_idx == 0:
+                rotation = chaos_keyframes[0] * segment_progress
+            elif segment_idx < num_segments:
+                prev = chaos_keyframes[segment_idx - 1]
+                curr = chaos_keyframes[segment_idx]
+                # Snappy easing for that whiplash feel
+                eased = 1 - pow(1 - segment_progress, 2)
+                rotation = prev + (curr - prev) * eased
+            else:
+                rotation = total_spin
+        elif i <= slow_end:
+            # Main spin with quintic ease-out
             phase_progress = i / slow_end
-            # Quintic ease-out for smooth deceleration
             eased = 1 - pow(1 - phase_progress, 5)
             rotation = near_miss_rotation * eased
+        elif ending_style == "double_pump" and i <= slow_end + 5:
+            # Tiny acceleration burst
+            base_rotation = near_miss_rotation
+            pump_progress = (i - slow_end) / 5
+            pump_amount = angle_per_wedge * 0.15 * math.sin(pump_progress * math.pi)
+            rotation = base_rotation + pump_amount
         else:
-            # Creep phase: slowly cover the final 0.7 wedges
-            creep_progress = (i - slow_end) / (creep_end - slow_end)
-            # Quadratic ease-out for the final creep (like fighting friction)
+            # Creep phase
+            if ending_style == "double_pump":
+                creep_start = slow_end + 5
+            else:
+                creep_start = slow_end
+            creep_progress = (i - creep_start) / (creep_end - creep_start)
+            creep_progress = min(1.0, max(0.0, creep_progress))
             creep_eased = 1 - pow(1 - creep_progress, 2)
             remaining = total_spin - near_miss_rotation
             rotation = near_miss_rotation + (remaining * creep_eased)
@@ -576,33 +705,37 @@ def create_wheel_gif(target_idx: int, size: int = 400) -> io.BytesIO:
             size, rotation, selected_idx=target_idx if is_final else None
         )
 
-        # Convert to palette mode for GIF
         frame_p = frame.convert("RGB").convert("P", palette=Image.ADAPTIVE, colors=256)
         frames.append(frame_p)
 
-        # Variable timing - slower during creep for suspense
-        if i < fast_end:
-            durations.append(50)      # Fast spin: 50ms
+        # Timing: variable 8-18 seconds of animation
+        if i < 30:
+            durations.append(30)       # Very fast: 30ms
+        elif i < fast_end:
+            durations.append(40)       # Fast: 40ms
         elif i < medium_end:
-            durations.append(100)     # Medium: 100ms
+            durations.append(65)       # Medium: 65ms
         elif i < slow_end:
-            durations.append(250)     # Slow crawl: 250ms
+            durations.append(100)      # Slow: 100ms
         elif i == slow_end:
-            # First creep frame - this is the "near-miss" moment
-            # Add full stop duration if we're doing a full stop
+            # Near-miss moment with dramatic pause
             base = int(creep_base_duration * creep_speed_factor)
             durations.append(base + full_stop_duration)
         elif i < creep_end:
-            # Creep phase: randomized base + gradual slowdown
             creep_idx = i - slow_end
             creep_frames = creep_end - slow_end
-            # Duration increases as we approach the end
-            slowdown = 1 + (0.5 * creep_idx / creep_frames)
+            slowdown = 1 + (0.7 * creep_idx / creep_frames)
             duration = int(creep_base_duration * creep_speed_factor * slowdown)
+            # Style-specific timing adds variability
+            if ending_style == "stutter" and creep_idx % 4 == 0:
+                duration += random.randint(200, 500)
+            elif ending_style == "tease" and creep_idx < 4:
+                duration += random.randint(150, 350)
+            elif ending_style == "full_stop" and creep_idx > creep_frames - 3:
+                duration += random.randint(100, 250)  # Extra suspense at end
             durations.append(duration)
         else:
-            # Hold final frame for 60s (appears frozen)
-            durations.append(60000)
+            durations.append(60000)    # Hold final for 60s
 
     buffer = io.BytesIO()
     frames[0].save(
@@ -611,7 +744,7 @@ def create_wheel_gif(target_idx: int, size: int = 400) -> io.BytesIO:
         save_all=True,
         append_images=frames[1:],
         duration=durations,
-        loop=1,  # Play once
+        loop=1,  # Play once, hold on final frame
     )
     buffer.seek(0)
     return buffer
