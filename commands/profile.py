@@ -1412,6 +1412,8 @@ class ProfileCommands(commands.Cog):
                 value="\n".join(lines),
                 inline=True,
             )
+        else:
+            embed.add_field(name="⚖️ Even Teammates", value="No data yet", inline=True)
 
         # Evenly Matched Opponents
         even_opponents = pairings_repo.get_evenly_matched_opponents(
@@ -1429,6 +1431,11 @@ class ProfileCommands(commands.Cog):
                 value="\n".join(lines),
                 inline=True,
             )
+        else:
+            embed.add_field(name="⚖️ Even Opponents", value="No data yet", inline=True)
+
+        # Spacer to complete the Even row
+        embed.add_field(name="\u200b", value="\u200b", inline=True)
 
         # Get totals for footer
         counts = pairings_repo.get_pairing_counts(target_discord_id, min_games=min_games)
