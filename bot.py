@@ -459,7 +459,29 @@ async def notify_lobby_ready(channel, lobby):
             value="Anyone can use `/shuffle` to create balanced teams!",
             inline=False,
         )
-        await channel.send(embed=embed)
+
+        # Add jump link to lobby embed
+        lobby_message_id = lobby_service.get_lobby_message_id() if lobby_service else None
+        lobby_channel_id = lobby_service.get_lobby_channel_id() if lobby_service else None
+        if lobby_message_id and lobby_channel_id:
+            guild_id = channel.guild.id if channel.guild else 0
+            jump_url = f"https://discord.com/channels/{guild_id}/{lobby_channel_id}/{lobby_message_id}"
+            embed.add_field(name="", value=f"[Jump to Lobby]({jump_url})", inline=False)
+
+        # Use origin channel if available (where /lobby was run), otherwise fallback to reaction channel
+        origin_channel_id = lobby_service.get_origin_channel_id() if lobby_service else None
+        target_channel = channel  # Default to reaction channel
+
+        if origin_channel_id and origin_channel_id != channel.id:
+            try:
+                target_channel = bot.get_channel(origin_channel_id)
+                if not target_channel:
+                    target_channel = await bot.fetch_channel(origin_channel_id)
+            except Exception as exc:
+                logger.warning(f"Could not fetch origin channel {origin_channel_id}: {exc}")
+                target_channel = channel  # Fallback
+
+        await target_channel.send(embed=embed)
     except Exception as exc:
         logger.error(f"Error notifying lobby ready: {exc}", exc_info=True)
 
@@ -491,6 +513,13 @@ async def notify_lobby_rally(channel, thread, lobby, guild_id: int) -> bool:
             description=f"The lobby has **{total}** players — just **+{needed}** more needed!",
             color=discord.Color.orange(),
         )
+
+        # Add jump link to lobby embed
+        lobby_message_id = lobby_service.get_lobby_message_id() if lobby_service else None
+        lobby_channel_id = lobby_service.get_lobby_channel_id() if lobby_service else None
+        if lobby_message_id and lobby_channel_id:
+            jump_url = f"https://discord.com/channels/{guild_id}/{lobby_channel_id}/{lobby_message_id}"
+            embed.add_field(name="", value=f"[Jump to Lobby]({jump_url})", inline=False)
 
         # Use origin channel if available (where /lobby was run), otherwise fallback to reaction channel
         origin_channel_id = lobby_service.get_origin_channel_id() if lobby_service else None

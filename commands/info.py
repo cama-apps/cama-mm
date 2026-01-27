@@ -452,7 +452,7 @@ class UnifiedLeaderboardView(discord.ui.View):
                 lines = []
                 for i, entry in enumerate(page_entries, start + 1):
                     name = self._get_name_for_gambling(entry.discord_id)
-                    lines.append(f"{i}. **{name}** {entry.total_wagered}{JOPACOIN_EMOTE} wagered")
+                    lines.append(f"{i}. **{name}** {entry.total_wagered} {JOPACOIN_EMOTE} wagered")
                 embed.add_field(name=" Biggest Gamblers", value="\n".join(lines), inline=False)
 
         # Footer
@@ -460,7 +460,7 @@ class UnifiedLeaderboardView(discord.ui.View):
         if leaderboard.server_stats:
             s = leaderboard.server_stats
             footer_parts.append(
-                f" {s['total_bets']} bets • {s['total_wagered']}{JOPACOIN_EMOTE} wagered • "
+                f" {s['total_bets']} bets • {s['total_wagered']} {JOPACOIN_EMOTE} wagered • "
                 f"{s['unique_gamblers']} players • {s['total_bankruptcies']} bankruptcies"
             )
         footer_parts.append(f"Page {state.current_page + 1}/{state.max_page + 1}")

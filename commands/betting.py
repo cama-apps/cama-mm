@@ -277,18 +277,20 @@ class BettingCommands(commands.Cog):
         else:
             return
 
-        # Post to channel
-        if message_id and channel_id:
-            try:
-                channel = self.bot.get_channel(channel_id)
-                if channel is None:
-                    channel = await self.bot.fetch_channel(channel_id)
-                if channel:
-                    message = await channel.fetch_message(message_id)
-                    if message:
-                        await message.reply(content, allowed_mentions=discord.AllowedMentions.none())
-            except Exception as exc:
-                logger.warning(f"Failed to send betting reminder to channel: {exc}", exc_info=True)
+        # Post to origin channel (where /lobby was run, e.g., dota-mm) instead of lobby channel
+        try:
+            lobby_service = getattr(self.bot, "lobby_service", None)
+            origin_channel_id = lobby_service.get_origin_channel_id() if lobby_service else None
+            target_channel_id = origin_channel_id if origin_channel_id else channel_id
+
+            if target_channel_id:
+                target_channel = self.bot.get_channel(target_channel_id)
+                if target_channel is None:
+                    target_channel = await self.bot.fetch_channel(target_channel_id)
+                if target_channel:
+                    await target_channel.send(content, allowed_mentions=discord.AllowedMentions.none())
+        except Exception as exc:
+            logger.warning(f"Failed to send betting reminder to channel: {exc}", exc_info=True)
 
         # Post to thread
         if thread_message_id and thread_id:
