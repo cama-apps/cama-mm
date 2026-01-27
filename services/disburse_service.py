@@ -7,6 +7,7 @@ Players vote on how to distribute collected loan fees to players with negative b
 from __future__ import annotations
 
 import math
+import random
 import time
 from dataclasses import dataclass, field
 
@@ -27,7 +28,10 @@ class DisburseProposal:
     fund_amount: int
     quorum_required: int
     status: str
-    votes: dict[str, int] = field(default_factory=lambda: {"even": 0, "proportional": 0, "neediest": 0, "stimulus": 0})
+    votes: dict[str, int] = field(default_factory=lambda: {
+        "even": 0, "proportional": 0, "neediest": 0, "stimulus": 0,
+        "lottery": 0, "social_security": 0, "cancel": 0
+    })
 
     @property
     def total_votes(self) -> int:
@@ -54,12 +58,15 @@ class DisburseService:
     - neediest: All funds go to player with most debt (capped)
     """
 
-    METHODS = ("even", "proportional", "neediest", "stimulus")
+    METHODS = ("even", "proportional", "neediest", "stimulus", "lottery", "social_security", "cancel")
     METHOD_LABELS = {
         "even": "Even Split",
         "proportional": "Proportional",
         "neediest": "Neediest First",
         "stimulus": "Stimulus",
+        "lottery": "Lottery",
+        "social_security": "Social Security",
+        "cancel": "Cancel",
     }
 
     def __init__(
@@ -134,7 +141,10 @@ class DisburseService:
             fund_amount=fund_amount,
             quorum_required=quorum_required,
             status="active",
-            votes={"even": 0, "proportional": 0, "neediest": 0, "stimulus": 0},
+            votes={
+                "even": 0, "proportional": 0, "neediest": 0, "stimulus": 0,
+                "lottery": 0, "social_security": 0, "cancel": 0
+            },
         )
 
     def set_proposal_message(
@@ -224,8 +234,8 @@ class DisburseService:
         # Get all methods with max votes
         winners = [m for m, v in votes.items() if v == max_votes]
 
-        # Tie-breaker order: even > proportional > neediest > stimulus
-        for method in ("even", "proportional", "neediest", "stimulus"):
+        # Tie-breaker order: even > proportional > neediest > stimulus > lottery > social_security > cancel
+        for method in ("even", "proportional", "neediest", "stimulus", "lottery", "social_security", "cancel"):
             if method in winners:
                 return True, method
 
@@ -249,6 +259,19 @@ class DisburseService:
 
         fund_amount = proposal.fund_amount
 
+        # Handle cancel specially - reset proposal instead of distributing
+        if method == "cancel":
+            self.disburse_repo.reset_proposal(guild_id)
+            return {
+                "success": True,
+                "method": "cancel",
+                "method_label": "Cancel",
+                "total_disbursed": 0,
+                "distributions": [],
+                "cancelled": True,
+                "message": "Proposal cancelled by vote. Funds remain in nonprofit.",
+            }
+
         # Handle stimulus separately - different eligibility criteria
         if method == "stimulus":
             eligible = self.player_repo.get_stimulus_eligible_players()
@@ -263,6 +286,34 @@ class DisburseService:
                     "message": "No eligible players for stimulus (need 4+ non-debtor players).",
                 }
             distributions = self._calculate_stimulus_distribution(fund_amount, eligible)
+        elif method == "lottery":
+            # Lottery: pick one random registered player, winner takes all
+            eligible = self.player_repo.get_all_registered_players_for_lottery()
+            if not eligible:
+                self.disburse_repo.complete_proposal(guild_id)
+                return {
+                    "success": True,
+                    "method": method,
+                    "method_label": self.METHOD_LABELS[method],
+                    "total_disbursed": 0,
+                    "distributions": [],
+                    "message": "No registered players for lottery.",
+                }
+            distributions = self._calculate_lottery_distribution(fund_amount, eligible)
+        elif method == "social_security":
+            # Social security: distribute proportional to games played
+            eligible = self.player_repo.get_players_by_games_played()
+            if not eligible:
+                self.disburse_repo.complete_proposal(guild_id)
+                return {
+                    "success": True,
+                    "method": method,
+                    "method_label": self.METHOD_LABELS[method],
+                    "total_disbursed": 0,
+                    "distributions": [],
+                    "message": "No players with games played for social security.",
+                }
+            distributions = self._calculate_social_security_distribution(fund_amount, eligible)
         else:
             # Debtor-based methods: even, proportional, neediest
             debtors = self.player_repo.get_players_with_negative_balance()
@@ -453,5 +504,55 @@ class DisburseService:
             amount = per_player + (1 if i < remainder else 0)
             if amount > 0:
                 distributions.append((player["discord_id"], amount))
+
+        return distributions
+
+    def _calculate_lottery_distribution(
+        self, fund: int, players: list[dict]
+    ) -> list[tuple[int, int]]:
+        """
+        Randomly select one registered player to receive the entire fund.
+
+        Winner takes all - no debt cap. Any registered player can win.
+        """
+        if not players:
+            return []
+
+        winner = random.choice(players)
+        return [(winner["discord_id"], fund)]
+
+    def _calculate_social_security_distribution(
+        self, fund: int, players: list[dict]
+    ) -> list[tuple[int, int]]:
+        """
+        Distribute funds proportionally to games played.
+
+        Players with more games played receive more funds.
+        No cap - all funds are distributed. Rewards veterans.
+        """
+        if not players:
+            return []
+
+        total_games = sum(p["games_played"] for p in players)
+        if total_games == 0:
+            return []
+
+        distributions = []
+        remaining = fund
+
+        # Sort by games played descending for consistent allocation
+        sorted_players = sorted(players, key=lambda p: -p["games_played"])
+
+        for i, player in enumerate(sorted_players):
+            if i == len(sorted_players) - 1:
+                # Last player gets all remaining
+                amount = remaining
+            else:
+                # Calculate proportional share
+                amount = int((player["games_played"] / total_games) * fund)
+
+            if amount > 0:
+                distributions.append((player["discord_id"], amount))
+                remaining -= amount
 
         return distributions

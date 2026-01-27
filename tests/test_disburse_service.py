@@ -453,6 +453,76 @@ class TestStimulusDistribution:
         assert distributions[0] == (1001, 100)
 
 
+class TestLotteryEligibility:
+    """Test lottery eligibility in repository."""
+
+    def test_get_all_registered_players_for_lottery(self, player_repo):
+        """Test that all registered players are returned for lottery."""
+        # Create 5 players
+        for i in range(1, 6):
+            player_repo.add(discord_id=i, discord_username=f"Player{i}", initial_mmr=3000)
+
+        eligible = player_repo.get_all_registered_players_for_lottery()
+
+        assert len(eligible) == 5
+        eligible_ids = {p["discord_id"] for p in eligible}
+        assert eligible_ids == {1, 2, 3, 4, 5}
+
+    def test_get_all_registered_players_for_lottery_includes_debtors(self, player_repo):
+        """Test that debtors are included in lottery."""
+        player_repo.add(discord_id=1, discord_username="Rich", initial_mmr=3000)
+        player_repo.add(discord_id=2, discord_username="Debtor", initial_mmr=3000)
+
+        player_repo.update_balance(1, 100)
+        player_repo.update_balance(2, -100)  # Debtor
+
+        eligible = player_repo.get_all_registered_players_for_lottery()
+
+        eligible_ids = {p["discord_id"] for p in eligible}
+        assert 1 in eligible_ids
+        assert 2 in eligible_ids  # Debtors included
+
+
+class TestSocialSecurityEligibility:
+    """Test social security eligibility in repository."""
+
+    def test_get_players_by_games_played_basic(self, player_repo):
+        """Test that players are sorted by games played."""
+        for i in range(1, 4):
+            player_repo.add(discord_id=i, discord_username=f"Player{i}", initial_mmr=3000)
+
+        # Set different game counts
+        with player_repo.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("UPDATE players SET wins = 10, losses = 5 WHERE discord_id = 1")  # 15 games
+            cursor.execute("UPDATE players SET wins = 20, losses = 10 WHERE discord_id = 2")  # 30 games
+            cursor.execute("UPDATE players SET wins = 5, losses = 5 WHERE discord_id = 3")    # 10 games
+
+        players = player_repo.get_players_by_games_played()
+
+        assert len(players) == 3
+        # Should be sorted by games DESC
+        assert players[0]["discord_id"] == 2  # 30 games
+        assert players[1]["discord_id"] == 1  # 15 games
+        assert players[2]["discord_id"] == 3  # 10 games
+        assert players[0]["games_played"] == 30
+
+    def test_get_players_by_games_played_excludes_zero_games(self, player_repo):
+        """Test that players with 0 games are excluded."""
+        player_repo.add(discord_id=1, discord_username="Veteran", initial_mmr=3000)
+        player_repo.add(discord_id=2, discord_username="Newbie", initial_mmr=3000)
+
+        with player_repo.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("UPDATE players SET wins = 10, losses = 5 WHERE discord_id = 1")
+            # Player 2 has 0 wins, 0 losses (default)
+
+        players = player_repo.get_players_by_games_played()
+
+        assert len(players) == 1
+        assert players[0]["discord_id"] == 1
+
+
 class TestStimulusEligibility:
     """Test stimulus eligibility in repository."""
 
@@ -596,6 +666,226 @@ class TestStimulusExecution:
         assert player_repo.get_balance(1) == 500
         assert player_repo.get_balance(2) == 300
         assert player_repo.get_balance(3) == 100
+
+
+class TestLotteryDistribution:
+    """Test lottery distribution calculation."""
+
+    def test_lottery_distribution_basic(self, disburse_service):
+        """Test that lottery picks one random player who gets all funds."""
+        players = [
+            {"discord_id": 1001},
+            {"discord_id": 1002},
+            {"discord_id": 1003},
+        ]
+        distributions = disburse_service._calculate_lottery_distribution(100, players)
+
+        assert len(distributions) == 1
+        assert distributions[0][1] == 100  # Winner takes all
+        assert distributions[0][0] in [1001, 1002, 1003]
+
+    def test_lottery_distribution_single_player(self, disburse_service):
+        """Test lottery with single player."""
+        players = [{"discord_id": 1001}]
+        distributions = disburse_service._calculate_lottery_distribution(100, players)
+
+        assert len(distributions) == 1
+        assert distributions[0] == (1001, 100)
+
+    def test_lottery_distribution_empty(self, disburse_service):
+        """Test lottery with no players."""
+        distributions = disburse_service._calculate_lottery_distribution(100, [])
+        assert distributions == []
+
+
+class TestSocialSecurityDistribution:
+    """Test social security distribution calculation."""
+
+    def test_social_security_distribution_basic(self, disburse_service):
+        """Test proportional distribution by games played."""
+        players = [
+            {"discord_id": 1001, "games_played": 30},  # 30% of 100 games
+            {"discord_id": 1002, "games_played": 50},  # 50% of 100 games
+            {"discord_id": 1003, "games_played": 20},  # 20% of 100 games
+        ]
+        distributions = disburse_service._calculate_social_security_distribution(100, players)
+
+        amounts = {d[0]: d[1] for d in distributions}
+        # Should be roughly proportional
+        assert sum(amounts.values()) == 100
+        # Player with 50 games should get most
+        assert amounts[1002] >= amounts[1001]
+        assert amounts[1002] >= amounts[1003]
+
+    def test_social_security_distribution_single_player(self, disburse_service):
+        """Test social security with single player."""
+        players = [{"discord_id": 1001, "games_played": 10}]
+        distributions = disburse_service._calculate_social_security_distribution(100, players)
+
+        assert len(distributions) == 1
+        assert distributions[0] == (1001, 100)
+
+    def test_social_security_distribution_empty(self, disburse_service):
+        """Test social security with no players."""
+        distributions = disburse_service._calculate_social_security_distribution(100, [])
+        assert distributions == []
+
+    def test_social_security_distribution_zero_games(self, disburse_service):
+        """Test social security when all players have zero games (shouldn't happen)."""
+        players = [
+            {"discord_id": 1001, "games_played": 0},
+            {"discord_id": 1002, "games_played": 0},
+        ]
+        distributions = disburse_service._calculate_social_security_distribution(100, players)
+        assert distributions == []
+
+    def test_social_security_distributes_all_funds(self, disburse_service):
+        """Test that all funds are distributed (no cap)."""
+        players = [
+            {"discord_id": 1001, "games_played": 10},
+            {"discord_id": 1002, "games_played": 10},
+        ]
+        distributions = disburse_service._calculate_social_security_distribution(100, players)
+
+        total = sum(d[1] for d in distributions)
+        assert total == 100
+
+
+class TestCancelDisbursement:
+    """Test cancel vote handling."""
+
+    def test_cancel_wins_resets_proposal(
+        self, disburse_service, setup_players, setup_nonprofit_fund
+    ):
+        """Test that cancel vote resets proposal instead of distributing."""
+        disburse_service.create_proposal(guild_id=None)
+
+        # Vote for cancel
+        disburse_service.add_vote(guild_id=None, discord_id=1003, method="cancel")
+        disburse_service.add_vote(guild_id=None, discord_id=1004, method="cancel")
+
+        result = disburse_service.execute_disbursement(guild_id=None)
+
+        assert result["success"]
+        assert result["method"] == "cancel"
+        assert result["cancelled"] is True
+        assert result["total_disbursed"] == 0
+        assert "cancelled" in result["message"].lower() or "remain" in result["message"].lower()
+
+    def test_cancel_tiebreaker_loses(
+        self, disburse_service, setup_players, setup_nonprofit_fund
+    ):
+        """Test that cancel loses all ties (lowest priority in tiebreaker)."""
+        disburse_service.create_proposal(guild_id=None)
+
+        # Vote in a tie between even and cancel
+        disburse_service.add_vote(guild_id=None, discord_id=1003, method="even")
+        disburse_service.add_vote(guild_id=None, discord_id=1004, method="cancel")
+
+        quorum_reached, winner = disburse_service.check_quorum(guild_id=None)
+        assert quorum_reached
+        assert winner == "even"  # Even wins tiebreaker
+
+    def test_cancel_preserves_fund(
+        self, disburse_service, loan_repo, setup_players, setup_nonprofit_fund
+    ):
+        """Test that cancel preserves funds in nonprofit."""
+        initial_fund = loan_repo.get_nonprofit_fund(guild_id=None)
+
+        disburse_service.create_proposal(guild_id=None)
+        disburse_service.add_vote(guild_id=None, discord_id=1003, method="cancel")
+        disburse_service.add_vote(guild_id=None, discord_id=1004, method="cancel")
+
+        disburse_service.execute_disbursement(guild_id=None)
+
+        final_fund = loan_repo.get_nonprofit_fund(guild_id=None)
+        assert final_fund == initial_fund
+
+
+class TestLotteryExecution:
+    """Test full lottery execution flow."""
+
+    def test_execute_lottery_disbursement(
+        self, disburse_service, player_repo, loan_repo
+    ):
+        """Test full lottery disbursement execution."""
+        # Create 5 players
+        for i in range(1, 6):
+            player_repo.add(discord_id=i, discord_username=f"Player{i}", initial_mmr=3000)
+            player_repo.update_balance(i, 50)
+
+        # Add nonprofit fund
+        loan_repo.add_to_nonprofit_fund(guild_id=None, amount=300)
+
+        # Create proposal
+        disburse_service.create_proposal(guild_id=None)
+
+        # Vote for lottery (quorum = 2 for 5 players at 40%)
+        disburse_service.add_vote(guild_id=None, discord_id=1, method="lottery")
+        disburse_service.add_vote(guild_id=None, discord_id=2, method="lottery")
+
+        result = disburse_service.execute_disbursement(guild_id=None)
+
+        assert result["success"]
+        assert result["method"] == "lottery"
+        assert result["recipient_count"] == 1  # Only one winner
+        assert result["total_disbursed"] == 300  # Winner gets all
+
+        # Verify one player has 350 (50 + 300) and others still have 50
+        balances = [player_repo.get_balance(i) for i in range(1, 6)]
+        assert 350 in balances
+        assert balances.count(50) == 4
+
+
+class TestSocialSecurityExecution:
+    """Test full social security execution flow."""
+
+    def test_execute_social_security_disbursement(
+        self, disburse_service, player_repo, loan_repo
+    ):
+        """Test full social security disbursement execution."""
+        # Create 4 players with varying game counts
+        for i in range(1, 5):
+            player_repo.add(discord_id=i, discord_username=f"Player{i}", initial_mmr=3000)
+            player_repo.update_balance(i, 50)
+
+        # Set wins/losses for game counts
+        # Use repository directly to set wins/losses
+        with player_repo.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("UPDATE players SET wins = 20, losses = 10 WHERE discord_id = 1")  # 30 games
+            cursor.execute("UPDATE players SET wins = 10, losses = 10 WHERE discord_id = 2")  # 20 games
+            cursor.execute("UPDATE players SET wins = 5, losses = 5 WHERE discord_id = 3")    # 10 games
+            cursor.execute("UPDATE players SET wins = 0, losses = 0 WHERE discord_id = 4")    # 0 games (excluded)
+
+        # Add nonprofit fund
+        loan_repo.add_to_nonprofit_fund(guild_id=None, amount=300)
+
+        # Create proposal
+        disburse_service.create_proposal(guild_id=None)
+
+        # Vote for social security (quorum = 2 for 4 players at 40%)
+        disburse_service.add_vote(guild_id=None, discord_id=1, method="social_security")
+        disburse_service.add_vote(guild_id=None, discord_id=2, method="social_security")
+
+        result = disburse_service.execute_disbursement(guild_id=None)
+
+        assert result["success"]
+        assert result["method"] == "social_security"
+        assert result["recipient_count"] == 3  # Player 4 excluded (0 games)
+        assert result["total_disbursed"] == 300  # All funds distributed
+
+        # Player 1 (30 games, 50%) should get most
+        # Player 2 (20 games, 33%) middle
+        # Player 3 (10 games, 17%) least
+        # Player 4 (0 games) excluded
+        bal1 = player_repo.get_balance(1)
+        bal2 = player_repo.get_balance(2)
+        bal3 = player_repo.get_balance(3)
+        bal4 = player_repo.get_balance(4)
+
+        assert bal1 > bal2 > bal3
+        assert bal4 == 50  # Unchanged (not eligible)
 
 
 class TestGetIndividualVotes:

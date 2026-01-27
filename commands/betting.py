@@ -1735,6 +1735,21 @@ class BettingCommands(commands.Cog):
             value=f"Even split to non-top-3\n**{votes['stimulus']}** votes",
             inline=True,
         )
+        embed.add_field(
+            name="🎲 Lottery",
+            value=f"Random player wins all\n**{votes.get('lottery', 0)}** votes",
+            inline=True,
+        )
+        embed.add_field(
+            name="👴 Social Security",
+            value=f"By games played\n**{votes.get('social_security', 0)}** votes",
+            inline=True,
+        )
+        embed.add_field(
+            name="❌ Cancel",
+            value=f"Keep funds in nonprofit\n**{votes.get('cancel', 0)}** votes",
+            inline=True,
+        )
 
         # Progress bar
         bar_length = 20
@@ -1782,8 +1797,8 @@ class BettingCommands(commands.Cog):
 
         # Vote breakdown
         vote_lines = []
-        for method in ["even", "proportional", "neediest", "stimulus"]:
-            count = votes[method]
+        for method in ["even", "proportional", "neediest", "stimulus", "lottery", "social_security", "cancel"]:
+            count = votes.get(method, 0)
             pct = (count / total_votes * 100) if total_votes > 0 else 0
             label = self.disburse_service.METHOD_LABELS[method]
             vote_lines.append(f"**{label}:** {count} ({pct:.0f}%)")
@@ -1892,11 +1907,25 @@ class DisburseVoteView(discord.ui.View):
             try:
                 disbursement = self.disburse_service.execute_disbursement(guild_id)
 
+                # Handle cancel specially
+                if disbursement.get("cancelled"):
+                    embed = discord.Embed(
+                        title="❌ Proposal Cancelled",
+                        description=disbursement.get("message", "Proposal cancelled by vote."),
+                        color=0xFF6B6B,  # Red
+                    )
+                    await interaction.response.send_message(embed=embed)
                 # Build result message
-                if disbursement["total_disbursed"] == 0:
+                elif disbursement["total_disbursed"] == 0:
                     result_msg = disbursement.get(
                         "message", "No funds were distributed."
                     )
+                    embed = discord.Embed(
+                        title="💝 Disbursement Complete!",
+                        description=result_msg,
+                        color=0x00FF00,  # Green
+                    )
+                    await interaction.response.send_message(embed=embed)
                 else:
                     recipients = disbursement["distributions"]
                     recipient_lines = []
@@ -1912,13 +1941,13 @@ class DisburseVoteView(discord.ui.View):
                         + "\n".join(recipient_lines)
                     )
 
-                # Send result as new message
-                embed = discord.Embed(
-                    title="💝 Disbursement Complete!",
-                    description=result_msg,
-                    color=0x00FF00,  # Green
-                )
-                await interaction.response.send_message(embed=embed)
+                    # Send result as new message
+                    embed = discord.Embed(
+                        title="💝 Disbursement Complete!",
+                        description=result_msg,
+                        color=0x00FF00,  # Green
+                    )
+                    await interaction.response.send_message(embed=embed)
 
                 # Disable buttons on the original message
                 try:
@@ -2000,6 +2029,39 @@ class DisburseVoteView(discord.ui.View):
         self, interaction: discord.Interaction, button: discord.ui.Button
     ):
         await self._handle_vote(interaction, "stimulus", "Stimulus")
+
+    @discord.ui.button(
+        label="Lottery",
+        emoji="🎲",
+        style=discord.ButtonStyle.primary,
+        custom_id="disburse:lottery",
+    )
+    async def vote_lottery(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        await self._handle_vote(interaction, "lottery", "Lottery")
+
+    @discord.ui.button(
+        label="Social Security",
+        emoji="👴",
+        style=discord.ButtonStyle.primary,
+        custom_id="disburse:social_security",
+    )
+    async def vote_social_security(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        await self._handle_vote(interaction, "social_security", "Social Security")
+
+    @discord.ui.button(
+        label="Cancel",
+        emoji="❌",
+        style=discord.ButtonStyle.danger,
+        custom_id="disburse:cancel",
+    )
+    async def vote_cancel(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        await self._handle_vote(interaction, "cancel", "Cancel")
 
 
 async def setup(bot: commands.Bot):

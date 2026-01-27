@@ -880,6 +880,43 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 for row in cursor.fetchall()
             ]
 
+    def get_all_registered_players_for_lottery(self) -> list[dict]:
+        """
+        Get all registered players (discord_id only) for lottery selection.
+
+        Returns:
+            List of dicts with 'discord_id' for all registered players.
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT discord_id FROM players")
+            return [{"discord_id": row["discord_id"]} for row in cursor.fetchall()]
+
+    def get_players_by_games_played(self) -> list[dict]:
+        """
+        Get players sorted by total games played (wins + losses).
+
+        Only includes players with at least 1 game played.
+        Used for social security distribution.
+
+        Returns:
+            List of dicts with 'discord_id' and 'games_played', sorted by games DESC.
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT discord_id, COALESCE(wins, 0) + COALESCE(losses, 0) as games_played
+                FROM players
+                WHERE COALESCE(wins, 0) + COALESCE(losses, 0) > 0
+                ORDER BY games_played DESC
+                """
+            )
+            return [
+                {"discord_id": row["discord_id"], "games_played": row["games_played"]}
+                for row in cursor.fetchall()
+            ]
+
     def apply_interest_bulk(self, updates: list[tuple[int, int]]) -> int:
         """
         Apply interest charges to multiple players in a single transaction.
