@@ -187,6 +187,181 @@ class TestTipRepository:
         total = tip_repo.get_total_fees_collected()
         assert total == 0
 
+    def test_get_top_senders(self, tip_repo, player_repo):
+        """Test getting top senders by total amount."""
+        register_player(player_repo, 1)
+        register_player(player_repo, 2)
+        register_player(player_repo, 3)
+        register_player(player_repo, 4)
+
+        # Player 1 sends 50 total (20+30)
+        tip_repo.log_tip(1, 4, 20, 2, 111)
+        tip_repo.log_tip(1, 4, 30, 3, 111)
+        # Player 2 sends 100 total
+        tip_repo.log_tip(2, 4, 100, 10, 111)
+        # Player 3 sends 25 total
+        tip_repo.log_tip(3, 4, 25, 2, 111)
+
+        top_senders = tip_repo.get_top_senders(guild_id=111, limit=10)
+
+        assert len(top_senders) == 3
+        # Player 2 should be first (100)
+        assert top_senders[0]["discord_id"] == 2
+        assert top_senders[0]["total_amount"] == 100
+        assert top_senders[0]["tip_count"] == 1
+        # Player 1 should be second (50)
+        assert top_senders[1]["discord_id"] == 1
+        assert top_senders[1]["total_amount"] == 50
+        assert top_senders[1]["tip_count"] == 2
+        # Player 3 should be third (25)
+        assert top_senders[2]["discord_id"] == 3
+        assert top_senders[2]["total_amount"] == 25
+
+    def test_get_top_senders_respects_limit(self, tip_repo, player_repo):
+        """Test that limit parameter works for top senders."""
+        register_player(player_repo, 1)
+        register_player(player_repo, 2)
+        register_player(player_repo, 3)
+        register_player(player_repo, 4)
+
+        tip_repo.log_tip(1, 4, 50, 5, 111)
+        tip_repo.log_tip(2, 4, 40, 4, 111)
+        tip_repo.log_tip(3, 4, 30, 3, 111)
+
+        top_senders = tip_repo.get_top_senders(guild_id=111, limit=2)
+        assert len(top_senders) == 2
+
+    def test_get_top_senders_filters_by_guild(self, tip_repo, player_repo):
+        """Test that top senders filters by guild."""
+        register_player(player_repo, 1)
+        register_player(player_repo, 2)
+        register_player(player_repo, 3)
+
+        tip_repo.log_tip(1, 3, 100, 10, 111)
+        tip_repo.log_tip(2, 3, 50, 5, 222)
+
+        top_senders = tip_repo.get_top_senders(guild_id=111, limit=10)
+        assert len(top_senders) == 1
+        assert top_senders[0]["discord_id"] == 1
+
+    def test_get_top_receivers(self, tip_repo, player_repo):
+        """Test getting top receivers by total amount."""
+        register_player(player_repo, 1)
+        register_player(player_repo, 2)
+        register_player(player_repo, 3)
+        register_player(player_repo, 4)
+
+        # Player 2 receives 100 total
+        tip_repo.log_tip(1, 2, 100, 10, 111)
+        # Player 3 receives 60 total (30+30)
+        tip_repo.log_tip(1, 3, 30, 3, 111)
+        tip_repo.log_tip(4, 3, 30, 3, 111)
+        # Player 4 receives 20
+        tip_repo.log_tip(1, 4, 20, 2, 111)
+
+        top_receivers = tip_repo.get_top_receivers(guild_id=111, limit=10)
+
+        assert len(top_receivers) == 3
+        # Player 2 should be first (100)
+        assert top_receivers[0]["discord_id"] == 2
+        assert top_receivers[0]["total_amount"] == 100
+        assert top_receivers[0]["tip_count"] == 1
+        # Player 3 should be second (60)
+        assert top_receivers[1]["discord_id"] == 3
+        assert top_receivers[1]["total_amount"] == 60
+        assert top_receivers[1]["tip_count"] == 2
+        # Player 4 should be third (20)
+        assert top_receivers[2]["discord_id"] == 4
+        assert top_receivers[2]["total_amount"] == 20
+
+    def test_get_user_tip_stats(self, tip_repo, player_repo):
+        """Test getting individual user tip statistics."""
+        register_player(player_repo, 1)
+        register_player(player_repo, 2)
+        register_player(player_repo, 3)
+
+        # Player 1 sends tips
+        tip_repo.log_tip(1, 2, 50, 5, 111)
+        tip_repo.log_tip(1, 3, 30, 3, 111)
+        # Player 1 also receives a tip
+        tip_repo.log_tip(2, 1, 20, 2, 111)
+
+        stats = tip_repo.get_user_tip_stats(discord_id=1, guild_id=111)
+
+        assert stats["total_sent"] == 80  # 50 + 30
+        assert stats["tips_sent_count"] == 2
+        assert stats["fees_paid"] == 8  # 5 + 3
+        assert stats["total_received"] == 20
+        assert stats["tips_received_count"] == 1
+
+    def test_get_user_tip_stats_no_history(self, tip_repo, player_repo):
+        """Test user tip stats when user has no tip history."""
+        register_player(player_repo, 1)
+
+        stats = tip_repo.get_user_tip_stats(discord_id=1, guild_id=111)
+
+        assert stats["total_sent"] == 0
+        assert stats["tips_sent_count"] == 0
+        assert stats["fees_paid"] == 0
+        assert stats["total_received"] == 0
+        assert stats["tips_received_count"] == 0
+
+    def test_get_user_tip_stats_filters_by_guild(self, tip_repo, player_repo):
+        """Test that user tip stats filter by guild."""
+        register_player(player_repo, 1)
+        register_player(player_repo, 2)
+
+        tip_repo.log_tip(1, 2, 100, 10, 111)
+        tip_repo.log_tip(1, 2, 50, 5, 222)
+
+        stats_guild1 = tip_repo.get_user_tip_stats(discord_id=1, guild_id=111)
+        stats_guild2 = tip_repo.get_user_tip_stats(discord_id=1, guild_id=222)
+
+        assert stats_guild1["total_sent"] == 100
+        assert stats_guild1["tips_sent_count"] == 1
+        assert stats_guild2["total_sent"] == 50
+        assert stats_guild2["tips_sent_count"] == 1
+
+    def test_get_total_tip_volume(self, tip_repo, player_repo):
+        """Test getting server-wide tip statistics."""
+        register_player(player_repo, 1)
+        register_player(player_repo, 2)
+        register_player(player_repo, 3)
+
+        tip_repo.log_tip(1, 2, 100, 10, 111)
+        tip_repo.log_tip(2, 3, 50, 5, 111)
+        tip_repo.log_tip(3, 1, 25, 2, 111)
+
+        volume = tip_repo.get_total_tip_volume(guild_id=111)
+
+        assert volume["total_amount"] == 175  # 100 + 50 + 25
+        assert volume["total_fees"] == 17  # 10 + 5 + 2
+        assert volume["total_transactions"] == 3
+
+    def test_get_total_tip_volume_empty(self, tip_repo):
+        """Test total tip volume when no tips exist."""
+        volume = tip_repo.get_total_tip_volume(guild_id=111)
+
+        assert volume["total_amount"] == 0
+        assert volume["total_fees"] == 0
+        assert volume["total_transactions"] == 0
+
+    def test_get_total_tip_volume_filters_by_guild(self, tip_repo, player_repo):
+        """Test that total tip volume filters by guild."""
+        register_player(player_repo, 1)
+        register_player(player_repo, 2)
+
+        tip_repo.log_tip(1, 2, 100, 10, 111)
+        tip_repo.log_tip(1, 2, 50, 5, 222)
+
+        volume_guild1 = tip_repo.get_total_tip_volume(guild_id=111)
+        volume_guild2 = tip_repo.get_total_tip_volume(guild_id=222)
+
+        assert volume_guild1["total_amount"] == 100
+        assert volume_guild1["total_transactions"] == 1
+        assert volume_guild2["total_amount"] == 50
+        assert volume_guild2["total_transactions"] == 1
+
 
 class TestTipAtomic:
     """Tests for tip_atomic() in PlayerRepository."""
