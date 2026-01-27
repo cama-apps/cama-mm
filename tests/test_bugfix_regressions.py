@@ -352,13 +352,13 @@ class TestProfileTeammatesSpacerPresent:
             if field.name == "\u200b" and field.value == "\u200b"
         )
 
-        # Should have exactly 3 spacers for proper row layout:
+        # Should have exactly 4 spacers for proper row layout:
         # Row 1: Best Teammates | Worst Teammates | Spacer (1)
         # Row 2: Dominates | Struggles Against | Spacer (2)
         # Row 3: Most Played With | Most Played Against | Spacer (3)
-        # Row 4: Even Teammates | Even Opponents (no spacer needed - last row)
-        assert spacer_count == 3, (
-            f"Expected exactly 3 spacer fields for proper row layout, found {spacer_count}. "
+        # Row 4: Even Teammates | Even Opponents | Spacer (4)
+        assert spacer_count == 4, (
+            f"Expected exactly 4 spacer fields for proper row layout, found {spacer_count}. "
             "Each pair of inline fields needs a spacer to complete the row."
         )
 
