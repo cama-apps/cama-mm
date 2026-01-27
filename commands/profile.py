@@ -219,6 +219,9 @@ class ProfileCommands(commands.Cog):
     def _get_pairings_repo(self):
         return getattr(self.bot, "pairings_repo", None)
 
+    def _get_tip_repository(self):
+        return getattr(self.bot, "tip_repository", None)
+
     def _get_rating_system(self):
         match_service = getattr(self.bot, "match_service", None)
         if match_service:
@@ -694,6 +697,33 @@ class ProfileCommands(commands.Cog):
                 value=f"**{lowest_balance}** {JOPACOIN_EMOTE}",
                 inline=True,
             )
+
+        # Tipping statistics
+        tip_repo = self._get_tip_repository()
+        if tip_repo:
+            # Get guild_id from the interaction context (via the view/cog)
+            guild_id = None
+            tip_stats = tip_repo.get_user_tip_stats(target_discord_id, guild_id)
+
+            # Only show if user has tip history
+            if tip_stats["tips_sent_count"] > 0 or tip_stats["tips_received_count"] > 0:
+                tip_lines = []
+                if tip_stats["tips_sent_count"] > 0:
+                    tip_lines.append(
+                        f"**Sent:** {tip_stats['total_sent']} {JOPACOIN_EMOTE} ({tip_stats['tips_sent_count']} tips)"
+                    )
+                if tip_stats["tips_received_count"] > 0:
+                    tip_lines.append(
+                        f"**Received:** {tip_stats['total_received']} {JOPACOIN_EMOTE} ({tip_stats['tips_received_count']} tips)"
+                    )
+                if tip_stats["fees_paid"] > 0:
+                    tip_lines.append(f"**Fees Paid:** {tip_stats['fees_paid']} {JOPACOIN_EMOTE}")
+
+                embed.add_field(
+                    name="💝 Tipping",
+                    value="\n".join(tip_lines),
+                    inline=True,
+                )
 
         embed.set_footer(text="Tip: Use /balance for quick check, /loan to borrow")
 

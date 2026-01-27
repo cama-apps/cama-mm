@@ -42,6 +42,7 @@ class LeaderboardTab(Enum):
     PREDICTIONS = "predictions"
     GLICKO = "glicko"
     OPENSKILL = "openskill"
+    TIPS = "tips"
 
 
 @dataclass
@@ -94,6 +95,7 @@ class UnifiedLeaderboardView(discord.ui.View):
             LeaderboardTab.PREDICTIONS: self.predictions_btn,
             LeaderboardTab.GLICKO: self.glicko_btn,
             LeaderboardTab.OPENSKILL: self.openskill_btn,
+            LeaderboardTab.TIPS: self.tips_btn,
         }
         for tab, button in tab_buttons.items():
             if tab == self.current_tab:
@@ -123,6 +125,8 @@ class UnifiedLeaderboardView(discord.ui.View):
             await self._fetch_glicko_data(state)
         elif tab == LeaderboardTab.OPENSKILL:
             await self._fetch_openskill_data(state)
+        elif tab == LeaderboardTab.TIPS:
+            await self._fetch_tips_data(state)
 
         state.loaded = True
 
@@ -298,6 +302,36 @@ class UnifiedLeaderboardView(discord.ui.View):
         }
         state.max_page = max(0, (len(players_with_stats) - 1) // SINGLE_SECTION_PAGE_SIZE)
 
+    async def _fetch_tips_data(self, state: TabState) -> None:
+        """Fetch tip leaderboard data."""
+        tip_repo = getattr(self.cog.bot, "tip_repository", None)
+        if not tip_repo:
+            state.data = None
+            return
+
+        top_senders = tip_repo.get_top_senders(self.guild_id, limit=self.limit)
+        top_receivers = tip_repo.get_top_receivers(self.guild_id, limit=self.limit)
+        total_volume = tip_repo.get_total_tip_volume(self.guild_id)
+
+        # Pre-fetch guild members
+        guild = self.interaction.guild
+        guild_members = {m.id: m for m in guild.members} if guild else {}
+
+        state.data = {
+            "top_senders": top_senders,
+            "top_receivers": top_receivers,
+            "total_volume": total_volume,
+        }
+        state.extra = {"guild_members": guild_members}
+
+        # Calculate max pages based on longest section
+        max_entries = max(
+            len(top_senders),
+            len(top_receivers),
+            1,
+        )
+        state.max_page = max(0, (max_entries - 1) // MULTI_SECTION_PAGE_SIZE)
+
     def _get_name_for_gambling(self, discord_id: int) -> str:
         """Get display name for gambling leaderboard entries."""
         state = self._tab_states[LeaderboardTab.GAMBLING]
@@ -324,6 +358,13 @@ class UnifiedLeaderboardView(discord.ui.View):
         member = guild_members.get(discord_id)
         return member.display_name if member else f"User {discord_id}"
 
+    def _get_name_for_tips(self, discord_id: int) -> str:
+        """Get display name for tips leaderboard entries."""
+        state = self._tab_states[LeaderboardTab.TIPS]
+        guild_members = state.extra.get("guild_members", {})
+        member = guild_members.get(discord_id)
+        return member.display_name if member else f"User {discord_id}"
+
     def build_embed(self) -> discord.Embed:
         """Build embed for current tab and page."""
         state = self._tab_states[self.current_tab]
@@ -338,6 +379,8 @@ class UnifiedLeaderboardView(discord.ui.View):
             return self._build_glicko_embed(state)
         elif self.current_tab == LeaderboardTab.OPENSKILL:
             return self._build_openskill_embed(state)
+        elif self.current_tab == LeaderboardTab.TIPS:
+            return self._build_tips_embed(state)
 
         # Fallback
         return discord.Embed(title="Leaderboard", description="Unknown tab")
@@ -615,6 +658,67 @@ class UnifiedLeaderboardView(discord.ui.View):
 
         return embed
 
+    def _build_tips_embed(self, state: TabState) -> discord.Embed:
+        """Build Tips tab embed."""
+        embed = discord.Embed(
+            title="LEADERBOARD > Tips",
+            description="Jopacoin tipping rankings",
+            color=0xE91E63,  # Pink color for generosity theme
+        )
+
+        if not state.data:
+            embed.description = "Tip tracking service is not available."
+            return embed
+
+        top_senders = state.data.get("top_senders", [])
+        top_receivers = state.data.get("top_receivers", [])
+        total_volume = state.data.get("total_volume", {})
+
+        if not top_senders and not top_receivers:
+            embed.description = "No tips yet! Use `/tip` to spread some jopacoin love."
+            return embed
+
+        start = state.current_page * MULTI_SECTION_PAGE_SIZE
+        end = start + MULTI_SECTION_PAGE_SIZE
+
+        # Most Generous (top senders)
+        if top_senders:
+            page_entries = top_senders[start:end]
+            if page_entries:
+                lines = []
+                for i, entry in enumerate(page_entries, start + 1):
+                    name = self._get_name_for_tips(entry["discord_id"])
+                    lines.append(
+                        f"{i}. **{name}** {entry['total_amount']} {JOPACOIN_EMOTE} ({entry['tip_count']} tips)"
+                    )
+                embed.add_field(name="💝 Most Generous", value="\n".join(lines), inline=False)
+
+        # Fan Favorites (top receivers)
+        if top_receivers:
+            page_entries = top_receivers[start:end]
+            if page_entries:
+                lines = []
+                for i, entry in enumerate(page_entries, start + 1):
+                    name = self._get_name_for_tips(entry["discord_id"])
+                    lines.append(
+                        f"{i}. **{name}** {entry['total_amount']} {JOPACOIN_EMOTE} ({entry['tip_count']} tips)"
+                    )
+                embed.add_field(name="⭐ Fan Favorites", value="\n".join(lines), inline=False)
+
+        # Server Stats
+        if total_volume:
+            stats_lines = [
+                f"**Total Tips:** {total_volume.get('total_transactions', 0)}",
+                f"**Total Tipped:** {total_volume.get('total_amount', 0)} {JOPACOIN_EMOTE}",
+                f"**Fees Collected:** {total_volume.get('total_fees', 0)} {JOPACOIN_EMOTE}",
+            ]
+            embed.add_field(name="📊 Server Stats", value="\n".join(stats_lines), inline=False)
+
+        # Footer
+        embed.set_footer(text=f"Page {state.current_page + 1}/{state.max_page + 1}")
+
+        return embed
+
     async def _handle_tab_switch(self, interaction: discord.Interaction, tab: LeaderboardTab) -> None:
         """Handle tab button click with rate limiting and concurrency control."""
         # Rate limiting: 1.5s cooldown between tab switches per user
@@ -681,7 +785,11 @@ class UnifiedLeaderboardView(discord.ui.View):
     async def openskill_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._handle_tab_switch(interaction, LeaderboardTab.OPENSKILL)
 
-    # Row 1: Pagination buttons
+    # Row 1: Tips tab and pagination buttons
+    @discord.ui.button(label="Tips", style=discord.ButtonStyle.secondary, row=1)
+    async def tips_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._handle_tab_switch(interaction, LeaderboardTab.TIPS)
+
     @discord.ui.button(label=" Previous", style=discord.ButtonStyle.secondary, row=1)
     async def prev_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._handle_pagination(interaction, -1)
@@ -825,6 +933,7 @@ class InfoCommands(commands.Cog):
                 "`/leaderboard type:openskill` - OpenSkill (fantasy-weighted) rankings\n"
                 "`/leaderboard type:gambling` - Gambling rankings & Hall of Degen\n"
                 "`/leaderboard type:predictions` - Prediction market rankings\n"
+                "`/leaderboard type:tips` - Tipping rankings (generous/popular)\n"
                 "`/calibration` - Rating system health & calibration stats"
             ),
             inline=False,
@@ -861,6 +970,7 @@ class InfoCommands(commands.Cog):
         app_commands.Choice(name="OpenSkill Rating", value="openskill"),
         app_commands.Choice(name="Gambling", value="gambling"),
         app_commands.Choice(name="Predictions", value="predictions"),
+        app_commands.Choice(name="Tips", value="tips"),
     ])
     async def leaderboard(
         self,
@@ -908,6 +1018,7 @@ class InfoCommands(commands.Cog):
                 "predictions": LeaderboardTab.PREDICTIONS,
                 "glicko": LeaderboardTab.GLICKO,
                 "openskill": LeaderboardTab.OPENSKILL,
+                "tips": LeaderboardTab.TIPS,
             }
             initial_tab = tab_mapping.get(leaderboard_type, LeaderboardTab.BALANCE)
 

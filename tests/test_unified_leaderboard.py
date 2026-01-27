@@ -94,10 +94,11 @@ class TestLeaderboardTab:
         assert LeaderboardTab.PREDICTIONS.value == "predictions"
         assert LeaderboardTab.GLICKO.value == "glicko"
         assert LeaderboardTab.OPENSKILL.value == "openskill"
+        assert LeaderboardTab.TIPS.value == "tips"
 
     def test_tab_count(self):
-        """Test we have exactly 5 tabs."""
-        assert len(LeaderboardTab) == 5
+        """Test we have exactly 6 tabs."""
+        assert len(LeaderboardTab) == 6
 
 
 class TestTabState:
@@ -160,7 +161,7 @@ class TestUnifiedLeaderboardViewInitialization:
             guild_id=12345,
             interaction=mock_interaction,
         )
-        assert len(view._tab_states) == 5
+        assert len(view._tab_states) == 6
         for tab in LeaderboardTab:
             assert tab in view._tab_states
             assert isinstance(view._tab_states[tab], TabState)
@@ -461,3 +462,102 @@ class TestDeepLinking:
             initial_tab=LeaderboardTab.OPENSKILL,
         )
         assert view.current_tab == LeaderboardTab.OPENSKILL
+
+    @pytest.mark.asyncio
+    async def test_tips_deep_link(self, mock_cog, mock_interaction):
+        """Test initializing with tips tab."""
+        view = UnifiedLeaderboardView(
+            cog=mock_cog,
+            guild_id=12345,
+            interaction=mock_interaction,
+            initial_tab=LeaderboardTab.TIPS,
+        )
+        assert view.current_tab == LeaderboardTab.TIPS
+
+
+class TestTipsTab:
+    """Tests for the Tips leaderboard tab."""
+
+    @pytest.fixture
+    def mock_cog_with_tips(self, mock_cog):
+        """Create a mock cog with tip_repository."""
+        mock_tip_repo = MagicMock()
+        mock_tip_repo.get_top_senders.return_value = []
+        mock_tip_repo.get_top_receivers.return_value = []
+        mock_tip_repo.get_total_tip_volume.return_value = {
+            "total_amount": 0,
+            "total_fees": 0,
+            "total_transactions": 0,
+        }
+        mock_cog.bot = MagicMock()
+        mock_cog.bot.tip_repository = mock_tip_repo
+        return mock_cog
+
+    @pytest.mark.asyncio
+    async def test_build_tips_embed_empty(self, mock_cog_with_tips, mock_interaction):
+        """Test Tips embed with no data."""
+        view = UnifiedLeaderboardView(
+            cog=mock_cog_with_tips,
+            guild_id=12345,
+            interaction=mock_interaction,
+            initial_tab=LeaderboardTab.TIPS,
+        )
+
+        await view._load_tab_data(LeaderboardTab.TIPS)
+        embed = view.build_embed()
+
+        assert "Tips" in embed.title
+        assert "No tips yet" in embed.description
+
+    @pytest.mark.asyncio
+    async def test_build_tips_embed_with_data(self, mock_cog_with_tips, mock_interaction):
+        """Test Tips embed with data."""
+        # Set up mock data
+        mock_cog_with_tips.bot.tip_repository.get_top_senders.return_value = [
+            {"discord_id": 123, "total_amount": 100, "tip_count": 5},
+            {"discord_id": 456, "total_amount": 50, "tip_count": 3},
+        ]
+        mock_cog_with_tips.bot.tip_repository.get_top_receivers.return_value = [
+            {"discord_id": 789, "total_amount": 80, "tip_count": 4},
+        ]
+        mock_cog_with_tips.bot.tip_repository.get_total_tip_volume.return_value = {
+            "total_amount": 150,
+            "total_fees": 15,
+            "total_transactions": 8,
+        }
+
+        view = UnifiedLeaderboardView(
+            cog=mock_cog_with_tips,
+            guild_id=12345,
+            interaction=mock_interaction,
+            initial_tab=LeaderboardTab.TIPS,
+        )
+
+        await view._load_tab_data(LeaderboardTab.TIPS)
+        embed = view.build_embed()
+
+        assert "Tips" in embed.title
+        # Check for expected fields
+        field_names = [field.name for field in embed.fields]
+        assert "💝 Most Generous" in field_names
+        assert "⭐ Fan Favorites" in field_names
+        assert "📊 Server Stats" in field_names
+
+    @pytest.mark.asyncio
+    async def test_tips_tab_no_repository(self, mock_cog, mock_interaction):
+        """Test Tips tab when tip_repository is not available."""
+        mock_cog.bot = MagicMock()
+        mock_cog.bot.tip_repository = None
+
+        view = UnifiedLeaderboardView(
+            cog=mock_cog,
+            guild_id=12345,
+            interaction=mock_interaction,
+            initial_tab=LeaderboardTab.TIPS,
+        )
+
+        await view._load_tab_data(LeaderboardTab.TIPS)
+        embed = view.build_embed()
+
+        assert "Tips" in embed.title
+        assert "not available" in embed.description
