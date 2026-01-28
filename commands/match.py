@@ -617,7 +617,9 @@ class MatchCommands(commands.Cog):
         await interaction.followup.send("✅ Teams shuffled!", ephemeral=True)
 
         # Save the shuffle message link so pending-match prompts can point to it
+        # Capture origin_channel_id before reset_lobby clears it (needed for betting reminders)
         try:
+            origin_channel_id = self.lobby_service.get_origin_channel_id()
             if message:
                 jump_url = message.jump_url if hasattr(message, "jump_url") else None
                 self.match_service.set_shuffle_message_info(
@@ -625,6 +627,7 @@ class MatchCommands(commands.Cog):
                     message_id=message.id,
                     channel_id=message.channel.id if message.channel else None,
                     jump_url=jump_url,
+                    origin_channel_id=origin_channel_id,
                 )
         except Exception as exc:
             logger.warning(f"Failed to store shuffle message URL: {exc}", exc_info=True)
