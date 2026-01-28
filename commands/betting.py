@@ -282,10 +282,10 @@ class BettingCommands(commands.Cog):
         else:
             return
 
-        # Post to origin channel (where /lobby was run, e.g., dota-mm) instead of lobby channel
+        # Post to origin channel (stored in shuffle message info, since reset_lobby clears it)
         try:
-            lobby_service = getattr(self.bot, "lobby_service", None)
-            origin_channel_id = lobby_service.get_origin_channel_id() if lobby_service else None
+            # Get origin_channel_id from shuffle message info (lobby_service's is cleared by reset_lobby)
+            origin_channel_id = message_info.get("origin_channel_id") if message_info else None
             target_channel_id = origin_channel_id if origin_channel_id else channel_id
 
             if target_channel_id:
