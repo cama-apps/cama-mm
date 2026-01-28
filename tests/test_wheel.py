@@ -126,10 +126,11 @@ async def test_wheel_cooldown_expired_allows_spin():
 
     commands = BettingCommands(bot, betting_service, match_service, player_service)
 
-    # Mock random to get a predictable result (index 3 = "5")
+    # Mock random to get a predictable result (index 3 = "5") and disable explosion
     with patch("commands.betting.random.randint", return_value=3):
-        with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
-            await commands.gamba.callback(commands, interaction)
+        with patch("commands.betting.random.random", return_value=1.0):  # No explosion
+            with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
+                await commands.gamba.callback(commands, interaction)
 
     # Should defer then send via followup
     interaction.response.defer.assert_awaited_once()
@@ -178,10 +179,11 @@ async def test_wheel_positive_applies_garnishment():
 
     commands = BettingCommands(bot, betting_service, match_service, player_service)
 
-    # Mock random to get a positive result (index 13 = "30")
+    # Mock random to get a positive result (index 13 = "30") and disable explosion
     with patch("commands.betting.random.randint", return_value=13):
-        with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
-            await commands.gamba.callback(commands, interaction)
+        with patch("commands.betting.random.random", return_value=1.0):  # No explosion
+            with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
+                await commands.gamba.callback(commands, interaction)
 
     # Should call garnishment service
     garnishment_service.add_income.assert_called_once_with(1002, 30)
@@ -222,10 +224,11 @@ async def test_wheel_positive_no_debt_adds_directly():
 
     commands = BettingCommands(bot, betting_service, match_service, player_service)
 
-    # Mock random to get a positive result (index 3 = "5")
+    # Mock random to get a positive result (index 3 = "5") and disable explosion
     with patch("commands.betting.random.randint", return_value=3):
-        with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
-            await commands.gamba.callback(commands, interaction)
+        with patch("commands.betting.random.random", return_value=1.0):  # No explosion
+            with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
+                await commands.gamba.callback(commands, interaction)
 
     # Should add balance directly
     player_service.player_repo.add_balance.assert_called_once_with(1003, 5)
@@ -263,10 +266,11 @@ async def test_wheel_bankrupt_subtracts_balance():
 
     commands = BettingCommands(bot, betting_service, match_service, player_service)
 
-    # Mock random to get Bankrupt (index 0)
+    # Mock random to get Bankrupt (index 0) and disable explosion
     with patch("commands.betting.random.randint", return_value=0):
-        with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
-            await commands.gamba.callback(commands, interaction)
+        with patch("commands.betting.random.random", return_value=1.0):  # No explosion
+            with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
+                await commands.gamba.callback(commands, interaction)
 
     # Should subtract the bankrupt value (negative)
     bankrupt_value = WHEEL_WEDGES[0][1]
@@ -308,10 +312,11 @@ async def test_wheel_bankrupt_ignores_max_debt():
 
     commands = BettingCommands(bot, betting_service, match_service, player_service)
 
-    # Mock random to get Bankrupt (index 0)
+    # Mock random to get Bankrupt (index 0) and disable explosion
     with patch("commands.betting.random.randint", return_value=0):
-        with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
-            await commands.gamba.callback(commands, interaction)
+        with patch("commands.betting.random.random", return_value=1.0):  # No explosion
+            with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
+                await commands.gamba.callback(commands, interaction)
 
     # Should subtract bankrupt value regardless of MAX_DEBT
     player_service.player_repo.add_balance.assert_called_once_with(1005, bankrupt_value)
@@ -349,10 +354,11 @@ async def test_wheel_lose_turn_no_change():
 
     commands = BettingCommands(bot, betting_service, match_service, player_service)
 
-    # Mock random to get "Lose a Turn" (index 2)
+    # Mock random to get "Lose a Turn" (index 2) and disable explosion
     with patch("commands.betting.random.randint", return_value=2):
-        with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
-            await commands.gamba.callback(commands, interaction)
+        with patch("commands.betting.random.random", return_value=1.0):  # No explosion
+            with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
+                await commands.gamba.callback(commands, interaction)
 
     # Should NOT call add_balance at all
     player_service.player_repo.add_balance.assert_not_called()
@@ -390,10 +396,11 @@ async def test_wheel_jackpot_result():
 
     commands = BettingCommands(bot, betting_service, match_service, player_service)
 
-    # Mock random to get Jackpot (index 22)
+    # Mock random to get Jackpot (index 22) and disable explosion
     with patch("commands.betting.random.randint", return_value=22):
-        with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
-            await commands.gamba.callback(commands, interaction)
+        with patch("commands.betting.random.random", return_value=1.0):  # No explosion
+            with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
+                await commands.gamba.callback(commands, interaction)
 
     # Should add 100
     player_service.player_repo.add_balance.assert_called_once_with(1007, 100)
@@ -474,8 +481,9 @@ async def test_wheel_animation_uses_gif():
     commands = BettingCommands(bot, betting_service, match_service, player_service)
 
     with patch("commands.betting.random.randint", return_value=5):
-        with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
-            await commands.gamba.callback(commands, interaction)
+        with patch("commands.betting.random.random", return_value=1.0):  # No explosion
+            with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+                await commands.gamba.callback(commands, interaction)
 
     # GIF animation: 1 sleep for animation + 1 sleep before result
     assert mock_sleep.await_count == 2
@@ -519,8 +527,9 @@ async def test_wheel_updates_cooldown_in_database():
     before_time = int(time.time())
 
     with patch("commands.betting.random.randint", return_value=5):
-        with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
-            await commands.gamba.callback(commands, interaction)
+        with patch("commands.betting.random.random", return_value=1.0):  # No explosion
+            with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
+                await commands.gamba.callback(commands, interaction)
 
     after_time = int(time.time())
 
@@ -566,8 +575,9 @@ async def test_wheel_admin_bypasses_cooldown():
     # Mock admin check to return True
     with patch("commands.betting.has_admin_permission", return_value=True):
         with patch("commands.betting.random.randint", return_value=5):
-            with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
-                await commands.gamba.callback(commands, interaction)
+            with patch("commands.betting.random.random", return_value=1.0):  # No explosion
+                with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
+                    await commands.gamba.callback(commands, interaction)
 
     # Admin should be able to spin despite cooldown - file attachment means spin happened
     call_kwargs = interaction.followup.send.call_args.kwargs

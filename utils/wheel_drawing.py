@@ -2,6 +2,7 @@
 
 import io
 import math
+import random
 from PIL import Image, ImageDraw, ImageFont
 
 from config import WHEEL_TARGET_EV
@@ -745,6 +746,278 @@ def create_wheel_gif(target_idx: int, size: int = 400) -> io.BytesIO:
         append_images=frames[1:],
         duration=durations,
         loop=1,  # Play once, hold on final frame
+    )
+    buffer.seek(0)
+    return buffer
+
+
+def create_explosion_gif(size: int = 400) -> io.BytesIO:
+    """
+    Create an animated GIF of the wheel exploding.
+
+    The wheel spins briefly, then EXPLODES with particles, fire, and smoke.
+    A "67 JC" appears in the aftermath with an apology.
+
+    Args:
+        size: Image size in pixels
+
+    Returns:
+        BytesIO buffer containing the GIF data
+    """
+    frames = []
+    durations = []
+
+    center = size // 2
+    radius = size // 2 - 50
+
+    # Phase 1: Normal spin for ~1 second (builds tension)
+    spin_frames = 20
+    for i in range(spin_frames):
+        rotation = i * 25  # Fast spin
+        frame = create_wheel_frame_for_gif(size, rotation, selected_idx=None)
+        frame_p = frame.convert("RGB").convert("P", palette=Image.ADAPTIVE, colors=256)
+        frames.append(frame_p)
+        durations.append(50)
+
+    # Phase 2: Wheel starts shaking/glitching (something's wrong...)
+    shake_frames = 15
+    base_rotation = spin_frames * 25
+    for i in range(shake_frames):
+        # Increasingly violent shaking
+        shake_intensity = (i + 1) * 3
+        shake_x = random.randint(-shake_intensity, shake_intensity)
+        shake_y = random.randint(-shake_intensity, shake_intensity)
+
+        frame = create_wheel_frame_for_gif(size, base_rotation + random.randint(-5, 5))
+
+        # Apply shake by creating offset composite
+        shaken = Image.new("RGBA", (size, size), (30, 30, 35, 255))
+        shaken.paste(frame, (shake_x, shake_y))
+
+        # Add warning red tint that intensifies
+        red_overlay = Image.new("RGBA", (size, size), (255, 0, 0, int(20 + i * 8)))
+        shaken = Image.alpha_composite(shaken.convert("RGBA"), red_overlay)
+
+        frame_p = shaken.convert("RGB").convert("P", palette=Image.ADAPTIVE, colors=256)
+        frames.append(frame_p)
+        durations.append(60 + i * 10)  # Slowing down before explosion
+
+    # Phase 3: THE EXPLOSION
+    explosion_frames = 25
+
+    # Pre-generate explosion particles
+    num_particles = 80
+    particles = []
+    for _ in range(num_particles):
+        angle = random.uniform(0, 2 * math.pi)
+        speed = random.uniform(3, 15)
+        particle = {
+            "x": center,
+            "y": center,
+            "vx": math.cos(angle) * speed,
+            "vy": math.sin(angle) * speed,
+            "size": random.randint(4, 20),
+            "color": random.choice([
+                (255, 100, 0),    # Orange fire
+                (255, 200, 0),    # Yellow fire
+                (255, 50, 0),     # Red fire
+                (200, 200, 200),  # Smoke/debris
+                (100, 100, 100),  # Dark smoke
+                (255, 255, 100),  # Bright spark
+            ]),
+            "decay": random.uniform(0.85, 0.95),
+        }
+        particles.append(particle)
+
+    # Generate wheel fragments
+    num_fragments = 12
+    fragments = []
+    for i in range(num_fragments):
+        angle = (i / num_fragments) * 2 * math.pi + random.uniform(-0.2, 0.2)
+        speed = random.uniform(5, 12)
+        fragments.append({
+            "x": center,
+            "y": center,
+            "vx": math.cos(angle) * speed,
+            "vy": math.sin(angle) * speed,
+            "rotation": random.uniform(0, 360),
+            "rot_speed": random.uniform(-20, 20),
+            "size": random.randint(20, 50),
+            "color": random.choice(["#e74c3c", "#f1c40f", "#3498db", "#2ecc71", "#9b59b6"]),
+        })
+
+    for frame_idx in range(explosion_frames):
+        img = Image.new("RGBA", (size, size), (30, 30, 35, 255))
+        draw = ImageDraw.Draw(img)
+
+        # Initial flash (first few frames)
+        if frame_idx < 3:
+            flash_alpha = 255 - frame_idx * 80
+            flash = Image.new("RGBA", (size, size), (255, 255, 200, flash_alpha))
+            img = Image.alpha_composite(img, flash)
+            draw = ImageDraw.Draw(img)
+
+        # Draw expanding shockwave rings
+        if frame_idx < 15:
+            for ring in range(3):
+                ring_radius = (frame_idx + 1) * 15 + ring * 30
+                ring_alpha = max(0, 200 - frame_idx * 15 - ring * 40)
+                if ring_alpha > 0 and ring_radius < size:
+                    draw.ellipse(
+                        [center - ring_radius, center - ring_radius,
+                         center + ring_radius, center + ring_radius],
+                        outline=(255, 200, 100, ring_alpha),
+                        width=4 - ring,
+                    )
+
+        # Update and draw fragments
+        for frag in fragments:
+            frag["x"] += frag["vx"]
+            frag["y"] += frag["vy"]
+            frag["vy"] += 0.3  # Gravity
+            frag["rotation"] += frag["rot_speed"]
+            frag["vx"] *= 0.97  # Air resistance
+
+            # Draw fragment as a simple wedge shape
+            fx, fy = int(frag["x"]), int(frag["y"])
+            fsize = frag["size"]
+            if 0 <= fx < size and 0 <= fy < size:
+                # Draw a triangular fragment
+                rot_rad = math.radians(frag["rotation"])
+                points = []
+                for j in range(3):
+                    point_angle = rot_rad + j * (2 * math.pi / 3)
+                    px = fx + fsize * math.cos(point_angle)
+                    py = fy + fsize * math.sin(point_angle)
+                    points.append((px, py))
+                try:
+                    rgb = hex_to_rgb(frag["color"])
+                    alpha = max(0, 255 - frame_idx * 10)
+                    draw.polygon(points, fill=(*rgb, alpha))
+                except Exception:
+                    pass
+
+        # Update and draw particles
+        for p in particles:
+            p["x"] += p["vx"]
+            p["y"] += p["vy"]
+            p["vy"] += 0.2  # Gravity
+            p["vx"] *= p["decay"]
+            p["vy"] *= p["decay"]
+            p["size"] = max(1, p["size"] * 0.95)
+
+            px, py = int(p["x"]), int(p["y"])
+            psize = int(p["size"])
+            if 0 <= px < size and 0 <= py < size and psize > 0:
+                alpha = max(0, 255 - frame_idx * 8)
+                color = (*p["color"], alpha)
+                draw.ellipse(
+                    [px - psize, py - psize, px + psize, py + psize],
+                    fill=color,
+                )
+
+        # Draw smoke clouds (appear after initial explosion)
+        if frame_idx > 5:
+            for smoke_idx in range(5):
+                smoke_x = center + random.randint(-80, 80)
+                smoke_y = center + random.randint(-80, 40) - frame_idx * 2
+                smoke_size = 30 + frame_idx * 2 + smoke_idx * 10
+                smoke_alpha = max(0, 100 - frame_idx * 3)
+                if smoke_alpha > 0:
+                    draw.ellipse(
+                        [smoke_x - smoke_size, smoke_y - smoke_size,
+                         smoke_x + smoke_size, smoke_y + smoke_size],
+                        fill=(80, 80, 80, smoke_alpha),
+                    )
+
+        frame_p = img.convert("RGB").convert("P", palette=Image.ADAPTIVE, colors=256)
+        frames.append(frame_p)
+        durations.append(60 if frame_idx < 5 else 80)
+
+    # Phase 4: Aftermath with "67 JC" and smoke clearing
+    aftermath_frames = 20
+    try:
+        font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+        big_font = ImageFont.truetype(font_path, 48)
+        small_font = ImageFont.truetype(font_path, 20)
+    except OSError:
+        big_font = ImageFont.load_default()
+        small_font = big_font
+
+    for frame_idx in range(aftermath_frames):
+        img = Image.new("RGBA", (size, size), (30, 30, 35, 255))
+        draw = ImageDraw.Draw(img)
+
+        # Fading smoke
+        smoke_alpha = max(0, 60 - frame_idx * 3)
+        if smoke_alpha > 0:
+            for _ in range(8):
+                sx = center + random.randint(-100, 100)
+                sy = center + random.randint(-60, 60) - frame_idx * 3
+                ssize = random.randint(40, 80)
+                draw.ellipse(
+                    [sx - ssize, sy - ssize, sx + ssize, sy + ssize],
+                    fill=(60, 60, 60, smoke_alpha),
+                )
+
+        # Scattered debris on ground
+        for _ in range(15):
+            dx = center + random.randint(-150, 150)
+            dy = center + random.randint(50, 120)
+            dsize = random.randint(3, 8)
+            draw.ellipse(
+                [dx - dsize, dy - dsize, dx + dsize, dy + dsize],
+                fill=(100, 100, 100, 150),
+            )
+
+        # Draw the compensation message
+        text_alpha = min(255, frame_idx * 25)
+
+        # "67 JC" in gold
+        jc_text = "+67 JC"
+        bbox = draw.textbbox((0, 0), jc_text, font=big_font)
+        text_w = bbox[2] - bbox[0]
+        jc_x = center - text_w // 2
+        jc_y = center - 50
+
+        # Glow effect
+        for glow in range(3, 0, -1):
+            glow_alpha = min(text_alpha, 50)
+            draw.text(
+                (jc_x - glow, jc_y - glow), jc_text,
+                fill=(255, 215, 0, glow_alpha), font=big_font
+            )
+            draw.text(
+                (jc_x + glow, jc_y + glow), jc_text,
+                fill=(255, 215, 0, glow_alpha), font=big_font
+            )
+
+        # Main text
+        draw.text((jc_x + 2, jc_y + 2), jc_text, fill=(0, 0, 0, text_alpha), font=big_font)
+        draw.text((jc_x, jc_y), jc_text, fill=(255, 215, 0, text_alpha), font=big_font)
+
+        # Apology text
+        sorry_text = "Sorry for the inconvenience!"
+        bbox2 = draw.textbbox((0, 0), sorry_text, font=small_font)
+        sorry_w = bbox2[2] - bbox2[0]
+        sorry_x = center - sorry_w // 2
+        sorry_y = center + 20
+
+        draw.text((sorry_x + 1, sorry_y + 1), sorry_text, fill=(0, 0, 0, text_alpha), font=small_font)
+        draw.text((sorry_x, sorry_y), sorry_text, fill=(255, 255, 255, text_alpha), font=small_font)
+
+        frame_p = img.convert("RGB").convert("P", palette=Image.ADAPTIVE, colors=256)
+        frames.append(frame_p)
+        durations.append(100 if frame_idx < aftermath_frames - 1 else 60000)  # Hold final
+
+    buffer = io.BytesIO()
+    frames[0].save(
+        buffer,
+        format="GIF",
+        save_all=True,
+        append_images=frames[1:],
+        duration=durations,
+        loop=1,
     )
     buffer.seek(0)
     return buffer

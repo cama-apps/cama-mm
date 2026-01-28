@@ -47,8 +47,13 @@ from utils.rate_limiter import GLOBAL_RATE_LIMITER
 from utils.wheel_drawing import (
     WHEEL_WEDGES,
     create_wheel_gif,
+    create_explosion_gif,
     get_wedge_at_index,
 )
+
+# 1% chance for the wheel to explode
+WHEEL_EXPLOSION_CHANCE = 0.01
+WHEEL_EXPLOSION_REWARD = 67
 
 logger = logging.getLogger("cama_bot.commands.betting")
 
@@ -310,6 +315,11 @@ class BettingCommands(commands.Cog):
         buffer = create_wheel_gif(target_idx=target_idx, size=400)
         return discord.File(buffer, filename="wheel.gif")
 
+    def _create_explosion_gif_file(self) -> discord.File:
+        """Create an explosion animation and return as discord.File."""
+        buffer = create_explosion_gif(size=400)
+        return discord.File(buffer, filename="explosion.gif")
+
     def _wheel_result_embed(
         self, result: tuple, new_balance: int, garnished: int, next_spin_time: int
     ) -> discord.Embed:
@@ -367,6 +377,45 @@ class BettingCommands(commands.Cog):
             value=f"<t:{next_spin_time}:R>",
             inline=False,
         )
+
+        return embed
+
+    def _wheel_explosion_embed(
+        self, new_balance: int, garnished: int, next_spin_time: int
+    ) -> discord.Embed:
+        """Build the result embed when the wheel explodes."""
+        title = "💥 THE WHEEL EXPLODED! 💥"
+        color = discord.Color.orange()
+
+        description = (
+            f"**KABOOM!**\n\n"
+            f"The wheel has exploded! Fortunately, no one was hurt.\n\n"
+            f"We sincerely apologize for the inconvenience. "
+            f"As compensation, you've been awarded **{WHEEL_EXPLOSION_REWARD}** {JOPACOIN_EMOTE}."
+        )
+
+        if garnished > 0:
+            description += f"\n\n*{garnished} {JOPACOIN_EMOTE} went to debt repayment.*"
+
+        embed = discord.Embed(
+            title=title,
+            description=description,
+            color=color,
+        )
+
+        embed.add_field(
+            name="New Balance",
+            value=f"**{new_balance}** {JOPACOIN_EMOTE}",
+            inline=False,
+        )
+
+        embed.add_field(
+            name="Next Spin",
+            value=f"<t:{next_spin_time}:R>",
+            inline=False,
+        )
+
+        embed.set_footer(text="Our engineers are working on a replacement wheel.")
 
         return embed
 
@@ -880,7 +929,51 @@ class BettingCommands(commands.Cog):
             # Admin bypass - still set the timestamp for consistency
             self.player_service.player_repo.set_last_wheel_spin(user_id, int(now))
 
-        # Pre-determine the result
+        # Check for 1% explosion chance (overrides normal result)
+        is_explosion = random.random() < WHEEL_EXPLOSION_CHANCE
+        guild_id = interaction.guild.id if interaction.guild else None
+
+        if is_explosion:
+            # THE WHEEL EXPLODES!
+            await interaction.response.defer()
+
+            # Generate explosion animation
+            gif_file = self._create_explosion_gif_file()
+            message = await interaction.followup.send(file=gif_file, wait=True)
+
+            # Wait for explosion animation (~8 seconds)
+            # 20 spin frames * 50ms + 15 shake frames * ~100ms + 25 explosion * 70ms + 20 aftermath * 100ms
+            await asyncio.sleep(8.0)
+
+            # Apply explosion reward (67 JC)
+            garnished_amount = 0
+            new_balance = self.player_service.get_balance(user_id)
+
+            garnishment_service = getattr(self.bot, "garnishment_service", None)
+            if garnishment_service and new_balance < 0:
+                result = garnishment_service.add_income(user_id, WHEEL_EXPLOSION_REWARD)
+                garnished_amount = result.get("garnished", 0)
+                new_balance = result.get("new_balance", new_balance + WHEEL_EXPLOSION_REWARD)
+            else:
+                self.player_service.player_repo.add_balance(user_id, WHEEL_EXPLOSION_REWARD)
+                new_balance = self.player_service.get_balance(user_id)
+
+            next_spin_time = int(now) + WHEEL_COOLDOWN_SECONDS
+
+            # Log the explosion as a special result
+            self.player_service.player_repo.log_wheel_spin(
+                discord_id=user_id,
+                guild_id=guild_id,
+                result=WHEEL_EXPLOSION_REWARD,
+                spin_time=int(now),
+            )
+
+            await asyncio.sleep(0.5)
+            result_embed = self._wheel_explosion_embed(new_balance, garnished_amount, next_spin_time)
+            await message.edit(embed=result_embed)
+            return
+
+        # Pre-determine the result (normal spin)
         result_idx = random.randint(0, len(WHEEL_WEDGES) - 1)
         result_wedge = get_wedge_at_index(result_idx)
 
@@ -903,7 +996,6 @@ class BettingCommands(commands.Cog):
         await asyncio.sleep(23.0)
 
         # Apply the result
-        guild_id = interaction.guild.id if interaction.guild else None
         result_value = result_wedge[1]
         garnished_amount = 0
         new_balance = self.player_service.get_balance(user_id)
