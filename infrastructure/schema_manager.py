@@ -211,6 +211,7 @@ class SchemaManager:
             ("add_last_wheel_spin_to_players", self._migration_add_last_wheel_spin_to_players),
             ("create_wheel_spins_table", self._migration_create_wheel_spins_table),
             ("add_balancing_rating_system_column", self._migration_add_balancing_rating_system_column),
+            ("create_match_corrections_table", self._migration_create_match_corrections_table),
         ]
 
     # --- Migrations ---
@@ -928,4 +929,23 @@ class SchemaManager:
         """Track which rating system was used for team balancing (experiment)."""
         self._add_column_if_not_exists(
             cursor, "matches", "balancing_rating_system", "TEXT DEFAULT 'glicko'"
+        )
+
+    def _migration_create_match_corrections_table(self, cursor) -> None:
+        """Create table for tracking match result corrections."""
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS match_corrections (
+                correction_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                match_id INTEGER NOT NULL,
+                old_winning_team INTEGER NOT NULL,
+                new_winning_team INTEGER NOT NULL,
+                corrected_by INTEGER NOT NULL,
+                corrected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (match_id) REFERENCES matches(match_id)
+            )
+            """
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_match_corrections_match_id ON match_corrections(match_id)"
         )

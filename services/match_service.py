@@ -1217,3 +1217,313 @@ class MatchService:
             "team1_avg_ordinal": team1_avg_ordinal,
             "team2_avg_ordinal": team2_avg_ordinal,
         }
+
+    def correct_match_result(
+        self,
+        match_id: int,
+        new_winning_team: str,
+        guild_id: int | None = None,
+        corrected_by: int | None = None,
+    ) -> dict:
+        """
+        Correct an incorrectly recorded match result.
+
+        This reverses all effects of the original recording and re-applies
+        them with the correct winning team. Effects reversed/reapplied:
+        - Win/loss counters
+        - Glicko-2 ratings (restored from rating_history snapshots)
+        - OpenSkill ratings (restored from rating_history snapshots)
+        - Bet payouts (winners become losers and vice versa)
+        - Pairings statistics
+
+        Note: Loan repayments are NOT reversed (they are deferred payments,
+        not match-dependent rewards).
+
+        Args:
+            match_id: The match ID to correct
+            new_winning_team: 'radiant' or 'dire'
+            guild_id: Guild ID (for bet operations)
+            corrected_by: Discord ID of the admin making the correction
+
+        Returns:
+            Dict with correction details and summary
+
+        Raises:
+            ValueError: If match not found, result unchanged, or missing data
+        """
+        if new_winning_team not in ("radiant", "dire"):
+            raise ValueError("new_winning_team must be 'radiant' or 'dire'")
+
+        # 1. Load match data
+        match = self.match_repo.get_match(match_id)
+        if not match:
+            raise ValueError(f"Match {match_id} not found")
+
+        old_winning_team_num = match.get("winning_team")  # 1 = Radiant, 2 = Dire
+        new_winning_team_num = 1 if new_winning_team == "radiant" else 2
+
+        if old_winning_team_num == new_winning_team_num:
+            raise ValueError(
+                f"Match {match_id} already has {new_winning_team} as winner"
+            )
+
+        old_winning_team = "radiant" if old_winning_team_num == 1 else "dire"
+
+        # 2. Get participant data
+        participants = self.match_repo.get_match_participants(match_id)
+        if not participants:
+            raise ValueError(f"No participants found for match {match_id}")
+
+        radiant_ids = [p["discord_id"] for p in participants if p.get("side") == "radiant"]
+        dire_ids = [p["discord_id"] for p in participants if p.get("side") == "dire"]
+
+        if len(radiant_ids) != 5 or len(dire_ids) != 5:
+            logger.warning(
+                f"Match {match_id} correction: unexpected team sizes "
+                f"radiant={len(radiant_ids)}, dire={len(dire_ids)}"
+            )
+
+        # Determine old/new winners and losers
+        old_winner_ids = radiant_ids if old_winning_team == "radiant" else dire_ids
+        old_loser_ids = dire_ids if old_winning_team == "radiant" else radiant_ids
+        new_winner_ids = radiant_ids if new_winning_team == "radiant" else dire_ids
+        new_loser_ids = dire_ids if new_winning_team == "radiant" else radiant_ids
+
+        # 3. Load rating history for restoration
+        rating_history = self.match_repo.get_full_rating_history_for_match(match_id)
+        if not rating_history:
+            raise ValueError(
+                f"No rating history found for match {match_id}. "
+                "Cannot correct matches without stored snapshots."
+            )
+
+        # 4. Reverse win/loss counters
+        # Old winners: wins-- | Old losers: losses--
+        # New winners: wins++ | New losers: losses++
+        # Since old winners become new losers and vice versa, we can just swap
+        with self.player_repo.connection() as conn:
+            cursor = conn.cursor()
+            # Decrement wins for old winners (they become losers)
+            for pid in old_winner_ids:
+                cursor.execute(
+                    "UPDATE players SET wins = wins - 1, losses = losses + 1 WHERE discord_id = ?",
+                    (pid,),
+                )
+            # Decrement losses for old losers (they become winners)
+            for pid in old_loser_ids:
+                cursor.execute(
+                    "UPDATE players SET losses = losses - 1, wins = wins + 1 WHERE discord_id = ?",
+                    (pid,),
+                )
+
+        # 5. Restore pre-match ratings from rating_history
+        glicko_updates = []
+        os_updates = []
+        for entry in rating_history:
+            pid = entry["discord_id"]
+            # Restore Glicko-2 from before values
+            if entry.get("rating_before") is not None:
+                glicko_updates.append((
+                    pid,
+                    entry["rating_before"],
+                    entry["rd_before"],
+                    entry["volatility_before"],
+                ))
+            # Restore OpenSkill from before values
+            if entry.get("os_mu_before") is not None:
+                os_updates.append((pid, entry["os_mu_before"], entry["os_sigma_before"]))
+
+        # 6. Recalculate ratings with correct winner
+        # Build Glicko players from restored ratings
+        radiant_glicko = []
+        dire_glicko = []
+        rating_by_id = {e["discord_id"]: e for e in rating_history}
+
+        for pid in radiant_ids:
+            entry = rating_by_id.get(pid)
+            if entry and entry.get("rating_before") is not None:
+                player = self.rating_system.create_player_from_rating(
+                    entry["rating_before"],
+                    entry["rd_before"],
+                    entry["volatility_before"],
+                )
+            else:
+                # Fallback to current rating
+                player, _ = self._load_glicko_player(pid)
+            radiant_glicko.append((player, pid))
+
+        for pid in dire_ids:
+            entry = rating_by_id.get(pid)
+            if entry and entry.get("rating_before") is not None:
+                player = self.rating_system.create_player_from_rating(
+                    entry["rating_before"],
+                    entry["rd_before"],
+                    entry["volatility_before"],
+                )
+            else:
+                player, _ = self._load_glicko_player(pid)
+            dire_glicko.append((player, pid))
+
+        # Update Glicko-2 with correct winner
+        if new_winning_team == "radiant":
+            team1_updated, team2_updated = self.rating_system.update_ratings_after_match(
+                radiant_glicko, dire_glicko, 1
+            )
+        else:
+            team1_updated, team2_updated = self.rating_system.update_ratings_after_match(
+                dire_glicko, radiant_glicko, 1
+            )
+
+        # Persist new Glicko ratings
+        new_glicko_updates = [
+            (pid, rating, rd, vol)
+            for rating, rd, vol, pid in team1_updated + team2_updated
+        ]
+        self.player_repo.update_glicko_ratings_bulk(new_glicko_updates)
+
+        # Update rating history with new values
+        glicko_by_id = {pid: (rating, rd, vol) for pid, rating, rd, vol in new_glicko_updates}
+        for entry in rating_history:
+            pid = entry["discord_id"]
+            new_won = pid in new_winner_ids
+            if pid in glicko_by_id:
+                new_rating, new_rd, new_vol = glicko_by_id[pid]
+                self.match_repo.update_rating_history_for_correction(
+                    match_id=match_id,
+                    discord_id=pid,
+                    new_rating=new_rating,
+                    new_rd=new_rd,
+                    new_volatility=new_vol,
+                    new_won=new_won,
+                )
+
+        # 7. Recalculate OpenSkill ratings with correct winner
+        if os_updates:
+            # Build OpenSkill data from restored ratings
+            os_rating_by_id = {pid: (mu, sigma) for pid, mu, sigma in os_updates}
+
+            radiant_os_data = [
+                (pid, *os_rating_by_id.get(pid, (None, None)))
+                for pid in radiant_ids
+            ]
+            dire_os_data = [
+                (pid, *os_rating_by_id.get(pid, (None, None)))
+                for pid in dire_ids
+            ]
+
+            os_results = self.openskill_system.update_ratings_equal_weight(
+                radiant_os_data, dire_os_data,
+                winning_team=new_winning_team_num
+            )
+
+            # Persist new OpenSkill ratings
+            new_os_updates = [(pid, mu, sigma) for pid, (mu, sigma) in os_results.items()]
+            self.player_repo.update_openskill_ratings_bulk(new_os_updates)
+
+            # Update rating history OpenSkill after values
+            for pid, (new_mu, new_sigma) in os_results.items():
+                self.match_repo.update_rating_history_for_correction(
+                    match_id=match_id,
+                    discord_id=pid,
+                    new_rating=glicko_by_id.get(pid, (0, 0, 0))[0],
+                    new_rd=glicko_by_id.get(pid, (0, 0, 0))[1],
+                    new_volatility=glicko_by_id.get(pid, (0, 0, 0))[2],
+                    new_won=pid in new_winner_ids,
+                    new_os_mu=new_mu,
+                    new_os_sigma=new_sigma,
+                )
+
+        # 8. Update match result in database
+        self.match_repo.update_match_result(match_id, new_winning_team_num)
+
+        # 9. Reverse and recalculate bet payouts
+        bet_correction_summary = {}
+        if self.betting_service and hasattr(self.betting_service, "bet_repo"):
+            bet_repo = self.betting_service.bet_repo
+            all_bets = bet_repo.get_settled_bets_for_match(match_id)
+
+            if all_bets:
+                # Identify old winners (bets that won under old result)
+                old_winning_bets = [
+                    b for b in all_bets
+                    if (old_winning_team == "radiant" and b["team_bet_on"] == "radiant")
+                    or (old_winning_team == "dire" and b["team_bet_on"] == "dire")
+                ]
+
+                # New winning bets
+                new_winning_bets = [
+                    b for b in all_bets
+                    if (new_winning_team == "radiant" and b["team_bet_on"] == "radiant")
+                    or (new_winning_team == "dire" and b["team_bet_on"] == "dire")
+                ]
+
+                # Reverse payouts from old winners
+                reversal_deltas = bet_repo.reverse_bet_payouts_for_correction(
+                    match_id, old_winning_bets
+                )
+
+                # Apply new payouts
+                betting_mode = "pool"  # Default to pool mode
+                new_deltas = bet_repo.apply_new_bet_payouts_for_correction(
+                    match_id, new_winning_bets, pool_mode=(betting_mode == "pool")
+                )
+
+                # Combine deltas and apply to player balances
+                combined_deltas: dict[int, int] = {}
+                for pid, delta in reversal_deltas.items():
+                    combined_deltas[pid] = combined_deltas.get(pid, 0) + delta
+                for pid, delta in new_deltas.items():
+                    combined_deltas[pid] = combined_deltas.get(pid, 0) + delta
+
+                if combined_deltas:
+                    self.player_repo.add_balance_many(combined_deltas)
+
+                bet_correction_summary = {
+                    "bets_affected": len(all_bets),
+                    "old_winners_reversed": len(old_winning_bets),
+                    "new_winners_paid": len(new_winning_bets),
+                    "balance_changes": combined_deltas,
+                }
+
+        # 10. Reverse and recalculate pairings
+        if self.pairings_repo:
+            # Reverse original pairings
+            self.pairings_repo.reverse_pairings_for_match(
+                team1_ids=radiant_ids,
+                team2_ids=dire_ids,
+                original_winning_team=old_winning_team_num,
+            )
+            # Apply new pairings with correct winner
+            self.pairings_repo.update_pairings_for_match(
+                match_id=match_id,
+                team1_ids=radiant_ids,
+                team2_ids=dire_ids,
+                winning_team=new_winning_team_num,
+            )
+
+        # 11. Log correction for audit
+        correction_id = None
+        if corrected_by is not None:
+            correction_id = self.match_repo.add_match_correction(
+                match_id=match_id,
+                old_winning_team=old_winning_team_num,
+                new_winning_team=new_winning_team_num,
+                corrected_by=corrected_by,
+            )
+
+        logger.info(
+            f"Match {match_id} corrected: {old_winning_team} -> {new_winning_team} "
+            f"(by user {corrected_by})"
+        )
+
+        return {
+            "match_id": match_id,
+            "old_winning_team": old_winning_team,
+            "new_winning_team": new_winning_team,
+            "correction_id": correction_id,
+            "players_affected": len(radiant_ids) + len(dire_ids),
+            "ratings_updated": len(new_glicko_updates),
+            "bet_correction": bet_correction_summary,
+            "new_winner_ids": new_winner_ids,
+            "new_loser_ids": new_loser_ids,
+        }

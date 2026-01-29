@@ -86,7 +86,8 @@ commands/                 # Discord slash commands (15 cog modules)
 ├── ask.py                # /ask (AI-powered Q&A)
 └── admin.py              # /addfake, /filllobbytest, /resetuser, /registeruser, /givecoin,
                           # /resetloancooldown, /resetbankruptcycooldown, /setinitialrating,
-                          # /recalibrate, /resetrecalibrationcooldown, /extendbetting, /sync
+                          # /recalibrate, /resetrecalibrationcooldown, /extendbetting,
+                          # /correctmatch, /sync
 
 domain/
 ├── models/               # Pure domain models (no DB dependencies)
@@ -302,6 +303,9 @@ shuffle_players(player_ids, guild_id, betting_mode) -> dict
 # Record match result (handles voting, ratings, bets)
 record_match(winning_team, guild_id, dotabuff_match_id) -> dict
 
+# Correct an incorrectly recorded match result
+correct_match_result(match_id, new_winning_team, guild_id, corrected_by) -> dict
+
 # OpenSkill rating updates
 update_openskill_ratings_for_match(match_id, radiant_won, fantasy_weights) -> dict
 backfill_openskill_ratings() -> dict
@@ -490,6 +494,7 @@ resolution_votes TEXT  -- JSON {discord_id: outcome}
 | `/setinitialrating` | Set initial rating | `user`, `rating` |
 | `/recalibrate` | Reset rating uncertainty | `user` (Admin) |
 | `/extendbetting` | Extend betting window | `minutes`: 1-60 |
+| `/correctmatch` | Correct recorded match result | `match_id`, `correct_result` |
 | `/sync` | Force sync commands | Admin only |
 
 **Consolidated Commands:**
@@ -620,7 +625,7 @@ See `config.py` for the full list (50+ options).
 - **Conditional Players**: "Froglings" who only play if needed to reach 10 players
 - **Recalibration**: Admins can reset a player's RD to 350 (90-day cooldown, min 5 games)
 - **Pairings Storage**: Canonical pairs with player1_id < player2_id to avoid duplicates
-- **Schema**: 49 migrations total
+- **Schema**: 50 migrations total
 
 ## Key Dependencies
 
