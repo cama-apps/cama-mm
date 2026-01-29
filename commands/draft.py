@@ -3,6 +3,7 @@ Draft commands for Immortal Draft mode: /setcaptain, /startdraft, /restartdraft
 """
 
 import logging
+import random
 import time
 from typing import TYPE_CHECKING
 
@@ -618,6 +619,197 @@ class DraftCommands(commands.Cog):
                     pass
 
     # ========================================================================
+    # Core draft execution (reusable by /shuffle auto-redirect)
+    # ========================================================================
+
+    async def _execute_draft(
+        self,
+        interaction: discord.Interaction,
+        guild_id: int | None,
+        lobby,
+        force_random_captains: bool = False,
+        specified_captain1_id: int | None = None,
+        specified_captain2_id: int | None = None,
+    ) -> bool:
+        """
+        Core draft logic, callable from /startdraft or /shuffle auto-redirect.
+
+        Args:
+            interaction: The Discord interaction
+            guild_id: The guild ID
+            lobby: The Lobby object
+            force_random_captains: If True, picks any 2 random players as captains
+                                   (ignoring captain eligibility)
+            specified_captain1_id: Optional specified captain 1 ID
+            specified_captain2_id: Optional specified captain 2 ID
+
+        Returns:
+            True if draft started successfully, False otherwise.
+        """
+        # Get all players including conditional ones
+        lobby_player_ids = list(lobby.players) + list(lobby.conditional_players)
+
+        # Get player ratings for captain selection
+        players = self.player_repo.get_by_ids(lobby_player_ids)
+        player_ratings = {p.discord_id: p.glicko_rating or 1500.0 for p in players}
+
+        if force_random_captains:
+            # Randomly select 2 players as captains (no eligibility check)
+            if len(lobby_player_ids) < 2:
+                await interaction.followup.send(
+                    "❌ Not enough players to select captains.",
+                    ephemeral=True,
+                )
+                return False
+            selected_captains = random.sample(lobby_player_ids, 2)
+            specified_captain1_id = selected_captains[0]
+            specified_captain2_id = selected_captains[1]
+            # All players are eligible when force_random_captains is True
+            eligible_captain_ids = lobby_player_ids.copy()
+        else:
+            # Normal captain eligibility check
+            eligible_captain_ids = self.player_repo.get_captain_eligible_players(lobby_player_ids)
+
+            # If captains are specified, add them to eligible list if not already there
+            if specified_captain1_id and specified_captain1_id not in eligible_captain_ids:
+                eligible_captain_ids.append(specified_captain1_id)
+            if specified_captain2_id and specified_captain2_id not in eligible_captain_ids:
+                eligible_captain_ids.append(specified_captain2_id)
+
+            # Check we have enough captains
+            needed_captains = 2
+            if specified_captain1_id:
+                needed_captains -= 1
+            if specified_captain2_id:
+                needed_captains -= 1
+
+            if len(eligible_captain_ids) < needed_captains + (1 if specified_captain1_id else 0) + (
+                1 if specified_captain2_id else 0
+            ):
+                if needed_captains == 2:
+                    await interaction.followup.send(
+                        "❌ Not enough captain-eligible players in lobby.\n"
+                        "Players can use `/setcaptain` to mark themselves as eligible, "
+                        "or specify captains with the `captain1` and `captain2` options.",
+                        ephemeral=True,
+                    )
+                else:
+                    await interaction.followup.send(
+                        f"❌ Need at least {needed_captains} more captain-eligible player(s) in lobby.\n"
+                        "Players can use `/setcaptain` to mark themselves as eligible.",
+                        ephemeral=True,
+                    )
+                return False
+
+        # Select captains
+        try:
+            captain_pair = self.draft_service.select_captains(
+                eligible_ids=eligible_captain_ids,
+                player_ratings=player_ratings,
+                specified_captain1=specified_captain1_id,
+                specified_captain2=specified_captain2_id,
+            )
+        except ValueError as e:
+            await interaction.followup.send(f"❌ {e}", ephemeral=True)
+            return False
+
+        # Get exclusion counts for player pool selection
+        exclusion_counts = self.player_repo.get_exclusion_counts(lobby_player_ids)
+
+        # Select player pool (10 players, captains always included)
+        try:
+            pool_result = self.draft_service.select_player_pool(
+                lobby_player_ids=lobby_player_ids,
+                exclusion_counts=exclusion_counts,
+                forced_include_ids=[captain_pair.captain1_id, captain_pair.captain2_id],
+                pool_size=DRAFT_POOL_SIZE,
+            )
+        except ValueError as e:
+            await interaction.followup.send(f"❌ {e}", ephemeral=True)
+            return False
+
+        # Update exclusion counts for excluded players
+        for excluded_id in pool_result.excluded_ids:
+            self.player_repo.increment_exclusion_count(excluded_id)
+
+        # Create draft state
+        try:
+            state = self.draft_state_manager.create_draft(guild_id)
+        except ValueError as e:
+            await interaction.followup.send(f"❌ {e}", ephemeral=True)
+            return False
+
+        # Initialize state
+        state.player_pool_ids = pool_result.selected_ids
+        state.excluded_player_ids = pool_result.excluded_ids
+        state.captain1_id = captain_pair.captain1_id
+        state.captain2_id = captain_pair.captain2_id
+        state.captain1_rating = captain_pair.captain1_rating
+        state.captain2_rating = captain_pair.captain2_rating
+        state.draft_channel_id = interaction.channel_id
+
+        # Perform coinflip
+        coinflip_winner_id = self.draft_service.coinflip(
+            captain_pair.captain1_id, captain_pair.captain2_id
+        )
+        state.coinflip_winner_id = coinflip_winner_id
+        state.phase = DraftPhase.WINNER_CHOICE
+
+        # Get captain names for display
+        captain1_name = await self._get_member_name(interaction.guild, captain_pair.captain1_id)
+        captain2_name = await self._get_member_name(interaction.guild, captain_pair.captain2_id)
+        winner_name = (
+            captain1_name if coinflip_winner_id == captain_pair.captain1_id else captain2_name
+        )
+
+        # Build coinflip result embed
+        embed = discord.Embed(
+            title="🎲 IMMORTAL DRAFT",
+            color=discord.Color.gold(),
+        )
+
+        embed.add_field(
+            name="👑 Captains",
+            value=(
+                f"**{captain1_name}** ({captain_pair.captain1_rating:.0f})\n"
+                f"**{captain2_name}** ({captain_pair.captain2_rating:.0f})"
+            ),
+            inline=False,
+        )
+
+        embed.add_field(
+            name="🎰 Coinflip Result",
+            value=f"**{winner_name}** won the coinflip!",
+            inline=False,
+        )
+
+        embed.add_field(
+            name="Next Step",
+            value=f"{winner_name}, choose whether to pick **Side** or **Hero Pick Order**.",
+            inline=False,
+        )
+
+        if pool_result.excluded_ids:
+            excluded_names = []
+            for eid in pool_result.excluded_ids:
+                name = await self._get_member_name(interaction.guild, eid)
+                excluded_names.append(name)
+            embed.add_field(
+                name="📤 Excluded Players",
+                value=", ".join(excluded_names),
+                inline=False,
+            )
+
+        # Send with winner choice buttons
+        view = WinnerChoiceView(self, guild_id, coinflip_winner_id)
+        message = await interaction.followup.send(embed=embed, view=view)
+
+        # Store message ID for later updates
+        state.draft_message_id = message.id
+
+        return True
+
+    # ========================================================================
     # /startdraft command
     # ========================================================================
 
@@ -710,149 +902,15 @@ class DraftCommands(commands.Cog):
             )
             return
 
-        # Get captain-eligible players from lobby
-        eligible_captain_ids = self.player_repo.get_captain_eligible_players(lobby_player_ids)
-
-        # If captains are specified, add them to eligible list if not already there
-        if specified_captain1_id and specified_captain1_id not in eligible_captain_ids:
-            eligible_captain_ids.append(specified_captain1_id)
-        if specified_captain2_id and specified_captain2_id not in eligible_captain_ids:
-            eligible_captain_ids.append(specified_captain2_id)
-
-        # Check we have enough captains
-        needed_captains = 2
-        if specified_captain1_id:
-            needed_captains -= 1
-        if specified_captain2_id:
-            needed_captains -= 1
-
-        if len(eligible_captain_ids) < needed_captains + (1 if specified_captain1_id else 0) + (
-            1 if specified_captain2_id else 0
-        ):
-            if needed_captains == 2:
-                await interaction.followup.send(
-                    "❌ Not enough captain-eligible players in lobby.\n"
-                    "Players can use `/setcaptain` to mark themselves as eligible, "
-                    "or specify captains with the `captain1` and `captain2` options.",
-                    ephemeral=True,
-                )
-            else:
-                await interaction.followup.send(
-                    f"❌ Need at least {needed_captains} more captain-eligible player(s) in lobby.\n"
-                    "Players can use `/setcaptain` to mark themselves as eligible.",
-                    ephemeral=True,
-                )
-            return
-
-        # Get player ratings for captain selection
-        players = self.player_repo.get_by_ids(lobby_player_ids)
-        player_ratings = {p.discord_id: p.glicko_rating or 1500.0 for p in players}
-
-        # Select captains
-        try:
-            captain_pair = self.draft_service.select_captains(
-                eligible_ids=eligible_captain_ids,
-                player_ratings=player_ratings,
-                specified_captain1=specified_captain1_id,
-                specified_captain2=specified_captain2_id,
-            )
-        except ValueError as e:
-            await interaction.followup.send(f"❌ {e}", ephemeral=True)
-            return
-
-        # Get exclusion counts for player pool selection
-        exclusion_counts = self.player_repo.get_exclusion_counts(lobby_player_ids)
-
-        # Select player pool (10 players, captains always included)
-        try:
-            pool_result = self.draft_service.select_player_pool(
-                lobby_player_ids=lobby_player_ids,
-                exclusion_counts=exclusion_counts,
-                forced_include_ids=[captain_pair.captain1_id, captain_pair.captain2_id],
-                pool_size=DRAFT_POOL_SIZE,
-            )
-        except ValueError as e:
-            await interaction.followup.send(f"❌ {e}", ephemeral=True)
-            return
-
-        # Update exclusion counts for excluded players
-        for excluded_id in pool_result.excluded_ids:
-            self.player_repo.increment_exclusion_count(excluded_id)
-
-        # Create draft state
-        try:
-            state = self.draft_state_manager.create_draft(guild_id)
-        except ValueError as e:
-            await interaction.followup.send(f"❌ {e}", ephemeral=True)
-            return
-
-        # Initialize state
-        state.player_pool_ids = pool_result.selected_ids
-        state.excluded_player_ids = pool_result.excluded_ids
-        state.captain1_id = captain_pair.captain1_id
-        state.captain2_id = captain_pair.captain2_id
-        state.captain1_rating = captain_pair.captain1_rating
-        state.captain2_rating = captain_pair.captain2_rating
-        state.draft_channel_id = interaction.channel_id
-
-        # Perform coinflip
-        coinflip_winner_id = self.draft_service.coinflip(
-            captain_pair.captain1_id, captain_pair.captain2_id
+        # Execute draft with specified captains (normal captain eligibility check)
+        await self._execute_draft(
+            interaction,
+            guild_id,
+            lobby,
+            force_random_captains=False,
+            specified_captain1_id=specified_captain1_id,
+            specified_captain2_id=specified_captain2_id,
         )
-        state.coinflip_winner_id = coinflip_winner_id
-        state.phase = DraftPhase.WINNER_CHOICE
-
-        # Get captain names for display
-        captain1_name = await self._get_member_name(interaction.guild, captain_pair.captain1_id)
-        captain2_name = await self._get_member_name(interaction.guild, captain_pair.captain2_id)
-        winner_name = (
-            captain1_name if coinflip_winner_id == captain_pair.captain1_id else captain2_name
-        )
-
-        # Build coinflip result embed
-        embed = discord.Embed(
-            title="🎲 IMMORTAL DRAFT",
-            color=discord.Color.gold(),
-        )
-
-        embed.add_field(
-            name="👑 Captains",
-            value=(
-                f"**{captain1_name}** ({captain_pair.captain1_rating:.0f})\n"
-                f"**{captain2_name}** ({captain_pair.captain2_rating:.0f})"
-            ),
-            inline=False,
-        )
-
-        embed.add_field(
-            name="🎰 Coinflip Result",
-            value=f"**{winner_name}** won the coinflip!",
-            inline=False,
-        )
-
-        embed.add_field(
-            name="Next Step",
-            value=f"{winner_name}, choose whether to pick **Side** or **Hero Pick Order**.",
-            inline=False,
-        )
-
-        if pool_result.excluded_ids:
-            excluded_names = []
-            for eid in pool_result.excluded_ids:
-                name = await self._get_member_name(interaction.guild, eid)
-                excluded_names.append(name)
-            embed.add_field(
-                name="📤 Excluded Players",
-                value=", ".join(excluded_names),
-                inline=False,
-            )
-
-        # Send with winner choice buttons
-        view = WinnerChoiceView(self, guild_id, coinflip_winner_id)
-        message = await interaction.followup.send(embed=embed, view=view)
-
-        # Store message ID for later updates
-        state.draft_message_id = message.id
 
     # ========================================================================
     # Choice Handlers

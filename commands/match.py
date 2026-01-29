@@ -366,6 +366,24 @@ class MatchCommands(commands.Cog):
             )
             return
 
+        # More than 15 players → force Immortal Draft with auto-selected captains
+        if total_count > 15:
+            await interaction.followup.send(
+                f"⚔️ **{total_count} players signed up** — starting Immortal Draft!\n"
+                f"_(Shuffle limited to 15 players)_"
+            )
+            draft_cog = self.bot.get_cog("DraftCommands")
+            if draft_cog:
+                await draft_cog._execute_draft(
+                    interaction, guild_id, lobby, force_random_captains=True
+                )
+            else:
+                await interaction.followup.send(
+                    "❌ Draft system not available. Please contact an admin.",
+                    ephemeral=True,
+                )
+            return
+
         # Build the player list for shuffling
         # Priority: regular players first, then fill with conditional if needed
         player_ids, players = self.lobby_service.get_lobby_players(lobby)
