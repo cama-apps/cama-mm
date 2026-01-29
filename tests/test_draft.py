@@ -446,7 +446,7 @@ class TestForceRandomCaptains:
         """Random selection always picks two different players."""
         import random
 
-        player_ids = list(range(1, 17))  # 16 players (>15 threshold)
+        player_ids = list(range(1, 17))  # 16 players (>=15 threshold)
 
         # Verify random.sample always gives different players
         for _ in range(100):
@@ -455,12 +455,12 @@ class TestForceRandomCaptains:
             assert selected[0] != selected[1]
 
     def test_shuffle_redirect_threshold(self):
-        """Verify the >15 player threshold constant."""
+        """Verify the >=15 player threshold constant."""
         # This documents the threshold behavior
-        # 10-15 players: normal shuffle
-        # >15 players (16+): redirect to draft
-        SHUFFLE_MAX_FOR_NORMAL = 15
-        DRAFT_REDIRECT_MIN = 16
+        # 10-14 players: normal shuffle
+        # >=15 players (15+): redirect to draft
+        SHUFFLE_MAX_FOR_NORMAL = 14
+        DRAFT_REDIRECT_MIN = 15
 
         assert DRAFT_REDIRECT_MIN > SHUFFLE_MAX_FOR_NORMAL
 
@@ -479,7 +479,7 @@ class TestForceRandomCaptains:
 
         total = lobby.get_total_count()
         assert total == 16
-        assert total > 15  # Would trigger draft redirect
+        assert total >= 15  # Would trigger draft redirect
 
 
 class TestCaptainEligibility:
