@@ -1040,6 +1040,120 @@ class AdminCommands(commands.Cog):
             f"for guild {guild_id}. New lock: {new_lock_until}{status_note}"
         )
 
+    @app_commands.command(
+        name="correctmatch",
+        description="Correct an incorrectly recorded match result (Admin only)",
+    )
+    @app_commands.describe(
+        match_id="The match ID to correct",
+        correct_result="The correct winning team",
+    )
+    @app_commands.choices(
+        correct_result=[
+            app_commands.Choice(name="Radiant", value="radiant"),
+            app_commands.Choice(name="Dire", value="dire"),
+        ]
+    )
+    async def correctmatch(
+        self,
+        interaction: discord.Interaction,
+        match_id: int,
+        correct_result: app_commands.Choice[str],
+    ):
+        """Admin command to correct an incorrectly recorded match result.
+
+        This reverses all effects of the original recording and re-applies
+        them with the correct winning team, including:
+        - Win/loss counters
+        - Glicko-2 and OpenSkill ratings
+        - Bet payouts
+        - Pairings statistics
+        """
+        if not has_admin_permission(interaction):
+            await interaction.response.send_message(
+                "❌ Admin only! You need Administrator or Manage Server permissions.",
+                ephemeral=True,
+            )
+            return
+
+        await safe_defer(interaction, ephemeral=True)
+
+        # Get match_service from bot
+        match_service = getattr(self.bot, "match_service", None)
+        if not match_service:
+            await safe_followup(
+                interaction,
+                content="❌ Match service not available.",
+                ephemeral=True,
+            )
+            return
+
+        guild_id = interaction.guild.id if interaction.guild else None
+
+        try:
+            result = match_service.correct_match_result(
+                match_id=match_id,
+                new_winning_team=correct_result.value,
+                guild_id=guild_id,
+                corrected_by=interaction.user.id,
+            )
+
+            # Build response message
+            old_team = result["old_winning_team"].title()
+            new_team = result["new_winning_team"].title()
+            players_affected = result["players_affected"]
+            ratings_updated = result["ratings_updated"]
+
+            response_lines = [
+                f"✅ **Match #{match_id} corrected!**",
+                f"• Result changed: {old_team} → **{new_team}**",
+                f"• Players affected: {players_affected}",
+                f"• Ratings updated: {ratings_updated}",
+            ]
+
+            # Add bet correction info if applicable
+            bet_info = result.get("bet_correction", {})
+            if bet_info:
+                bets_affected = bet_info.get("bets_affected", 0)
+                if bets_affected > 0:
+                    old_winners = bet_info.get("old_winners_reversed", 0)
+                    new_winners = bet_info.get("new_winners_paid", 0)
+                    response_lines.append(
+                        f"• Bets corrected: {bets_affected} "
+                        f"({old_winners} reversed, {new_winners} paid)"
+                    )
+
+            response_lines.append(
+                f"\n*Correction ID: {result.get('correction_id', 'N/A')}*"
+            )
+
+            await safe_followup(
+                interaction,
+                content="\n".join(response_lines),
+                ephemeral=True,
+            )
+
+            logger.info(
+                f"Admin {interaction.user.id} ({interaction.user}) corrected match {match_id}: "
+                f"{old_team} -> {new_team}"
+            )
+
+        except ValueError as e:
+            await safe_followup(
+                interaction,
+                content=f"❌ {str(e)}",
+                ephemeral=True,
+            )
+        except Exception as e:
+            logger.error(
+                f"Error correcting match {match_id}: {str(e)}", exc_info=True
+            )
+            await safe_followup(
+                interaction,
+                content=f"❌ Unexpected error correcting match: {str(e)}",
+                ephemeral=True,
+            )
+
 
 async def setup(bot: commands.Bot):
     lobby_service = getattr(bot, "lobby_service", None)
@@ -1077,6 +1191,7 @@ async def setup(bot: commands.Bot):
             "extendbetting",
             "recalibrate",
             "resetrecalibrationcooldown",
+            "correctmatch",
         ]
     ]
     logger.info(

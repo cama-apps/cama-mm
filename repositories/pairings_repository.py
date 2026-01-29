@@ -416,6 +416,73 @@ class PairingsRepository(BaseRepository, IPairingsRepository):
                 )
             return result
 
+    def reverse_pairings_for_match(
+        self,
+        team1_ids: list[int],
+        team2_ids: list[int],
+        original_winning_team: int,
+    ) -> None:
+        """
+        Reverse pairings that were incremented during original match recording.
+
+        This decrements the stats that were added when the match was first recorded.
+        Used during match correction to undo the original recording's effects.
+
+        Args:
+            team1_ids: List of discord IDs for team 1 (Radiant)
+            team2_ids: List of discord IDs for team 2 (Dire)
+            original_winning_team: 1 or 2 indicating which team originally won
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+
+            # Reverse teammates on team 1
+            team1_won = original_winning_team == 1
+            for i, p1 in enumerate(team1_ids):
+                for p2 in team1_ids[i + 1:]:
+                    self._reverse_together(cursor, p1, p2, team1_won)
+
+            # Reverse teammates on team 2
+            team2_won = original_winning_team == 2
+            for i, p1 in enumerate(team2_ids):
+                for p2 in team2_ids[i + 1:]:
+                    self._reverse_together(cursor, p1, p2, team2_won)
+
+            # Reverse opponents (team1 vs team2)
+            for p1 in team1_ids:
+                for p2 in team2_ids:
+                    self._reverse_against(cursor, p1, p2, team1_won)
+
+    def _reverse_together(self, cursor, id1: int, id2: int, won: bool) -> None:
+        """Reverse stats for two players who were on the same team."""
+        p1, p2 = self._canonical_pair(id1, id2)
+        cursor.execute(
+            """
+            UPDATE player_pairings
+            SET games_together = games_together - 1,
+                wins_together = wins_together - ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE player1_id = ? AND player2_id = ?
+            """,
+            (1 if won else 0, p1, p2),
+        )
+
+    def _reverse_against(self, cursor, id1: int, id2: int, id1_won: bool) -> None:
+        """Reverse stats for two players who were on opposing teams."""
+        p1, p2 = self._canonical_pair(id1, id2)
+        player1_won = id1_won if id1 == p1 else not id1_won
+
+        cursor.execute(
+            """
+            UPDATE player_pairings
+            SET games_against = games_against - 1,
+                player1_wins_against = player1_wins_against - ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE player1_id = ? AND player2_id = ?
+            """,
+            (1 if player1_won else 0, p1, p2),
+        )
+
     def rebuild_all_pairings(self) -> int:
         """
         Recalculate all pairings from match history.

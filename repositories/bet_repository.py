@@ -1048,6 +1048,163 @@ class BetRepository(BaseRepository, IBetRepository):
             row = cursor.fetchone()
             return row["count"] if row else 0
 
+    def get_settled_bets_for_match(self, match_id: int) -> list[dict]:
+        """
+        Get all bets with their payout amounts for a specific match.
+
+        Used for match correction to reverse payouts.
+
+        Returns:
+            List of dicts with bet_id, discord_id, team_bet_on, amount, leverage,
+            effective_bet, payout, and outcome
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT
+                    b.bet_id,
+                    b.discord_id,
+                    b.team_bet_on,
+                    b.amount,
+                    COALESCE(b.leverage, 1) as leverage,
+                    b.amount * COALESCE(b.leverage, 1) as effective_bet,
+                    b.payout,
+                    CASE
+                        WHEN m.winning_team = 1 AND b.team_bet_on = 'radiant' THEN 'won'
+                        WHEN m.winning_team = 2 AND b.team_bet_on = 'dire' THEN 'won'
+                        ELSE 'lost'
+                    END as outcome
+                FROM bets b
+                JOIN matches m ON b.match_id = m.match_id
+                WHERE b.match_id = ?
+                ORDER BY b.bet_time ASC
+                """,
+                (match_id,),
+            )
+            return [dict(row) for row in cursor.fetchall()]
+
+    def reverse_bet_payouts_for_correction(
+        self,
+        match_id: int,
+        old_winners: list[dict],
+    ) -> dict[int, int]:
+        """
+        Reverse bet payouts for match correction.
+
+        Subtracts payout from winners who are now losers.
+        Does NOT refund losers (they already lost their stake).
+
+        Args:
+            match_id: The match being corrected
+            old_winners: List of bet dicts for bets that previously won
+
+        Returns:
+            Dict mapping discord_id -> amount subtracted from their balance
+        """
+        balance_deltas: dict[int, int] = {}
+
+        for bet in old_winners:
+            payout = bet.get("payout") or 0
+            if payout > 0:
+                discord_id = bet["discord_id"]
+                balance_deltas[discord_id] = balance_deltas.get(discord_id, 0) - payout
+
+        return balance_deltas
+
+    def apply_new_bet_payouts_for_correction(
+        self,
+        match_id: int,
+        new_winners: list[dict],
+        pool_mode: bool = True,
+    ) -> dict[int, int]:
+        """
+        Apply new bet payouts after correction.
+
+        For the new winners: they get their stakes back + winnings.
+        For pool mode: recalculate based on pool proportions.
+        For house mode: double the effective bet.
+
+        Args:
+            match_id: The match being corrected
+            new_winners: List of bet dicts for bets that now win
+            pool_mode: True for parimutuel, False for house mode
+
+        Returns:
+            Dict mapping discord_id -> amount to add to their balance
+        """
+        balance_deltas: dict[int, int] = {}
+        payout_updates: list[tuple[int, int]] = []  # (payout, bet_id)
+
+        if pool_mode:
+            # Get all bets for the match to calculate pool
+            all_bets = self.get_settled_bets_for_match(match_id)
+            total_pool = sum(b["effective_bet"] for b in all_bets)
+            winner_pool = sum(b["effective_bet"] for b in new_winners)
+
+            if winner_pool == 0:
+                # Edge case: no bets on winning side - this shouldn't happen
+                # but if it does, no payouts
+                return balance_deltas
+
+            multiplier = total_pool / winner_pool
+
+            # Group winners by user
+            winners_by_user: dict[int, list[dict]] = {}
+            for bet in new_winners:
+                discord_id = bet["discord_id"]
+                if discord_id not in winners_by_user:
+                    winners_by_user[discord_id] = []
+                winners_by_user[discord_id].append(bet)
+
+            # Calculate payouts per user with single ceiling
+            import math
+            for discord_id, bets in winners_by_user.items():
+                raw_total = sum((b["effective_bet"] / winner_pool) * total_pool for b in bets)
+                user_payout = math.ceil(raw_total)
+                balance_deltas[discord_id] = user_payout
+
+                # Distribute across individual bets
+                allocated = 0
+                for i, bet in enumerate(bets):
+                    if i == len(bets) - 1:
+                        bet_payout = user_payout - allocated
+                    else:
+                        bet_payout = int((bet["effective_bet"] / sum(b["effective_bet"] for b in bets)) * user_payout)
+                        allocated += bet_payout
+                    payout_updates.append((bet_payout, bet["bet_id"]))
+        else:
+            # House mode: 2x effective bet
+            for bet in new_winners:
+                payout = bet["effective_bet"] * 2
+                discord_id = bet["discord_id"]
+                balance_deltas[discord_id] = balance_deltas.get(discord_id, 0) + payout
+                payout_updates.append((payout, bet["bet_id"]))
+
+        # Update payout column for new winners
+        if payout_updates:
+            with self.connection() as conn:
+                cursor = conn.cursor()
+                cursor.executemany(
+                    "UPDATE bets SET payout = ? WHERE bet_id = ?",
+                    payout_updates,
+                )
+
+        # Clear payout for new losers (old winners)
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE bets
+                SET payout = NULL
+                WHERE match_id = ?
+                  AND bet_id NOT IN (SELECT bet_id FROM bets WHERE match_id = ? AND payout IS NOT NULL)
+                """,
+                (match_id, match_id),
+            )
+
+        return balance_deltas
+
     def get_bets_on_player_matches(self, target_discord_id: int) -> list[dict]:
         """
         Get all bets by OTHER players on matches where target_discord_id participated.

@@ -1623,3 +1623,156 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 row["discord_id"]: (row["os_mu_before"], row["os_sigma_before"])
                 for row in rows
             }
+
+    def get_full_rating_history_for_match(self, match_id: int) -> list[dict]:
+        """
+        Get all rating history entries for a specific match with full snapshot data.
+
+        Used for match correction to restore pre-match ratings.
+
+        Returns:
+            List of dicts with all rating history columns including before/after values
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT
+                    discord_id,
+                    rating,
+                    rating_before,
+                    rd_before,
+                    rd_after,
+                    volatility_before,
+                    volatility_after,
+                    expected_team_win_prob,
+                    team_number,
+                    won,
+                    os_mu_before,
+                    os_mu_after,
+                    os_sigma_before,
+                    os_sigma_after,
+                    fantasy_weight
+                FROM rating_history
+                WHERE match_id = ?
+                """,
+                (match_id,),
+            )
+            rows = cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    def update_match_result(self, match_id: int, new_winning_team: int) -> None:
+        """
+        Update the winning_team for a match and update match_participants.won accordingly.
+
+        Args:
+            match_id: The match ID to update
+            new_winning_team: 1 for Radiant, 2 for Dire
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            # Update match winning_team
+            cursor.execute(
+                "UPDATE matches SET winning_team = ? WHERE match_id = ?",
+                (new_winning_team, match_id),
+            )
+            # Update participants: team 1 = radiant, team 2 = dire
+            cursor.execute(
+                """
+                UPDATE match_participants
+                SET won = CASE
+                    WHEN team_number = ? THEN 1
+                    ELSE 0
+                END
+                WHERE match_id = ?
+                """,
+                (new_winning_team, match_id),
+            )
+
+    def update_rating_history_for_correction(
+        self,
+        match_id: int,
+        discord_id: int,
+        new_rating: float,
+        new_rd: float,
+        new_volatility: float,
+        new_won: bool,
+        new_os_mu: float | None = None,
+        new_os_sigma: float | None = None,
+    ) -> None:
+        """
+        Update rating history entry for a match correction.
+
+        Updates the 'after' values while preserving 'before' snapshots.
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE rating_history
+                SET rating = ?,
+                    rd_after = ?,
+                    volatility_after = ?,
+                    won = ?,
+                    os_mu_after = COALESCE(?, os_mu_after),
+                    os_sigma_after = COALESCE(?, os_sigma_after)
+                WHERE match_id = ? AND discord_id = ?
+                """,
+                (
+                    new_rating,
+                    new_rd,
+                    new_volatility,
+                    new_won,
+                    new_os_mu,
+                    new_os_sigma,
+                    match_id,
+                    discord_id,
+                ),
+            )
+
+    def add_match_correction(
+        self,
+        match_id: int,
+        old_winning_team: int,
+        new_winning_team: int,
+        corrected_by: int,
+    ) -> int:
+        """
+        Log a match correction for audit purposes.
+
+        Returns:
+            The correction_id
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO match_corrections
+                (match_id, old_winning_team, new_winning_team, corrected_by)
+                VALUES (?, ?, ?, ?)
+                """,
+                (match_id, old_winning_team, new_winning_team, corrected_by),
+            )
+            return cursor.lastrowid
+
+    def get_match_corrections(self, match_id: int) -> list[dict]:
+        """
+        Get correction history for a match.
+
+        Returns:
+            List of correction records with correction_id, old/new winning_team,
+            corrected_by, and corrected_at
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT correction_id, old_winning_team, new_winning_team,
+                       corrected_by, corrected_at
+                FROM match_corrections
+                WHERE match_id = ?
+                ORDER BY corrected_at ASC
+                """,
+                (match_id,),
+            )
+            return [dict(row) for row in cursor.fetchall()]
