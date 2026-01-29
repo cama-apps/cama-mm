@@ -230,6 +230,11 @@ class IMatchRepository(ABC):
         """Get hero statistics for a player from enriched matches."""
         ...
 
+    @abstractmethod
+    def get_last_match_participant_ids(self) -> set[int]:
+        """Get Discord IDs of participants from the most recently recorded match."""
+        ...
+
 
 class ILobbyRepository(ABC):
     @abstractmethod

@@ -553,6 +553,15 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 "notes": row["notes"],
             }
 
+    def get_last_match_participant_ids(self) -> set[int]:
+        """Get Discord IDs of participants from the most recently recorded match."""
+        match = self.get_most_recent_match()
+        if not match:
+            return set()
+        team1_ids = match.get("team1_players", [])
+        team2_ids = match.get("team2_players", [])
+        return set(team1_ids + team2_ids)
+
     def get_matches_without_enrichment(self, limit: int = 10) -> list[dict]:
         """Get matches that don't have Valve enrichment data yet."""
         with self.connection() as conn:
