@@ -1166,6 +1166,122 @@ def draw_rating_comparison_chart(comparison_data: dict) -> BytesIO:
     return fp
 
 
+def draw_hero_performance_chart(
+    hero_stats: list[dict],
+    username: str,
+    max_heroes: int = 8,
+) -> BytesIO:
+    """
+    Generate a horizontal bar chart showing top heroes by games played.
+
+    Bars are colored by winrate (green for high, red for low).
+
+    Args:
+        hero_stats: List of dicts with hero_id, games, wins (from get_player_hero_detailed_stats)
+        username: Player's display name for title
+        max_heroes: Maximum number of heroes to display (default 8)
+
+    Returns:
+        BytesIO containing the PNG image
+    """
+    from utils.hero_lookup import get_hero_name
+
+    if not hero_stats:
+        # Return empty image
+        img = Image.new("RGBA", (450, 100), DISCORD_BG)
+        draw = ImageDraw.Draw(img)
+        font = _get_font(18)
+        draw.text((20, 40), "No hero data available", fill=DISCORD_GREY, font=font)
+        fp = BytesIO()
+        img.save(fp, format="PNG")
+        fp.seek(0)
+        return fp
+
+    # Limit heroes displayed
+    stats = hero_stats[:max_heroes]
+
+    # Image dimensions
+    width = 450
+    bar_height = 32
+    padding = 15
+    header_height = 35
+    label_width = 110  # Space for hero name
+    value_width = 70   # Space for winrate and games
+
+    height = header_height + len(stats) * (bar_height + 6) + padding * 2
+
+    # Create image
+    img = Image.new("RGBA", (width, height), DISCORD_BG)
+    draw = ImageDraw.Draw(img)
+
+    # Draw title
+    title_font = _get_font(18)
+    draw.text((padding, padding), f"Top Heroes: {username}", fill=DISCORD_WHITE, font=title_font)
+
+    # Calculate max games for bar scaling
+    max_games = max(s["games"] for s in stats) if stats else 1
+
+    label_font = _get_font(14)
+    value_font = _get_font(13)
+
+    y = padding + header_height
+    bar_max_width = width - padding * 2 - label_width - value_width - 10
+
+    for stat in stats:
+        hero_name = get_hero_name(stat["hero_id"])
+        games = stat["games"]
+        wins = stat["wins"]
+        winrate = wins / games if games > 0 else 0
+
+        # Truncate long hero names
+        if len(hero_name) > 13:
+            hero_name = hero_name[:11] + ".."
+
+        # Draw hero name
+        draw.text((padding, y + 8), hero_name, fill=DISCORD_WHITE, font=label_font)
+
+        # Calculate bar dimensions
+        bar_x = padding + label_width
+        bar_fill_width = int(bar_max_width * games / max_games)
+        bar_fill_width = max(bar_fill_width, 4)  # Minimum visible bar
+
+        # Color based on winrate (gradient from red to green)
+        if winrate >= 0.60:
+            bar_color = DISCORD_GREEN
+        elif winrate >= 0.50:
+            # Yellow-green gradient
+            bar_color = "#7CB342"  # Light green
+        elif winrate >= 0.40:
+            bar_color = DISCORD_YELLOW
+        else:
+            bar_color = DISCORD_RED
+
+        # Draw bar background
+        draw.rectangle(
+            [(bar_x, y + 5), (bar_x + bar_max_width, y + bar_height - 5)],
+            fill=DISCORD_DARKER,
+        )
+
+        # Draw bar fill
+        draw.rectangle(
+            [(bar_x, y + 5), (bar_x + bar_fill_width, y + bar_height - 5)],
+            fill=bar_color,
+        )
+
+        # Draw winrate and games text
+        wr_text = f"{winrate:.0%} ({games}g)"
+        text_x = bar_x + bar_max_width + 8
+        draw.text((text_x, y + 8), wr_text, fill=DISCORD_GREY, font=value_font)
+
+        y += bar_height + 6
+
+    # Save to BytesIO
+    fp = BytesIO()
+    img.save(fp, format="PNG")
+    fp.seek(0)
+    return fp
+
+
 def draw_prediction_over_time(match_data: list[dict], window: int = 20) -> BytesIO:
     """
     Draw rolling accuracy of predictions over time for both systems.

@@ -1776,3 +1776,429 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 (match_id,),
             )
             return [dict(row) for row in cursor.fetchall()]
+
+    # -------------------------------------------------------------------------
+    # Hero Stats Methods for Profile Heroes Tab
+    # -------------------------------------------------------------------------
+
+    def get_player_hero_detailed_stats(self, discord_id: int, limit: int = 20) -> list[dict]:
+        """
+        Get comprehensive per-hero stats from enriched matches.
+
+        Args:
+            discord_id: Player's Discord ID
+            limit: Maximum number of heroes to return
+
+        Returns:
+            List of dicts with hero_id, games, wins, avg stats, ordered by games desc
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT hero_id,
+                       COUNT(*) as games,
+                       SUM(CASE WHEN won THEN 1 ELSE 0 END) as wins,
+                       AVG(kills) as avg_kills,
+                       AVG(deaths) as avg_deaths,
+                       AVG(assists) as avg_assists,
+                       AVG(gpm) as avg_gpm,
+                       AVG(xpm) as avg_xpm,
+                       AVG(hero_damage) as avg_damage,
+                       AVG(tower_damage) as avg_tower_damage,
+                       AVG(fantasy_points) as avg_fantasy,
+                       AVG(lane_efficiency) as avg_lane_eff,
+                       SUM(COALESCE(obs_placed, 0)) as total_obs,
+                       SUM(COALESCE(sen_placed, 0)) as total_sens
+                FROM match_participants
+                WHERE discord_id = ? AND hero_id IS NOT NULL AND hero_id > 0
+                GROUP BY hero_id
+                ORDER BY games DESC
+                LIMIT ?
+                """,
+                (discord_id, limit),
+            )
+            rows = cursor.fetchall()
+            return [
+                {
+                    "hero_id": row["hero_id"],
+                    "games": row["games"],
+                    "wins": row["wins"],
+                    "avg_kills": row["avg_kills"] or 0,
+                    "avg_deaths": row["avg_deaths"] or 0,
+                    "avg_assists": row["avg_assists"] or 0,
+                    "avg_gpm": row["avg_gpm"] or 0,
+                    "avg_xpm": row["avg_xpm"] or 0,
+                    "avg_damage": row["avg_damage"] or 0,
+                    "avg_tower_damage": row["avg_tower_damage"] or 0,
+                    "avg_fantasy": row["avg_fantasy"] or 0,
+                    "avg_lane_eff": row["avg_lane_eff"],
+                    "total_obs": row["total_obs"] or 0,
+                    "total_sens": row["total_sens"] or 0,
+                }
+                for row in rows
+            ]
+
+    def get_player_lane_stats(self, discord_id: int) -> list[dict]:
+        """
+        Get performance by lane from enriched matches.
+
+        Args:
+            discord_id: Player's Discord ID
+
+        Returns:
+            List of dicts with lane_role, games, wins, avg stats
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT lane_role,
+                       COUNT(*) as games,
+                       SUM(CASE WHEN won THEN 1 ELSE 0 END) as wins,
+                       AVG(kills) as avg_kills,
+                       AVG(deaths) as avg_deaths,
+                       AVG(assists) as avg_assists,
+                       AVG(gpm) as avg_gpm,
+                       AVG(xpm) as avg_xpm,
+                       AVG(lane_efficiency) as avg_lane_eff
+                FROM match_participants
+                WHERE discord_id = ? AND lane_role IS NOT NULL
+                GROUP BY lane_role
+                ORDER BY games DESC
+                """,
+                (discord_id,),
+            )
+            rows = cursor.fetchall()
+            return [
+                {
+                    "lane_role": row["lane_role"],
+                    "games": row["games"],
+                    "wins": row["wins"],
+                    "avg_kills": row["avg_kills"] or 0,
+                    "avg_deaths": row["avg_deaths"] or 0,
+                    "avg_assists": row["avg_assists"] or 0,
+                    "avg_gpm": row["avg_gpm"] or 0,
+                    "avg_xpm": row["avg_xpm"] or 0,
+                    "avg_lane_eff": row["avg_lane_eff"],
+                }
+                for row in rows
+            ]
+
+    def get_player_ward_stats_by_lane(self, discord_id: int) -> list[dict]:
+        """
+        Get ward stats by lane from enriched matches.
+
+        Args:
+            discord_id: Player's Discord ID
+
+        Returns:
+            List of dicts with lane_role, games, total/avg obs/sens
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT lane_role,
+                       COUNT(*) as games,
+                       SUM(COALESCE(obs_placed, 0)) as total_obs,
+                       SUM(COALESCE(sen_placed, 0)) as total_sens,
+                       AVG(COALESCE(obs_placed, 0)) as avg_obs,
+                       AVG(COALESCE(sen_placed, 0)) as avg_sens
+                FROM match_participants
+                WHERE discord_id = ?
+                  AND (obs_placed IS NOT NULL OR sen_placed IS NOT NULL)
+                GROUP BY lane_role
+                ORDER BY lane_role
+                """,
+                (discord_id,),
+            )
+            rows = cursor.fetchall()
+            return [
+                {
+                    "lane_role": row["lane_role"],
+                    "games": row["games"],
+                    "total_obs": row["total_obs"] or 0,
+                    "total_sens": row["total_sens"] or 0,
+                    "avg_obs": row["avg_obs"] or 0,
+                    "avg_sens": row["avg_sens"] or 0,
+                }
+                for row in rows
+            ]
+
+    def get_player_hero_lane_performance(self, discord_id: int) -> list[dict]:
+        """
+        Get per-hero lane performance from enriched matches.
+
+        Args:
+            discord_id: Player's Discord ID
+
+        Returns:
+            List of dicts with hero_id, lane_role, games, wins, avg stats
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT hero_id, lane_role,
+                       COUNT(*) as games,
+                       SUM(CASE WHEN won THEN 1 ELSE 0 END) as wins,
+                       AVG(lane_efficiency) as avg_lane_eff,
+                       AVG(gpm) as avg_gpm
+                FROM match_participants
+                WHERE discord_id = ?
+                  AND hero_id IS NOT NULL AND hero_id > 0
+                  AND lane_role IS NOT NULL
+                GROUP BY hero_id, lane_role
+                ORDER BY hero_id, games DESC
+                """,
+                (discord_id,),
+            )
+            rows = cursor.fetchall()
+            return [
+                {
+                    "hero_id": row["hero_id"],
+                    "lane_role": row["lane_role"],
+                    "games": row["games"],
+                    "wins": row["wins"],
+                    "avg_lane_eff": row["avg_lane_eff"],
+                    "avg_gpm": row["avg_gpm"] or 0,
+                }
+                for row in rows
+            ]
+
+    def get_player_hero_vs_opponent_heroes(
+        self, discord_id: int, min_games: int = 2
+    ) -> list[dict]:
+        """
+        Get hero vs opponent hero matchups from enriched matches.
+
+        Args:
+            discord_id: Player's Discord ID
+            min_games: Minimum games for a matchup to be included
+
+        Returns:
+            List of dicts with my_hero, opponent_hero, games, wins
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT mp.hero_id as my_hero,
+                       opp.hero_id as opponent_hero,
+                       COUNT(*) as games,
+                       SUM(CASE WHEN mp.won THEN 1 ELSE 0 END) as wins
+                FROM match_participants mp
+                JOIN match_participants opp ON mp.match_id = opp.match_id
+                     AND mp.team_number != opp.team_number
+                WHERE mp.discord_id = ?
+                  AND mp.hero_id IS NOT NULL AND mp.hero_id > 0
+                  AND opp.hero_id IS NOT NULL AND opp.hero_id > 0
+                GROUP BY mp.hero_id, opp.hero_id
+                HAVING COUNT(*) >= ?
+                ORDER BY games DESC
+                LIMIT 30
+                """,
+                (discord_id, min_games),
+            )
+            rows = cursor.fetchall()
+            return [
+                {
+                    "my_hero": row["my_hero"],
+                    "opponent_hero": row["opponent_hero"],
+                    "games": row["games"],
+                    "wins": row["wins"],
+                }
+                for row in rows
+            ]
+
+    def get_player_enriched_match_count(self, discord_id: int) -> int:
+        """
+        Get count of enriched matches with hero data for a player.
+
+        Args:
+            discord_id: Player's Discord ID
+
+        Returns:
+            Count of matches with hero_id set
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT COUNT(*) as count
+                FROM match_participants
+                WHERE discord_id = ? AND hero_id IS NOT NULL AND hero_id > 0
+                """,
+                (discord_id,),
+            )
+            return cursor.fetchone()["count"]
+
+    def get_player_overall_hero_stats(self, discord_id: int) -> dict:
+        """
+        Get aggregated hero stats for a player (for tab header).
+
+        Args:
+            discord_id: Player's Discord ID
+
+        Returns:
+            Dict with total_games, avg_kills, avg_deaths, avg_assists, etc.
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT COUNT(*) as total_games,
+                       AVG(kills) as avg_kills,
+                       AVG(deaths) as avg_deaths,
+                       AVG(assists) as avg_assists,
+                       AVG(gpm) as avg_gpm,
+                       AVG(xpm) as avg_xpm,
+                       AVG(fantasy_points) as avg_fantasy,
+                       SUM(COALESCE(obs_placed, 0)) as total_obs,
+                       SUM(COALESCE(sen_placed, 0)) as total_sens
+                FROM match_participants
+                WHERE discord_id = ? AND hero_id IS NOT NULL AND hero_id > 0
+                """,
+                (discord_id,),
+            )
+            row = cursor.fetchone()
+            return {
+                "total_games": row["total_games"] or 0,
+                "avg_kills": row["avg_kills"] or 0,
+                "avg_deaths": row["avg_deaths"] or 0,
+                "avg_assists": row["avg_assists"] or 0,
+                "avg_gpm": row["avg_gpm"] or 0,
+                "avg_xpm": row["avg_xpm"] or 0,
+                "avg_fantasy": row["avg_fantasy"] or 0,
+                "total_obs": row["total_obs"] or 0,
+                "total_sens": row["total_sens"] or 0,
+            }
+
+    def get_player_nemesis_heroes(self, discord_id: int, min_games: int = 2) -> list[dict]:
+        """
+        Get heroes on enemy team that the player loses to most often.
+
+        Args:
+            discord_id: Player's Discord ID
+            min_games: Minimum games against to be included
+
+        Returns:
+            List of dicts with enemy_hero, games, wins, losses, loss_rate
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT opp.hero_id as enemy_hero,
+                       COUNT(*) as games,
+                       SUM(CASE WHEN mp.won = 0 THEN 1 ELSE 0 END) as losses,
+                       SUM(CASE WHEN mp.won = 1 THEN 1 ELSE 0 END) as wins
+                FROM match_participants mp
+                JOIN match_participants opp ON mp.match_id = opp.match_id
+                     AND mp.team_number != opp.team_number
+                WHERE mp.discord_id = ?
+                  AND opp.hero_id IS NOT NULL AND opp.hero_id > 0
+                GROUP BY opp.hero_id
+                HAVING COUNT(*) >= ?
+                ORDER BY (losses * 1.0 / games) DESC, games DESC
+                LIMIT 10
+                """,
+                (discord_id, min_games),
+            )
+            rows = cursor.fetchall()
+            return [
+                {
+                    "enemy_hero": row["enemy_hero"],
+                    "games": row["games"],
+                    "wins": row["wins"],
+                    "losses": row["losses"],
+                    "loss_rate": row["losses"] / row["games"] if row["games"] > 0 else 0,
+                }
+                for row in rows
+            ]
+
+    def get_player_easiest_opponents(self, discord_id: int, min_games: int = 2) -> list[dict]:
+        """
+        Get heroes on enemy team that the player wins against most often.
+
+        Args:
+            discord_id: Player's Discord ID
+            min_games: Minimum games against to be included
+
+        Returns:
+            List of dicts with enemy_hero, games, wins, losses, win_rate
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT opp.hero_id as enemy_hero,
+                       COUNT(*) as games,
+                       SUM(CASE WHEN mp.won = 1 THEN 1 ELSE 0 END) as wins,
+                       SUM(CASE WHEN mp.won = 0 THEN 1 ELSE 0 END) as losses
+                FROM match_participants mp
+                JOIN match_participants opp ON mp.match_id = opp.match_id
+                     AND mp.team_number != opp.team_number
+                WHERE mp.discord_id = ?
+                  AND opp.hero_id IS NOT NULL AND opp.hero_id > 0
+                GROUP BY opp.hero_id
+                HAVING COUNT(*) >= ?
+                ORDER BY (wins * 1.0 / games) DESC, games DESC
+                LIMIT 10
+                """,
+                (discord_id, min_games),
+            )
+            rows = cursor.fetchall()
+            return [
+                {
+                    "enemy_hero": row["enemy_hero"],
+                    "games": row["games"],
+                    "wins": row["wins"],
+                    "losses": row["losses"],
+                    "win_rate": row["wins"] / row["games"] if row["games"] > 0 else 0,
+                }
+                for row in rows
+            ]
+
+    def get_player_best_hero_synergies(self, discord_id: int, min_games: int = 2) -> list[dict]:
+        """
+        Get heroes on same team (teammates' heroes) player wins with most.
+
+        Args:
+            discord_id: Player's Discord ID
+            min_games: Minimum games with to be included
+
+        Returns:
+            List of dicts with ally_hero, games, wins, win_rate
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT ally.hero_id as ally_hero,
+                       COUNT(*) as games,
+                       SUM(CASE WHEN mp.won = 1 THEN 1 ELSE 0 END) as wins
+                FROM match_participants mp
+                JOIN match_participants ally ON mp.match_id = ally.match_id
+                     AND mp.team_number = ally.team_number
+                     AND mp.discord_id != ally.discord_id
+                WHERE mp.discord_id = ?
+                  AND ally.hero_id IS NOT NULL AND ally.hero_id > 0
+                GROUP BY ally.hero_id
+                HAVING COUNT(*) >= ?
+                ORDER BY (wins * 1.0 / games) DESC, games DESC
+                LIMIT 10
+                """,
+                (discord_id, min_games),
+            )
+            rows = cursor.fetchall()
+            return [
+                {
+                    "ally_hero": row["ally_hero"],
+                    "games": row["games"],
+                    "wins": row["wins"],
+                    "win_rate": row["wins"] / row["games"] if row["games"] > 0 else 0,
+                }
+                for row in rows
+            ]

@@ -20,7 +20,12 @@ from discord.ext import commands
 from config import BANKRUPTCY_PENALTY_RATE
 from openskill_rating_system import CamaOpenSkillSystem
 from rating_system import CamaRatingSystem
-from utils.drawing import draw_gamba_chart, draw_lane_distribution, draw_role_graph
+from utils.drawing import (
+    draw_gamba_chart,
+    draw_hero_performance_chart,
+    draw_lane_distribution,
+    draw_role_graph,
+)
 from utils.formatting import JOPACOIN_EMOTE, TOMBSTONE_EMOJI, format_role_display
 from utils.interaction_safety import safe_defer, safe_followup
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
@@ -39,7 +44,7 @@ class ProfileView(discord.ui.View):
     """View with tab buttons for navigating profile sections."""
 
     # Tabs that require expensive operations (OpenDota API, chart generation)
-    EXPENSIVE_TABS = {"dota", "gambling"}
+    EXPENSIVE_TABS = {"dota", "gambling", "heroes"}
 
     def __init__(
         self,
@@ -85,6 +90,7 @@ class ProfileView(discord.ui.View):
             "predictions": self.predictions_btn,
             "dota": self.dota_btn,
             "teammates": self.teammates_btn,
+            "heroes": self.heroes_btn,
         }
         for tab_name, button in tab_buttons.items():
             if tab_name == self.current_tab:
@@ -188,6 +194,12 @@ class ProfileView(discord.ui.View):
     ):
         await self._handle_tab_click(interaction, "teammates")
 
+    @discord.ui.button(label="Heroes", style=discord.ButtonStyle.secondary, row=1)
+    async def heroes_btn(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        await self._handle_tab_click(interaction, "heroes")
+
 
 class ProfileCommands(commands.Cog):
     """Unified profile command with tabbed navigation."""
@@ -243,6 +255,7 @@ class ProfileCommands(commands.Cog):
             "predictions": self._build_predictions_embed,
             "dota": self._build_dota_embed,
             "teammates": self._build_teammates_embed,
+            "heroes": self._build_heroes_embed,
         }
         builder = builders.get(tab_name, self._build_overview_embed)
         result = await builder(target_user, target_discord_id)
@@ -1481,6 +1494,269 @@ class ProfileCommands(commands.Cog):
     def _get_opendota_player_service(self):
         """Get OpenDotaPlayerService from bot."""
         return getattr(self.bot, "opendota_player_service", None)
+
+    async def _build_heroes_embed(
+        self,
+        target_user: discord.Member | discord.User,
+        target_discord_id: int,
+    ) -> tuple[discord.Embed, list[discord.File]]:
+        """Build the Heroes tab embed with comprehensive hero statistics."""
+        from utils.hero_lookup import get_hero_name
+
+        match_repo = self._get_match_repo()
+        player_repo = self._get_player_repo()
+
+        if not match_repo or not player_repo:
+            return discord.Embed(
+                title="Error", description="Repository unavailable", color=COLOR_RED
+            ), []
+
+        player = player_repo.get_by_id(target_discord_id)
+        if not player:
+            return discord.Embed(
+                title="Not Registered",
+                description=f"{target_user.display_name} is not registered.",
+                color=COLOR_RED,
+            ), []
+
+        # Get enriched match count
+        enriched_count = match_repo.get_player_enriched_match_count(target_discord_id)
+
+        if enriched_count == 0:
+            return discord.Embed(
+                title=f"Profile: {target_user.display_name} > Heroes",
+                description=(
+                    "No enriched match data available.\n\n"
+                    "Hero stats require matches to be enriched with Dota 2 data.\n"
+                    "Ask an admin to run `/enrichmatch` or `/autodiscover` to add match data."
+                ),
+                color=COLOR_ORANGE,
+            ), []
+
+        embed = discord.Embed(
+            title=f"Profile: {target_user.display_name} > Heroes",
+            color=COLOR_BLUE,
+        )
+
+        files = []
+
+        # Get hero stats for chart
+        hero_stats = match_repo.get_player_hero_detailed_stats(target_discord_id, limit=20)
+
+        # Generate hero performance chart
+        if hero_stats:
+            try:
+                chart_bytes = draw_hero_performance_chart(hero_stats, target_user.display_name)
+                chart_file = discord.File(chart_bytes, filename="hero_chart.png")
+                files.append(chart_file)
+                embed.set_image(url="attachment://hero_chart.png")
+            except Exception as e:
+                logger.debug(f"Could not generate hero chart: {e}")
+
+        # Get overall stats for header
+        overall = match_repo.get_player_overall_hero_stats(target_discord_id)
+        avg_kda = f"{overall['avg_kills']:.1f}/{overall['avg_deaths']:.1f}/{overall['avg_assists']:.1f}"
+        embed.add_field(
+            name="Overview",
+            value=(
+                f"**Enriched Games:** {overall['total_games']}\n"
+                f"**Avg KDA:** {avg_kda}\n"
+                f"**Avg GPM:** {overall['avg_gpm']:.0f}"
+            ),
+            inline=True,
+        )
+
+        # Top heroes text (supplement to chart)
+        if hero_stats:
+            top_lines = []
+            for stat in hero_stats[:5]:
+                hero_name = get_hero_name(stat["hero_id"])
+                games = stat["games"]
+                wins = stat["wins"]
+                wr = wins / games if games > 0 else 0
+                kda = f"{stat['avg_kills']:.1f}/{stat['avg_deaths']:.1f}/{stat['avg_assists']:.1f}"
+                gpm = stat["avg_gpm"]
+                top_lines.append(f"**{hero_name}** - {games}g ({wr:.0%}) | {kda} | {gpm:.0f}g")
+            embed.add_field(
+                name="Top Heroes",
+                value="\n".join(top_lines),
+                inline=False,
+            )
+
+        # Lane performance
+        lane_stats = match_repo.get_player_lane_stats(target_discord_id)
+        if lane_stats:
+            lane_names = {1: "Safe", 2: "Mid", 3: "Off", 4: "Jungle"}
+            lane_lines = []
+            for ls in lane_stats[:4]:
+                lane_name = lane_names.get(ls["lane_role"], f"Lane {ls['lane_role']}")
+                games = ls["games"]
+                wins = ls["wins"]
+                wr = wins / games if games > 0 else 0
+                kda = f"{ls['avg_kills']:.1f}/{ls['avg_deaths']:.1f}/{ls['avg_assists']:.1f}"
+                gpm = ls["avg_gpm"]
+                eff = f"{ls['avg_lane_eff']:.0f}% eff" if ls["avg_lane_eff"] else "-"
+                lane_lines.append(f"**{lane_name}** ({games}g): {wr:.0%} WR | {kda} | {gpm:.0f}g | {eff}")
+            embed.add_field(
+                name="Performance by Lane",
+                value="\n".join(lane_lines),
+                inline=False,
+            )
+
+        # Ward stats
+        ward_stats = match_repo.get_player_ward_stats_by_lane(target_discord_id)
+        if ward_stats and overall["total_obs"] + overall["total_sens"] > 0:
+            ward_lines = [f"**Totals:** {overall['total_obs']} obs | {overall['total_sens']} sens"]
+            # Aggregate by role type (support lanes vs core lanes)
+            support_obs = support_sens = support_games = 0
+            core_obs = core_sens = core_games = 0
+            for ws in ward_stats:
+                if ws["lane_role"] in [4, 5]:  # Support lanes
+                    support_obs += ws["total_obs"]
+                    support_sens += ws["total_sens"]
+                    support_games += ws["games"]
+                else:
+                    core_obs += ws["total_obs"]
+                    core_sens += ws["total_sens"]
+                    core_games += ws["games"]
+            if support_games > 0:
+                ward_lines.append(
+                    f"**Support avg:** {support_obs/support_games:.1f} obs/g | {support_sens/support_games:.1f} sens/g"
+                )
+            if core_games > 0:
+                ward_lines.append(
+                    f"**Core avg:** {core_obs/core_games:.1f} obs/g | {core_sens/core_games:.1f} sens/g"
+                )
+            embed.add_field(
+                name="Ward Stats",
+                value="\n".join(ward_lines),
+                inline=True,
+            )
+
+        # Hero pairwise stats section
+        embed.add_field(name="\u200b", value="━━━ **Hero Pairwise Stats** ━━━", inline=False)
+
+        # Nemesis heroes (lose to)
+        nemesis = match_repo.get_player_nemesis_heroes(target_discord_id, min_games=2)
+        if nemesis:
+            # Filter to actually high loss rate (>50%)
+            nemesis_bad = [n for n in nemesis if n["loss_rate"] > 0.5][:3]
+            if nemesis_bad:
+                nem_lines = []
+                for n in nemesis_bad:
+                    hero_name = get_hero_name(n["enemy_hero"])
+                    nem_lines.append(f"{hero_name} ({n['games']}g, {n['wins']}-{n['losses']})")
+                embed.add_field(
+                    name="💀 Nemesis Heroes",
+                    value="\n".join(nem_lines),
+                    inline=True,
+                )
+
+        # Easy prey (beat)
+        easy = match_repo.get_player_easiest_opponents(target_discord_id, min_games=2)
+        if easy:
+            # Filter to actually high win rate (>50%)
+            easy_good = [e for e in easy if e["win_rate"] > 0.5][:3]
+            if easy_good:
+                easy_lines = []
+                for e in easy_good:
+                    hero_name = get_hero_name(e["enemy_hero"])
+                    easy_lines.append(f"{hero_name} ({e['games']}g, {e['wins']}-{e['losses']})")
+                embed.add_field(
+                    name="😈 Easy Prey",
+                    value="\n".join(easy_lines),
+                    inline=True,
+                )
+
+        # Best ally heroes
+        synergies = match_repo.get_player_best_hero_synergies(target_discord_id, min_games=2)
+        if synergies:
+            # Filter to high win rate
+            synergies_good = [s for s in synergies if s["win_rate"] > 0.5][:3]
+            if synergies_good:
+                syn_lines = []
+                for s in synergies_good:
+                    hero_name = get_hero_name(s["ally_hero"])
+                    losses = s["games"] - s["wins"]
+                    syn_lines.append(f"{hero_name} ({s['games']}g, {s['wins']}-{losses})")
+                embed.add_field(
+                    name="🤝 Best Ally Heroes",
+                    value="\n".join(syn_lines),
+                    inline=True,
+                )
+
+        # Hero vs opponent hero matchups
+        hero_vs_hero = match_repo.get_player_hero_vs_opponent_heroes(target_discord_id, min_games=2)
+        if hero_vs_hero:
+            # Group by player's hero and find best/worst matchups
+            by_my_hero: dict[int, list] = {}
+            for m in hero_vs_hero:
+                my_hero = m["my_hero"]
+                if my_hero not in by_my_hero:
+                    by_my_hero[my_hero] = []
+                by_my_hero[my_hero].append(m)
+
+            matchup_lines = []
+            for my_hero_id, matchups in list(by_my_hero.items())[:3]:
+                my_hero_name = get_hero_name(my_hero_id)
+                # Sort by win rate
+                sorted_matchups = sorted(matchups, key=lambda x: x["wins"] / x["games"] if x["games"] > 0 else 0)
+                worst = sorted_matchups[0] if sorted_matchups else None
+                best = sorted_matchups[-1] if sorted_matchups else None
+
+                parts = []
+                if best and best["wins"] / best["games"] > 0.5:
+                    best_name = get_hero_name(best["opponent_hero"])
+                    parts.append(f"good vs {best_name} ({best['wins']}-{best['games']-best['wins']})")
+                if worst and worst["wins"] / worst["games"] < 0.5:
+                    worst_name = get_hero_name(worst["opponent_hero"])
+                    parts.append(f"bad vs {worst_name} ({worst['wins']}-{worst['games']-worst['wins']})")
+
+                if parts:
+                    matchup_lines.append(f"**{my_hero_name}:** {', '.join(parts)}")
+
+            if matchup_lines:
+                embed.add_field(
+                    name="Your Hero vs Enemy Heroes",
+                    value="\n".join(matchup_lines),
+                    inline=False,
+                )
+
+        # Best heroes by lane
+        hero_lane = match_repo.get_player_hero_lane_performance(target_discord_id)
+        if hero_lane:
+            # Group by lane and find best hero for each
+            by_lane: dict[int, list] = {}
+            for hl in hero_lane:
+                lane = hl["lane_role"]
+                if lane not in by_lane:
+                    by_lane[lane] = []
+                by_lane[lane].append(hl)
+
+            lane_names = {1: "Safe", 2: "Mid", 3: "Off", 4: "Jungle"}
+            best_by_lane = []
+            for lane_role in [1, 2, 3]:  # Safe, Mid, Off
+                if lane_role in by_lane:
+                    # Find best hero by win rate with minimum 2 games
+                    candidates = [h for h in by_lane[lane_role] if h["games"] >= 2]
+                    if candidates:
+                        best = max(candidates, key=lambda x: x["wins"] / x["games"])
+                        hero_name = get_hero_name(best["hero_id"])
+                        wr = best["wins"] / best["games"] if best["games"] > 0 else 0
+                        lane_name = lane_names.get(lane_role, f"Lane {lane_role}")
+                        best_by_lane.append(f"**{lane_name}:** {hero_name} ({best['games']}g, {wr:.0%})")
+
+            if best_by_lane:
+                embed.add_field(
+                    name="Best Heroes by Lane",
+                    value="\n".join(best_by_lane),
+                    inline=True,
+                )
+
+        # Footer
+        embed.set_footer(text=f"Based on {enriched_count} enriched matches | Use /enrichmatch to add more")
+
+        return embed, files
 
     async def _delete_after_timeout(
         self, message: discord.Message, view: "ProfileView", timeout: int
