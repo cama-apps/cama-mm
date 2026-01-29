@@ -486,11 +486,13 @@ class TestBulkBankruptcyState:
         player_repo = db_and_repos["player_repo"]
         bankruptcy_repo = db_and_repos["bankruptcy_repo"]
 
-        # Create service with very short cooldown for testing
+        # Create service with short but safe cooldown for testing.
+        # Note: Using 2 seconds instead of 1 to avoid timing issues at second boundaries
+        # (both declare_bankruptcy and get_bulk_states use int(time.time()) which truncates)
         short_cooldown_service = BankruptcyService(
             bankruptcy_repo=bankruptcy_repo,
             player_repo=player_repo,
-            cooldown_seconds=1,  # 1 second cooldown
+            cooldown_seconds=2,  # 2 second cooldown (1s is flaky due to truncation)
             penalty_games=5,
             penalty_rate=0.5,
         )
@@ -503,7 +505,7 @@ class TestBulkBankruptcyState:
         assert states[pid].is_on_cooldown is True
 
         # Wait for cooldown to expire
-        time.sleep(1.1)
+        time.sleep(2.1)
 
         # After cooldown: should not be on cooldown
         states = short_cooldown_service.get_bulk_states([pid])

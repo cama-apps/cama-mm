@@ -34,6 +34,7 @@ class BalancedShuffler:
         exclusion_penalty_weight: float | None = None,
         rd_priority_weight: float | None = None,
         use_openskill: bool = False,
+        recent_match_penalty_weight: float | None = None,
     ):
         """
         Initialize the shuffler.
@@ -46,6 +47,7 @@ class BalancedShuffler:
             role_matchup_delta_weight: Weight applied to lane matchup delta when scoring teams
             exclusion_penalty_weight: Penalty per exclusion count for excluded players (default 50.0)
             use_openskill: Whether to use OpenSkill ratings instead of Glicko-2 (default False)
+            recent_match_penalty_weight: Penalty per recent match participant selected (default 25.0)
         """
         self.use_glicko = use_glicko
         self.consider_roles = consider_roles
@@ -75,6 +77,11 @@ class BalancedShuffler:
             rd_priority_weight
             if rd_priority_weight is not None
             else RD_PRIORITY_WEIGHT
+        )
+        self.recent_match_penalty_weight = (
+            recent_match_penalty_weight
+            if recent_match_penalty_weight is not None
+            else settings["recent_match_penalty_weight"]
         )
 
     def _calculate_role_matchup_delta(self, team1: Team, team2: Team) -> float:
@@ -130,7 +137,10 @@ class BalancedShuffler:
         return rd_total * self.rd_priority_weight
 
     def _greedy_shuffle(
-        self, players: list[Player], exclusion_counts: dict[str, int] | None = None
+        self,
+        players: list[Player],
+        exclusion_counts: dict[str, int] | None = None,
+        recent_match_names: set[str] | None = None,
     ) -> tuple[Team, Team, list[Player], float]:
         """
         Greedy snake-draft shuffle for initial upper bound in branch and bound.
@@ -140,11 +150,13 @@ class BalancedShuffler:
         Args:
             players: List of players (10-14)
             exclusion_counts: Optional dict mapping player names to exclusion counts
+            recent_match_names: Optional set of player names who participated in the most recent match
 
         Returns:
             Tuple of (team1, team2, excluded_players, score)
         """
         exclusion_counts = exclusion_counts or {}
+        recent_match_names = recent_match_names or set()
 
         # Sort by rating descending
         sorted_players = sorted(
@@ -154,11 +166,20 @@ class BalancedShuffler:
         )
 
         # For >10 players, exclude those with lowest exclusion counts first (greedily)
+        # Recent match participants get lower effective count (more likely to be excluded)
         if len(players) > 10:
-            # Sort excluded candidates by exclusion count (prefer excluding those with low counts)
+            # Sort excluded candidates by effective exclusion count
+            # Recent match participants have their count reduced to prefer excluding them
+            def effective_exclusion_count(p: Player) -> float:
+                base_count = exclusion_counts.get(p.name, 0)
+                # Reduce count for recent participants (makes them more likely to be excluded)
+                if p.name in recent_match_names:
+                    return base_count - (self.recent_match_penalty_weight / self.exclusion_penalty_weight)
+                return base_count
+
             excluded_candidates = sorted(
                 sorted_players[10:],
-                key=lambda p: exclusion_counts.get(p.name, 0),
+                key=effective_exclusion_count,
             )
             selected = sorted_players[:10]
             excluded = list(excluded_candidates[: len(players) - 10])
@@ -201,7 +222,15 @@ class BalancedShuffler:
             sum(exclusion_counts.get(p.name, 0) for p in excluded)
             * self.exclusion_penalty_weight
         )
-        total_score = base_score + exclusion_penalty
+
+        # Add recent match penalty for selected players
+        recent_penalty = 0.0
+        if recent_match_names:
+            selected_names = {p.name for p in team1.players + team2.players}
+            recent_in_match = len(selected_names & recent_match_names)
+            recent_penalty = recent_in_match * self.recent_match_penalty_weight
+
+        total_score = base_score + exclusion_penalty + recent_penalty
 
         return team1, team2, excluded, total_score
 
@@ -464,7 +493,10 @@ class BalancedShuffler:
         return best_teams
 
     def shuffle_from_pool(
-        self, players: list[Player], exclusion_counts: dict[str, int] | None = None
+        self,
+        players: list[Player],
+        exclusion_counts: dict[str, int] | None = None,
+        recent_match_names: set[str] | None = None,
     ) -> tuple[Team, Team, list[Player]]:
         """
         Shuffle players into two balanced teams when there are more than 10 players.
@@ -476,6 +508,9 @@ class BalancedShuffler:
             players: List of players (can be 10 or more)
             exclusion_counts: Optional dict mapping player names to their exclusion counts.
                              Players with higher counts are prioritized for inclusion.
+            recent_match_names: Optional set of player names who participated in the most recent match.
+                               These players receive a penalty when selected, making them more likely
+                               to sit out.
 
         Returns:
             Tuple of (Team1, Team2, excluded_players)
@@ -486,9 +521,11 @@ class BalancedShuffler:
         if len(players) < 10:
             raise ValueError(f"Need at least 10 players, got {len(players)}")
 
-        # Default to empty dict if not provided
+        # Default to empty dict/set if not provided
         if exclusion_counts is None:
             exclusion_counts = {}
+        if recent_match_names is None:
+            recent_match_names = set()
 
         if len(players) == 10:
             # Just use the regular shuffle
@@ -497,7 +534,7 @@ class BalancedShuffler:
 
         if len(players) == 14:
             # Use branch and bound for 14 players (optimized pruning)
-            return self.shuffle_branch_bound(players, exclusion_counts)
+            return self.shuffle_branch_bound(players, exclusion_counts, recent_match_names)
 
         # ---- Performance knobs (kept internal to preserve current public API) ----
         # Pool shuffles are far more expensive than 10-player shuffles. We therefore
@@ -608,8 +645,14 @@ class BalancedShuffler:
                 )
 
                 # base_score includes: value_diff + off_role_penalty + role_matchup_delta - rd_priority
-                # We need to add exclusion_penalty and extract components for logging
-                total_score = base_score + exclusion_penalty
+                # We need to add exclusion_penalty and recent_match_penalty, then extract components for logging
+
+                # Add recent match penalty for selected players
+                selected_player_names = {p.name for p in team1_players + team2_players}
+                recent_in_match = len(selected_player_names & recent_match_names)
+                recent_penalty = recent_in_match * self.recent_match_penalty_weight
+
+                total_score = base_score + exclusion_penalty + recent_penalty
 
                 # Extract components for logging
                 team1_value = team1.get_team_value(
@@ -746,7 +789,10 @@ class BalancedShuffler:
         return best_teams[0], best_teams[1], best_excluded
 
     def shuffle_branch_bound(
-        self, players: list[Player], exclusion_counts: dict[str, int] | None = None
+        self,
+        players: list[Player],
+        exclusion_counts: dict[str, int] | None = None,
+        recent_match_names: set[str] | None = None,
     ) -> tuple[Team, Team, list[Player]]:
         """
         Branch and bound shuffle optimized for 14 players.
@@ -757,6 +803,7 @@ class BalancedShuffler:
         Args:
             players: List of exactly 14 players
             exclusion_counts: Optional dict mapping player names to exclusion counts
+            recent_match_names: Optional set of player names who participated in the most recent match
 
         Returns:
             Tuple of (Team1, Team2, excluded_players)
@@ -765,10 +812,11 @@ class BalancedShuffler:
             raise ValueError(f"Branch and bound shuffle requires exactly 14 players, got {len(players)}")
 
         exclusion_counts = exclusion_counts or {}
+        recent_match_names = recent_match_names or set()
 
         # Step 1: Get greedy initial upper bound
         greedy_t1, greedy_t2, greedy_excluded, best_score = self._greedy_shuffle(
-            players, exclusion_counts
+            players, exclusion_counts, recent_match_names
         )
         best_result: tuple[Team, Team, list[Player]] = (greedy_t1, greedy_t2, greedy_excluded)
 
@@ -831,8 +879,13 @@ class BalancedShuffler:
                 t2_sum = sum(player_values[p.name] for p in team2_players)
                 value_diff_lb = abs(t1_sum - t2_sum)
 
-                # Quick lower bound: value_diff + exclusion_penalty (ignore role penalties)
-                lower_bound = value_diff_lb + exclusion_penalty
+                # Compute recent match penalty for selected players
+                selected_player_names = {p.name for p in team1_players + team2_players}
+                recent_in_match = len(selected_player_names & recent_match_names)
+                recent_penalty = recent_in_match * self.recent_match_penalty_weight
+
+                # Quick lower bound: value_diff + exclusion_penalty + recent_penalty (ignore role penalties)
+                lower_bound = value_diff_lb + exclusion_penalty + recent_penalty
 
                 # Prune if lower bound >= best score
                 if lower_bound >= best_score:
@@ -845,7 +898,7 @@ class BalancedShuffler:
                     team1_players, team2_players, max_assignments_per_team=3
                 )
 
-                total_score = base_score + exclusion_penalty
+                total_score = base_score + exclusion_penalty + recent_penalty
 
                 if total_score < best_score:
                     best_score = total_score

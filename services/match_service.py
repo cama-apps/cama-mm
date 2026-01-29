@@ -383,6 +383,12 @@ class MatchService:
             pl.name: exclusion_counts_by_id.get(pid, 0) for pid, pl in zip(player_ids, players)
         }
 
+        # Get recent match participants and convert to player names
+        recent_match_ids = self.match_repo.get_last_match_participant_ids()
+        recent_match_names = {
+            p.name for p in players if p.discord_id in recent_match_ids
+        }
+
         # Create a shuffler configured for the requested rating system
         use_openskill = rating_system == "openskill"
         shuffler = BalancedShuffler(
@@ -392,7 +398,7 @@ class MatchService:
 
         if len(players) > 10:
             team1, team2, excluded_players = shuffler.shuffle_from_pool(
-                players, exclusion_counts
+                players, exclusion_counts, recent_match_names
             )
         else:
             team1, team2 = shuffler.shuffle(players)
@@ -456,8 +462,15 @@ class MatchService:
             exclusion_sum = sum(exclusion_counts.get(name, 0) for name in excluded_names)
             excluded_penalty = exclusion_sum * shuffler.exclusion_penalty_weight
 
+        # Calculate recent match penalty for selected players
+        recent_match_penalty = 0.0
+        if recent_match_names:
+            selected_names = {p.name for p in radiant_team.players + dire_team.players}
+            recent_in_match = len(selected_names & recent_match_names)
+            recent_match_penalty = recent_in_match * shuffler.recent_match_penalty_weight
+
         goodness_score = (
-            value_diff + off_role_penalty + weighted_role_matchup_delta + excluded_penalty
+            value_diff + off_role_penalty + weighted_role_matchup_delta + excluded_penalty + recent_match_penalty
         )
 
         # Calculate Glicko-2 win probability for Radiant
