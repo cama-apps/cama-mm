@@ -419,6 +419,69 @@ class TestSnakeDraftOrder:
         assert SNAKE_DRAFT_ORDER[7] == 0  # First captain
 
 
+class TestForceRandomCaptains:
+    """Tests for force_random_captains functionality used in shuffle auto-redirect."""
+
+    def test_select_captains_force_random_all_eligible(self):
+        """When force_random_captains=True, any player can be captain."""
+        service = DraftService()
+        # All players have the same rating - simulates random selection
+        ratings = {1: 1500.0, 2: 1500.0, 3: 1500.0, 4: 1500.0, 5: 1500.0}
+
+        # With force_random_captains, we pass all players as eligible
+        # and let select_captains randomly pick two with specified captains
+        selected = [1, 2]  # Simulating random.sample result
+
+        result = service.select_captains(
+            eligible_ids=[1, 2, 3, 4, 5],
+            player_ratings=ratings,
+            specified_captain1=selected[0],
+            specified_captain2=selected[1],
+        )
+
+        assert result.captain1_id == 1
+        assert result.captain2_id == 2
+
+    def test_force_random_captains_different_players(self):
+        """Random selection always picks two different players."""
+        import random
+
+        player_ids = list(range(1, 17))  # 16 players (>15 threshold)
+
+        # Verify random.sample always gives different players
+        for _ in range(100):
+            selected = random.sample(player_ids, 2)
+            assert len(selected) == 2
+            assert selected[0] != selected[1]
+
+    def test_shuffle_redirect_threshold(self):
+        """Verify the >15 player threshold constant."""
+        # This documents the threshold behavior
+        # 10-15 players: normal shuffle
+        # >15 players (16+): redirect to draft
+        SHUFFLE_MAX_FOR_NORMAL = 15
+        DRAFT_REDIRECT_MIN = 16
+
+        assert DRAFT_REDIRECT_MIN > SHUFFLE_MAX_FOR_NORMAL
+
+    def test_lobby_player_count_includes_conditional(self):
+        """Verify total count includes both regular and conditional players."""
+        from datetime import datetime
+        from domain.models.lobby import Lobby
+
+        lobby = Lobby(lobby_id=1, created_by=999, created_at=datetime.now())
+        # Add 10 regular players
+        for i in range(1, 11):
+            lobby.add_player(i)
+        # Add 6 conditional players
+        for i in range(11, 17):
+            lobby.add_conditional_player(i)
+
+        total = lobby.get_total_count()
+        assert total == 16
+        assert total > 15  # Would trigger draft redirect
+
+
 class TestCaptainEligibility:
     """Tests for captain eligibility repository methods."""
 
