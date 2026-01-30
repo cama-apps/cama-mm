@@ -12,7 +12,13 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from config import SHOP_ANNOUNCE_COST, SHOP_ANNOUNCE_TARGET_COST, SHOP_PROTECT_HERO_COST
+from config import (
+    SHOP_ANNOUNCE_COST,
+    SHOP_ANNOUNCE_TARGET_COST,
+    SHOP_ODDS_BOOST_COST,
+    SHOP_ODDS_BOOST_MULTIPLIER,
+    SHOP_PROTECT_HERO_COST,
+)
 from services.flavor_text_service import FlavorEvent
 from services.player_service import PlayerService
 from utils.formatting import JOPACOIN_EMOTE
@@ -94,6 +100,7 @@ class ShopCommands(commands.Cog):
         item="What to buy",
         target="User to tag (required for 'Announce + Tag' option)",
         hero="Hero to protect from bans (required for 'Protect Hero' option)",
+        team="Team to boost odds for (required for 'Odds Boost' option)",
     )
     @app_commands.choices(
         item=[
@@ -109,7 +116,15 @@ class ShopCommands(commands.Cog):
                 name=f"Protect Hero ({SHOP_PROTECT_HERO_COST} jopacoin)",
                 value="protect_hero",
             ),
-        ]
+            app_commands.Choice(
+                name=f"Odds Boost ({SHOP_ODDS_BOOST_COST} jopacoin - {SHOP_ODDS_BOOST_MULTIPLIER}x payout)",
+                value="odds_boost",
+            ),
+        ],
+        team=[
+            app_commands.Choice(name="Radiant", value="radiant"),
+            app_commands.Choice(name="Dire", value="dire"),
+        ],
     )
     @app_commands.autocomplete(hero=hero_autocomplete)
     async def shop(
@@ -118,6 +133,7 @@ class ShopCommands(commands.Cog):
         item: app_commands.Choice[str],
         target: discord.Member | None = None,
         hero: str | None = None,
+        team: app_commands.Choice[str] | None = None,
     ):
         """Buy items from the shop with jopacoin."""
         guild = interaction.guild if interaction.guild else None
@@ -159,6 +175,16 @@ class ShopCommands(commands.Cog):
                 )
                 return
             await self._handle_protect_hero(interaction, hero=hero)
+        elif item.value == "odds_boost":
+            # Odds boost - require team selection
+            if not team:
+                await interaction.response.send_message(
+                    "You selected 'Odds Boost' but didn't specify a team. "
+                    "Please select Radiant or Dire!",
+                    ephemeral=True,
+                )
+                return
+            await self._handle_odds_boost(interaction, team=team.value)
 
     async def _handle_announce(
         self,
@@ -545,6 +571,138 @@ class ShopCommands(commands.Cog):
 
         # Confirm to the user (this posts to where the command was invoked)
         await safe_followup(interaction, content=content, embed=embed)
+
+    async def _handle_odds_boost(
+        self,
+        interaction: discord.Interaction,
+        team: str,
+    ):
+        """Handle the odds boost purchase."""
+        user_id = interaction.user.id
+        guild_id = interaction.guild.id if interaction.guild else None
+        cost = SHOP_ODDS_BOOST_COST
+
+        # Check if registered
+        player = self.player_service.get_player(user_id)
+        if not player:
+            await interaction.response.send_message(
+                "You need to `/register` before you can shop.",
+                ephemeral=True,
+            )
+            return
+
+        # Check if match_service is available
+        if not self.match_service:
+            await interaction.response.send_message(
+                "This feature is currently unavailable.",
+                ephemeral=True,
+            )
+            return
+
+        # Check if there's an active shuffle
+        pending_state = self.match_service.get_last_shuffle(guild_id)
+        if not pending_state:
+            await interaction.response.send_message(
+                "There's no active match. You can only boost odds during an active game.",
+                ephemeral=True,
+            )
+            return
+
+        # Check balance
+        balance = self.player_service.get_balance(user_id)
+        if balance < cost:
+            await interaction.response.send_message(
+                f"You need {cost} {JOPACOIN_EMOTE} for this, but you only have {balance}.",
+                ephemeral=True,
+            )
+            return
+
+        # Defer - this will post publicly
+        if not await safe_defer(interaction, ephemeral=False):
+            return
+
+        # Deduct cost
+        self.player_service.player_repo.add_balance(user_id, -cost)
+
+        # Calculate the boost amount based on current pool size
+        # The boost adds phantom jopacoin to the opposing team's pool
+        # This increases the payout multiplier for the boosted team
+        boost_amount = int(cost * SHOP_ODDS_BOOST_MULTIPLIER)
+
+        # Update the pending match state with the odds boost
+        current_boosts = pending_state.get("odds_boosts", {"radiant": 0, "dire": 0})
+        current_boosts[team] = current_boosts.get(team, 0) + boost_amount
+        pending_state["odds_boosts"] = current_boosts
+
+        # Save the updated pending match state
+        self.match_service.match_repo.save_pending_match(guild_id, pending_state)
+
+        # Get current pool totals for display
+        betting_service = getattr(self.bot, "betting_service", None)
+        if betting_service:
+            totals = betting_service.get_pot_odds(guild_id, pending_state=pending_state)
+            radiant_total = totals.get("radiant", 0)
+            dire_total = totals.get("dire", 0)
+            total_pool = radiant_total + dire_total
+
+            # Calculate new odds for each team
+            if radiant_total > 0:
+                radiant_odds = total_pool / radiant_total
+            else:
+                radiant_odds = 0
+            if dire_total > 0:
+                dire_odds = total_pool / dire_total
+            else:
+                dire_odds = 0
+        else:
+            radiant_odds = 0
+            dire_odds = 0
+            radiant_total = 0
+            dire_total = 0
+
+        # Build the embed
+        team_display = team.title()
+        opposing_team = "Dire" if team == "radiant" else "Radiant"
+
+        embed = discord.Embed(
+            title=f"Odds Boosted: {team_display}",
+            description=(
+                f"{interaction.user.mention} has boosted **{team_display}** odds!\n\n"
+                f"**+{boost_amount}** phantom {JOPACOIN_EMOTE} added to the pool.\n"
+                f"Bets on {team_display} now have better payouts!\n\n"
+                f"*The boost adds synthetic money that {team_display} bettors can win.*"
+            ),
+            color=0x92FC92 if team == "radiant" else 0xC23C2A,
+        )
+
+        # Show new pool odds
+        embed.add_field(
+            name="Current Pool Odds",
+            value=(
+                f"Radiant: **{radiant_odds:.2f}x** ({radiant_total} {JOPACOIN_EMOTE})\n"
+                f"Dire: **{dire_odds:.2f}x** ({dire_total} {JOPACOIN_EMOTE})"
+            ),
+            inline=False,
+        )
+
+        # Show total boosts applied
+        total_radiant_boost = current_boosts.get("radiant", 0)
+        total_dire_boost = current_boosts.get("dire", 0)
+        if total_radiant_boost > 0 or total_dire_boost > 0:
+            boost_lines = []
+            if total_radiant_boost > 0:
+                boost_lines.append(f"Radiant: +{total_radiant_boost} {JOPACOIN_EMOTE}")
+            if total_dire_boost > 0:
+                boost_lines.append(f"Dire: +{total_dire_boost} {JOPACOIN_EMOTE}")
+            embed.add_field(
+                name="Total Odds Boosts",
+                value="\n".join(boost_lines),
+                inline=False,
+            )
+
+        embed.set_footer(text=f"Cost: {cost} jopacoin")
+
+        await safe_followup(interaction, embed=embed)
 
 
 async def setup(bot: commands.Bot):

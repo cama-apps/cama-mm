@@ -431,6 +431,7 @@ class BetRepository(BaseRepository, IBetRepository):
         winning_team: str,
         house_payout_multiplier: float,
         betting_mode: str = "pool",
+        odds_boosts: dict[str, int] | None = None,
     ) -> dict[str, list[dict]]:
         """
         Atomically settle bets for the current match window:
@@ -439,6 +440,7 @@ class BetRepository(BaseRepository, IBetRepository):
 
         Args:
             betting_mode: "pool" for parimutuel betting, "house" for 1:1 payouts
+            odds_boosts: Synthetic pool amounts added to each team's pool for odds calculation
         """
         normalized_guild = self.normalize_guild_id(guild_id)
         distributions: dict[str, list[dict]] = {"winners": [], "losers": []}
@@ -459,7 +461,7 @@ class BetRepository(BaseRepository, IBetRepository):
 
             if betting_mode == "pool":
                 distributions, balance_deltas, payout_updates = self._calculate_pool_payouts(
-                    rows, winning_team
+                    rows, winning_team, odds_boosts=odds_boosts
                 )
             else:
                 distributions, balance_deltas, payout_updates = self._calculate_house_payouts(
@@ -529,11 +531,21 @@ class BetRepository(BaseRepository, IBetRepository):
 
         return distributions, balance_deltas, payout_updates
 
-    def _calculate_pool_payouts(self, rows: list, winning_team: str) -> tuple:
+    def _calculate_pool_payouts(
+        self,
+        rows: list,
+        winning_team: str,
+        odds_boosts: dict[str, int] | None = None,
+    ) -> tuple:
         """Calculate pool mode payouts (proportional from total pool) with leverage support.
 
         Payouts are aggregated per user before applying ceiling to prevent exploits
         where splitting bets into many small wagers gains extra coins from rounding.
+
+        Args:
+            odds_boosts: Synthetic pool amounts from shop purchases. These are added to
+                        the losing side's pool to increase the odds for winners on the
+                        boosted team, but are not actually paid out (they vanish).
         """
         distributions: dict[str, list[dict]] = {"winners": [], "losers": []}
         balance_deltas: dict[int, int] = {}
@@ -542,16 +554,44 @@ class BetRepository(BaseRepository, IBetRepository):
         # Convert rows to dicts for .get() support
         rows = [dict(row) for row in rows]
 
-        # Calculate totals using effective bets (amount * leverage)
-        total_pool = sum(row["amount"] * (row.get("leverage") or 1) for row in rows)
-        winner_pool = sum(
+        # Calculate real bet totals using effective bets (amount * leverage)
+        real_total_pool = sum(row["amount"] * (row.get("leverage") or 1) for row in rows)
+        real_winner_pool = sum(
             row["amount"] * (row.get("leverage") or 1)
             for row in rows
             if row["team_bet_on"] == winning_team
         )
 
-        # Edge case: no bets on winning side - refund all effective bets
-        if winner_pool == 0:
+        # Odds boosts add synthetic money to the OPPOSING team's visible pool
+        # This increases the odds for bettors on the boosted team
+        # Example: 200 JC boost on Radiant adds 200 phantom JC to Dire's pool for odds calc
+        boosts = odds_boosts or {"radiant": 0, "dire": 0}
+
+        # Calculate adjusted pools for odds calculation only
+        # The boost for team X is added to the opposing team's effective pool
+        radiant_real = sum(
+            row["amount"] * (row.get("leverage") or 1)
+            for row in rows
+            if row["team_bet_on"] == "radiant"
+        )
+        dire_real = sum(
+            row["amount"] * (row.get("leverage") or 1)
+            for row in rows
+            if row["team_bet_on"] == "dire"
+        )
+
+        # Radiant boost adds phantom money that Radiant bettors can win (added to Dire side for odds)
+        # Dire boost adds phantom money that Dire bettors can win (added to Radiant side for odds)
+        radiant_adjusted = radiant_real + boosts.get("dire", 0)  # Dire boost benefits Radiant bettors
+        dire_adjusted = dire_real + boosts.get("radiant", 0)  # Radiant boost benefits Dire bettors
+
+        # Total pool for payout includes both real bets AND odds boosts
+        # Winners on the boosted team get to split the boost amount
+        total_adjusted = radiant_adjusted + dire_adjusted
+        winner_adjusted = radiant_adjusted if winning_team == "radiant" else dire_adjusted
+
+        # Edge case: no bets on winning side - refund all real effective bets
+        if real_winner_pool == 0:
             for row in rows:
                 bet = dict(row)
                 leverage = bet.get("leverage", 1) or 1
@@ -572,7 +612,8 @@ class BetRepository(BaseRepository, IBetRepository):
                 )
             return distributions, balance_deltas, payout_updates
 
-        multiplier = total_pool / winner_pool
+        # Calculate multiplier using adjusted pools (includes odds boosts)
+        multiplier = total_adjusted / winner_adjusted
 
         # First pass: calculate raw payouts and group winning bets by user
         winning_bets_by_user: dict[int, list[dict]] = {}
@@ -596,8 +637,9 @@ class BetRepository(BaseRepository, IBetRepository):
                 distributions["losers"].append(entry)
                 continue
 
-            # Calculate raw (unrounded) payout for this bet
-            raw_payout = (effective_bet / winner_pool) * total_pool
+            # Calculate raw (unrounded) payout using adjusted pools
+            # Winners on the boosted team get to share in the boost amount
+            raw_payout = (effective_bet / winner_adjusted) * total_adjusted
             entry["raw_payout"] = raw_payout
             entry["multiplier"] = multiplier
 
