@@ -43,6 +43,10 @@ class DraftState:
     # Pool of 10 players selected for this draft
     player_pool_ids: list[int] = field(default_factory=list)
 
+    # Cached player data for the pool (avoids repeated DB queries)
+    # Maps discord_id -> {name: str, rating: float, roles: list[str]}
+    player_pool_data: dict[int, dict] = field(default_factory=dict)
+
     # Excluded players (if lobby had >10)
     excluded_player_ids: list[int] = field(default_factory=list)
 
@@ -226,6 +230,7 @@ class DraftState:
         return {
             "guild_id": self.guild_id,
             "player_pool_ids": self.player_pool_ids,
+            "player_pool_data": self.player_pool_data,
             "excluded_player_ids": self.excluded_player_ids,
             "captain1_id": self.captain1_id,
             "captain2_id": self.captain2_id,
@@ -254,6 +259,7 @@ class DraftState:
         """Create from dictionary format."""
         state = cls(guild_id=data["guild_id"])
         state.player_pool_ids = data.get("player_pool_ids", [])
+        state.player_pool_data = data.get("player_pool_data", {})
         state.excluded_player_ids = data.get("excluded_player_ids", [])
         state.captain1_id = data.get("captain1_id")
         state.captain2_id = data.get("captain2_id")
