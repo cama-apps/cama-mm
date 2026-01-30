@@ -1155,6 +1155,106 @@ class AdminCommands(commands.Cog):
             )
 
 
+    @app_commands.command(
+        name="seedherogrid",
+        description="Seed fake players with enriched match data for /herogrid testing (Admin only)",
+    )
+    async def seedherogrid(self, interaction: discord.Interaction):
+        """Create 20 fake players with ~30 enriched matches for hero grid testing."""
+        if not has_admin_permission(interaction):
+            await interaction.response.send_message("❌ Admin only command.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        match_repo = getattr(interaction.client, "match_repo", None)
+        if not match_repo:
+            await interaction.followup.send("❌ match_repo not available.", ephemeral=True)
+            return
+
+        # Hero pool: 20 popular heroes with IDs from heroes.json
+        HERO_POOL = [
+            1, 2, 5, 7, 8, 11, 14, 18, 19, 22,       # AM, Axe, CM, ES, Jug, SF, Pudge, Sven, Tiny, Zeus
+            25, 29, 35, 39, 41, 44, 48, 49, 74, 86,    # Lina, Tide, Sniper, QoP, Void, PA, Luna, DK, Invoker, Rubick
+        ]
+
+        NUM_PLAYERS = 20
+        NUM_MATCHES = 30
+        BASE_ID = -1001  # Separate range from lobby fake users
+
+        # Assign each player a "preferred" subset of 4-6 heroes (weighted picks)
+        player_hero_pools = {}
+        for i in range(NUM_PLAYERS):
+            pool_size = random.randint(4, 6)
+            player_hero_pools[i] = random.sample(HERO_POOL, k=pool_size)
+
+        # 1. Create fake players
+        player_ids = []
+        for i in range(NUM_PLAYERS):
+            pid = BASE_ID - i  # -1001, -1002, ...
+            player_ids.append(pid)
+            existing = self.player_repo.get_by_id(pid)
+            if not existing:
+                self.player_repo.add(
+                    discord_id=pid,
+                    discord_username=f"GridTest{i + 1}",
+                    glicko_rating=random.randint(1000, 2000),
+                    glicko_rd=random.uniform(50, 200),
+                    glicko_volatility=0.06,
+                    preferred_roles=random.sample(["1", "2", "3", "4", "5"], k=random.randint(1, 3)),
+                )
+
+        # 2. Record matches with enrichment
+        matches_created = 0
+        for _ in range(NUM_MATCHES):
+            shuffled = random.sample(player_ids, k=10)
+            team1 = shuffled[:5]
+            team2 = shuffled[5:]
+            winning_team = random.choice([1, 2])
+
+            match_id = match_repo.record_match(
+                team1_ids=team1,
+                team2_ids=team2,
+                winning_team=winning_team,
+                lobby_type="shuffle",
+            )
+
+            # Enrich each participant
+            for team_ids in [team1, team2]:
+                for pid in team_ids:
+                    idx = player_ids.index(pid)
+                    pool = player_hero_pools[idx]
+                    # 70% chance pick from preferred pool, 30% any hero
+                    if random.random() < 0.7:
+                        hero_id = random.choice(pool)
+                    else:
+                        hero_id = random.choice(HERO_POOL)
+
+                    match_repo.update_participant_stats(
+                        match_id=match_id,
+                        discord_id=pid,
+                        hero_id=hero_id,
+                        kills=random.randint(0, 25),
+                        deaths=random.randint(0, 15),
+                        assists=random.randint(0, 30),
+                        gpm=random.randint(200, 800),
+                        xpm=random.randint(200, 700),
+                        hero_damage=random.randint(5000, 50000),
+                        tower_damage=random.randint(500, 15000),
+                        last_hits=random.randint(20, 400),
+                        denies=random.randint(0, 40),
+                        net_worth=random.randint(5000, 40000),
+                    )
+
+            matches_created += 1
+
+        await interaction.followup.send(
+            f"✅ Seeded {NUM_PLAYERS} players and {matches_created} enriched matches.\n"
+            f"Run `/herogrid source:All Players min_games:1` to see the grid.",
+            ephemeral=True,
+        )
+
+
 async def setup(bot: commands.Bot):
     lobby_service = getattr(bot, "lobby_service", None)
     # Use player_repo directly from bot for admin operations
