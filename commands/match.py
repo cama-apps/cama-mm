@@ -1176,26 +1176,12 @@ class MatchCommands(commands.Cog):
         self, interaction: discord.Interaction, guild_id: int | None, admin_override: bool
     ):
         betting_service = getattr(self.bot, "betting_service", None)
-        stake_service = getattr(self.bot, "stake_service", None)
-        spectator_pool_service = getattr(self.bot, "spectator_pool_service", None)
         pending_state = self.match_service.get_last_shuffle(guild_id)
         if betting_service and pending_state:
             try:
                 betting_service.refund_pending_bets(guild_id, pending_state)
             except Exception as exc:
                 logger.error(f"Error refunding pending bets on abort: {exc}", exc_info=True)
-        # Clear player stakes (draft mode - refunds player pool bets)
-        if stake_service and pending_state and pending_state.get("is_draft"):
-            try:
-                stake_service.clear_stakes(guild_id, pending_state)
-            except Exception as exc:
-                logger.error(f"Error clearing stakes on abort: {exc}", exc_info=True)
-        # Refund spectator pool bets (draft mode only)
-        if spectator_pool_service and pending_state and pending_state.get("is_draft"):
-            try:
-                spectator_pool_service.refund_bets(guild_id, pending_state)
-            except Exception as exc:
-                logger.error(f"Error refunding spectator bets on abort: {exc}", exc_info=True)
         # Cancel any pending betting reminders
         self._cancel_betting_tasks(guild_id)
 
