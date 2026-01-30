@@ -189,6 +189,7 @@ class BettingService:
             return {"winners": [], "losers": []}
 
         betting_mode = pending_state.get("betting_mode", "pool")
+        odds_boosts = pending_state.get("odds_boosts", {"radiant": 0, "dire": 0})
 
         # Prefer atomic settlement (payouts + bet tagging in one DB transaction)
         if hasattr(self.bet_repo, "settle_pending_bets_atomic"):
@@ -199,6 +200,7 @@ class BettingService:
                 winning_team=winning_team,
                 house_payout_multiplier=HOUSE_PAYOUT_MULTIPLIER,
                 betting_mode=betting_mode,
+                odds_boosts=odds_boosts,
             )
 
         # Fallback (older behavior) - only supports house mode
@@ -400,11 +402,33 @@ class BettingService:
     def get_pot_odds(
         self, guild_id: int | None, pending_state: dict[str, Any] | None = None
     ) -> dict[str, int]:
-        """Return current bet totals by team for odds calculation."""
+        """Return current bet totals by team for odds calculation.
+
+        Includes odds_boosts as synthetic pool money if present in pending_state.
+        Boost for team X is added to the OPPOSING team's effective pool (since
+        the boost adds phantom money that team X bettors can win).
+        """
         since_ts = self._since_ts(pending_state)
         if pending_state is None or since_ts is None:
             return dict.fromkeys(self.bet_repo.VALID_TEAMS, 0)
-        return self.bet_repo.get_total_bets_by_guild(guild_id, since_ts=since_ts)
+        totals = self.bet_repo.get_total_bets_by_guild(guild_id, since_ts=since_ts)
+
+        # Add odds boosts (synthetic pool money from shop purchases)
+        # Radiant boost adds to Dire's effective pool (benefits Radiant bettors)
+        # Dire boost adds to Radiant's effective pool (benefits Dire bettors)
+        odds_boosts = pending_state.get("odds_boosts", {})
+        totals["radiant"] += odds_boosts.get("dire", 0)
+        totals["dire"] += odds_boosts.get("radiant", 0)
+
+        return totals
+
+    def get_odds_boosts(
+        self, pending_state: dict[str, Any] | None = None
+    ) -> dict[str, int]:
+        """Return the current odds boosts for each team."""
+        if pending_state is None:
+            return {"radiant": 0, "dire": 0}
+        return pending_state.get("odds_boosts", {"radiant": 0, "dire": 0})
 
     def get_pending_bet(
         self, guild_id: int | None, discord_id: int, pending_state: dict[str, Any] | None = None

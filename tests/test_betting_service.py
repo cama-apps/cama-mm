@@ -1826,3 +1826,162 @@ class TestBlindBets:
         # Verify player balances restored
         for pid in player_ids:
             assert player_repo.get_balance(pid) == 100
+
+
+class TestOddsBoost:
+    """Test cases for odds boost shop feature."""
+
+    def test_odds_boost_increases_pool_payout(self, services):
+        """Odds boost should increase payout for the boosted team."""
+        match_service = services["match_service"]
+        betting_service = services["betting_service"]
+        player_repo = services["player_repo"]
+
+        player_ids = list(range(2000, 2013))
+        for pid in player_ids:
+            player_repo.add(
+                discord_id=pid,
+                discord_username=f"Player{pid}",
+                dotabuff_url=f"https://dotabuff.com/players/{pid}",
+                initial_mmr=3000,
+                glicko_rating=1500.0,
+                glicko_rd=350.0,
+                glicko_volatility=0.06,
+            )
+            player_repo.add_balance(pid, 100)
+
+        match_service.shuffle_players(player_ids, 1)
+        pending_state = match_service.get_last_shuffle(1)
+
+        radiant_ids = pending_state["radiant_team_ids"]
+        dire_ids = pending_state["dire_team_ids"]
+
+        # Place equal bets on both sides
+        betting_service.place_bet(1, radiant_ids[0], "radiant", 50, pending_state)
+        betting_service.place_bet(1, dire_ids[0], "dire", 50, pending_state)
+
+        # Before boost: 50 on each side, 2x payout for winners
+        totals_before = betting_service.get_pot_odds(1, pending_state)
+        assert totals_before["radiant"] == 50
+        assert totals_before["dire"] == 50
+
+        # Add odds boost for radiant (400 phantom jopacoin at 2x multiplier)
+        boost_amount = 400
+        pending_state["odds_boosts"] = {"radiant": boost_amount, "dire": 0}
+
+        # After boost: Radiant boost adds 400 phantom JC to Dire's effective pool
+        # Radiant pool (for odds calc) = 50 real
+        # Dire pool (for odds calc) = 50 real + 400 boost = 450
+        # Total pool = 500, so Radiant bettors get 500/50 = 10x if they win
+        # Dire bettors get 500/450 = 1.11x if they win
+        totals_after = betting_service.get_pot_odds(1, pending_state)
+        assert totals_after["radiant"] == 50  # unchanged real bets
+        assert totals_after["dire"] == 50 + boost_amount  # 450 (radiant boost adds here)
+
+        # Settle with radiant winning - they get boosted pool
+        distributions = betting_service.settle_bets(101, 1, "radiant", pending_state)
+
+        # Winner should get proportional share of total (including boost)
+        # 50 JC bet on radiant, pool is 50 radiant + 450 dire = 500 total
+        # Payout = (50 / 50) * 500 = 500
+        assert len(distributions["winners"]) == 1
+        winner = distributions["winners"][0]
+        assert winner["payout"] == 500
+
+    def test_odds_boost_dire_team(self, services):
+        """Odds boost on Dire should benefit Dire bettors."""
+        match_service = services["match_service"]
+        betting_service = services["betting_service"]
+        player_repo = services["player_repo"]
+
+        player_ids = list(range(2100, 2113))
+        for pid in player_ids:
+            player_repo.add(
+                discord_id=pid,
+                discord_username=f"Player{pid}",
+                dotabuff_url=f"https://dotabuff.com/players/{pid}",
+                initial_mmr=3000,
+                glicko_rating=1500.0,
+                glicko_rd=350.0,
+                glicko_volatility=0.06,
+            )
+            player_repo.add_balance(pid, 100)
+
+        match_service.shuffle_players(player_ids, 1)
+        pending_state = match_service.get_last_shuffle(1)
+
+        radiant_ids = pending_state["radiant_team_ids"]
+        dire_ids = pending_state["dire_team_ids"]
+
+        # Place bets
+        betting_service.place_bet(1, radiant_ids[0], "radiant", 50, pending_state)
+        betting_service.place_bet(1, dire_ids[0], "dire", 50, pending_state)
+
+        # Boost dire odds by 400 (adds 400 phantom JC to Radiant's effective pool)
+        pending_state["odds_boosts"] = {"radiant": 0, "dire": 400}
+
+        # Settle with dire winning
+        distributions = betting_service.settle_bets(102, 1, "dire", pending_state)
+
+        # Dire bettors get the boosted pool
+        assert len(distributions["winners"]) == 1
+        winner = distributions["winners"][0]
+        # 50 JC bet on dire, radiant_adjusted = 450, dire_adjusted = 50, total = 500
+        # Payout = (50 / 50) * 500 = 500
+        assert winner["payout"] == 500
+
+    def test_odds_boost_no_effect_when_boosted_team_loses(self, services):
+        """When the boosted team loses, losers don't benefit from boost."""
+        match_service = services["match_service"]
+        betting_service = services["betting_service"]
+        player_repo = services["player_repo"]
+
+        player_ids = list(range(2200, 2213))
+        for pid in player_ids:
+            player_repo.add(
+                discord_id=pid,
+                discord_username=f"Player{pid}",
+                dotabuff_url=f"https://dotabuff.com/players/{pid}",
+                initial_mmr=3000,
+                glicko_rating=1500.0,
+                glicko_rd=350.0,
+                glicko_volatility=0.06,
+            )
+            player_repo.add_balance(pid, 100)
+
+        match_service.shuffle_players(player_ids, 1)
+        pending_state = match_service.get_last_shuffle(1)
+
+        radiant_ids = pending_state["radiant_team_ids"]
+        dire_ids = pending_state["dire_team_ids"]
+
+        # Place bets
+        betting_service.place_bet(1, radiant_ids[0], "radiant", 50, pending_state)
+        betting_service.place_bet(1, dire_ids[0], "dire", 50, pending_state)
+
+        # Boost radiant odds (adds 400 phantom JC to dire's effective pool)
+        pending_state["odds_boosts"] = {"radiant": 400, "dire": 0}
+
+        # Radiant loses - dire wins but doesn't benefit from radiant's boost
+        distributions = betting_service.settle_bets(103, 1, "dire", pending_state)
+
+        assert len(distributions["winners"]) == 1
+        winner = distributions["winners"][0]
+        # Radiant boost adds 400 to dire's effective pool: dire_adjusted = 450
+        # radiant_adjusted = 50, total = 500
+        # Dire payout = (50 / 450) * 500 = 55.55 -> ceiled to 56
+        assert winner["payout"] == 56
+
+    def test_get_odds_boosts_method(self, services):
+        """get_odds_boosts should return current boosts or defaults."""
+        betting_service = services["betting_service"]
+
+        # No pending state
+        assert betting_service.get_odds_boosts(None) == {"radiant": 0, "dire": 0}
+
+        # Empty pending state
+        assert betting_service.get_odds_boosts({}) == {"radiant": 0, "dire": 0}
+
+        # With boosts
+        pending_state = {"odds_boosts": {"radiant": 100, "dire": 200}}
+        assert betting_service.get_odds_boosts(pending_state) == {"radiant": 100, "dire": 200}

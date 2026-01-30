@@ -444,7 +444,7 @@ resolution_votes TEXT  -- JSON {discord_id: outcome}
 | `/nonprofit` | View nonprofit fund | - |
 | `/disburse` | Manage fund distribution | `action`: propose/status/reset |
 | `/gamba` | Spin Wheel of Fortune | Daily cooldown |
-| `/shop` | Spend jopacoin | `item`, `target` |
+| `/shop` | Spend jopacoin | `item`, `target`, `hero`, `team` |
 | `/prediction` | Create prediction market | `question`, `closes_in` |
 | `/predictions` | List active predictions | - |
 | `/mypredictions` | View your positions | - |
