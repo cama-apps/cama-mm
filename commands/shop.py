@@ -12,7 +12,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from config import SHOP_ANNOUNCE_COST, SHOP_ANNOUNCE_TARGET_COST, SHOP_PROTECT_HERO_COST
+from config import SHOP_ANNOUNCE_COST, SHOP_ANNOUNCE_TARGET_COST, SHOP_PROTECT_HERO_COST, SHOP_MYSTERY_GIFT_COST
 from services.flavor_text_service import FlavorEvent
 from services.player_service import PlayerService
 from utils.formatting import JOPACOIN_EMOTE
@@ -109,6 +109,10 @@ class ShopCommands(commands.Cog):
                 name=f"Protect Hero ({SHOP_PROTECT_HERO_COST} jopacoin)",
                 value="protect_hero",
             ),
+            app_commands.Choice(
+                name=f"Mystery Gift ({SHOP_MYSTERY_GIFT_COST} jopacoin)",
+                value="mystery_gift",
+            ),
         ]
     )
     @app_commands.autocomplete(hero=hero_autocomplete)
@@ -159,6 +163,8 @@ class ShopCommands(commands.Cog):
                 )
                 return
             await self._handle_protect_hero(interaction, hero=hero)
+        elif item.value == "mystery_gift":
+            await self._handle_mystery_gift(interaction)
 
     async def _handle_announce(
         self,
@@ -545,6 +551,46 @@ class ShopCommands(commands.Cog):
 
         # Confirm to the user (this posts to where the command was invoked)
         await safe_followup(interaction, content=content, embed=embed)
+
+    async def _handle_mystery_gift(
+        self,
+        interaction: discord.Interaction,
+    ):
+        """Handle the mystery gift purchase."""
+        user_id = interaction.user.id
+        cost = SHOP_MYSTERY_GIFT_COST
+
+        # Check if registered
+        player = self.player_service.get_player(user_id)
+        if not player:
+            await interaction.response.send_message(
+                "You need to `/register` before you can shop.",
+                ephemeral=True,
+            )
+            return
+
+        # Check balance
+        balance = self.player_service.get_balance(user_id)
+        if balance < cost:
+            await interaction.response.send_message(
+                f"You need {cost} {JOPACOIN_EMOTE} for this, but you only have {balance}.",
+                ephemeral=True,
+            )
+            return
+
+        # Deduct cost
+        self.player_service.player_repo.add_balance(user_id, -cost)
+
+        # Build the announcement embed
+        embed = discord.Embed(
+            title="🎁 Mystery Gift Redeemed!",
+            description=f"{interaction.user.mention} has redeemed a **Mystery Gift**!",
+            color=0x9B59B6,  # Purple for mystery
+        )
+        embed.set_footer(text=f"Cost: {cost} jopacoin")
+
+        # Send public announcement
+        await interaction.response.send_message(embed=embed)
 
 
 async def setup(bot: commands.Bot):
