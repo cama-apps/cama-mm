@@ -784,6 +784,14 @@ class DraftCommands(commands.Cog):
             inline=False,
         )
 
+        # Show player pool (8 available players)
+        player_pool_display = self._build_player_pool_field(state)
+        embed.add_field(
+            name="📋 Player Pool",
+            value=player_pool_display,
+            inline=False,
+        )
+
         if pool_result.excluded_ids:
             excluded_names = []
             for eid in pool_result.excluded_ids:
@@ -934,6 +942,14 @@ class DraftCommands(commands.Cog):
             inline=False,
         )
 
+        # Show player pool
+        player_pool_display = self._build_player_pool_field(state)
+        embed.add_field(
+            name="📋 Player Pool",
+            value=player_pool_display,
+            inline=False,
+        )
+
         view = SideChoiceView(self, guild_id, state.coinflip_winner_id, is_winner=True)
         await interaction.response.edit_message(embed=embed, view=view)
 
@@ -957,6 +973,14 @@ class DraftCommands(commands.Cog):
         embed.add_field(
             name="Choose Hero Pick Order",
             value=f"{winner_name}, pick First or Second hero pick (in-game).",
+            inline=False,
+        )
+
+        # Show player pool
+        player_pool_display = self._build_player_pool_field(state)
+        embed.add_field(
+            name="📋 Player Pool",
+            value=player_pool_display,
             inline=False,
         )
 
@@ -1008,6 +1032,14 @@ class DraftCommands(commands.Cog):
             embed.add_field(
                 name="Choose Hero Pick Order",
                 value=f"{loser_name}, pick First or Second hero pick (in-game).",
+                inline=False,
+            )
+
+            # Show player pool
+            player_pool_display = self._build_player_pool_field(state)
+            embed.add_field(
+                name="📋 Player Pool",
+                value=player_pool_display,
                 inline=False,
             )
 
@@ -1064,6 +1096,14 @@ class DraftCommands(commands.Cog):
             embed.add_field(
                 name="Choose Your Side",
                 value=f"{loser_name}, pick Radiant or Dire.",
+                inline=False,
+            )
+
+            # Show player pool
+            player_pool_display = self._build_player_pool_field(state)
+            embed.add_field(
+                name="📋 Player Pool",
+                value=player_pool_display,
                 inline=False,
             )
 
@@ -1156,6 +1196,14 @@ class DraftCommands(commands.Cog):
         embed.add_field(
             name="Player Draft Order",
             value=f"{lower_captain_name} (lower-rated) chooses first or second pick for player draft.",
+            inline=False,
+        )
+
+        # Show player pool
+        player_pool_display = self._build_player_pool_field(state)
+        embed.add_field(
+            name="📋 Player Pool",
+            value=player_pool_display,
             inline=False,
         )
 
@@ -1848,6 +1896,35 @@ class DraftCommands(commands.Cog):
     # ========================================================================
     # Helper Methods
     # ========================================================================
+
+    def _build_player_pool_field(self, state: DraftState) -> str:
+        """
+        Build the player pool display for pre-draft embeds.
+        Shows the 8 available players (excluding captains) with ratings and roles.
+        """
+        # Get available players (pool minus captains)
+        available_ids = [
+            pid for pid in state.player_pool_ids
+            if pid != state.captain1_id and pid != state.captain2_id
+        ]
+
+        if not available_ids:
+            return "No players in pool"
+
+        # Fetch player data
+        available_players = self.player_repo.get_by_ids(available_ids)
+
+        # Sort by rating descending
+        available_players.sort(key=lambda p: p.glicko_rating or 1500.0, reverse=True)
+
+        # Build display lines
+        lines = []
+        for p in available_players:
+            rating = p.glicko_rating or 1500.0
+            roles = format_roles(p.preferred_roles) if p.preferred_roles else ""
+            lines.append(f"{p.name} ({rating:.0f}) {roles}")
+
+        return "\n".join(lines)
 
     async def _post_to_match_thread(
         self, state: DraftState, embed: discord.Embed, thread_id: int | None = None
