@@ -743,6 +743,17 @@ class DraftCommands(commands.Cog):
         state.captain2_rating = captain_pair.captain2_rating
         state.draft_channel_id = interaction.channel_id
 
+        # Cache player data for the pool (avoids repeated DB queries during pre-draft phases)
+        state.player_pool_data = {
+            p.discord_id: {
+                "name": p.name,
+                "rating": p.glicko_rating or 1500.0,
+                "roles": p.preferred_roles or [],
+            }
+            for p in players
+            if p.discord_id in pool_result.selected_ids
+        }
+
         # Perform coinflip
         coinflip_winner_id = self.draft_service.coinflip(
             captain_pair.captain1_id, captain_pair.captain2_id
@@ -1901,6 +1912,7 @@ class DraftCommands(commands.Cog):
         """
         Build the player pool display for pre-draft embeds.
         Shows the 8 available players (excluding captains) with ratings and roles.
+        Uses cached player_pool_data from state (no DB queries).
         """
         # Get available players (pool minus captains)
         available_ids = [
@@ -1911,18 +1923,32 @@ class DraftCommands(commands.Cog):
         if not available_ids:
             return "No players in pool"
 
-        # Fetch player data
-        available_players = self.player_repo.get_by_ids(available_ids)
+        # Build player info list from cached data
+        player_info = []
+        for pid in available_ids:
+            data = state.player_pool_data.get(pid)
+            if data:
+                player_info.append({
+                    "name": data["name"],
+                    "rating": data["rating"],
+                    "roles": data["roles"],
+                })
+            else:
+                # Fallback if data missing (shouldn't happen)
+                player_info.append({
+                    "name": f"Player {pid}",
+                    "rating": 1500.0,
+                    "roles": [],
+                })
 
         # Sort by rating descending
-        available_players.sort(key=lambda p: p.glicko_rating or 1500.0, reverse=True)
+        player_info.sort(key=lambda p: p["rating"], reverse=True)
 
         # Build display lines
         lines = []
-        for p in available_players:
-            rating = p.glicko_rating or 1500.0
-            roles = format_roles(p.preferred_roles) if p.preferred_roles else ""
-            lines.append(f"{p.name} ({rating:.0f}) {roles}")
+        for p in player_info:
+            roles = format_roles(p["roles"]) if p["roles"] else ""
+            lines.append(f"{p['name']} ({p['rating']:.0f}) {roles}")
 
         return "\n".join(lines)
 

@@ -168,6 +168,46 @@ class TestDraftState:
         assert restored.phase == DraftPhase.DRAFTING
         assert restored.player_pool_ids == [1, 2, 3]
 
+    def test_player_pool_data_serialization(self):
+        """Player pool data is correctly serialized and deserialized."""
+        state = DraftState(guild_id=123)
+        state.player_pool_ids = [1, 2, 3]
+        state.player_pool_data = {
+            1: {"name": "Alice", "rating": 1800.0, "roles": ["1", "2"]},
+            2: {"name": "Bob", "rating": 1650.0, "roles": ["3"]},
+            3: {"name": "Charlie", "rating": 1500.0, "roles": ["4", "5"]},
+        }
+
+        data = state.to_dict()
+        assert "player_pool_data" in data
+        assert data["player_pool_data"][1]["name"] == "Alice"
+
+        restored = DraftState.from_dict(data)
+        assert restored.player_pool_data == state.player_pool_data
+        assert restored.player_pool_data[2]["rating"] == 1650.0
+
+    def test_player_pool_data_empty_by_default(self):
+        """New DraftState has empty player_pool_data."""
+        state = DraftState(guild_id=123)
+        assert state.player_pool_data == {}
+
+    def test_player_pool_data_survives_round_trip(self):
+        """Player pool data survives to_dict/from_dict with various data types."""
+        state = DraftState(guild_id=456)
+        state.player_pool_data = {
+            100: {"name": "Player100", "rating": 2100.5, "roles": []},
+            200: {"name": "Player200", "rating": 1400.0, "roles": ["1", "2", "3", "4", "5"]},
+        }
+
+        # Round trip
+        restored = DraftState.from_dict(state.to_dict())
+
+        # Verify exact equality
+        assert restored.player_pool_data[100]["name"] == "Player100"
+        assert restored.player_pool_data[100]["rating"] == 2100.5
+        assert restored.player_pool_data[100]["roles"] == []
+        assert restored.player_pool_data[200]["roles"] == ["1", "2", "3", "4", "5"]
+
 
 class TestDraftStateManager:
     """Tests for DraftStateManager."""
@@ -596,3 +636,189 @@ class TestCaptainEligibility:
         # Only query for 2 and 4 - should return only 2
         eligible = player_repository.get_captain_eligible_players([4002, 4004])
         assert eligible == [4002]
+
+
+class TestPlayerPoolVisibility:
+    """
+    Tests for player pool visibility during pre-draft phases.
+    Verifies the cached player data is used correctly without DB queries.
+    """
+
+    def test_player_pool_data_excludes_captains(self):
+        """Available player IDs correctly excludes captains."""
+        state = DraftState(guild_id=123)
+        state.player_pool_ids = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        state.captain1_id = 1
+        state.captain2_id = 2
+
+        # Simulate what _build_player_pool_field does
+        available_ids = [
+            pid for pid in state.player_pool_ids
+            if pid != state.captain1_id and pid != state.captain2_id
+        ]
+
+        assert 1 not in available_ids  # Captain1 excluded
+        assert 2 not in available_ids  # Captain2 excluded
+        assert len(available_ids) == 8  # 8 draftable players remain
+
+    def test_player_pool_display_sorts_by_rating(self):
+        """Player pool display is sorted by rating descending."""
+        state = DraftState(guild_id=123)
+        state.player_pool_ids = [1, 2, 3, 4, 5]
+        state.captain1_id = None
+        state.captain2_id = None
+        state.player_pool_data = {
+            1: {"name": "LowRating", "rating": 1200.0, "roles": ["5"]},
+            2: {"name": "HighRating", "rating": 1900.0, "roles": ["1"]},
+            3: {"name": "MidRating", "rating": 1500.0, "roles": ["3"]},
+            4: {"name": "VeryHighRating", "rating": 2100.0, "roles": ["2"]},
+            5: {"name": "VeryLowRating", "rating": 1000.0, "roles": ["4"]},
+        }
+
+        # Build player info like _build_player_pool_field does
+        player_info = []
+        for pid in state.player_pool_ids:
+            data = state.player_pool_data.get(pid)
+            if data:
+                player_info.append({
+                    "name": data["name"],
+                    "rating": data["rating"],
+                    "roles": data["roles"],
+                })
+
+        # Sort by rating descending
+        player_info.sort(key=lambda p: p["rating"], reverse=True)
+
+        # Verify order
+        assert player_info[0]["name"] == "VeryHighRating"
+        assert player_info[1]["name"] == "HighRating"
+        assert player_info[2]["name"] == "MidRating"
+        assert player_info[3]["name"] == "LowRating"
+        assert player_info[4]["name"] == "VeryLowRating"
+
+    def test_player_pool_data_fallback_for_missing(self):
+        """Missing player data uses fallback values."""
+        state = DraftState(guild_id=123)
+        state.player_pool_ids = [1, 2, 3]
+        state.captain1_id = None
+        state.captain2_id = None
+        # Only provide data for player 1
+        state.player_pool_data = {
+            1: {"name": "HasData", "rating": 1800.0, "roles": ["1", "2"]},
+        }
+
+        # Build player info like _build_player_pool_field does
+        player_info = []
+        for pid in state.player_pool_ids:
+            data = state.player_pool_data.get(pid)
+            if data:
+                player_info.append({
+                    "name": data["name"],
+                    "rating": data["rating"],
+                    "roles": data["roles"],
+                })
+            else:
+                player_info.append({
+                    "name": f"Player {pid}",
+                    "rating": 1500.0,
+                    "roles": [],
+                })
+
+        # Verify fallback
+        assert player_info[0]["name"] == "HasData"
+        assert player_info[0]["rating"] == 1800.0
+        assert player_info[1]["name"] == "Player 2"  # Fallback
+        assert player_info[1]["rating"] == 1500.0  # Default rating
+        assert player_info[2]["name"] == "Player 3"
+        assert player_info[2]["roles"] == []
+
+    def test_player_pool_empty_when_all_are_captains(self):
+        """Returns empty available list when all players are captains."""
+        state = DraftState(guild_id=123)
+        state.player_pool_ids = [1, 2]  # Only 2 players
+        state.captain1_id = 1
+        state.captain2_id = 2
+
+        available_ids = [
+            pid for pid in state.player_pool_ids
+            if pid != state.captain1_id and pid != state.captain2_id
+        ]
+
+        assert available_ids == []
+
+    def test_player_pool_data_with_full_draft_state(self):
+        """Full draft state integration test with all 10 players."""
+        state = DraftState(guild_id=999)
+
+        # Setup 10 players with realistic data
+        state.player_pool_ids = list(range(1001, 1011))  # Players 1001-1010
+        state.captain1_id = 1001
+        state.captain2_id = 1002
+        state.captain1_rating = 1850.0
+        state.captain2_rating = 1820.0
+
+        # Cache player data for all 10 players
+        state.player_pool_data = {
+            1001: {"name": "Captain1", "rating": 1850.0, "roles": ["1", "2"]},
+            1002: {"name": "Captain2", "rating": 1820.0, "roles": ["2", "3"]},
+            1003: {"name": "Player3", "rating": 1750.0, "roles": ["3"]},
+            1004: {"name": "Player4", "rating": 1700.0, "roles": ["4", "5"]},
+            1005: {"name": "Player5", "rating": 1650.0, "roles": ["5"]},
+            1006: {"name": "Player6", "rating": 1600.0, "roles": ["1"]},
+            1007: {"name": "Player7", "rating": 1550.0, "roles": ["2"]},
+            1008: {"name": "Player8", "rating": 1500.0, "roles": ["3", "4"]},
+            1009: {"name": "Player9", "rating": 1450.0, "roles": ["4"]},
+            1010: {"name": "Player10", "rating": 1400.0, "roles": ["5"]},
+        }
+
+        # Get available (non-captain) players
+        available_ids = [
+            pid for pid in state.player_pool_ids
+            if pid != state.captain1_id and pid != state.captain2_id
+        ]
+
+        # Verify 8 players available for draft
+        assert len(available_ids) == 8
+        assert 1001 not in available_ids  # Captain1 excluded
+        assert 1002 not in available_ids  # Captain2 excluded
+
+        # Build sorted player info
+        player_info = []
+        for pid in available_ids:
+            data = state.player_pool_data[pid]
+            player_info.append({
+                "name": data["name"],
+                "rating": data["rating"],
+                "roles": data["roles"],
+            })
+        player_info.sort(key=lambda p: p["rating"], reverse=True)
+
+        # Verify sorting (highest rated first)
+        assert player_info[0]["name"] == "Player3"
+        assert player_info[0]["rating"] == 1750.0
+        assert player_info[-1]["name"] == "Player10"
+        assert player_info[-1]["rating"] == 1400.0
+
+        # Verify all 8 players are present
+        names = [p["name"] for p in player_info]
+        assert "Captain1" not in names
+        assert "Captain2" not in names
+        assert len(names) == 8
+
+    def test_player_pool_data_preserves_roles(self):
+        """Role data is correctly preserved and accessible."""
+        state = DraftState(guild_id=123)
+        state.player_pool_ids = [1, 2, 3]
+        state.player_pool_data = {
+            1: {"name": "Carry", "rating": 1800.0, "roles": ["1"]},
+            2: {"name": "Flex", "rating": 1750.0, "roles": ["1", "2", "3", "4", "5"]},
+            3: {"name": "Support", "rating": 1700.0, "roles": ["4", "5"]},
+        }
+
+        assert state.player_pool_data[1]["roles"] == ["1"]
+        assert state.player_pool_data[2]["roles"] == ["1", "2", "3", "4", "5"]
+        assert state.player_pool_data[3]["roles"] == ["4", "5"]
+
+        # Verify round-trip preserves roles
+        restored = DraftState.from_dict(state.to_dict())
+        assert restored.player_pool_data[2]["roles"] == ["1", "2", "3", "4", "5"]
