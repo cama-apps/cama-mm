@@ -337,9 +337,7 @@ class ServiceContainer:
     def _wire_dependencies(self) -> None:
         """Wire any post-construction dependencies."""
         logger.debug("Wiring post-construction dependencies")
-
-        # Example: match_service.stake_service would be set here
-        # if stake service exists
+        # Currently no post-construction wiring needed
         pass
 
     # =========================================================================

@@ -14,8 +14,7 @@ Cama Balanced Shuffle is a Discord bot for Dota 2 inhouse leagues. It implements
 - **Dual rating systems**: Glicko-2 (primary) and OpenSkill Plackett-Luce (fantasy-weighted)
 - **Player registration** with OpenDota MMR integration
 - **Match recording** with rating updates, pairwise statistics, and fantasy points
-- **Jopacoin betting system** with house/pool modes, leverage (2x-5x), debt, and bankruptcy
-- **Draft betting**: Player stakes (auto-liquidity), spectator pools, player pool bets
+- **Jopacoin betting system** with house/pool modes, leverage (2x-5x), debt, and bankruptcy (unified for shuffle and draft)
 - **Prediction markets** for yes/no outcomes with resolution voting and payouts
 - **Jopacoin economy**: Loans, nonprofit disbursements, shop purchases, tipping, Wheel of Fortune
 - **Match enrichment** via OpenDota/Valve APIs for detailed stats (K/D/A, heroes, GPM, lane outcomes, fantasy)
@@ -118,8 +117,6 @@ services/                 # Application services (orchestrate repos + domain)
 ├── opendota_player_service.py  # Player profile fetching
 ├── match_state_manager.py      # In-memory pending match state
 ├── draft_state_manager.py      # In-memory draft state management
-├── stake_service.py            # Draft mode player auto-liquidity stakes
-├── spectator_pool_service.py   # Draft mode spectator parimutuel pool
 ├── guild_config_service.py     # Per-guild configuration management
 ├── rating_comparison_service.py # Glicko-2 vs OpenSkill analysis
 ├── ai_service.py               # LiteLLM/Cerebras integration
@@ -139,9 +136,6 @@ repositories/             # Data access layer
 ├── prediction_repository.py   # Prediction markets data access
 ├── guild_config_repository.py    # Per-guild configuration
 ├── recalibration_repository.py   # Recalibration state tracking
-├── stake_repository.py       # Player stakes for draft mode
-├── spectator_bet_repository.py   # Spectator bets (parimutuel + player cut)
-├── player_pool_bet_repository.py # Player pool bets (participants)
 ├── tip_repository.py         # Tip transaction history
 └── ai_query_repository.py    # AI query caching
 
@@ -205,12 +199,12 @@ MatchService
 ├── CamaRatingSystem (Glicko-2)
 ├── CamaOpenSkillSystem (OpenSkill Plackett-Luce)
 ├── BalancedShuffler
-├── BettingService (optional)
+├── BettingService (optional, unified for shuffle + draft)
 │   ├── BetRepository
 │   ├── PlayerRepository
 │   ├── GarnishmentService
 │   └── BankruptcyService
-├── StakeService (draft mode)
+├── LoanService (optional)
 └── IPairingsRepository (optional)
 ```
 
@@ -324,15 +318,6 @@ award_participation(player_ids) -> dict  # 1 jopacoin per game
 award_win_bonus(winning_ids) -> dict     # JOPACOIN_WIN_REWARD per win
 ```
 
-### StakeService (`services/stake_service.py`)
-Draft mode auto-liquidity for players.
-
-```python
-create_auto_liquidity(guild_id, radiant_ids, dire_ids, excluded_ids, ratings) -> PoolState
-settle_stakes(match_id, guild_id, winning_team) -> dict
-get_pool_odds(guild_id) -> dict
-```
-
 ### LoanService (`services/loan_service.py`)
 Handles loans, cooldowns, and nonprofit fund accounting.
 
@@ -408,12 +393,6 @@ amount INTEGER, leverage INTEGER DEFAULT 1
 is_blind INTEGER DEFAULT 0  -- Auto-blind flag
 odds_at_placement REAL  -- Historical odds
 payout INTEGER  -- NULL for pending/lost
-```
-
-### player_stakes (Draft mode)
-```sql
-guild_id INTEGER, match_id INTEGER, discord_id INTEGER
-team TEXT, is_excluded INTEGER, payout INTEGER
 ```
 
 ### wheel_spins
@@ -564,11 +543,9 @@ def sample_players():
 | `TIP_FEE_RATE` | 0.01 | Tipping fee rate (1%) |
 | `WHEEL_COOLDOWN_SECONDS` | 86400 | 24 hours between /gamba spins |
 | `WHEEL_TARGET_EV` | -10.0 | Target expected value per spin |
-| `AUTO_BLIND_ENABLED` | True | Auto-blind in pool mode |
+| `AUTO_BLIND_ENABLED` | True | Auto-blind in pool mode (shuffle + draft) |
 | `AUTO_BLIND_THRESHOLD` | 50 | Min balance for auto-blind |
 | `AUTO_BLIND_PERCENTAGE` | 0.05 | Bet size as % of balance |
-| `PLAYER_STAKE_POOL_SIZE` | 50 | Draft mode auto-liquidity total |
-| `SPECTATOR_POOL_PLAYER_CUT` | 0.10 | Winner share of spectator pool |
 | `CEREBRAS_API_KEY` | None | AI service API key |
 | `AI_FEATURES_ENABLED` | False | Global AI toggle |
 | `RECALIBRATION_COOLDOWN_SECONDS` | 7776000 | 90 days between recalibrations |
@@ -613,9 +590,8 @@ See `config.py` for the full list (50+ options).
 - **Voting Threshold**: 2 non-admin votes OR 1 admin vote to record match
 - **Leverage**: Multiplies effective bet; losses can cause debt up to MAX_DEBT
 - **Garnishment**: 100% of winnings go to debt repayment until balance >= 0
-- **Auto-Blind**: Pool mode auto-generates blind bets for liquidity (5% of balance for players with 50+ JC)
-- **Draft Stakes**: Players auto-contribute to draft pool; excluded players get consolation payout
-- **Spectator Pool**: 90% to winning bettors, 10% to winning team players
+- **Auto-Blind**: Pool mode auto-generates blind bets for liquidity (5% of balance for players with 50+ JC) - works for both shuffle and draft
+- **Unified Betting**: Both shuffle and draft modes use the same BettingService with full leverage, multi-bet, and debt support
 - **Loans**: One outstanding loan at a time; repayment runs on match record; fees fund nonprofit
 - **Disbursement**: Requires quorum; methods are even/proportional/neediest/stimulus
 - **Predictions**: Resolution threshold is 3 matching votes or 1 admin vote

@@ -37,7 +37,6 @@ class MatchService:
         betting_service: BettingService | None = None,
         pairings_repo: IPairingsRepository | None = None,
         loan_service=None,
-        stake_service=None,
     ):
         """
         Initialize MatchService with required repository dependencies.
@@ -49,7 +48,6 @@ class MatchService:
             betting_service: Optional betting service for wager handling
             pairings_repo: Optional repository for pairwise player statistics
             loan_service: Optional loan service for deferred repayment
-            stake_service: Optional stake service for draft mode player stakes
         """
         self.player_repo = player_repo
         self.match_repo = match_repo
@@ -67,8 +65,6 @@ class MatchService:
         self.betting_service = betting_service
         self.pairings_repo = pairings_repo
         self.loan_service = loan_service
-        self.stake_service = stake_service
-        self.spectator_pool_service = None  # Set externally by bot.py
         # Guard against concurrent finalizations per guild
         self._recording_lock = threading.Lock()
         self._recording_in_progress: set[int] = set()
@@ -679,24 +675,6 @@ class MatchService:
                 if excluded_conditional_ids:
                     self.betting_service.award_exclusion_bonus_half(excluded_conditional_ids)
 
-            # Settle player stakes (draft mode only)
-            stake_distributions = {}
-            if self.stake_service and last_shuffle.get("is_draft") and last_shuffle.get("stake_pool_created"):
-                stake_distributions = self.stake_service.settle_stakes(
-                    match_id, guild_id, winning_team, pending_state=last_shuffle
-                )
-
-            # Settle spectator pool (draft mode only)
-            spectator_distributions = {}
-            if self.spectator_pool_service and last_shuffle.get("is_draft"):
-                spectator_distributions = self.spectator_pool_service.settle_bets(
-                    match_id=match_id,
-                    guild_id=guild_id,
-                    winning_team=winning_team,
-                    winning_player_ids=winning_ids,
-                    pending_state=last_shuffle,
-                )
-
             # Repay outstanding loans for all participants
             loan_repayments = []
             if self.loan_service:
@@ -879,8 +857,6 @@ class MatchService:
                 "losing_player_ids": losing_ids,
                 "bet_distributions": distributions,
                 "loan_repayments": loan_repayments,
-                "stake_distributions": stake_distributions,
-                "spectator_distributions": spectator_distributions,
             }
         finally:
             with self._recording_lock:

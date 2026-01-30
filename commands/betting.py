@@ -479,119 +479,37 @@ class BettingCommands(commands.Cog):
             await interaction.followup.send("❌ No active match to bet on.", ephemeral=True)
             return
 
-        # Check if this is draft mode (dual pool betting)
-        is_draft = pending_state.get("is_draft", False)
-        if is_draft:
-            # Dual pool system: route to player pool or spectator pool
-            radiant_ids = pending_state.get("radiant_ids", [])
-            dire_ids = pending_state.get("dire_ids", [])
-            is_participant = user_id in radiant_ids or user_id in dire_ids
+        # Unified betting through BettingService (works for both shuffle and draft modes)
+        lev = leverage.value if leverage else 1
+        effective_bet = amount * lev
 
-            if is_participant:
-                # Player pool: can only bet on their own team
-                user_team = "radiant" if user_id in radiant_ids else "dire"
-                if team.value != user_team:
-                    await interaction.followup.send(
-                        f"❌ As a participant, you can only bet on your own team ({user_team.title()}).",
-                        ephemeral=True,
-                    )
-                    return
+        try:
+            self.betting_service.place_bet(
+                guild_id, user_id, team.value, amount, pending_state, leverage=lev
+            )
+        except ValueError as exc:
+            await interaction.followup.send(f"❌ {exc}", ephemeral=True)
+            return
 
-                # Leverage not supported for player pool bets
-                if leverage and leverage.value > 1:
-                    await interaction.followup.send(
-                        "❌ Leverage is not supported for player pool bets.",
-                        ephemeral=True,
-                    )
-                    return
+        await self._update_shuffle_message_wagers(guild_id)
 
-                stake_service = getattr(self.bot, "stake_service", None)
-                if not stake_service:
-                    await interaction.followup.send(
-                        "❌ Player pool betting is not available.", ephemeral=True
-                    )
-                    return
+        # Build response message
+        betting_mode = pending_state.get("betting_mode", "pool") if pending_state else "pool"
+        pool_warning = ""
+        if betting_mode == "pool":
+            pool_warning = "\n⚠️ Pool mode: odds may shift as more bets come in. Use `/mybets` to check current EV."
 
-                result = stake_service.place_player_bet(
-                    guild_id, user_id, team.value, amount, pending_state
-                )
-                if not result.get("success"):
-                    await interaction.followup.send(
-                        f"❌ {result.get('error', 'Unknown error')}", ephemeral=True
-                    )
-                    return
-
-                await interaction.followup.send(
-                    f"Player pool bet placed: {amount} {JOPACOIN_EMOTE} on {team.name}\n"
-                    f"Current multiplier: {result.get('new_multiplier', 0):.2f}x\n"
-                    f"New balance: {result.get('new_balance', 0)} {JOPACOIN_EMOTE}",
-                    ephemeral=True,
-                )
-            else:
-                # Spectator pool: parimutuel with player cut
-                # Leverage not supported for spectator pool bets
-                if leverage and leverage.value > 1:
-                    await interaction.followup.send(
-                        "❌ Leverage is not supported for spectator pool bets.",
-                        ephemeral=True,
-                    )
-                    return
-
-                spectator_pool_service = getattr(self.bot, "spectator_pool_service", None)
-                if not spectator_pool_service:
-                    await interaction.followup.send(
-                        "❌ Spectator pool betting is not available.", ephemeral=True
-                    )
-                    return
-
-                result = spectator_pool_service.place_bet(
-                    guild_id, user_id, team.value, amount, pending_state
-                )
-                if not result.get("success"):
-                    await interaction.followup.send(
-                        f"❌ {result.get('error', 'Unknown error')}", ephemeral=True
-                    )
-                    return
-
-                pool_totals = result.get("pool_totals", {})
-                await interaction.followup.send(
-                    f"Spectator pool bet placed: {amount} {JOPACOIN_EMOTE} on {team.name}\n"
-                    f"Pool totals: Radiant {pool_totals.get('radiant', 0)} JC | Dire {pool_totals.get('dire', 0)} JC\n"
-                    f"Note: 90% to winners, 10% to winning players",
-                    ephemeral=True,
-                )
+        if lev > 1:
+            await interaction.followup.send(
+                f"Bet placed: {amount} {JOPACOIN_EMOTE} on {team.name} at {lev}x leverage "
+                f"(effective: {effective_bet} {JOPACOIN_EMOTE}).{pool_warning}",
+                ephemeral=True,
+            )
         else:
-            # Legacy betting mode (non-draft)
-            lev = leverage.value if leverage else 1
-            effective_bet = amount * lev
-
-            try:
-                self.betting_service.place_bet(
-                    guild_id, user_id, team.value, amount, pending_state, leverage=lev
-                )
-            except ValueError as exc:
-                await interaction.followup.send(f"❌ {exc}", ephemeral=True)
-                return
-
-            await self._update_shuffle_message_wagers(guild_id)
-
-            # Build response message
-            betting_mode = pending_state.get("betting_mode", "pool") if pending_state else "pool"
-            pool_warning = ""
-            if betting_mode == "pool":
-                pool_warning = "\n⚠️ Pool mode: odds may shift as more bets come in. Use `/mybets` to check current EV."
-
-            if lev > 1:
-                await interaction.followup.send(
-                    f"Bet placed: {amount} {JOPACOIN_EMOTE} on {team.name} at {lev}x leverage "
-                    f"(effective: {effective_bet} {JOPACOIN_EMOTE}).{pool_warning}",
-                    ephemeral=True,
-                )
-            else:
-                await interaction.followup.send(
-                    f"Bet placed: {amount} {JOPACOIN_EMOTE} on {team.name}.{pool_warning}",
-                    ephemeral=True,
-                )
+            await interaction.followup.send(
+                f"Bet placed: {amount} {JOPACOIN_EMOTE} on {team.name}.{pool_warning}",
+                ephemeral=True,
+            )
 
     @app_commands.command(name="mybets", description="Show your active bets")
     async def mybets(self, interaction: discord.Interaction):

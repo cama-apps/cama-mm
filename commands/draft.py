@@ -435,15 +435,10 @@ class DraftCommands(commands.Cog):
             )
             return
 
-        # Clear any pending stakes if a match was created from the draft
+        # Clear any pending match if one was created from the draft
         if self.match_service:
             pending_state = self.match_service.get_last_shuffle(guild_id)
             if pending_state and pending_state.get("is_draft"):
-                # Clear stakes
-                stake_service = getattr(self.bot, "stake_service", None)
-                if stake_service:
-                    stake_service.clear_stakes(guild_id, pending_state)
-                # Clear pending match
                 self.match_service.clear_last_shuffle(guild_id)
 
         # Clear the draft state
@@ -1502,6 +1497,24 @@ class DraftCommands(commands.Cog):
             # Get pending state for betting display
             pending_state = self.match_service.get_last_shuffle(guild_id)
 
+            # === NEW: Create auto-blind bets (same as shuffle mode) ===
+            betting_service = getattr(self.bot, "betting_service", None)
+            if betting_service and pending_state:
+                try:
+                    blind_result = betting_service.create_auto_blind_bets(
+                        guild_id=guild_id,
+                        radiant_ids=state.radiant_player_ids,
+                        dire_ids=state.dire_player_ids,
+                        shuffle_timestamp=pending_state.get("shuffle_timestamp"),
+                    )
+                    if blind_result and blind_result.get("created", 0) > 0:
+                        # Store blind bets result in pending state for embed display
+                        pending_state["blind_bets_result"] = blind_result
+                        self.match_service.set_last_shuffle(guild_id, pending_state)
+                        logger.info(f"Created {blind_result['created']} blind bets for draft")
+                except Exception as exc:
+                    logger.warning(f"Failed to create blind bets for draft: {exc}")
+
             # Decay exclusion counts for included players (same as shuffle mode)
             included_player_ids = state.radiant_player_ids + state.dire_player_ids
             for pid in included_player_ids:
@@ -1515,7 +1528,32 @@ class DraftCommands(commands.Cog):
             self.lobby_manager.reset_lobby()
 
             embed = await self._build_draft_complete_embed(interaction.guild, state, pending_state)
-            await interaction.response.edit_message(embed=embed, view=None)
+            message = await interaction.response.edit_message(embed=embed, view=None)
+
+            # === NEW: Store message info for odds updates ===
+            try:
+                # Get the message we just sent (interaction response)
+                original_message = await interaction.original_response()
+                if original_message:
+                    self.match_service.set_shuffle_message_info(
+                        guild_id,
+                        message_id=original_message.id,
+                        channel_id=original_message.channel.id,
+                        jump_url=original_message.jump_url,
+                        origin_channel_id=state.draft_channel_id,
+                    )
+            except Exception as exc:
+                logger.warning(f"Failed to store draft message info: {exc}")
+
+            # === NEW: Schedule betting reminders (same as shuffle mode) ===
+            match_cog = self.bot.get_cog("MatchCommands")
+            if match_cog and hasattr(match_cog, "_schedule_betting_reminders"):
+                try:
+                    await match_cog._schedule_betting_reminders(
+                        guild_id, pending_state.get("bet_lock_until")
+                    )
+                except Exception as exc:
+                    logger.warning(f"Failed to schedule betting reminders for draft: {exc}")
 
             # Post to match thread and ping players
             await self._post_to_match_thread(state, embed, thread_id)
@@ -1647,32 +1685,10 @@ class DraftCommands(commands.Cog):
             "shuffle_message_jump_url": None,
             "shuffle_message_id": state.draft_message_id,
             "shuffle_channel_id": state.draft_channel_id,
+            "origin_channel_id": state.draft_channel_id,  # For betting reminders
             "betting_mode": "pool",  # Default to pool mode for drafts
             "is_draft": True,  # Mark as draft for any special handling
-            "stake_radiant_win_prob": radiant_win_prob,  # For stake pool calculations
         }
-
-        # Create stakes for player stake pool (draft only)
-        stake_service = getattr(self.bot, "stake_service", None)
-        stake_result = None
-        if stake_service and stake_service.is_enabled():
-            stake_result = stake_service.create_stakes_for_draft(
-                guild_id=guild_id,
-                radiant_ids=state.radiant_player_ids,
-                dire_ids=state.dire_player_ids,
-                excluded_ids=state.excluded_player_ids,
-                radiant_win_prob=radiant_win_prob,
-                stake_time=now_ts,
-            )
-            shuffle_state["stake_pool_created"] = True
-            shuffle_state["stake_result"] = stake_result
-            logger.info(
-                f"Created stake pool for draft: radiant_win_prob={radiant_win_prob:.2f}, "
-                f"radiant_payout={stake_result.get('radiant_payout_if_win')}, "
-                f"dire_payout={stake_result.get('dire_payout_if_win')}"
-            )
-        else:
-            shuffle_state["stake_pool_created"] = False
 
         self.match_service.set_last_shuffle(guild_id, shuffle_state)
         self.match_service._persist_match_state(guild_id, shuffle_state)
@@ -1816,58 +1832,7 @@ class DraftCommands(commands.Cog):
                 )
                 embed.add_field(name="🎲 Blind Bets", value=blind_note, inline=False)
 
-            # Player Stake Pool (draft mode only) - Dual Pool System
-            stake_service = getattr(self.bot, "stake_service", None)
-            if stake_service and stake_service.is_enabled() and pending_state.get("stake_pool_created"):
-                stake_result = pending_state.get("stake_result", {})
-                radiant_win_prob = stake_result.get("radiant_win_prob", 0.5)
-                dire_win_prob = 1.0 - radiant_win_prob
-                radiant_auto = stake_result.get("radiant_auto", 25)
-                dire_auto = stake_result.get("dire_auto", 25)
-                pool_size = stake_result.get("pool_size", 50)
-                radiant_mult = stake_result.get("initial_radiant_multiplier", 2.0)
-                dire_mult = stake_result.get("initial_dire_multiplier", 2.0)
-                excluded_count = len(state.excluded_player_ids)
-                excluded_payout_radiant = stake_result.get("excluded_payout_if_radiant_wins", 10)
-                excluded_payout_dire = stake_result.get("excluded_payout_if_dire_wins", 10)
-
-                # Determine favored team
-                if radiant_win_prob > 0.52:
-                    radiant_label = f"🟢 Radiant ({radiant_win_prob*100:.0f}% favored)"
-                    dire_label = f"🔴 Dire ({dire_win_prob*100:.0f}% underdog)"
-                elif dire_win_prob > 0.52:
-                    radiant_label = f"🟢 Radiant ({radiant_win_prob*100:.0f}% underdog)"
-                    dire_label = f"🔴 Dire ({dire_win_prob*100:.0f}% favored)"
-                else:
-                    radiant_label = f"🟢 Radiant ({radiant_win_prob*100:.0f}%)"
-                    dire_label = f"🔴 Dire ({dire_win_prob*100:.0f}%)"
-
-                # Player Pool: auto-liquidity + optional player bets
-                player_pool_note = (
-                    f"**{pool_size} {JOPACOIN_EMOTE} auto-liquidity** (Glicko-weighted)\n"
-                    f"{radiant_label}: {radiant_auto:.1f} {JOPACOIN_EMOTE} → **{radiant_mult:.2f}x**\n"
-                    f"{dire_label}: {dire_auto:.1f} {JOPACOIN_EMOTE} → **{dire_mult:.2f}x**\n"
-                    f"*Players: `/bet` on your team to add to pool*"
-                )
-                if excluded_count > 0:
-                    player_pool_note += (
-                        f"\nExcluded ({excluded_count}): **{excluded_payout_radiant}** if Rad / "
-                        f"**{excluded_payout_dire}** if Dire"
-                    )
-
-                embed.add_field(name="🎯 Player Stake Pool", value=player_pool_note, inline=False)
-
-            # Spectator Pool (draft mode only)
-            spectator_pool_service = getattr(self.bot, "spectator_pool_service", None)
-            if spectator_pool_service and pending_state.get("is_draft"):
-                spectator_note = (
-                    "Spectators: `/bet <team> <amount>`\n"
-                    "90% to winning bettors, 10% to winning players\n"
-                    "Pool: 🟢 0 JC | 🔴 0 JC"
-                )
-                embed.add_field(name="🎲 Spectator Pool", value=spectator_note, inline=False)
-
-            # Current wagers
+            # Current wagers (same display as shuffle mode)
             guild_id = state.guild_id
             totals = betting_service.get_pot_odds(guild_id, pending_state=pending_state)
             lock_until = pending_state.get("bet_lock_until")
