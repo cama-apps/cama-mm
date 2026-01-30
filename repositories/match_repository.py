@@ -2202,3 +2202,68 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 }
                 for row in rows
             ]
+
+    def get_multi_player_hero_stats(self, discord_ids: list[int]) -> list[dict]:
+        """
+        Get hero stats for multiple players in a single query.
+
+        Args:
+            discord_ids: List of Discord IDs to query
+
+        Returns:
+            List of dicts with discord_id, hero_id, games, wins
+            sorted by discord_id, games DESC
+        """
+        if not discord_ids:
+            return []
+
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            placeholders = ",".join("?" * len(discord_ids))
+            cursor.execute(
+                f"""
+                SELECT discord_id, hero_id,
+                       COUNT(*) as games,
+                       SUM(CASE WHEN won THEN 1 ELSE 0 END) as wins
+                FROM match_participants
+                WHERE discord_id IN ({placeholders})
+                  AND hero_id IS NOT NULL AND hero_id > 0
+                GROUP BY discord_id, hero_id
+                ORDER BY discord_id, games DESC
+                """,
+                discord_ids,
+            )
+            rows = cursor.fetchall()
+            return [
+                {
+                    "discord_id": row["discord_id"],
+                    "hero_id": row["hero_id"],
+                    "games": row["games"],
+                    "wins": row["wins"],
+                }
+                for row in rows
+            ]
+
+    def get_players_with_enriched_data(self) -> list[dict]:
+        """
+        Get all players that have at least one enriched match with hero data.
+
+        Returns:
+            List of dicts with discord_id, total_games ordered by total_games DESC
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT discord_id, COUNT(*) as total_games
+                FROM match_participants
+                WHERE hero_id IS NOT NULL AND hero_id > 0
+                GROUP BY discord_id
+                ORDER BY total_games DESC
+                """
+            )
+            rows = cursor.fetchall()
+            return [
+                {"discord_id": row["discord_id"], "total_games": row["total_games"]}
+                for row in rows
+            ]

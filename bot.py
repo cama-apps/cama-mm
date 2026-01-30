@@ -306,6 +306,7 @@ EXTENSIONS = [
     "commands.profile",
     "commands.draft",
     "commands.rating_analysis",
+    "commands.herogrid",
 ]
 
 
