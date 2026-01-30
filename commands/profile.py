@@ -1583,6 +1583,27 @@ class ProfileCommands(commands.Cog):
                 inline=False,
             )
 
+        # Average heroes (exactly 50% winrate)
+        if hero_stats:
+            avg_heroes = [
+                s for s in hero_stats
+                if s["games"] >= 2 and s["wins"] * 2 == s["games"]
+            ]
+            if avg_heroes:
+                avg_lines = []
+                for stat in avg_heroes[:5]:
+                    hero_name = get_hero_name(stat["hero_id"])
+                    games = stat["games"]
+                    wins = stat["wins"]
+                    kda = f"{stat['avg_kills']:.1f}/{stat['avg_deaths']:.1f}/{stat['avg_assists']:.1f}"
+                    gpm = stat["avg_gpm"]
+                    avg_lines.append(f"**{hero_name}** - {games}g ({wins}-{wins}) | {kda} | {gpm:.0f}g")
+                embed.add_field(
+                    name="😐 Average Heroes",
+                    value="\n".join(avg_lines),
+                    inline=False,
+                )
+
         # Lane performance
         lane_stats = match_repo.get_player_lane_stats(target_discord_id)
         if lane_stats:
