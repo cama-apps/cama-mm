@@ -1099,16 +1099,23 @@ class MatchService:
             }
 
         # Reset all players' OpenSkill ratings if requested
+        # Seed from initial_mmr (what they started with), falling back to DEFAULT_MU
         if reset_first:
             all_players = self.player_repo.get_all()
-            reset_updates = [
-                (p.discord_id, self.openskill_system.DEFAULT_MU, self.openskill_system.DEFAULT_SIGMA)
-                for p in all_players
-                if p.discord_id is not None
-            ]
+            reset_updates = []
+            for p in all_players:
+                if p.discord_id is None:
+                    continue
+                # Seed mu from initial_mmr (OpenDota MMR at registration)
+                if p.initial_mmr is not None:
+                    # Convert MMR to mu: mu = 25 + (mmr / 200)
+                    seed_mu = self.openskill_system.mmr_to_os_mu(p.initial_mmr)
+                else:
+                    seed_mu = self.openskill_system.DEFAULT_MU
+                reset_updates.append((p.discord_id, seed_mu, self.openskill_system.DEFAULT_SIGMA))
             if reset_updates:
                 self.player_repo.update_openskill_ratings_bulk(reset_updates)
-                logger.info(f"Reset {len(reset_updates)} players to default OpenSkill ratings")
+                logger.info(f"Reset {len(reset_updates)} players to seeded OpenSkill ratings")
 
         # Process each match in chronological order
         for i, match in enumerate(all_matches):
