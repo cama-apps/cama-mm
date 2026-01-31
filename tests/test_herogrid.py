@@ -3,10 +3,13 @@ Tests for the /herogrid command: repository methods, drawing function, and integ
 """
 
 from io import BytesIO
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 from PIL import Image
 
+from commands.herogrid import HeroGridCommands
 from repositories.match_repository import MatchRepository
 from repositories.player_repository import PlayerRepository
 from utils.drawing import draw_hero_grid
@@ -339,3 +342,208 @@ class TestHeroGridIntegration:
         img = Image.open(result)
         assert img.format == "PNG"
         assert img.size[0] > 0 and img.size[1] > 0
+
+
+# ---------------------------------------------------------------------------
+# Player resolution priority chain tests
+# ---------------------------------------------------------------------------
+
+
+def _make_cog(
+    lobby_players=None,
+    conditional_players=None,
+    shuffle_state=None,
+    draft_pool_ids=None,
+    last_match_ids=None,
+    enriched_players=None,
+    has_draft_state_manager=None,
+):
+    """Build a HeroGridCommands cog with mocked dependencies."""
+    bot = SimpleNamespace()
+
+    # Lobby manager
+    lobby_manager = MagicMock()
+    if lobby_players is not None:
+        lobby = SimpleNamespace(
+            players=set(lobby_players),
+            conditional_players=set(conditional_players or []),
+        )
+        lobby_manager.get_lobby.return_value = lobby
+    else:
+        lobby_manager.get_lobby.return_value = None
+
+    # Match service
+    match_service = MagicMock()
+    match_service.get_last_shuffle.return_value = shuffle_state
+
+    # Draft state manager
+    if draft_pool_ids is not None:
+        dsm = MagicMock()
+        dsm.get_state.return_value = SimpleNamespace(player_pool_ids=draft_pool_ids)
+        bot.draft_state_manager = dsm
+
+    # Match repo
+    match_repo = MagicMock()
+    match_repo.get_last_match_participant_ids.return_value = set(last_match_ids or [])
+    match_repo.get_players_with_enriched_data.return_value = [
+        {"discord_id": pid} for pid in (enriched_players or [])
+    ]
+
+    player_repo = MagicMock()
+
+    return HeroGridCommands(bot, match_repo, player_repo, lobby_manager, match_service)
+
+
+class TestResolvePlayerIds:
+    def test_resolve_lobby_priority(self):
+        """Lobby with players is highest priority."""
+        cog = _make_cog(
+            lobby_players=[1, 2, 3],
+            shuffle_state={"radiant_team_ids": [10, 11], "dire_team_ids": [20, 21]},
+        )
+        ids, label = cog._resolve_player_ids("auto", guild_id=99)
+        assert set(ids) == {1, 2, 3}
+        assert label == "Lobby"
+
+    def test_resolve_pending_match_fallback(self):
+        """No lobby, pending match exists -> uses match IDs."""
+        cog = _make_cog(
+            shuffle_state={
+                "radiant_team_ids": [1, 2, 3, 4, 5],
+                "dire_team_ids": [6, 7, 8, 9, 10],
+            },
+        )
+        ids, label = cog._resolve_player_ids("auto", guild_id=99)
+        assert set(ids) == set(range(1, 11))
+        assert label == "Active Match"
+
+    def test_resolve_draft_fallback(self):
+        """No lobby or match, active draft -> uses draft pool IDs."""
+        cog = _make_cog(draft_pool_ids=[100, 200, 300])
+        ids, label = cog._resolve_player_ids("auto", guild_id=99)
+        assert set(ids) == {100, 200, 300}
+        assert label == "Draft"
+
+    def test_resolve_last_match_fallback(self):
+        """No lobby/match/draft -> uses most recent match IDs."""
+        cog = _make_cog(last_match_ids=[50, 51, 52, 53, 54])
+        ids, label = cog._resolve_player_ids("auto", guild_id=99)
+        assert set(ids) == {50, 51, 52, 53, 54}
+        assert label == "Last Match"
+
+    def test_resolve_all_fallback(self):
+        """Nothing at all, source=auto -> falls back to all enriched players."""
+        cog = _make_cog(enriched_players=[1000, 2000, 3000])
+        ids, label = cog._resolve_player_ids("auto", guild_id=99)
+        assert ids == [1000, 2000, 3000]
+        assert label is None
+
+    def test_resolve_priority_order(self):
+        """Lobby AND pending match both present -> lobby wins."""
+        cog = _make_cog(
+            lobby_players=[1, 2],
+            shuffle_state={"radiant_team_ids": [10], "dire_team_ids": [20]},
+            last_match_ids=[50, 51],
+        )
+        ids, label = cog._resolve_player_ids("auto", guild_id=99)
+        assert set(ids) == {1, 2}
+        assert label == "Lobby"
+
+    def test_draft_state_manager_none(self):
+        """No draft_state_manager attr on bot -> gracefully skips draft check."""
+        cog = _make_cog(last_match_ids=[70, 71])
+        # SimpleNamespace won't have draft_state_manager unless we add it
+        assert not hasattr(cog.bot, "draft_state_manager")
+        ids, label = cog._resolve_player_ids("auto", guild_id=99)
+        assert set(ids) == {70, 71}
+        assert label == "Last Match"
+
+    def test_match_service_none(self):
+        """match_service is None -> gracefully skips pending match check."""
+        cog = _make_cog(last_match_ids=[80, 81])
+        cog.match_service = None
+        ids, label = cog._resolve_player_ids("auto", guild_id=99)
+        assert set(ids) == {80, 81}
+        assert label == "Last Match"
+
+    def test_source_all_skips_chain(self):
+        """source=all -> goes directly to all players, ignoring lobby."""
+        cog = _make_cog(
+            lobby_players=[1, 2, 3],
+            enriched_players=[100, 200],
+        )
+        ids, label = cog._resolve_player_ids("all", guild_id=99)
+        assert ids == [100, 200]
+        assert label is None
+
+    def test_source_lobby_fails_gracefully(self):
+        """source=lobby with nothing found -> returns empty list."""
+        cog = _make_cog()
+        ids, label = cog._resolve_player_ids("lobby", guild_id=99)
+        assert ids == []
+
+
+# ---------------------------------------------------------------------------
+# Repeat label tests
+# ---------------------------------------------------------------------------
+
+
+class TestRepeatLabels:
+    @staticmethod
+    def _make_grid_data(num_players, num_heroes):
+        """Generate grid data for given counts."""
+        data = []
+        names = {}
+        for pid in range(1, num_players + 1):
+            for hid in range(1, num_heroes + 1):
+                data.append({"discord_id": pid, "hero_id": hid, "games": 5, "wins": 3})
+            names[pid] = f"P{pid}"
+        return data, names
+
+    def test_no_repeat_small_grid(self):
+        """5 players, 5 heroes: no repeats, dimensions match old formula."""
+        data, names = self._make_grid_data(5, 5)
+        result = draw_hero_grid(data, names, min_games=1)
+        img = Image.open(result)
+        # With no repeats, width = 15 + 120 + 5*44 + 15 = 370
+        # height = 15 + 30 + 90 + 5*44 + 80 + 15 = 450
+        assert img.size == (370, 450)
+
+    def test_repeat_bands_many_players(self):
+        """25 players: image is taller than without repeats."""
+        data, names = self._make_grid_data(25, 5)
+        result = draw_hero_grid(data, names, min_games=1)
+        img = Image.open(result)
+        # n_extra_bands = (25-1) // 10 = 2
+        # No-repeat height would be: 15 + 30 + 90 + 25*44 + 80 + 15 = 1330
+        # With repeats: 1330 + 2*90 = 1510
+        assert img.size[1] == 1510
+
+    def test_repeat_cols_many_heroes(self):
+        """25 heroes: image is wider than without repeats."""
+        data, names = self._make_grid_data(5, 25)
+        result = draw_hero_grid(data, names, min_games=1)
+        img = Image.open(result)
+        # n_extra_cols = (25-1) // 10 = 2
+        # No-repeat width: 15 + 120 + 25*44 + 15 = 1250
+        # With repeats: 1250 + 2*120 = 1490
+        assert img.size[0] == 1490
+
+    def test_exactly_10_no_repeat(self):
+        """10 players, 10 heroes: no repeats (boundary condition)."""
+        data, names = self._make_grid_data(10, 10)
+        result = draw_hero_grid(data, names, min_games=1)
+        img = Image.open(result)
+        # No repeats: width = 15 + 120 + 10*44 + 15 = 590
+        # height = 15 + 30 + 90 + 10*44 + 80 + 15 = 670
+        assert img.size == (590, 670)
+
+    def test_11_players_one_repeat(self):
+        """11 players: one extra hero header band."""
+        data, names = self._make_grid_data(11, 5)
+        result = draw_hero_grid(data, names, min_games=1)
+        img = Image.open(result)
+        # n_extra_bands = (11-1) // 10 = 1
+        # No-repeat height: 15 + 30 + 90 + 11*44 + 80 + 15 = 714
+        # With repeats: 714 + 1*90 = 804
+        assert img.size[1] == 804
