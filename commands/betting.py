@@ -84,7 +84,7 @@ BANKRUPTCY_SUCCESS_MESSAGES = [
     "Congratulations on your complete financial ruin. Your debt has been erased, but at what cost?",
     "The court has granted your bankruptcy. Your ancestors weep.",
     "Chapter 7 approved. Your jopacoin legacy dies here.",
-    "Debt cleared. Dignity? Also cleared. For the next {games} games, you'll earn only {rate}% of win bonuses.",
+    "Debt cleared. Dignity? Also cleared. You must WIN {games} games to escape low priority.",
     "The Jopacoin Federal Reserve takes note of another fallen gambler. Debt erased.",
     "Your bankruptcy filing has been accepted. The house always wins, but at least you don't owe it anymore.",
     "Financial rock bottom achieved. Welcome to the Bankruptcy Hall of Shame.",
@@ -768,7 +768,7 @@ class BettingCommands(commands.Cog):
                 penalty_rate_pct = int(BANKRUPTCY_PENALTY_RATE * 100)
                 penalty_info = (
                     f"\n**Bankruptcy penalty:** {penalty_rate_pct}% win bonus "
-                    f"for {state.penalty_games_remaining} more game(s)"
+                    f"for {state.penalty_games_remaining} more win(s)"
                 )
 
         # Check for loan info
@@ -1252,7 +1252,7 @@ class BettingCommands(commands.Cog):
             f"{message}{flavor_line}\n\n"
             f"**Details:**\n"
             f"Debt cleared: {result['debt_cleared']} {JOPACOIN_EMOTE}\n"
-            f"Penalty: {penalty_rate_pct}% win bonus for the next {result['penalty_games']} games\n"
+            f"Penalty: {penalty_rate_pct}% win bonus until you **WIN** {result['penalty_games']} games\n"
             f"New balance: 0 {JOPACOIN_EMOTE}",
             ephemeral=False,
         )

@@ -590,6 +590,7 @@ See `config.py` for the full list (50+ options).
 - **Voting Threshold**: 2 non-admin votes OR 1 admin vote to record match
 - **Leverage**: Multiplies effective bet; losses can cause debt up to MAX_DEBT
 - **Garnishment**: 100% of winnings go to debt repayment until balance >= 0
+- **Bankruptcy**: Players must WIN 5 games to clear penalty (like Dota 2 low prio), not just play games. 50% reduced rewards during penalty period.
 - **Auto-Blind**: Pool mode auto-generates blind bets for liquidity (5% of balance for players with 50+ JC) - works for both shuffle and draft
 - **Unified Betting**: Both shuffle and draft modes use the same BettingService with full leverage, multi-bet, and debt support
 - **Loans**: One outstanding loan at a time; repayment runs on match record; fees fund nonprofit
