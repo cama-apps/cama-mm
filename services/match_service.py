@@ -1059,9 +1059,11 @@ class MatchService:
 
     def backfill_openskill_ratings(self, reset_first: bool = True) -> dict:
         """
-        Backfill OpenSkill ratings from all enriched matches with fantasy data.
+        Backfill OpenSkill ratings from ALL matches.
 
         Processes matches in chronological order to simulate rating progression.
+        - Enriched matches (with fantasy data): Use FP-weighted update with blending + inversion
+        - Non-enriched matches: Use equal-weight update
 
         Args:
             reset_first: If True, reset all players' OpenSkill ratings to defaults before backfill
@@ -1069,25 +1071,31 @@ class MatchService:
         Returns:
             Dict with:
             - matches_processed: int
+            - matches_with_fantasy: int
+            - matches_equal_weight: int
             - players_updated: int (unique players)
             - errors: list of error messages
         """
-        logger.info("Starting OpenSkill backfill...")
+        logger.info("Starting OpenSkill backfill (all matches)...")
 
         errors = []
         matches_processed = 0
+        matches_with_fantasy = 0
+        matches_equal_weight = 0
         players_touched = set()
 
-        # Get all enriched matches in chronological order
-        enriched_matches = self.match_repo.get_enriched_matches_chronological()
-        total_matches = len(enriched_matches)
-        logger.info(f"Found {total_matches} enriched matches to process")
+        # Get ALL matches in chronological order (not just enriched)
+        all_matches = self.match_repo.get_all_matches_chronological()
+        total_matches = len(all_matches)
+        logger.info(f"Found {total_matches} total matches to process")
 
         if total_matches == 0:
             return {
                 "matches_processed": 0,
+                "matches_with_fantasy": 0,
+                "matches_equal_weight": 0,
                 "players_updated": 0,
-                "errors": ["No enriched matches found"],
+                "errors": ["No matches found"],
             }
 
         # Reset all players' OpenSkill ratings if requested
@@ -1103,20 +1111,53 @@ class MatchService:
                 logger.info(f"Reset {len(reset_updates)} players to default OpenSkill ratings")
 
         # Process each match in chronological order
-        for i, match in enumerate(enriched_matches):
+        for i, match in enumerate(all_matches):
             match_id = match["match_id"]
+            winning_team = match["winning_team"]
+
             try:
-                result = self.update_openskill_ratings_for_match(match_id)
+                # Get participants to check for fantasy data
+                participants = self.match_repo.get_match_participants(match_id)
+
+                if not participants:
+                    # No participants recorded - use team lists from match
+                    radiant_ids = match.get("team1_players", [])
+                    dire_ids = match.get("team2_players", [])
+                    if not radiant_ids or not dire_ids:
+                        errors.append(f"Match {match_id}: No participant data")
+                        continue
+                    has_fantasy = False
+                else:
+                    radiant_ids = [p["discord_id"] for p in participants if p.get("side") == "radiant"]
+                    dire_ids = [p["discord_id"] for p in participants if p.get("side") == "dire"]
+                    has_fantasy = any(p.get("fantasy_points") is not None for p in participants)
+
+                    # If no side info, fall back to match team lists
+                    if not radiant_ids or not dire_ids:
+                        radiant_ids = match.get("team1_players", [])
+                        dire_ids = match.get("team2_players", [])
+
+                if has_fantasy:
+                    # Use FP-weighted update (with blending + inversion)
+                    result = self._backfill_match_with_fantasy(match_id, participants, winning_team)
+                    if result.get("success"):
+                        matches_with_fantasy += 1
+                else:
+                    # Use equal-weight update
+                    result = self._backfill_match_equal_weight(
+                        match_id, radiant_ids, dire_ids, winning_team
+                    )
+                    if result.get("success"):
+                        matches_equal_weight += 1
+
                 if result.get("success"):
                     matches_processed += 1
-                    # Track unique players
-                    participants = self.match_repo.get_match_participants(match_id)
-                    for p in participants:
-                        players_touched.add(p["discord_id"])
+                    for pid in radiant_ids + dire_ids:
+                        players_touched.add(pid)
                 else:
                     error = result.get("error", "Unknown error")
-                    if "No fantasy data" not in error:
-                        errors.append(f"Match {match_id}: {error}")
+                    errors.append(f"Match {match_id}: {error}")
+
             except Exception as e:
                 errors.append(f"Match {match_id}: {str(e)}")
                 logger.error(f"Backfill error for match {match_id}: {e}")
@@ -1126,16 +1167,106 @@ class MatchService:
                 logger.info(f"Backfill progress: {i + 1}/{total_matches} matches processed")
 
         logger.info(
-            f"OpenSkill backfill complete: {matches_processed} matches, "
+            f"OpenSkill backfill complete: {matches_processed} matches "
+            f"({matches_with_fantasy} FP-weighted, {matches_equal_weight} equal-weight), "
             f"{len(players_touched)} unique players"
         )
 
         return {
             "matches_processed": matches_processed,
+            "matches_with_fantasy": matches_with_fantasy,
+            "matches_equal_weight": matches_equal_weight,
             "players_updated": len(players_touched),
             "total_matches": total_matches,
             "errors": errors[:10],  # Limit error list
         }
+
+    def _backfill_match_with_fantasy(
+        self,
+        match_id: int,
+        participants: list[dict],
+        winning_team: int,
+    ) -> dict:
+        """
+        Backfill a single match using FP-weighted OpenSkill update.
+
+        Uses current player ratings (after reset) and fantasy points from participants.
+        """
+        radiant = [p for p in participants if p.get("side") == "radiant"]
+        dire = [p for p in participants if p.get("side") == "dire"]
+
+        if len(radiant) != 5 or len(dire) != 5:
+            return {"success": False, "error": f"Invalid team sizes: {len(radiant)}/{len(dire)}"}
+
+        # Get current ratings (from DB, after potential reset)
+        all_ids = [p["discord_id"] for p in participants]
+        os_ratings = self.player_repo.get_openskill_ratings_bulk(all_ids)
+
+        # Build team data: (discord_id, mu, sigma, fantasy_points)
+        team1_data = []
+        for p in radiant:
+            pid = p["discord_id"]
+            mu, sigma = os_ratings.get(pid, (None, None))
+            fp = p.get("fantasy_points")
+            team1_data.append((pid, mu, sigma, fp))
+
+        team2_data = []
+        for p in dire:
+            pid = p["discord_id"]
+            mu, sigma = os_ratings.get(pid, (None, None))
+            fp = p.get("fantasy_points")
+            team2_data.append((pid, mu, sigma, fp))
+
+        try:
+            results = self.openskill_system.update_ratings_after_match(
+                team1_data, team2_data, winning_team
+            )
+            # Persist updated ratings
+            updates = [(pid, mu, sigma) for pid, (mu, sigma, _) in results.items()]
+            self.player_repo.update_openskill_ratings_bulk(updates)
+            return {"success": True, "players_updated": len(updates)}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def _backfill_match_equal_weight(
+        self,
+        match_id: int,
+        radiant_ids: list[int],
+        dire_ids: list[int],
+        winning_team: int,
+    ) -> dict:
+        """
+        Backfill a single match using equal-weight OpenSkill update.
+
+        Used for non-enriched matches without fantasy data.
+        """
+        if len(radiant_ids) != 5 or len(dire_ids) != 5:
+            return {"success": False, "error": f"Invalid team sizes: {len(radiant_ids)}/{len(dire_ids)}"}
+
+        # Get current ratings (from DB, after potential reset)
+        all_ids = radiant_ids + dire_ids
+        os_ratings = self.player_repo.get_openskill_ratings_bulk(all_ids)
+
+        # Build team data: (discord_id, mu, sigma)
+        radiant_data = [
+            (pid, *os_ratings.get(pid, (None, None)))
+            for pid in radiant_ids
+        ]
+        dire_data = [
+            (pid, *os_ratings.get(pid, (None, None)))
+            for pid in dire_ids
+        ]
+
+        try:
+            results = self.openskill_system.update_ratings_equal_weight(
+                radiant_data, dire_data, winning_team
+            )
+            # Persist updated ratings
+            updates = [(pid, mu, sigma) for pid, (mu, sigma) in results.items()]
+            self.player_repo.update_openskill_ratings_bulk(updates)
+            return {"success": True, "players_updated": len(updates)}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
 
     def get_openskill_predictions_for_match(
         self, team1_ids: list[int], team2_ids: list[int]
