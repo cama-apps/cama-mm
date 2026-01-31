@@ -207,30 +207,30 @@ class TestBankruptcyPenalty:
         assert result["penalized"] == 10
         assert result["penalty_applied"] == 0
 
-    def test_penalty_games_decrement(self, db_and_repos, bankruptcy_service):
-        """Playing games decrements the penalty counter."""
+    def test_penalty_wins_decrement(self, db_and_repos, bankruptcy_service):
+        """Winning games decrements the penalty counter (like Dota 2 low prio)."""
         player_repo = db_and_repos["player_repo"]
         pid = create_test_player(player_repo, 1001, balance=-300)
 
         bankruptcy_service.declare_bankruptcy(pid)
         assert bankruptcy_service.get_state(pid).penalty_games_remaining == 5
 
-        # Play 3 games
+        # Win 3 games
         for _ in range(3):
-            bankruptcy_service.on_game_played(pid)
+            bankruptcy_service.on_game_won(pid)
 
         assert bankruptcy_service.get_state(pid).penalty_games_remaining == 2
 
-    def test_penalty_expires_after_games(self, db_and_repos, bankruptcy_service):
-        """Penalty stops applying after all penalty games are played."""
+    def test_penalty_expires_after_wins(self, db_and_repos, bankruptcy_service):
+        """Penalty stops applying after all penalty wins are achieved."""
         player_repo = db_and_repos["player_repo"]
         pid = create_test_player(player_repo, 1001, balance=-300)
 
         bankruptcy_service.declare_bankruptcy(pid)
 
-        # Play all 5 penalty games
+        # Win all 5 required games
         for _ in range(5):
-            bankruptcy_service.on_game_played(pid)
+            bankruptcy_service.on_game_won(pid)
 
         # No more penalty
         result = bankruptcy_service.apply_penalty_to_winnings(pid, 10)
@@ -272,8 +272,8 @@ class TestBettingServiceIntegration:
         assert results[pid]["bankruptcy_penalty"] == 1  # Half of 2 is 1
         assert results[pid]["net"] == 1  # Gets only 1 instead of 2
 
-    def test_participation_decrements_penalty_games(self, db_and_repos):
-        """Participation awards decrement bankruptcy penalty games."""
+    def test_participation_does_not_decrement_penalty(self, db_and_repos):
+        """Participation (playing) does NOT decrement bankruptcy penalty - only wins count."""
         player_repo = db_and_repos["player_repo"]
         bankruptcy_repo = db_and_repos["bankruptcy_repo"]
         bet_repo = db_and_repos["bet_repo"]
@@ -298,10 +298,42 @@ class TestBettingServiceIntegration:
 
         assert bankruptcy_service.get_state(pid).penalty_games_remaining == 5
 
-        # Award participation
+        # Award participation (playing a game, not winning)
         betting_service.award_participation([pid])
 
-        # Penalty games should be decremented
+        # Penalty games should NOT be decremented - only wins count
+        assert bankruptcy_service.get_state(pid).penalty_games_remaining == 5
+
+    def test_win_bonus_decrements_penalty(self, db_and_repos):
+        """Win bonuses decrement bankruptcy penalty - only wins clear bankruptcy."""
+        player_repo = db_and_repos["player_repo"]
+        bankruptcy_repo = db_and_repos["bankruptcy_repo"]
+        bet_repo = db_and_repos["bet_repo"]
+
+        bankruptcy_service = BankruptcyService(
+            bankruptcy_repo=bankruptcy_repo,
+            player_repo=player_repo,
+            cooldown_seconds=604800,
+            penalty_games=5,
+            penalty_rate=0.5,
+        )
+
+        betting_service = BettingService(
+            bet_repo=bet_repo,
+            player_repo=player_repo,
+            bankruptcy_service=bankruptcy_service,
+        )
+
+        # Create player with debt and declare bankruptcy
+        pid = create_test_player(player_repo, 1001, balance=-200)
+        bankruptcy_service.declare_bankruptcy(pid)
+
+        assert bankruptcy_service.get_state(pid).penalty_games_remaining == 5
+
+        # Award win bonus (this is what clears bankruptcy)
+        betting_service.award_win_bonus([pid])
+
+        # Penalty games should be decremented after winning
         assert bankruptcy_service.get_state(pid).penalty_games_remaining == 4
 
 

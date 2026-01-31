@@ -142,18 +142,14 @@ class BettingService:
         """
         Give each participant 1 jopacoin for playing.
 
-        Also decrements bankruptcy penalty games for each participant.
+        Note: Bankruptcy penalty games are NOT decremented here - only wins count
+        toward clearing bankruptcy (like Dota 2 low priority). See award_win_bonus().
 
         Returns dict of {discord_id: {gross, garnished, net}} for each player.
         """
         results: dict[int, dict[str, int]] = {}
         if not player_ids:
             return results
-
-        # Decrement bankruptcy penalty games for all participants
-        if self.bankruptcy_service:
-            for pid in player_ids:
-                self.bankruptcy_service.on_game_played(pid)
 
         # If garnishment service is available, use it for individual processing
         if self.garnishment_service:
@@ -287,13 +283,19 @@ class BettingService:
         Reward winners with additional jopacoins.
 
         Applies bankruptcy penalty if applicable (reduced reward for players
-        who declared bankruptcy).
+        who declared bankruptcy). Also decrements bankruptcy penalty games
+        for winners - only wins count toward clearing the penalty (like Dota 2 low prio).
 
         Returns dict of {discord_id: {gross, garnished, net, bankruptcy_penalty}} for each player.
         """
         results: dict[int, dict[str, int]] = {}
         if not winning_ids:
             return results
+
+        # Decrement bankruptcy penalty games for winners only (wins clear bankruptcy)
+        if self.bankruptcy_service:
+            for pid in winning_ids:
+                self.bankruptcy_service.on_game_won(pid)
 
         for pid in winning_ids:
             reward = JOPACOIN_WIN_REWARD
