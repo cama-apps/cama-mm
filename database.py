@@ -54,6 +54,11 @@ class Database:
             unique_name = uuid.uuid4().hex
             self.db_path = f"file:memdb_{unique_name}?mode=memory&cache=shared"
             self._use_uri = True
+            # For in-memory databases with cache=shared, we must keep at least one
+            # connection open at all times or the database is destroyed.
+            # Open it now BEFORE schema initialization.
+            self._memory_connection = sqlite3.connect(self.db_path, uri=True)
+            self._memory_connection.row_factory = sqlite3.Row
         else:
             self.db_path = raw_path
         logger.info(f"Using database path: {self.db_path}")
