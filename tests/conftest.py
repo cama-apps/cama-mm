@@ -1,8 +1,13 @@
 """
 Pytest fixtures for tests.
+
+Performance optimization: Uses session-scoped schema template to avoid running
+56 database migrations for every test. Instead, we run migrations once and copy
+the resulting database file (~1ms) instead of re-initializing (~50ms+).
 """
 
 import os
+import shutil
 import sqlite3
 import tempfile
 
@@ -16,16 +21,25 @@ from repositories.match_repository import MatchRepository
 from repositories.player_repository import PlayerRepository
 
 
+@pytest.fixture(scope="session")
+def _schema_template_path(tmp_path_factory):
+    """
+    Create a schema template database once per test session.
+
+    All 56 migrations run ONCE here. Tests copy from this template
+    instead of running schema initialization each time.
+    """
+    template_dir = tmp_path_factory.mktemp("schema_template")
+    template_path = str(template_dir / "template.db")
+    Database(template_path)
+    yield template_path
+
+
 @pytest.fixture
-def temp_db_path():
-    """Create a temporary database path."""
-    fd, path = tempfile.mkstemp(suffix=".db")
-    os.close(fd)
+def temp_db_path(tmp_path):
+    """Create a temporary database path (no schema)."""
+    path = str(tmp_path / "temp.db")
     yield path
-    try:
-        os.unlink(path)
-    except OSError:
-        pass
 
 
 @pytest.fixture
@@ -45,29 +59,16 @@ def sample_players():
 
 
 @pytest.fixture
-def repo_db_path():
-    """Create a temporary database path for repository tests."""
-    fd, path = tempfile.mkstemp(suffix=".db")
-    os.close(fd)
-    # Initialize the database schema
-    Database(path)
-    # Sanity-check required tables exist in the file we just created
-    with sqlite3.connect(path) as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('players', 'matches')"
-        )
-        existing = {row[0] for row in cursor.fetchall()}
-        required = {"players", "matches"}
-        if not required.issubset(existing):
-            raise RuntimeError(
-                f"Schema initialization failed for {path}; missing tables: {sorted(required - existing)}"
-            )
-    yield path
-    try:
-        os.unlink(path)
-    except OSError:
-        pass
+def repo_db_path(_schema_template_path, tmp_path):
+    """
+    Create a temporary database with initialized schema for repository tests.
+
+    Fast: file copy (~1ms) instead of schema initialization (~50ms+).
+    The schema template is created once per session and reused.
+    """
+    test_db_path = str(tmp_path / "test.db")
+    shutil.copy2(_schema_template_path, test_db_path)
+    yield test_db_path
 
 
 @pytest.fixture

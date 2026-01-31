@@ -37,6 +37,8 @@ testpaths = ["tests", "."]
 python_files = "test_*.py"
 python_classes = "Test*"
 python_functions = "test_*"
+# Group tests by module/class to share session-scoped fixtures efficiently
+addopts = "--dist=loadscope"
 markers = [
     "timeout: mark test with a timeout",
     "forceserial: mark test to run in isolation (avoid parallel test state pollution)",

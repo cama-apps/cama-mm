@@ -2,8 +2,6 @@
 Tests for the bankruptcy feature.
 """
 
-import os
-import tempfile
 import time
 
 import pytest
@@ -16,28 +14,20 @@ from services.betting_service import BettingService
 
 
 @pytest.fixture
-def db_and_repos():
-    """Create test database and repositories."""
-    fd, db_path = tempfile.mkstemp(suffix=".db")
-    os.close(fd)
-
-    db = Database(db_path)
-    player_repo = PlayerRepository(db_path)
-    bankruptcy_repo = BankruptcyRepository(db_path)
-    bet_repo = BetRepository(db_path)
+def db_and_repos(repo_db_path):
+    """Create test database and repositories using centralized fast fixture."""
+    db = Database(repo_db_path)
+    player_repo = PlayerRepository(repo_db_path)
+    bankruptcy_repo = BankruptcyRepository(repo_db_path)
+    bet_repo = BetRepository(repo_db_path)
 
     yield {
         "db": db,
         "player_repo": player_repo,
         "bankruptcy_repo": bankruptcy_repo,
         "bet_repo": bet_repo,
-        "db_path": db_path,
+        "db_path": repo_db_path,
     }
-
-    try:
-        os.unlink(db_path)
-    except OSError:
-        pass
 
 
 @pytest.fixture

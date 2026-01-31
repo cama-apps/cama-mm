@@ -1,9 +1,6 @@
 """Tests for balance validation utilities."""
 
 import pytest
-import tempfile
-import os
-import time
 
 from services.balance_validation import (
     validate_can_spend,
@@ -12,28 +9,12 @@ from services.balance_validation import (
 )
 from services import error_codes
 from repositories.player_repository import PlayerRepository
-from infrastructure.schema_manager import SchemaManager
 
 
 @pytest.fixture
-def temp_db():
-    """Create a temporary database with schema."""
-    fd, path = tempfile.mkstemp(suffix=".db")
-    os.close(fd)
-    schema_manager = SchemaManager(path)
-    schema_manager.initialize()
-    yield path
-    time.sleep(0.1)  # Windows file locking
-    try:
-        os.unlink(path)
-    except Exception:
-        pass
-
-
-@pytest.fixture
-def player_repo(temp_db):
-    """Create a player repository."""
-    return PlayerRepository(temp_db)
+def player_repo(repo_db_path):
+    """Create a player repository using centralized fast fixture."""
+    return PlayerRepository(repo_db_path)
 
 
 @pytest.fixture

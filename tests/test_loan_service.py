@@ -7,8 +7,6 @@ Loans work as follows:
 3. Fee goes to nonprofit fund at repayment time
 """
 
-import os
-import tempfile
 import time
 
 import pytest
@@ -19,27 +17,18 @@ from services.loan_service import LoanRepository, LoanService
 
 
 @pytest.fixture
-def db_and_repos():
-    """Create test database and repositories."""
-    fd, db_path = tempfile.mkstemp(suffix=".db")
-    os.close(fd)
-
-    db = Database(db_path)
-    player_repo = PlayerRepository(db_path)
-    loan_repo = LoanRepository(db_path)
+def db_and_repos(repo_db_path):
+    """Create test database and repositories using centralized fast fixture."""
+    db = Database(repo_db_path)
+    player_repo = PlayerRepository(repo_db_path)
+    loan_repo = LoanRepository(repo_db_path)
 
     yield {
         "db": db,
         "player_repo": player_repo,
         "loan_repo": loan_repo,
-        "db_path": db_path,
+        "db_path": repo_db_path,
     }
-
-    try:
-        time.sleep(0.1)  # Windows file locking
-        os.unlink(db_path)
-    except OSError:
-        pass
 
 
 @pytest.fixture

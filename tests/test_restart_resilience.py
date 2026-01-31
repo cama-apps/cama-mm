@@ -7,14 +7,11 @@ These tests validate that:
 3. Lobby state is restored from database
 """
 
-import os
-import tempfile
 import time
 
 import pytest
 
 from services.lobby_manager_service import LobbyManagerService as LobbyManager
-from infrastructure.schema_manager import SchemaManager
 from repositories.bet_repository import BetRepository
 from repositories.lobby_repository import LobbyRepository
 from repositories.match_repository import MatchRepository
@@ -43,17 +40,9 @@ class TestRestartResilience:
     """Tests that verify state survives simulated restarts."""
 
     @pytest.fixture
-    def db_path(self):
-        """Create a temporary database with schema."""
-        fd, path = tempfile.mkstemp(suffix=".db")
-        os.close(fd)
-        SchemaManager(path).initialize()
-        yield path
-        time.sleep(0.1)
-        try:
-            os.unlink(path)
-        except OSError:
-            pass
+    def db_path(self, repo_db_path):
+        """Use centralized fast fixture for database path."""
+        return repo_db_path
 
     def test_pending_match_restored_after_restart(self, db_path):
         """Test that pending match state is restored from DB after service restart."""

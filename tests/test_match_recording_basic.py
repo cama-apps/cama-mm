@@ -3,10 +3,6 @@ Basic unit tests for match recording functionality.
 Tests the critical bug fix where wins/losses were incorrectly recorded.
 """
 
-import os
-import tempfile
-import time
-
 import pytest
 
 from database import Database
@@ -16,31 +12,9 @@ class TestMatchRecording:
     """Test match recording and win/loss tracking."""
 
     @pytest.fixture
-    def test_db(self):
-        """Create a temporary test database."""
-        fd, db_path = tempfile.mkstemp(suffix=".db")
-        os.close(fd)
-        db = Database(db_path)
-        yield db
-        # Close any open connections before cleanup
-        try:
-            # Force close any open connections
-            import sqlite3
-
-            sqlite3.connect(db_path).close()
-        except Exception:
-            pass
-        # Small delay to ensure file is released
-        time.sleep(0.1)
-        try:
-            os.unlink(db_path)
-        except PermissionError:
-            # On Windows, sometimes the file is still locked - try again after a delay
-            time.sleep(0.2)
-            try:
-                os.unlink(db_path)
-            except Exception:
-                pass  # Best effort cleanup
+    def test_db(self, repo_db_path):
+        """Create a test database using centralized fast fixture."""
+        return Database(repo_db_path)
 
     @pytest.fixture
     def test_players(self, test_db):

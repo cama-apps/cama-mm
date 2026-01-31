@@ -6,13 +6,10 @@ incorrectly recorded match results by reversing all effects and
 re-applying with the correct winner.
 """
 
-import os
-import tempfile
 import time
 
 import pytest
 
-from database import Database
 from repositories.bet_repository import BetRepository
 from repositories.match_repository import MatchRepository
 from repositories.pairings_repository import PairingsRepository
@@ -22,16 +19,12 @@ from services.match_service import MatchService
 
 
 @pytest.fixture
-def correction_services():
-    """Create test services with a temporary database for correction tests."""
-    fd, db_path = tempfile.mkstemp(suffix=".db")
-    os.close(fd)
-
-    Database(db_path)
-    player_repo = PlayerRepository(db_path)
-    bet_repo = BetRepository(db_path)
-    match_repo = MatchRepository(db_path)
-    pairings_repo = PairingsRepository(db_path)
+def correction_services(repo_db_path):
+    """Create test services using centralized fast fixture."""
+    player_repo = PlayerRepository(repo_db_path)
+    bet_repo = BetRepository(repo_db_path)
+    match_repo = MatchRepository(repo_db_path)
+    pairings_repo = PairingsRepository(repo_db_path)
     betting_service = BettingService(bet_repo, player_repo)
     match_service = MatchService(
         player_repo=player_repo,
@@ -48,14 +41,8 @@ def correction_services():
         "match_repo": match_repo,
         "pairings_repo": pairings_repo,
         "bet_repo": bet_repo,
-        "db_path": db_path,
+        "db_path": repo_db_path,
     }
-
-    # Cleanup
-    try:
-        os.unlink(db_path)
-    except OSError:
-        pass
 
 
 def _create_players(player_repo, start_id=1000, count=10):

@@ -1,10 +1,9 @@
 """
 Shared fixtures and utilities for end-to-end tests.
+
+Uses centralized fixtures from conftest.py for fast database setup.
 """
 
-import os
-import tempfile
-import time
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -41,49 +40,15 @@ class MockDiscordInteraction:
 
 
 @pytest.fixture
-def e2e_test_db():
-    """Create a temporary Database for e2e tests."""
-    fd, db_path = tempfile.mkstemp(suffix=".db")
-    os.close(fd)
-    db = Database(db_path)
-    yield db
-    try:
-        import sqlite3
-
-        sqlite3.connect(db_path).close()
-    except Exception:
-        pass
-    try:
-        os.unlink(db_path)
-    except PermissionError:
-        time.sleep(0.1)
-        try:
-            os.unlink(db_path)
-        except Exception:
-            pass
+def e2e_test_db(repo_db_path):
+    """Create a Database for e2e tests using centralized fast fixture."""
+    return Database(repo_db_path)
 
 
 @pytest.fixture
-def match_test_db():
-    """Create a temporary Database for match service tests."""
-    fd, db_path = tempfile.mkstemp(suffix=".db")
-    os.close(fd)
-    db = Database(db_path)
-    yield db
-    try:
-        import sqlite3
-
-        sqlite3.connect(db_path).close()
-    except Exception:
-        pass
-    try:
-        os.unlink(db_path)
-    except PermissionError:
-        time.sleep(0.1)
-        try:
-            os.unlink(db_path)
-        except Exception:
-            pass
+def match_test_db(repo_db_path):
+    """Create a Database for match service tests using centralized fast fixture."""
+    return Database(repo_db_path)
 
 
 def create_test_players(db, start_id=60000, count=10):
@@ -99,30 +64,3 @@ def create_test_players(db, start_id=60000, count=10):
             glicko_volatility=0.06,
         )
     return player_ids
-
-
-def create_test_db_fixture():
-    """Factory function for creating test_db fixtures (used in class-based tests)."""
-    fd, db_path = tempfile.mkstemp(suffix=".db")
-    os.close(fd)
-    db = Database(db_path)
-    return db, db_path
-
-
-def cleanup_test_db(db_path):
-    """Cleanup function for test databases."""
-    try:
-        import sqlite3
-
-        sqlite3.connect(db_path).close()
-    except Exception:
-        pass
-    time.sleep(0.1)
-    try:
-        os.unlink(db_path)
-    except PermissionError:
-        time.sleep(0.2)
-        try:
-            os.unlink(db_path)
-        except Exception:
-            pass

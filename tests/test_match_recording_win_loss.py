@@ -2,33 +2,15 @@
 Additional unit tests for win/loss recording edge cases and integrity.
 """
 
-import os
-import tempfile
-import time
-
 import pytest
 
 from database import Database
 
 
 @pytest.fixture
-def test_db():
-    """Temporary database for win/loss recording tests."""
-    fd, db_path = tempfile.mkstemp(suffix=".db")
-    os.close(fd)
-    db = Database(db_path)
-    yield db
-    try:
-        import sqlite3
-
-        sqlite3.connect(db_path).close()
-    except Exception:
-        pass
-    time.sleep(0.05)
-    try:
-        os.unlink(db_path)
-    except Exception:
-        pass
+def test_db(repo_db_path):
+    """Temporary database for win/loss recording tests using centralized fast fixture."""
+    return Database(repo_db_path)
 
 
 @pytest.fixture

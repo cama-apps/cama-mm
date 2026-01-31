@@ -1,9 +1,8 @@
 """Tests for LoanService Result-returning methods."""
 
-import pytest
 import time
-import tempfile
-import os
+
+import pytest
 
 from services.loan_service import (
     LoanService,
@@ -15,29 +14,13 @@ from services.loan_service import (
 from services.result import Result
 from services import error_codes
 from repositories.player_repository import PlayerRepository
-from infrastructure.schema_manager import SchemaManager
 
 
 @pytest.fixture
-def temp_db():
-    """Create a temporary database with schema."""
-    fd, path = tempfile.mkstemp(suffix=".db")
-    os.close(fd)
-    schema_manager = SchemaManager(path)
-    schema_manager.initialize()
-    yield path
-    time.sleep(0.1)  # Windows file locking
-    try:
-        os.unlink(path)
-    except Exception:
-        pass
-
-
-@pytest.fixture
-def services(temp_db):
-    """Create loan service with dependencies."""
-    player_repo = PlayerRepository(temp_db)
-    loan_repo = LoanRepository(temp_db)
+def services(repo_db_path):
+    """Create loan service with dependencies using centralized fast fixture."""
+    player_repo = PlayerRepository(repo_db_path)
+    loan_repo = LoanRepository(repo_db_path)
     loan_service = LoanService(
         loan_repo=loan_repo,
         player_repo=player_repo,

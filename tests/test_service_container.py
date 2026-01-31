@@ -1,31 +1,15 @@
 """Tests for ServiceContainer."""
 
 import pytest
-import tempfile
-import os
-import time
 
 from infrastructure.service_container import ServiceContainer, ServiceConfig
 
 
 @pytest.fixture
-def temp_db_path():
-    """Create a temporary database path."""
-    fd, path = tempfile.mkstemp(suffix=".db")
-    os.close(fd)
-    yield path
-    time.sleep(0.1)  # Windows file locking
-    try:
-        os.unlink(path)
-    except Exception:
-        pass
-
-
-@pytest.fixture
-def config(temp_db_path):
-    """Create a test configuration."""
+def config(repo_db_path):
+    """Create a test configuration using centralized fast fixture."""
     return ServiceConfig(
-        db_path=temp_db_path,
+        db_path=repo_db_path,
         lobby_ready_threshold=10,
         lobby_max_players=12,
     )
