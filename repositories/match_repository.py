@@ -1463,6 +1463,40 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 for row in rows
             ]
 
+    def get_all_matches_chronological(self) -> list[dict]:
+        """
+        Get ALL matches in chronological order for backfill.
+
+        Unlike get_enriched_matches_chronological, this returns ALL matches
+        regardless of whether they have fantasy data. Used for full backfill
+        where non-enriched matches use equal weights.
+
+        Returns:
+            List of dicts with match_id, winning_team, match_date, team1_players, team2_players
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT match_id, winning_team, match_date,
+                       team1_players, team2_players
+                FROM matches
+                WHERE winning_team IN (1, 2)
+                ORDER BY match_date ASC
+                """
+            )
+            rows = cursor.fetchall()
+            return [
+                {
+                    "match_id": row["match_id"],
+                    "winning_team": row["winning_team"],
+                    "match_date": row["match_date"],
+                    "team1_players": json.loads(row["team1_players"]),
+                    "team2_players": json.loads(row["team2_players"]),
+                }
+                for row in rows
+            ]
+
     def get_all_matches_with_predictions(self) -> list[dict]:
         """
         Get all matches with Glicko-2 prediction data for analysis.
