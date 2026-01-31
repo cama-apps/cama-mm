@@ -3,10 +3,6 @@ Tests for Radiant/Dire mapping fix in match recording.
 Tests the critical bug fix where Dire wins were incorrectly recorded as losses.
 """
 
-import os
-import tempfile
-import time
-
 import pytest
 
 from database import Database
@@ -55,28 +51,9 @@ class TestRadiantDireMapping:
         assert winning_team_for_db == 1  # In this scenario
 
     @pytest.fixture
-    def test_db(self):
-        """Create a temporary test database."""
-        fd, db_path = tempfile.mkstemp(suffix=".db")
-        os.close(fd)
-        db = Database(db_path)
-        yield db
-        # Close any open connections before cleanup
-        try:
-            import sqlite3
-
-            sqlite3.connect(db_path).close()
-        except Exception:
-            pass
-        time.sleep(0.1)
-        try:
-            os.unlink(db_path)
-        except PermissionError:
-            time.sleep(0.2)
-            try:
-                os.unlink(db_path)
-            except Exception:
-                pass
+    def test_db(self, repo_db_path):
+        """Create a test database using centralized fast fixture."""
+        return Database(repo_db_path)
 
     def test_team_id_mapping_after_shuffle(self, test_db):
         """
@@ -194,28 +171,9 @@ class TestRadiantDireBugFix:
     """Test the critical bug fix where Dire wins were incorrectly recorded as losses."""
 
     @pytest.fixture
-    def test_db(self):
-        """Create a temporary test database."""
-        fd, db_path = tempfile.mkstemp(suffix=".db")
-        os.close(fd)
-        db = Database(db_path)
-        yield db
-        # Close any open connections before cleanup
-        try:
-            import sqlite3
-
-            sqlite3.connect(db_path).close()
-        except Exception:
-            pass
-        time.sleep(0.1)
-        try:
-            os.unlink(db_path)
-        except PermissionError:
-            time.sleep(0.2)
-            try:
-                os.unlink(db_path)
-            except Exception:
-                pass
+    def test_db(self, repo_db_path):
+        """Create a test database using centralized fast fixture."""
+        return Database(repo_db_path)
 
     def test_exact_bug_scenario_dire_wins(self, test_db):
         """

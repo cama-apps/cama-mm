@@ -3,10 +3,6 @@ End-to-end tests for bug scenarios reported by users.
 Tests the exact bug scenario and production bugs.
 """
 
-import os
-import tempfile
-import time
-
 import pytest
 
 from database import Database
@@ -17,27 +13,9 @@ class TestExactBugScenario:
     """Test the exact bug scenario reported by user - Dire wins but recorded as loss."""
 
     @pytest.fixture
-    def test_db(self):
-        """Create a temporary test database."""
-        fd, db_path = tempfile.mkstemp(suffix=".db")
-        os.close(fd)
-        db = Database(db_path)
-        yield db
-        try:
-            import sqlite3
-
-            sqlite3.connect(db_path).close()
-        except Exception:
-            pass
-        time.sleep(0.1)
-        try:
-            os.unlink(db_path)
-        except PermissionError:
-            time.sleep(0.2)
-            try:
-                os.unlink(db_path)
-            except Exception:
-                pass
+    def test_db(self, repo_db_path):
+        """Create a test database using centralized fast fixture."""
+        return Database(repo_db_path)
 
     def test_exact_bug_scenario_shuffle_to_leaderboard(self, test_db):
         """
@@ -207,27 +185,9 @@ class TestProductionBugScenarios:
     """End-to-end tests for actual production bugs reported by users."""
 
     @pytest.fixture
-    def test_db(self):
-        """Create a temporary test database."""
-        fd, db_path = tempfile.mkstemp(suffix=".db")
-        os.close(fd)
-        db = Database(db_path)
-        yield db
-        try:
-            import sqlite3
-
-            sqlite3.connect(db_path).close()
-        except Exception:
-            pass
-        time.sleep(0.1)
-        try:
-            os.unlink(db_path)
-        except PermissionError:
-            time.sleep(0.2)
-            try:
-                os.unlink(db_path)
-            except Exception:
-                pass
+    def test_db(self, repo_db_path):
+        """Create a test database using centralized fast fixture."""
+        return Database(repo_db_path)
 
     def test_excluded_players_get_losses_bug(self, test_db):
         """

@@ -8,13 +8,10 @@ Tests verify that:
 4. Bets can be placed after extension reopens a closed window
 """
 
-import os
-import tempfile
 import time
 
 import pytest
 
-from infrastructure.schema_manager import SchemaManager
 from repositories.bet_repository import BetRepository
 from repositories.match_repository import MatchRepository
 from repositories.player_repository import PlayerRepository
@@ -42,17 +39,9 @@ class TestExtendBetting:
     """Tests for extending the betting window."""
 
     @pytest.fixture
-    def db_path(self):
-        """Create a temporary database with schema."""
-        fd, path = tempfile.mkstemp(suffix=".db")
-        os.close(fd)
-        SchemaManager(path).initialize()
-        yield path
-        time.sleep(0.1)
-        try:
-            os.unlink(path)
-        except OSError:
-            pass
+    def db_path(self, repo_db_path):
+        """Use centralized fast fixture for database path."""
+        return repo_db_path
 
     def test_extend_betting_updates_lock_until(self, db_path):
         """Test that extending betting updates bet_lock_until in state."""

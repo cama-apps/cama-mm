@@ -97,21 +97,9 @@ class TestPlayerServiceSetRoles:
     """Service layer tests for PlayerService.set_roles()."""
 
     @pytest.fixture
-    def test_db(self):
-        """Create a temporary test database."""
-        fd, db_path = tempfile.mkstemp(suffix=".db")
-        os.close(fd)
-        db = Database(db_path)
-        yield db
-        time.sleep(0.1)
-        try:
-            os.unlink(db_path)
-        except PermissionError:
-            time.sleep(0.2)
-            try:
-                os.unlink(db_path)
-            except Exception:
-                pass
+    def test_db(self, repo_db_path):
+        """Create a test database using centralized fast fixture."""
+        return Database(repo_db_path)
 
     @pytest.fixture
     def player_service(self, test_db):
@@ -222,21 +210,9 @@ class TestSetRolesE2E:
     """End-to-end tests for the /setroles command flow."""
 
     @pytest.fixture
-    def test_db(self):
-        """Create a temporary test database."""
-        fd, db_path = tempfile.mkstemp(suffix=".db")
-        os.close(fd)
-        db = Database(db_path)
-        yield db
-        time.sleep(0.1)
-        try:
-            os.unlink(db_path)
-        except PermissionError:
-            time.sleep(0.2)
-            try:
-                os.unlink(db_path)
-            except Exception:
-                pass
+    def test_db(self, repo_db_path):
+        """Create a test database using centralized fast fixture."""
+        return Database(repo_db_path)
 
     @pytest.fixture
     def player_service(self, test_db):

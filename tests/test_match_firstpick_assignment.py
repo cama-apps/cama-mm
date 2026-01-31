@@ -2,10 +2,6 @@
 Tests for firstpick team assignment in match shuffling.
 """
 
-import os
-import tempfile
-import time
-
 import pytest
 
 from database import Database
@@ -18,27 +14,9 @@ class TestFirstpickAssignment:
     """Test that firstpick team is randomly assigned between Radiant and Dire."""
 
     @pytest.fixture
-    def test_db(self):
-        """Create a temporary test database."""
-        fd, db_path = tempfile.mkstemp(suffix=".db")
-        os.close(fd)
-        db = Database(db_path)
-        yield db
-        try:
-            import sqlite3
-
-            sqlite3.connect(db_path).close()
-        except Exception:
-            pass
-        time.sleep(0.1)
-        try:
-            os.unlink(db_path)
-        except PermissionError:
-            time.sleep(0.2)
-            try:
-                os.unlink(db_path)
-            except Exception:
-                pass
+    def test_db(self, repo_db_path):
+        """Create a test database using centralized fast fixture."""
+        return Database(repo_db_path)
 
     @pytest.fixture
     def test_players(self, test_db):
@@ -137,27 +115,9 @@ class TestFirstpickEndToEnd:
     """End-to-end tests for firstpick assignment through the full workflow."""
 
     @pytest.fixture
-    def test_db(self):
-        """Create a temporary test database."""
-        fd, db_path = tempfile.mkstemp(suffix=".db")
-        os.close(fd)
-        db = Database(db_path)
-        yield db
-        try:
-            import sqlite3
-
-            sqlite3.connect(db_path).close()
-        except Exception:
-            pass
-        time.sleep(0.1)
-        try:
-            os.unlink(db_path)
-        except PermissionError:
-            time.sleep(0.2)
-            try:
-                os.unlink(db_path)
-            except Exception:
-                pass
+    def test_db(self, repo_db_path):
+        """Create a test database using centralized fast fixture."""
+        return Database(repo_db_path)
 
     @pytest.fixture
     def test_players(self, test_db):

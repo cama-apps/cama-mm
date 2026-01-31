@@ -1,12 +1,9 @@
 """Tests for betting impact stats feature."""
 
-import os
-import tempfile
 import time
 
 import pytest
 
-from database import Database
 from repositories.bet_repository import BetRepository
 from repositories.match_repository import MatchRepository
 from repositories.player_repository import PlayerRepository
@@ -20,15 +17,11 @@ from services.match_service import MatchService
 
 
 @pytest.fixture
-def services():
-    """Create test services with a temporary database."""
-    fd, db_path = tempfile.mkstemp(suffix=".db")
-    os.close(fd)
-
-    Database(db_path)
-    player_repo = PlayerRepository(db_path)
-    bet_repo = BetRepository(db_path)
-    match_repo = MatchRepository(db_path)
+def services(repo_db_path):
+    """Create test services using centralized fast fixture."""
+    player_repo = PlayerRepository(repo_db_path)
+    bet_repo = BetRepository(repo_db_path)
+    match_repo = MatchRepository(repo_db_path)
     betting_service = BettingService(bet_repo, player_repo)
     match_service = MatchService(
         player_repo=player_repo,
@@ -49,14 +42,8 @@ def services():
         "player_repo": player_repo,
         "bet_repo": bet_repo,
         "match_repo": match_repo,
-        "db_path": db_path,
+        "db_path": repo_db_path,
     }
-
-    # Cleanup
-    try:
-        os.unlink(db_path)
-    except OSError:
-        pass
 
 
 def _setup_players(player_repo, player_ids, spectator_ids):

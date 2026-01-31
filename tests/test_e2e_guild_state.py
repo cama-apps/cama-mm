@@ -2,10 +2,6 @@
 End-to-end tests for guild-specific match state tracking.
 """
 
-import os
-import tempfile
-import time
-
 import pytest
 
 from database import Database
@@ -15,26 +11,9 @@ from services.match_service import MatchService
 
 
 @pytest.fixture
-def match_test_db():
-    """Create a temporary Database for match service tests."""
-    fd, db_path = tempfile.mkstemp(suffix=".db")
-    os.close(fd)
-    db = Database(db_path)
-    yield db
-    try:
-        import sqlite3
-
-        sqlite3.connect(db_path).close()
-    except Exception:
-        pass
-    try:
-        os.unlink(db_path)
-    except PermissionError:
-        time.sleep(0.1)
-        try:
-            os.unlink(db_path)
-        except Exception:
-            pass
+def match_test_db(repo_db_path):
+    """Create a Database for match service tests using centralized fast fixture."""
+    return Database(repo_db_path)
 
 
 def create_test_players(db, start_id=60000, count=10):
