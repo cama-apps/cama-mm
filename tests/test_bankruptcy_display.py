@@ -129,10 +129,10 @@ def test_tombstone_disappears_after_penalty_games(test_services):
     )
     assert TOMBSTONE_EMOJI in display_name
 
-    # Simulate playing games until penalty is gone
+    # Simulate winning games until penalty is gone (only wins count)
     penalty_games = bankruptcy_service.penalty_games
     for _ in range(penalty_games):
-        bankruptcy_service.on_game_played(1003)
+        bankruptcy_service.on_game_won(1003)
 
     # Tombstone should be gone
     display_name = get_player_display_name(

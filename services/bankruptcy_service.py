@@ -356,9 +356,12 @@ class BankruptcyService(IBankruptcyService):
             "penalty_applied": penalty_applied,
         }
 
-    def on_game_played(self, discord_id: int) -> int:
+    def on_game_won(self, discord_id: int) -> int:
         """
-        Called when a player plays a game. Decrements their penalty counter.
+        Called when a player wins a game. Decrements their penalty counter.
+
+        Only wins count toward clearing bankruptcy (like Dota 2 low priority).
+        Losses do not decrement the counter.
 
         Returns the remaining penalty games.
         """
