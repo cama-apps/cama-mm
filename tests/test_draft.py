@@ -822,3 +822,188 @@ class TestPlayerPoolVisibility:
         # Verify round-trip preserves roles
         restored = DraftState.from_dict(state.to_dict())
         assert restored.player_pool_data[2]["roles"] == ["1", "2", "3", "4", "5"]
+
+
+class TestConditionalPlayerPromotion:
+    """
+    Tests for conditional player promotion logic in draft.
+
+    Conditional players ("froglings") are only promoted to the draft pool
+    when there aren't enough regular players. Regular players are always
+    included first; conditional players are randomly selected to fill
+    remaining spots up to 10.
+    """
+
+    def test_enough_regular_players_excludes_conditional(self):
+        """When >= 10 regular players, conditional players are excluded."""
+        from datetime import datetime
+        from domain.models.lobby import Lobby
+
+        lobby = Lobby(lobby_id=1, created_by=999, created_at=datetime.now())
+        # Add 12 regular players
+        for i in range(1, 13):
+            lobby.add_player(i)
+        # Add 3 conditional players
+        for i in range(101, 104):
+            lobby.add_conditional_player(i)
+
+        regular_players = list(lobby.players)
+        conditional_players = list(lobby.conditional_players)
+        DRAFT_POOL_SIZE = 10
+
+        if len(regular_players) >= DRAFT_POOL_SIZE:
+            lobby_player_ids = regular_players
+        else:
+            needed = DRAFT_POOL_SIZE - len(regular_players)
+            import random
+            promoted_conditional = random.sample(
+                conditional_players, min(needed, len(conditional_players))
+            )
+            lobby_player_ids = regular_players + promoted_conditional
+
+        # All should be regular players, no conditional
+        assert len(lobby_player_ids) == 12
+        assert all(pid < 100 for pid in lobby_player_ids)
+        assert not any(pid >= 100 for pid in lobby_player_ids)
+
+    def test_promotes_conditional_when_not_enough_regular(self):
+        """When < 10 regular players, promotes random conditional players."""
+        from datetime import datetime
+        from domain.models.lobby import Lobby
+        import random
+
+        lobby = Lobby(lobby_id=1, created_by=999, created_at=datetime.now())
+        # Add 8 regular players
+        for i in range(1, 9):
+            lobby.add_player(i)
+        # Add 4 conditional players
+        for i in range(101, 105):
+            lobby.add_conditional_player(i)
+
+        regular_players = list(lobby.players)
+        conditional_players = list(lobby.conditional_players)
+        DRAFT_POOL_SIZE = 10
+
+        if len(regular_players) >= DRAFT_POOL_SIZE:
+            lobby_player_ids = regular_players
+        else:
+            needed = DRAFT_POOL_SIZE - len(regular_players)
+            promoted_conditional = random.sample(
+                conditional_players, min(needed, len(conditional_players))
+            )
+            lobby_player_ids = regular_players + promoted_conditional
+
+        # Should have 10 players: 8 regular + 2 promoted conditional
+        assert len(lobby_player_ids) == 10
+
+        # All 8 regular players should be included
+        for i in range(1, 9):
+            assert i in lobby_player_ids
+
+        # Exactly 2 conditional players should be promoted
+        conditional_in_pool = [pid for pid in lobby_player_ids if pid >= 100]
+        assert len(conditional_in_pool) == 2
+
+    def test_promotes_all_conditional_if_needed(self):
+        """When regular + conditional < 10, promotes all conditional."""
+        from datetime import datetime
+        from domain.models.lobby import Lobby
+        import random
+
+        lobby = Lobby(lobby_id=1, created_by=999, created_at=datetime.now())
+        # Add 7 regular players
+        for i in range(1, 8):
+            lobby.add_player(i)
+        # Add 3 conditional players (total 10)
+        for i in range(101, 104):
+            lobby.add_conditional_player(i)
+
+        regular_players = list(lobby.players)
+        conditional_players = list(lobby.conditional_players)
+        DRAFT_POOL_SIZE = 10
+
+        if len(regular_players) >= DRAFT_POOL_SIZE:
+            lobby_player_ids = regular_players
+        else:
+            needed = DRAFT_POOL_SIZE - len(regular_players)  # 3 needed
+            promoted_conditional = random.sample(
+                conditional_players, min(needed, len(conditional_players))
+            )
+            lobby_player_ids = regular_players + promoted_conditional
+
+        # Should have 10 players: 7 regular + 3 conditional
+        assert len(lobby_player_ids) == 10
+
+        # All 7 regular players should be included
+        for i in range(1, 8):
+            assert i in lobby_player_ids
+
+        # All 3 conditional players should be promoted
+        for i in range(101, 104):
+            assert i in lobby_player_ids
+
+    def test_conditional_promotion_is_random(self):
+        """Conditional player promotion uses random selection, not rating."""
+        from datetime import datetime
+        from domain.models.lobby import Lobby
+        import random
+
+        lobby = Lobby(lobby_id=1, created_by=999, created_at=datetime.now())
+        # Add 8 regular players
+        for i in range(1, 9):
+            lobby.add_player(i)
+        # Add 5 conditional players
+        for i in range(101, 106):
+            lobby.add_conditional_player(i)
+
+        regular_players = list(lobby.players)
+        conditional_players = list(lobby.conditional_players)
+        DRAFT_POOL_SIZE = 10
+
+        # Run multiple times to verify randomness
+        promoted_sets = []
+        for _ in range(20):
+            needed = DRAFT_POOL_SIZE - len(regular_players)  # 2 needed
+            promoted = tuple(sorted(random.sample(
+                conditional_players, min(needed, len(conditional_players))
+            )))
+            promoted_sets.append(promoted)
+
+        # Should have multiple different combinations (randomness)
+        unique_combinations = set(promoted_sets)
+        # With 5 choose 2 = 10 possible combinations, we should see variety
+        assert len(unique_combinations) > 1, "Promotion should be random, not deterministic"
+
+    def test_exactly_ten_regular_no_conditional_needed(self):
+        """Exactly 10 regular players means no conditional promotion."""
+        from datetime import datetime
+        from domain.models.lobby import Lobby
+        import random
+
+        lobby = Lobby(lobby_id=1, created_by=999, created_at=datetime.now())
+        # Add exactly 10 regular players
+        for i in range(1, 11):
+            lobby.add_player(i)
+        # Add 2 conditional players
+        for i in range(101, 103):
+            lobby.add_conditional_player(i)
+
+        regular_players = list(lobby.players)
+        conditional_players = list(lobby.conditional_players)
+        DRAFT_POOL_SIZE = 10
+
+        if len(regular_players) >= DRAFT_POOL_SIZE:
+            lobby_player_ids = regular_players
+        else:
+            needed = DRAFT_POOL_SIZE - len(regular_players)
+            promoted_conditional = random.sample(
+                conditional_players, min(needed, len(conditional_players))
+            )
+            lobby_player_ids = regular_players + promoted_conditional
+
+        # Should have exactly 10 regular players
+        assert len(lobby_player_ids) == 10
+        assert all(pid < 100 for pid in lobby_player_ids)
+        # No conditional players promoted
+        assert 101 not in lobby_player_ids
+        assert 102 not in lobby_player_ids

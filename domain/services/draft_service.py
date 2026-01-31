@@ -39,13 +39,13 @@ class DraftService:
     - Coinflip logic
     """
 
-    def __init__(self, rating_weight_factor: float = 100.0):
+    def __init__(self, rating_weight_factor: float = 50.0):
         """
         Initialize draft service.
 
         Args:
-            rating_weight_factor: Higher = more weight to similar ratings.
-                                  At 100, a 100-point difference halves the weight.
+            rating_weight_factor: Lower = more weight to similar ratings.
+                                  At 50, a 50-point difference halves the weight.
         """
         self.rating_weight_factor = rating_weight_factor
 

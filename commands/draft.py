@@ -20,7 +20,7 @@ from domain.services.draft_service import DraftService
 from services.draft_state_manager import DraftStateManager
 from services.permissions import has_admin_permission
 from utils.draft_embeds import MAX_NAME_LEN, format_player_row, format_roles
-from utils.formatting import JOPACOIN_EMOTE, format_betting_display
+from utils.formatting import JOPACOIN_EMOTE, format_betting_display, get_player_display_name
 from utils.interaction_safety import safe_defer
 
 if TYPE_CHECKING:
@@ -283,6 +283,7 @@ class DraftingView(discord.ui.View):
         guild_id: int,
         available_players: list,  # List of Player objects
         current_captain_id: int,
+        guild: discord.Guild | None = None,
         timeout: float = DRAFTING_TIMEOUT,
     ):
         super().__init__(timeout=timeout)
@@ -293,10 +294,12 @@ class DraftingView(discord.ui.View):
         # Add player pick buttons (up to 8 players, across rows 0-1)
         for i, player in enumerate(available_players[:8]):
             row = i // 4  # 4 buttons per row
+            # Use get_player_display_name to show server nicknames instead of Discord usernames
+            display_name = get_player_display_name(player, discord_id=player.discord_id, guild=guild)
             self.add_item(
                 PlayerPickButton(
                     player_id=player.discord_id,
-                    player_name=player.name,
+                    player_name=display_name,
                     player_rating=player.glicko_rating or 1500.0,
                     player_roles=player.preferred_roles,
                     row=row,
@@ -516,6 +519,7 @@ class DraftCommands(commands.Cog):
             guild_id=guild_id,
             available_players=available_players,
             current_captain_id=state.current_captain_id,
+            guild=interaction.guild,
         )
 
         await interaction.response.send_message(
@@ -641,8 +645,22 @@ class DraftCommands(commands.Cog):
         Returns:
             True if draft started successfully, False otherwise.
         """
-        # Get all players including conditional ones
-        lobby_player_ids = list(lobby.players) + list(lobby.conditional_players)
+        # Handle regular and conditional players separately
+        # Regular players are always included; conditional players fill remaining spots if needed
+        regular_players = list(lobby.players)
+        conditional_players = list(lobby.conditional_players)
+
+        if len(regular_players) >= DRAFT_POOL_SIZE:
+            # Enough regular players - use them (conditional players excluded)
+            lobby_player_ids = regular_players
+        else:
+            # Need to promote some conditional players to reach 10
+            needed = DRAFT_POOL_SIZE - len(regular_players)
+            # Randomly select conditional players to promote (per plan: random.sample, not rating-based)
+            promoted_conditional = random.sample(
+                conditional_players, min(needed, len(conditional_players))
+            )
+            lobby_player_ids = regular_players + promoted_conditional
 
         # Get player ratings for captain selection
         players = self.player_repo.get_by_ids(lobby_player_ids)
@@ -744,9 +762,10 @@ class DraftCommands(commands.Cog):
         state.draft_channel_id = interaction.channel_id
 
         # Cache player data for the pool (avoids repeated DB queries during pre-draft phases)
+        # Use get_player_display_name to resolve server nicknames at cache time
         state.player_pool_data = {
             p.discord_id: {
-                "name": p.name,
+                "name": get_player_display_name(p, discord_id=p.discord_id, guild=interaction.guild),
                 "rating": p.glicko_rating or 1500.0,
                 "roles": p.preferred_roles or [],
             }
@@ -878,27 +897,34 @@ class DraftCommands(commands.Cog):
             )
             return
 
-        lobby_player_ids = list(lobby.players)
-        if len(lobby_player_ids) < LOBBY_READY_THRESHOLD:
+        # Use total count (regular + conditional) like /shuffle does
+        regular_count = lobby.get_player_count()
+        conditional_count = lobby.get_conditional_count()
+        total_count = lobby.get_total_count()
+
+        if total_count < LOBBY_READY_THRESHOLD:
             await interaction.followup.send(
                 f"❌ Need at least {LOBBY_READY_THRESHOLD} players in lobby. "
-                f"Currently have {len(lobby_player_ids)}.",
+                f"Currently have {total_count} ({regular_count} regular, {conditional_count} conditional).",
                 ephemeral=True,
             )
             return
+
+        # All lobby players (regular + conditional) for captain validation
+        all_lobby_player_ids = set(lobby.players) | set(lobby.conditional_players)
 
         # Validate specified captains are in lobby
         specified_captain1_id = captain1.id if captain1 else None
         specified_captain2_id = captain2.id if captain2 else None
 
-        if specified_captain1_id and specified_captain1_id not in lobby_player_ids:
+        if specified_captain1_id and specified_captain1_id not in all_lobby_player_ids:
             await interaction.followup.send(
                 f"❌ {captain1.display_name} is not in the lobby.",
                 ephemeral=True,
             )
             return
 
-        if specified_captain2_id and specified_captain2_id not in lobby_player_ids:
+        if specified_captain2_id and specified_captain2_id not in all_lobby_player_ids:
             await interaction.followup.send(
                 f"❌ {captain2.display_name} is not in the lobby.",
                 ephemeral=True,
@@ -1271,6 +1297,7 @@ class DraftCommands(commands.Cog):
             guild_id=guild_id,
             available_players=available_players,
             current_captain_id=state.current_captain_id,
+            guild=interaction.guild,
         )
 
         if is_edit:
@@ -1310,7 +1337,8 @@ class DraftCommands(commands.Cog):
         for pid in state.radiant_player_ids:
             is_cap = pid == state.radiant_captain_id
             player = all_players.get(pid)
-            name = radiant_captain_name if is_cap else (player.name if player else f"P{pid}")
+            # Use radiant_captain_name for captain (already resolved), else use get_player_display_name
+            name = radiant_captain_name if is_cap else get_player_display_name(player, discord_id=pid, guild=guild)
             rating = player.glicko_rating if player and player.glicko_rating else 1500.0
             roles = get_role_nums(pid)
             radiant_lines.append(format_player_row(is_cap, name, rating, roles))
@@ -1319,7 +1347,8 @@ class DraftCommands(commands.Cog):
         for pid in state.dire_player_ids:
             is_cap = pid == state.dire_captain_id
             player = all_players.get(pid)
-            name = dire_captain_name if is_cap else (player.name if player else f"P{pid}")
+            # Use dire_captain_name for captain (already resolved), else use get_player_display_name
+            name = dire_captain_name if is_cap else get_player_display_name(player, discord_id=pid, guild=guild)
             rating = player.glicko_rating if player and player.glicko_rating else 1500.0
             roles = get_role_nums(pid)
             dire_lines.append(format_player_row(is_cap, name, rating, roles))
@@ -1334,6 +1363,7 @@ class DraftCommands(commands.Cog):
         available_players.sort(key=lambda p: p.glicko_rating or 1500.0, reverse=True)
         available_display = []
         for p in available_players:
+            display_name = get_player_display_name(p, discord_id=p.discord_id, guild=guild)
             rating = p.glicko_rating or 1500.0
             roles = format_roles(p.preferred_roles)
             pref = state.side_preferences.get(p.discord_id)
@@ -1344,7 +1374,7 @@ class DraftCommands(commands.Cog):
                 pref_indicator = " 🔴"
             else:
                 pref_indicator = ""
-            available_display.append(f"{p.name} ({rating:.0f}) {roles}{pref_indicator}")
+            available_display.append(f"{display_name} ({rating:.0f}) {roles}{pref_indicator}")
 
         # Color based on current team
         if current_team == "radiant":
@@ -1421,9 +1451,10 @@ class DraftCommands(commands.Cog):
             excluded_players.sort(key=lambda p: p.glicko_rating or 1500.0, reverse=True)
             excluded_display = []
             for p in excluded_players:
+                display_name = get_player_display_name(p, discord_id=p.discord_id, guild=guild)
                 rating = p.glicko_rating or 1500.0
                 roles = format_roles(p.preferred_roles)
-                excluded_display.append(f"{p.name} ({rating:.0f}) {roles}".strip())
+                excluded_display.append(f"{display_name} ({rating:.0f}) {roles}".strip())
 
             excluded_note = "Excluded players are prioritized in future games."
             embed.add_field(
@@ -1478,6 +1509,7 @@ class DraftCommands(commands.Cog):
                     guild_id=state.guild_id,
                     available_players=available_players,
                     current_captain_id=state.current_captain_id,
+                    guild=guild,
                 )
                 await message.edit(embed=embed, view=view)
 
@@ -1797,7 +1829,8 @@ class DraftCommands(commands.Cog):
         for pid in state.radiant_player_ids:
             is_cap = pid == state.radiant_captain_id
             player = all_players.get(pid)
-            name = radiant_captain_name if is_cap else (player.name if player else f"P{pid}")
+            # Use radiant_captain_name for captain (already resolved), else use get_player_display_name
+            name = radiant_captain_name if is_cap else get_player_display_name(player, discord_id=pid, guild=guild)
             rating = player.glicko_rating if player and player.glicko_rating else 1500.0
             roles = get_role_nums(pid)
             radiant_lines.append(format_player_row(is_cap, name, rating, roles))
@@ -1806,7 +1839,8 @@ class DraftCommands(commands.Cog):
         for pid in state.dire_player_ids:
             is_cap = pid == state.dire_captain_id
             player = all_players.get(pid)
-            name = dire_captain_name if is_cap else (player.name if player else f"P{pid}")
+            # Use dire_captain_name for captain (already resolved), else use get_player_display_name
+            name = dire_captain_name if is_cap else get_player_display_name(player, discord_id=pid, guild=guild)
             rating = player.glicko_rating if player and player.glicko_rating else 1500.0
             roles = get_role_nums(pid)
             dire_lines.append(format_player_row(is_cap, name, rating, roles))
@@ -1848,9 +1882,10 @@ class DraftCommands(commands.Cog):
             excluded_players.sort(key=lambda p: p.glicko_rating or 1500.0, reverse=True)
             excluded_display = []
             for p in excluded_players:
+                display_name = get_player_display_name(p, discord_id=p.discord_id, guild=guild)
                 rating = p.glicko_rating or 1500.0
                 roles = format_roles(p.preferred_roles)
-                excluded_display.append(f"{p.name} ({rating:.0f}) {roles}".strip())
+                excluded_display.append(f"{display_name} ({rating:.0f}) {roles}".strip())
 
             excluded_note = "Excluded players are prioritized in future games."
             embed.add_field(

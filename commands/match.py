@@ -340,11 +340,30 @@ class MatchCommands(commands.Cog):
         # Check for active draft
         draft_state_manager = getattr(self.bot, "draft_state_manager", None)
         if draft_state_manager and draft_state_manager.has_active_draft(guild_id):
-            await interaction.followup.send(
-                "❌ There's an active Immortal Draft in progress! "
-                "Use `/restartdraft` to restart it or complete the draft first.",
-                ephemeral=True,
-            )
+            state = draft_state_manager.get_state(guild_id)
+            user_id = interaction.user.id
+
+            # Check if user can restart (captain or admin)
+            is_captain = state and user_id in (state.captain1_id, state.captain2_id)
+            is_admin = user_id in getattr(self.bot, "admin_user_ids", set())
+            if not is_admin and interaction.guild:
+                member = interaction.guild.get_member(user_id)
+                if member and member.guild_permissions.administrator:
+                    is_admin = True
+
+            # Only show restart option to captains and admins
+            if is_captain or is_admin:
+                msg = (
+                    "❌ There's an active Immortal Draft in progress! "
+                    "Use `/restartdraft` to restart it or complete the draft first."
+                )
+            else:
+                msg = (
+                    "❌ There's an active Immortal Draft in progress! "
+                    "Please wait for it to complete."
+                )
+
+            await interaction.followup.send(msg, ephemeral=True)
             return
 
         lobby = self.lobby_service.get_lobby()
