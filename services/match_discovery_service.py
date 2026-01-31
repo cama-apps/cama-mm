@@ -122,22 +122,32 @@ class MatchDiscoveryService:
 
         participants = self.match_repo.get_match_participants(match_id)
 
-        # Get steam_ids for participants
-        steam_ids = []
-        for p in participants:
-            steam_id = self.player_repo.get_steam_id(p["discord_id"])
-            if steam_id:
-                steam_ids.append(steam_id)
+        # Get all steam_ids for participants (supports multiple per player)
+        discord_ids = [p["discord_id"] for p in participants]
+        discord_to_steam_ids = self.player_repo.get_steam_ids_bulk(discord_ids)
 
-        if len(steam_ids) < MIN_PLAYERS_FOR_DISCOVERY:
+        # Flatten all steam_ids and track which discord_id each came from
+        steam_ids = []
+        steam_to_discord: dict[int, int] = {}  # For validation later
+        for p in participants:
+            player_steam_ids = discord_to_steam_ids.get(p["discord_id"], [])
+            for sid in player_steam_ids:
+                if sid not in steam_to_discord:
+                    steam_ids.append(sid)
+                    steam_to_discord[sid] = p["discord_id"]
+
+        # Count unique players with at least one steam_id
+        players_with_steam_id = sum(1 for did in discord_ids if discord_to_steam_ids.get(did))
+
+        if players_with_steam_id < MIN_PLAYERS_FOR_DISCOVERY:
             logger.debug(
-                f"Match {match_id}: Only {len(steam_ids)} players with steam_id, "
+                f"Match {match_id}: Only {players_with_steam_id} players with steam_id, "
                 f"need {MIN_PLAYERS_FOR_DISCOVERY}"
             )
             return {
                 "match_id": match_id,
                 "status": "no_steam_ids",
-                "players_with_steam_id": len(steam_ids),
+                "players_with_steam_id": players_with_steam_id,
             }
 
         # Parse match timestamp
@@ -161,7 +171,11 @@ class MatchDiscoveryService:
                         valve_match_id = m.get("match_id")
                         if valve_match_id not in candidate_matches:
                             candidate_matches[valve_match_id] = set()
-                        candidate_matches[valve_match_id].add(steam_id)
+                        # Track the discord_id (player), not the steam_id
+                        # This way, multiple steam_ids for same player count as one
+                        discord_id = steam_to_discord.get(steam_id)
+                        if discord_id:
+                            candidate_matches[valve_match_id].add(discord_id)
 
             except Exception as e:
                 logger.warning(f"Error fetching matches for steam_id {steam_id}: {e}")
@@ -172,24 +186,24 @@ class MatchDiscoveryService:
         if not candidate_matches:
             return {"match_id": match_id, "status": "no_candidates"}
 
-        # Find best candidate based on player count
+        # Find best candidate based on unique player count
         best_match_id = None
         best_player_count = 0
 
-        for valve_match_id, players in candidate_matches.items():
-            player_count = len(players)
+        for valve_match_id, matched_discord_ids in candidate_matches.items():
+            player_count = len(matched_discord_ids)
             if player_count > best_player_count:
                 best_match_id = valve_match_id
                 best_player_count = player_count
 
         # Use strict validation: require all players (configurable via ENRICHMENT_MIN_PLAYER_MATCH)
         min_required = ENRICHMENT_MIN_PLAYER_MATCH
-        confidence = best_player_count / len(steam_ids) if steam_ids else 0.0
+        confidence = best_player_count / players_with_steam_id if players_with_steam_id else 0.0
 
         if best_match_id and best_player_count >= min_required:
             logger.info(
                 f"Match {match_id}: Found valve_match_id={best_match_id} "
-                f"with {best_player_count}/{len(steam_ids)} players"
+                f"with {best_player_count}/{players_with_steam_id} players"
             )
 
             if not dry_run:
@@ -222,7 +236,7 @@ class MatchDiscoveryService:
                         "best_valve_match_id": best_match_id,
                         "confidence": confidence,
                         "player_count": best_player_count,
-                        "total_players": len(steam_ids),
+                        "total_players": players_with_steam_id,
                         "validation_error": result.get("validation_error", result.get("error")),
                     }
 
@@ -232,12 +246,12 @@ class MatchDiscoveryService:
                 "valve_match_id": best_match_id,
                 "confidence": confidence,
                 "player_count": best_player_count,
-                "total_players": len(steam_ids),
+                "total_players": players_with_steam_id,
             }
         else:
             logger.debug(
                 f"Match {match_id}: Best candidate {best_match_id} has only "
-                f"{best_player_count}/{len(steam_ids)} players (need {min_required})"
+                f"{best_player_count}/{players_with_steam_id} players (need {min_required})"
             )
             return {
                 "match_id": match_id,
@@ -245,7 +259,7 @@ class MatchDiscoveryService:
                 "best_valve_match_id": best_match_id,
                 "confidence": confidence,
                 "player_count": best_player_count,
-                "total_players": len(steam_ids),
+                "total_players": players_with_steam_id,
             }
 
     def discover_match(self, match_id: int) -> dict:

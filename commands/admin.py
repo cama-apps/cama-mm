@@ -1155,6 +1155,185 @@ class AdminCommands(commands.Cog):
             )
 
 
+    # --- Multi-Steam ID Admin Commands ---
+
+    @app_commands.command(
+        name="adminaddsteamid",
+        description="Add a Steam ID to a player's account (Admin only)",
+    )
+    @app_commands.describe(
+        user="The user to add the Steam ID to",
+        steam_id="Steam32 ID to add",
+        set_primary="Set as primary account (default: False)",
+    )
+    async def adminaddsteamid(
+        self,
+        interaction: discord.Interaction,
+        user: discord.Member,
+        steam_id: int,
+        set_primary: bool = False,
+    ):
+        """Admin command to add a Steam ID to any player's account."""
+        if not has_admin_permission(interaction):
+            await interaction.response.send_message(
+                "❌ Admin only! You need Administrator or Manage Server permissions.",
+                ephemeral=True,
+            )
+            return
+
+        player = self.player_repo.get_by_id(user.id)
+        if not player:
+            await interaction.response.send_message(
+                f"⚠️ {user.mention} is not registered.",
+                ephemeral=True,
+            )
+            return
+
+        # Validate steam_id
+        if steam_id <= 0 or steam_id > 2**32:
+            await interaction.response.send_message(
+                "❌ Invalid Steam ID.",
+                ephemeral=True,
+            )
+            return
+
+        try:
+            current_ids = self.player_repo.get_steam_ids(user.id)
+            is_first = len(current_ids) == 0
+            self.player_repo.add_steam_id(user.id, steam_id, is_primary=set_primary or is_first)
+
+            primary_note = " (set as primary)" if set_primary or is_first else ""
+            await interaction.response.send_message(
+                f"✅ Added Steam ID `{steam_id}` to {user.mention}'s account{primary_note}.",
+                ephemeral=True,
+            )
+            logger.info(
+                f"Admin {interaction.user.id} ({interaction.user}) added steam_id {steam_id} "
+                f"to {user.id} ({user}), primary={set_primary or is_first}"
+            )
+        except ValueError as e:
+            await interaction.response.send_message(
+                f"❌ {str(e)}",
+                ephemeral=True,
+            )
+
+    @app_commands.command(
+        name="adminremovesteamid",
+        description="Remove a Steam ID from a player's account (Admin only)",
+    )
+    @app_commands.describe(
+        user="The user to remove the Steam ID from",
+        steam_id="Steam32 ID to remove",
+    )
+    async def adminremovesteamid(
+        self,
+        interaction: discord.Interaction,
+        user: discord.Member,
+        steam_id: int,
+    ):
+        """Admin command to remove a Steam ID from any player's account."""
+        if not has_admin_permission(interaction):
+            await interaction.response.send_message(
+                "❌ Admin only! You need Administrator or Manage Server permissions.",
+                ephemeral=True,
+            )
+            return
+
+        player = self.player_repo.get_by_id(user.id)
+        if not player:
+            await interaction.response.send_message(
+                f"⚠️ {user.mention} is not registered.",
+                ephemeral=True,
+            )
+            return
+
+        current_ids = self.player_repo.get_steam_ids(user.id)
+        if steam_id not in current_ids:
+            await interaction.response.send_message(
+                f"❌ Steam ID `{steam_id}` is not linked to {user.mention}.",
+                ephemeral=True,
+            )
+            return
+
+        removed = self.player_repo.remove_steam_id(user.id, steam_id)
+        if removed:
+            remaining = self.player_repo.get_steam_ids(user.id)
+            if remaining:
+                await interaction.response.send_message(
+                    f"✅ Removed Steam ID `{steam_id}` from {user.mention}'s account.\n"
+                    f"Primary is now `{remaining[0]}`.",
+                    ephemeral=True,
+                )
+            else:
+                await interaction.response.send_message(
+                    f"✅ Removed Steam ID `{steam_id}` from {user.mention}'s account.\n"
+                    "They no longer have any linked Steam accounts.",
+                    ephemeral=True,
+                )
+            logger.info(
+                f"Admin {interaction.user.id} ({interaction.user}) removed steam_id {steam_id} "
+                f"from {user.id} ({user})"
+            )
+        else:
+            await interaction.response.send_message(
+                f"❌ Failed to remove Steam ID `{steam_id}`.",
+                ephemeral=True,
+            )
+
+    @app_commands.command(
+        name="adminsetprimarysteam",
+        description="Set a player's primary Steam ID (Admin only)",
+    )
+    @app_commands.describe(
+        user="The user to set primary Steam ID for",
+        steam_id="Steam32 ID to set as primary (must already be linked)",
+    )
+    async def adminsetprimarysteam(
+        self,
+        interaction: discord.Interaction,
+        user: discord.Member,
+        steam_id: int,
+    ):
+        """Admin command to change which Steam ID is primary for a player."""
+        if not has_admin_permission(interaction):
+            await interaction.response.send_message(
+                "❌ Admin only! You need Administrator or Manage Server permissions.",
+                ephemeral=True,
+            )
+            return
+
+        player = self.player_repo.get_by_id(user.id)
+        if not player:
+            await interaction.response.send_message(
+                f"⚠️ {user.mention} is not registered.",
+                ephemeral=True,
+            )
+            return
+
+        current_ids = self.player_repo.get_steam_ids(user.id)
+        if steam_id not in current_ids:
+            await interaction.response.send_message(
+                f"❌ Steam ID `{steam_id}` is not linked to {user.mention}.\n"
+                f"Linked accounts: {', '.join(f'`{sid}`' for sid in current_ids) if current_ids else 'none'}",
+                ephemeral=True,
+            )
+            return
+
+        if self.player_repo.set_primary_steam_id(user.id, steam_id):
+            await interaction.response.send_message(
+                f"✅ Set `{steam_id}` as {user.mention}'s primary Steam account.",
+                ephemeral=True,
+            )
+            logger.info(
+                f"Admin {interaction.user.id} ({interaction.user}) set primary steam_id to {steam_id} "
+                f"for {user.id} ({user})"
+            )
+        else:
+            await interaction.response.send_message(
+                f"❌ Failed to set primary Steam ID.",
+                ephemeral=True,
+            )
+
     @app_commands.command(
         name="seedherogrid",
         description="Seed fake players with enriched match data for /herogrid testing (Admin only)",

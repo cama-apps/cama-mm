@@ -41,8 +41,10 @@ class TestMatchDiscoveryService:
             for i in range(1, 11)  # 10 players
         ]
 
-        # All players have steam_ids
-        player_repo.get_steam_id.side_effect = list(range(1001, 1011))
+        # All players have steam_ids (bulk method returns dict of lists)
+        player_repo.get_steam_ids_bulk.return_value = {
+            i: [i + 1000] for i in range(1, 11)
+        }
 
         # OpenDota returns matches for all players within time window
         match_time = int(datetime(2024, 1, 15, 12, 0, 0).timestamp())
@@ -68,8 +70,10 @@ class TestMatchDiscoveryService:
         }
         match_repo.get_match_participants.return_value = [{"discord_id": i} for i in range(1, 11)]
 
-        # All players have steam_ids
-        player_repo.get_steam_id.side_effect = list(range(1001, 1011))
+        # All players have steam_ids (bulk method returns dict of lists)
+        player_repo.get_steam_ids_bulk.return_value = {
+            i: [i + 1000] for i in range(1, 11)
+        }
 
         match_time = int(datetime(2024, 1, 15, 12, 0, 0).timestamp())
 
@@ -99,12 +103,11 @@ class TestMatchDiscoveryService:
         match_repo.get_match_participants.return_value = [{"discord_id": i} for i in range(1, 11)]
 
         # Only 3 players have steam_ids (below MIN_PLAYERS_FOR_DISCOVERY)
-        def mock_get_steam_id(discord_id):
-            if discord_id <= 3:
-                return discord_id + 1000
-            return None
-
-        player_repo.get_steam_id.side_effect = mock_get_steam_id
+        # Bulk method returns dict of lists (empty list for players without steam_ids)
+        player_repo.get_steam_ids_bulk.return_value = {
+            1: [1001], 2: [1002], 3: [1003],
+            4: [], 5: [], 6: [], 7: [], 8: [], 9: [], 10: [],
+        }
 
         service = MatchDiscoveryService(match_repo, player_repo, mock_opendota_api)
         result = service._discover_single_match(1, dry_run=True)
@@ -122,7 +125,10 @@ class TestMatchDiscoveryService:
         }
         match_repo.get_match_participants.return_value = [{"discord_id": i} for i in range(1, 11)]
 
-        player_repo.get_steam_id.side_effect = list(range(1001, 1011))
+        # Bulk method returns dict of lists
+        player_repo.get_steam_ids_bulk.return_value = {
+            i: [i + 1000] for i in range(1, 11)
+        }
 
         match_time = int(datetime(2024, 1, 15, 12, 0, 0).timestamp())
 
@@ -146,7 +152,10 @@ class TestMatchDiscoveryService:
         }
         match_repo.get_match_participants.return_value = [{"discord_id": i} for i in range(1, 11)]
 
-        player_repo.get_steam_id.side_effect = list(range(1001, 1011))
+        # Bulk method returns dict of lists
+        player_repo.get_steam_ids_bulk.return_value = {
+            i: [i + 1000] for i in range(1, 11)
+        }
 
         match_time = int(datetime(2024, 1, 15, 12, 0, 0).timestamp())
         mock_opendota_api.get_player_matches.return_value = [
@@ -179,7 +188,11 @@ class TestMatchDiscoveryService:
         match_repo.get_match_participants.return_value = [{"discord_id": i} for i in range(1, 11)]
 
         # Only 3 steam_ids (will skip both)
-        player_repo.get_steam_id.side_effect = lambda x: x + 1000 if x <= 3 else None
+        # Bulk method returns dict of lists
+        player_repo.get_steam_ids_bulk.return_value = {
+            1: [1001], 2: [1002], 3: [1003],
+            4: [], 5: [], 6: [], 7: [], 8: [], 9: [], 10: [],
+        }
 
         service = MatchDiscoveryService(match_repo, player_repo, mock_opendota_api)
         results = service.discover_all_matches(dry_run=True)
@@ -437,6 +450,8 @@ class TestEnrichmentServiceSource:
 
         match_repo.get_match.return_value = {"match_id": 1, "winning_team": 1}
         match_repo.get_match_participants.return_value = []
+        # Bulk method returns dict of lists (empty for no participants)
+        player_repo.get_steam_ids_bulk.return_value = {}
 
         service = MatchEnrichmentService(match_repo, player_repo, mock_opendota_api)
         # Use skip_validation since this test is checking source/confidence, not validation
@@ -466,6 +481,8 @@ class TestEnrichmentServiceSource:
 
         match_repo.get_match.return_value = {"match_id": 1, "winning_team": 1}
         match_repo.get_match_participants.return_value = []
+        # Bulk method returns dict of lists (empty for no participants)
+        player_repo.get_steam_ids_bulk.return_value = {}
 
         service = MatchEnrichmentService(match_repo, player_repo, mock_opendota_api)
         # Use skip_validation since this test is checking source/confidence, not validation
@@ -683,6 +700,8 @@ class TestEnrichmentValidation:
         # Internal match: Radiant won
         match_repo.get_match.return_value = {"match_id": 1, "winning_team": 1}
         match_repo.get_match_participants.return_value = []
+        # Bulk method returns dict of lists (empty for no participants)
+        player_repo.get_steam_ids_bulk.return_value = {}
 
         # OpenDota: Dire won
         mock_opendota_api.get_match_details.return_value = {
@@ -716,8 +735,8 @@ class TestEnrichmentValidation:
         match_repo.get_match_participants.return_value = [
             {"discord_id": 123, "side": "radiant"},
         ]
-        # Use bulk method
-        player_repo.get_steam_ids_bulk.return_value = {123: 12345678}
+        # Use bulk method - returns dict of lists
+        player_repo.get_steam_ids_bulk.return_value = {123: [12345678]}
 
         # OpenDota: Player 12345678 on Dire (slot 128+)
         mock_opendota_api.get_match_details.return_value = {
@@ -755,7 +774,8 @@ class TestEnrichmentValidation:
         match_repo.get_match_participants.return_value = participants
 
         # Map discord_id to steam_id using bulk method (discord_id + 1000)
-        player_repo.get_steam_ids_bulk.return_value = {i: i + 1000 for i in range(10)}
+        # Returns dict of lists
+        player_repo.get_steam_ids_bulk.return_value = {i: [i + 1000] for i in range(10)}
 
         # Create OpenDota players
         od_players = []

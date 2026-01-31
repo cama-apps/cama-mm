@@ -107,6 +107,38 @@ class IPlayerRepository(ABC):
         """Get all players with dotabuff_url but no steam_id set."""
         ...
 
+    # --- Multi-Steam ID methods ---
+
+    @abstractmethod
+    def get_steam_ids(self, discord_id: int) -> list[int]:
+        """Get all Steam IDs for a player (primary first)."""
+        ...
+
+    @abstractmethod
+    def add_steam_id(self, discord_id: int, steam_id: int, is_primary: bool = False) -> None:
+        """Add a Steam ID to a player."""
+        ...
+
+    @abstractmethod
+    def remove_steam_id(self, discord_id: int, steam_id: int) -> bool:
+        """Remove a Steam ID from a player. Returns True if removed."""
+        ...
+
+    @abstractmethod
+    def set_primary_steam_id(self, discord_id: int, steam_id: int) -> bool:
+        """Set a Steam ID as the primary for a player. Returns True if successful."""
+        ...
+
+    @abstractmethod
+    def get_primary_steam_id(self, discord_id: int) -> int | None:
+        """Get the primary Steam ID for a player."""
+        ...
+
+    @abstractmethod
+    def get_player_by_any_steam_id(self, steam_id: int):
+        """Get player by any of their Steam IDs."""
+        ...
+
 
 class IBetRepository(ABC):
     VALID_TEAMS: set

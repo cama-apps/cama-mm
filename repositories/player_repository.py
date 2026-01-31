@@ -1117,12 +1117,21 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         """
         Get player by Steam ID (32-bit account_id).
 
+        Checks the junction table first (for multi-steam-id support),
+        then falls back to legacy players.steam_id column.
+
         Args:
             steam_id: The 32-bit Steam account ID
 
         Returns:
             Player object or None if not found
         """
+        # First, try the junction table
+        player = self.get_player_by_any_steam_id(steam_id)
+        if player:
+            return player
+
+        # Fallback to legacy column for backward compatibility
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM players WHERE steam_id = ?", (steam_id,))
@@ -1135,48 +1144,94 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
 
     def get_steam_id(self, discord_id: int) -> int | None:
         """
-        Get a player's Steam ID.
+        Get a player's primary Steam ID.
+
+        Checks the junction table first, then falls back to legacy column.
 
         Returns:
             Steam ID (32-bit) or None if not set
         """
+        # First, try the junction table
+        primary = self.get_primary_steam_id(discord_id)
+        if primary is not None:
+            return primary
+
+        # Fallback to legacy column for backward compatibility
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT steam_id FROM players WHERE discord_id = ?", (discord_id,))
             row = cursor.fetchone()
             return row["steam_id"] if row and row["steam_id"] else None
 
-    def get_steam_ids_bulk(self, discord_ids: list[int]) -> dict[int, int | None]:
+    def get_steam_ids_bulk(self, discord_ids: list[int]) -> dict[int, list[int]]:
         """
-        Get steam_ids for multiple players in one query.
+        Get all steam_ids for multiple players in one query.
 
         Args:
             discord_ids: List of Discord user IDs
 
         Returns:
-            Dict mapping discord_id to steam_id (or None if not set)
+            Dict mapping discord_id to list of steam_ids (primary first)
         """
         if not discord_ids:
             return {}
+
+        result: dict[int, list[int]] = {did: [] for did in discord_ids}
+
         with self.connection() as conn:
             cursor = conn.cursor()
             placeholders = ",".join("?" * len(discord_ids))
+
+            # First, check the junction table (primary first via ORDER BY)
             cursor.execute(
-                f"SELECT discord_id, steam_id FROM players WHERE discord_id IN ({placeholders})",
+                f"""
+                SELECT discord_id, steam_id
+                FROM player_steam_ids
+                WHERE discord_id IN ({placeholders})
+                ORDER BY discord_id, is_primary DESC, added_at ASC
+                """,
                 discord_ids,
             )
-            return {row["discord_id"]: row["steam_id"] for row in cursor.fetchall()}
+
+            junction_found = set()
+            for row in cursor.fetchall():
+                did = row["discord_id"]
+                sid = row["steam_id"]
+                result[did].append(sid)
+                junction_found.add(did)
+
+            # Fallback to legacy column for players not in junction table
+            missing = [did for did in discord_ids if did not in junction_found]
+            if missing:
+                placeholders = ",".join("?" * len(missing))
+                cursor.execute(
+                    f"SELECT discord_id, steam_id FROM players WHERE discord_id IN ({placeholders})",
+                    missing,
+                )
+                for row in cursor.fetchall():
+                    did = row["discord_id"]
+                    sid = row["steam_id"]
+                    if sid and not result[did]:
+                        result[did].append(sid)
+
+        return result
 
     def set_steam_id(self, discord_id: int, steam_id: int) -> None:
         """
-        Set a player's Steam ID.
+        Set a player's primary Steam ID.
+
+        Also updates the legacy players.steam_id column and adds to junction table.
 
         Args:
             discord_id: The player's Discord ID
             steam_id: The 32-bit Steam account ID
         """
+        import time
+
         with self.connection() as conn:
             cursor = conn.cursor()
+
+            # Update legacy column for backward compatibility
             cursor.execute(
                 """
                 UPDATE players
@@ -1184,6 +1239,22 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 WHERE discord_id = ?
                 """,
                 (steam_id, discord_id),
+            )
+
+            # Clear existing primary flag for this player
+            cursor.execute(
+                "UPDATE player_steam_ids SET is_primary = 0 WHERE discord_id = ?",
+                (discord_id,),
+            )
+
+            # Add to junction table or update if already exists
+            cursor.execute(
+                """
+                INSERT INTO player_steam_ids (discord_id, steam_id, is_primary, added_at)
+                VALUES (?, ?, 1, ?)
+                ON CONFLICT(discord_id, steam_id) DO UPDATE SET is_primary = 1
+                """,
+                (discord_id, steam_id, int(time.time())),
             )
 
     def get_all_with_dotabuff_no_steam_id(self) -> list[dict]:
@@ -1597,6 +1668,258 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 {"result": row["result"], "spin_time": row["spin_time"]}
                 for row in cursor.fetchall()
             ]
+
+    # --- Multi-Steam ID methods ---
+
+    def get_steam_ids(self, discord_id: int) -> list[int]:
+        """
+        Get all Steam IDs for a player (primary first).
+
+        Args:
+            discord_id: Player's Discord ID
+
+        Returns:
+            List of steam_ids with primary first, or empty list if none
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+
+            # Check junction table first
+            cursor.execute(
+                """
+                SELECT steam_id FROM player_steam_ids
+                WHERE discord_id = ?
+                ORDER BY is_primary DESC, added_at ASC
+                """,
+                (discord_id,),
+            )
+            rows = cursor.fetchall()
+
+            if rows:
+                return [row["steam_id"] for row in rows]
+
+            # Fallback to legacy column
+            cursor.execute(
+                "SELECT steam_id FROM players WHERE discord_id = ?",
+                (discord_id,),
+            )
+            row = cursor.fetchone()
+            if row and row["steam_id"]:
+                return [row["steam_id"]]
+
+            return []
+
+    def add_steam_id(self, discord_id: int, steam_id: int, is_primary: bool = False) -> None:
+        """
+        Add a Steam ID to a player.
+
+        Args:
+            discord_id: Player's Discord ID
+            steam_id: The 32-bit Steam account ID to add
+            is_primary: Whether to set as primary (default False)
+
+        Raises:
+            ValueError: If steam_id is already linked to another player
+        """
+        import time
+
+        with self.connection() as conn:
+            cursor = conn.cursor()
+
+            # Check if steam_id is already linked to another player
+            cursor.execute(
+                "SELECT discord_id FROM player_steam_ids WHERE steam_id = ?",
+                (steam_id,),
+            )
+            existing = cursor.fetchone()
+            if existing and existing["discord_id"] != discord_id:
+                raise ValueError(f"Steam ID {steam_id} is already linked to another player")
+
+            # Also check legacy column
+            cursor.execute(
+                "SELECT discord_id FROM players WHERE steam_id = ? AND discord_id != ?",
+                (steam_id, discord_id),
+            )
+            if cursor.fetchone():
+                raise ValueError(f"Steam ID {steam_id} is already linked to another player")
+
+            # If setting as primary, clear existing primary flag
+            if is_primary:
+                cursor.execute(
+                    "UPDATE player_steam_ids SET is_primary = 0 WHERE discord_id = ?",
+                    (discord_id,),
+                )
+
+            # Add or update the steam_id
+            cursor.execute(
+                """
+                INSERT INTO player_steam_ids (discord_id, steam_id, is_primary, added_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(discord_id, steam_id) DO UPDATE SET is_primary = excluded.is_primary
+                """,
+                (discord_id, steam_id, 1 if is_primary else 0, int(time.time())),
+            )
+
+            # If primary, also update legacy column
+            if is_primary:
+                cursor.execute(
+                    "UPDATE players SET steam_id = ?, updated_at = CURRENT_TIMESTAMP WHERE discord_id = ?",
+                    (steam_id, discord_id),
+                )
+
+    def remove_steam_id(self, discord_id: int, steam_id: int) -> bool:
+        """
+        Remove a Steam ID from a player.
+
+        Args:
+            discord_id: Player's Discord ID
+            steam_id: The steam_id to remove
+
+        Returns:
+            True if removed, False if not found
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+
+            # Check if this was the primary
+            cursor.execute(
+                "SELECT is_primary FROM player_steam_ids WHERE discord_id = ? AND steam_id = ?",
+                (discord_id, steam_id),
+            )
+            row = cursor.fetchone()
+            was_primary = row and row["is_primary"]
+
+            # Remove from junction table
+            cursor.execute(
+                "DELETE FROM player_steam_ids WHERE discord_id = ? AND steam_id = ?",
+                (discord_id, steam_id),
+            )
+
+            if cursor.rowcount == 0:
+                return False
+
+            # If it was primary, promote another steam_id or clear legacy column
+            if was_primary:
+                cursor.execute(
+                    """
+                    SELECT steam_id FROM player_steam_ids
+                    WHERE discord_id = ?
+                    ORDER BY added_at ASC
+                    LIMIT 1
+                    """,
+                    (discord_id,),
+                )
+                next_row = cursor.fetchone()
+                if next_row:
+                    # Promote the oldest remaining steam_id to primary
+                    new_primary = next_row["steam_id"]
+                    cursor.execute(
+                        "UPDATE player_steam_ids SET is_primary = 1 WHERE discord_id = ? AND steam_id = ?",
+                        (discord_id, new_primary),
+                    )
+                    cursor.execute(
+                        "UPDATE players SET steam_id = ?, updated_at = CURRENT_TIMESTAMP WHERE discord_id = ?",
+                        (new_primary, discord_id),
+                    )
+                else:
+                    # No more steam_ids, clear legacy column
+                    cursor.execute(
+                        "UPDATE players SET steam_id = NULL, updated_at = CURRENT_TIMESTAMP WHERE discord_id = ?",
+                        (discord_id,),
+                    )
+
+            return True
+
+    def set_primary_steam_id(self, discord_id: int, steam_id: int) -> bool:
+        """
+        Set a Steam ID as the primary for a player.
+
+        Args:
+            discord_id: Player's Discord ID
+            steam_id: The steam_id to set as primary (must already be linked)
+
+        Returns:
+            True if successful, False if steam_id not linked to this player
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+
+            # Check if steam_id belongs to this player
+            cursor.execute(
+                "SELECT 1 FROM player_steam_ids WHERE discord_id = ? AND steam_id = ?",
+                (discord_id, steam_id),
+            )
+            if not cursor.fetchone():
+                return False
+
+            # Clear existing primary
+            cursor.execute(
+                "UPDATE player_steam_ids SET is_primary = 0 WHERE discord_id = ?",
+                (discord_id,),
+            )
+
+            # Set new primary
+            cursor.execute(
+                "UPDATE player_steam_ids SET is_primary = 1 WHERE discord_id = ? AND steam_id = ?",
+                (discord_id, steam_id),
+            )
+
+            # Update legacy column
+            cursor.execute(
+                "UPDATE players SET steam_id = ?, updated_at = CURRENT_TIMESTAMP WHERE discord_id = ?",
+                (steam_id, discord_id),
+            )
+
+            return True
+
+    def get_primary_steam_id(self, discord_id: int) -> int | None:
+        """
+        Get the primary Steam ID for a player from the junction table.
+
+        Args:
+            discord_id: Player's Discord ID
+
+        Returns:
+            Primary steam_id or None if not set
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT steam_id FROM player_steam_ids
+                WHERE discord_id = ? AND is_primary = 1
+                """,
+                (discord_id,),
+            )
+            row = cursor.fetchone()
+            return row["steam_id"] if row else None
+
+    def get_player_by_any_steam_id(self, steam_id: int) -> Player | None:
+        """
+        Get player by any of their Steam IDs (from junction table).
+
+        Args:
+            steam_id: The 32-bit Steam account ID
+
+        Returns:
+            Player object or None if not found
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT p.* FROM players p
+                JOIN player_steam_ids psi ON p.discord_id = psi.discord_id
+                WHERE psi.steam_id = ?
+                """,
+                (steam_id,),
+            )
+            row = cursor.fetchone()
+
+            if not row:
+                return None
+
+            return self._row_to_player(row)
 
     def _row_to_player(self, row) -> Player:
         """Convert database row to Player object."""
