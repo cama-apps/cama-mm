@@ -157,13 +157,12 @@ class CamaOpenSkillSystem:
         """
         Convert OpenDota MMR to OpenSkill mu.
 
-        Uses the same scale as Glicko conversion (MMR/4 = Glicko),
-        then maps to OpenSkill mu range.
+        Maps MMR to mu such that display rating matches MMR scale:
+        - 0 MMR → mu=25 → display 0
+        - 4000 MMR → mu=45 → display 1500
+        - 8000 MMR → mu=65 → display 3000
 
-        Formula: mu = (mmr / 400) + 10
-        - 4000 MMR → 20 mu
-        - 6000 MMR → 25 mu (OpenSkill default)
-        - 8000 MMR → 30 mu
+        Formula: mu = 25 + (mmr / 200)
 
         Args:
             mmr: OpenDota MMR (typically 0-12000+)
@@ -171,7 +170,7 @@ class CamaOpenSkillSystem:
         Returns:
             OpenSkill mu value
         """
-        return (mmr / 400) + 10
+        return 25 + (mmr / 200)
 
     def create_rating(
         self, mu: float | None = None, sigma: float | None = None, name: str | None = None
