@@ -21,16 +21,15 @@ def calculate_fantasy_points(player_data: dict) -> float:
 
     Fantasy scoring formula based on official DPC fantasy with role balance additions:
     - Kills: +0.3 per kill
-    - Deaths: -0.3 per death
+    - Deaths: 3 - (deaths × 0.3) (starts at 3 points, -0.3 per death)
     - Assists: +0.15 per assist
     - Last hits: +0.003 per LH
-    - Denies: +0.02 per deny (rewards lane control, esp. mid)
+    - Denies: +0.003 per deny
     - GPM: +0.002 per GPM
     - XPM: +0.002 per XPM (rewards solo XP efficiency)
-    - Tower damage: +0.0001 per damage (rewards splitpush heroes)
     - Tower kills: +1.0 per tower
     - Roshan kills: +1.0 per Roshan
-    - Teamfight participation: +3.0 weighted (0-1 scale)
+    - Teamfight participation: +3.0 × participation (0.0-1.0 from OpenDota)
     - Wards placed: +0.5 per ward (obs + sen)
     - Camps stacked: +0.5 per stack
     - Rune pickups: +0.25 per rune
@@ -48,19 +47,24 @@ def calculate_fantasy_points(player_data: dict) -> float:
 
     # Core stats
     points += player_data.get("kills", 0) * 0.3
-    points -= player_data.get("deaths", 0) * 0.3
+    # Deaths: starts at 3 points, then -0.3 per death
+    # 0 deaths = 3.0, 2 deaths = 2.4, 3 deaths = 2.1, 11 deaths = -0.3
+    # Only apply if deaths key exists (skip for empty data)
+    if "deaths" in player_data:
+        deaths = player_data["deaths"]
+        points += 3 - (deaths * 0.3)
     points += player_data.get("assists", 0) * 0.15
     points += player_data.get("last_hits", 0) * 0.003
-    points += player_data.get("denies", 0) * 0.02
+    points += player_data.get("denies", 0) * 0.003
     points += player_data.get("gold_per_min", 0) * 0.002
     points += player_data.get("xp_per_min", 0) * 0.002
 
-    # Objectives
-    points += player_data.get("tower_damage", 0) * 0.0001
+    # Objectives (no tower damage points)
     points += player_data.get("towers_killed", 0) * 1.0
     points += player_data.get("roshans_killed", 0) * 1.0
 
-    # Teamfight (0-1 scale, weighted by 3.0)
+    # Teamfight participation (0.0-1.0 scale from OpenDota, weighted by 3.0)
+    # e.g., 0.7 participation = 2.1 points
     points += player_data.get("teamfight_participation", 0) * 3.0
 
     # Vision game
