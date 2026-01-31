@@ -14,7 +14,7 @@ from openskill_rating_system import CamaOpenSkillSystem
 
 
 class TestWeightBlending:
-    """Test that FP impact is limited to 25% blend with equal weight."""
+    """Test that FP impact is limited to 10% blend with equal weight."""
 
     def test_weight_blending_reduces_fp_impact(self):
         """High FP player should only get ~1.1x the gain, not 3x."""
@@ -133,8 +133,8 @@ class TestLossWeightInversion:
         )
 
         # Both teams should have same weights (no inversion)
-        # High FP (30) → raw 3.0 → blended = 0.25*3.0 + 0.75*1.0 = 1.5
-        # Low FP (5) → raw 1.0 → blended = 0.25*1.0 + 0.75*1.0 = 1.0
+        # High FP (30) → raw 3.0 → blended = 0.10*3.0 + 0.90*1.0 = 1.2
+        # Low FP (5) → raw 1.0 → blended = 0.10*1.0 + 0.90*1.0 = 1.0
         assert team1_weights[0] > team1_weights[1], (
             f"High FP should have higher weight: "
             f"high FP={team1_weights[0]:.3f}, low FP={team1_weights[1]:.3f}"

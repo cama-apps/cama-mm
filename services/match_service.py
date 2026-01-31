@@ -1062,7 +1062,7 @@ class MatchService:
         Backfill OpenSkill ratings from ALL matches.
 
         Processes matches in chronological order to simulate rating progression.
-        - Enriched matches (with fantasy data): Use FP-weighted update with blending + inversion
+        - Enriched matches (with fantasy data): Use FP-weighted update with blending
         - Non-enriched matches: Use equal-weight update
 
         Args:
@@ -1139,13 +1139,15 @@ class MatchService:
                     dire_ids = [p["discord_id"] for p in participants if p.get("side") == "dire"]
                     has_fantasy = any(p.get("fantasy_points") is not None for p in participants)
 
-                    # If no side info, fall back to match team lists
+                    # If no side info, fall back to match team lists and use equal weight
+                    # (can't use fantasy weights without knowing which player was on which team)
                     if not radiant_ids or not dire_ids:
                         radiant_ids = match.get("team1_players", [])
                         dire_ids = match.get("team2_players", [])
+                        has_fantasy = False
 
                 if has_fantasy:
-                    # Use FP-weighted update (with blending + inversion)
+                    # Use FP-weighted update (with blending)
                     result = self._backfill_match_with_fantasy(match_id, participants, winning_team)
                     if result.get("success"):
                         matches_with_fantasy += 1

@@ -37,7 +37,7 @@ class CamaOpenSkillSystem:
     - High FP loser → high weight → small loss (less blame)
     - Low FP loser → low weight → large loss (more blame)
 
-    Weight blending: 25% FP-based + 75% equal (FP is a nudge, not dominant)
+    Weight blending: 10% FP-based + 90% equal (FP is a nudge, not dominant)
     """
 
     DEFAULT_MU = 25.0
@@ -57,9 +57,9 @@ class CamaOpenSkillSystem:
     # Calibration threshold (sigma below this = calibrated)
     CALIBRATION_THRESHOLD = 4.0
 
-    # Weight blending: 25% FP-based, 75% equal weight
-    # This limits FP impact to a small nudge rather than dominant factor
-    FP_WEIGHT_BLEND = 0.25
+    # Weight blending: 10% FP-based, 90% equal weight
+    # FP is a tiny nudge, not a significant factor
+    FP_WEIGHT_BLEND = 0.10
 
     # Per-game mu swing cap (prevents massive rating swings)
     # 2.0 mu ≈ 150 display rating points
@@ -125,7 +125,7 @@ class CamaOpenSkillSystem:
 
         Weight calculation:
         1. Normalize FP to raw weights (1-3 range)
-        2. Blend: 25% FP weight + 75% equal weight (1.0)
+        2. Blend: 10% FP weight + 90% equal weight (1.0)
 
         Args:
             team1_fantasy: Fantasy points for team 1 players (may contain None)
@@ -201,7 +201,7 @@ class CamaOpenSkillSystem:
 
         Weight processing:
         1. Normalize FP to raw weights (1-3)
-        2. Blend: 25% FP + 75% equal weight (no inversion needed)
+        2. Blend: 10% FP + 90% equal weight (no inversion needed)
 
         OpenSkill naturally handles win/loss asymmetry:
         - Winners: high weight = more gain
