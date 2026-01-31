@@ -1444,17 +1444,50 @@ def draw_hero_grid(
     TITLE_HEIGHT = 30
     MIN_CIRCLE_RADIUS = 4
     MAX_CIRCLE_RADIUS = 18
-
-    max_width = 3900
-    max_heroes_by_width = (max_width - PADDING * 2 - PLAYER_LABEL_WIDTH) // CELL_SIZE
-    num_heroes = min(len(hero_ids), MAX_HEROES, max_heroes_by_width)
-    hero_ids = hero_ids[:num_heroes]
+    LABEL_REPEAT_INTERVAL = 10
 
     num_players = len(player_ids)
+    num_heroes_raw = len(hero_ids)
+
+    # Compute repeat band/column counts for dimension calculations
+    n_extra_bands = (num_players - 1) // LABEL_REPEAT_INTERVAL if num_players > LABEL_REPEAT_INTERVAL else 0
+    n_extra_cols = (num_heroes_raw - 1) // LABEL_REPEAT_INTERVAL if num_heroes_raw > LABEL_REPEAT_INTERVAL else 0
+
+    max_width = 3900
+    extra_col_width = n_extra_cols * PLAYER_LABEL_WIDTH
+    max_heroes_by_width = (max_width - PADDING * 2 - PLAYER_LABEL_WIDTH - extra_col_width) // CELL_SIZE
+    num_heroes = min(num_heroes_raw, MAX_HEROES, max_heroes_by_width)
+    hero_ids = hero_ids[:num_heroes]
+
+    # Recompute extra columns after capping heroes
+    n_extra_cols = (num_heroes - 1) // LABEL_REPEAT_INTERVAL if num_heroes > LABEL_REPEAT_INTERVAL else 0
+
+    # --- Repeat-label coordinate helpers ---
+    def _count_bands_before(player_idx: int) -> int:
+        """Number of hero-header repeat bands above this player row."""
+        if num_players <= LABEL_REPEAT_INTERVAL:
+            return 0
+        return player_idx // LABEL_REPEAT_INTERVAL
+
+    def _count_cols_before(hero_idx: int) -> int:
+        """Number of player-label repeat columns left of this hero column."""
+        if num_heroes <= LABEL_REPEAT_INTERVAL:
+            return 0
+        return hero_idx // LABEL_REPEAT_INTERVAL
+
+    def _player_row_y(player_idx: int) -> int:
+        return grid_top + player_idx * CELL_SIZE + _count_bands_before(player_idx) * HERO_LABEL_HEIGHT
+
+    def _hero_col_x(hero_idx: int) -> int:
+        return PADDING + PLAYER_LABEL_WIDTH + hero_idx * CELL_SIZE + _count_cols_before(hero_idx) * PLAYER_LABEL_WIDTH
 
     # --- Image dimensions ---
-    width = PADDING + PLAYER_LABEL_WIDTH + num_heroes * CELL_SIZE + PADDING
-    height = PADDING + TITLE_HEIGHT + HERO_LABEL_HEIGHT + num_players * CELL_SIZE + LEGEND_HEIGHT + PADDING
+    extra_band_height = n_extra_bands * HERO_LABEL_HEIGHT
+    extra_col_width = n_extra_cols * PLAYER_LABEL_WIDTH
+    width = PADDING + PLAYER_LABEL_WIDTH + num_heroes * CELL_SIZE + extra_col_width + PADDING
+    height = PADDING + TITLE_HEIGHT + HERO_LABEL_HEIGHT + num_players * CELL_SIZE + extra_band_height + LEGEND_HEIGHT + PADDING
+
+    grid_top = PADDING + TITLE_HEIGHT + HERO_LABEL_HEIGHT
 
     img = Image.new("RGBA", (width, height), DISCORD_BG)
     draw = ImageDraw.Draw(img)
@@ -1470,54 +1503,83 @@ def draw_hero_grid(
     title_font = _get_font(18)
     draw.text((PADDING, PADDING), title, fill=DISCORD_WHITE, font=title_font)
 
-    # --- Draw hero column headers (rotated 45 degrees) ---
+    # --- Helper: draw hero column headers at a given y_bottom ---
     label_font = _get_font(11)
-    grid_top = PADDING + TITLE_HEIGHT + HERO_LABEL_HEIGHT
 
-    for hero_idx, hero_id in enumerate(hero_ids):
-        hero_name = get_hero_short_name(hero_id)
-        tw, th = _get_text_size(label_font, hero_name)
-        txt_img = Image.new("RGBA", (tw + 4, th + 4), (0, 0, 0, 0))
-        txt_draw = ImageDraw.Draw(txt_img)
-        txt_draw.text((2, 2), hero_name, fill=DISCORD_WHITE, font=label_font)
-        rotated = txt_img.rotate(45, expand=True, resample=Image.BICUBIC)
+    def _draw_hero_headers(y_bottom: int) -> None:
+        for hero_idx, hero_id in enumerate(hero_ids):
+            hero_name = get_hero_short_name(hero_id)
+            tw, th = _get_text_size(label_font, hero_name)
+            txt_img = Image.new("RGBA", (tw + 4, th + 4), (0, 0, 0, 0))
+            txt_draw = ImageDraw.Draw(txt_img)
+            txt_draw.text((2, 2), hero_name, fill=DISCORD_WHITE, font=label_font)
+            rotated = txt_img.rotate(45, expand=True, resample=Image.BICUBIC)
 
-        col_center_x = PADDING + PLAYER_LABEL_WIDTH + hero_idx * CELL_SIZE + CELL_SIZE // 2
-        paste_x = col_center_x - rotated.width // 2
-        paste_y = grid_top - rotated.height - 2
-        img.paste(rotated, (paste_x, paste_y), rotated)
+            col_center_x = _hero_col_x(hero_idx) + CELL_SIZE // 2
+            paste_x = col_center_x - rotated.width // 2
+            paste_y = y_bottom - rotated.height - 2
+            img.paste(rotated, (paste_x, paste_y), rotated)
 
-    # --- Draw player row labels and alternating backgrounds ---
+    # --- Helper: draw player row labels at a given x_left ---
     name_font = _get_font(13)
+
+    def _draw_player_labels(x_left: int) -> None:
+        for player_idx, pid in enumerate(player_ids):
+            row_y = _player_row_y(player_idx)
+            name = player_names.get(pid, f"Player {pid}")
+            if len(name) > 14:
+                name = name[:12] + ".."
+            _tw, th = _get_text_size(name_font, name)
+            text_y = row_y + (CELL_SIZE - th) // 2
+            draw.text((x_left, text_y), name, fill=DISCORD_WHITE, font=name_font)
+
+    # --- Draw player row backgrounds (alternating) — must come before labels ---
+    grid_right = _hero_col_x(num_heroes - 1) + CELL_SIZE if num_heroes > 0 else PADDING + PLAYER_LABEL_WIDTH
+
     for player_idx, pid in enumerate(player_ids):
-        row_y = grid_top + player_idx * CELL_SIZE
+        row_y = _player_row_y(player_idx)
 
         # Alternating row background
         if player_idx % 2 == 1:
             draw.rectangle(
                 [(PADDING + PLAYER_LABEL_WIDTH, row_y),
-                 (PADDING + PLAYER_LABEL_WIDTH + num_heroes * CELL_SIZE, row_y + CELL_SIZE)],
+                 (grid_right, row_y + CELL_SIZE)],
                 fill=DISCORD_DARKER,
             )
 
-        # Player name (truncated)
-        name = player_names.get(pid, f"Player {pid}")
-        if len(name) > 14:
-            name = name[:12] + ".."
-        _tw, th = _get_text_size(name_font, name)
-        text_y = row_y + (CELL_SIZE - th) // 2
-        draw.text((PADDING, text_y), name, fill=DISCORD_WHITE, font=name_font)
+    # --- Draw original hero column headers ---
+    _draw_hero_headers(grid_top)
+
+    # --- Draw repeat hero header bands ---
+    for band_idx in range(1, n_extra_bands + 1):
+        # This band appears just above player row (band_idx * LABEL_REPEAT_INTERVAL)
+        band_player_idx = band_idx * LABEL_REPEAT_INTERVAL
+        band_y_bottom = _player_row_y(band_player_idx)
+        _draw_hero_headers(band_y_bottom)
+
+    # --- Draw original player row labels ---
+    _draw_player_labels(PADDING)
+
+    grid_bottom = _player_row_y(num_players - 1) + CELL_SIZE if num_players > 0 else grid_top
 
     # --- Draw subtle grid lines ---
     grid_color = "#2A2D33"
+    # Vertical lines (hero columns)
     for hero_idx in range(num_heroes + 1):
-        x = PADDING + PLAYER_LABEL_WIDTH + hero_idx * CELL_SIZE
-        draw.line([(x, grid_top), (x, grid_top + num_players * CELL_SIZE)], fill=grid_color)
+        if hero_idx < num_heroes:
+            x = _hero_col_x(hero_idx)
+        else:
+            x = _hero_col_x(num_heroes - 1) + CELL_SIZE
+        draw.line([(x, grid_top), (x, grid_bottom)], fill=grid_color)
+    # Horizontal lines (player rows)
+    grid_left = PADDING + PLAYER_LABEL_WIDTH
     for player_idx in range(num_players + 1):
-        y = grid_top + player_idx * CELL_SIZE
+        if player_idx < num_players:
+            y = _player_row_y(player_idx)
+        else:
+            y = _player_row_y(num_players - 1) + CELL_SIZE
         draw.line(
-            [(PADDING + PLAYER_LABEL_WIDTH, y),
-             (PADDING + PLAYER_LABEL_WIDTH + num_heroes * CELL_SIZE, y)],
+            [(grid_left, y), (grid_right, y)],
             fill=grid_color,
         )
 
@@ -1550,8 +1612,8 @@ def draw_hero_grid(
             else:
                 color = DISCORD_RED
 
-            cx = PADDING + PLAYER_LABEL_WIDTH + hero_idx * CELL_SIZE + CELL_SIZE // 2
-            cy = grid_top + player_idx * CELL_SIZE + CELL_SIZE // 2
+            cx = _hero_col_x(hero_idx) + CELL_SIZE // 2
+            cy = _player_row_y(player_idx) + CELL_SIZE // 2
 
             draw.ellipse(
                 [(cx - radius, cy - radius), (cx + radius, cy + radius)],
@@ -1569,8 +1631,30 @@ def draw_hero_grid(
                     font=count_font,
                 )
 
+    # --- Draw repeat player label columns (on top of everything) ---
+    separator_color = "#4E5058"
+    for col_idx in range(1, n_extra_cols + 1):
+        col_hero_idx = col_idx * LABEL_REPEAT_INTERVAL
+        col_x_left = _hero_col_x(col_hero_idx) - PLAYER_LABEL_WIDTH
+        # Solid background to clear everything in this column
+        draw.rectangle(
+            [(col_x_left, grid_top), (col_x_left + PLAYER_LABEL_WIDTH - 1, grid_bottom)],
+            fill=DISCORD_BG,
+        )
+        _draw_player_labels(col_x_left)
+        # Vertical separator lines on left and right edges
+        draw.line(
+            [(col_x_left - 1, grid_top), (col_x_left - 1, grid_bottom)],
+            fill=separator_color, width=2,
+        )
+        draw.line(
+            [(col_x_left + PLAYER_LABEL_WIDTH, grid_top),
+             (col_x_left + PLAYER_LABEL_WIDTH, grid_bottom)],
+            fill=separator_color, width=2,
+        )
+
     # --- Draw legend ---
-    legend_y = grid_top + num_players * CELL_SIZE + 25
+    legend_y = grid_bottom + 25
     legend_font = _get_font(11)
 
     # Size legend

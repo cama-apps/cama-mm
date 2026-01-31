@@ -20,11 +20,68 @@ logger = logging.getLogger("cama_bot.commands.herogrid")
 class HeroGridCommands(commands.Cog):
     """Commands for hero grid visualization."""
 
-    def __init__(self, bot: commands.Bot, match_repo, player_repo, lobby_manager):
+    def __init__(self, bot: commands.Bot, match_repo, player_repo, lobby_manager, match_service=None):
         self.bot = bot
         self.match_repo = match_repo
         self.player_repo = player_repo
         self.lobby_manager = lobby_manager
+        self.match_service = match_service
+
+    def _resolve_player_ids(self, source_value: str, guild_id: int | None) -> tuple[list[int], str | None]:
+        """Resolve player IDs using a priority chain.
+
+        Returns:
+            (player_ids, source_label) where source_label is None for the all-players fallback.
+        """
+        if source_value == "all":
+            enriched_players = self.match_repo.get_players_with_enriched_data()
+            return [p["discord_id"] for p in enriched_players], None
+
+        # Priority 1: Active lobby
+        lobby = self.lobby_manager.get_lobby()
+        if lobby and lobby.players:
+            player_ids = list(lobby.players)
+            if lobby.conditional_players:
+                player_ids.extend(lobby.conditional_players)
+            return player_ids, "Lobby"
+
+        # Priority 2: Pending match (post-shuffle)
+        if self.match_service is not None:
+            try:
+                last_shuffle = self.match_service.get_last_shuffle(guild_id)
+                if last_shuffle:
+                    radiant_ids = last_shuffle.get("radiant_team_ids", [])
+                    dire_ids = last_shuffle.get("dire_team_ids", [])
+                    if radiant_ids or dire_ids:
+                        return list(radiant_ids) + list(dire_ids), "Active Match"
+            except Exception:
+                logger.debug("Failed to check pending match state", exc_info=True)
+
+        # Priority 3: Active draft
+        draft_state_manager = getattr(self.bot, "draft_state_manager", None)
+        if draft_state_manager is not None:
+            try:
+                draft_state = draft_state_manager.get_state(guild_id)
+                if draft_state and draft_state.player_pool_ids:
+                    return list(draft_state.player_pool_ids), "Draft"
+            except Exception:
+                logger.debug("Failed to check draft state", exc_info=True)
+
+        # Priority 4: Most recent recorded match
+        try:
+            last_match_ids = self.match_repo.get_last_match_participant_ids()
+            if last_match_ids:
+                return list(last_match_ids), "Last Match"
+        except Exception:
+            logger.debug("Failed to check last match participants", exc_info=True)
+
+        # Priority 5: All players (only for "auto", not "lobby")
+        if source_value == "auto":
+            enriched_players = self.match_repo.get_players_with_enriched_data()
+            return [p["discord_id"] for p in enriched_players], None
+
+        # source_value == "lobby" and nothing found
+        return [], None
 
     @app_commands.command(
         name="herogrid",
@@ -54,30 +111,18 @@ class HeroGridCommands(commands.Cog):
             return
 
         source_value = source.value if source else "auto"
+        guild_id = interaction.guild.id if interaction.guild else None
 
-        # Determine player list
-        player_ids = []
-        used_lobby = False
-
-        if source_value in ("auto", "lobby"):
-            lobby = self.lobby_manager.get_lobby()
-            if lobby and lobby.players:
-                player_ids = list(lobby.players)
-                if lobby.conditional_players:
-                    player_ids.extend(lobby.conditional_players)
-                used_lobby = True
+        # Determine player list via priority chain
+        player_ids, source_label = self._resolve_player_ids(source_value, guild_id)
 
         if not player_ids and source_value == "lobby":
             await safe_followup(
                 interaction,
-                content="No active lobby found. Use `source: All Players` to show all players.",
+                content="No active lobby, pending match, draft, or recent match found. "
+                "Use `source: All Players` to show all players.",
             )
             return
-
-        if not player_ids:
-            # Fallback to all players with enriched data (pre-sorted by games desc)
-            enriched_players = self.match_repo.get_players_with_enriched_data()
-            player_ids = [p["discord_id"] for p in enriched_players]
 
         if not player_ids:
             await safe_followup(
@@ -116,7 +161,7 @@ class HeroGridCommands(commands.Cog):
 
         # Generate image
         try:
-            grid_title = "Hero Grid: Lobby" if used_lobby else "Hero Grid"
+            grid_title = f"Hero Grid: {source_label}" if source_label else "Hero Grid"
 
             image_bytes = draw_hero_grid(
                 grid_data=grid_data,
@@ -150,6 +195,7 @@ async def setup(bot: commands.Bot):
     match_repo = getattr(bot, "match_repo", None)
     player_repo = getattr(bot, "player_repo", None)
     lobby_manager = getattr(bot, "lobby_manager", None)
+    match_service = getattr(bot, "match_service", None)
 
     if match_repo is None:
         logger.warning("HeroGridCommands: match_repo not found on bot, skipping cog load")
@@ -161,4 +207,4 @@ async def setup(bot: commands.Bot):
         logger.warning("HeroGridCommands: lobby_manager not found on bot, skipping cog load")
         return
 
-    await bot.add_cog(HeroGridCommands(bot, match_repo, player_repo, lobby_manager))
+    await bot.add_cog(HeroGridCommands(bot, match_repo, player_repo, lobby_manager, match_service))
