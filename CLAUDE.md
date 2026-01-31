@@ -598,7 +598,7 @@ See `config.py` for the full list (50+ options).
 - **Wheel of Fortune**: Daily spin with WIN/LOSE/BANKRUPT outcomes; target EV of -10 JC
 - **Degen Score**: 0-100 based on leverage addiction (40%), bet frequency (20%), bankruptcies (20%), loss chasing (10%), paper hands (10%)
 - **Fantasy Points**: Calculated from OpenDota stats (kills, deaths, gpm, towers, runes, etc.)
-- **Conditional Players**: "Froglings" who only play if needed to reach 10 players
+- **Conditional Players**: "Froglings" who only play if needed to reach 10 players. In both `/shuffle` and `/startdraft`, regular players are always included first; conditional players are randomly selected (not rating-based) to fill remaining spots up to 10. If there are ≥10 regular players, conditional players are excluded entirely.
 - **Recalibration**: Admins can reset a player's RD to 350 (90-day cooldown, min 5 games)
 - **Pairings Storage**: Canonical pairs with player1_id < player2_id to avoid duplicates
 - **Schema**: 50 migrations total
