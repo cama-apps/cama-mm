@@ -65,8 +65,8 @@ class TestMatchEnrichmentService:
             {"discord_id": 100, "side": "radiant"},
         ]
 
-        # Setup mock steam_id bulk lookup
-        player_repo.get_steam_ids_bulk.return_value = {100: 12345}
+        # Setup mock steam_id bulk lookup (returns dict of lists)
+        player_repo.get_steam_ids_bulk.return_value = {100: [12345]}
 
         service = MatchEnrichmentService(match_repo, player_repo, mock_opendota_api)
         # Use skip_validation for unit test - validation is tested separately
@@ -115,8 +115,8 @@ class TestMatchEnrichmentService:
         match_repo.get_match_participants.return_value = [
             {"discord_id": 100, "side": "radiant"},
         ]
-        # Setup mock steam_id bulk lookup - steam_id 12345 not in API response
-        player_repo.get_steam_ids_bulk.return_value = {100: 12345}
+        # Setup mock steam_id bulk lookup - steam_id 12345 not in API response (returns dict of lists)
+        player_repo.get_steam_ids_bulk.return_value = {100: [12345]}
 
         service = MatchEnrichmentService(match_repo, player_repo, mock_opendota_api)
         # Use skip_validation for unit test
@@ -146,8 +146,8 @@ class TestMatchEnrichmentService:
         match_repo.get_match_participants.return_value = [
             {"discord_id": 100, "side": "radiant"},
         ]
-        # Setup mock steam_id bulk lookup - no steam_id for player
-        player_repo.get_steam_ids_bulk.return_value = {100: None}
+        # Setup mock steam_id bulk lookup - no steam_id for player (empty list)
+        player_repo.get_steam_ids_bulk.return_value = {100: []}
 
         service = MatchEnrichmentService(match_repo, player_repo, mock_opendota_api)
         # Use skip_validation for unit test
@@ -171,6 +171,9 @@ class TestMatchEnrichmentService:
             },
         ]
 
+        # Mock get_steam_ids to return empty lists (no existing steam_ids)
+        player_repo.get_steam_ids.return_value = []
+
         service = MatchEnrichmentService(match_repo, player_repo, mock_opendota_api)
 
         # Mock the opendota_api extract method
@@ -179,7 +182,7 @@ class TestMatchEnrichmentService:
 
         assert result["players_updated"] == 2
         assert len(result["players_failed"]) == 0
-        assert player_repo.set_steam_id.call_count == 2
+        assert player_repo.add_steam_id.call_count == 2
 
     def test_backfill_steam_ids_with_failures(self, mock_repos, mock_opendota_api):
         """Test steam_id backfill with some failures."""
@@ -192,6 +195,9 @@ class TestMatchEnrichmentService:
             },
             {"discord_id": 101, "dotabuff_url": "invalid_url"},
         ]
+
+        # Mock get_steam_ids to return empty lists (no existing steam_ids)
+        player_repo.get_steam_ids.return_value = []
 
         service = MatchEnrichmentService(match_repo, player_repo, mock_opendota_api)
         mock_opendota_api.extract_player_id_from_dotabuff.side_effect = [52079950, None]

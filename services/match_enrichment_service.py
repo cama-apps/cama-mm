@@ -121,7 +121,7 @@ class MatchEnrichmentService:
         internal_match: dict,
         opendota_match: dict,
         participants: list[dict],
-        steam_ids: list[int],
+        discord_to_steam_ids: dict[int, list[int]],
     ) -> tuple[bool, str]:
         """
         Validate that OpenDota match data matches our internal match.
@@ -135,7 +135,7 @@ class MatchEnrichmentService:
             internal_match: Our internal match data
             opendota_match: OpenDota API response
             participants: List of our match participants
-            steam_ids: List of steam_ids for participants (parallel to participants)
+            discord_to_steam_ids: Dict mapping discord_id to list of steam_ids
 
         Returns:
             Tuple of (is_valid, error_message)
@@ -143,12 +143,25 @@ class MatchEnrichmentService:
         # Build OpenDota player lookup by account_id
         od_players = {p.get("account_id"): p for p in opendota_match.get("players", [])}
 
-        # Rule 1: All players must match
-        matched_count = sum(1 for sid in steam_ids if sid and sid in od_players)
+        # Rule 1: All players must match (try all steam_ids for each player)
+        matched_count = 0
+        player_matches: dict[int, int] = {}  # discord_id -> matched steam_id
+
+        for participant in participants:
+            discord_id = participant["discord_id"]
+            player_steam_ids = discord_to_steam_ids.get(discord_id, [])
+
+            for sid in player_steam_ids:
+                if sid and sid in od_players:
+                    matched_count += 1
+                    player_matches[discord_id] = sid
+                    break
+
         min_required = ENRICHMENT_MIN_PLAYER_MATCH
+        total_with_steam_ids = sum(1 for p in participants if discord_to_steam_ids.get(p["discord_id"]))
 
         if matched_count < min_required:
-            return False, f"Only {matched_count}/{len(steam_ids)} players matched (need {min_required})"
+            return False, f"Only {matched_count}/{total_with_steam_ids} players matched (need {min_required})"
 
         # Rule 2: Winning team must match
         internal_radiant_won = internal_match.get("winning_team") == 1
@@ -158,12 +171,13 @@ class MatchEnrichmentService:
             return False, f"Winning team mismatch: internal={'Radiant' if internal_radiant_won else 'Dire'}, OpenDota={'Radiant' if od_radiant_won else 'Dire'}"
 
         # Rule 3: Player sides must match
-        for i, participant in enumerate(participants):
-            steam_id = steam_ids[i] if i < len(steam_ids) else None
-            if not steam_id:
+        for participant in participants:
+            discord_id = participant["discord_id"]
+            matched_steam_id = player_matches.get(discord_id)
+            if not matched_steam_id:
                 continue
 
-            od_player = od_players.get(steam_id)
+            od_player = od_players.get(matched_steam_id)
             if not od_player:
                 continue
 
@@ -173,7 +187,6 @@ class MatchEnrichmentService:
             od_is_radiant = od_player_slot < 128
 
             if internal_is_radiant != od_is_radiant:
-                discord_id = participant.get("discord_id", "unknown")
                 return False, f"Player {discord_id} on wrong team: internal={'Radiant' if internal_is_radiant else 'Dire'}, OpenDota={'Radiant' if od_is_radiant else 'Dire'}"
 
         return True, "Valid"
@@ -229,15 +242,23 @@ class MatchEnrichmentService:
             }
 
         # Get our match participants and their steam_ids (bulk lookup)
+        # Now supports multiple steam_ids per player
         participants = self.match_repo.get_match_participants(internal_match_id)
         discord_ids = [p["discord_id"] for p in participants]
-        discord_to_steam = self.player_repo.get_steam_ids_bulk(discord_ids)
-        steam_ids = [discord_to_steam.get(p["discord_id"]) for p in participants]
+        discord_to_steam_ids = self.player_repo.get_steam_ids_bulk(discord_ids)
+
+        # Build reverse mapping: any steam_id -> discord_id
+        # This allows matching when a player uses an alternate account
+        steam_to_discord: dict[int, int] = {}
+        for discord_id, steam_id_list in discord_to_steam_ids.items():
+            for sid in steam_id_list:
+                steam_to_discord[sid] = discord_id
 
         # Strict validation (unless skipped for manual enrichment)
+        # Now passes the full dict of steam_id lists to try all options
         if not skip_validation:
             is_valid, validation_error = self._validate_enrichment(
-                internal_match, match_data, participants, steam_ids
+                internal_match, match_data, participants, discord_to_steam_ids
             )
             if not is_valid:
                 logger.warning(f"Validation failed for match {internal_match_id}: {validation_error}")
@@ -271,19 +292,30 @@ class MatchEnrichmentService:
         dire_fantasy = 0.0
         participant_updates = []  # Collect updates for bulk operation
 
-        # Match each participant
+        # Match each participant - try all their steam_ids
         for participant in participants:
             discord_id = participant["discord_id"]
-            steam_id = discord_to_steam.get(discord_id)
+            player_steam_ids = discord_to_steam_ids.get(discord_id, [])
 
-            if not steam_id:
+            if not player_steam_ids:
                 logger.warning(f"Player {discord_id} has no steam_id, cannot enrich")
                 continue
 
-            player_data = opendota_players.get(steam_id)
+            # Try all steam_ids for this player to find a match in OpenDota data
+            player_data = None
+            matched_steam_id = None
+            for sid in player_steam_ids:
+                if sid in opendota_players:
+                    player_data = opendota_players[sid]
+                    matched_steam_id = sid
+                    break
+
             if not player_data:
-                logger.warning(f"Steam ID {steam_id} (discord {discord_id}) not found in match")
-                players_not_found.append(steam_id)
+                primary_sid = player_steam_ids[0] if player_steam_ids else None
+                logger.warning(
+                    f"Player {discord_id} (steam_ids: {player_steam_ids}) not found in match"
+                )
+                players_not_found.append(primary_sid)
                 continue
 
             # Calculate fantasy points
@@ -375,6 +407,9 @@ class MatchEnrichmentService:
         """
         Backfill steam_id from dotabuff_url for all players missing it.
 
+        Adds extracted steam_ids to the junction table. Sets as primary only
+        if the player has no existing steam_ids linked.
+
         Returns:
             Dict with:
             - players_updated: int
@@ -390,9 +425,22 @@ class MatchEnrichmentService:
 
             steam_id = self.opendota_api.extract_player_id_from_dotabuff(dotabuff_url)
             if steam_id:
-                self.player_repo.set_steam_id(discord_id, steam_id)
-                updated += 1
-                logger.info(f"Backfilled steam_id {steam_id} for discord {discord_id}")
+                try:
+                    # Check if player already has steam_ids linked
+                    existing_ids = self.player_repo.get_steam_ids(discord_id)
+                    is_first = len(existing_ids) == 0
+
+                    # Add to junction table (set as primary only if first)
+                    self.player_repo.add_steam_id(discord_id, steam_id, is_primary=is_first)
+                    updated += 1
+                    logger.info(
+                        f"Backfilled steam_id {steam_id} for discord {discord_id} "
+                        f"(primary={is_first})"
+                    )
+                except ValueError as e:
+                    # steam_id already linked to another player
+                    failed.append(discord_id)
+                    logger.warning(f"Could not backfill {steam_id} for discord {discord_id}: {e}")
             else:
                 failed.append(discord_id)
                 logger.warning(

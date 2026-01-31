@@ -212,6 +212,7 @@ class SchemaManager:
             ("create_wheel_spins_table", self._migration_create_wheel_spins_table),
             ("add_balancing_rating_system_column", self._migration_add_balancing_rating_system_column),
             ("create_match_corrections_table", self._migration_create_match_corrections_table),
+            ("create_player_steam_ids_table", self._migration_create_player_steam_ids_table),
         ]
 
     # --- Migrations ---
@@ -948,4 +949,39 @@ class SchemaManager:
         )
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_match_corrections_match_id ON match_corrections(match_id)"
+        )
+
+    def _migration_create_player_steam_ids_table(self, cursor) -> None:
+        """Create junction table for multiple Steam IDs per player."""
+        # Create the junction table
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS player_steam_ids (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                discord_id INTEGER NOT NULL,
+                steam_id INTEGER NOT NULL,
+                is_primary INTEGER DEFAULT 0,
+                added_at INTEGER NOT NULL,
+                FOREIGN KEY (discord_id) REFERENCES players(discord_id) ON DELETE CASCADE,
+                UNIQUE (discord_id, steam_id),
+                UNIQUE (steam_id)
+            )
+            """
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_player_steam_ids_discord ON player_steam_ids(discord_id)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_player_steam_ids_steam ON player_steam_ids(steam_id)"
+        )
+
+        # Migrate existing steam_ids from players table to junction table
+        # Only migrate non-null steam_ids that don't already exist in the junction table
+        cursor.execute(
+            """
+            INSERT OR IGNORE INTO player_steam_ids (discord_id, steam_id, is_primary, added_at)
+            SELECT discord_id, steam_id, 1, CAST(strftime('%s', 'now') AS INTEGER)
+            FROM players
+            WHERE steam_id IS NOT NULL
+            """
         )

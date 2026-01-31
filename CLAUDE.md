@@ -358,9 +358,20 @@ os_mu REAL, os_sigma REAL  -- OpenSkill Plackett-Luce
 preferred_roles TEXT  -- JSON array ["1", "2"]
 jopacoin_balance INTEGER DEFAULT 3
 exclusion_count INTEGER DEFAULT 0
-steam_id INTEGER UNIQUE
+steam_id INTEGER UNIQUE  -- Legacy primary steam_id (see player_steam_ids)
 last_wheel_spin INTEGER  -- Unix timestamp for /gamba cooldown
 lowest_balance_ever INTEGER  -- For degen scoring
+```
+
+### player_steam_ids (Multi-Steam ID Support)
+```sql
+id INTEGER PRIMARY KEY AUTOINCREMENT
+discord_id INTEGER NOT NULL  -- FK to players
+steam_id INTEGER NOT NULL
+is_primary INTEGER DEFAULT 0  -- Primary account flag
+added_at INTEGER NOT NULL  -- Unix timestamp
+UNIQUE (discord_id, steam_id)  -- Player can't have duplicate
+UNIQUE (steam_id)  -- Steam ID can only belong to one player
 ```
 
 ### matches
@@ -428,7 +439,9 @@ resolution_votes TEXT  -- JSON {discord_id: outcome}
 | `/setcaptain` | Set your team's captain | - |
 | `/restartdraft` | Restart current draft | Admin only |
 | `/register` | Register player | `steam_id`: Steam32 ID |
-| `/linksteam` | Link Steam account if registered | `steam_id`: Steam32 ID |
+| `/linksteam` | Link additional Steam account | `steam_id`, `set_primary` |
+| `/unlinksteam` | Remove a linked Steam account | `steam_id` |
+| `/mysteamids` | View linked Steam accounts | - |
 | `/setroles` | Set role preferences | `roles`: "1,2,3" or "123" |
 | `/profile` | Unified player profile (7 tabs) | `user`: optional |
 | `/calibration` | Rating system stats | `user`: optional |
@@ -474,6 +487,9 @@ resolution_votes TEXT  -- JSON {discord_id: outcome}
 | `/recalibrate` | Reset rating uncertainty | `user` (Admin) |
 | `/extendbetting` | Extend betting window | `minutes`: 1-60 |
 | `/correctmatch` | Correct recorded match result | `match_id`, `correct_result` |
+| `/adminaddsteamid` | Add Steam ID to player | `user`, `steam_id`, `set_primary` |
+| `/adminremovesteamid` | Remove Steam ID from player | `user`, `steam_id` |
+| `/adminsetprimarysteam` | Set player's primary Steam ID | `user`, `steam_id` |
 | `/sync` | Force sync commands | Admin only |
 
 **Consolidated Commands:**
@@ -583,6 +599,7 @@ See `config.py` for the full list (50+ options).
 ## Important Notes
 
 - **Dual Rating Systems**: Glicko-2 (primary, probabilistic) and OpenSkill Plackett-Luce (fantasy-weighted alternative)
+- **Multi-Steam ID Support**: Players can link multiple Steam accounts via `player_steam_ids` table; match discovery/enrichment checks all linked accounts
 - **5 Roles**: 1=Carry, 2=Mid, 3=Offlane, 4=Soft Support, 5=Hard Support (stored as strings)
 - **Team Convention**: team1=Radiant, team2=Dire, winning_team: 1 or 2
 - **Match Types**: `lobby_type` = "shuffle" (random balanced) or "draft" (captain's pick)
