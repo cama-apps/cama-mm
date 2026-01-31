@@ -502,8 +502,9 @@ class UnifiedLeaderboardView(discord.ui.View):
         footer_parts = []
         if leaderboard.server_stats:
             s = leaderboard.server_stats
+            # Note: Footer only supports plain text, so use "JC" instead of custom emote
             footer_parts.append(
-                f" {s['total_bets']} bets • {s['total_wagered']} {JOPACOIN_EMOTE} wagered • "
+                f"{s['total_bets']} bets • {s['total_wagered']} JC wagered • "
                 f"{s['unique_gamblers']} players • {s['total_bankruptcies']} bankruptcies"
             )
         footer_parts.append(f"Page {state.current_page + 1}/{state.max_page + 1}")
