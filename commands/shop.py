@@ -6,14 +6,23 @@ from __future__ import annotations
 
 import logging
 import random
+import time
 from typing import TYPE_CHECKING
 
 import discord
 from discord import app_commands
 from discord.ext import commands
 
-from config import SHOP_ANNOUNCE_COST, SHOP_ANNOUNCE_TARGET_COST, SHOP_PROTECT_HERO_COST, SHOP_MYSTERY_GIFT_COST
-from services.flavor_text_service import FlavorEvent
+from config import (
+    DOUBLE_OR_NOTHING_COOLDOWN_SECONDS,
+    SHOP_ANNOUNCE_COST,
+    SHOP_ANNOUNCE_TARGET_COST,
+    SHOP_DOUBLE_OR_NOTHING_COST,
+    SHOP_MYSTERY_GIFT_COST,
+    SHOP_PROTECT_HERO_COST,
+)
+from services.flavor_text_service import EVENT_EXAMPLES, FlavorEvent
+from services.permissions import has_admin_permission
 from services.player_service import PlayerService
 from utils.formatting import JOPACOIN_EMOTE
 from utils.hero_lookup import get_all_heroes, get_hero_color, get_hero_image_url, get_hero_name
@@ -113,6 +122,10 @@ class ShopCommands(commands.Cog):
                 name=f"Mystery Gift ({SHOP_MYSTERY_GIFT_COST} jopacoin)",
                 value="mystery_gift",
             ),
+            app_commands.Choice(
+                name=f"Double or Nothing ({SHOP_DOUBLE_OR_NOTHING_COST} jopacoin)",
+                value="double_or_nothing",
+            ),
         ]
     )
     @app_commands.autocomplete(hero=hero_autocomplete)
@@ -165,6 +178,8 @@ class ShopCommands(commands.Cog):
             await self._handle_protect_hero(interaction, hero=hero)
         elif item.value == "mystery_gift":
             await self._handle_mystery_gift(interaction)
+        elif item.value == "double_or_nothing":
+            await self._handle_double_or_nothing(interaction)
 
     async def _handle_announce(
         self,
@@ -591,6 +606,179 @@ class ShopCommands(commands.Cog):
 
         # Send public announcement
         await interaction.response.send_message(embed=embed)
+
+    async def _handle_double_or_nothing(
+        self,
+        interaction: discord.Interaction,
+    ):
+        """Handle the Double or Nothing gamble."""
+        user_id = interaction.user.id
+        guild_id = interaction.guild.id if interaction.guild else None
+        cost = SHOP_DOUBLE_OR_NOTHING_COST
+
+        # Check if registered
+        player = self.player_service.get_player(user_id)
+        if not player:
+            await interaction.response.send_message(
+                "You need to `/register` before you can gamble. "
+                "Can't double nothing if you have nothing.",
+                ephemeral=True,
+            )
+            return
+
+        # Check cooldown (admins bypass)
+        is_admin = has_admin_permission(interaction)
+        last_spin = self.player_service.player_repo.get_last_double_or_nothing(user_id)
+        now = int(time.time())
+        if last_spin is not None and not is_admin:
+            elapsed = now - last_spin
+            if elapsed < DOUBLE_OR_NOTHING_COOLDOWN_SECONDS:
+                remaining = DOUBLE_OR_NOTHING_COOLDOWN_SECONDS - elapsed
+                days = remaining // 86400
+                hours = (remaining % 86400) // 3600
+                minutes = (remaining % 3600) // 60
+                time_str = ""
+                if days > 0:
+                    time_str += f"{days}d "
+                if hours > 0:
+                    time_str += f"{hours}h "
+                if minutes > 0 or not time_str:
+                    time_str += f"{minutes}m"
+                await interaction.response.send_message(
+                    f"You already tempted fate recently. "
+                    f"Wait **{time_str.strip()}** before your next Double or Nothing.",
+                    ephemeral=True,
+                )
+                return
+
+        # Check balance
+        balance = self.player_service.get_balance(user_id)
+
+        if balance < 0:
+            await interaction.response.send_message(
+                f"You're in debt ({balance} {JOPACOIN_EMOTE}). "
+                "You can't double debt. Pay it off first!",
+                ephemeral=True,
+            )
+            return
+
+        if balance < cost:
+            await interaction.response.send_message(
+                f"You need {cost} {JOPACOIN_EMOTE} for this, but you only have {balance}. "
+                "Can't afford the ante.",
+                ephemeral=True,
+            )
+            return
+
+        # Defer - we'll send the result publicly
+        if not await safe_defer(interaction, ephemeral=False):
+            return
+
+        # Deduct cost first
+        self.player_service.player_repo.add_balance(user_id, -cost)
+        balance_after_cost = balance - cost
+
+        # 50/50 flip
+        won = random.random() < 0.5
+
+        if balance_after_cost == 0:
+            # Special case: paid exactly the cost, balance is 0
+            # Both win and lose result in 0
+            final_balance = 0
+            if won:
+                result_title = "DOUBLE... NOTHING!"
+                result_color = 0xFFFF00  # Yellow for irony
+                flavor_event = FlavorEvent.DOUBLE_OR_NOTHING_ZERO
+            else:
+                result_title = "NOTHING!"
+                result_color = 0xFF0000  # Red
+                flavor_event = FlavorEvent.DOUBLE_OR_NOTHING_LOSE
+        elif won:
+            # WIN: Double the remaining balance
+            winnings = balance_after_cost
+            self.player_service.player_repo.add_balance(user_id, winnings)
+            final_balance = balance_after_cost * 2
+            result_title = "DOUBLE!"
+            result_color = 0x00FF00  # Green
+            flavor_event = FlavorEvent.DOUBLE_OR_NOTHING_WIN
+        else:
+            # LOSE: Zero out the balance
+            self.player_service.player_repo.update_balance(user_id, 0)
+            final_balance = 0
+            result_title = "NOTHING!"
+            result_color = 0xFF0000  # Red
+            flavor_event = FlavorEvent.DOUBLE_OR_NOTHING_LOSE
+
+        # Generate AI flavor text (falls back to examples if AI disabled)
+        result_message = None
+        if self.flavor_text_service:
+            try:
+                event_details = {
+                    "starting_balance": balance,
+                    "cost": cost,
+                    "balance_at_risk": balance_after_cost,
+                    "final_balance": final_balance,
+                    "won": won,
+                    "net_change": final_balance - balance,
+                }
+                result_message = await self.flavor_text_service.generate_event_flavor(
+                    guild_id=guild_id,
+                    event=flavor_event,
+                    discord_id=user_id,
+                    event_details=event_details,
+                )
+            except Exception as e:
+                logger.warning(f"Failed to generate AI flavor for double or nothing: {e}")
+
+        # Fallback to random example if AI failed or returned None
+        if not result_message:
+            examples = EVENT_EXAMPLES.get(flavor_event, [])
+            if examples:
+                result_message = random.choice(examples)
+            else:
+                result_message = "The coin has decided your fate."
+
+        # Log the result
+        self.player_service.player_repo.log_double_or_nothing(
+            discord_id=user_id,
+            guild_id=guild_id,
+            cost=cost,
+            balance_before=balance_after_cost,
+            balance_after=final_balance,
+            won=won,
+            spin_time=now,
+        )
+
+        # Build result embed
+        embed = discord.Embed(
+            title=f"Double or Nothing: {result_title}",
+            color=result_color,
+        )
+
+        embed.description = f"*{result_message}*\n\n"
+        embed.description += "━" * 25 + "\n\n"
+
+        # Show the math
+        embed.description += f"**Starting Balance:** {balance} {JOPACOIN_EMOTE}\n"
+        embed.description += f"**Entry Cost:** -{cost} {JOPACOIN_EMOTE}\n"
+        embed.description += f"**At Risk:** {balance_after_cost} {JOPACOIN_EMOTE}\n\n"
+
+        if won and balance_after_cost > 0:
+            embed.description += f"**Result:** {balance_after_cost} x 2 = **{final_balance}** {JOPACOIN_EMOTE}\n"
+            net = final_balance - balance
+            embed.description += f"**Net Gain:** +{net} {JOPACOIN_EMOTE}"
+        else:
+            net = final_balance - balance
+            embed.description += f"**Result:** **{final_balance}** {JOPACOIN_EMOTE}\n"
+            embed.description += f"**Net Loss:** {net} {JOPACOIN_EMOTE}"
+
+        embed.set_footer(text=f"Entry: {cost} JC | Cooldown: 30 days")
+
+        # Set user avatar as thumbnail
+        if interaction.user.avatar:
+            embed.set_thumbnail(url=interaction.user.avatar.url)
+
+        await safe_followup(interaction, content=interaction.user.mention, embed=embed)
 
 
 async def setup(bot: commands.Bot):

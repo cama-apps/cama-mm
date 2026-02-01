@@ -1921,6 +1921,111 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
 
             return self._row_to_player(row)
 
+    # --- Double or Nothing methods ---
+
+    def get_last_double_or_nothing(self, discord_id: int) -> int | None:
+        """
+        Get the timestamp of a player's last Double or Nothing spin.
+
+        Args:
+            discord_id: Player's Discord ID
+
+        Returns:
+            Unix timestamp of last spin, or None if never played
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT last_double_or_nothing FROM players WHERE discord_id = ?",
+                (discord_id,),
+            )
+            row = cursor.fetchone()
+            if not row or row["last_double_or_nothing"] is None:
+                return None
+            return int(row["last_double_or_nothing"])
+
+    def log_double_or_nothing(
+        self,
+        discord_id: int,
+        guild_id: int | None,
+        cost: int,
+        balance_before: int,
+        balance_after: int,
+        won: bool,
+        spin_time: int,
+    ) -> None:
+        """
+        Log a Double or Nothing spin and update cooldown.
+
+        Args:
+            discord_id: Player's Discord ID
+            guild_id: Guild ID (None for DMs)
+            cost: Cost paid to play
+            balance_before: Balance before the gamble (after cost deducted)
+            balance_after: Balance after the gamble
+            won: Whether the player won
+            spin_time: Unix timestamp of the spin
+        """
+        normalized_guild_id = guild_id if guild_id is not None else 0
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            # Log the spin
+            cursor.execute(
+                """
+                INSERT INTO double_or_nothing_spins
+                (guild_id, discord_id, cost, balance_before, balance_after, won, spin_time)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    normalized_guild_id,
+                    discord_id,
+                    cost,
+                    balance_before,
+                    balance_after,
+                    1 if won else 0,
+                    spin_time,
+                ),
+            )
+            # Update cooldown
+            cursor.execute(
+                """
+                UPDATE players SET last_double_or_nothing = ? WHERE discord_id = ?
+                """,
+                (spin_time, discord_id),
+            )
+
+    def get_double_or_nothing_history(self, discord_id: int) -> list[dict]:
+        """
+        Get Double or Nothing history for a player.
+
+        Args:
+            discord_id: Player's Discord ID
+
+        Returns:
+            List of dicts with spin details, sorted by spin_time
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT cost, balance_before, balance_after, won, spin_time
+                FROM double_or_nothing_spins
+                WHERE discord_id = ?
+                ORDER BY spin_time ASC
+                """,
+                (discord_id,),
+            )
+            return [
+                {
+                    "cost": row["cost"],
+                    "balance_before": row["balance_before"],
+                    "balance_after": row["balance_after"],
+                    "won": bool(row["won"]),
+                    "spin_time": row["spin_time"],
+                }
+                for row in cursor.fetchall()
+            ]
+
     def _row_to_player(self, row) -> Player:
         """Convert database row to Player object."""
         preferred_roles = json.loads(row["preferred_roles"]) if row["preferred_roles"] else None
