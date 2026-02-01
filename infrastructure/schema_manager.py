@@ -213,6 +213,8 @@ class SchemaManager:
             ("add_balancing_rating_system_column", self._migration_add_balancing_rating_system_column),
             ("create_match_corrections_table", self._migration_create_match_corrections_table),
             ("create_player_steam_ids_table", self._migration_create_player_steam_ids_table),
+            ("create_double_or_nothing_table", self._migration_create_double_or_nothing_table),
+            ("add_last_double_or_nothing_column", self._migration_add_last_double_or_nothing),
         ]
 
     # --- Migrations ---
@@ -985,3 +987,28 @@ class SchemaManager:
             WHERE steam_id IS NOT NULL
             """
         )
+
+    def _migration_create_double_or_nothing_table(self, cursor) -> None:
+        """Create table for tracking Double or Nothing spin history."""
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS double_or_nothing_spins (
+                spin_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL DEFAULT 0,
+                discord_id INTEGER NOT NULL,
+                cost INTEGER NOT NULL,
+                balance_before INTEGER NOT NULL,
+                balance_after INTEGER NOT NULL,
+                won INTEGER NOT NULL,
+                spin_time INTEGER NOT NULL,
+                FOREIGN KEY (discord_id) REFERENCES players(discord_id)
+            )
+            """
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_don_discord_id ON double_or_nothing_spins(discord_id)"
+        )
+
+    def _migration_add_last_double_or_nothing(self, cursor) -> None:
+        """Add last_double_or_nothing column to players for cooldown tracking."""
+        self._add_column_if_not_exists(cursor, "players", "last_double_or_nothing", "INTEGER")
