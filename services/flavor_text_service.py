@@ -42,6 +42,9 @@ class FlavorEvent(Enum):
     MATCH_LOSS = "match_loss"
     SHOP_ANNOUNCE = "shop_announce"  # Balance announcement flex
     SHOP_ANNOUNCE_TARGET = "shop_announce_target"  # Targeted flex on another player
+    DOUBLE_OR_NOTHING_WIN = "double_or_nothing_win"  # Won the 50/50 gamble
+    DOUBLE_OR_NOTHING_LOSE = "double_or_nothing_lose"  # Lost everything
+    DOUBLE_OR_NOTHING_ZERO = "double_or_nothing_zero"  # Had exactly 25 JC, doubled nothing
 
 
 # Example messages for each event type (used as few-shot examples and fallbacks)
@@ -135,6 +138,35 @@ EVENT_EXAMPLES: dict[FlavorEvent, list[str]] = {
         "Imagine having less jopacoin than me. Oh wait, you don't have to imagine. Just look at yours.",
         "I spent money specifically to remind you I'm better. That's how petty I am.",
         "The numbers don't lie, and right now they're saying 'get rekt'.",
+    ],
+    FlavorEvent.DOUBLE_OR_NOTHING_WIN: [
+        "The coin gods smile upon you today. Enjoy it while it lasts.",
+        "DOUBLED! The house weeps. (Don't worry, they'll get it back.)",
+        "Fortune favors the bold. And apparently, the financially reckless.",
+        "You absolute madman. It actually worked.",
+        "Against all odds... just kidding, it was literally 50/50.",
+        "Lady Luck is on your side! Quick, go lose it on something else.",
+        "The spirits of the coin have blessed you. They're known for taking it back later.",
+        "Congratulations on your temporary victory over probability.",
+    ],
+    FlavorEvent.DOUBLE_OR_NOTHING_LOSE: [
+        "And it's gone. All of it. Every last jopacoin.",
+        "The coin has spoken. You have nothing. Absolutely nothing.",
+        "Fortune is a fickle mistress, and she just took EVERYTHING.",
+        "Poof. Should have walked away. But you're not that person, are you?",
+        "Your wealth has been redistributed to the void. The void thanks you.",
+        "Gone. Reduced to atoms. Your jopacoin are in a better place now.",
+        "The house always... wait, you did this to yourself.",
+        "From hero to zero in one coin flip. Speedrun any%.",
+        "Remember when you had money? That was nice.",
+    ],
+    FlavorEvent.DOUBLE_OR_NOTHING_ZERO: [
+        "You paid 25 to double... nothing. Math is cruel.",
+        "Congratulations! 0 x 2 = 0. The house thanks you for the donation.",
+        "The coin landed in your favor! Unfortunately, 2 times nothing is still nothing.",
+        "Victory! Your vast fortune of 0 has been doubled to... 0.",
+        "You won the gamble but lost the war. Classic.",
+        "Technically a win. Spiritually, a disaster.",
     ],
 }
 
