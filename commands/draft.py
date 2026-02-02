@@ -700,43 +700,50 @@ class DraftCommands(commands.Cog):
                 1 if specified_captain2_id else 0
             )
 
-            if len(eligible_captain_ids) < total_needed:
-                # Ping all lobby players and wait for captain opt-ins/opt-outs
-                still_needed = total_needed - len(eligible_captain_ids)
-                mentions = " ".join(f"<@{pid}>" for pid in lobby_player_ids)
+            # Always ping all lobby players and give 60s to change eligibility
+            current_eligible = len(eligible_captain_ids)
+            mentions = " ".join(f"<@{pid}>" for pid in lobby_player_ids)
+            if current_eligible < total_needed:
+                still_needed = total_needed - current_eligible
                 waiting_msg = await interaction.followup.send(
                     f"⏳ **Waiting for captains!**\n"
                     f"Need **{still_needed}** more captain-eligible player(s) to start the draft.\n"
                     f"Use `/setcaptain` to opt in or out: {mentions}",
                 )
+            else:
+                waiting_msg = await interaction.followup.send(
+                    f"⏳ **Captain check — 60 seconds to update eligibility!**\n"
+                    f"Currently **{current_eligible}** captain-eligible player(s).\n"
+                    f"Use `/setcaptain` to opt in or out: {mentions}",
+                )
 
-                # Always wait the full 60s so players can opt in or change their mind
-                for _ in range(12):
-                    await asyncio.sleep(5)
+            # Always wait the full 60s so players can opt in or change their mind
+            for _ in range(12):
+                await asyncio.sleep(5)
 
-                # Re-query eligibility after the wait
-                eligible_captain_ids = self.player_repo.get_captain_eligible_players(lobby_player_ids)
-                if specified_captain1_id and specified_captain1_id not in eligible_captain_ids:
-                    eligible_captain_ids.append(specified_captain1_id)
-                if specified_captain2_id and specified_captain2_id not in eligible_captain_ids:
-                    eligible_captain_ids.append(specified_captain2_id)
+            # Re-query eligibility after the wait
+            eligible_captain_ids = self.player_repo.get_captain_eligible_players(lobby_player_ids)
+            if specified_captain1_id and specified_captain1_id not in eligible_captain_ids:
+                eligible_captain_ids.append(specified_captain1_id)
+            if specified_captain2_id and specified_captain2_id not in eligible_captain_ids:
+                eligible_captain_ids.append(specified_captain2_id)
 
-                if len(eligible_captain_ids) >= total_needed:
-                    try:
-                        await waiting_msg.edit(
-                            content="✅ **Enough captains!** Starting the draft..."
-                        )
-                    except Exception:
-                        pass
-                else:
-                    try:
-                        await waiting_msg.edit(
-                            content="❌ Draft cancelled — not enough captains opted in within 60 seconds.\n"
-                            "Use `/startdraft` to try again."
-                        )
-                    except Exception:
-                        pass
-                    return False
+            if len(eligible_captain_ids) >= total_needed:
+                try:
+                    await waiting_msg.edit(
+                        content=f"✅ **{len(eligible_captain_ids)} captain(s) eligible!** Starting the draft..."
+                    )
+                except Exception:
+                    pass
+            else:
+                try:
+                    await waiting_msg.edit(
+                        content="❌ Draft cancelled — not enough captains opted in within 60 seconds.\n"
+                        "Use `/startdraft` to try again."
+                    )
+                except Exception:
+                    pass
+                return False
 
         # Select captains
         try:
