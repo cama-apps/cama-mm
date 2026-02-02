@@ -213,6 +213,7 @@ class SchemaManager:
             ("add_balancing_rating_system_column", self._migration_add_balancing_rating_system_column),
             ("create_match_corrections_table", self._migration_create_match_corrections_table),
             ("create_player_steam_ids_table", self._migration_create_player_steam_ids_table),
+            ("add_streak_columns_to_rating_history", self._migration_add_streak_columns),
         ]
 
     # --- Migrations ---
@@ -985,3 +986,8 @@ class SchemaManager:
             WHERE steam_id IS NOT NULL
             """
         )
+
+    def _migration_add_streak_columns(self, cursor) -> None:
+        """Add streak tracking columns to rating_history for analytics."""
+        self._add_column_if_not_exists(cursor, "rating_history", "streak_length", "INTEGER")
+        self._add_column_if_not_exists(cursor, "rating_history", "streak_multiplier", "REAL")

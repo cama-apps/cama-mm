@@ -693,6 +693,21 @@ class MatchService:
             radiant_glicko = [self._load_glicko_player(pid) for pid in radiant_team_ids]
             dire_glicko = [self._load_glicko_player(pid) for pid in dire_team_ids]
 
+            # Calculate streak multipliers for each player
+            all_player_ids_for_streak = radiant_team_ids + dire_team_ids
+            streak_multipliers: dict[int, float] = {}
+            streak_data: dict[int, tuple[int, float]] = {}  # pid -> (length, multiplier)
+
+            for pid in all_player_ids_for_streak:
+                won = (pid in radiant_team_ids and winning_team == "radiant") or \
+                      (pid in dire_team_ids and winning_team == "dire")
+                recent_outcomes = self.match_repo.get_player_recent_outcomes(pid, limit=20)
+                streak_length, multiplier = self.rating_system.calculate_streak_multiplier(
+                    recent_outcomes, won=won
+                )
+                streak_multipliers[pid] = multiplier
+                streak_data[pid] = (streak_length, multiplier)
+
             # Snapshot pre-match ratings for history + prediction stats
             pre_match = {}
             for player, pid in radiant_glicko:
@@ -702,6 +717,8 @@ class MatchService:
                     "volatility_before": player.vol,
                     "team_number": 1,
                     "won": winning_team == "radiant",
+                    "streak_length": streak_data.get(pid, (1, 1.0))[0],
+                    "streak_multiplier": streak_data.get(pid, (1, 1.0))[1],
                 }
             for player, pid in dire_glicko:
                 pre_match[pid] = {
@@ -710,6 +727,8 @@ class MatchService:
                     "volatility_before": player.vol,
                     "team_number": 2,
                     "won": winning_team == "dire",
+                    "streak_length": streak_data.get(pid, (1, 1.0))[0],
+                    "streak_multiplier": streak_data.get(pid, (1, 1.0))[1],
                 }
 
             radiant_rating, radiant_rd, _ = self.rating_system.aggregate_team_stats(
@@ -728,11 +747,11 @@ class MatchService:
 
             if winning_team == "radiant":
                 team1_updated, team2_updated = self.rating_system.update_ratings_after_match(
-                    radiant_glicko, dire_glicko, 1
+                    radiant_glicko, dire_glicko, 1, streak_multipliers=streak_multipliers
                 )
             else:
                 team1_updated, team2_updated = self.rating_system.update_ratings_after_match(
-                    dire_glicko, radiant_glicko, 1
+                    dire_glicko, radiant_glicko, 1, streak_multipliers=streak_multipliers
                 )
 
             {pid for _, _, _, pid in team1_updated + team2_updated}
@@ -835,6 +854,8 @@ class MatchService:
                     os_mu_after=pre.get("os_mu_after"),
                     os_sigma_before=pre.get("os_sigma_before"),
                     os_sigma_after=pre.get("os_sigma_after"),
+                    streak_length=pre.get("streak_length"),
+                    streak_multiplier=pre.get("streak_multiplier"),
                 )
 
             # Update pairwise player statistics

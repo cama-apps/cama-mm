@@ -117,6 +117,8 @@ class MatchRepository(BaseRepository, IMatchRepository):
         os_sigma_before: float | None = None,
         os_sigma_after: float | None = None,
         fantasy_weight: float | None = None,
+        streak_length: int | None = None,
+        streak_multiplier: float | None = None,
     ) -> None:
         """Record a rating change in history (Glicko-2 and optionally OpenSkill)."""
         with self.connection() as conn:
@@ -139,9 +141,11 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     os_mu_after,
                     os_sigma_before,
                     os_sigma_after,
-                    fantasy_weight
+                    fantasy_weight,
+                    streak_length,
+                    streak_multiplier
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
                 (
                     discord_id,
@@ -160,6 +164,8 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     os_sigma_before,
                     os_sigma_after,
                     fantasy_weight,
+                    streak_length,
+                    streak_multiplier,
                 ),
             )
 
@@ -290,9 +296,39 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     "rating": row["rating"],
                     "match_id": row["match_id"],
                     "timestamp": row["timestamp"],
+                    "streak_length": row["streak_length"] if "streak_length" in row.keys() else None,
+                    "streak_multiplier": row["streak_multiplier"] if "streak_multiplier" in row.keys() else None,
                 }
                 for row in rows
             ]
+
+    def get_player_recent_outcomes(self, discord_id: int, limit: int = 20) -> list[bool]:
+        """
+        Get recent match outcomes for a player.
+
+        Returns a list of booleans (True=win, False=loss) in reverse chronological
+        order (most recent first). Uses the `won` column from rating_history.
+
+        Args:
+            discord_id: Player's Discord ID
+            limit: Maximum number of outcomes to return
+
+        Returns:
+            List of booleans representing win/loss outcomes
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT won FROM rating_history
+                WHERE discord_id = ? AND won IS NOT NULL
+                ORDER BY id DESC
+                LIMIT ?
+            """,
+                (discord_id, limit),
+            )
+            rows = cursor.fetchall()
+            return [bool(row["won"]) for row in rows]
 
     def get_player_rating_history_detailed(self, discord_id: int, limit: int = 50) -> list[dict]:
         """Get detailed rating history for a player including prediction and OpenSkill data."""
