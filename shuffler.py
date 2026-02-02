@@ -8,6 +8,7 @@ import logging
 import math
 import random
 from collections.abc import Iterable
+from dataclasses import dataclass
 
 from config import RD_PRIORITY_WEIGHT, SHUFFLER_SETTINGS
 from domain.models.player import Player
@@ -15,6 +16,15 @@ from domain.models.team import Team
 from utils.role_assignment_cache import get_cached_role_assignments
 
 logger = logging.getLogger("cama_bot.shuffler")
+
+
+@dataclass
+class DraftPoolResult:
+    """Result of balanced draft pool selection."""
+
+    selected_players: list[Player]  # 8 non-captain players
+    excluded_players: list[Player]  # Players not selected
+    pool_score: float  # Best achievable balance score + penalties
 
 
 class BalancedShuffler:
@@ -972,3 +982,129 @@ class BalancedShuffler:
                 best_teams = (team1, team2)
 
         return best_teams
+
+    def _score_draft_pool(
+        self,
+        captain_a: Player,
+        captain_b: Player,
+        pool: list[Player],
+        max_assignments_per_team: int = 3,
+    ) -> float:
+        """
+        Score a candidate draft pool by evaluating all possible team splits.
+
+        Tries all C(8,4) = 70 ways to divide the 8 non-captain players across
+        the two captains, and returns the best (lowest) score — the most balanced
+        game this pool can produce.
+
+        Args:
+            captain_a: First captain
+            captain_b: Second captain
+            pool: 8 non-captain players
+            max_assignments_per_team: Max role assignments to try per team
+
+        Returns:
+            Best (lowest) score across all splits.
+        """
+        best_score = float("inf")
+
+        for team_a_indices in itertools.combinations(range(len(pool)), 4):
+            team_a_players = [captain_a] + [pool[i] for i in team_a_indices]
+            team_b_players = [captain_b] + [pool[i] for i in range(len(pool)) if i not in team_a_indices]
+
+            _, _, score = self._optimize_role_assignments_for_matchup(
+                team_a_players, team_b_players, max_assignments_per_team=max_assignments_per_team
+            )
+
+            if score < best_score:
+                best_score = score
+
+        return best_score
+
+    def select_draft_pool(
+        self,
+        captain_a: Player,
+        captain_b: Player,
+        candidates: list[Player],
+        exclusion_counts: dict[str, int] | None = None,
+        recent_match_names: set[str] | None = None,
+    ) -> DraftPoolResult:
+        """
+        Select 8 non-captain players for draft such that snake-draft produces
+        balanced teams regardless of who picks first.
+
+        Uses worst-case scoring: pool_score = max(score_a, score_b) + penalties.
+
+        Args:
+            captain_a: First captain
+            captain_b: Second captain
+            candidates: Non-captain lobby players (8-12)
+            exclusion_counts: Dict mapping player names to exclusion counts
+            recent_match_names: Set of player names from most recent match
+
+        Returns:
+            DraftPoolResult with selected/excluded players and scores
+
+        Raises:
+            ValueError: If fewer than 8 candidates
+        """
+        if len(candidates) < 8:
+            raise ValueError(
+                f"Need at least 8 non-captain candidates, got {len(candidates)}"
+            )
+
+        exclusion_counts = exclusion_counts or {}
+        recent_match_names = recent_match_names or set()
+
+        if len(candidates) == 8:
+            # Only one possible pool
+            best_split_score = self._score_draft_pool(captain_a, captain_b, candidates)
+
+            # Add recent match penalty
+            selected_names = {p.name for p in candidates}
+            recent_penalty = len(selected_names & recent_match_names) * self.recent_match_penalty_weight
+
+            pool_score = best_split_score + recent_penalty
+
+            return DraftPoolResult(
+                selected_players=list(candidates),
+                excluded_players=[],
+                pool_score=pool_score,
+            )
+
+        # Enumerate all C(N, 8) pools and pick the best
+        best_result: DraftPoolResult | None = None
+        best_pool_score = float("inf")
+
+        for pool_indices in itertools.combinations(range(len(candidates)), 8):
+            pool = [candidates[i] for i in pool_indices]
+            excluded = [candidates[i] for i in range(len(candidates)) if i not in pool_indices]
+
+            best_split_score = self._score_draft_pool(captain_a, captain_b, pool)
+
+            # Exclusion penalty: penalize excluding frequently-excluded players
+            exclusion_penalty = (
+                sum(exclusion_counts.get(p.name, 0) for p in excluded)
+                * self.exclusion_penalty_weight
+            )
+
+            # Recent match penalty for selected players
+            selected_names = {p.name for p in pool}
+            recent_penalty = len(selected_names & recent_match_names) * self.recent_match_penalty_weight
+
+            pool_score = best_split_score + exclusion_penalty + recent_penalty
+
+            if pool_score < best_pool_score:
+                best_pool_score = pool_score
+                best_result = DraftPoolResult(
+                    selected_players=list(pool),
+                    excluded_players=list(excluded),
+                    pool_score=pool_score,
+                )
+
+        logger.info(
+            f"Draft pool selection: evaluated {math.comb(len(candidates), 8)} pools, "
+            f"best score={best_pool_score:.1f}"
+        )
+
+        return best_result
