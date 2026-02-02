@@ -599,6 +599,7 @@ See `config.py` for the full list (50+ options).
 ## Important Notes
 
 - **Dual Rating Systems**: Glicko-2 (primary, probabilistic) and OpenSkill Plackett-Luce (fantasy-weighted alternative)
+- **Streak-Based Rating Adjustments**: Players on win/loss streaks of 3+ games get amplified rating changes. Multiplier = 1.0 + 0.20 * (streak_length - 2), e.g., 3-streak = 1.20x, 4-streak = 1.40x, 5-streak = 1.60x, uncapped. Only applies when the match outcome continues the streak.
 - **Multi-Steam ID Support**: Players can link multiple Steam accounts via `player_steam_ids` table; match discovery/enrichment checks all linked accounts
 - **5 Roles**: 1=Carry, 2=Mid, 3=Offlane, 4=Soft Support, 5=Hard Support (stored as strings)
 - **Team Convention**: team1=Radiant, team2=Dire, winning_team: 1 or 2
@@ -619,7 +620,7 @@ See `config.py` for the full list (50+ options).
 - **Conditional Players**: "Froglings" who only play if needed to reach 10 players. In both `/shuffle` and `/startdraft`, regular players are always included first; conditional players are randomly selected (not rating-based) to fill remaining spots up to 10. If there are ≥10 regular players, conditional players are excluded entirely.
 - **Recalibration**: Admins can reset a player's RD to 350 (90-day cooldown, min 5 games)
 - **Pairings Storage**: Canonical pairs with player1_id < player2_id to avoid duplicates
-- **Schema**: 50 migrations total
+- **Schema**: 51 migrations total
 
 ## Key Dependencies
 

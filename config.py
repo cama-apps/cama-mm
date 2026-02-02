@@ -166,6 +166,10 @@ RD_DECAY_GRACE_PERIOD_WEEKS = _parse_int("RD_DECAY_GRACE_PERIOD_WEEKS", 2)  # No
 MMR_MODAL_TIMEOUT_MINUTES = _parse_int("MMR_MODAL_TIMEOUT_MINUTES", 5)  # Timeout for MMR input modal
 MMR_MODAL_RETRY_LIMIT = _parse_int("MMR_MODAL_RETRY_LIMIT", 3)  # Maximum retries for invalid MMR input
 
+# Streak-based rating adjustment configuration
+STREAK_THRESHOLD = _parse_int("STREAK_THRESHOLD", 3)  # Min streak length for multiplier (boost applies ON this game)
+STREAK_MULTIPLIER_PER_GAME = _parse_float("STREAK_MULTIPLIER_PER_GAME", 0.20)  # 20% boost per game at/above threshold
+
 # Recalibration configuration
 RECALIBRATION_COOLDOWN_SECONDS = _parse_int("RECALIBRATION_COOLDOWN_SECONDS", 7776000)  # 90 days
 RECALIBRATION_INITIAL_RD = _parse_float("RECALIBRATION_INITIAL_RD", 350.0)  # RD to reset to

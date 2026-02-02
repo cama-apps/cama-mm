@@ -205,6 +205,8 @@ class IMatchRepository(ABC):
         expected_team_win_prob: float | None = None,
         team_number: int | None = None,
         won: bool | None = None,
+        streak_length: int | None = None,
+        streak_multiplier: float | None = None,
     ) -> None: ...
 
     @abstractmethod
@@ -215,6 +217,11 @@ class IMatchRepository(ABC):
 
     @abstractmethod
     def get_rating_history(self, discord_id: int, limit: int = 20): ...
+
+    @abstractmethod
+    def get_player_recent_outcomes(self, discord_id: int, limit: int = 20) -> list[bool]:
+        """Get recent match outcomes for a player (True=win, most recent first)."""
+        ...
 
     @abstractmethod
     def get_recent_rating_history(self, limit: int = 200): ...

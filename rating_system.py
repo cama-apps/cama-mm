@@ -8,6 +8,8 @@ from config import (
     MAX_RATING_SWING_PER_GAME,
     RD_DECAY_CONSTANT,
     RD_DECAY_GRACE_PERIOD_WEEKS,
+    STREAK_THRESHOLD,
+    STREAK_MULTIPLIER_PER_GAME,
 )
 
 from glicko2 import Player
@@ -176,6 +178,53 @@ class CamaRatingSystem:
         """
         return Player(rating=rating, rd=rd, vol=volatility)
 
+    def calculate_streak_multiplier(
+        self, recent_outcomes: list[bool], won: bool
+    ) -> tuple[int, float]:
+        """
+        Calculate current streak length and delta multiplier.
+
+        A streak is a sequence of consecutive wins or losses. The multiplier
+        amplifies rating gains/losses when a player is on a streak of 3+ games
+        and the current match continues that streak.
+
+        Formula: multiplier = 1.0 + STREAK_MULTIPLIER_PER_GAME * max(0, streak_length - 2)
+
+        Args:
+            recent_outcomes: List of recent outcomes (most recent first), True=win
+            won: Whether this match was won
+
+        Returns:
+            (streak_length, multiplier) - multiplier is 1.0 if streak < 3 or
+            outcome breaks streak
+        """
+        if not recent_outcomes:
+            # First game ever
+            return 1, 1.0
+
+        # Check if the most recent outcome matches current result
+        # This determines if we're continuing or breaking a streak
+        most_recent = recent_outcomes[0]
+
+        if most_recent != won:
+            # Streak is broken - this game starts a new streak of 1
+            return 1, 1.0
+
+        # Count how many consecutive games match the current outcome
+        streak_length = 1  # Count this game
+        for outcome in recent_outcomes:
+            if outcome == won:
+                streak_length += 1
+            else:
+                break
+
+        # Calculate multiplier: 1.0 + STREAK_MULTIPLIER_PER_GAME * max(0, streak_length - 2)
+        if streak_length < STREAK_THRESHOLD:
+            return streak_length, 1.0
+
+        multiplier = 1.0 + STREAK_MULTIPLIER_PER_GAME * (streak_length - 2)
+        return streak_length, multiplier
+
     def _update_player_rating(
         self,
         player: Player,
@@ -183,6 +232,7 @@ class CamaRatingSystem:
         opponent_rating: float,
         opponent_rd: float,
         result: float,
+        streak_multiplier: float = 1.0,
     ) -> tuple[float, float, float]:
         """
         Compute updated rating, RD, and volatility for a single player.
@@ -198,6 +248,7 @@ class CamaRatingSystem:
             opponent_rating: Opponent team average rating
             opponent_rd: Opponent team RMS RD
             result: 1.0 for win, 0.0 for loss
+            streak_multiplier: Multiplier for rating delta (default 1.0)
 
         Returns:
             Tuple of (new_rating, new_rd, new_vol)
@@ -208,6 +259,10 @@ class CamaRatingSystem:
 
         # Delta is how much the "team representative with this player's RD" moved
         delta = synth.rating - team_rating
+
+        # Apply streak multiplier before capping
+        delta = delta * streak_multiplier
+
         delta = max(-MAX_RATING_SWING_PER_GAME, min(MAX_RATING_SWING_PER_GAME, delta))
 
         final_rating = max(0.0, player.rating + delta)
@@ -223,6 +278,7 @@ class CamaRatingSystem:
         team1_players: list[tuple[Player, int]],  # (player, discord_id)
         team2_players: list[tuple[Player, int]],
         winning_team: int,
+        streak_multipliers: dict[int, float] | None = None,
     ) -> tuple[list[tuple[float, float, float, int]], list[tuple[float, float, float, int]]]:
         """
         Update ratings after a match using team-based expected outcome with individual RD.
@@ -250,6 +306,7 @@ class CamaRatingSystem:
             team1_players: List of (Glicko-2 Player, discord_id) for team 1 (non-empty)
             team2_players: List of (Glicko-2 Player, discord_id) for team 2 (non-empty)
             winning_team: 1 or 2 (which team won)
+            streak_multipliers: Optional dict mapping discord_id to streak multiplier
 
         Returns:
             Tuple of (team1_updated_ratings, team2_updated_ratings)
@@ -265,6 +322,8 @@ class CamaRatingSystem:
         if winning_team not in (1, 2):
             raise ValueError(f"winning_team must be 1 or 2, got {winning_team}")
 
+        streak_multipliers = streak_multipliers or {}
+
         # Get team aggregates (mean rating, RMS RD)
         team1_rating, team1_rd, _ = self.aggregate_team_stats([p for p, _ in team1_players])
         team2_rating, team2_rd, _ = self.aggregate_team_stats([p for p, _ in team2_players])
@@ -272,13 +331,25 @@ class CamaRatingSystem:
         team1_result = 1.0 if winning_team == 1 else 0.0
         team2_result = 1.0 if winning_team == 2 else 0.0
 
-        # Update all players using the helper method
+        # Update all players using the helper method with per-player streak multipliers
         team1_updated = [
-            (*self._update_player_rating(player, team1_rating, team2_rating, team2_rd, team1_result), discord_id)
+            (
+                *self._update_player_rating(
+                    player, team1_rating, team2_rating, team2_rd, team1_result,
+                    streak_multiplier=streak_multipliers.get(discord_id, 1.0)
+                ),
+                discord_id
+            )
             for player, discord_id in team1_players
         ]
         team2_updated = [
-            (*self._update_player_rating(player, team2_rating, team1_rating, team1_rd, team2_result), discord_id)
+            (
+                *self._update_player_rating(
+                    player, team2_rating, team1_rating, team1_rd, team2_result,
+                    streak_multiplier=streak_multipliers.get(discord_id, 1.0)
+                ),
+                discord_id
+            )
             for player, discord_id in team2_players
         ]
 
