@@ -2,6 +2,7 @@
 Draft commands for Immortal Draft mode: /setcaptain, /startdraft, /restartdraft
 """
 
+import asyncio
 import logging
 import random
 import time
@@ -18,6 +19,7 @@ from domain.models.draft import SNAKE_DRAFT_ORDER, DraftPhase, DraftState
 from rating_system import CamaRatingSystem
 from domain.services.draft_service import DraftService
 from services.draft_state_manager import DraftStateManager
+from shuffler import BalancedShuffler
 from services.permissions import has_admin_permission
 from utils.draft_embeds import MAX_NAME_LEN, format_player_row, format_roles
 from utils.formatting import JOPACOIN_EMOTE, format_betting_display, get_player_display_name
@@ -667,17 +669,15 @@ class DraftCommands(commands.Cog):
         player_ratings = {p.discord_id: p.glicko_rating or 1500.0 for p in players}
 
         if force_random_captains:
-            # Randomly select 2 players as captains (no eligibility check)
+            # All players are eligible when force_random_captains is True
+            # Captain selection (random first, weighted random second) is handled
+            # by select_captains() below — no need to pre-pick here
             if len(lobby_player_ids) < 2:
                 await interaction.followup.send(
                     "❌ Not enough players to select captains.",
                     ephemeral=True,
                 )
                 return False
-            selected_captains = random.sample(lobby_player_ids, 2)
-            specified_captain1_id = selected_captains[0]
-            specified_captain2_id = selected_captains[1]
-            # All players are eligible when force_random_captains is True
             eligible_captain_ids = lobby_player_ids.copy()
         else:
             # Normal captain eligibility check
@@ -696,23 +696,47 @@ class DraftCommands(commands.Cog):
             if specified_captain2_id:
                 needed_captains -= 1
 
-            if len(eligible_captain_ids) < needed_captains + (1 if specified_captain1_id else 0) + (
+            total_needed = needed_captains + (1 if specified_captain1_id else 0) + (
                 1 if specified_captain2_id else 0
-            ):
-                if needed_captains == 2:
-                    await interaction.followup.send(
-                        "❌ Not enough captain-eligible players in lobby.\n"
-                        "Players can use `/setcaptain` to mark themselves as eligible, "
-                        "or specify captains with the `captain1` and `captain2` options.",
-                        ephemeral=True,
-                    )
+            )
+
+            if len(eligible_captain_ids) < total_needed:
+                # Ping all lobby players and wait for captain opt-ins/opt-outs
+                still_needed = total_needed - len(eligible_captain_ids)
+                mentions = " ".join(f"<@{pid}>" for pid in lobby_player_ids)
+                waiting_msg = await interaction.followup.send(
+                    f"⏳ **Waiting for captains!**\n"
+                    f"Need **{still_needed}** more captain-eligible player(s) to start the draft.\n"
+                    f"Use `/setcaptain` to opt in or out: {mentions}",
+                )
+
+                # Always wait the full 60s so players can opt in or change their mind
+                for _ in range(12):
+                    await asyncio.sleep(5)
+
+                # Re-query eligibility after the wait
+                eligible_captain_ids = self.player_repo.get_captain_eligible_players(lobby_player_ids)
+                if specified_captain1_id and specified_captain1_id not in eligible_captain_ids:
+                    eligible_captain_ids.append(specified_captain1_id)
+                if specified_captain2_id and specified_captain2_id not in eligible_captain_ids:
+                    eligible_captain_ids.append(specified_captain2_id)
+
+                if len(eligible_captain_ids) >= total_needed:
+                    try:
+                        await waiting_msg.edit(
+                            content="✅ **Enough captains!** Starting the draft..."
+                        )
+                    except Exception:
+                        pass
                 else:
-                    await interaction.followup.send(
-                        f"❌ Need at least {needed_captains} more captain-eligible player(s) in lobby.\n"
-                        "Players can use `/setcaptain` to mark themselves as eligible.",
-                        ephemeral=True,
-                    )
-                return False
+                    try:
+                        await waiting_msg.edit(
+                            content="❌ Draft cancelled — not enough captains opted in within 60 seconds.\n"
+                            "Use `/startdraft` to try again."
+                        )
+                    except Exception:
+                        pass
+                    return False
 
         # Select captains
         try:
@@ -730,16 +754,82 @@ class DraftCommands(commands.Cog):
         exclusion_counts = self.player_repo.get_exclusion_counts(lobby_player_ids)
 
         # Select player pool (10 players, captains always included)
+        # Use balanced pool selection when possible, fall back to exclusion-count-only
         try:
-            pool_result = self.draft_service.select_player_pool(
-                lobby_player_ids=lobby_player_ids,
-                exclusion_counts=exclusion_counts,
-                forced_include_ids=[captain_pair.captain1_id, captain_pair.captain2_id],
-                pool_size=DRAFT_POOL_SIZE,
-            )
-        except ValueError as e:
-            await interaction.followup.send(f"❌ {e}", ephemeral=True)
-            return False
+            # Build player map and non-captain candidate list
+            player_map = {p.discord_id: p for p in players}
+            captain_a = player_map.get(captain_pair.captain1_id)
+            captain_b = player_map.get(captain_pair.captain2_id)
+            non_captain_candidates = [
+                p for p in players
+                if p.discord_id not in (captain_pair.captain1_id, captain_pair.captain2_id)
+            ]
+
+            if captain_a and captain_b and len(non_captain_candidates) >= 8:
+                # Convert exclusion counts from ID-keyed to name-keyed
+                name_exclusion_counts = {
+                    player_map[pid].name: count
+                    for pid, count in exclusion_counts.items()
+                    if pid in player_map
+                }
+
+                # Get recent match participant names
+                recent_match_names: set[str] = set()
+                if self.match_service:
+                    try:
+                        match_repo = getattr(self.match_service, "match_repo", None)
+                        if match_repo:
+                            last_match = match_repo.get_last_match()
+                            if last_match:
+                                participants = match_repo.get_match_participants(last_match["match_id"])
+                                recent_ids = {p["discord_id"] for p in participants}
+                                recent_match_names = {
+                                    player_map[pid].name
+                                    for pid in recent_ids
+                                    if pid in player_map
+                                }
+                    except Exception:
+                        pass  # Non-critical, proceed without
+
+                shuffler = BalancedShuffler()
+                draft_pool_result = shuffler.select_draft_pool(
+                    captain_a=captain_a,
+                    captain_b=captain_b,
+                    candidates=non_captain_candidates,
+                    exclusion_counts=name_exclusion_counts,
+                    recent_match_names=recent_match_names,
+                )
+
+                # Convert back to ID-based PoolSelectionResult format
+                selected_ids = (
+                    [captain_pair.captain1_id, captain_pair.captain2_id]
+                    + [p.discord_id for p in draft_pool_result.selected_players]
+                )
+                excluded_ids = [p.discord_id for p in draft_pool_result.excluded_players]
+
+                from domain.services.draft_service import PoolSelectionResult
+                pool_result = PoolSelectionResult(
+                    selected_ids=selected_ids,
+                    excluded_ids=excluded_ids,
+                )
+                logger.info(
+                    f"Balanced draft pool selected: score={draft_pool_result.pool_score:.1f}"
+                )
+            else:
+                raise ValueError("Missing captain data or insufficient candidates")
+
+        except Exception as e:
+            logger.info(f"Balanced pool selection unavailable ({e}), using fallback")
+            try:
+                pool_result = self.draft_service.select_player_pool(
+                    lobby_player_ids=lobby_player_ids,
+                    exclusion_counts=exclusion_counts,
+                    forced_include_ids=[captain_pair.captain1_id, captain_pair.captain2_id],
+                    pool_size=DRAFT_POOL_SIZE,
+                )
+            except ValueError as e2:
+                await interaction.followup.send(f"❌ {e2}", ephemeral=True)
+                return False
 
         # Update exclusion counts for excluded players
         for excluded_id in pool_result.excluded_ids:
