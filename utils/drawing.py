@@ -739,6 +739,10 @@ def draw_gamba_chart(
     bet_sizes = [b["effective_bet"] for b in bet_infos if b.get("source", "bet") == "bet" and b["effective_bet"] > 0]
     max_bet_size = max(bet_sizes) if bet_sizes else 1
 
+    # Calculate max double or nothing size for scaling
+    don_sizes = [b["effective_bet"] for b in bet_infos if b.get("source") == "double_or_nothing" and b["effective_bet"] > 0]
+    max_don_size = max(don_sizes) if don_sizes else 1
+
     for bet_num, pnl, info in pnl_series:
         px, py = to_pixel(bet_num, pnl)
         source = info.get("source", "bet")
@@ -763,13 +767,26 @@ def draw_gamba_chart(
             # Draw spokes (4 lines through center)
             spoke_len = size - 1
             for angle in [0, 45, 90, 135]:
-                import math as m
-                rad = m.radians(angle)
-                x1 = px + int(spoke_len * m.cos(rad))
-                y1 = py + int(spoke_len * m.sin(rad))
-                x2 = px - int(spoke_len * m.cos(rad))
-                y2 = py - int(spoke_len * m.sin(rad))
+                rad = math.radians(angle)
+                x1 = px + int(spoke_len * math.cos(rad))
+                y1 = py + int(spoke_len * math.sin(rad))
+                x2 = px - int(spoke_len * math.cos(rad))
+                y2 = py - int(spoke_len * math.sin(rad))
                 draw.line([(x1, y1), (x2, y2)], fill=DISCORD_WHITE, width=1)
+        elif source == "double_or_nothing":
+            # Star/burst marker for Double or Nothing
+            # Size scaled by amount risked (5-10 pixels)
+            size = 5 + int((info["effective_bet"] / max_don_size) * 5)
+            # Draw 8-pointed star
+            points = []
+            for i in range(16):
+                angle = math.radians(i * 22.5 - 90)  # Start from top
+                # Alternate between outer and inner radius
+                r = size if i % 2 == 0 else size * 0.4
+                x = px + int(r * math.cos(angle))
+                y = py + int(r * math.sin(angle))
+                points.append((x, y))
+            draw.polygon(points, fill=color, outline=DISCORD_WHITE)
         else:
             # Regular bet marker
             # Size based on bet amount (3-8 pixels)
@@ -849,6 +866,21 @@ def draw_gamba_chart(
         outline=DISCORD_WHITE,
     )
     draw.text((lx + marker_size + 5, legend_y - 1), "Leveraged", fill=DISCORD_GREY, font=legend_font)
+
+    # Double or Nothing marker (star)
+    lx_don = padding + 260
+    center_x = lx_don + half
+    center_y = legend_y + half
+    star_size = half
+    star_points = []
+    for i in range(16):
+        angle = math.radians(i * 22.5 - 90)
+        r = star_size if i % 2 == 0 else star_size * 0.4
+        x = center_x + int(r * math.cos(angle))
+        y = center_y + int(r * math.sin(angle))
+        star_points.append((x, y))
+    draw.polygon(star_points, fill=DISCORD_ACCENT, outline=DISCORD_WHITE)
+    draw.text((lx_don + marker_size + 5, legend_y - 1), "DoN", fill=DISCORD_GREY, font=legend_font)
 
     # Draw footer stats
     footer_y = height - footer_height + 5

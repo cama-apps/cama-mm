@@ -839,6 +839,9 @@ class GamblingStatsService:
         # Get wheel spin history
         wheel_history = self.player_repo.get_wheel_spin_history(discord_id)
 
+        # Get Double or Nothing history
+        don_history = self.player_repo.get_double_or_nothing_history(discord_id)
+
         # Convert to unified format with timestamps for sorting
         events = []
 
@@ -876,6 +879,23 @@ class GamblingStatsService:
                 "profit": profit,
                 "team": None,  # No team for wheel
                 "source": "wheel",
+            })
+
+        for spin in don_history:
+            # Original balance = balance_before + cost (before cost was deducted)
+            original = spin["balance_before"] + spin["cost"]
+            # Profit = final balance - original balance
+            profit = spin["balance_after"] - original
+
+            events.append({
+                "time": spin["spin_time"],
+                "amount": original,  # Total amount at stake (full balance before cost)
+                "leverage": 1,  # No leverage concept
+                "effective_bet": spin["balance_before"],  # Amount risked (for marker sizing)
+                "outcome": "won" if spin["won"] else "lost",
+                "profit": profit,
+                "team": None,
+                "source": "double_or_nothing",
             })
 
         # Sort by time

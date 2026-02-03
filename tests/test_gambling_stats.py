@@ -409,6 +409,61 @@ class TestPnlSeries:
         assert series[1][1] == 0  # 10 - 10 = 0
         assert series[2][1] == 10  # 0 + 10 = 10
 
+    def test_cumulative_pnl_series_with_double_or_nothing(self, gambling_stats_service, repositories):
+        """Test cumulative P&L series includes Double or Nothing spins."""
+        player_repo = repositories["player_repo"]
+
+        discord_id = _setup_player(player_repo, balance=1000)
+        now = int(time.time())
+
+        # Simulate a Double or Nothing WIN:
+        # Player has 1000 balance, pays 50 cost, has 950 at risk, doubles to 1900
+        # Profit = 1900 - (950 + 50) = 1900 - 1000 = +900
+        player_repo.log_double_or_nothing(
+            discord_id=discord_id,
+            guild_id=0,
+            cost=50,
+            balance_before=950,  # Balance after cost deducted
+            balance_after=1900,  # Doubled from balance_before
+            won=True,
+            spin_time=now,
+        )
+
+        # Simulate a Double or Nothing LOSS:
+        # Player has 1900 balance, pays 50 cost, has 1850 at risk, loses everything
+        # Profit = 0 - (1850 + 50) = 0 - 1900 = -1900
+        player_repo.log_double_or_nothing(
+            discord_id=discord_id,
+            guild_id=0,
+            cost=50,
+            balance_before=1850,
+            balance_after=0,
+            won=False,
+            spin_time=now + 100,
+        )
+
+        series = gambling_stats_service.get_cumulative_pnl_series(discord_id)
+
+        assert len(series) == 2
+
+        # First event: DoN win
+        assert series[0][0] == 1  # Event number
+        assert series[0][1] == 900  # Cumulative P&L
+        assert series[0][2]["source"] == "double_or_nothing"
+        assert series[0][2]["outcome"] == "won"
+        assert series[0][2]["profit"] == 900
+        assert series[0][2]["amount"] == 1000  # Original balance (before cost)
+        assert series[0][2]["effective_bet"] == 950  # Amount at risk
+
+        # Second event: DoN loss
+        assert series[1][0] == 2  # Event number
+        assert series[1][1] == 900 - 1900  # Cumulative: 900 - 1900 = -1000
+        assert series[1][2]["source"] == "double_or_nothing"
+        assert series[1][2]["outcome"] == "lost"
+        assert series[1][2]["profit"] == -1900
+        assert series[1][2]["amount"] == 1900  # Original balance
+        assert series[1][2]["effective_bet"] == 1850  # Amount at risk
+
 
 class TestPaperHands:
     """Tests for paper hands detection."""
