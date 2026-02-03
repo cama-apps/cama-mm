@@ -213,7 +213,7 @@ class WrappedCog(commands.Cog):
                 award_text = []
                 for award in server_wrapped.awards[:5]:
                     award_text.append(
-                        f"{award.emoji} **{award.title}**: @{award.discord_username}"
+                        f"{award.emoji} **{award.title}**: <@{award.discord_id}>"
                     )
                 embed.add_field(
                     name="Top Awards",
@@ -381,7 +381,7 @@ class WrappedCog(commands.Cog):
                     awards_text = []
                     for a in by_category[cat][:5]:  # Limit per category
                         awards_text.append(
-                            f"{a.emoji} **{a.title}**: @{a.discord_username}\n"
+                            f"{a.emoji} **{a.title}**: <@{a.discord_id}>\n"
                             f"  {a.stat_name}: {a.stat_value}"
                         )
                     embed.add_field(
