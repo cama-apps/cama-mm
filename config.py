@@ -191,3 +191,9 @@ SPECTATOR_POOL_PLAYER_CUT = _parse_float("SPECTATOR_POOL_PLAYER_CUT", 0.10)  # 1
 ENRICHMENT_DISCOVERY_TIME_WINDOW = _parse_int("ENRICHMENT_DISCOVERY_TIME_WINDOW", 7200)  # 2 hours (seconds)
 ENRICHMENT_MIN_PLAYER_MATCH = _parse_int("ENRICHMENT_MIN_PLAYER_MATCH", 10)  # All 10 players required for strict validation
 ENRICHMENT_RETRY_DELAYS = _parse_int_list("ENRICHMENT_RETRY_DELAYS", [1, 5, 20, 60, 180])  # Exponential backoff delays (seconds)
+
+# Wrapped (monthly summary) configuration
+WRAPPED_ENABLED = _parse_bool("WRAPPED_ENABLED", True)
+WRAPPED_MIN_GAMES = _parse_int("WRAPPED_MIN_GAMES", 3)  # Min games to appear in wrapped
+WRAPPED_MIN_BETS = _parse_int("WRAPPED_MIN_BETS", 3)  # Min bets for betting awards
+WRAPPED_CHECK_INTERVAL_HOURS = _parse_int("WRAPPED_CHECK_INTERVAL_HOURS", 12)  # Hours between checks (12-24)
