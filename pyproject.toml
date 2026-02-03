@@ -19,6 +19,7 @@ dependencies = [
     "matplotlib>=3.8.0",
     "scipy>=1.11.0",
     "openskill>=6.0.0",
+    "pilmoji>=2.0.5",
 ]
 
 [dependency-groups]

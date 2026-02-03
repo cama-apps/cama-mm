@@ -216,6 +216,7 @@ class SchemaManager:
             ("add_streak_columns_to_rating_history", self._migration_add_streak_columns),
             ("create_double_or_nothing_table", self._migration_create_double_or_nothing_table),
             ("add_last_double_or_nothing_column", self._migration_add_last_double_or_nothing),
+            ("create_wrapped_generation_table", self._migration_create_wrapped_generation_table),
         ]
 
     # --- Migrations ---
@@ -1018,3 +1019,25 @@ class SchemaManager:
     def _migration_add_last_double_or_nothing(self, cursor) -> None:
         """Add last_double_or_nothing column to players for cooldown tracking."""
         self._add_column_if_not_exists(cursor, "players", "last_double_or_nothing", "INTEGER")
+
+    def _migration_create_wrapped_generation_table(self, cursor) -> None:
+        """Create table for tracking monthly wrapped generation."""
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS wrapped_generation (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL DEFAULT 0,
+                year_month TEXT NOT NULL,
+                channel_id INTEGER,
+                message_id INTEGER,
+                generated_at INTEGER NOT NULL,
+                generated_by INTEGER,
+                generation_type TEXT DEFAULT 'auto',
+                stats_json TEXT,
+                UNIQUE (guild_id, year_month)
+            )
+            """
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_wrapped_guild_month ON wrapped_generation(guild_id, year_month)"
+        )

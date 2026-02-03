@@ -281,6 +281,20 @@ def _init_services():
     bot.sql_query_service = sql_query_service
     bot.flavor_text_service = flavor_text_service
 
+    # Create wrapped service for monthly summaries
+    from repositories.wrapped_repository import WrappedRepository
+    from services.wrapped_service import WrappedService
+
+    wrapped_repo = WrappedRepository(DB_PATH)
+    wrapped_service = WrappedService(
+        wrapped_repo=wrapped_repo,
+        player_repo=player_repo,
+        match_repo=match_repo,
+        bet_repo=bet_repo,
+        gambling_stats_service=gambling_stats_service,
+    )
+    bot.wrapped_service = wrapped_service
+
     _services_initialized = True
 
 
@@ -307,6 +321,7 @@ EXTENSIONS = [
     "commands.draft",
     "commands.rating_analysis",
     "commands.herogrid",
+    "commands.wrapped",
 ]
 
 
