@@ -15,6 +15,8 @@ from services.gambling_stats_service import (
 )
 from services.match_service import MatchService
 
+TEST_GUILD_ID = 12345
+
 
 @pytest.fixture
 def services(repo_db_path):
@@ -52,6 +54,7 @@ def _setup_players(player_repo, player_ids, spectator_ids):
         player_repo.add(
             discord_id=pid,
             discord_username=f"Player{pid}",
+            guild_id=TEST_GUILD_ID,
             dotabuff_url=f"https://dotabuff.com/players/{pid}",
             initial_mmr=1500,
             glicko_rating=1500.0,
@@ -62,6 +65,7 @@ def _setup_players(player_repo, player_ids, spectator_ids):
         player_repo.add(
             discord_id=sid,
             discord_username=f"Spectator{sid}",
+            guild_id=TEST_GUILD_ID,
             dotabuff_url=f"https://dotabuff.com/players/{sid}",
             initial_mmr=1500,
             glicko_rating=1500.0,
@@ -82,7 +86,7 @@ class TestBetRepositoryGetBetsOnPlayerMatches:
     def test_returns_empty_for_player_with_no_matches(self, services):
         """Player with no match participation returns empty list."""
         bet_repo = services["bet_repo"]
-        result = bet_repo.get_bets_on_player_matches(99999)
+        result = bet_repo.get_bets_on_player_matches(99999, TEST_GUILD_ID)
         assert result == []
 
     def test_excludes_players_own_bets(self, services):
@@ -99,28 +103,28 @@ class TestBetRepositoryGetBetsOnPlayerMatches:
 
         # Give balances
         for sid in spectator_ids:
-            player_repo.add_balance(sid, 100)
+            player_repo.add_balance(sid, TEST_GUILD_ID, 100)
 
         # Shuffle and set up betting
-        match_service.shuffle_players(player_ids, guild_id=1, betting_mode="house")
-        pending = match_service.get_last_shuffle(1)
+        match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID, betting_mode="house")
+        pending = match_service.get_last_shuffle(TEST_GUILD_ID)
         _ensure_betting_open(pending)
 
         # Target player is first on radiant
         target_player = pending["radiant_team_ids"][0]
-        player_repo.add_balance(target_player, 100)
+        player_repo.add_balance(target_player, TEST_GUILD_ID, 100)
 
         # Target player bets on their own team
-        betting_service.place_bet(1, target_player, "radiant", 10, pending)
+        betting_service.place_bet(TEST_GUILD_ID, target_player, "radiant", 10, pending)
         # Spectators bet
-        betting_service.place_bet(1, 2001, "radiant", 20, pending)  # FOR target
-        betting_service.place_bet(1, 2002, "dire", 15, pending)  # AGAINST target
+        betting_service.place_bet(TEST_GUILD_ID, 2001, "radiant", 20, pending)  # FOR target
+        betting_service.place_bet(TEST_GUILD_ID, 2002, "dire", 15, pending)  # AGAINST target
 
         # Record match (radiant wins)
-        match_service.record_match("radiant", guild_id=1)
+        match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
 
         # Get bets on target player's matches
-        bets = bet_repo.get_bets_on_player_matches(target_player)
+        bets = bet_repo.get_bets_on_player_matches(target_player, TEST_GUILD_ID)
 
         # Should only have spectator bets, not target's own bet
         assert len(bets) == 2
@@ -139,24 +143,24 @@ class TestBetRepositoryGetBetsOnPlayerMatches:
         player_ids = list(range(1000, 1010))
         spectator_ids = [2001]
         _setup_players(player_repo, player_ids, spectator_ids)
-        player_repo.add_balance(2001, 100)
+        player_repo.add_balance(2001, TEST_GUILD_ID, 100)
 
         # First match - will be recorded
-        match_service.shuffle_players(player_ids, guild_id=1, betting_mode="house")
-        pending1 = match_service.get_last_shuffle(1)
+        match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID, betting_mode="house")
+        pending1 = match_service.get_last_shuffle(TEST_GUILD_ID)
         _ensure_betting_open(pending1)
-        betting_service.place_bet(1, 2001, "radiant", 10, pending1)
-        match_service.record_match("radiant", guild_id=1)
+        betting_service.place_bet(TEST_GUILD_ID, 2001, "radiant", 10, pending1)
+        match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
 
         # Second match - pending (not recorded)
-        match_service.shuffle_players(player_ids, guild_id=1, betting_mode="house")
-        pending2 = match_service.get_last_shuffle(1)
+        match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID, betting_mode="house")
+        pending2 = match_service.get_last_shuffle(TEST_GUILD_ID)
         _ensure_betting_open(pending2)
-        betting_service.place_bet(1, 2001, "radiant", 20, pending2)
+        betting_service.place_bet(TEST_GUILD_ID, 2001, "radiant", 20, pending2)
         # Don't record this match
 
         target_player = pending1["radiant_team_ids"][0]
-        bets = bet_repo.get_bets_on_player_matches(target_player)
+        bets = bet_repo.get_bets_on_player_matches(target_player, TEST_GUILD_ID)
         # Should only have bet from first (settled) match
         assert len(bets) == 1
         assert bets[0]["effective_bet"] == 10
@@ -172,21 +176,21 @@ class TestBetRepositoryGetBetsOnPlayerMatches:
         spectator_ids = [2001, 2002]
         _setup_players(player_repo, player_ids, spectator_ids)
         for sid in spectator_ids:
-            player_repo.add_balance(sid, 100)
+            player_repo.add_balance(sid, TEST_GUILD_ID, 100)
 
-        match_service.shuffle_players(player_ids, guild_id=1, betting_mode="house")
-        pending = match_service.get_last_shuffle(1)
+        match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID, betting_mode="house")
+        pending = match_service.get_last_shuffle(TEST_GUILD_ID)
         _ensure_betting_open(pending)
 
         # Target player is on radiant
         target_player = pending["radiant_team_ids"][0]
 
-        betting_service.place_bet(1, 2001, "radiant", 10, pending)  # FOR
-        betting_service.place_bet(1, 2002, "dire", 15, pending)  # AGAINST
+        betting_service.place_bet(TEST_GUILD_ID, 2001, "radiant", 10, pending)  # FOR
+        betting_service.place_bet(TEST_GUILD_ID, 2002, "dire", 15, pending)  # AGAINST
 
-        match_service.record_match("radiant", guild_id=1)
+        match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
 
-        bets = bet_repo.get_bets_on_player_matches(target_player)
+        bets = bet_repo.get_bets_on_player_matches(target_player, TEST_GUILD_ID)
 
         for_bet = next(b for b in bets if b["bettor_id"] == 2001)
         against_bet = next(b for b in bets if b["bettor_id"] == 2002)
@@ -201,7 +205,7 @@ class TestGamblingStatsServiceBettingImpact:
     def test_returns_none_for_no_external_bets(self, services):
         """Returns None when player has no external bets on their matches."""
         gambling_stats_service = services["gambling_stats_service"]
-        result = gambling_stats_service.get_betting_impact_stats(99999)
+        result = gambling_stats_service.get_betting_impact_stats(99999, TEST_GUILD_ID)
         assert result is None
 
     def test_calculates_aggregate_totals(self, services):
@@ -215,24 +219,24 @@ class TestGamblingStatsServiceBettingImpact:
         spectator_ids = [2001, 2002, 2003]
         _setup_players(player_repo, player_ids, spectator_ids)
         for sid in spectator_ids:
-            player_repo.add_balance(sid, 100)
+            player_repo.add_balance(sid, TEST_GUILD_ID, 100)
 
-        match_service.shuffle_players(player_ids, guild_id=1, betting_mode="house")
-        pending = match_service.get_last_shuffle(1)
+        match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID, betting_mode="house")
+        pending = match_service.get_last_shuffle(TEST_GUILD_ID)
         _ensure_betting_open(pending)
 
         target_player = pending["radiant_team_ids"][0]
 
         # Bets FOR target (radiant)
-        betting_service.place_bet(1, 2001, "radiant", 10, pending)
-        betting_service.place_bet(1, 2002, "radiant", 20, pending)
+        betting_service.place_bet(TEST_GUILD_ID, 2001, "radiant", 10, pending)
+        betting_service.place_bet(TEST_GUILD_ID, 2002, "radiant", 20, pending)
         # Bet AGAINST target (dire)
-        betting_service.place_bet(1, 2003, "dire", 15, pending)
+        betting_service.place_bet(TEST_GUILD_ID, 2003, "dire", 15, pending)
 
         # Radiant wins - supporters profit, haters lose
-        match_service.record_match("radiant", guild_id=1)
+        match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
 
-        impact = gambling_stats_service.get_betting_impact_stats(target_player)
+        impact = gambling_stats_service.get_betting_impact_stats(target_player, TEST_GUILD_ID)
 
         assert impact is not None
         assert impact.total_wagered_for == 30  # 10 + 20
@@ -252,21 +256,21 @@ class TestGamblingStatsServiceBettingImpact:
         player_ids = list(range(1000, 1010))
         spectator_ids = [2001, 2002]
         _setup_players(player_repo, player_ids, spectator_ids)
-        player_repo.add_balance(2001, 100)
-        player_repo.add_balance(2002, 100)
+        player_repo.add_balance(2001, TEST_GUILD_ID, 100)
+        player_repo.add_balance(2002, TEST_GUILD_ID, 100)
 
-        match_service.shuffle_players(player_ids, guild_id=1, betting_mode="house")
-        pending = match_service.get_last_shuffle(1)
+        match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID, betting_mode="house")
+        pending = match_service.get_last_shuffle(TEST_GUILD_ID)
         _ensure_betting_open(pending)
 
         target_player = pending["radiant_team_ids"][0]
 
-        betting_service.place_bet(1, 2001, "radiant", 10, pending)
-        betting_service.place_bet(1, 2002, "radiant", 50, pending)  # Bigger bet
+        betting_service.place_bet(TEST_GUILD_ID, 2001, "radiant", 10, pending)
+        betting_service.place_bet(TEST_GUILD_ID, 2002, "radiant", 50, pending)  # Bigger bet
 
-        match_service.record_match("radiant", guild_id=1)
+        match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
 
-        impact = gambling_stats_service.get_betting_impact_stats(target_player)
+        impact = gambling_stats_service.get_betting_impact_stats(target_player, TEST_GUILD_ID)
 
         assert impact.biggest_fan is not None
         assert impact.biggest_fan.discord_id == 2002
@@ -282,21 +286,21 @@ class TestGamblingStatsServiceBettingImpact:
         player_ids = list(range(1000, 1010))
         spectator_ids = [2001, 2002]
         _setup_players(player_repo, player_ids, spectator_ids)
-        player_repo.add_balance(2001, 100)
-        player_repo.add_balance(2002, 100)
+        player_repo.add_balance(2001, TEST_GUILD_ID, 100)
+        player_repo.add_balance(2002, TEST_GUILD_ID, 100)
 
-        match_service.shuffle_players(player_ids, guild_id=1, betting_mode="house")
-        pending = match_service.get_last_shuffle(1)
+        match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID, betting_mode="house")
+        pending = match_service.get_last_shuffle(TEST_GUILD_ID)
         _ensure_betting_open(pending)
 
         target_player = pending["radiant_team_ids"][0]
 
-        betting_service.place_bet(1, 2001, "dire", 15, pending)
-        betting_service.place_bet(1, 2002, "dire", 40, pending)  # Bigger bet
+        betting_service.place_bet(TEST_GUILD_ID, 2001, "dire", 15, pending)
+        betting_service.place_bet(TEST_GUILD_ID, 2002, "dire", 40, pending)  # Bigger bet
 
-        match_service.record_match("radiant", guild_id=1)
+        match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
 
-        impact = gambling_stats_service.get_betting_impact_stats(target_player)
+        impact = gambling_stats_service.get_betting_impact_stats(target_player, TEST_GUILD_ID)
 
         assert impact.biggest_hater is not None
         assert impact.biggest_hater.discord_id == 2002
@@ -312,21 +316,21 @@ class TestGamblingStatsServiceBettingImpact:
         player_ids = list(range(1000, 1010))
         spectator_ids = [2001, 2002]
         _setup_players(player_repo, player_ids, spectator_ids)
-        player_repo.add_balance(2001, 100)
-        player_repo.add_balance(2002, 100)
+        player_repo.add_balance(2001, TEST_GUILD_ID, 100)
+        player_repo.add_balance(2002, TEST_GUILD_ID, 100)
 
-        match_service.shuffle_players(player_ids, guild_id=1, betting_mode="house")
-        pending = match_service.get_last_shuffle(1)
+        match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID, betting_mode="house")
+        pending = match_service.get_last_shuffle(TEST_GUILD_ID)
         _ensure_betting_open(pending)
 
         target_player = pending["radiant_team_ids"][0]
 
-        betting_service.place_bet(1, 2001, "radiant", 75, pending)  # FOR
-        betting_service.place_bet(1, 2002, "dire", 25, pending)  # AGAINST
+        betting_service.place_bet(TEST_GUILD_ID, 2001, "radiant", 75, pending)  # FOR
+        betting_service.place_bet(TEST_GUILD_ID, 2002, "dire", 25, pending)  # AGAINST
 
-        match_service.record_match("radiant", guild_id=1)
+        match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
 
-        impact = gambling_stats_service.get_betting_impact_stats(target_player)
+        impact = gambling_stats_service.get_betting_impact_stats(target_player, TEST_GUILD_ID)
 
         # 75 / (75 + 25) = 0.75
         assert impact.market_favorability == 0.75
@@ -342,21 +346,21 @@ class TestGamblingStatsServiceBettingImpact:
         spectator_ids = [2001, 2002, 2003]
         _setup_players(player_repo, player_ids, spectator_ids)
         for sid in spectator_ids:
-            player_repo.add_balance(sid, 100)
+            player_repo.add_balance(sid, TEST_GUILD_ID, 100)
 
-        match_service.shuffle_players(player_ids, guild_id=1, betting_mode="house")
-        pending = match_service.get_last_shuffle(1)
+        match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID, betting_mode="house")
+        pending = match_service.get_last_shuffle(TEST_GUILD_ID)
         _ensure_betting_open(pending)
 
         target_player = pending["radiant_team_ids"][0]
 
-        betting_service.place_bet(1, 2001, "radiant", 10, pending)  # Supporter
-        betting_service.place_bet(1, 2002, "radiant", 10, pending)  # Supporter
-        betting_service.place_bet(1, 2003, "dire", 10, pending)  # Hater
+        betting_service.place_bet(TEST_GUILD_ID, 2001, "radiant", 10, pending)  # Supporter
+        betting_service.place_bet(TEST_GUILD_ID, 2002, "radiant", 10, pending)  # Supporter
+        betting_service.place_bet(TEST_GUILD_ID, 2003, "dire", 10, pending)  # Hater
 
-        match_service.record_match("radiant", guild_id=1)
+        match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
 
-        impact = gambling_stats_service.get_betting_impact_stats(target_player)
+        impact = gambling_stats_service.get_betting_impact_stats(target_player, TEST_GUILD_ID)
 
         assert impact.unique_supporters == 2
         assert impact.unique_haters == 1
@@ -371,20 +375,20 @@ class TestGamblingStatsServiceBettingImpact:
         player_ids = list(range(1000, 1010))
         spectator_ids = [2001]
         _setup_players(player_repo, player_ids, spectator_ids)
-        player_repo.add_balance(2001, 100)
+        player_repo.add_balance(2001, TEST_GUILD_ID, 100)
 
-        match_service.shuffle_players(player_ids, guild_id=1, betting_mode="house")
-        pending = match_service.get_last_shuffle(1)
+        match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID, betting_mode="house")
+        pending = match_service.get_last_shuffle(TEST_GUILD_ID)
         _ensure_betting_open(pending)
 
         target_player = pending["radiant_team_ids"][0]
 
-        betting_service.place_bet(1, 2001, "radiant", 10, pending)  # FOR target
+        betting_service.place_bet(TEST_GUILD_ID, 2001, "radiant", 10, pending)  # FOR target
 
         # Record dire win - supporter loses
-        match_service.record_match("dire", guild_id=1)
+        match_service.record_match("dire", guild_id=TEST_GUILD_ID)
 
-        impact = gambling_stats_service.get_betting_impact_stats(target_player)
+        impact = gambling_stats_service.get_betting_impact_stats(target_player, TEST_GUILD_ID)
 
         # Supporter lost, so blessing should be None
         assert impact.blessing is None
@@ -399,20 +403,20 @@ class TestGamblingStatsServiceBettingImpact:
         player_ids = list(range(1000, 1010))
         spectator_ids = [2001]
         _setup_players(player_repo, player_ids, spectator_ids)
-        player_repo.add_balance(2001, 100)
+        player_repo.add_balance(2001, TEST_GUILD_ID, 100)
 
-        match_service.shuffle_players(player_ids, guild_id=1, betting_mode="house")
-        pending = match_service.get_last_shuffle(1)
+        match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID, betting_mode="house")
+        pending = match_service.get_last_shuffle(TEST_GUILD_ID)
         _ensure_betting_open(pending)
 
         target_player = pending["radiant_team_ids"][0]
 
-        betting_service.place_bet(1, 2001, "dire", 10, pending)  # AGAINST target
+        betting_service.place_bet(TEST_GUILD_ID, 2001, "dire", 10, pending)  # AGAINST target
 
         # Record radiant win - hater loses
-        match_service.record_match("radiant", guild_id=1)
+        match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
 
-        impact = gambling_stats_service.get_betting_impact_stats(target_player)
+        impact = gambling_stats_service.get_betting_impact_stats(target_player, TEST_GUILD_ID)
 
         # Hater lost, so luckiest_hater should be None
         assert impact.luckiest_hater is None
@@ -428,22 +432,22 @@ class TestGamblingStatsServiceBettingImpact:
         spectator_ids = [2001, 2002, 2003]
         _setup_players(player_repo, player_ids, spectator_ids)
         for sid in spectator_ids:
-            player_repo.add_balance(sid, 100)
+            player_repo.add_balance(sid, TEST_GUILD_ID, 100)
 
-        match_service.shuffle_players(player_ids, guild_id=1, betting_mode="house")
-        pending = match_service.get_last_shuffle(1)
+        match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID, betting_mode="house")
+        pending = match_service.get_last_shuffle(TEST_GUILD_ID)
         _ensure_betting_open(pending)
 
         target_player = pending["radiant_team_ids"][0]
 
         # 3 bets total
-        betting_service.place_bet(1, 2001, "radiant", 10, pending)
-        betting_service.place_bet(1, 2002, "radiant", 20, pending)
-        betting_service.place_bet(1, 2003, "dire", 15, pending)
+        betting_service.place_bet(TEST_GUILD_ID, 2001, "radiant", 10, pending)
+        betting_service.place_bet(TEST_GUILD_ID, 2002, "radiant", 20, pending)
+        betting_service.place_bet(TEST_GUILD_ID, 2003, "dire", 15, pending)
 
-        match_service.record_match("radiant", guild_id=1)
+        match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
 
-        impact = gambling_stats_service.get_betting_impact_stats(target_player)
+        impact = gambling_stats_service.get_betting_impact_stats(target_player, TEST_GUILD_ID)
 
         assert impact.total_bets == 3
 
@@ -458,22 +462,22 @@ class TestGamblingStatsServiceBettingImpact:
         spectator_ids = [2001, 2002, 2003, 2004]
         _setup_players(player_repo, player_ids, spectator_ids)
         for sid in spectator_ids:
-            player_repo.add_balance(sid, 200)
+            player_repo.add_balance(sid, TEST_GUILD_ID, 200)
 
         # First match - radiant wins
-        match_service.shuffle_players(player_ids, guild_id=1, betting_mode="house")
-        pending = match_service.get_last_shuffle(1)
+        match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID, betting_mode="house")
+        pending = match_service.get_last_shuffle(TEST_GUILD_ID)
         _ensure_betting_open(pending)
         target_player = pending["radiant_team_ids"][0]
 
-        betting_service.place_bet(1, 2001, "radiant", 10, pending)  # FOR - wins
-        betting_service.place_bet(1, 2002, "radiant", 10, pending)  # FOR - wins
-        betting_service.place_bet(1, 2003, "dire", 10, pending)  # AGAINST - loses
-        betting_service.place_bet(1, 2004, "dire", 10, pending)  # AGAINST - loses
+        betting_service.place_bet(TEST_GUILD_ID, 2001, "radiant", 10, pending)  # FOR - wins
+        betting_service.place_bet(TEST_GUILD_ID, 2002, "radiant", 10, pending)  # FOR - wins
+        betting_service.place_bet(TEST_GUILD_ID, 2003, "dire", 10, pending)  # AGAINST - loses
+        betting_service.place_bet(TEST_GUILD_ID, 2004, "dire", 10, pending)  # AGAINST - loses
 
-        match_service.record_match("radiant", guild_id=1)
+        match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
 
-        impact = gambling_stats_service.get_betting_impact_stats(target_player)
+        impact = gambling_stats_service.get_betting_impact_stats(target_player, TEST_GUILD_ID)
 
         # Supporters: 2 bets, 2 wins = 100%
         assert impact.supporter_win_rate == 1.0
@@ -492,30 +496,30 @@ class TestGamblingStatsServiceBettingImpact:
         player_ids = list(range(1000, 1010))
         spectator_ids = [2001, 2002]
         _setup_players(player_repo, player_ids, spectator_ids)
-        player_repo.add_balance(2001, 200)
-        player_repo.add_balance(2002, 200)
+        player_repo.add_balance(2001, TEST_GUILD_ID, 200)
+        player_repo.add_balance(2002, TEST_GUILD_ID, 200)
 
         # First match
-        match_service.shuffle_players(player_ids, guild_id=1, betting_mode="house")
-        pending1 = match_service.get_last_shuffle(1)
+        match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID, betting_mode="house")
+        pending1 = match_service.get_last_shuffle(TEST_GUILD_ID)
         _ensure_betting_open(pending1)
         target_player = pending1["radiant_team_ids"][0]
 
-        betting_service.place_bet(1, 2001, "radiant", 10, pending1)  # 2001 bets FOR target
-        betting_service.place_bet(1, 2002, "radiant", 5, pending1)  # 2002 bets FOR target
-        match_service.record_match("radiant", guild_id=1)
+        betting_service.place_bet(TEST_GUILD_ID, 2001, "radiant", 10, pending1)  # 2001 bets FOR target
+        betting_service.place_bet(TEST_GUILD_ID, 2002, "radiant", 5, pending1)  # 2002 bets FOR target
+        match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
 
         # Second match - find which team target is on
-        match_service.shuffle_players(player_ids, guild_id=1, betting_mode="house")
-        pending2 = match_service.get_last_shuffle(1)
+        match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID, betting_mode="house")
+        pending2 = match_service.get_last_shuffle(TEST_GUILD_ID)
         _ensure_betting_open(pending2)
 
         # Bet on whichever team the target is on
         target_team2 = "radiant" if target_player in pending2["radiant_team_ids"] else "dire"
-        betting_service.place_bet(1, 2002, target_team2, 5, pending2)  # 2002 bets FOR target again
-        match_service.record_match(target_team2, guild_id=1)  # Target's team wins
+        betting_service.place_bet(TEST_GUILD_ID, 2002, target_team2, 5, pending2)  # 2002 bets FOR target again
+        match_service.record_match(target_team2, guild_id=TEST_GUILD_ID)  # Target's team wins
 
-        impact = gambling_stats_service.get_betting_impact_stats(target_player)
+        impact = gambling_stats_service.get_betting_impact_stats(target_player, TEST_GUILD_ID)
 
         # 2002 has more bets (2) vs 2001 (1)
         assert impact.most_consistent_fan is not None
@@ -532,23 +536,23 @@ class TestGamblingStatsServiceBettingImpact:
         player_ids = list(range(1000, 1010))
         spectator_ids = [2001, 2002]
         _setup_players(player_repo, player_ids, spectator_ids)
-        player_repo.add_balance(2001, 200)
-        player_repo.add_balance(2002, 200)
+        player_repo.add_balance(2001, TEST_GUILD_ID, 200)
+        player_repo.add_balance(2002, TEST_GUILD_ID, 200)
 
         # First match - target's team wins
-        match_service.shuffle_players(player_ids, guild_id=1, betting_mode="house")
-        pending1 = match_service.get_last_shuffle(1)
+        match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID, betting_mode="house")
+        pending1 = match_service.get_last_shuffle(TEST_GUILD_ID)
         _ensure_betting_open(pending1)
         target_player = pending1["radiant_team_ids"][0]
 
         # Both bet FOR target (on radiant)
-        betting_service.place_bet(1, 2001, "radiant", 50, pending1)  # Wins 50
-        betting_service.place_bet(1, 2002, "radiant", 10, pending1)  # Wins 10
-        match_service.record_match("radiant", guild_id=1)
+        betting_service.place_bet(TEST_GUILD_ID, 2001, "radiant", 50, pending1)  # Wins 50
+        betting_service.place_bet(TEST_GUILD_ID, 2002, "radiant", 10, pending1)  # Wins 10
+        match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
 
         # Second match - target's team loses
-        match_service.shuffle_players(player_ids, guild_id=1, betting_mode="house")
-        pending2 = match_service.get_last_shuffle(1)
+        match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID, betting_mode="house")
+        pending2 = match_service.get_last_shuffle(TEST_GUILD_ID)
         _ensure_betting_open(pending2)
 
         # Find which team target is on, then bet FOR them (they will lose)
@@ -556,11 +560,11 @@ class TestGamblingStatsServiceBettingImpact:
         losing_team = target_team2
         winning_team = "dire" if target_team2 == "radiant" else "radiant"
 
-        betting_service.place_bet(1, 2001, target_team2, 10, pending2)  # Loses 10 (betting FOR target)
-        betting_service.place_bet(1, 2002, target_team2, 50, pending2)  # Loses 50 (betting FOR target)
-        match_service.record_match(winning_team, guild_id=1)  # Target's team loses
+        betting_service.place_bet(TEST_GUILD_ID, 2001, target_team2, 10, pending2)  # Loses 10 (betting FOR target)
+        betting_service.place_bet(TEST_GUILD_ID, 2002, target_team2, 50, pending2)  # Loses 50 (betting FOR target)
+        match_service.record_match(winning_team, guild_id=TEST_GUILD_ID)  # Target's team loses
 
-        impact = gambling_stats_service.get_betting_impact_stats(target_player)
+        impact = gambling_stats_service.get_betting_impact_stats(target_player, TEST_GUILD_ID)
 
         # 2001: +50 -10 = +40 net (betting FOR target)
         # 2002: +10 -50 = -40 net (betting FOR target)
@@ -584,22 +588,22 @@ class TestGamblingStatsServiceBettingImpact:
         player_ids = list(range(1000, 1010))
         spectator_ids = [2001, 2002]
         _setup_players(player_repo, player_ids, spectator_ids)
-        player_repo.add_balance(2001, 200)
-        player_repo.add_balance(2002, 200)
+        player_repo.add_balance(2001, TEST_GUILD_ID, 200)
+        player_repo.add_balance(2002, TEST_GUILD_ID, 200)
 
-        match_service.shuffle_players(player_ids, guild_id=1, betting_mode="house")
-        pending = match_service.get_last_shuffle(1)
+        match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID, betting_mode="house")
+        pending = match_service.get_last_shuffle(TEST_GUILD_ID)
         _ensure_betting_open(pending)
 
         target_player = pending["radiant_team_ids"][0]
 
         # Winner wins 50, loser loses 30
-        betting_service.place_bet(1, 2001, "radiant", 50, pending)  # Wins +50
-        betting_service.place_bet(1, 2002, "dire", 30, pending)  # Loses -30
+        betting_service.place_bet(TEST_GUILD_ID, 2001, "radiant", 50, pending)  # Wins +50
+        betting_service.place_bet(TEST_GUILD_ID, 2002, "dire", 30, pending)  # Loses -30
 
-        match_service.record_match("radiant", guild_id=1)
+        match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
 
-        impact = gambling_stats_service.get_betting_impact_stats(target_player)
+        impact = gambling_stats_service.get_betting_impact_stats(target_player, TEST_GUILD_ID)
 
         assert impact.biggest_single_win == 50
         assert impact.biggest_single_loss == -30

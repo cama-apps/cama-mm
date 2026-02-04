@@ -103,8 +103,8 @@ class DisburseService:
             return False, f"insufficient_fund:{fund}:{self.min_fund}"
 
         # Check for players with negative balance OR stimulus-eligible players
-        debtors = self.player_repo.get_players_with_negative_balance()
-        stimulus_eligible = self.player_repo.get_stimulus_eligible_players()
+        debtors = self.player_repo.get_players_with_negative_balance(guild_id)
+        stimulus_eligible = self.player_repo.get_stimulus_eligible_players(guild_id)
         if not debtors and not stimulus_eligible:
             return False, "no_eligible_recipients"
 
@@ -123,7 +123,7 @@ class DisburseService:
 
         proposal_id = int(time.time())
         fund_amount = self.loan_repo.get_nonprofit_fund(guild_id)
-        player_count = self.player_repo.get_registered_player_count()
+        player_count = self.player_repo.get_registered_player_count(guild_id)
         quorum_required = max(1, math.ceil(player_count * self.quorum_percentage))
 
         self.disburse_repo.create_proposal(
@@ -274,7 +274,7 @@ class DisburseService:
 
         # Handle stimulus separately - different eligibility criteria
         if method == "stimulus":
-            eligible = self.player_repo.get_stimulus_eligible_players()
+            eligible = self.player_repo.get_stimulus_eligible_players(guild_id)
             if not eligible:
                 self.disburse_repo.complete_proposal(guild_id)
                 return {
@@ -288,7 +288,7 @@ class DisburseService:
             distributions = self._calculate_stimulus_distribution(fund_amount, eligible)
         elif method == "lottery":
             # Lottery: pick one random registered player, winner takes all
-            eligible = self.player_repo.get_all_registered_players_for_lottery()
+            eligible = self.player_repo.get_all_registered_players_for_lottery(guild_id)
             if not eligible:
                 self.disburse_repo.complete_proposal(guild_id)
                 return {
@@ -302,7 +302,7 @@ class DisburseService:
             distributions = self._calculate_lottery_distribution(fund_amount, eligible)
         elif method == "social_security":
             # Social security: distribute proportional to games played
-            eligible = self.player_repo.get_players_by_games_played()
+            eligible = self.player_repo.get_players_by_games_played(guild_id)
             if not eligible:
                 self.disburse_repo.complete_proposal(guild_id)
                 return {
@@ -316,7 +316,7 @@ class DisburseService:
             distributions = self._calculate_social_security_distribution(fund_amount, eligible)
         else:
             # Debtor-based methods: even, proportional, neediest
-            debtors = self.player_repo.get_players_with_negative_balance()
+            debtors = self.player_repo.get_players_with_negative_balance(guild_id)
             if not debtors:
                 self.disburse_repo.complete_proposal(guild_id)
                 return {

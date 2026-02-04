@@ -4,6 +4,8 @@ from repositories.match_repository import MatchRepository
 from repositories.player_repository import PlayerRepository
 from services.match_service import MatchService
 
+TEST_GUILD_ID = 12345
+
 
 def test_record_match_stores_predictions_and_history(repo_db_path):
     player_repo = PlayerRepository(repo_db_path)
@@ -15,21 +17,22 @@ def test_record_match_stores_predictions_and_history(repo_db_path):
         player_repo.add(
             discord_id=pid,
             discord_username=f"Player{pid}",
+            guild_id=TEST_GUILD_ID,
             initial_mmr=4000,
             glicko_rating=1500.0,
             glicko_rd=350.0,
             glicko_volatility=0.06,
         )
 
-    match_service.shuffle_players(player_ids, guild_id=1)
-    result = match_service.record_match("radiant", guild_id=1)
+    match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
+    result = match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
 
-    predictions = match_repo.get_recent_match_predictions(limit=1)
+    predictions = match_repo.get_recent_match_predictions(guild_id=TEST_GUILD_ID, limit=1)
     assert len(predictions) == 1
     assert predictions[0]["match_id"] == result["match_id"]
     assert predictions[0]["expected_radiant_win_prob"] == pytest.approx(0.5, rel=1e-6)
 
-    history = match_repo.get_recent_rating_history(limit=20)
+    history = match_repo.get_recent_rating_history(guild_id=TEST_GUILD_ID, limit=20)
     assert len(history) == 10
     assert {entry["match_id"] for entry in history} == {result["match_id"]}
     for entry in history:

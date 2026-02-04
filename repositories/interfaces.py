@@ -13,6 +13,7 @@ class IPlayerRepository(ABC):
         self,
         discord_id: int,
         discord_username: str,
+        guild_id: int,
         dotabuff_url: str | None = None,
         initial_mmr: int | None = None,
         preferred_roles: list[str] | None = None,
@@ -23,69 +24,69 @@ class IPlayerRepository(ABC):
     ) -> None: ...
 
     @abstractmethod
-    def get_by_id(self, discord_id: int): ...
+    def get_by_id(self, discord_id: int, guild_id: int): ...
 
     @abstractmethod
-    def get_by_ids(self, discord_ids: list[int]): ...
+    def get_by_ids(self, discord_ids: list[int], guild_id: int): ...
 
     @abstractmethod
-    def get_by_username(self, username: str): ...
+    def get_by_username(self, username: str, guild_id: int): ...
 
     @abstractmethod
-    def get_all(self): ...
+    def get_all(self, guild_id: int): ...
 
     @abstractmethod
-    def exists(self, discord_id: int) -> bool: ...
+    def exists(self, discord_id: int, guild_id: int) -> bool: ...
 
     @abstractmethod
-    def update_roles(self, discord_id: int, roles: list[str]) -> None: ...
+    def update_roles(self, discord_id: int, guild_id: int, roles: list[str]) -> None: ...
 
     @abstractmethod
     def update_glicko_rating(
-        self, discord_id: int, rating: float, rd: float, volatility: float
+        self, discord_id: int, guild_id: int, rating: float, rd: float, volatility: float
     ) -> None: ...
 
     @abstractmethod
-    def get_glicko_rating(self, discord_id: int) -> tuple[float, float, float] | None: ...
+    def get_glicko_rating(self, discord_id: int, guild_id: int) -> tuple[float, float, float] | None: ...
 
     @abstractmethod
-    def update_mmr(self, discord_id: int, new_mmr: float) -> None: ...
+    def update_mmr(self, discord_id: int, guild_id: int, new_mmr: float) -> None: ...
 
     @abstractmethod
-    def get_balance(self, discord_id: int) -> int: ...
+    def get_balance(self, discord_id: int, guild_id: int) -> int: ...
 
     @abstractmethod
-    def update_balance(self, discord_id: int, amount: int) -> None: ...
+    def update_balance(self, discord_id: int, guild_id: int, amount: int) -> None: ...
 
     @abstractmethod
-    def add_balance(self, discord_id: int, amount: int) -> None: ...
+    def add_balance(self, discord_id: int, guild_id: int, amount: int) -> None: ...
 
     @abstractmethod
-    def increment_wins(self, discord_id: int) -> None: ...
+    def increment_wins(self, discord_id: int, guild_id: int) -> None: ...
 
     @abstractmethod
-    def increment_losses(self, discord_id: int) -> None: ...
+    def increment_losses(self, discord_id: int, guild_id: int) -> None: ...
 
     @abstractmethod
-    def get_exclusion_counts(self, discord_ids: list[int]) -> dict[int, int]: ...
+    def get_exclusion_counts(self, discord_ids: list[int], guild_id: int) -> dict[int, int]: ...
 
     @abstractmethod
-    def increment_exclusion_count(self, discord_id: int) -> None: ...
+    def increment_exclusion_count(self, discord_id: int, guild_id: int) -> None: ...
 
     @abstractmethod
-    def increment_exclusion_count_half(self, discord_id: int) -> None: ...
+    def increment_exclusion_count_half(self, discord_id: int, guild_id: int) -> None: ...
 
     @abstractmethod
-    def decay_exclusion_count(self, discord_id: int) -> None: ...
+    def decay_exclusion_count(self, discord_id: int, guild_id: int) -> None: ...
 
     @abstractmethod
-    def delete(self, discord_id: int) -> bool: ...
+    def delete(self, discord_id: int, guild_id: int) -> bool: ...
 
     @abstractmethod
-    def delete_all(self) -> int: ...
+    def delete_all(self, guild_id: int) -> int: ...
 
     @abstractmethod
-    def delete_fake_users(self) -> int: ...
+    def delete_fake_users(self, guild_id: int) -> int: ...
 
     @abstractmethod
     def get_by_steam_id(self, steam_id: int):
@@ -185,6 +186,7 @@ class IMatchRepository(ABC):
         team1_ids: list[int],
         team2_ids: list[int],
         winning_team: int,
+        guild_id: int,
         radiant_team_ids: list[int] | None = None,
         dire_team_ids: list[int] | None = None,
         dotabuff_match_id: str | None = None,
@@ -195,6 +197,7 @@ class IMatchRepository(ABC):
     def add_rating_history(
         self,
         discord_id: int,
+        guild_id: int,
         rating: float,
         match_id: int | None = None,
         rating_before: float | None = None,
@@ -210,29 +213,30 @@ class IMatchRepository(ABC):
     ) -> None: ...
 
     @abstractmethod
-    def get_match(self, match_id: int): ...
+    def get_match(self, match_id: int, guild_id: int): ...
 
     @abstractmethod
-    def get_player_matches(self, discord_id: int, limit: int = 10): ...
+    def get_player_matches(self, discord_id: int, guild_id: int, limit: int = 10): ...
 
     @abstractmethod
-    def get_rating_history(self, discord_id: int, limit: int = 20): ...
+    def get_rating_history(self, discord_id: int, guild_id: int, limit: int = 20): ...
 
     @abstractmethod
-    def get_player_recent_outcomes(self, discord_id: int, limit: int = 20) -> list[bool]:
+    def get_player_recent_outcomes(self, discord_id: int, guild_id: int, limit: int = 20) -> list[bool]:
         """Get recent match outcomes for a player (True=win, most recent first)."""
         ...
 
     @abstractmethod
-    def get_recent_rating_history(self, limit: int = 200): ...
+    def get_recent_rating_history(self, guild_id: int, limit: int = 200): ...
 
     @abstractmethod
-    def get_match_count(self) -> int: ...
+    def get_match_count(self, guild_id: int) -> int: ...
 
     @abstractmethod
     def add_match_prediction(
         self,
         match_id: int,
+        guild_id: int,
         radiant_rating: float,
         dire_rating: float,
         radiant_rd: float,
@@ -241,16 +245,16 @@ class IMatchRepository(ABC):
     ) -> None: ...
 
     @abstractmethod
-    def get_recent_match_predictions(self, limit: int = 200): ...
+    def get_recent_match_predictions(self, guild_id: int, limit: int = 200): ...
 
     @abstractmethod
-    def get_biggest_upsets(self, limit: int = 5): ...
+    def get_biggest_upsets(self, guild_id: int, limit: int = 5): ...
 
     @abstractmethod
-    def get_player_performance_stats(self): ...
+    def get_player_performance_stats(self, guild_id: int): ...
 
     @abstractmethod
-    def delete_all_matches(self) -> int: ...
+    def delete_all_matches(self, guild_id: int) -> int: ...
 
     @abstractmethod
     def save_pending_match(self, guild_id: int | None, payload: dict) -> None: ...
@@ -265,12 +269,12 @@ class IMatchRepository(ABC):
     def consume_pending_match(self, guild_id: int | None) -> dict | None: ...
 
     @abstractmethod
-    def get_player_hero_stats(self, discord_id: int) -> dict:
+    def get_player_hero_stats(self, discord_id: int, guild_id: int) -> dict:
         """Get hero statistics for a player from enriched matches."""
         ...
 
     @abstractmethod
-    def get_last_match_participant_ids(self) -> set[int]:
+    def get_last_match_participant_ids(self, guild_id: int) -> set[int]:
         """Get Discord IDs of participants from the most recently recorded match."""
         ...
 
@@ -307,77 +311,78 @@ class IPairingsRepository(ABC):
         team1_ids: list[int],
         team2_ids: list[int],
         winning_team: int,
+        guild_id: int,
     ) -> None:
         """Update pairwise statistics for all player pairs in a match."""
         ...
 
     @abstractmethod
-    def get_pairings_for_player(self, discord_id: int) -> list[dict]:
+    def get_pairings_for_player(self, discord_id: int, guild_id: int) -> list[dict]:
         """Get all pairwise stats involving a player."""
         ...
 
     @abstractmethod
-    def get_best_teammates(self, discord_id: int, min_games: int = 3, limit: int = 5) -> list[dict]:
+    def get_best_teammates(self, discord_id: int, guild_id: int, min_games: int = 3, limit: int = 5) -> list[dict]:
         """Get players with highest win rate when on same team."""
         ...
 
     @abstractmethod
     def get_worst_teammates(
-        self, discord_id: int, min_games: int = 3, limit: int = 5
+        self, discord_id: int, guild_id: int, min_games: int = 3, limit: int = 5
     ) -> list[dict]:
         """Get players with lowest win rate when on same team."""
         ...
 
     @abstractmethod
-    def get_best_matchups(self, discord_id: int, min_games: int = 3, limit: int = 5) -> list[dict]:
+    def get_best_matchups(self, discord_id: int, guild_id: int, min_games: int = 3, limit: int = 5) -> list[dict]:
         """Get players with highest win rate when on opposing teams."""
         ...
 
     @abstractmethod
-    def get_worst_matchups(self, discord_id: int, min_games: int = 3, limit: int = 5) -> list[dict]:
+    def get_worst_matchups(self, discord_id: int, guild_id: int, min_games: int = 3, limit: int = 5) -> list[dict]:
         """Get players with lowest win rate when on opposing teams."""
         ...
 
     @abstractmethod
     def get_most_played_with(
-        self, discord_id: int, min_games: int = 3, limit: int = 5
+        self, discord_id: int, guild_id: int, min_games: int = 3, limit: int = 5
     ) -> list[dict]:
         """Get teammates sorted by most games played together."""
         ...
 
     @abstractmethod
     def get_most_played_against(
-        self, discord_id: int, min_games: int = 3, limit: int = 5
+        self, discord_id: int, guild_id: int, min_games: int = 3, limit: int = 5
     ) -> list[dict]:
         """Get opponents sorted by most games played against."""
         ...
 
     @abstractmethod
     def get_evenly_matched_teammates(
-        self, discord_id: int, min_games: int = 3, limit: int = 5
+        self, discord_id: int, guild_id: int, min_games: int = 3, limit: int = 5
     ) -> list[dict]:
         """Get teammates with exactly 50% win rate."""
         ...
 
     @abstractmethod
     def get_evenly_matched_opponents(
-        self, discord_id: int, min_games: int = 3, limit: int = 5
+        self, discord_id: int, guild_id: int, min_games: int = 3, limit: int = 5
     ) -> list[dict]:
         """Get opponents with exactly 50% win rate."""
         ...
 
     @abstractmethod
-    def get_pairing_counts(self, discord_id: int, min_games: int = 1) -> dict:
+    def get_pairing_counts(self, discord_id: int, guild_id: int, min_games: int = 1) -> dict:
         """Get total counts of unique teammates and opponents."""
         ...
 
     @abstractmethod
-    def get_head_to_head(self, player1_id: int, player2_id: int) -> dict | None:
+    def get_head_to_head(self, player1_id: int, player2_id: int, guild_id: int) -> dict | None:
         """Get detailed stats between two specific players."""
         ...
 
     @abstractmethod
-    def rebuild_all_pairings(self) -> int:
+    def rebuild_all_pairings(self, guild_id: int) -> int:
         """Recalculate all pairings from match history. Returns count of pairings updated."""
         ...
 
@@ -526,7 +531,7 @@ class IRecalibrationRepository(ABC):
     """Repository for recalibration state tracking."""
 
     @abstractmethod
-    def get_state(self, discord_id: int) -> dict | None:
+    def get_state(self, discord_id: int, guild_id: int) -> dict | None:
         """Get recalibration state for a player."""
         ...
 
@@ -534,6 +539,7 @@ class IRecalibrationRepository(ABC):
     def upsert_state(
         self,
         discord_id: int,
+        guild_id: int,
         last_recalibration_at: int | None = None,
         total_recalibrations: int | None = None,
         rating_at_recalibration: float | None = None,
@@ -542,6 +548,6 @@ class IRecalibrationRepository(ABC):
         ...
 
     @abstractmethod
-    def reset_cooldown(self, discord_id: int) -> None:
+    def reset_cooldown(self, discord_id: int, guild_id: int) -> None:
         """Reset recalibration cooldown by setting last_recalibration_at to 0."""
         ...

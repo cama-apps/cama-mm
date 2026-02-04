@@ -194,7 +194,7 @@ class ShopCommands(commands.Cog):
         cost = SHOP_ANNOUNCE_TARGET_COST if target else SHOP_ANNOUNCE_COST
 
         # Check if registered
-        player = self.player_service.get_player(user_id)
+        player = self.player_service.get_player(user_id, guild_id)
         if not player:
             await interaction.response.send_message(
                 "You need to `/register` before you can shop. "
@@ -204,7 +204,7 @@ class ShopCommands(commands.Cog):
             return
 
         # Check balance
-        balance = self.player_service.get_balance(user_id)
+        balance = self.player_service.get_balance(user_id, guild_id)
         if balance < cost:
             await interaction.response.send_message(
                 f"You need {cost} {JOPACOIN_EMOTE} for this, but you only have {balance}. "
@@ -218,12 +218,12 @@ class ShopCommands(commands.Cog):
             return
 
         # Deduct cost
-        self.player_service.player_repo.add_balance(user_id, -cost)
+        self.player_service.player_repo.add_balance(user_id, guild_id, -cost)
         new_balance = balance - cost
 
         # Build stats comparison for targeted flex
-        buyer_stats = self._get_flex_stats(user_id)
-        target_stats = self._get_flex_stats(target.id) if target else None
+        buyer_stats = self._get_flex_stats(user_id, guild_id)
+        target_stats = self._get_flex_stats(target.id, guild_id) if target else None
 
         # Generate AI flavor text
         ai_flavor = None
@@ -267,10 +267,10 @@ class ShopCommands(commands.Cog):
         else:
             await safe_followup(interaction, embed=embed)
 
-    def _get_flex_stats(self, discord_id: int) -> dict:
+    def _get_flex_stats(self, discord_id: int, guild_id: int | None = None) -> dict:
         """Get stats for flex comparison."""
         stats = {
-            "balance": self.player_service.get_balance(discord_id),
+            "balance": self.player_service.get_balance(discord_id, guild_id),
             "wins": 0,
             "losses": 0,
             "win_rate": None,
@@ -281,7 +281,7 @@ class ShopCommands(commands.Cog):
             "bankruptcies": 0,
         }
 
-        player = self.player_service.get_player(discord_id)
+        player = self.player_service.get_player(discord_id, guild_id)
         if player:
             stats["wins"] = player.wins or 0
             stats["losses"] = player.losses or 0
@@ -292,7 +292,7 @@ class ShopCommands(commands.Cog):
 
         if self.gambling_stats_service:
             try:
-                gamba_stats = self.gambling_stats_service.get_player_stats(discord_id)
+                gamba_stats = self.gambling_stats_service.get_player_stats(discord_id, guild_id)
                 if gamba_stats:
                     stats["total_bets"] = gamba_stats.total_bets
                     stats["net_pnl"] = gamba_stats.net_pnl
@@ -455,7 +455,7 @@ class ShopCommands(commands.Cog):
         cost = SHOP_PROTECT_HERO_COST
 
         # Check if registered
-        player = self.player_service.get_player(user_id)
+        player = self.player_service.get_player(user_id, guild_id)
         if not player:
             await interaction.response.send_message(
                 "You need to `/register` before you can shop.",
@@ -493,7 +493,7 @@ class ShopCommands(commands.Cog):
             return
 
         # Check balance
-        balance = self.player_service.get_balance(user_id)
+        balance = self.player_service.get_balance(user_id, guild_id)
         if balance < cost:
             await interaction.response.send_message(
                 f"You need {cost} {JOPACOIN_EMOTE} for this, but you only have {balance}.",
@@ -506,7 +506,7 @@ class ShopCommands(commands.Cog):
             return
 
         # Deduct cost
-        self.player_service.player_repo.add_balance(user_id, -cost)
+        self.player_service.player_repo.add_balance(user_id, guild_id, -cost)
 
         # Get hero info
         hero_id = int(hero)
@@ -573,10 +573,11 @@ class ShopCommands(commands.Cog):
     ):
         """Handle the mystery gift purchase."""
         user_id = interaction.user.id
+        guild_id = interaction.guild.id if interaction.guild else None
         cost = SHOP_MYSTERY_GIFT_COST
 
         # Check if registered
-        player = self.player_service.get_player(user_id)
+        player = self.player_service.get_player(user_id, guild_id)
         if not player:
             await interaction.response.send_message(
                 "You need to `/register` before you can shop.",
@@ -585,7 +586,7 @@ class ShopCommands(commands.Cog):
             return
 
         # Check balance
-        balance = self.player_service.get_balance(user_id)
+        balance = self.player_service.get_balance(user_id, guild_id)
         if balance < cost:
             await interaction.response.send_message(
                 f"You need {cost} {JOPACOIN_EMOTE} for this, but you only have {balance}.",
@@ -594,7 +595,7 @@ class ShopCommands(commands.Cog):
             return
 
         # Deduct cost
-        self.player_service.player_repo.add_balance(user_id, -cost)
+        self.player_service.player_repo.add_balance(user_id, guild_id, -cost)
 
         # Build the announcement embed
         embed = discord.Embed(
@@ -617,7 +618,7 @@ class ShopCommands(commands.Cog):
         cost = SHOP_DOUBLE_OR_NOTHING_COST
 
         # Check if registered
-        player = self.player_service.get_player(user_id)
+        player = self.player_service.get_player(user_id, guild_id)
         if not player:
             await interaction.response.send_message(
                 "You need to `/register` before you can gamble. "
@@ -628,7 +629,7 @@ class ShopCommands(commands.Cog):
 
         # Check cooldown (admins bypass)
         is_admin = has_admin_permission(interaction)
-        last_spin = self.player_service.player_repo.get_last_double_or_nothing(user_id)
+        last_spin = self.player_service.player_repo.get_last_double_or_nothing(user_id, guild_id)
         now = int(time.time())
         if last_spin is not None and not is_admin:
             elapsed = now - last_spin
@@ -652,7 +653,7 @@ class ShopCommands(commands.Cog):
                 return
 
         # Check balance
-        balance = self.player_service.get_balance(user_id)
+        balance = self.player_service.get_balance(user_id, guild_id)
 
         if balance < 0:
             await interaction.response.send_message(
@@ -675,7 +676,7 @@ class ShopCommands(commands.Cog):
             return
 
         # Deduct cost first
-        self.player_service.player_repo.add_balance(user_id, -cost)
+        self.player_service.player_repo.add_balance(user_id, guild_id, -cost)
         balance_after_cost = balance - cost
 
         # 50/50 flip
@@ -696,14 +697,14 @@ class ShopCommands(commands.Cog):
         elif won:
             # WIN: Double the remaining balance
             winnings = balance_after_cost
-            self.player_service.player_repo.add_balance(user_id, winnings)
+            self.player_service.player_repo.add_balance(user_id, guild_id, winnings)
             final_balance = balance_after_cost * 2
             result_title = "DOUBLE!"
             result_color = 0x00FF00  # Green
             flavor_event = FlavorEvent.DOUBLE_OR_NOTHING_WIN
         else:
             # LOSE: Zero out the balance
-            self.player_service.player_repo.update_balance(user_id, 0)
+            self.player_service.player_repo.update_balance(user_id, guild_id, 0)
             final_balance = 0
             result_title = "NOTHING!"
             result_color = 0xFF0000  # Red

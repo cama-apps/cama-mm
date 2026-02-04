@@ -21,14 +21,17 @@ async def invoke_kick(cog: LobbyCommands, interaction, player):
 class FakePlayerRepo:
     """Minimal player repo stub used by LobbyService."""
 
-    def get_by_ids(self, _ids):
+    def get_by_ids(self, _ids, guild_id=None):
+        return []
+
+    def get_captain_eligible_players(self, _ids, guild_id=None):
         return []
 
 
 class FakePlayerService:
     """Minimal player service stub used by LobbyCommands."""
 
-    def get_player(self, discord_id):
+    def get_player(self, discord_id, guild_id=None):
         return None
 
 

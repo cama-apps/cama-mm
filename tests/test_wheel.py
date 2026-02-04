@@ -129,8 +129,8 @@ async def test_wheel_positive_applies_garnishment():
             with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
                 await commands.gamba.callback(commands, interaction)
 
-    # Should call garnishment service
-    garnishment_service.add_income.assert_called_once_with(1002, 30)
+    # Should call garnishment service (user_id, amount, guild_id)
+    garnishment_service.add_income.assert_called_once_with(1002, 30, 123)
 
 
 @pytest.mark.asyncio
@@ -174,8 +174,8 @@ async def test_wheel_positive_no_debt_adds_directly():
             with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
                 await commands.gamba.callback(commands, interaction)
 
-    # Should add balance directly
-    player_service.player_repo.add_balance.assert_called_once_with(1003, 5)
+    # Should add balance directly (user_id, guild_id, amount)
+    player_service.player_repo.add_balance.assert_called_once_with(1003, 123, 5)
 
 
 @pytest.mark.asyncio
@@ -219,7 +219,7 @@ async def test_wheel_bankrupt_subtracts_balance():
     # Should subtract the bankrupt value (negative)
     bankrupt_value = WHEEL_WEDGES[0][1]
     assert bankrupt_value < 0, "Bankrupt should have negative value"
-    player_service.player_repo.add_balance.assert_called_once_with(1004, bankrupt_value)
+    player_service.player_repo.add_balance.assert_called_once_with(1004, 123, bankrupt_value)
 
 
 @pytest.mark.asyncio
@@ -263,7 +263,7 @@ async def test_wheel_bankrupt_ignores_max_debt():
                 await commands.gamba.callback(commands, interaction)
 
     # Should subtract bankrupt value regardless of MAX_DEBT
-    player_service.player_repo.add_balance.assert_called_once_with(1005, bankrupt_value)
+    player_service.player_repo.add_balance.assert_called_once_with(1005, 123, bankrupt_value)
 
 
 @pytest.mark.asyncio
@@ -347,7 +347,7 @@ async def test_wheel_jackpot_result():
                 await commands.gamba.callback(commands, interaction)
 
     # Should add 100
-    player_service.player_repo.add_balance.assert_called_once_with(1007, 100)
+    player_service.player_repo.add_balance.assert_called_once_with(1007, 123, 100)
 
 
 def test_wheel_wedges_has_correct_count():
@@ -477,11 +477,12 @@ async def test_wheel_updates_cooldown_in_database():
 
     after_time = int(time.time())
 
-    # Should have called set_last_wheel_spin with a timestamp
+    # Should have called set_last_wheel_spin with (user_id, guild_id, timestamp)
     player_service.player_repo.set_last_wheel_spin.assert_called_once()
     call_args = player_service.player_repo.set_last_wheel_spin.call_args[0]
     assert call_args[0] == 1009  # user_id
-    assert before_time <= call_args[1] <= after_time  # timestamp
+    assert call_args[1] == 123  # guild_id
+    assert before_time <= call_args[2] <= after_time  # timestamp
 
 
 @pytest.mark.asyncio

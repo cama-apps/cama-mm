@@ -19,21 +19,24 @@ from repositories.player_repository import PlayerRepository
 from services.betting_service import BettingService
 from services.match_service import MatchService
 
+TEST_GUILD_ID = 12345
 
-def _seed_players(player_repo: PlayerRepository, player_ids: list[int], balance: int = 100):
+
+def _seed_players(player_repo: PlayerRepository, player_ids: list[int], balance: int = 100, guild_id: int = TEST_GUILD_ID):
     """Create test players with roles and balance."""
     roles_cycle = [["1"], ["2"], ["3"], ["4"], ["5"]]
     for i, pid in enumerate(player_ids):
         player_repo.add(
             discord_id=pid,
             discord_username=f"Player{pid}",
+            guild_id=guild_id,
             initial_mmr=3000 + (i * 100),
             glicko_rating=1500.0,
             glicko_rd=200.0,
             glicko_volatility=0.06,
             preferred_roles=roles_cycle[i % 5],
         )
-        player_repo.update_balance(pid, balance)
+        player_repo.update_balance(pid, guild_id, balance)
 
 
 class TestRestartResilience:
@@ -58,7 +61,7 @@ class TestRestartResilience:
         )
 
         player_ids = list(range(1000, 1010))
-        _seed_players(player_repo_1, player_ids)
+        _seed_players(player_repo_1, player_ids, guild_id=guild_id)
 
         # Perform shuffle
         result = match_service_1.shuffle_players(player_ids, guild_id=guild_id)
@@ -102,19 +105,20 @@ class TestRestartResilience:
         )
 
         player_ids = list(range(2000, 2010))
-        _seed_players(player_repo_1, player_ids, balance=100)
+        _seed_players(player_repo_1, player_ids, balance=100, guild_id=guild_id)
 
         # Create a spectator who will bet
         spectator_id = 9999
         player_repo_1.add(
             discord_id=spectator_id,
             discord_username="Spectator",
+            guild_id=guild_id,
             initial_mmr=3000,
             glicko_rating=1500.0,
             glicko_rd=200.0,
             glicko_volatility=0.06,
         )
-        player_repo_1.update_balance(spectator_id, 50)
+        player_repo_1.update_balance(spectator_id, guild_id, 50)
 
         # Shuffle with betting enabled
         match_service_1.shuffle_players(
@@ -148,7 +152,7 @@ class TestRestartResilience:
         assert pre_bets[0]["team_bet_on"] == "radiant"
 
         # Check balance was debited
-        spectator_balance_before = player_repo_1.get_by_id(spectator_id).jopacoin_balance
+        spectator_balance_before = player_repo_1.get_by_id(spectator_id, guild_id).jopacoin_balance
         assert spectator_balance_before == 30  # 50 - 20
 
         # --- Phase 2: Simulate restart ---
@@ -181,7 +185,7 @@ class TestRestartResilience:
 
         # Verify bet was settled correctly (spectator won)
         # House mode: win returns stake + profit = 20 + 20 = 40
-        spectator_balance_after = player_repo_2.get_by_id(spectator_id).jopacoin_balance
+        spectator_balance_after = player_repo_2.get_by_id(spectator_id, guild_id).jopacoin_balance
         assert spectator_balance_after == 70  # 30 + 40 (stake + winnings)
 
         # Verify no more pending bets
@@ -254,7 +258,7 @@ class TestRestartResilience:
 
         # Create players and add to lobby
         player_ids = list(range(3000, 3010))
-        _seed_players(player_repo_1, player_ids, balance=50)
+        _seed_players(player_repo_1, player_ids, balance=50, guild_id=guild_id)
 
         for pid in player_ids:
             lobby_manager_1.join_lobby(pid)
@@ -266,12 +270,13 @@ class TestRestartResilience:
             player_repo_1.add(
                 discord_id=sid,
                 discord_username=f"Spectator{sid}",
+                guild_id=guild_id,
                 initial_mmr=3000,
                 glicko_rating=1500.0,
                 glicko_rd=200.0,
                 glicko_volatility=0.06,
             )
-            player_repo_1.update_balance(sid, 100)
+            player_repo_1.update_balance(sid, guild_id, 100)
 
         # Shuffle
         match_service_1.shuffle_players(
@@ -312,8 +317,8 @@ class TestRestartResilience:
         assert lobby_manager_1.lobby.get_player_count() == 10
 
         # Record balances before restart
-        radiant_balance_pre = player_repo_1.get_by_id(spectator_radiant).jopacoin_balance
-        dire_balance_pre = player_repo_1.get_by_id(spectator_dire).jopacoin_balance
+        radiant_balance_pre = player_repo_1.get_by_id(spectator_radiant, guild_id).jopacoin_balance
+        dire_balance_pre = player_repo_1.get_by_id(spectator_dire, guild_id).jopacoin_balance
         assert radiant_balance_pre == 70  # 100 - 30
         assert dire_balance_pre == 75  # 100 - 25
 
@@ -356,8 +361,8 @@ class TestRestartResilience:
         # Verify bet settlement
         # Radiant spectator LOST: balance stays at 70 (already debited)
         # Dire spectator WON: gets 25 + 25 = 50 back, so 75 + 50 = 125
-        radiant_final = player_repo_2.get_by_id(spectator_radiant).jopacoin_balance
-        dire_final = player_repo_2.get_by_id(spectator_dire).jopacoin_balance
+        radiant_final = player_repo_2.get_by_id(spectator_radiant, guild_id).jopacoin_balance
+        dire_final = player_repo_2.get_by_id(spectator_dire, guild_id).jopacoin_balance
 
         assert radiant_final == 70, f"Radiant loser balance wrong: {radiant_final}"
         assert dire_final == 125, f"Dire winner balance wrong: {dire_final}"

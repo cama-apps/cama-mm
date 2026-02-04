@@ -15,7 +15,7 @@ class FakeRepo:
         self.rating_data = rating_data
         self.updates = []
 
-    def get_by_id(self, _id):
+    def get_by_id(self, _id, guild_id=None):
         return object() if self.exists else None
 
     def get_game_count(self, _id):
@@ -29,8 +29,9 @@ class FakeRepo:
 
 
 class DummyInteraction:
-    def __init__(self, user_id=1):
+    def __init__(self, user_id=1, guild_id=123):
         self.user = types.SimpleNamespace(id=user_id, mention=f"<@{user_id}>")
+        self.guild = types.SimpleNamespace(id=guild_id) if guild_id else None
         self.response_messages = []
 
         class Resp:

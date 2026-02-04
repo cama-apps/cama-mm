@@ -18,6 +18,8 @@ import pytest
 from config import STREAK_THRESHOLD, STREAK_MULTIPLIER_PER_GAME
 from rating_system import CamaRatingSystem
 
+TEST_GUILD_ID = 12345
+
 
 class TestStreakMultiplierCalculation:
     """Tests for streak detection and multiplier calculation."""
@@ -216,6 +218,7 @@ class TestMatchRepositoryRecentOutcomes:
         player_repository.add(
             discord_id=discord_id,
             discord_username="TestPlayer",
+            guild_id=TEST_GUILD_ID,
             glicko_rating=1500,
             glicko_rd=100,
             glicko_volatility=0.06,
@@ -227,15 +230,17 @@ class TestMatchRepositoryRecentOutcomes:
                 team1_ids=[discord_id],
                 team2_ids=[99999 + i],
                 winning_team=1 if won else 2,
+                guild_id=TEST_GUILD_ID,
             )
             match_repository.add_rating_history(
                 discord_id=discord_id,
+                guild_id=TEST_GUILD_ID,
                 rating=1500 + i * 10,
                 match_id=match_id,
                 won=won,
             )
 
-        outcomes = match_repository.get_player_recent_outcomes(discord_id, limit=10)
+        outcomes = match_repository.get_player_recent_outcomes(discord_id, guild_id=TEST_GUILD_ID, limit=10)
 
         assert isinstance(outcomes, list)
         assert all(isinstance(o, bool) for o in outcomes)
@@ -250,6 +255,7 @@ class TestMatchRepositoryRecentOutcomes:
         player_repository.add(
             discord_id=discord_id,
             discord_username="TestPlayer",
+            guild_id=TEST_GUILD_ID,
             glicko_rating=1500,
             glicko_rd=100,
             glicko_volatility=0.06,
@@ -261,15 +267,17 @@ class TestMatchRepositoryRecentOutcomes:
                 team1_ids=[discord_id],
                 team2_ids=[99999 + i],
                 winning_team=1,
+                guild_id=TEST_GUILD_ID,
             )
             match_repository.add_rating_history(
                 discord_id=discord_id,
+                guild_id=TEST_GUILD_ID,
                 rating=1500 + i * 10,
                 match_id=match_id,
                 won=True,
             )
 
-        outcomes = match_repository.get_player_recent_outcomes(discord_id, limit=5)
+        outcomes = match_repository.get_player_recent_outcomes(discord_id, guild_id=TEST_GUILD_ID, limit=5)
         assert len(outcomes) == 5
 
     def test_get_player_recent_outcomes_empty_for_new_player(
@@ -280,9 +288,10 @@ class TestMatchRepositoryRecentOutcomes:
         player_repository.add(
             discord_id=discord_id,
             discord_username="TestPlayer",
+            guild_id=TEST_GUILD_ID,
         )
 
-        outcomes = match_repository.get_player_recent_outcomes(discord_id, limit=10)
+        outcomes = match_repository.get_player_recent_outcomes(discord_id, guild_id=TEST_GUILD_ID, limit=10)
         assert outcomes == []
 
     def test_get_player_recent_outcomes_returns_most_recent_first(
@@ -293,6 +302,7 @@ class TestMatchRepositoryRecentOutcomes:
         player_repository.add(
             discord_id=discord_id,
             discord_username="TestPlayer",
+            guild_id=TEST_GUILD_ID,
             glicko_rating=1500,
             glicko_rd=100,
             glicko_volatility=0.06,
@@ -305,15 +315,17 @@ class TestMatchRepositoryRecentOutcomes:
                 team1_ids=[discord_id],
                 team2_ids=[99999 + i],
                 winning_team=1 if won else 2,
+                guild_id=TEST_GUILD_ID,
             )
             match_repository.add_rating_history(
                 discord_id=discord_id,
+                guild_id=TEST_GUILD_ID,
                 rating=1500 + i * 10,
                 match_id=match_id,
                 won=won,
             )
 
-        outcomes = match_repository.get_player_recent_outcomes(discord_id, limit=10)
+        outcomes = match_repository.get_player_recent_outcomes(discord_id, guild_id=TEST_GUILD_ID, limit=10)
         # Should be reversed: most recent first
         assert outcomes == list(reversed(results))
 
@@ -403,6 +415,7 @@ class TestRatingHistoryStreakColumns:
         player_repository.add(
             discord_id=discord_id,
             discord_username="TestPlayer",
+            guild_id=TEST_GUILD_ID,
             glicko_rating=1500,
             glicko_rd=100,
             glicko_volatility=0.06,
@@ -412,10 +425,12 @@ class TestRatingHistoryStreakColumns:
             team1_ids=[discord_id],
             team2_ids=[99999],
             winning_team=1,
+            guild_id=TEST_GUILD_ID,
         )
 
         match_repository.add_rating_history(
             discord_id=discord_id,
+            guild_id=TEST_GUILD_ID,
             rating=1520,
             match_id=match_id,
             rating_before=1500,
@@ -424,7 +439,7 @@ class TestRatingHistoryStreakColumns:
             streak_multiplier=1.30,
         )
 
-        history = match_repository.get_rating_history(discord_id, limit=1)
+        history = match_repository.get_rating_history(discord_id, guild_id=TEST_GUILD_ID, limit=1)
         assert len(history) == 1
         assert history[0]["streak_length"] == 5
         assert history[0]["streak_multiplier"] == pytest.approx(1.30)
@@ -437,6 +452,7 @@ class TestRatingHistoryStreakColumns:
         player_repository.add(
             discord_id=discord_id,
             discord_username="TestPlayer",
+            guild_id=TEST_GUILD_ID,
             glicko_rating=1500,
             glicko_rd=100,
             glicko_volatility=0.06,
@@ -446,16 +462,18 @@ class TestRatingHistoryStreakColumns:
             team1_ids=[discord_id],
             team2_ids=[99999],
             winning_team=1,
+            guild_id=TEST_GUILD_ID,
         )
 
         match_repository.add_rating_history(
             discord_id=discord_id,
+            guild_id=TEST_GUILD_ID,
             rating=1520,
             match_id=match_id,
             won=True,
         )
 
-        history = match_repository.get_rating_history(discord_id, limit=1)
+        history = match_repository.get_rating_history(discord_id, guild_id=TEST_GUILD_ID, limit=1)
         assert len(history) == 1
         assert history[0].get("streak_length") is None
         assert history[0].get("streak_multiplier") is None

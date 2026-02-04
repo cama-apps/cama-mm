@@ -9,6 +9,8 @@ import pytest
 
 from services.match_enrichment_service import MatchEnrichmentService
 
+TEST_GUILD_ID = 12345
+
 
 class TestMatchEnrichmentService:
     """Tests for MatchEnrichmentService."""
@@ -224,11 +226,11 @@ class TestMatchRepositoryEnrichment:
         repo = MatchRepository(temp_db_path)
 
         # Record two matches
-        repo.record_match([1, 2, 3, 4, 5], [6, 7, 8, 9, 10], 1)
-        match2_id = repo.record_match([11, 12, 13, 14, 15], [16, 17, 18, 19, 20], 2)
+        repo.record_match([1, 2, 3, 4, 5], [6, 7, 8, 9, 10], 1, guild_id=TEST_GUILD_ID)
+        match2_id = repo.record_match([11, 12, 13, 14, 15], [16, 17, 18, 19, 20], 2, guild_id=TEST_GUILD_ID)
 
         # Most recent should be match2
-        recent = repo.get_most_recent_match()
+        recent = repo.get_most_recent_match(guild_id=TEST_GUILD_ID)
         assert recent is not None
         assert recent["match_id"] == match2_id
 
@@ -240,7 +242,7 @@ class TestMatchRepositoryEnrichment:
         SchemaManager(temp_db_path).initialize()
         repo = MatchRepository(temp_db_path)
 
-        match_id = repo.record_match([1, 2, 3, 4, 5], [6, 7, 8, 9, 10], 1)
+        match_id = repo.record_match([1, 2, 3, 4, 5], [6, 7, 8, 9, 10], 1, guild_id=TEST_GUILD_ID)
 
         repo.update_match_enrichment(
             match_id=match_id,
@@ -253,7 +255,7 @@ class TestMatchRepositoryEnrichment:
         )
 
         # Verify update
-        match = repo.get_most_recent_match()
+        match = repo.get_most_recent_match(guild_id=TEST_GUILD_ID)
         assert match["valve_match_id"] == 8181518332
 
     def test_update_participant_stats(self, temp_db_path):
@@ -264,7 +266,7 @@ class TestMatchRepositoryEnrichment:
         SchemaManager(temp_db_path).initialize()
         repo = MatchRepository(temp_db_path)
 
-        match_id = repo.record_match([100], [200], 1)
+        match_id = repo.record_match([100], [200], 1, guild_id=TEST_GUILD_ID)
 
         repo.update_participant_stats(
             match_id=match_id,
@@ -301,14 +303,14 @@ class TestMatchRepositoryEnrichment:
         repo = MatchRepository(temp_db_path)
 
         # Record match without enrichment
-        match_id = repo.record_match([1, 2, 3, 4, 5], [6, 7, 8, 9, 10], 1)
+        match_id = repo.record_match([1, 2, 3, 4, 5], [6, 7, 8, 9, 10], 1, guild_id=TEST_GUILD_ID)
 
-        unenriched = repo.get_matches_without_enrichment()
+        unenriched = repo.get_matches_without_enrichment(guild_id=TEST_GUILD_ID)
         assert len(unenriched) == 1
         assert unenriched[0]["match_id"] == match_id
 
         # Enrich it
         repo.set_valve_match_id(match_id, 8181518332)
 
-        unenriched = repo.get_matches_without_enrichment()
+        unenriched = repo.get_matches_without_enrichment(guild_id=TEST_GUILD_ID)
         assert len(unenriched) == 0

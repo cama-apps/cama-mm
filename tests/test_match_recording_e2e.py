@@ -13,6 +13,9 @@ from repositories.player_repository import PlayerRepository
 from services.lobby_service import LobbyService
 from services.match_service import MatchService
 
+# Legacy Database.add_player() uses guild_id=0 by default
+TEST_GUILD_ID = 0
+
 
 class TestEndToEndMatchFlow:
     """End-to-end tests for the complete match flow."""
@@ -309,7 +312,7 @@ class TestAbortLobbyReset:
         assert lobby_service.get_lobby().get_player_count() == 10
 
         # Shuffle players (this resets the lobby)
-        match_service.shuffle_players(test_players, guild_id=123)
+        match_service.shuffle_players(test_players, guild_id=TEST_GUILD_ID)
         lobby_service.reset_lobby()
 
         # After shuffle, lobby should be reset
@@ -324,7 +327,7 @@ class TestAbortLobbyReset:
 
         # Step 4: Abort the match (simulating /record abort command)
         # This should reset the lobby and clear the message ID
-        match_service.clear_last_shuffle(123)
+        match_service.clear_last_shuffle(TEST_GUILD_ID)
         lobby_service.reset_lobby()
 
         # Step 5: Verify lobby is reset after abort

@@ -29,6 +29,7 @@ class Player:
     os_sigma: float | None = None
     # Identity and economy
     discord_id: int | None = None
+    guild_id: int | None = None  # Guild ID for multi-server isolation
     jopacoin_balance: int = 0
     steam_id: int | None = None  # Steam32 account ID for OpenDota integration
 

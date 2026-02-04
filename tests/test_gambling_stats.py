@@ -55,14 +55,15 @@ def gambling_stats_service(repositories):
     )
 
 
-def _setup_player(player_repo, discord_id=1001, balance=100):
+def _setup_player(player_repo, discord_id=1001, balance=100, guild_id=0):
     """Helper to create a test player."""
     player_repo.add(
         discord_id=discord_id,
         discord_username=f"TestPlayer{discord_id}",
+        guild_id=guild_id,
         initial_mmr=3000,
     )
-    player_repo.update_balance(discord_id, balance)
+    player_repo.update_balance(discord_id, guild_id, balance)
     return discord_id
 
 
@@ -83,7 +84,7 @@ def _place_and_settle_bet(
 
     # Debit balance
     effective = amount * leverage
-    player_repo.add_balance(discord_id, -effective)
+    player_repo.add_balance(discord_id, guild_id, -effective)
 
     # Place bet
     bet_repo.create_bet(guild_id, discord_id, team, amount, now)
@@ -100,6 +101,7 @@ def _place_and_settle_bet(
         team1_ids=[discord_id] if team == "radiant" else [999],
         team2_ids=[999] if team == "radiant" else [discord_id],
         winning_team=1 if winning_team == "radiant" else 2,
+        guild_id=guild_id,
     )
 
     # Settle bet
@@ -197,7 +199,7 @@ class TestGambaStats:
         player_repo = repositories["player_repo"]
         _setup_player(player_repo)
 
-        stats = gambling_stats_service.get_player_stats(1001)
+        stats = gambling_stats_service.get_player_stats(1001, guild_id=0)
         assert stats is None
 
     def test_get_player_stats_with_bets(self, gambling_stats_service, repositories):
@@ -213,7 +215,7 @@ class TestGambaStats:
         _place_and_settle_bet(bet_repo, match_repo, player_repo, discord_id, 10, "radiant", "radiant")
         _place_and_settle_bet(bet_repo, match_repo, player_repo, discord_id, 10, "radiant", "dire")
 
-        stats = gambling_stats_service.get_player_stats(discord_id)
+        stats = gambling_stats_service.get_player_stats(discord_id, guild_id=0)
 
         assert stats is not None
         assert stats.total_bets == 3
@@ -238,7 +240,7 @@ class TestGambaStats:
         _place_and_settle_bet(bet_repo, match_repo, player_repo, discord_id, 5, "radiant", "dire")
         _place_and_settle_bet(bet_repo, match_repo, player_repo, discord_id, 5, "radiant", "dire")
 
-        stats = gambling_stats_service.get_player_stats(discord_id)
+        stats = gambling_stats_service.get_player_stats(discord_id, guild_id=0)
 
         assert stats.best_streak == 3
         assert stats.worst_streak == -2
@@ -260,7 +262,7 @@ class TestDegenScore:
         _place_and_settle_bet(bet_repo, match_repo, player_repo, discord_id, 10, "radiant", "radiant")
         _place_and_settle_bet(bet_repo, match_repo, player_repo, discord_id, 10, "radiant", "dire")
 
-        degen = gambling_stats_service.calculate_degen_score(discord_id)
+        degen = gambling_stats_service.calculate_degen_score(discord_id, guild_id=0)
 
         assert isinstance(degen, DegenScoreBreakdown)
         assert 0 <= degen.total <= 100
@@ -282,8 +284,8 @@ class TestDegenScore:
         _place_and_settle_bet(bet_repo, match_repo, player_repo, discord_id2, 10, "radiant", "radiant", leverage=5)
         _place_and_settle_bet(bet_repo, match_repo, player_repo, discord_id2, 10, "radiant", "radiant", leverage=5)
 
-        degen1 = gambling_stats_service.calculate_degen_score(discord_id1)
-        degen2 = gambling_stats_service.calculate_degen_score(discord_id2)
+        degen1 = gambling_stats_service.calculate_degen_score(discord_id1, guild_id=0)
+        degen2 = gambling_stats_service.calculate_degen_score(discord_id2, guild_id=0)
 
         assert degen2.max_leverage_score > degen1.max_leverage_score
         assert degen2.total > degen1.total
@@ -402,7 +404,7 @@ class TestPnlSeries:
         _place_and_settle_bet(bet_repo, match_repo, player_repo, discord_id, 10, "radiant", "dire")
         _place_and_settle_bet(bet_repo, match_repo, player_repo, discord_id, 10, "radiant", "radiant")
 
-        series = gambling_stats_service.get_cumulative_pnl_series(discord_id)
+        series = gambling_stats_service.get_cumulative_pnl_series(discord_id, guild_id=0)
 
         assert len(series) == 3
         assert series[0] == (1, 10, pytest.approx({"amount": 10, "leverage": 1, "effective_bet": 10, "outcome": "won", "profit": 10, "team": "radiant", "source": "bet"}, rel=1e-2))
@@ -442,7 +444,7 @@ class TestPnlSeries:
             spin_time=now + 100,
         )
 
-        series = gambling_stats_service.get_cumulative_pnl_series(discord_id)
+        series = gambling_stats_service.get_cumulative_pnl_series(discord_id, guild_id=0)
 
         assert len(series) == 2
 
@@ -481,6 +483,7 @@ class TestPaperHands:
             team1_ids=[discord_id],
             team2_ids=[999],
             winning_team=1,
+            guild_id=0,
         )
 
         # No bet placed on this match

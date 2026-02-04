@@ -17,6 +17,8 @@ from repositories.player_repository import PlayerRepository
 from services.betting_service import BettingService
 from services.match_service import MatchService
 
+TEST_GUILD_ID = 12345
+
 
 @pytest.fixture
 def correction_services(repo_db_path):
@@ -52,6 +54,7 @@ def _create_players(player_repo, start_id=1000, count=10):
         player_repo.add(
             discord_id=pid,
             discord_username=f"Player{pid}",
+            guild_id=TEST_GUILD_ID,
             dotabuff_url=f"https://dotabuff.com/players/{pid}",
             initial_mmr=1500,
             glicko_rating=1500.0,
@@ -59,7 +62,7 @@ def _create_players(player_repo, start_id=1000, count=10):
             glicko_volatility=0.06,
         )
         # Give players some balance for betting
-        player_repo.add_balance(pid, 100)
+        player_repo.add_balance(pid, TEST_GUILD_ID, 100)
     return player_ids
 
 
@@ -72,25 +75,25 @@ class TestMatchCorrection:
         player_repo = correction_services["player_repo"]
 
         player_ids = _create_players(player_repo)
-        match_service.shuffle_players(player_ids, guild_id=1)
-        pending = match_service.get_last_shuffle(1)
+        match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
+        pending = match_service.get_last_shuffle(TEST_GUILD_ID)
 
         radiant_ids = pending["radiant_team_ids"]
         dire_ids = pending["dire_team_ids"]
 
         # Record with Radiant winning (incorrectly)
-        match_service.add_record_submission(1, 99999, "radiant", is_admin=True)
-        result = match_service.record_match("radiant", guild_id=1)
+        match_service.add_record_submission(TEST_GUILD_ID, 99999, "radiant", is_admin=True)
+        result = match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
         match_id = result["match_id"]
 
         # Verify initial state: radiant won, dire lost
         for pid in radiant_ids:
-            player = player_repo.get_by_id(pid)
+            player = player_repo.get_by_id(pid, TEST_GUILD_ID)
             assert player.wins == 1
             assert player.losses == 0
 
         for pid in dire_ids:
-            player = player_repo.get_by_id(pid)
+            player = player_repo.get_by_id(pid, TEST_GUILD_ID)
             assert player.wins == 0
             assert player.losses == 1
 
@@ -98,7 +101,7 @@ class TestMatchCorrection:
         correction_result = match_service.correct_match_result(
             match_id=match_id,
             new_winning_team="dire",
-            guild_id=1,
+            guild_id=TEST_GUILD_ID,
             corrected_by=99999,
         )
 
@@ -107,12 +110,12 @@ class TestMatchCorrection:
 
         # Verify corrected state: dire won, radiant lost
         for pid in radiant_ids:
-            player = player_repo.get_by_id(pid)
+            player = player_repo.get_by_id(pid, TEST_GUILD_ID)
             assert player.wins == 0, f"Player {pid} should have 0 wins after correction"
             assert player.losses == 1, f"Player {pid} should have 1 loss after correction"
 
         for pid in dire_ids:
-            player = player_repo.get_by_id(pid)
+            player = player_repo.get_by_id(pid, TEST_GUILD_ID)
             assert player.wins == 1, f"Player {pid} should have 1 win after correction"
             assert player.losses == 0, f"Player {pid} should have 0 losses after correction"
 
@@ -122,8 +125,8 @@ class TestMatchCorrection:
         player_repo = correction_services["player_repo"]
 
         player_ids = _create_players(player_repo, start_id=2000)
-        match_service.shuffle_players(player_ids, guild_id=1)
-        pending = match_service.get_last_shuffle(1)
+        match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
+        pending = match_service.get_last_shuffle(TEST_GUILD_ID)
 
         radiant_ids = pending["radiant_team_ids"]
         dire_ids = pending["dire_team_ids"]
@@ -131,18 +134,18 @@ class TestMatchCorrection:
         # Store original ratings
         original_ratings = {}
         for pid in player_ids:
-            rating_data = player_repo.get_glicko_rating(pid)
+            rating_data = player_repo.get_glicko_rating(pid, TEST_GUILD_ID)
             original_ratings[pid] = rating_data[0] if rating_data else 1500.0
 
         # Record with Radiant winning
-        match_service.add_record_submission(1, 99999, "radiant", is_admin=True)
-        result = match_service.record_match("radiant", guild_id=1)
+        match_service.add_record_submission(TEST_GUILD_ID, 99999, "radiant", is_admin=True)
+        result = match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
         match_id = result["match_id"]
 
         # Get ratings after incorrect recording
         ratings_after_wrong = {}
         for pid in player_ids:
-            rating_data = player_repo.get_glicko_rating(pid)
+            rating_data = player_repo.get_glicko_rating(pid, TEST_GUILD_ID)
             ratings_after_wrong[pid] = rating_data[0] if rating_data else 1500.0
 
         # Radiant should have gained rating, Dire should have lost
@@ -158,14 +161,14 @@ class TestMatchCorrection:
         match_service.correct_match_result(
             match_id=match_id,
             new_winning_team="dire",
-            guild_id=1,
+            guild_id=TEST_GUILD_ID,
             corrected_by=99999,
         )
 
         # Get ratings after correction
         ratings_after_correction = {}
         for pid in player_ids:
-            rating_data = player_repo.get_glicko_rating(pid)
+            rating_data = player_repo.get_glicko_rating(pid, TEST_GUILD_ID)
             ratings_after_correction[pid] = rating_data[0] if rating_data else 1500.0
 
         # Now Dire should have gained, Radiant should have lost (relative to original)
@@ -190,13 +193,14 @@ class TestMatchCorrection:
         player_repo.add(
             discord_id=spectator_id,
             discord_username="Spectator",
+            guild_id=TEST_GUILD_ID,
             dotabuff_url="https://dotabuff.com/players/3999",
             initial_mmr=1500,
         )
-        player_repo.add_balance(spectator_id, 100)
+        player_repo.add_balance(spectator_id, TEST_GUILD_ID, 100)
 
-        match_service.shuffle_players(player_ids, guild_id=1, betting_mode="pool")
-        pending = match_service.get_last_shuffle(1)
+        match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID, betting_mode="pool")
+        pending = match_service.get_last_shuffle(TEST_GUILD_ID)
 
         radiant_ids = pending["radiant_team_ids"]
         dire_ids = pending["dire_team_ids"]
@@ -205,31 +209,31 @@ class TestMatchCorrection:
         pending["bet_lock_until"] = int(time.time()) + 600
 
         # Place bets: spectator bets on Dire
-        betting_service.place_bet(1, spectator_id, "dire", 50, pending)
+        betting_service.place_bet(TEST_GUILD_ID, spectator_id, "dire", 50, pending)
 
         # A radiant player bets on their own team
-        betting_service.place_bet(1, radiant_ids[0], "radiant", 20, pending)
+        betting_service.place_bet(TEST_GUILD_ID, radiant_ids[0], "radiant", 20, pending)
 
         # Record spectator balance before recording
-        spectator_balance_before = player_repo.get_balance(spectator_id)
+        spectator_balance_before = player_repo.get_balance(spectator_id, TEST_GUILD_ID)
 
         # Record with Radiant winning (spectator loses their bet)
-        match_service.add_record_submission(1, 99999, "radiant", is_admin=True)
-        result = match_service.record_match("radiant", guild_id=1)
+        match_service.add_record_submission(TEST_GUILD_ID, 99999, "radiant", is_admin=True)
+        result = match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
         match_id = result["match_id"]
 
         # Spectator should have lost their bet (balance unchanged from bet deduction)
-        spectator_balance_after_wrong = player_repo.get_balance(spectator_id)
+        spectator_balance_after_wrong = player_repo.get_balance(spectator_id, TEST_GUILD_ID)
 
         # Correct to Dire winning (spectator should now win their bet)
         match_service.correct_match_result(
             match_id=match_id,
             new_winning_team="dire",
-            guild_id=1,
+            guild_id=TEST_GUILD_ID,
             corrected_by=99999,
         )
 
-        spectator_balance_after_correction = player_repo.get_balance(spectator_id)
+        spectator_balance_after_correction = player_repo.get_balance(spectator_id, TEST_GUILD_ID)
 
         # After correction, spectator (who bet on Dire) should have their payout
         # Their bet of 50 on Dire should now pay out
@@ -243,27 +247,27 @@ class TestMatchCorrection:
         pairings_repo = correction_services["pairings_repo"]
 
         player_ids = _create_players(player_repo, start_id=4000)
-        match_service.shuffle_players(player_ids, guild_id=1)
-        pending = match_service.get_last_shuffle(1)
+        match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
+        pending = match_service.get_last_shuffle(TEST_GUILD_ID)
 
         radiant_ids = pending["radiant_team_ids"]
         dire_ids = pending["dire_team_ids"]
 
         # Record with Radiant winning
-        match_service.add_record_submission(1, 99999, "radiant", is_admin=True)
-        result = match_service.record_match("radiant", guild_id=1)
+        match_service.add_record_submission(TEST_GUILD_ID, 99999, "radiant", is_admin=True)
+        result = match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
         match_id = result["match_id"]
 
         # Check pairings: two radiant players should have wins_together=1
         p1, p2 = radiant_ids[0], radiant_ids[1]
-        pair = pairings_repo.get_head_to_head(p1, p2)
+        pair = pairings_repo.get_head_to_head(p1, p2, TEST_GUILD_ID)
         assert pair is not None, "Pairing should exist for radiant teammates"
         assert pair["games_together"] == 1
         assert pair["wins_together"] == 1
 
         # Two dire players should have games_together=1, wins_together=0
         d1, d2 = dire_ids[0], dire_ids[1]
-        dpair = pairings_repo.get_head_to_head(d1, d2)
+        dpair = pairings_repo.get_head_to_head(d1, d2, TEST_GUILD_ID)
         assert dpair is not None, "Pairing should exist for dire teammates"
         assert dpair["games_together"] == 1
         assert dpair["wins_together"] == 0
@@ -272,18 +276,18 @@ class TestMatchCorrection:
         match_service.correct_match_result(
             match_id=match_id,
             new_winning_team="dire",
-            guild_id=1,
+            guild_id=TEST_GUILD_ID,
             corrected_by=99999,
         )
 
         # After correction: radiant teammates should have 0 wins_together
-        pair_after = pairings_repo.get_head_to_head(p1, p2)
+        pair_after = pairings_repo.get_head_to_head(p1, p2, TEST_GUILD_ID)
         assert pair_after["games_together"] == 1
         assert pair_after["wins_together"] == 0, \
             "Radiant teammates should have 0 wins after correction"
 
         # Dire teammates should have 1 win_together
-        dpair_after = pairings_repo.get_head_to_head(d1, d2)
+        dpair_after = pairings_repo.get_head_to_head(d1, d2, TEST_GUILD_ID)
         assert dpair_after["games_together"] == 1
         assert dpair_after["wins_together"] == 1, \
             "Dire teammates should have 1 win after correction"
@@ -295,17 +299,17 @@ class TestMatchCorrection:
         player_repo = correction_services["player_repo"]
 
         player_ids = _create_players(player_repo, start_id=5000)
-        match_service.shuffle_players(player_ids, guild_id=1)
+        match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
 
-        match_service.add_record_submission(1, 99999, "radiant", is_admin=True)
-        result = match_service.record_match("radiant", guild_id=1)
+        match_service.add_record_submission(TEST_GUILD_ID, 99999, "radiant", is_admin=True)
+        result = match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
         match_id = result["match_id"]
 
         admin_id = 88888
         correction_result = match_service.correct_match_result(
             match_id=match_id,
             new_winning_team="dire",
-            guild_id=1,
+            guild_id=TEST_GUILD_ID,
             corrected_by=admin_id,
         )
 
@@ -324,17 +328,17 @@ class TestMatchCorrection:
         player_repo = correction_services["player_repo"]
 
         player_ids = _create_players(player_repo, start_id=6000)
-        match_service.shuffle_players(player_ids, guild_id=1)
+        match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
 
-        match_service.add_record_submission(1, 99999, "radiant", is_admin=True)
-        result = match_service.record_match("radiant", guild_id=1)
+        match_service.add_record_submission(TEST_GUILD_ID, 99999, "radiant", is_admin=True)
+        result = match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
         match_id = result["match_id"]
 
         with pytest.raises(ValueError, match="already has radiant as winner"):
             match_service.correct_match_result(
                 match_id=match_id,
                 new_winning_team="radiant",
-                guild_id=1,
+                guild_id=TEST_GUILD_ID,
             )
 
     def test_correction_rejects_nonexistent_match(self, correction_services):
@@ -345,7 +349,7 @@ class TestMatchCorrection:
             match_service.correct_match_result(
                 match_id=99999,
                 new_winning_team="dire",
-                guild_id=1,
+                guild_id=TEST_GUILD_ID,
             )
 
     def test_double_correction_works(self, correction_services):
@@ -355,31 +359,31 @@ class TestMatchCorrection:
         player_repo = correction_services["player_repo"]
 
         player_ids = _create_players(player_repo, start_id=7000)
-        match_service.shuffle_players(player_ids, guild_id=1)
-        pending = match_service.get_last_shuffle(1)
+        match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
+        pending = match_service.get_last_shuffle(TEST_GUILD_ID)
 
         radiant_ids = pending["radiant_team_ids"]
         dire_ids = pending["dire_team_ids"]
 
         # Record with Radiant winning
-        match_service.add_record_submission(1, 99999, "radiant", is_admin=True)
-        result = match_service.record_match("radiant", guild_id=1)
+        match_service.add_record_submission(TEST_GUILD_ID, 99999, "radiant", is_admin=True)
+        result = match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
         match_id = result["match_id"]
 
         # Correct to Dire
-        match_service.correct_match_result(match_id, "dire", 1, corrected_by=1)
+        match_service.correct_match_result(match_id, "dire", TEST_GUILD_ID, corrected_by=1)
 
         # Correct back to Radiant
-        match_service.correct_match_result(match_id, "radiant", 1, corrected_by=1)
+        match_service.correct_match_result(match_id, "radiant", TEST_GUILD_ID, corrected_by=1)
 
         # Verify final state matches original recording
         for pid in radiant_ids:
-            player = player_repo.get_by_id(pid)
+            player = player_repo.get_by_id(pid, TEST_GUILD_ID)
             assert player.wins == 1
             assert player.losses == 0
 
         for pid in dire_ids:
-            player = player_repo.get_by_id(pid)
+            player = player_repo.get_by_id(pid, TEST_GUILD_ID)
             assert player.wins == 0
             assert player.losses == 1
 

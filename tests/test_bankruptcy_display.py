@@ -19,6 +19,11 @@ from services.lobby_service import LobbyService
 from utils.embeds import create_lobby_embed, format_player_list
 from utils.formatting import TOMBSTONE_EMOJI, get_player_display_name
 
+# Use guild_id=0 because get_player_display_name() doesn't pass guild_id
+# to bankruptcy_repo.get_penalty_games(), which normalizes None to 0.
+# This ensures the bankruptcy state lookup works correctly.
+TEST_GUILD_ID = 0
+
 
 @pytest.fixture
 def test_services(repo_db_path):
@@ -53,6 +58,7 @@ def test_tombstone_not_shown_for_non_bankrupted_player(test_services):
     player_repo.add(
         discord_id=1001,
         discord_username="NormalPlayer",
+        guild_id=TEST_GUILD_ID,
         dotabuff_url="https://dotabuff.com/players/1001",
         initial_mmr=3000,
         glicko_rating=750.0,
@@ -60,7 +66,7 @@ def test_tombstone_not_shown_for_non_bankrupted_player(test_services):
         glicko_volatility=0.06,
     )
 
-    player = player_repo.get_by_id(1001)
+    player = player_repo.get_by_id(1001, TEST_GUILD_ID)
     display_name = get_player_display_name(
         player, discord_id=1001, bankruptcy_repo=bankruptcy_repo
     )
@@ -79,6 +85,7 @@ def test_tombstone_shown_for_bankrupted_player(test_services):
     player_repo.add(
         discord_id=1002,
         discord_username="BankruptPlayer",
+        guild_id=TEST_GUILD_ID,
         dotabuff_url="https://dotabuff.com/players/1002",
         initial_mmr=3000,
         glicko_rating=750.0,
@@ -87,14 +94,14 @@ def test_tombstone_shown_for_bankrupted_player(test_services):
     )
 
     # Put them in debt
-    player_repo.add_balance(1002, -200)
+    player_repo.add_balance(1002, TEST_GUILD_ID, -200)
 
     # Declare bankruptcy
-    result = bankruptcy_service.declare_bankruptcy(1002)
+    result = bankruptcy_service.declare_bankruptcy(1002, TEST_GUILD_ID)
     assert result["success"] is True
 
     # Check display name includes tombstone
-    player = player_repo.get_by_id(1002)
+    player = player_repo.get_by_id(1002, TEST_GUILD_ID)
     display_name = get_player_display_name(
         player, discord_id=1002, bankruptcy_repo=bankruptcy_repo
     )
@@ -113,17 +120,18 @@ def test_tombstone_disappears_after_penalty_games(test_services):
     player_repo.add(
         discord_id=1003,
         discord_username="RecoveringPlayer",
+        guild_id=TEST_GUILD_ID,
         dotabuff_url="https://dotabuff.com/players/1003",
         initial_mmr=3000,
         glicko_rating=750.0,
         glicko_rd=350.0,
         glicko_volatility=0.06,
     )
-    player_repo.add_balance(1003, -100)
-    bankruptcy_service.declare_bankruptcy(1003)
+    player_repo.add_balance(1003, TEST_GUILD_ID, -100)
+    bankruptcy_service.declare_bankruptcy(1003, TEST_GUILD_ID)
 
     # Initially has tombstone
-    player = player_repo.get_by_id(1003)
+    player = player_repo.get_by_id(1003, TEST_GUILD_ID)
     display_name = get_player_display_name(
         player, discord_id=1003, bankruptcy_repo=bankruptcy_repo
     )
@@ -152,6 +160,7 @@ def test_tombstone_in_lobby_player_list(test_services):
         player_repo.add(
             discord_id=i,
             discord_username=username,
+            guild_id=TEST_GUILD_ID,
             dotabuff_url=f"https://dotabuff.com/players/{i}",
             initial_mmr=3000,
             glicko_rating=750.0,
@@ -160,11 +169,11 @@ def test_tombstone_in_lobby_player_list(test_services):
         )
 
     # Make one bankrupt
-    player_repo.add_balance(1005, -100)
-    bankruptcy_service.declare_bankruptcy(1005)
+    player_repo.add_balance(1005, TEST_GUILD_ID, -100)
+    bankruptcy_service.declare_bankruptcy(1005, TEST_GUILD_ID)
 
     # Get players and format list
-    players = player_repo.get_by_ids([1004, 1005])
+    players = player_repo.get_by_ids([1004, 1005], TEST_GUILD_ID)
     player_ids = [1004, 1005]
 
     formatted_list, count = format_player_list(
@@ -196,6 +205,7 @@ def test_tombstone_in_lobby_embed(test_services):
         player_repo.add(
             discord_id=i,
             discord_username=f"Player{i}",
+            guild_id=TEST_GUILD_ID,
             dotabuff_url=f"https://dotabuff.com/players/{i}",
             initial_mmr=3000,
             glicko_rating=750.0,
@@ -204,8 +214,8 @@ def test_tombstone_in_lobby_embed(test_services):
         )
 
     # Make one bankrupt
-    player_repo.add_balance(1011, -100)
-    bankruptcy_service.declare_bankruptcy(1011)
+    player_repo.add_balance(1011, TEST_GUILD_ID, -100)
+    bankruptcy_service.declare_bankruptcy(1011, TEST_GUILD_ID)
 
     # Create lobby and add players
     lobby = lobby_manager.get_or_create_lobby(creator_id=1010)
@@ -214,7 +224,7 @@ def test_tombstone_in_lobby_embed(test_services):
 
     # Build embed
     lobby = lobby_manager.get_lobby()
-    players = player_repo.get_by_ids(list(lobby.players))
+    players = player_repo.get_by_ids(list(lobby.players), TEST_GUILD_ID)
     player_ids = list(lobby.players)
 
     embed = create_lobby_embed(
@@ -245,6 +255,7 @@ def test_fake_users_excluded_from_bankruptcy_check(test_services):
     player_repo.add(
         discord_id=-1,
         discord_username="FakeUser",
+        guild_id=TEST_GUILD_ID,
         dotabuff_url="",
         initial_mmr=3000,
         glicko_rating=750.0,
@@ -252,7 +263,7 @@ def test_fake_users_excluded_from_bankruptcy_check(test_services):
         glicko_volatility=0.06,
     )
 
-    player = player_repo.get_by_id(-1)
+    player = player_repo.get_by_id(-1, TEST_GUILD_ID)
 
     # Even if we somehow add bankruptcy state, fake users should be skipped
     # (though this shouldn't happen in practice)
@@ -274,18 +285,19 @@ def test_bankruptcy_state_persistence(test_services):
     player_repo.add(
         discord_id=1020,
         discord_username="PersistentPlayer",
+        guild_id=TEST_GUILD_ID,
         dotabuff_url="https://dotabuff.com/players/1020",
         initial_mmr=3000,
         glicko_rating=750.0,
         glicko_rd=350.0,
         glicko_volatility=0.06,
     )
-    player_repo.add_balance(1020, -100)
+    player_repo.add_balance(1020, TEST_GUILD_ID, -100)
 
     # Use first bankruptcy repo instance
     bankruptcy_repo1 = BankruptcyRepository(db_path)
     bankruptcy_service1 = BankruptcyService(bankruptcy_repo1, player_repo)
-    bankruptcy_service1.declare_bankruptcy(1020)
+    bankruptcy_service1.declare_bankruptcy(1020, TEST_GUILD_ID)
 
     # Create new bankruptcy repo instance
     bankruptcy_repo2 = BankruptcyRepository(db_path)
@@ -306,6 +318,7 @@ def test_multiple_bankrupted_players_in_lobby(test_services):
         player_repo.add(
             discord_id=i,
             discord_username=f"Player{i}",
+            guild_id=TEST_GUILD_ID,
             dotabuff_url=f"https://dotabuff.com/players/{i}",
             initial_mmr=3000,
             glicko_rating=750.0,
@@ -315,11 +328,11 @@ def test_multiple_bankrupted_players_in_lobby(test_services):
 
     # Bankrupt players 2001 and 2003
     for player_id in [2001, 2003]:
-        player_repo.add_balance(player_id, -100)
-        bankruptcy_service.declare_bankruptcy(player_id)
+        player_repo.add_balance(player_id, TEST_GUILD_ID, -100)
+        bankruptcy_service.declare_bankruptcy(player_id, TEST_GUILD_ID)
 
     # Format player list
-    players = player_repo.get_by_ids(list(range(2000, 2005)))
+    players = player_repo.get_by_ids(list(range(2000, 2005)), TEST_GUILD_ID)
     player_ids = list(range(2000, 2005))
 
     formatted_list, count = format_player_list(
@@ -343,6 +356,7 @@ def test_graceful_handling_of_missing_bankruptcy_repo(test_services):
     player_repo.add(
         discord_id=3000,
         discord_username="TestPlayer",
+        guild_id=TEST_GUILD_ID,
         dotabuff_url="https://dotabuff.com/players/3000",
         initial_mmr=3000,
         glicko_rating=750.0,
@@ -350,7 +364,7 @@ def test_graceful_handling_of_missing_bankruptcy_repo(test_services):
         glicko_volatility=0.06,
     )
 
-    player = player_repo.get_by_id(3000)
+    player = player_repo.get_by_id(3000, TEST_GUILD_ID)
 
     # Should not crash when bankruptcy_repo is None
     display_name = get_player_display_name(player, discord_id=3000, bankruptcy_repo=None)

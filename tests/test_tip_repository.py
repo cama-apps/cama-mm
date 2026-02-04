@@ -20,16 +20,20 @@ def player_repo(repo_db_path):
     return PlayerRepository(repo_db_path)
 
 
-def register_player(player_repo, discord_id, balance=100):
+TEST_GUILD_ID = 12345
+
+
+def register_player(player_repo, discord_id, balance=100, guild_id=TEST_GUILD_ID):
     """Helper to register a test player with a given balance."""
     player_repo.add(
         discord_id=discord_id,
         discord_username=f"Player{discord_id}",
+        guild_id=guild_id,
         initial_mmr=3000,
     )
     # Set initial balance
     if balance != 3:  # Default balance is 3
-        player_repo.add_balance(discord_id, balance - 3)
+        player_repo.add_balance(discord_id, guild_id, balance - 3)
 
 
 class TestTipRepository:
@@ -372,6 +376,7 @@ class TestTipAtomic:
         register_player(player_repo, 2, balance=50)
 
         result = player_repo.tip_atomic(
+            guild_id=TEST_GUILD_ID,
             from_discord_id=1,
             to_discord_id=2,
             amount=20,
@@ -391,6 +396,7 @@ class TestTipAtomic:
         register_player(player_repo, 2, balance=50)
 
         player_repo.tip_atomic(
+            guild_id=TEST_GUILD_ID,
             from_discord_id=1,
             to_discord_id=2,
             amount=20,
@@ -402,8 +408,8 @@ class TestTipAtomic:
         # Sender: 100 - 20 - 5 = 75
         # Recipient: 50 + 20 = 70
         # Total: 145, burned: 5
-        sender = player_repo.get_by_id(1)
-        recipient = player_repo.get_by_id(2)
+        sender = player_repo.get_by_id(1, TEST_GUILD_ID)
+        recipient = player_repo.get_by_id(2, TEST_GUILD_ID)
         total_after = sender.jopacoin_balance + recipient.jopacoin_balance
         assert total_after == 145  # 150 - 5 fee
 
@@ -414,7 +420,8 @@ class TestTipAtomic:
 
         with pytest.raises(ValueError) as exc_info:
             player_repo.tip_atomic(
-                from_discord_id=1,
+            guild_id=TEST_GUILD_ID,
+            from_discord_id=1,
                 to_discord_id=2,
                 amount=10,
                 fee=1,  # Total: 11, but only have 10
@@ -427,7 +434,8 @@ class TestTipAtomic:
 
         with pytest.raises(ValueError) as exc_info:
             player_repo.tip_atomic(
-                from_discord_id=999,  # Not registered
+            guild_id=TEST_GUILD_ID,
+            from_discord_id=999,  # Not registered
                 to_discord_id=2,
                 amount=10,
                 fee=1,
@@ -440,7 +448,8 @@ class TestTipAtomic:
 
         with pytest.raises(ValueError) as exc_info:
             player_repo.tip_atomic(
-                from_discord_id=1,
+            guild_id=TEST_GUILD_ID,
+            from_discord_id=1,
                 to_discord_id=999,  # Not registered
                 amount=10,
                 fee=1,
@@ -454,7 +463,8 @@ class TestTipAtomic:
 
         with pytest.raises(ValueError) as exc_info:
             player_repo.tip_atomic(
-                from_discord_id=1,
+            guild_id=TEST_GUILD_ID,
+            from_discord_id=1,
                 to_discord_id=2,
                 amount=-10,
                 fee=1,
@@ -468,7 +478,8 @@ class TestTipAtomic:
 
         with pytest.raises(ValueError) as exc_info:
             player_repo.tip_atomic(
-                from_discord_id=1,
+            guild_id=TEST_GUILD_ID,
+            from_discord_id=1,
                 to_discord_id=2,
                 amount=0,
                 fee=1,
@@ -482,7 +493,8 @@ class TestTipAtomic:
 
         with pytest.raises(ValueError) as exc_info:
             player_repo.tip_atomic(
-                from_discord_id=1,
+            guild_id=TEST_GUILD_ID,
+            from_discord_id=1,
                 to_discord_id=2,
                 amount=10,
                 fee=-1,
@@ -495,6 +507,7 @@ class TestTipAtomic:
         register_player(player_repo, 2, balance=50)
 
         result = player_repo.tip_atomic(
+            guild_id=TEST_GUILD_ID,
             from_discord_id=1,
             to_discord_id=2,
             amount=10,
@@ -511,6 +524,7 @@ class TestTipAtomic:
         register_player(player_repo, 2, balance=0)
 
         result = player_repo.tip_atomic(
+            guild_id=TEST_GUILD_ID,
             from_discord_id=1,
             to_discord_id=2,
             amount=10,
@@ -525,20 +539,21 @@ class TestTipAtomic:
         register_player(player_repo, 1, balance=5)
         register_player(player_repo, 2, balance=50)
 
-        original_sender_balance = player_repo.get_by_id(1).jopacoin_balance
-        original_recipient_balance = player_repo.get_by_id(2).jopacoin_balance
+        original_sender_balance = player_repo.get_by_id(1, TEST_GUILD_ID).jopacoin_balance
+        original_recipient_balance = player_repo.get_by_id(2, TEST_GUILD_ID).jopacoin_balance
 
         with pytest.raises(ValueError):
             player_repo.tip_atomic(
-                from_discord_id=1,
+            guild_id=TEST_GUILD_ID,
+            from_discord_id=1,
                 to_discord_id=2,
                 amount=10,
                 fee=1,
             )
 
         # Verify no changes occurred
-        assert player_repo.get_by_id(1).jopacoin_balance == original_sender_balance
-        assert player_repo.get_by_id(2).jopacoin_balance == original_recipient_balance
+        assert player_repo.get_by_id(1, TEST_GUILD_ID).jopacoin_balance == original_sender_balance
+        assert player_repo.get_by_id(2, TEST_GUILD_ID).jopacoin_balance == original_recipient_balance
 
     def test_tip_atomic_large_amounts(self, player_repo):
         """Test tip with large amounts."""
@@ -546,6 +561,7 @@ class TestTipAtomic:
         register_player(player_repo, 2, balance=0)
 
         result = player_repo.tip_atomic(
+            guild_id=TEST_GUILD_ID,
             from_discord_id=1,
             to_discord_id=2,
             amount=500000,
@@ -561,13 +577,14 @@ class TestTipAtomic:
         register_player(player_repo, 2, balance=50)
 
         player_repo.tip_atomic(
+            guild_id=TEST_GUILD_ID,
             from_discord_id=1,
             to_discord_id=2,
             amount=90,
             fee=5,  # New balance = 5
         )
 
-        sender = player_repo.get_by_id(1)
+        sender = player_repo.get_by_id(1, TEST_GUILD_ID)
         assert sender.jopacoin_balance == 5
 
         # Verify lowest_balance_ever in DB directly (not exposed on Player model)

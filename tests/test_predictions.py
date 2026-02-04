@@ -10,6 +10,8 @@ from repositories.player_repository import PlayerRepository
 from repositories.prediction_repository import PredictionRepository
 from services.prediction_service import PredictionService
 
+TEST_GUILD_ID = 12345
+
 
 @pytest.fixture
 def prediction_repo(repo_db_path):
@@ -36,36 +38,24 @@ def prediction_service(prediction_repo, player_repo):
 @pytest.fixture
 def registered_player(player_repo):
     """Create a registered player with balance."""
-    player_repo.add(
-        discord_id=123,
-        discord_username="TestPlayer",
-        initial_mmr=3000,
-    )
-    player_repo.update_balance(123, 100)  # Give 100 coins
+    player_repo.add(discord_id=123, discord_username="TestPlayer", guild_id=TEST_GUILD_ID, initial_mmr=3000)
+    player_repo.update_balance(123, TEST_GUILD_ID, 100)  # Give 100 coins
     return 123
 
 
 @pytest.fixture
 def registered_player2(player_repo):
     """Create a second registered player with balance."""
-    player_repo.add(
-        discord_id=456,
-        discord_username="TestPlayer2",
-        initial_mmr=3000,
-    )
-    player_repo.update_balance(456, 100)
+    player_repo.add(discord_id=456, discord_username="TestPlayer2", guild_id=TEST_GUILD_ID, initial_mmr=3000)
+    player_repo.update_balance(456, TEST_GUILD_ID, 100)
     return 456
 
 
 @pytest.fixture
 def registered_player3(player_repo):
     """Create a third registered player with balance."""
-    player_repo.add(
-        discord_id=789,
-        discord_username="TestPlayer3",
-        initial_mmr=3000,
-    )
-    player_repo.update_balance(789, 100)
+    player_repo.add(discord_id=789, discord_username="TestPlayer3", guild_id=TEST_GUILD_ID, initial_mmr=3000)
+    player_repo.update_balance(789, TEST_GUILD_ID, 100)
     return 789
 
 
@@ -93,21 +83,21 @@ class TestPredictionRepository:
     def test_get_active_predictions(self, prediction_repo):
         """Test getting active predictions."""
         closes_at = int(time.time()) + 3600
-        prediction_repo.create_prediction(1, 123, "Q1", closes_at)
-        prediction_repo.create_prediction(1, 123, "Q2", closes_at)
+        prediction_repo.create_prediction(TEST_GUILD_ID, 123, "Q1", closes_at)
+        prediction_repo.create_prediction(TEST_GUILD_ID, 123, "Q2", closes_at)
         prediction_repo.create_prediction(2, 123, "Q3", closes_at)  # Different guild
 
-        active = prediction_repo.get_active_predictions(1)
+        active = prediction_repo.get_active_predictions(TEST_GUILD_ID)
         assert len(active) == 2
 
     def test_place_bet_atomic(self, prediction_repo, player_repo):
         """Test atomic bet placement."""
         # Create player with balance
-        player_repo.add(discord_id=123, discord_username="Test", initial_mmr=3000)
-        player_repo.update_balance(123, 50)
+        player_repo.add(discord_id=123, discord_username="Test", guild_id=TEST_GUILD_ID, initial_mmr=3000)
+        player_repo.update_balance(123, TEST_GUILD_ID, 50)
 
         closes_at = int(time.time()) + 3600
-        pred_id = prediction_repo.create_prediction(1, 999, "Test?", closes_at)
+        pred_id = prediction_repo.create_prediction(TEST_GUILD_ID, 999, "Test?", closes_at)
 
         result = prediction_repo.place_bet_atomic(
             prediction_id=pred_id,
@@ -125,22 +115,22 @@ class TestPredictionRepository:
 
     def test_place_bet_insufficient_balance(self, prediction_repo, player_repo):
         """Test bet placement with insufficient balance."""
-        player_repo.add(discord_id=123, discord_username="Test", initial_mmr=3000)
-        player_repo.update_balance(123, 5)
+        player_repo.add(discord_id=123, discord_username="Test", guild_id=TEST_GUILD_ID, initial_mmr=3000)
+        player_repo.update_balance(123, TEST_GUILD_ID, 5)
 
         closes_at = int(time.time()) + 3600
-        pred_id = prediction_repo.create_prediction(1, 999, "Test?", closes_at)
+        pred_id = prediction_repo.create_prediction(TEST_GUILD_ID, 999, "Test?", closes_at)
 
         with pytest.raises(ValueError, match="Insufficient balance"):
             prediction_repo.place_bet_atomic(pred_id, 123, "yes", 10)
 
     def test_place_bet_opposite_side_rejected(self, prediction_repo, player_repo):
         """Test that betting on opposite side is rejected."""
-        player_repo.add(discord_id=123, discord_username="Test", initial_mmr=3000)
-        player_repo.update_balance(123, 100)
+        player_repo.add(discord_id=123, discord_username="Test", guild_id=TEST_GUILD_ID, initial_mmr=3000)
+        player_repo.update_balance(123, TEST_GUILD_ID, 100)
 
         closes_at = int(time.time()) + 3600
-        pred_id = prediction_repo.create_prediction(1, 999, "Test?", closes_at)
+        pred_id = prediction_repo.create_prediction(TEST_GUILD_ID, 999, "Test?", closes_at)
 
         # First bet on YES
         prediction_repo.place_bet_atomic(pred_id, 123, "yes", 10)
@@ -151,11 +141,11 @@ class TestPredictionRepository:
 
     def test_place_bet_same_side_allowed(self, prediction_repo, player_repo):
         """Test that adding to same side is allowed."""
-        player_repo.add(discord_id=123, discord_username="Test", initial_mmr=3000)
-        player_repo.update_balance(123, 100)
+        player_repo.add(discord_id=123, discord_username="Test", guild_id=TEST_GUILD_ID, initial_mmr=3000)
+        player_repo.update_balance(123, TEST_GUILD_ID, 100)
 
         closes_at = int(time.time()) + 3600
-        pred_id = prediction_repo.create_prediction(1, 999, "Test?", closes_at)
+        pred_id = prediction_repo.create_prediction(TEST_GUILD_ID, 999, "Test?", closes_at)
 
         # First bet on YES
         prediction_repo.place_bet_atomic(pred_id, 123, "yes", 10)
@@ -167,7 +157,7 @@ class TestPredictionRepository:
     def test_resolution_votes(self, prediction_repo):
         """Test resolution voting."""
         closes_at = int(time.time()) + 3600
-        pred_id = prediction_repo.create_prediction(1, 123, "Test?", closes_at)
+        pred_id = prediction_repo.create_prediction(TEST_GUILD_ID, 123, "Test?", closes_at)
 
         # Add votes
         result1 = prediction_repo.add_resolution_vote(pred_id, 1, "yes", False)
@@ -184,7 +174,7 @@ class TestPredictionRepository:
     def test_resolution_vote_change_rejected(self, prediction_repo):
         """Test that changing vote is rejected."""
         closes_at = int(time.time()) + 3600
-        pred_id = prediction_repo.create_prediction(1, 123, "Test?", closes_at)
+        pred_id = prediction_repo.create_prediction(TEST_GUILD_ID, 123, "Test?", closes_at)
 
         prediction_repo.add_resolution_vote(pred_id, 1, "yes", False)
 
@@ -194,13 +184,13 @@ class TestPredictionRepository:
     def test_settle_prediction_bets(self, prediction_repo, player_repo):
         """Test settling prediction bets."""
         # Create players
-        player_repo.add(discord_id=1, discord_username="P1", initial_mmr=3000)
-        player_repo.add(discord_id=2, discord_username="P2", initial_mmr=3000)
-        player_repo.update_balance(1, 100)
-        player_repo.update_balance(2, 100)
+        player_repo.add(discord_id=1, discord_username="P1", guild_id=TEST_GUILD_ID, initial_mmr=3000)
+        player_repo.add(discord_id=2, discord_username="P2", guild_id=TEST_GUILD_ID, initial_mmr=3000)
+        player_repo.update_balance(1, TEST_GUILD_ID, 100)
+        player_repo.update_balance(2, TEST_GUILD_ID, 100)
 
         closes_at = int(time.time()) + 3600
-        pred_id = prediction_repo.create_prediction(1, 999, "Test?", closes_at)
+        pred_id = prediction_repo.create_prediction(TEST_GUILD_ID, 999, "Test?", closes_at)
 
         # Player 1 bets YES
         prediction_repo.place_bet_atomic(pred_id, 1, "yes", 30)
@@ -220,25 +210,25 @@ class TestPredictionRepository:
         assert winner["payout"] == 100  # Entire pool
 
         # Check balances updated
-        p1_balance = player_repo.get_balance(1)
-        p2_balance = player_repo.get_balance(2)
+        p1_balance = player_repo.get_balance(1, TEST_GUILD_ID)
+        p2_balance = player_repo.get_balance(2, TEST_GUILD_ID)
         assert p1_balance == 70 + 100  # 70 remaining + 100 payout
         assert p2_balance == 30  # 100 - 70 bet
 
     def test_refund_prediction_bets(self, prediction_repo, player_repo):
         """Test refunding prediction bets."""
-        player_repo.add(discord_id=1, discord_username="P1", initial_mmr=3000)
-        player_repo.update_balance(1, 100)
+        player_repo.add(discord_id=1, discord_username="P1", guild_id=TEST_GUILD_ID, initial_mmr=3000)
+        player_repo.update_balance(1, TEST_GUILD_ID, 100)
 
         closes_at = int(time.time()) + 3600
-        pred_id = prediction_repo.create_prediction(1, 999, "Test?", closes_at)
+        pred_id = prediction_repo.create_prediction(TEST_GUILD_ID, 999, "Test?", closes_at)
 
         prediction_repo.place_bet_atomic(pred_id, 1, "yes", 50)
-        assert player_repo.get_balance(1) == 50  # 100 - 50
+        assert player_repo.get_balance(1, TEST_GUILD_ID) == 50  # 100 - 50
 
         result = prediction_repo.refund_prediction_bets(pred_id)
         assert result["total_refunded"] == 50
-        assert player_repo.get_balance(1) == 100  # Refunded
+        assert player_repo.get_balance(1, TEST_GUILD_ID) == 100  # Refunded
 
 
 class TestPredictionService:
@@ -261,18 +251,18 @@ class TestPredictionService:
         """Test that short questions are rejected."""
         closes_at = int(time.time()) + 3600
         with pytest.raises(ValueError, match="at least 5 characters"):
-            prediction_service.create_prediction(1, registered_player, "Hi?", closes_at)
+            prediction_service.create_prediction(TEST_GUILD_ID, registered_player, "Hi?", closes_at)
 
     def test_create_prediction_past_close(self, prediction_service, registered_player):
         """Test that past close times are rejected."""
         closes_at = int(time.time()) - 100  # In the past
         with pytest.raises(ValueError, match="future"):
-            prediction_service.create_prediction(1, registered_player, "Test question?", closes_at)
+            prediction_service.create_prediction(TEST_GUILD_ID, registered_player, "Test question?", closes_at)
 
     def test_place_bet(self, prediction_service, registered_player):
         """Test placing a bet via service."""
         closes_at = int(time.time()) + 3600
-        result = prediction_service.create_prediction(1, 999, "Test?", closes_at)
+        result = prediction_service.create_prediction(TEST_GUILD_ID, 999, "Test?", closes_at)
         pred_id = result["prediction_id"]
 
         bet_result = prediction_service.place_bet(pred_id, registered_player, "yes", 10)
@@ -296,7 +286,7 @@ class TestPredictionService:
     ):
         """Test resolution voting flow."""
         closes_at = int(time.time()) - 1  # Already closed
-        pred = prediction_service.create_prediction(1, 999, "Test question?", closes_at + 100)
+        pred = prediction_service.create_prediction(TEST_GUILD_ID, 999, "Test question?", closes_at + 100)
         pred_id = pred["prediction_id"]
 
         # Manually set closes_at to past for testing
@@ -327,7 +317,7 @@ class TestPredictionService:
     def test_admin_vote_resolves_immediately(self, prediction_service, registered_player):
         """Test that admin vote immediately allows resolution."""
         closes_at = int(time.time()) + 3600
-        pred = prediction_service.create_prediction(1, 999, "Test?", closes_at)
+        pred = prediction_service.create_prediction(TEST_GUILD_ID, 999, "Test?", closes_at)
         pred_id = pred["prediction_id"]
 
         # Set to locked and past close time
@@ -346,7 +336,7 @@ class TestPredictionService:
     def test_cancel_requires_admin(self, prediction_service, registered_player):
         """Test that cancellation requires admin."""
         closes_at = int(time.time()) + 3600
-        pred = prediction_service.create_prediction(1, registered_player, "Test?", closes_at)
+        pred = prediction_service.create_prediction(TEST_GUILD_ID, registered_player, "Test?", closes_at)
         pred_id = pred["prediction_id"]
 
         # Non-admin should fail
@@ -363,7 +353,7 @@ class TestPredictionService:
         """Test complete prediction flow: create -> bet -> resolve -> settle."""
         # Create prediction
         closes_at = int(time.time()) + 3600
-        pred = prediction_service.create_prediction(1, 999, "Will the test pass?", closes_at)
+        pred = prediction_service.create_prediction(TEST_GUILD_ID, 999, "Will the test pass?", closes_at)
         pred_id = pred["prediction_id"]
 
         # Place bets
@@ -397,8 +387,8 @@ class TestPredictionService:
         assert winner["payout"] == 50
 
         # Check final balances
-        p1_balance = player_repo.get_balance(registered_player)
-        p2_balance = player_repo.get_balance(registered_player2)
+        p1_balance = player_repo.get_balance(registered_player, TEST_GUILD_ID)
+        p2_balance = player_repo.get_balance(registered_player2, TEST_GUILD_ID)
         assert p1_balance == 70 + 50  # 100 - 30 bet + 50 payout = 120
         assert p2_balance == 80  # 100 - 20 bet
 
@@ -408,23 +398,23 @@ class TestPredictionCornerCases:
 
     def test_bet_on_closed_prediction(self, prediction_repo, player_repo):
         """Test that betting after close time is rejected."""
-        player_repo.add(discord_id=123, discord_username="Test", initial_mmr=3000)
-        player_repo.update_balance(123, 100)
+        player_repo.add(discord_id=123, discord_username="Test", guild_id=TEST_GUILD_ID, initial_mmr=3000)
+        player_repo.update_balance(123, TEST_GUILD_ID, 100)
 
         # Create prediction that closes immediately
         closes_at = int(time.time()) - 1  # Already closed
-        pred_id = prediction_repo.create_prediction(1, 999, "Test?", closes_at)
+        pred_id = prediction_repo.create_prediction(TEST_GUILD_ID, 999, "Test?", closes_at)
 
         with pytest.raises(ValueError, match="Betting period has ended"):
             prediction_repo.place_bet_atomic(pred_id, 123, "yes", 10)
 
     def test_bet_on_resolved_prediction(self, prediction_repo, player_repo):
         """Test that betting on resolved prediction is rejected."""
-        player_repo.add(discord_id=123, discord_username="Test", initial_mmr=3000)
-        player_repo.update_balance(123, 100)
+        player_repo.add(discord_id=123, discord_username="Test", guild_id=TEST_GUILD_ID, initial_mmr=3000)
+        player_repo.update_balance(123, TEST_GUILD_ID, 100)
 
         closes_at = int(time.time()) + 3600
-        pred_id = prediction_repo.create_prediction(1, 999, "Test?", closes_at)
+        pred_id = prediction_repo.create_prediction(TEST_GUILD_ID, 999, "Test?", closes_at)
 
         # Mark as resolved
         prediction_repo.update_prediction_status(pred_id, "resolved")
@@ -434,11 +424,11 @@ class TestPredictionCornerCases:
 
     def test_bet_on_cancelled_prediction(self, prediction_repo, player_repo):
         """Test that betting on cancelled prediction is rejected."""
-        player_repo.add(discord_id=123, discord_username="Test", initial_mmr=3000)
-        player_repo.update_balance(123, 100)
+        player_repo.add(discord_id=123, discord_username="Test", guild_id=TEST_GUILD_ID, initial_mmr=3000)
+        player_repo.update_balance(123, TEST_GUILD_ID, 100)
 
         closes_at = int(time.time()) + 3600
-        pred_id = prediction_repo.create_prediction(1, 999, "Test?", closes_at)
+        pred_id = prediction_repo.create_prediction(TEST_GUILD_ID, 999, "Test?", closes_at)
 
         # Mark as cancelled
         prediction_repo.update_prediction_status(pred_id, "cancelled")
@@ -448,24 +438,24 @@ class TestPredictionCornerCases:
 
     def test_bet_with_debt(self, prediction_repo, player_repo):
         """Test that users in debt cannot bet."""
-        player_repo.add(discord_id=123, discord_username="Test", initial_mmr=3000)
-        player_repo.update_balance(123, -50)  # In debt
+        player_repo.add(discord_id=123, discord_username="Test", guild_id=TEST_GUILD_ID, initial_mmr=3000)
+        player_repo.update_balance(123, TEST_GUILD_ID, -50)  # In debt
 
         closes_at = int(time.time()) + 3600
-        pred_id = prediction_repo.create_prediction(1, 999, "Test?", closes_at)
+        pred_id = prediction_repo.create_prediction(TEST_GUILD_ID, 999, "Test?", closes_at)
 
         with pytest.raises(ValueError, match="cannot place bets while in debt"):
             prediction_repo.place_bet_atomic(pred_id, 123, "yes", 10)
 
     def test_settlement_no_bets_on_winning_side(self, prediction_repo, player_repo):
         """Test settlement when no one bet on winning side - all get refund."""
-        player_repo.add(discord_id=1, discord_username="P1", initial_mmr=3000)
-        player_repo.add(discord_id=2, discord_username="P2", initial_mmr=3000)
-        player_repo.update_balance(1, 100)
-        player_repo.update_balance(2, 100)
+        player_repo.add(discord_id=1, discord_username="P1", guild_id=TEST_GUILD_ID, initial_mmr=3000)
+        player_repo.add(discord_id=2, discord_username="P2", guild_id=TEST_GUILD_ID, initial_mmr=3000)
+        player_repo.update_balance(1, TEST_GUILD_ID, 100)
+        player_repo.update_balance(2, TEST_GUILD_ID, 100)
 
         closes_at = int(time.time()) + 3600
-        pred_id = prediction_repo.create_prediction(1, 999, "Test?", closes_at)
+        pred_id = prediction_repo.create_prediction(TEST_GUILD_ID, 999, "Test?", closes_at)
 
         # Both bet NO
         prediction_repo.place_bet_atomic(pred_id, 1, "no", 30)
@@ -479,16 +469,16 @@ class TestPredictionCornerCases:
         assert all(l.get("refunded") for l in result["losers"])
 
         # Balances should be restored
-        assert player_repo.get_balance(1) == 100  # 70 + 30 refund
-        assert player_repo.get_balance(2) == 100  # 80 + 20 refund
+        assert player_repo.get_balance(1, TEST_GUILD_ID) == 100  # 70 + 30 refund
+        assert player_repo.get_balance(2, TEST_GUILD_ID) == 100  # 80 + 20 refund
 
     def test_settlement_only_one_side_has_bets(self, prediction_repo, player_repo):
         """Test settlement when only winners bet - they get original back."""
-        player_repo.add(discord_id=1, discord_username="P1", initial_mmr=3000)
-        player_repo.update_balance(1, 100)
+        player_repo.add(discord_id=1, discord_username="P1", guild_id=TEST_GUILD_ID, initial_mmr=3000)
+        player_repo.update_balance(1, TEST_GUILD_ID, 100)
 
         closes_at = int(time.time()) + 3600
-        pred_id = prediction_repo.create_prediction(1, 999, "Test?", closes_at)
+        pred_id = prediction_repo.create_prediction(TEST_GUILD_ID, 999, "Test?", closes_at)
 
         # Only bet YES
         prediction_repo.place_bet_atomic(pred_id, 1, "yes", 50)
@@ -500,12 +490,12 @@ class TestPredictionCornerCases:
         assert len(result["losers"]) == 0
         # Winner gets their bet back (pool = bet)
         assert result["winners"][0]["payout"] == 50
-        assert player_repo.get_balance(1) == 100  # 50 + 50 payout
+        assert player_repo.get_balance(1, TEST_GUILD_ID) == 100  # 50 + 50 payout
 
     def test_vote_before_close_rejected(self, prediction_service, registered_player):
         """Test that voting before close time is rejected."""
         closes_at = int(time.time()) + 3600  # 1 hour from now
-        pred = prediction_service.create_prediction(1, 999, "Test question?", closes_at)
+        pred = prediction_service.create_prediction(TEST_GUILD_ID, 999, "Test question?", closes_at)
         pred_id = pred["prediction_id"]
 
         with pytest.raises(ValueError, match="Cannot vote until betting period closes"):
@@ -514,7 +504,7 @@ class TestPredictionCornerCases:
     def test_resolve_already_resolved(self, prediction_service):
         """Test that resolving an already resolved prediction fails."""
         closes_at = int(time.time()) + 3600
-        pred = prediction_service.create_prediction(1, 999, "Test?", closes_at)
+        pred = prediction_service.create_prediction(TEST_GUILD_ID, 999, "Test?", closes_at)
         pred_id = pred["prediction_id"]
 
         # Force to resolved state
@@ -525,11 +515,11 @@ class TestPredictionCornerCases:
 
     def test_multiple_bets_same_user_same_side(self, prediction_repo, player_repo):
         """Test that multiple bets on same side accumulate correctly."""
-        player_repo.add(discord_id=123, discord_username="Test", initial_mmr=3000)
-        player_repo.update_balance(123, 100)
+        player_repo.add(discord_id=123, discord_username="Test", guild_id=TEST_GUILD_ID, initial_mmr=3000)
+        player_repo.update_balance(123, TEST_GUILD_ID, 100)
 
         closes_at = int(time.time()) + 3600
-        pred_id = prediction_repo.create_prediction(1, 999, "Test?", closes_at)
+        pred_id = prediction_repo.create_prediction(TEST_GUILD_ID, 999, "Test?", closes_at)
 
         prediction_repo.place_bet_atomic(pred_id, 123, "yes", 10)
         prediction_repo.place_bet_atomic(pred_id, 123, "yes", 20)
@@ -541,13 +531,13 @@ class TestPredictionCornerCases:
 
     def test_get_user_active_positions(self, prediction_repo, player_repo):
         """Test getting user's active positions across predictions."""
-        player_repo.add(discord_id=123, discord_username="Test", initial_mmr=3000)
-        player_repo.update_balance(123, 100)
+        player_repo.add(discord_id=123, discord_username="Test", guild_id=TEST_GUILD_ID, initial_mmr=3000)
+        player_repo.update_balance(123, TEST_GUILD_ID, 100)
 
         closes_at = int(time.time()) + 3600
-        pred1 = prediction_repo.create_prediction(1, 999, "Question 1?", closes_at)
-        pred2 = prediction_repo.create_prediction(1, 999, "Question 2?", closes_at)
-        pred3 = prediction_repo.create_prediction(1, 999, "Question 3?", closes_at)
+        pred1 = prediction_repo.create_prediction(TEST_GUILD_ID, 999, "Question 1?", closes_at)
+        pred2 = prediction_repo.create_prediction(TEST_GUILD_ID, 999, "Question 2?", closes_at)
+        pred3 = prediction_repo.create_prediction(TEST_GUILD_ID, 999, "Question 3?", closes_at)
 
         prediction_repo.place_bet_atomic(pred1, 123, "yes", 10)
         prediction_repo.place_bet_atomic(pred2, 123, "no", 20)
@@ -569,40 +559,40 @@ class TestPredictionCornerCases:
     def test_unregistered_player_bet(self, prediction_repo):
         """Test that unregistered player cannot bet."""
         closes_at = int(time.time()) + 3600
-        pred_id = prediction_repo.create_prediction(1, 999, "Test?", closes_at)
+        pred_id = prediction_repo.create_prediction(TEST_GUILD_ID, 999, "Test?", closes_at)
 
         with pytest.raises(ValueError, match="Player not found"):
             prediction_repo.place_bet_atomic(pred_id, 99999, "yes", 10)
 
     def test_zero_amount_bet_rejected(self, prediction_repo, player_repo):
         """Test that zero amount bet is rejected."""
-        player_repo.add(discord_id=123, discord_username="Test", initial_mmr=3000)
-        player_repo.update_balance(123, 100)
+        player_repo.add(discord_id=123, discord_username="Test", guild_id=TEST_GUILD_ID, initial_mmr=3000)
+        player_repo.update_balance(123, TEST_GUILD_ID, 100)
 
         closes_at = int(time.time()) + 3600
-        pred_id = prediction_repo.create_prediction(1, 999, "Test?", closes_at)
+        pred_id = prediction_repo.create_prediction(TEST_GUILD_ID, 999, "Test?", closes_at)
 
         with pytest.raises(ValueError, match="must be positive"):
             prediction_repo.place_bet_atomic(pred_id, 123, "yes", 0)
 
     def test_negative_amount_bet_rejected(self, prediction_repo, player_repo):
         """Test that negative amount bet is rejected."""
-        player_repo.add(discord_id=123, discord_username="Test", initial_mmr=3000)
-        player_repo.update_balance(123, 100)
+        player_repo.add(discord_id=123, discord_username="Test", guild_id=TEST_GUILD_ID, initial_mmr=3000)
+        player_repo.update_balance(123, TEST_GUILD_ID, 100)
 
         closes_at = int(time.time()) + 3600
-        pred_id = prediction_repo.create_prediction(1, 999, "Test?", closes_at)
+        pred_id = prediction_repo.create_prediction(TEST_GUILD_ID, 999, "Test?", closes_at)
 
         with pytest.raises(ValueError, match="must be positive"):
             prediction_repo.place_bet_atomic(pred_id, 123, "yes", -10)
 
     def test_invalid_position_rejected(self, prediction_repo, player_repo):
         """Test that invalid position is rejected."""
-        player_repo.add(discord_id=123, discord_username="Test", initial_mmr=3000)
-        player_repo.update_balance(123, 100)
+        player_repo.add(discord_id=123, discord_username="Test", guild_id=TEST_GUILD_ID, initial_mmr=3000)
+        player_repo.update_balance(123, TEST_GUILD_ID, 100)
 
         closes_at = int(time.time()) + 3600
-        pred_id = prediction_repo.create_prediction(1, 999, "Test?", closes_at)
+        pred_id = prediction_repo.create_prediction(TEST_GUILD_ID, 999, "Test?", closes_at)
 
         with pytest.raises(ValueError, match="Invalid position"):
             prediction_repo.place_bet_atomic(pred_id, 123, "maybe", 10)
@@ -610,7 +600,7 @@ class TestPredictionCornerCases:
     def test_cancel_already_cancelled(self, prediction_service):
         """Test that cancelling an already cancelled prediction fails."""
         closes_at = int(time.time()) + 3600
-        pred = prediction_service.create_prediction(1, 999, "Test question?", closes_at)
+        pred = prediction_service.create_prediction(TEST_GUILD_ID, 999, "Test question?", closes_at)
         pred_id = pred["prediction_id"]
 
         prediction_service.cancel(pred_id, 999)
@@ -621,7 +611,7 @@ class TestPredictionCornerCases:
     def test_cancel_resolved_prediction(self, prediction_service):
         """Test that cancelling a resolved prediction fails."""
         closes_at = int(time.time()) + 3600
-        pred = prediction_service.create_prediction(1, 999, "Test question?", closes_at)
+        pred = prediction_service.create_prediction(TEST_GUILD_ID, 999, "Test question?", closes_at)
         pred_id = pred["prediction_id"]
 
         prediction_service.prediction_repo.resolve_prediction(pred_id, "yes", 999)
@@ -632,7 +622,7 @@ class TestPredictionCornerCases:
     def test_cancel_locked_prediction(self, prediction_service):
         """Test that cancelling a locked prediction fails."""
         closes_at = int(time.time()) + 3600
-        pred = prediction_service.create_prediction(1, 999, "Test question?", closes_at)
+        pred = prediction_service.create_prediction(TEST_GUILD_ID, 999, "Test question?", closes_at)
         pred_id = pred["prediction_id"]
 
         prediction_service.prediction_repo.update_prediction_status(pred_id, "locked")
@@ -642,15 +632,15 @@ class TestPredictionCornerCases:
 
     def test_proportional_payout_calculation(self, prediction_repo, player_repo):
         """Test that proportional payouts are calculated correctly."""
-        player_repo.add(discord_id=1, discord_username="P1", initial_mmr=3000)
-        player_repo.add(discord_id=2, discord_username="P2", initial_mmr=3000)
-        player_repo.add(discord_id=3, discord_username="P3", initial_mmr=3000)
-        player_repo.update_balance(1, 100)
-        player_repo.update_balance(2, 100)
-        player_repo.update_balance(3, 100)
+        player_repo.add(discord_id=1, discord_username="P1", guild_id=TEST_GUILD_ID, initial_mmr=3000)
+        player_repo.add(discord_id=2, discord_username="P2", guild_id=TEST_GUILD_ID, initial_mmr=3000)
+        player_repo.add(discord_id=3, discord_username="P3", guild_id=TEST_GUILD_ID, initial_mmr=3000)
+        player_repo.update_balance(1, TEST_GUILD_ID, 100)
+        player_repo.update_balance(2, TEST_GUILD_ID, 100)
+        player_repo.update_balance(3, TEST_GUILD_ID, 100)
 
         closes_at = int(time.time()) + 3600
-        pred_id = prediction_repo.create_prediction(1, 999, "Test?", closes_at)
+        pred_id = prediction_repo.create_prediction(TEST_GUILD_ID, 999, "Test?", closes_at)
 
         # Two winners, one loser
         prediction_repo.place_bet_atomic(pred_id, 1, "yes", 30)  # 30/50 = 60%
@@ -669,13 +659,13 @@ class TestPredictionCornerCases:
         """Test that minimum duration is enforced."""
         closes_at = int(time.time()) + 30  # Only 30 seconds
         with pytest.raises(ValueError, match="at least 1 minute"):
-            prediction_service.create_prediction(1, registered_player, "Too short?", closes_at)
+            prediction_service.create_prediction(TEST_GUILD_ID, registered_player, "Too short?", closes_at)
 
     def test_expired_predictions_auto_locked(self, prediction_service):
         """Test that expired predictions are auto-locked when fetching active list."""
         # Create a prediction that's already expired
         closes_at = int(time.time()) + 3600
-        pred = prediction_service.create_prediction(1, 999, "Test question?", closes_at)
+        pred = prediction_service.create_prediction(TEST_GUILD_ID, 999, "Test question?", closes_at)
         pred_id = pred["prediction_id"]
 
         # Manually set closes_at to past
@@ -690,7 +680,7 @@ class TestPredictionCornerCases:
         assert pred_before["status"] == "open"
 
         # Fetch active predictions - should trigger auto-lock
-        prediction_service.get_active_predictions(1)
+        prediction_service.get_active_predictions(TEST_GUILD_ID)
 
         # Now it should be locked
         pred_after = prediction_service.get_prediction(pred_id)
@@ -699,14 +689,14 @@ class TestPredictionCornerCases:
     def test_cancelled_predictions_not_in_active_list(self, prediction_service):
         """Test that cancelled predictions don't appear in active list."""
         closes_at = int(time.time()) + 3600
-        pred1 = prediction_service.create_prediction(1, 999, "Question 1?", closes_at)
-        pred2 = prediction_service.create_prediction(1, 999, "Question 2?", closes_at)
+        pred1 = prediction_service.create_prediction(TEST_GUILD_ID, 999, "Question 1?", closes_at)
+        pred2 = prediction_service.create_prediction(TEST_GUILD_ID, 999, "Question 2?", closes_at)
 
         # Cancel pred1
         prediction_service.cancel(pred1["prediction_id"], 999)
 
         # Get active predictions
-        active = prediction_service.get_active_predictions(1)
+        active = prediction_service.get_active_predictions(TEST_GUILD_ID)
 
         # Only pred2 should be in list
         assert len(active) == 1
@@ -715,7 +705,7 @@ class TestPredictionCornerCases:
     def test_external_admin_flag_for_resolution(self, prediction_service, registered_player):
         """Test that external is_admin flag overrides internal check."""
         closes_at = int(time.time()) + 3600
-        pred = prediction_service.create_prediction(1, 999, "Test?", closes_at)
+        pred = prediction_service.create_prediction(TEST_GUILD_ID, 999, "Test?", closes_at)
         pred_id = pred["prediction_id"]
 
         # Set to locked and past close time
@@ -736,7 +726,7 @@ class TestPredictionCornerCases:
     def test_cancel_by_admin_skips_internal_check(self, prediction_service):
         """Test that cancel_by_admin doesn't check internal admin list."""
         closes_at = int(time.time()) + 3600
-        pred = prediction_service.create_prediction(1, 999, "Test?", closes_at)
+        pred = prediction_service.create_prediction(TEST_GUILD_ID, 999, "Test?", closes_at)
         pred_id = pred["prediction_id"]
 
         # Non-admin user (123) should succeed with cancel_by_admin
@@ -749,8 +739,8 @@ class TestPredictionCornerCases:
         closes_at_future = int(time.time()) + 3600
         closes_at_past = int(time.time()) - 100
 
-        pred1 = prediction_service.create_prediction(1, 999, "Future close?", closes_at_future)
-        pred2 = prediction_service.create_prediction(1, 999, "Past close?", closes_at_future)
+        pred1 = prediction_service.create_prediction(TEST_GUILD_ID, 999, "Future close?", closes_at_future)
+        pred2 = prediction_service.create_prediction(TEST_GUILD_ID, 999, "Past close?", closes_at_future)
 
         # Manually set pred2 to past close time
         with prediction_service.prediction_repo.connection() as conn:
@@ -760,7 +750,7 @@ class TestPredictionCornerCases:
             )
 
         # Run lock check
-        locked = prediction_service.check_and_lock_expired(1)
+        locked = prediction_service.check_and_lock_expired(TEST_GUILD_ID)
 
         # Only pred2 should be locked
         assert pred2["prediction_id"] in locked
@@ -797,7 +787,7 @@ class TestPredictionCornerCases:
     def test_update_discord_ids(self, prediction_service):
         """Test updating Discord message/thread IDs."""
         closes_at = int(time.time()) + 3600
-        pred = prediction_service.create_prediction(1, 999, "Test question?", closes_at)
+        pred = prediction_service.create_prediction(TEST_GUILD_ID, 999, "Test question?", closes_at)
         pred_id = pred["prediction_id"]
 
         # Update thread and message IDs
@@ -815,7 +805,7 @@ class TestPredictionCornerCases:
     def test_get_resolution_votes(self, prediction_service, registered_player, registered_player2):
         """Test getting resolution vote counts."""
         closes_at = int(time.time()) + 3600
-        pred = prediction_service.create_prediction(1, 999, "Test?", closes_at)
+        pred = prediction_service.create_prediction(TEST_GUILD_ID, 999, "Test?", closes_at)
         pred_id = pred["prediction_id"]
 
         # Set to locked and past close time
@@ -837,7 +827,7 @@ class TestPredictionCornerCases:
     def test_can_resolve_checks_threshold(self, prediction_service, registered_player, registered_player2, registered_player3):
         """Test can_resolve method with specific outcome."""
         closes_at = int(time.time()) + 3600
-        pred = prediction_service.create_prediction(1, 999, "Test?", closes_at)
+        pred = prediction_service.create_prediction(TEST_GUILD_ID, 999, "Test?", closes_at)
         pred_id = pred["prediction_id"]
 
         # Set to locked and past close time
@@ -865,7 +855,7 @@ class TestPredictionCornerCases:
     def test_get_pending_outcome(self, prediction_service, registered_player, registered_player2, registered_player3):
         """Test getting pending outcome when threshold reached."""
         closes_at = int(time.time()) + 3600
-        pred = prediction_service.create_prediction(1, 999, "Test?", closes_at)
+        pred = prediction_service.create_prediction(TEST_GUILD_ID, 999, "Test?", closes_at)
         pred_id = pred["prediction_id"]
 
         # Set to locked and past close time
@@ -889,7 +879,7 @@ class TestPredictionCornerCases:
     def test_get_prediction_enriches_with_odds(self, prediction_service, registered_player, registered_player2):
         """Test that get_prediction includes odds data."""
         closes_at = int(time.time()) + 3600
-        pred = prediction_service.create_prediction(1, 999, "Test?", closes_at)
+        pred = prediction_service.create_prediction(TEST_GUILD_ID, 999, "Test?", closes_at)
         pred_id = pred["prediction_id"]
 
         # Place some bets
@@ -915,7 +905,7 @@ class TestPredictionCornerCases:
     def test_vote_on_resolved_prediction_rejected(self, prediction_service, registered_player):
         """Test that voting on resolved prediction fails."""
         closes_at = int(time.time()) + 3600
-        pred = prediction_service.create_prediction(1, 999, "Test?", closes_at)
+        pred = prediction_service.create_prediction(TEST_GUILD_ID, 999, "Test?", closes_at)
         pred_id = pred["prediction_id"]
 
         # Resolve it
@@ -927,7 +917,7 @@ class TestPredictionCornerCases:
     def test_vote_on_cancelled_prediction_rejected(self, prediction_service, registered_player):
         """Test that voting on cancelled prediction fails."""
         closes_at = int(time.time()) + 3600
-        pred = prediction_service.create_prediction(1, 999, "Test?", closes_at)
+        pred = prediction_service.create_prediction(TEST_GUILD_ID, 999, "Test?", closes_at)
         pred_id = pred["prediction_id"]
 
         # Cancel it
@@ -939,7 +929,7 @@ class TestPredictionCornerCases:
     def test_get_user_position_via_service(self, prediction_service, registered_player):
         """Test get_user_position service method."""
         closes_at = int(time.time()) + 3600
-        pred = prediction_service.create_prediction(1, 999, "Test?", closes_at)
+        pred = prediction_service.create_prediction(TEST_GUILD_ID, 999, "Test?", closes_at)
         pred_id = pred["prediction_id"]
 
         # No position initially
@@ -956,8 +946,8 @@ class TestPredictionCornerCases:
     def test_get_user_active_positions_via_service(self, prediction_service, registered_player):
         """Test get_user_active_positions service method."""
         closes_at = int(time.time()) + 3600
-        pred1 = prediction_service.create_prediction(1, 999, "Question one?", closes_at)
-        pred2 = prediction_service.create_prediction(1, 999, "Question two?", closes_at)
+        pred1 = prediction_service.create_prediction(TEST_GUILD_ID, 999, "Question one?", closes_at)
+        pred2 = prediction_service.create_prediction(TEST_GUILD_ID, 999, "Question two?", closes_at)
 
         prediction_service.place_bet(pred1["prediction_id"], registered_player, "yes", 10)
         prediction_service.place_bet(pred2["prediction_id"], registered_player, "no", 20)
@@ -969,11 +959,11 @@ class TestPredictionCornerCases:
         """Test that large pools with odd division handle rounding."""
         # Create 3 players
         for i in range(1, 4):
-            player_repo.add(discord_id=i, discord_username=f"P{i}", initial_mmr=3000)
-            player_repo.update_balance(i, 1000)
+            player_repo.add(discord_id=i, discord_username=f"P{i}", guild_id=TEST_GUILD_ID, initial_mmr=3000)
+            player_repo.update_balance(i, TEST_GUILD_ID, 1000)
 
         closes_at = int(time.time()) + 3600
-        pred_id = prediction_repo.create_prediction(1, 999, "Test?", closes_at)
+        pred_id = prediction_repo.create_prediction(TEST_GUILD_ID, 999, "Test?", closes_at)
 
         # 3 winners betting unequal amounts that don't divide evenly
         prediction_repo.place_bet_atomic(pred_id, 1, "yes", 33)  # 33/100 = 33%
@@ -981,8 +971,8 @@ class TestPredictionCornerCases:
         prediction_repo.place_bet_atomic(pred_id, 3, "yes", 34)  # 34/100 = 34%
 
         # Loser
-        player_repo.add(discord_id=4, discord_username="P4", initial_mmr=3000)
-        player_repo.update_balance(4, 1000)
+        player_repo.add(discord_id=4, discord_username="P4", guild_id=TEST_GUILD_ID, initial_mmr=3000)
+        player_repo.update_balance(4, TEST_GUILD_ID, 1000)
         prediction_repo.place_bet_atomic(pred_id, 4, "no", 100)
 
         # Total pool = 200, winner pool = 100
@@ -995,7 +985,7 @@ class TestPredictionCornerCases:
     def test_change_vote_rejected(self, prediction_service, registered_player):
         """Test that changing vote to different outcome fails."""
         closes_at = int(time.time()) + 3600
-        pred = prediction_service.create_prediction(1, 999, "Test question?", closes_at)
+        pred = prediction_service.create_prediction(TEST_GUILD_ID, 999, "Test question?", closes_at)
         pred_id = pred["prediction_id"]
 
         # Set to locked and past close time
@@ -1016,7 +1006,7 @@ class TestPredictionCornerCases:
     def test_same_vote_twice_is_noop(self, prediction_service, registered_player):
         """Test that voting same outcome twice is allowed (no-op)."""
         closes_at = int(time.time()) + 3600
-        pred = prediction_service.create_prediction(1, 999, "Test question?", closes_at)
+        pred = prediction_service.create_prediction(TEST_GUILD_ID, 999, "Test question?", closes_at)
         pred_id = pred["prediction_id"]
 
         # Set to locked and past close time
@@ -1038,7 +1028,7 @@ class TestPredictionCornerCases:
     def test_resolve_cancelled_prediction_rejected(self, prediction_service):
         """Test that resolving a cancelled prediction fails."""
         closes_at = int(time.time()) + 3600
-        pred = prediction_service.create_prediction(1, 999, "Test?", closes_at)
+        pred = prediction_service.create_prediction(TEST_GUILD_ID, 999, "Test?", closes_at)
         pred_id = pred["prediction_id"]
 
         # Cancel it
@@ -1050,7 +1040,7 @@ class TestPredictionCornerCases:
     def test_get_odds_service_method(self, prediction_service, registered_player, registered_player2):
         """Test get_odds standalone method."""
         closes_at = int(time.time()) + 3600
-        pred = prediction_service.create_prediction(1, 999, "Test?", closes_at)
+        pred = prediction_service.create_prediction(TEST_GUILD_ID, 999, "Test?", closes_at)
         pred_id = pred["prediction_id"]
 
         prediction_service.place_bet(pred_id, registered_player, "yes", 40)
@@ -1066,7 +1056,7 @@ class TestPredictionCornerCases:
     def test_bet_returns_updated_odds(self, prediction_service, registered_player, registered_player2):
         """Test that place_bet returns updated odds."""
         closes_at = int(time.time()) + 3600
-        pred = prediction_service.create_prediction(1, 999, "Test?", closes_at)
+        pred = prediction_service.create_prediction(TEST_GUILD_ID, 999, "Test?", closes_at)
         pred_id = pred["prediction_id"]
 
         result1 = prediction_service.place_bet(pred_id, registered_player, "yes", 50)
@@ -1079,7 +1069,7 @@ class TestPredictionCornerCases:
     def test_can_resolve_returns_false_for_resolved(self, prediction_service):
         """Test can_resolve returns false for already resolved predictions."""
         closes_at = int(time.time()) + 3600
-        pred = prediction_service.create_prediction(1, 999, "Test?", closes_at)
+        pred = prediction_service.create_prediction(TEST_GUILD_ID, 999, "Test?", closes_at)
         pred_id = pred["prediction_id"]
 
         prediction_service.prediction_repo.resolve_prediction(pred_id, "yes", 999)
@@ -1098,10 +1088,10 @@ class TestPredictionCornerCases:
     def test_multiple_guilds_isolation(self, prediction_service):
         """Test that predictions are isolated by guild."""
         closes_at = int(time.time()) + 3600
-        pred1 = prediction_service.create_prediction(1, 999, "Guild 1 Q?", closes_at)
+        pred1 = prediction_service.create_prediction(TEST_GUILD_ID, 999, "Guild 1 Q?", closes_at)
         pred2 = prediction_service.create_prediction(2, 999, "Guild 2 Q?", closes_at)
 
-        guild1_active = prediction_service.get_active_predictions(1)
+        guild1_active = prediction_service.get_active_predictions(TEST_GUILD_ID)
         guild2_active = prediction_service.get_active_predictions(2)
 
         assert len(guild1_active) == 1
@@ -1112,7 +1102,7 @@ class TestPredictionCornerCases:
     def test_get_user_resolved_positions(self, prediction_service, registered_player, registered_player2):
         """Test getting user's resolved positions with payout info."""
         closes_at = int(time.time()) + 3600
-        pred = prediction_service.create_prediction(1, 999, "Test question?", closes_at)
+        pred = prediction_service.create_prediction(TEST_GUILD_ID, 999, "Test question?", closes_at)
         pred_id = pred["prediction_id"]
 
         # Place bets

@@ -18,6 +18,8 @@ from repositories.match_repository import MatchRepository
 from repositories.player_repository import PlayerRepository
 from services.match_service import MatchService
 
+TEST_GUILD_ID = 12345
+
 
 @pytest.fixture
 def test_db():
@@ -35,12 +37,13 @@ def test_last_match_date_updated_after_record(test_db):
     match_repo = MatchRepository(test_db.db_path)
     match_service = MatchService(player_repo, match_repo, use_glicko=True)
 
-    # Create 10 players
+    # Create 10 players using player_repo.add() with guild_id
     for i in range(10):
         pid = 100 + i
-        test_db.add_player(
+        player_repo.add(
             discord_id=pid,
             discord_username=f"Player{pid}",
+            guild_id=TEST_GUILD_ID,
             initial_mmr=3000,
             glicko_rating=1500.0,
             glicko_rd=200.0,
@@ -50,18 +53,18 @@ def test_last_match_date_updated_after_record(test_db):
     player_ids = list(range(100, 110))
 
     # Check last_match_date is initially NULL or created_at
-    before_dates = player_repo.get_last_match_date(100)
+    before_dates = player_repo.get_last_match_date(100, TEST_GUILD_ID)
     initial_last_match = before_dates[0] if before_dates else None
 
     # Shuffle and record match
-    match_service.shuffle_players(player_ids, guild_id=1)
-    result = match_service.record_match("radiant", guild_id=1)
+    match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
+    result = match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
 
     assert result["winning_team"] == "radiant"
 
     # Verify last_match_date was updated for all participants
     for pid in player_ids:
-        dates = player_repo.get_last_match_date(pid)
+        dates = player_repo.get_last_match_date(pid, TEST_GUILD_ID)
         assert dates is not None, f"Player {pid} should have dates tuple"
         last_match, created_at = dates
         assert last_match is not None, f"Player {pid} should have last_match_date set"
@@ -83,9 +86,10 @@ def test_rd_decay_not_applied_when_match_just_recorded(test_db):
     start_rd = 150.0
     for i in range(10):
         pid = 200 + i
-        test_db.add_player(
+        player_repo.add(
             discord_id=pid,
             discord_username=f"Player{pid}",
+            guild_id=TEST_GUILD_ID,
             initial_mmr=3000,
             glicko_rating=1500.0,
             glicko_rd=start_rd,
@@ -95,12 +99,12 @@ def test_rd_decay_not_applied_when_match_just_recorded(test_db):
     player_ids = list(range(200, 210))
 
     # Record a match first
-    match_service.shuffle_players(player_ids, guild_id=2)
-    match_service.record_match("dire", guild_id=2)
+    match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
+    match_service.record_match("dire", guild_id=TEST_GUILD_ID)
 
     # Now load a player - RD should be close to what Glicko-2 set it to (decreased from match)
     # NOT increased from decay since match was just recorded
-    player, _ = match_service._load_glicko_player(200)
+    player, _ = match_service._load_glicko_player(200, TEST_GUILD_ID)
 
     # After a match, RD typically decreases. It should definitely not be > start_rd
     # (which would indicate improper decay was applied)
@@ -116,9 +120,10 @@ def test_rd_decay_applied_for_inactive_player(test_db):
     # Create a player
     pid = 300
     start_rd = 100.0
-    test_db.add_player(
+    player_repo.add(
         discord_id=pid,
         discord_username="InactivePlayer",
+        guild_id=TEST_GUILD_ID,
         initial_mmr=3000,
         glicko_rating=1500.0,
         glicko_rd=start_rd,
@@ -127,10 +132,10 @@ def test_rd_decay_applied_for_inactive_player(test_db):
 
     # Manually set last_match_date to 4 weeks ago (beyond grace period)
     four_weeks_ago = (datetime.now(timezone.utc) - timedelta(weeks=4)).isoformat()
-    player_repo.update_last_match_date(pid, four_weeks_ago)
+    player_repo.update_last_match_date(pid, TEST_GUILD_ID, four_weeks_ago)
 
     # Load the player - RD should have decayed
-    player, _ = match_service._load_glicko_player(pid)
+    player, _ = match_service._load_glicko_player(pid, TEST_GUILD_ID)
 
     # Expected: sqrt(100^2 + 50^2 * 4) = sqrt(10000 + 10000) = sqrt(20000) ≈ 141.4
     expected_weeks = 4
@@ -149,9 +154,10 @@ def test_rd_decay_respects_grace_period(test_db):
     # Create a player
     pid = 400
     start_rd = 100.0
-    test_db.add_player(
+    player_repo.add(
         discord_id=pid,
         discord_username="RecentPlayer",
+        guild_id=TEST_GUILD_ID,
         initial_mmr=3000,
         glicko_rating=1500.0,
         glicko_rd=start_rd,
@@ -160,10 +166,10 @@ def test_rd_decay_respects_grace_period(test_db):
 
     # Set last_match_date to 1 week ago (within 2-week grace period)
     one_week_ago = (datetime.now(timezone.utc) - timedelta(weeks=1)).isoformat()
-    player_repo.update_last_match_date(pid, one_week_ago)
+    player_repo.update_last_match_date(pid, TEST_GUILD_ID, one_week_ago)
 
     # Load the player - RD should NOT have decayed
-    player, _ = match_service._load_glicko_player(pid)
+    player, _ = match_service._load_glicko_player(pid, TEST_GUILD_ID)
 
     assert player.rd == start_rd, f"RD should not decay within grace period (got {player.rd})"
 
@@ -177,9 +183,10 @@ def test_bulk_update_and_last_match_date_are_both_applied(test_db):
     # Create 10 players
     for i in range(10):
         pid = 500 + i
-        test_db.add_player(
+        player_repo.add(
             discord_id=pid,
             discord_username=f"Player{pid}",
+            guild_id=TEST_GUILD_ID,
             initial_mmr=3000,
             glicko_rating=1500.0,
             glicko_rd=350.0,  # High RD
@@ -191,16 +198,16 @@ def test_bulk_update_and_last_match_date_are_both_applied(test_db):
     # Get initial ratings
     initial_ratings = {}
     for pid in player_ids:
-        initial_ratings[pid] = player_repo.get_glicko_rating(pid)
+        initial_ratings[pid] = player_repo.get_glicko_rating(pid, TEST_GUILD_ID)
 
     # Record match
-    match_service.shuffle_players(player_ids, guild_id=3)
-    match_service.record_match("radiant", guild_id=3)
+    match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
+    match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
 
     # Verify both rating and last_match_date were updated
     for pid in player_ids:
-        new_rating = player_repo.get_glicko_rating(pid)
-        dates = player_repo.get_last_match_date(pid)
+        new_rating = player_repo.get_glicko_rating(pid, TEST_GUILD_ID)
+        dates = player_repo.get_last_match_date(pid, TEST_GUILD_ID)
 
         # Rating should have changed (RD decreases after a match)
         assert new_rating[1] < initial_ratings[pid][1], \
@@ -208,4 +215,3 @@ def test_bulk_update_and_last_match_date_are_both_applied(test_db):
 
         # last_match_date should be set
         assert dates[0] is not None, f"Player {pid} should have last_match_date"
-

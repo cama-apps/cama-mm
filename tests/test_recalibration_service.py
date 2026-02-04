@@ -10,6 +10,8 @@ from repositories.player_repository import PlayerRepository
 from repositories.recalibration_repository import RecalibrationRepository
 from services.recalibration_service import RecalibrationService
 
+TEST_GUILD_ID = 12345
+
 
 @pytest.fixture
 def services(repo_db_path):
@@ -39,7 +41,7 @@ class TestRecalibrationService:
         """Test get_state returns default state for player with no recalibration history."""
         service = services["service"]
 
-        state = service.get_state(discord_id=12345)
+        state = service.get_state(discord_id=12345, guild_id=TEST_GUILD_ID)
 
         assert state.discord_id == 12345
         assert state.last_recalibration_at is None
@@ -51,7 +53,7 @@ class TestRecalibrationService:
         """Test can_recalibrate returns error for unregistered player."""
         service = services["service"]
 
-        result = service.can_recalibrate(discord_id=99999)
+        result = service.can_recalibrate(discord_id=99999, guild_id=TEST_GUILD_ID)
 
         assert result["allowed"] is False
         assert result["reason"] == "not_registered"
@@ -68,9 +70,10 @@ class TestRecalibrationService:
             glicko_rating=1500.0,
             glicko_rd=200.0,
             glicko_volatility=0.06,
+            guild_id=TEST_GUILD_ID,
         )
 
-        result = service.can_recalibrate(discord_id=12345)
+        result = service.can_recalibrate(discord_id=12345, guild_id=TEST_GUILD_ID)
 
         assert result["allowed"] is False
         assert result["reason"] == "insufficient_games"
@@ -89,12 +92,13 @@ class TestRecalibrationService:
             glicko_rating=1500.0,
             glicko_rd=200.0,  # RD doesn't matter anymore
             glicko_volatility=0.06,
+            guild_id=TEST_GUILD_ID,
         )
         # Add 5 wins to meet minimum games requirement
         for _ in range(5):
-            player_repo.increment_wins(12345)
+            player_repo.increment_wins(12345, TEST_GUILD_ID)
 
-        result = service.can_recalibrate(discord_id=12345)
+        result = service.can_recalibrate(discord_id=12345, guild_id=TEST_GUILD_ID)
 
         assert result["allowed"] is True
         assert result["current_rating"] == 1500.0
@@ -114,19 +118,19 @@ class TestRecalibrationService:
             glicko_rating=1500.0,
             glicko_rd=80.0,
             glicko_volatility=0.06,
+            guild_id=TEST_GUILD_ID,
         )
         for _ in range(5):
-            player_repo.increment_wins(12345)
+            player_repo.increment_wins(12345, TEST_GUILD_ID)
 
         # Set a recent recalibration (within cooldown)
         now = int(time.time())
-        recalibration_repo.upsert_state(
-            discord_id=12345,
+        recalibration_repo.upsert_state(discord_id=12345, guild_id=TEST_GUILD_ID,
             last_recalibration_at=now,
             total_recalibrations=1,
         )
 
-        result = service.can_recalibrate(discord_id=12345)
+        result = service.can_recalibrate(discord_id=12345, guild_id=TEST_GUILD_ID)
 
         assert result["allowed"] is False
         assert result["reason"] == "on_cooldown"
@@ -144,11 +148,12 @@ class TestRecalibrationService:
             glicko_rating=1500.0,
             glicko_rd=80.0,
             glicko_volatility=0.05,
+            guild_id=TEST_GUILD_ID,
         )
         for _ in range(5):
-            player_repo.increment_wins(12345)
+            player_repo.increment_wins(12345, TEST_GUILD_ID)
 
-        result = service.recalibrate(discord_id=12345)
+        result = service.recalibrate(discord_id=12345, guild_id=TEST_GUILD_ID)
 
         assert result["success"] is True
         assert result["old_rating"] == 1500.0
@@ -158,7 +163,7 @@ class TestRecalibrationService:
         assert result["total_recalibrations"] == 1
 
         # Verify player's rating is preserved but RD is reset
-        rating_data = player_repo.get_glicko_rating(12345)
+        rating_data = player_repo.get_glicko_rating(12345, TEST_GUILD_ID)
         assert rating_data is not None
         rating, rd, vol = rating_data
         assert rating == 1500.0  # Rating unchanged
@@ -177,17 +182,18 @@ class TestRecalibrationService:
             glicko_rating=2000.0,
             glicko_rd=50.0,
             glicko_volatility=0.04,
+            guild_id=TEST_GUILD_ID,
         )
         for _ in range(5):
-            player_repo.increment_wins(12345)
+            player_repo.increment_wins(12345, TEST_GUILD_ID)
 
-        result = service.recalibrate(discord_id=12345)
+        result = service.recalibrate(discord_id=12345, guild_id=TEST_GUILD_ID)
 
         assert result["success"] is True
         assert result["old_rating"] == 2000.0
 
         # Verify rating is preserved
-        rating_data = player_repo.get_glicko_rating(12345)
+        rating_data = player_repo.get_glicko_rating(12345, TEST_GUILD_ID)
         rating, rd, vol = rating_data
         assert rating == 2000.0
 
@@ -204,25 +210,25 @@ class TestRecalibrationService:
             glicko_rating=1500.0,
             glicko_rd=80.0,
             glicko_volatility=0.06,
+            guild_id=TEST_GUILD_ID,
         )
         for _ in range(5):
-            player_repo.increment_wins(12345)
+            player_repo.increment_wins(12345, TEST_GUILD_ID)
 
         # Set a past recalibration (outside cooldown)
         past = int(time.time()) - 7200  # 2 hours ago
-        recalibration_repo.upsert_state(
-            discord_id=12345,
+        recalibration_repo.upsert_state(discord_id=12345, guild_id=TEST_GUILD_ID,
             last_recalibration_at=past,
             total_recalibrations=2,
         )
 
-        result = service.recalibrate(discord_id=12345)
+        result = service.recalibrate(discord_id=12345, guild_id=TEST_GUILD_ID)
 
         assert result["success"] is True
         assert result["total_recalibrations"] == 3
 
         # Verify state was updated
-        state = service.get_state(12345)
+        state = service.get_state(12345, TEST_GUILD_ID)
         assert state.total_recalibrations == 3
 
     def test_reset_cooldown(self, services):
@@ -238,27 +244,27 @@ class TestRecalibrationService:
             glicko_rating=1500.0,
             glicko_rd=80.0,
             glicko_volatility=0.06,
+            guild_id=TEST_GUILD_ID,
         )
 
         # Set a recent recalibration (on cooldown)
         now = int(time.time())
-        recalibration_repo.upsert_state(
-            discord_id=12345,
+        recalibration_repo.upsert_state(discord_id=12345, guild_id=TEST_GUILD_ID,
             last_recalibration_at=now,
             total_recalibrations=1,
         )
 
         # Verify on cooldown
-        state_before = service.get_state(12345)
+        state_before = service.get_state(12345, TEST_GUILD_ID)
         assert state_before.is_on_cooldown is True
 
         # Reset cooldown
-        result = service.reset_cooldown(12345)
+        result = service.reset_cooldown(12345, TEST_GUILD_ID)
 
         assert result["success"] is True
 
         # Verify no longer on cooldown
-        state_after = service.get_state(12345)
+        state_after = service.get_state(12345, TEST_GUILD_ID)
         assert state_after.is_on_cooldown is False
         # Count should be preserved
         assert state_after.total_recalibrations == 1
@@ -275,9 +281,10 @@ class TestRecalibrationService:
             glicko_rating=1500.0,
             glicko_rd=80.0,
             glicko_volatility=0.06,
+            guild_id=TEST_GUILD_ID,
         )
 
-        result = service.reset_cooldown(12345)
+        result = service.reset_cooldown(12345, TEST_GUILD_ID)
 
         assert result["success"] is False
         assert result["reason"] == "no_recalibration_history"
@@ -290,7 +297,7 @@ class TestRecalibrationRepository:
         """Test get_state returns None for non-existent player."""
         repo = RecalibrationRepository(repo_db_path)
 
-        state = repo.get_state(99999)
+        state = repo.get_state(99999, TEST_GUILD_ID)
 
         assert state is None
 
@@ -299,14 +306,13 @@ class TestRecalibrationRepository:
         repo = RecalibrationRepository(repo_db_path)
 
         now = int(time.time())
-        repo.upsert_state(
-            discord_id=12345,
+        repo.upsert_state(discord_id=12345, guild_id=TEST_GUILD_ID,
             last_recalibration_at=now,
             total_recalibrations=1,
             rating_at_recalibration=1500.0,
         )
 
-        state = repo.get_state(12345)
+        state = repo.get_state(12345, TEST_GUILD_ID)
         assert state is not None
         assert state["discord_id"] == 12345
         assert state["last_recalibration_at"] == now
@@ -319,21 +325,19 @@ class TestRecalibrationRepository:
 
         # Create initial state
         old_time = int(time.time()) - 3600
-        repo.upsert_state(
-            discord_id=12345,
+        repo.upsert_state(discord_id=12345, guild_id=TEST_GUILD_ID,
             last_recalibration_at=old_time,
             total_recalibrations=1,
         )
 
         # Update with new values
         new_time = int(time.time())
-        repo.upsert_state(
-            discord_id=12345,
+        repo.upsert_state(discord_id=12345, guild_id=TEST_GUILD_ID,
             last_recalibration_at=new_time,
             total_recalibrations=2,
         )
 
-        state = repo.get_state(12345)
+        state = repo.get_state(12345, TEST_GUILD_ID)
         assert state["last_recalibration_at"] == new_time
         assert state["total_recalibrations"] == 2
 
@@ -343,16 +347,15 @@ class TestRecalibrationRepository:
 
         # Create initial state
         now = int(time.time())
-        repo.upsert_state(
-            discord_id=12345,
+        repo.upsert_state(discord_id=12345, guild_id=TEST_GUILD_ID,
             last_recalibration_at=now,
             total_recalibrations=1,
         )
 
         # Reset cooldown
-        repo.reset_cooldown(12345)
+        repo.reset_cooldown(12345, TEST_GUILD_ID)
 
-        state = repo.get_state(12345)
+        state = repo.get_state(12345, TEST_GUILD_ID)
         assert state["last_recalibration_at"] == 0
         # Count should be preserved
         assert state["total_recalibrations"] == 1

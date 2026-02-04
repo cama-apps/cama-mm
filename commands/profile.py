@@ -51,11 +51,13 @@ class ProfileView(discord.ui.View):
         cog: "ProfileCommands",
         target_user: discord.Member | discord.User,
         target_discord_id: int,
+        guild_id: int | None = None,
     ):
         super().__init__(timeout=840)  # 14 minute timeout (interaction tokens expire at 15min)
         self.cog = cog
         self.target_user = target_user
         self.target_discord_id = target_discord_id
+        self.guild_id = guild_id
         self.current_tab = "overview"
         self._last_interaction_time: dict[int, float] = {}  # user_id -> timestamp
         self.message: discord.Message | None = None  # Set after sending
@@ -131,7 +133,7 @@ class ProfileView(discord.ui.View):
                     files.append(discord.File(BytesIO(cached_bytes), filename=filename))
             else:
                 embed, files = await self.cog.build_tab_embed(
-                    tab_name, self.target_user, self.target_discord_id
+                    tab_name, self.target_user, self.target_discord_id, self.guild_id
                 )
                 # Cache expensive tab results - extract bytes from Files before they're consumed
                 if is_expensive:
@@ -245,6 +247,7 @@ class ProfileCommands(commands.Cog):
         tab_name: str,
         target_user: discord.Member | discord.User,
         target_discord_id: int,
+        guild_id: int | None = None,
     ) -> tuple[discord.Embed, list[discord.File]]:
         """Build the embed and optional chart files for a specific tab."""
         builders = {
@@ -258,7 +261,7 @@ class ProfileCommands(commands.Cog):
             "heroes": self._build_heroes_embed,
         }
         builder = builders.get(tab_name, self._build_overview_embed)
-        result = await builder(target_user, target_discord_id)
+        result = await builder(target_user, target_discord_id, guild_id)
         # Normalize return value to always return a list of files
         embed = result[0]
         file_or_files = result[1]
@@ -273,6 +276,7 @@ class ProfileCommands(commands.Cog):
         self,
         target_user: discord.Member | discord.User,
         target_discord_id: int,
+        guild_id: int | None = None,
     ) -> tuple[discord.Embed, discord.File | None]:
         """Build the Overview tab embed."""
         player_service = self._get_player_service()
@@ -285,7 +289,7 @@ class ProfileCommands(commands.Cog):
             ), None
 
         try:
-            stats = player_service.get_stats(target_discord_id)
+            stats = player_service.get_stats(target_discord_id, guild_id)
         except ValueError:
             return discord.Embed(
                 title="Not Registered",
@@ -298,7 +302,7 @@ class ProfileCommands(commands.Cog):
         # Check for bankruptcy penalty
         penalty_games = 0
         if bankruptcy_service:
-            state = bankruptcy_service.get_state(target_discord_id)
+            state = bankruptcy_service.get_state(target_discord_id, guild_id)
             penalty_games = state.penalty_games_remaining
 
         # Title with tombstone if penalized
@@ -359,7 +363,7 @@ class ProfileCommands(commands.Cog):
             try:
                 from utils.hero_lookup import get_hero_name
 
-                hero_stats = match_repo.get_player_hero_stats(target_discord_id)
+                hero_stats = match_repo.get_player_hero_stats(target_discord_id, guild_id)
                 if isinstance(hero_stats, dict):
                     hero_lines = []
                     if hero_stats.get("last_hero_id"):
@@ -393,6 +397,7 @@ class ProfileCommands(commands.Cog):
         self,
         target_user: discord.Member | discord.User,
         target_discord_id: int,
+        guild_id: int | None = None,
     ) -> tuple[discord.Embed, discord.File | None]:
         """Build the Rating tab embed with detailed calibration stats."""
         player_repo = self._get_player_repo()
@@ -404,7 +409,7 @@ class ProfileCommands(commands.Cog):
                 title="Error", description="Player repository unavailable", color=COLOR_RED
             ), None
 
-        player = player_repo.get_by_id(target_discord_id)
+        player = player_repo.get_by_id(target_discord_id, guild_id)
         if not player:
             return discord.Embed(
                 title="Not Registered",
@@ -415,10 +420,10 @@ class ProfileCommands(commands.Cog):
         # Get rating history for trend analysis
         history = []
         if match_repo and hasattr(match_repo, "get_player_rating_history_detailed"):
-            history = match_repo.get_player_rating_history_detailed(target_discord_id, limit=50)
+            history = match_repo.get_player_rating_history_detailed(target_discord_id, guild_id, limit=50)
 
         # Calculate percentile
-        all_players = player_repo.get_all()
+        all_players = player_repo.get_all(guild_id)
         rated_players = [p for p in all_players if p.glicko_rating is not None]
         percentile = None
         if player.glicko_rating and rated_players:
@@ -604,6 +609,7 @@ class ProfileCommands(commands.Cog):
         self,
         target_user: discord.Member | discord.User,
         target_discord_id: int,
+        guild_id: int | None = None,
     ) -> tuple[discord.Embed, discord.File | None]:
         """Build the Economy tab embed with balance, loans, and bankruptcy."""
         player_repo = self._get_player_repo()
@@ -615,7 +621,7 @@ class ProfileCommands(commands.Cog):
                 title="Error", description="Player repository unavailable", color=COLOR_RED
             ), None
 
-        player = player_repo.get_by_id(target_discord_id)
+        player = player_repo.get_by_id(target_discord_id, guild_id)
         if not player:
             return discord.Embed(
                 title="Not Registered",
@@ -648,7 +654,7 @@ class ProfileCommands(commands.Cog):
 
         # Loan information
         if loan_service:
-            loan_state = loan_service.get_state(target_discord_id)
+            loan_state = loan_service.get_state(target_discord_id, guild_id)
 
             loan_lines = []
             loan_lines.append(f"**Loans Taken:** {loan_state.total_loans_taken}")
@@ -678,8 +684,8 @@ class ProfileCommands(commands.Cog):
         # Bankruptcy information
         if bankruptcy_service:
             bankruptcy_repo = bankruptcy_service.bankruptcy_repo
-            state_data = bankruptcy_repo.get_state(target_discord_id)
-            bankruptcy_state = bankruptcy_service.get_state(target_discord_id)
+            state_data = bankruptcy_repo.get_state(target_discord_id, guild_id)
+            bankruptcy_state = bankruptcy_service.get_state(target_discord_id, guild_id)
 
             bankruptcy_lines = []
             bankruptcy_count = state_data["bankruptcy_count"] if state_data else 0
@@ -703,7 +709,7 @@ class ProfileCommands(commands.Cog):
             )
 
         # Lowest balance ever reached
-        lowest_balance = player_repo.get_lowest_balance(target_discord_id)
+        lowest_balance = player_repo.get_lowest_balance(target_discord_id, guild_id)
         if lowest_balance is not None and lowest_balance < 0:
             embed.add_field(
                 name="📉 Lowest Balance",
@@ -714,8 +720,6 @@ class ProfileCommands(commands.Cog):
         # Tipping statistics
         tip_repo = self._get_tip_repository()
         if tip_repo:
-            # Get guild_id from the interaction context (via the view/cog)
-            guild_id = None
             tip_stats = tip_repo.get_user_tip_stats(target_discord_id, guild_id)
 
             # Only show if user has tip history
@@ -746,6 +750,7 @@ class ProfileCommands(commands.Cog):
         self,
         target_user: discord.Member | discord.User,
         target_discord_id: int,
+        guild_id: int | None = None,
     ) -> tuple[discord.Embed, discord.File | None]:
         """Build the Gambling tab embed with degen score, stats, and P&L chart."""
         gambling_stats_service = self._get_gambling_stats_service()
@@ -758,7 +763,7 @@ class ProfileCommands(commands.Cog):
                 title="Error", description="Gambling stats service unavailable", color=COLOR_RED
             ), None
 
-        stats = gambling_stats_service.get_player_stats(target_discord_id)
+        stats = gambling_stats_service.get_player_stats(target_discord_id, guild_id)
 
         if not stats:
             return discord.Embed(
@@ -788,7 +793,7 @@ class ProfileCommands(commands.Cog):
         roi_str = f"+{stats.roi:.1%}" if stats.roi >= 0 else f"{stats.roi:.1%}"
 
         # Get current balance
-        player = player_service.get_player(target_discord_id) if player_service else None
+        player = player_service.get_player(target_discord_id, guild_id) if player_service else None
         balance = player.jopacoin_balance if player else 0
 
         embed.add_field(
@@ -892,7 +897,7 @@ class ProfileCommands(commands.Cog):
             )
 
         # Betting Impact section - how others bet on this player
-        impact_stats = gambling_stats_service.get_betting_impact_stats(target_discord_id)
+        impact_stats = gambling_stats_service.get_betting_impact_stats(target_discord_id, guild_id)
         if impact_stats:
             embed.add_field(
                 name="\u200b",  # Separator
@@ -980,7 +985,7 @@ class ProfileCommands(commands.Cog):
         # Generate P&L chart
         chart_file = None
         try:
-            pnl_series = gambling_stats_service.get_cumulative_pnl_series(target_discord_id)
+            pnl_series = gambling_stats_service.get_cumulative_pnl_series(target_discord_id, guild_id)
             if pnl_series and len(pnl_series) >= 2:
                 degen = stats.degen_score
                 chart_bytes = draw_gamba_chart(
@@ -1007,6 +1012,7 @@ class ProfileCommands(commands.Cog):
         self,
         target_user: discord.Member | discord.User,
         target_discord_id: int,
+        guild_id: int | None = None,
     ) -> tuple[discord.Embed, discord.File | None]:
         """Build the Predictions tab embed with prediction market stats."""
         prediction_service = self._get_prediction_service()
@@ -1135,6 +1141,7 @@ class ProfileCommands(commands.Cog):
         self,
         target_user: discord.Member | discord.User,
         target_discord_id: int,
+        guild_id: int | None = None,
     ) -> tuple[discord.Embed, list[discord.File]]:
         """Build the Dota tab embed with OpenDota stats (roles/lanes)."""
         player_repo = self._get_player_repo()
@@ -1145,7 +1152,7 @@ class ProfileCommands(commands.Cog):
                 title="Error", description="Player repository unavailable", color=COLOR_RED
             ), []
 
-        player = player_repo.get_by_id(target_discord_id)
+        player = player_repo.get_by_id(target_discord_id, guild_id)
         if not player:
             return discord.Embed(
                 title="Not Registered",
@@ -1277,6 +1284,7 @@ class ProfileCommands(commands.Cog):
         self,
         target_user: discord.Member | discord.User,
         target_discord_id: int,
+        guild_id: int | None = None,
     ) -> tuple[discord.Embed, discord.File | None]:
         """Build the Teammates tab embed with pairwise statistics."""
         pairings_repo = self._get_pairings_repo()
@@ -1287,7 +1295,7 @@ class ProfileCommands(commands.Cog):
                 title="Error", description="Pairings data unavailable", color=COLOR_RED
             ), None
 
-        player = player_repo.get_by_id(target_discord_id)
+        player = player_repo.get_by_id(target_discord_id, guild_id)
         if not player:
             return discord.Embed(
                 title="Not Registered",
@@ -1307,12 +1315,12 @@ class ProfileCommands(commands.Cog):
             """Get a mention string for a player."""
             if discord_id and discord_id > 0:
                 return f"<@{discord_id}>"
-            p = player_repo.get_by_id(discord_id)
+            p = player_repo.get_by_id(discord_id, guild_id)
             return p.name if p else f"Unknown ({discord_id})"
 
         # Best Teammates (highest win rate with)
         best_teammates = pairings_repo.get_best_teammates(
-            target_discord_id, min_games=min_games, limit=limit
+            target_discord_id, guild_id=guild_id, min_games=min_games, limit=limit
         )
         if best_teammates:
             lines = []
@@ -1332,7 +1340,7 @@ class ProfileCommands(commands.Cog):
 
         # Worst Teammates (lowest win rate with)
         worst_teammates = pairings_repo.get_worst_teammates(
-            target_discord_id, min_games=min_games, limit=limit
+            target_discord_id, guild_id=guild_id, min_games=min_games, limit=limit
         )
         if worst_teammates:
             lines = []
@@ -1355,7 +1363,7 @@ class ProfileCommands(commands.Cog):
 
         # Dominates (best matchups against)
         best_matchups = pairings_repo.get_best_matchups(
-            target_discord_id, min_games=min_games, limit=limit
+            target_discord_id, guild_id=guild_id, min_games=min_games, limit=limit
         )
         if best_matchups:
             lines = []
@@ -1375,7 +1383,7 @@ class ProfileCommands(commands.Cog):
 
         # Struggles Against (worst matchups)
         worst_matchups = pairings_repo.get_worst_matchups(
-            target_discord_id, min_games=min_games, limit=limit
+            target_discord_id, guild_id=guild_id, min_games=min_games, limit=limit
         )
         if worst_matchups:
             lines = []
@@ -1398,7 +1406,7 @@ class ProfileCommands(commands.Cog):
 
         # Most Played With
         most_played_with = pairings_repo.get_most_played_with(
-            target_discord_id, min_games=min_games, limit=limit
+            target_discord_id, guild_id=guild_id, min_games=min_games, limit=limit
         )
         if most_played_with:
             lines = []
@@ -1418,7 +1426,7 @@ class ProfileCommands(commands.Cog):
 
         # Most Played Against
         most_played_against = pairings_repo.get_most_played_against(
-            target_discord_id, min_games=min_games, limit=limit
+            target_discord_id, guild_id=guild_id, min_games=min_games, limit=limit
         )
         if most_played_against:
             lines = []
@@ -1441,7 +1449,7 @@ class ProfileCommands(commands.Cog):
 
         # Evenly Matched (teammates with ~50% win rate)
         even_teammates = pairings_repo.get_evenly_matched_teammates(
-            target_discord_id, min_games=min_games, limit=limit
+            target_discord_id, guild_id=guild_id, min_games=min_games, limit=limit
         )
         if even_teammates:
             lines = []
@@ -1460,7 +1468,7 @@ class ProfileCommands(commands.Cog):
 
         # Evenly Matched Opponents
         even_opponents = pairings_repo.get_evenly_matched_opponents(
-            target_discord_id, min_games=min_games, limit=limit
+            target_discord_id, guild_id=guild_id, min_games=min_games, limit=limit
         )
         if even_opponents:
             lines = []
@@ -1481,7 +1489,7 @@ class ProfileCommands(commands.Cog):
         embed.add_field(name="\u200b", value="\u200b", inline=True)
 
         # Get totals for footer
-        counts = pairings_repo.get_pairing_counts(target_discord_id, min_games=min_games)
+        counts = pairings_repo.get_pairing_counts(target_discord_id, guild_id=guild_id, min_games=min_games)
         footer_parts = [f"Min {min_games} games"]
         if counts["unique_teammates"] > 0 or counts["unique_opponents"] > 0:
             footer_parts.append(
@@ -1499,6 +1507,7 @@ class ProfileCommands(commands.Cog):
         self,
         target_user: discord.Member | discord.User,
         target_discord_id: int,
+        guild_id: int | None = None,
     ) -> tuple[discord.Embed, list[discord.File]]:
         """Build the Heroes tab embed with comprehensive hero statistics."""
         from utils.hero_lookup import get_hero_name
@@ -1511,7 +1520,7 @@ class ProfileCommands(commands.Cog):
                 title="Error", description="Repository unavailable", color=COLOR_RED
             ), []
 
-        player = player_repo.get_by_id(target_discord_id)
+        player = player_repo.get_by_id(target_discord_id, guild_id)
         if not player:
             return discord.Embed(
                 title="Not Registered",
@@ -1541,7 +1550,7 @@ class ProfileCommands(commands.Cog):
         files = []
 
         # Get hero stats for chart
-        hero_stats = match_repo.get_player_hero_detailed_stats(target_discord_id, limit=20)
+        hero_stats = match_repo.get_player_hero_detailed_stats(target_discord_id, guild_id, limit=20)
 
         # Generate hero performance chart
         if hero_stats:
@@ -1554,7 +1563,7 @@ class ProfileCommands(commands.Cog):
                 logger.debug(f"Could not generate hero chart: {e}")
 
         # Get overall stats for header
-        overall = match_repo.get_player_overall_hero_stats(target_discord_id)
+        overall = match_repo.get_player_overall_hero_stats(target_discord_id, guild_id)
         avg_kda = f"{overall['avg_kills']:.1f}/{overall['avg_deaths']:.1f}/{overall['avg_assists']:.1f}"
         embed.add_field(
             name="Overview",
@@ -1605,7 +1614,7 @@ class ProfileCommands(commands.Cog):
                 )
 
         # Lane performance
-        lane_stats = match_repo.get_player_lane_stats(target_discord_id)
+        lane_stats = match_repo.get_player_lane_stats(target_discord_id, guild_id)
         if lane_stats:
             lane_names = {1: "Safe", 2: "Mid", 3: "Off", 4: "Jungle"}
             lane_lines = []
@@ -1625,7 +1634,7 @@ class ProfileCommands(commands.Cog):
             )
 
         # Ward stats
-        ward_stats = match_repo.get_player_ward_stats_by_lane(target_discord_id)
+        ward_stats = match_repo.get_player_ward_stats_by_lane(target_discord_id, guild_id)
         if ward_stats and overall["total_obs"] + overall["total_sens"] > 0:
             ward_lines = [f"**Totals:** {overall['total_obs']} obs | {overall['total_sens']} sens"]
             # Aggregate by role type (support lanes vs core lanes)
@@ -1658,7 +1667,7 @@ class ProfileCommands(commands.Cog):
         embed.add_field(name="\u200b", value="━━━ **Hero Pairwise Stats** ━━━", inline=False)
 
         # Nemesis heroes (lose to)
-        nemesis = match_repo.get_player_nemesis_heroes(target_discord_id, min_games=2)
+        nemesis = match_repo.get_player_nemesis_heroes(target_discord_id, guild_id, min_games=2)
         if nemesis:
             # Filter to actually high loss rate (>50%)
             nemesis_bad = [n for n in nemesis if n["loss_rate"] > 0.5][:3]
@@ -1674,7 +1683,7 @@ class ProfileCommands(commands.Cog):
                 )
 
         # Easy prey (beat)
-        easy = match_repo.get_player_easiest_opponents(target_discord_id, min_games=2)
+        easy = match_repo.get_player_easiest_opponents(target_discord_id, guild_id, min_games=2)
         if easy:
             # Filter to actually high win rate (>50%)
             easy_good = [e for e in easy if e["win_rate"] > 0.5][:3]
@@ -1690,7 +1699,7 @@ class ProfileCommands(commands.Cog):
                 )
 
         # Best ally heroes
-        synergies = match_repo.get_player_best_hero_synergies(target_discord_id, min_games=2)
+        synergies = match_repo.get_player_best_hero_synergies(target_discord_id, guild_id, min_games=2)
         if synergies:
             # Filter to high win rate
             synergies_good = [s for s in synergies if s["win_rate"] > 0.5][:3]
@@ -1707,7 +1716,7 @@ class ProfileCommands(commands.Cog):
                 )
 
         # Hero vs opponent hero matchups
-        hero_vs_hero = match_repo.get_player_hero_vs_opponent_heroes(target_discord_id, min_games=2)
+        hero_vs_hero = match_repo.get_player_hero_vs_opponent_heroes(target_discord_id, guild_id, min_games=2)
         if hero_vs_hero:
             # Group by player's hero and find best/worst matchups
             by_my_hero: dict[int, list] = {}
@@ -1744,7 +1753,7 @@ class ProfileCommands(commands.Cog):
                 )
 
         # Best heroes by lane
-        hero_lane = match_repo.get_player_hero_lane_performance(target_discord_id)
+        hero_lane = match_repo.get_player_hero_lane_performance(target_discord_id, guild_id)
         if hero_lane:
             # Group by lane and find best hero for each
             by_lane: dict[int, list] = {}
@@ -1823,11 +1832,12 @@ class ProfileCommands(commands.Cog):
 
         target_user = user or interaction.user
         target_discord_id = target_user.id
+        guild_id = guild.id if guild else None
 
         # Check if player is registered
         player_repo = self._get_player_repo()
         if player_repo:
-            player = player_repo.get_by_id(target_discord_id)
+            player = player_repo.get_by_id(target_discord_id, guild_id)
             if not player:
                 await safe_followup(
                     interaction,
@@ -1836,10 +1846,10 @@ class ProfileCommands(commands.Cog):
                 return
 
         # Build initial embed (overview)
-        embed, files = await self.build_tab_embed("overview", target_user, target_discord_id)
+        embed, files = await self.build_tab_embed("overview", target_user, target_discord_id, guild_id)
 
         # Create view with tab buttons
-        view = ProfileView(self, target_user, target_discord_id)
+        view = ProfileView(self, target_user, target_discord_id, guild_id)
 
         # Send and store message reference for timeout cleanup
         # safe_followup accepts 'files' kwarg for multiple files

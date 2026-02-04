@@ -18,6 +18,8 @@ from repositories.pairings_repository import PairingsRepository
 from services.bankruptcy_service import BankruptcyRepository, BankruptcyService
 from services.gambling_stats_service import GamblingStatsService, Leaderboard, LeaderboardEntry
 
+TEST_GUILD_ID = 12345
+
 
 @pytest.fixture
 def db_path(tmp_path):
@@ -330,6 +332,7 @@ class TestProfileTeammatesSpacerPresent:
         repositories["player_repo"].add(
             discord_id=1001,
             discord_username="TestPlayer",
+            guild_id=TEST_GUILD_ID,
             initial_mmr=3000,
         )
 
@@ -344,6 +347,7 @@ class TestProfileTeammatesSpacerPresent:
         embed, _ = await cog._build_teammates_embed(
             target_user=mock_user,
             target_discord_id=1001,
+            guild_id=TEST_GUILD_ID,
         )
 
         # Count spacer fields (name="\u200b", value="\u200b")
@@ -377,6 +381,7 @@ class TestProfileTeammatesSpacerPresent:
         repositories["player_repo"].add(
             discord_id=1001,
             discord_username="TestPlayer",
+            guild_id=TEST_GUILD_ID,
             initial_mmr=3000,
         )
 
@@ -389,6 +394,7 @@ class TestProfileTeammatesSpacerPresent:
         embed, _ = await cog._build_teammates_embed(
             target_user=mock_user,
             target_discord_id=1001,
+            guild_id=TEST_GUILD_ID,
         )
 
         # Get field names (excluding spacers)

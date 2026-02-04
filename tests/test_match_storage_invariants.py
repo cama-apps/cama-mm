@@ -12,6 +12,8 @@ from repositories.match_repository import MatchRepository
 from repositories.player_repository import PlayerRepository
 from services.match_service import MatchService
 
+TEST_GUILD_ID = 123
+
 
 class TestMatchStorageInvariants:
     """Test the Radiant/Dire storage invariants."""
@@ -180,13 +182,19 @@ class TestConcurrencyGuard:
         return Database(repo_db_path)
 
     @pytest.fixture
-    def test_players(self, test_db):
+    def player_repo(self, test_db):
+        """Create a PlayerRepository instance."""
+        return PlayerRepository(test_db.db_path)
+
+    @pytest.fixture
+    def test_players(self, test_db, player_repo):
         """Create 10 test players in the database."""
         player_ids = list(range(8001, 8011))
         for pid in player_ids:
-            test_db.add_player(
+            player_repo.add(
                 discord_id=pid,
                 discord_username=f"Player{pid}",
+                guild_id=TEST_GUILD_ID,
                 initial_mmr=1500,
                 glicko_rating=1500.0,
                 glicko_rd=350.0,
@@ -195,24 +203,23 @@ class TestConcurrencyGuard:
             )
         return player_ids
 
-    def test_double_record_fails(self, test_db, test_players):
+    def test_double_record_fails(self, test_db, player_repo, test_players):
         """Test that attempting to record twice fails."""
-        player_repo = PlayerRepository(test_db.db_path)
         match_repo = MatchRepository(test_db.db_path)
         match_service = MatchService(
             player_repo=player_repo, match_repo=match_repo, use_glicko=True
         )
 
         # Shuffle to create pending match
-        match_service.shuffle_players(test_players, guild_id=123)
+        match_service.shuffle_players(test_players, guild_id=TEST_GUILD_ID)
 
         # First record should succeed
-        result = match_service.record_match("radiant", guild_id=123)
+        result = match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
         assert result["match_id"] is not None
 
         # Second record should fail (no pending match)
         with pytest.raises(ValueError, match="No recent shuffle found"):
-            match_service.record_match("radiant", guild_id=123)
+            match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
 
     def test_consume_pending_match_atomic(self, test_db):
         """Test that consume_pending_match is atomic."""

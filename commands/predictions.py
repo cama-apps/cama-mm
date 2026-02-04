@@ -222,7 +222,8 @@ class PersistentPredictionView(discord.ui.View):
             )
             return
 
-        player = self.cog.player_service.get_player(interaction.user.id)
+        guild_id = interaction.guild.id if interaction.guild else None
+        player = self.cog.player_service.get_player(interaction.user.id, guild_id)
         if not player:
             await interaction.response.send_message(
                 "You must be registered to bet. Use `/register` first.",
@@ -463,7 +464,7 @@ class PredictionCommands(commands.Cog):
         guild_id = interaction.guild.id if interaction.guild else None
 
         # Check if user is registered
-        player = self.player_service.get_player(interaction.user.id)
+        player = self.player_service.get_player(interaction.user.id, guild_id)
         if not player:
             await safe_followup(
                 interaction,

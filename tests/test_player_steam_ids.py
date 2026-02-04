@@ -4,6 +4,8 @@ Tests for multi-Steam ID functionality.
 
 import pytest
 
+TEST_GUILD_ID = 12345
+
 
 class TestPlayerSteamIds:
     """Tests for multiple Steam IDs per player."""
@@ -13,6 +15,7 @@ class TestPlayerSteamIds:
         player_repository.add(
             discord_id=12345,
             discord_username="TestPlayer",
+            guild_id=TEST_GUILD_ID,
         )
 
         player_repository.add_steam_id(12345, 100001, is_primary=True)
@@ -26,6 +29,7 @@ class TestPlayerSteamIds:
         player_repository.add(
             discord_id=12345,
             discord_username="TestPlayer",
+            guild_id=TEST_GUILD_ID,
         )
 
         player_repository.add_steam_id(12345, 100001, is_primary=True)
@@ -40,8 +44,8 @@ class TestPlayerSteamIds:
 
     def test_steam_id_uniqueness_across_players(self, player_repository):
         """Test that a Steam ID can only belong to one player."""
-        player_repository.add(discord_id=12345, discord_username="Player1")
-        player_repository.add(discord_id=67890, discord_username="Player2")
+        player_repository.add(discord_id=12345, discord_username="Player1", guild_id=TEST_GUILD_ID)
+        player_repository.add(discord_id=67890, discord_username="Player2", guild_id=TEST_GUILD_ID)
 
         player_repository.add_steam_id(12345, 100001, is_primary=True)
 
@@ -53,23 +57,24 @@ class TestPlayerSteamIds:
         player_repository.add(
             discord_id=12345,
             discord_username="TestPlayer",
+            guild_id=TEST_GUILD_ID,
         )
 
         player_repository.add_steam_id(12345, 100001, is_primary=True)
         player_repository.add_steam_id(12345, 100002, is_primary=False)
 
         # Find by primary
-        player1 = player_repository.get_player_by_any_steam_id(100001)
+        player1 = player_repository.get_player_by_any_steam_id(100001, guild_id=TEST_GUILD_ID)
         assert player1 is not None
         assert player1.discord_id == 12345
 
         # Find by secondary
-        player2 = player_repository.get_player_by_any_steam_id(100002)
+        player2 = player_repository.get_player_by_any_steam_id(100002, guild_id=TEST_GUILD_ID)
         assert player2 is not None
         assert player2.discord_id == 12345
 
         # Not found
-        player3 = player_repository.get_player_by_any_steam_id(999999)
+        player3 = player_repository.get_player_by_any_steam_id(999999, guild_id=TEST_GUILD_ID)
         assert player3 is None
 
     def test_get_by_steam_id_uses_junction_table(self, player_repository):
@@ -77,12 +82,13 @@ class TestPlayerSteamIds:
         player_repository.add(
             discord_id=12345,
             discord_username="TestPlayer",
+            guild_id=TEST_GUILD_ID,
         )
 
         # Add via junction table only (not legacy column)
         player_repository.add_steam_id(12345, 100001, is_primary=True)
 
-        player = player_repository.get_by_steam_id(100001)
+        player = player_repository.get_by_steam_id(100001, guild_id=TEST_GUILD_ID)
         assert player is not None
         assert player.discord_id == 12345
 
@@ -91,6 +97,7 @@ class TestPlayerSteamIds:
         player_repository.add(
             discord_id=12345,
             discord_username="TestPlayer",
+            guild_id=TEST_GUILD_ID,
         )
 
         player_repository.add_steam_id(12345, 100001, is_primary=True)
@@ -112,6 +119,7 @@ class TestPlayerSteamIds:
         player_repository.add(
             discord_id=12345,
             discord_username="TestPlayer",
+            guild_id=TEST_GUILD_ID,
         )
 
         player_repository.add_steam_id(12345, 100001, is_primary=True)
@@ -124,6 +132,7 @@ class TestPlayerSteamIds:
         player_repository.add(
             discord_id=12345,
             discord_username="TestPlayer",
+            guild_id=TEST_GUILD_ID,
         )
 
         player_repository.add_steam_id(12345, 100001, is_primary=True)
@@ -140,6 +149,7 @@ class TestPlayerSteamIds:
         player_repository.add(
             discord_id=12345,
             discord_username="TestPlayer",
+            guild_id=TEST_GUILD_ID,
         )
 
         player_repository.add_steam_id(12345, 100001, is_primary=True)
@@ -158,6 +168,7 @@ class TestPlayerSteamIds:
         player_repository.add(
             discord_id=12345,
             discord_username="TestPlayer",
+            guild_id=TEST_GUILD_ID,
         )
 
         player_repository.add_steam_id(12345, 100001, is_primary=True)
@@ -173,6 +184,7 @@ class TestPlayerSteamIds:
         player_repository.add(
             discord_id=12345,
             discord_username="TestPlayer",
+            guild_id=TEST_GUILD_ID,
         )
 
         removed = player_repository.remove_steam_id(12345, 999999)
@@ -181,9 +193,9 @@ class TestPlayerSteamIds:
     def test_get_steam_ids_bulk(self, player_repository):
         """Test bulk lookup of Steam IDs."""
         # Create players with various Steam ID configurations
-        player_repository.add(discord_id=1, discord_username="Player1")
-        player_repository.add(discord_id=2, discord_username="Player2")
-        player_repository.add(discord_id=3, discord_username="Player3")
+        player_repository.add(discord_id=1, discord_username="Player1", guild_id=TEST_GUILD_ID)
+        player_repository.add(discord_id=2, discord_username="Player2", guild_id=TEST_GUILD_ID)
+        player_repository.add(discord_id=3, discord_username="Player3", guild_id=TEST_GUILD_ID)
 
         # Player 1: Multiple Steam IDs
         player_repository.add_steam_id(1, 100001, is_primary=True)
@@ -208,6 +220,7 @@ class TestPlayerSteamIds:
         player_repository.add(
             discord_id=12345,
             discord_username="TestPlayer",
+            guild_id=TEST_GUILD_ID,
         )
 
         # Use set_steam_id (the old method)
@@ -223,6 +236,7 @@ class TestPlayerSteamIds:
         player_repository.add(
             discord_id=12345,
             discord_username="TestPlayer",
+            guild_id=TEST_GUILD_ID,
         )
 
         player_repository.add_steam_id(12345, 100001, is_primary=True)
@@ -240,6 +254,7 @@ class TestPlayerSteamIds:
         player_repository.add(
             discord_id=12345,
             discord_username="TestPlayer",
+            guild_id=TEST_GUILD_ID,
         )
 
         # Directly set legacy column (simulating old data)
@@ -260,6 +275,7 @@ class TestPlayerSteamIds:
         player_repository.add(
             discord_id=12345,
             discord_username="TestPlayer",
+            guild_id=TEST_GUILD_ID,
         )
         player_repository.set_steam_id(12345, 100001)
 
@@ -273,7 +289,7 @@ class TestPlayerSteamIds:
         assert 100002 in steam_ids
 
         # Player should be findable by either
-        p1 = player_repository.get_by_steam_id(100001)
-        p2 = player_repository.get_by_steam_id(100002)
+        p1 = player_repository.get_by_steam_id(100001, guild_id=TEST_GUILD_ID)
+        p2 = player_repository.get_by_steam_id(100002, guild_id=TEST_GUILD_ID)
         assert p1.discord_id == 12345
         assert p2.discord_id == 12345

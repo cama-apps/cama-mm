@@ -122,7 +122,7 @@ class BettingService:
 
         # Fallback (older behavior) - doesn't support leverage
         effective_bet = amount * leverage
-        balance = self.player_repo.get_balance(discord_id)
+        balance = self.player_repo.get_balance(discord_id, guild_id)
         if balance - effective_bet < -self.max_debt:
             raise ValueError(f"Bet would exceed maximum debt limit of {self.max_debt} jopacoin.")
 
@@ -135,10 +135,12 @@ class BettingService:
                 "You can only add more bets on the same team."
             )
 
-        self.player_repo.add_balance(discord_id, -effective_bet)
+        self.player_repo.add_balance(discord_id, guild_id, -effective_bet)
         self.bet_repo.create_bet(guild_id, discord_id, team, amount, now_ts)
 
-    def award_participation(self, player_ids: list[int]) -> dict[int, dict[str, int]]:
+    def award_participation(
+        self, player_ids: list[int], guild_id: int | None = None
+    ) -> dict[int, dict[str, int]]:
         """
         Give each participant 1 jopacoin for playing.
 
@@ -154,17 +156,17 @@ class BettingService:
         # If garnishment service is available, use it for individual processing
         if self.garnishment_service:
             for pid in player_ids:
-                result = self.garnishment_service.add_income(pid, 1)
+                result = self.garnishment_service.add_income(pid, 1, guild_id=guild_id)
                 results[pid] = result
             return results
 
         # Otherwise, bulk add without garnishment tracking
         deltas = dict.fromkeys(player_ids, 1)
         if hasattr(self.player_repo, "add_balance_many"):
-            self.player_repo.add_balance_many(deltas)  # type: ignore[attr-defined]
+            self.player_repo.add_balance_many(deltas, guild_id=guild_id)  # type: ignore[attr-defined]
         else:
             for pid in player_ids:
-                self.player_repo.add_balance(pid, 1)
+                self.player_repo.add_balance(pid, guild_id, 1)
 
         for pid in player_ids:
             results[pid] = {"gross": 1, "garnished": 0, "net": 1}
@@ -206,12 +208,12 @@ class BettingService:
         self.bet_repo.assign_match_id(guild_id, match_id, since_ts=since_ts)
 
         if betting_mode == "pool":
-            return self._settle_pool_bets_fallback(bets, winning_team)
+            return self._settle_pool_bets_fallback(bets, winning_team, guild_id)
         else:
-            return self._settle_house_bets_fallback(bets, winning_team)
+            return self._settle_house_bets_fallback(bets, winning_team, guild_id)
 
     def _settle_house_bets_fallback(
-        self, bets: list[dict], winning_team: str
+        self, bets: list[dict], winning_team: str, guild_id: int | None = None
     ) -> dict[str, list[dict]]:
         """House mode fallback: 1:1 payouts."""
         distributions: dict[str, list[dict]] = {"winners": [], "losers": []}
@@ -227,14 +229,14 @@ class BettingService:
                 continue
 
             payout = int(bet["amount"] * (1 + HOUSE_PAYOUT_MULTIPLIER))
-            self.player_repo.add_balance(bet["discord_id"], payout)
+            self.player_repo.add_balance(bet["discord_id"], guild_id, payout)
             outcome_entry["payout"] = payout
             distributions["winners"].append(outcome_entry)
 
         return distributions
 
     def _settle_pool_bets_fallback(
-        self, bets: list[dict], winning_team: str
+        self, bets: list[dict], winning_team: str, guild_id: int | None = None
     ) -> dict[str, list[dict]]:
         """Pool mode fallback: proportional payouts from total pool."""
         distributions: dict[str, list[dict]] = {"winners": [], "losers": []}
@@ -246,7 +248,7 @@ class BettingService:
         # Edge case: no bets on winning side - refund all bets
         if winner_pool == 0:
             for bet in bets:
-                self.player_repo.add_balance(bet["discord_id"], bet["amount"])
+                self.player_repo.add_balance(bet["discord_id"], guild_id, bet["amount"])
                 distributions["losers"].append(
                     {
                         "discord_id": bet["discord_id"],
@@ -271,14 +273,16 @@ class BettingService:
             # Round up to ensure winners never lose fractional coins
             payout = math.ceil((bet["amount"] / winner_pool) * total_pool)
             multiplier = total_pool / winner_pool
-            self.player_repo.add_balance(bet["discord_id"], payout)
+            self.player_repo.add_balance(bet["discord_id"], guild_id, payout)
             outcome_entry["payout"] = payout
             outcome_entry["multiplier"] = multiplier
             distributions["winners"].append(outcome_entry)
 
         return distributions
 
-    def award_win_bonus(self, winning_ids: list[int]) -> dict[int, dict[str, int]]:
+    def award_win_bonus(
+        self, winning_ids: list[int], guild_id: int | None = None
+    ) -> dict[int, dict[str, int]]:
         """
         Reward winners with additional jopacoins.
 
@@ -295,7 +299,7 @@ class BettingService:
         # Decrement bankruptcy penalty games for winners only (wins clear bankruptcy)
         if self.bankruptcy_service:
             for pid in winning_ids:
-                self.bankruptcy_service.on_game_won(pid)
+                self.bankruptcy_service.on_game_won(pid, guild_id)
 
         for pid in winning_ids:
             reward = JOPACOIN_WIN_REWARD
@@ -303,18 +307,20 @@ class BettingService:
 
             # Apply bankruptcy penalty if applicable
             if self.bankruptcy_service:
-                penalty_result = self.bankruptcy_service.apply_penalty_to_winnings(pid, reward)
+                penalty_result = self.bankruptcy_service.apply_penalty_to_winnings(
+                    pid, reward, guild_id
+                )
                 reward = penalty_result["penalized"]
                 bankruptcy_penalty = penalty_result["penalty_applied"]
 
             # Apply garnishment if player has debt
             if self.garnishment_service:
-                result = self.garnishment_service.add_income(pid, reward)
+                result = self.garnishment_service.add_income(pid, reward, guild_id=guild_id)
                 result["bankruptcy_penalty"] = bankruptcy_penalty
                 result["gross"] = JOPACOIN_WIN_REWARD  # Original before penalty
                 results[pid] = result
             else:
-                self.player_repo.add_balance(pid, reward)
+                self.player_repo.add_balance(pid, guild_id, reward)
                 results[pid] = {
                     "gross": JOPACOIN_WIN_REWARD,
                     "garnished": 0,
@@ -324,7 +330,9 @@ class BettingService:
 
         return results
 
-    def award_exclusion_bonus(self, excluded_ids: list[int]) -> dict[int, dict[str, int]]:
+    def award_exclusion_bonus(
+        self, excluded_ids: list[int], guild_id: int | None = None
+    ) -> dict[int, dict[str, int]]:
         """
         Reward excluded players with a small consolation bonus.
 
@@ -339,17 +347,19 @@ class BettingService:
             bankruptcy_penalty = 0
 
             if self.bankruptcy_service:
-                penalty_result = self.bankruptcy_service.apply_penalty_to_winnings(pid, reward)
+                penalty_result = self.bankruptcy_service.apply_penalty_to_winnings(
+                    pid, reward, guild_id
+                )
                 reward = penalty_result["penalized"]
                 bankruptcy_penalty = penalty_result["penalty_applied"]
 
             if self.garnishment_service:
-                result = self.garnishment_service.add_income(pid, reward)
+                result = self.garnishment_service.add_income(pid, reward, guild_id=guild_id)
                 result["bankruptcy_penalty"] = bankruptcy_penalty
                 result["gross"] = JOPACOIN_EXCLUSION_REWARD
                 results[pid] = result
             else:
-                self.player_repo.add_balance(pid, reward)
+                self.player_repo.add_balance(pid, guild_id, reward)
                 results[pid] = {
                     "gross": JOPACOIN_EXCLUSION_REWARD,
                     "garnished": 0,
@@ -360,7 +370,7 @@ class BettingService:
         return results
 
     def award_exclusion_bonus_half(
-        self, excluded_ids: list[int]
+        self, excluded_ids: list[int], guild_id: int | None = None
     ) -> dict[int, dict[str, int]]:
         """
         Reward conditional players excluded from shuffle with half the normal bonus.
@@ -378,18 +388,18 @@ class BettingService:
 
             if self.bankruptcy_service:
                 penalty_result = self.bankruptcy_service.apply_penalty_to_winnings(
-                    pid, reward
+                    pid, reward, guild_id
                 )
                 reward = penalty_result["penalized"]
                 bankruptcy_penalty = penalty_result["penalty_applied"]
 
             if self.garnishment_service:
-                result = self.garnishment_service.add_income(pid, reward)
+                result = self.garnishment_service.add_income(pid, reward, guild_id=guild_id)
                 result["bankruptcy_penalty"] = bankruptcy_penalty
                 result["gross"] = half_reward
                 results[pid] = result
             else:
-                self.player_repo.add_balance(pid, reward)
+                self.player_repo.add_balance(pid, guild_id, reward)
                 results[pid] = {
                     "gross": half_reward,
                     "garnished": 0,
@@ -447,7 +457,7 @@ class BettingService:
             return 0
 
         for bet in bets:
-            self.player_repo.add_balance(bet["discord_id"], bet["amount"])
+            self.player_repo.add_balance(bet["discord_id"], guild_id, bet["amount"])
 
         return self.bet_repo.delete_pending_bets(guild_id, since_ts=since_ts)
 
@@ -509,7 +519,7 @@ class BettingService:
         for team, player_ids in [("radiant", radiant_ids), ("dire", dire_ids)]:
             for discord_id in player_ids:
                 try:
-                    balance = self.player_repo.get_balance(discord_id)
+                    balance = self.player_repo.get_balance(discord_id, guild_id)
 
                     # Skip players below threshold
                     if balance < AUTO_BLIND_THRESHOLD:

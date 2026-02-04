@@ -47,10 +47,13 @@ class RegistrationCommands(commands.Cog):
         if not await safe_defer(interaction, ephemeral=True):
             return
 
+        guild_id = interaction.guild.id if interaction.guild else None
+
         async def _finalize_register(mmr_override: int | None = None):
             result = self.player_service.register_player(
                 discord_id=interaction.user.id,
                 discord_username=str(interaction.user),
+                guild_id=guild_id,
                 steam_id=steam_id,
                 mmr_override=mmr_override,
             )
@@ -186,8 +189,10 @@ class RegistrationCommands(commands.Cog):
             await interaction.followup.send("❌ Player repository not available.", ephemeral=True)
             return
 
+        guild_id = interaction.guild.id if interaction.guild else None
+
         # Check if player is registered
-        player = player_repo.get_by_id(interaction.user.id)
+        player = player_repo.get_by_id(interaction.user.id, guild_id)
         if not player:
             await interaction.followup.send(
                 "❌ You are not registered. Use `/register` first.",
@@ -271,8 +276,10 @@ class RegistrationCommands(commands.Cog):
             await interaction.followup.send("❌ Player repository not available.", ephemeral=True)
             return
 
+        guild_id = interaction.guild.id if interaction.guild else None
+
         # Check if player is registered
-        player = player_repo.get_by_id(interaction.user.id)
+        player = player_repo.get_by_id(interaction.user.id, guild_id)
         if not player:
             await interaction.followup.send(
                 "❌ You are not registered. Use `/register` first.",
@@ -338,8 +345,10 @@ class RegistrationCommands(commands.Cog):
             await interaction.followup.send("❌ Player repository not available.", ephemeral=True)
             return
 
+        guild_id = interaction.guild.id if interaction.guild else None
+
         # Check if player is registered
-        player = player_repo.get_by_id(interaction.user.id)
+        player = player_repo.get_by_id(interaction.user.id, guild_id)
         if not player:
             await interaction.followup.send(
                 "❌ You are not registered. Use `/register` first.",
@@ -409,7 +418,8 @@ class RegistrationCommands(commands.Cog):
             # Deduplicate roles while preserving order
             role_list = list(dict.fromkeys(role_list))
 
-            self.player_service.set_roles(interaction.user.id, role_list)
+            guild_id = interaction.guild.id if interaction.guild else None
+            self.player_service.set_roles(interaction.user.id, guild_id, role_list)
 
             role_display = ", ".join([format_role_display(r) for r in role_list])
             await interaction.followup.send(f"✅ Set your preferred roles to: {role_display}")

@@ -545,7 +545,7 @@ class MatchCommands(commands.Cog):
         all_excluded_names = []
         if excluded_ids:
             for pid in excluded_ids:
-                player_obj = self.player_service.get_player(pid)
+                player_obj = self.player_service.get_player(pid, guild_id)
                 if player_obj:
                     display_name = get_player_display_name(player_obj, discord_id=pid, guild=guild)
                     all_excluded_names.append(display_name)
@@ -555,7 +555,7 @@ class MatchCommands(commands.Cog):
         # Add excluded conditional players with frogling emoji
         if excluded_conditional_ids:
             for pid in excluded_conditional_ids:
-                player_obj = self.player_service.get_player(pid)
+                player_obj = self.player_service.get_player(pid, guild_id)
                 if player_obj:
                     display_name = get_player_display_name(player_obj, discord_id=pid, guild=guild)
                     all_excluded_names.append(f"{FROGLING_EMOTE} {display_name}")
@@ -565,7 +565,7 @@ class MatchCommands(commands.Cog):
             # Give conditional players half the exclusion count bonus
             # (jopacoin bonus is awarded at record time in match_service)
             for pid in excluded_conditional_ids:
-                self.player_repo.increment_exclusion_count_half(pid)
+                self.player_repo.increment_exclusion_count_half(pid, guild_id)
 
             # Store excluded conditional IDs in shuffle state for jopacoin bonus at record time
             pending_state = self.match_service.get_last_shuffle(guild_id)
@@ -580,7 +580,7 @@ class MatchCommands(commands.Cog):
         if conditional_player_ids_included:
             conditional_names = []
             for pid in conditional_player_ids_included:
-                player_obj = self.player_service.get_player(pid)
+                player_obj = self.player_service.get_player(pid, guild_id)
                 if player_obj:
                     display_name = get_player_display_name(player_obj, discord_id=pid, guild=guild)
                     conditional_names.append(display_name)

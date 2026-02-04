@@ -28,6 +28,7 @@ class PlayerService:
         self,
         discord_id: int,
         discord_username: str,
+        guild_id: int,
         steam_id: int,
         *,
         mmr_override: int | None = None,
@@ -39,7 +40,7 @@ class PlayerService:
         """
         self._validate_steam_id(steam_id)
 
-        existing = self.player_repo.get_by_id(discord_id)
+        existing = self.player_repo.get_by_id(discord_id, guild_id)
         if existing:
             raise ValueError("Player already registered.")
 
@@ -83,6 +84,7 @@ class PlayerService:
         self.player_repo.add(
             discord_id=discord_id,
             discord_username=discord_username,
+            guild_id=guild_id,
             dotabuff_url=dotabuff_url,
             steam_id=steam_id,
             initial_mmr=mmr,
@@ -103,24 +105,24 @@ class PlayerService:
             "mmr": mmr,
         }
 
-    def set_roles(self, discord_id: int, roles: list[str]):
+    def set_roles(self, discord_id: int, guild_id: int, roles: list[str]):
         """Persist preferred roles for a player."""
-        player = self.player_repo.get_by_id(discord_id)
+        player = self.player_repo.get_by_id(discord_id, guild_id)
         if not player:
             raise ValueError("Player not registered.")
-        self.player_repo.update_roles(discord_id, roles)
+        self.player_repo.update_roles(discord_id, guild_id, roles)
 
-    def get_player(self, discord_id: int) -> Player | None:
-        """Fetch a Player model by Discord ID."""
-        return self.player_repo.get_by_id(discord_id)
+    def get_player(self, discord_id: int, guild_id: int) -> Player | None:
+        """Fetch a Player model by Discord ID and Guild ID."""
+        return self.player_repo.get_by_id(discord_id, guild_id)
 
-    def get_balance(self, discord_id: int) -> int:
+    def get_balance(self, discord_id: int, guild_id: int) -> int:
         """Return the player's current jopacoin balance."""
-        return self.player_repo.get_balance(discord_id)
+        return self.player_repo.get_balance(discord_id, guild_id)
 
-    def get_stats(self, discord_id: int) -> dict:
+    def get_stats(self, discord_id: int, guild_id: int) -> dict:
         """Return stats payload for a player."""
-        player = self.player_repo.get_by_id(discord_id)
+        player = self.player_repo.get_by_id(discord_id, guild_id)
         if not player:
             raise ValueError("Player not registered.")
 
@@ -140,5 +142,5 @@ class PlayerService:
             "cama_rating": cama_rating,
             "uncertainty": uncertainty,
             "win_rate": win_rate,
-            "jopacoin_balance": self.player_repo.get_balance(discord_id),
+            "jopacoin_balance": self.player_repo.get_balance(discord_id, guild_id),
         }

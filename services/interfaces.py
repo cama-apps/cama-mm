@@ -520,12 +520,12 @@ class IGamblingStatsService(ABC):
     """Interface for gambling statistics and leaderboards."""
 
     @abstractmethod
-    def get_player_stats(self, discord_id: int) -> "GambaStats | None":
+    def get_player_stats(self, discord_id: int, guild_id: int | None = None) -> "GambaStats | None":
         """Get gambling stats for a player."""
         ...
 
     @abstractmethod
-    def calculate_degen_score(self, discord_id: int) -> "DegenScoreBreakdown":
+    def calculate_degen_score(self, discord_id: int, guild_id: int | None = None) -> "DegenScoreBreakdown":
         """Calculate degen score with breakdown."""
         ...
 
@@ -596,7 +596,7 @@ class IRecalibrationService(ABC):
     """Interface for player rating recalibration."""
 
     @abstractmethod
-    def can_recalibrate(self, discord_id: int) -> dict:
+    def can_recalibrate(self, discord_id: int, guild_id: int | None) -> dict:
         """Check if a player can recalibrate."""
         ...
 
@@ -604,6 +604,7 @@ class IRecalibrationService(ABC):
     def recalibrate(
         self,
         discord_id: int,
+        guild_id: int | None,
         admin_id: int | None = None,
     ) -> dict:
         """Recalibrate a player's rating uncertainty."""

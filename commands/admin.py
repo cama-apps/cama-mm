@@ -137,12 +137,15 @@ class AdminCommands(commands.Cog):
         existing_fake_ids = [pid for pid in lobby.players if pid < 0]
         next_index = max([-pid for pid in existing_fake_ids], default=0) + 1
 
+        # guild_id for fake users - use None for global (they're not guild-specific)
+        addfake_guild_id = interaction.guild.id if interaction.guild else None
+
         for _ in range(count):
             fake_id = -next_index
             fake_name = f"FakeUser{next_index}"
             next_index += 1
 
-            existing = self.player_repo.get_by_id(fake_id)
+            existing = self.player_repo.get_by_id(fake_id, addfake_guild_id)
             if not existing:
                 rating = random.randint(1000, 2000)
                 rd = random.uniform(50, 350)
@@ -153,6 +156,7 @@ class AdminCommands(commands.Cog):
                     self.player_repo.add(
                         discord_id=fake_id,
                         discord_username=fake_name,
+                        guild_id=addfake_guild_id,
                         initial_mmr=None,
                         glicko_rating=rating,
                         glicko_rd=rd,
@@ -164,7 +168,7 @@ class AdminCommands(commands.Cog):
 
             # Set captain eligibility if requested
             if captain_eligible:
-                self.player_repo.set_captain_eligible(fake_id, True)
+                self.player_repo.set_captain_eligible(fake_id, addfake_guild_id, True)
 
             success, _ = self.lobby_service.join_lobby(fake_id)
             if success:
@@ -180,7 +184,7 @@ class AdminCommands(commands.Cog):
                 if not channel:
                     channel = await self.bot.fetch_channel(channel_id)
                 message = await channel.fetch_message(message_id)
-                embed = self.lobby_service.build_lobby_embed(lobby)
+                embed = self.lobby_service.build_lobby_embed(lobby, addfake_guild_id)
                 if embed:
                     await message.edit(embed=embed)
             except Exception as exc:
@@ -238,13 +242,16 @@ class AdminCommands(commands.Cog):
         existing_fake_ids = [pid for pid in lobby.players if pid < 0]
         next_index = max([-pid for pid in existing_fake_ids], default=0) + 1
 
+        # guild_id for fake users
+        fill_guild_id = interaction.guild.id if interaction.guild else None
+
         fake_users_added = []
         for _ in range(needed):
             fake_id = -next_index
             fake_name = f"FakeUser{next_index}"
             next_index += 1
 
-            existing = self.player_repo.get_by_id(fake_id)
+            existing = self.player_repo.get_by_id(fake_id, fill_guild_id)
             if not existing:
                 rating = random.randint(1000, 2000)
                 rd = random.uniform(50, 350)
@@ -255,6 +262,7 @@ class AdminCommands(commands.Cog):
                     self.player_repo.add(
                         discord_id=fake_id,
                         discord_username=fake_name,
+                        guild_id=fill_guild_id,
                         initial_mmr=None,
                         glicko_rating=rating,
                         glicko_rd=rd,
@@ -265,7 +273,7 @@ class AdminCommands(commands.Cog):
                     pass
 
             if captain_eligible:
-                self.player_repo.set_captain_eligible(fake_id, True)
+                self.player_repo.set_captain_eligible(fake_id, fill_guild_id, True)
 
             success, _ = self.lobby_service.join_lobby(fake_id)
             if success:
@@ -281,7 +289,7 @@ class AdminCommands(commands.Cog):
                 if not channel:
                     channel = await self.bot.fetch_channel(channel_id)
                 message = await channel.fetch_message(message_id)
-                embed = self.lobby_service.build_lobby_embed(lobby)
+                embed = self.lobby_service.build_lobby_embed(lobby, fill_guild_id)
                 if embed:
                     await message.edit(embed=embed)
             except Exception as exc:
@@ -325,7 +333,8 @@ class AdminCommands(commands.Cog):
             )
             return
 
-        player = self.player_repo.get_by_id(user.id)
+        guild_id = interaction.guild.id if interaction.guild else None
+        player = self.player_repo.get_by_id(user.id, guild_id)
         if not player:
             await safe_followup(
                 interaction,
@@ -573,7 +582,7 @@ class AdminCommands(commands.Cog):
             return
 
         # Handle user target (original behavior)
-        player = self.player_repo.get_by_id(user.id)
+        player = self.player_repo.get_by_id(user.id, guild_id)
         if not player:
             await interaction.response.send_message(
                 f"⚠️ {user.mention} is not registered.",
@@ -581,9 +590,9 @@ class AdminCommands(commands.Cog):
             )
             return
 
-        old_balance = self.player_repo.get_balance(user.id)
-        self.player_repo.add_balance(user.id, amount)
-        new_balance = self.player_repo.get_balance(user.id)
+        old_balance = self.player_repo.get_balance(user.id, guild_id)
+        self.player_repo.add_balance(user.id, guild_id, amount)
+        new_balance = self.player_repo.get_balance(user.id, guild_id)
 
         action = "gave" if amount >= 0 else "took"
         abs_amount = abs(amount)
@@ -618,7 +627,8 @@ class AdminCommands(commands.Cog):
             )
             return
 
-        player = self.player_repo.get_by_id(user.id)
+        guild_id = interaction.guild.id if interaction.guild else None
+        player = self.player_repo.get_by_id(user.id, guild_id)
         if not player:
             await interaction.response.send_message(
                 f"⚠️ {user.mention} is not registered.",
@@ -627,7 +637,7 @@ class AdminCommands(commands.Cog):
             return
 
         # Get current state
-        state = self.loan_service.get_state(user.id)
+        state = self.loan_service.get_state(user.id, guild_id)
 
         # Reset the cooldown by setting last_loan_at to 0 (epoch = no cooldown)
         # Note: Can't use None because COALESCE in upsert keeps old value
@@ -671,7 +681,8 @@ class AdminCommands(commands.Cog):
             )
             return
 
-        player = self.player_repo.get_by_id(user.id)
+        guild_id = interaction.guild.id if interaction.guild else None
+        player = self.player_repo.get_by_id(user.id, guild_id)
         if not player:
             await interaction.response.send_message(
                 f"⚠️ {user.mention} is not registered.",
@@ -680,7 +691,7 @@ class AdminCommands(commands.Cog):
             return
 
         # Get current state
-        state = self.bankruptcy_service.bankruptcy_repo.get_state(user.id)
+        state = self.bankruptcy_service.bankruptcy_repo.get_state(user.id, guild_id)
 
         if not state:
             await interaction.response.send_message(
@@ -692,6 +703,7 @@ class AdminCommands(commands.Cog):
         # Reset cooldown AND clear penalty games (without incrementing bankruptcy count)
         self.bankruptcy_service.bankruptcy_repo.reset_cooldown_only(
             discord_id=user.id,
+            guild_id=guild_id,
             last_bankruptcy_at=0,  # Far in the past = no cooldown
             penalty_games_remaining=0,  # Clear penalty games
         )
@@ -728,7 +740,8 @@ class AdminCommands(commands.Cog):
             )
             return
 
-        player = self.player_repo.get_by_id(user.id)
+        guild_id = interaction.guild.id if interaction.guild else None
+        player = self.player_repo.get_by_id(user.id, guild_id)
         if not player:
             await interaction.response.send_message(
                 f"⚠️ {user.mention} is not registered.",
@@ -790,7 +803,8 @@ class AdminCommands(commands.Cog):
             )
             return
 
-        result = self.recalibration_service.can_recalibrate(user.id)
+        guild_id = interaction.guild.id if interaction.guild else None
+        result = self.recalibration_service.can_recalibrate(user.id, guild_id)
         if not result["allowed"]:
             reason = result["reason"]
             if reason == "not_registered":
@@ -826,7 +840,7 @@ class AdminCommands(commands.Cog):
             return
 
         # Execute recalibration
-        recal_result = self.recalibration_service.recalibrate(user.id)
+        recal_result = self.recalibration_service.recalibrate(user.id, guild_id)
         if not recal_result["success"]:
             await interaction.response.send_message(
                 f"❌ Recalibration failed: {recal_result.get('reason', 'unknown error')}",
@@ -875,7 +889,8 @@ class AdminCommands(commands.Cog):
             )
             return
 
-        player = self.player_repo.get_by_id(user.id)
+        guild_id = interaction.guild.id if interaction.guild else None
+        player = self.player_repo.get_by_id(user.id, guild_id)
         if not player:
             await interaction.response.send_message(
                 f"⚠️ {user.mention} is not registered.",
@@ -883,7 +898,7 @@ class AdminCommands(commands.Cog):
             )
             return
 
-        result = self.recalibration_service.reset_cooldown(user.id)
+        result = self.recalibration_service.reset_cooldown(user.id, guild_id)
         if not result["success"]:
             reason = result["reason"]
             if reason == "no_recalibration_history":
@@ -1181,7 +1196,8 @@ class AdminCommands(commands.Cog):
             )
             return
 
-        player = self.player_repo.get_by_id(user.id)
+        guild_id = interaction.guild.id if interaction.guild else None
+        player = self.player_repo.get_by_id(user.id, guild_id)
         if not player:
             await interaction.response.send_message(
                 f"⚠️ {user.mention} is not registered.",
@@ -1239,7 +1255,8 @@ class AdminCommands(commands.Cog):
             )
             return
 
-        player = self.player_repo.get_by_id(user.id)
+        guild_id = interaction.guild.id if interaction.guild else None
+        player = self.player_repo.get_by_id(user.id, guild_id)
         if not player:
             await interaction.response.send_message(
                 f"⚠️ {user.mention} is not registered.",
@@ -1302,7 +1319,8 @@ class AdminCommands(commands.Cog):
             )
             return
 
-        player = self.player_repo.get_by_id(user.id)
+        guild_id = interaction.guild.id if interaction.guild else None
+        player = self.player_repo.get_by_id(user.id, guild_id)
         if not player:
             await interaction.response.send_message(
                 f"⚠️ {user.mention} is not registered.",
@@ -1368,15 +1386,17 @@ class AdminCommands(commands.Cog):
             player_hero_pools[i] = random.sample(HERO_POOL, k=pool_size)
 
         # 1. Create fake players
+        seed_guild_id = interaction.guild.id if interaction.guild else None
         player_ids = []
         for i in range(NUM_PLAYERS):
             pid = BASE_ID - i  # -1001, -1002, ...
             player_ids.append(pid)
-            existing = self.player_repo.get_by_id(pid)
+            existing = self.player_repo.get_by_id(pid, seed_guild_id)
             if not existing:
                 self.player_repo.add(
                     discord_id=pid,
                     discord_username=f"GridTest{i + 1}",
+                    guild_id=seed_guild_id,
                     glicko_rating=random.randint(1000, 2000),
                     glicko_rd=random.uniform(50, 200),
                     glicko_volatility=0.06,

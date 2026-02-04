@@ -19,6 +19,7 @@ from repositories.player_repository import PlayerRepository
 from services.result import Result
 from services import error_codes
 from services.interfaces import IBankruptcyService
+from utils.guild import normalize_guild_id
 
 
 @dataclass
@@ -54,34 +55,37 @@ class PenaltyApplication:
 class BankruptcyRepository(BaseRepository):
     """Data access for bankruptcy state."""
 
-    def get_state(self, discord_id: int) -> dict | None:
+    def get_state(self, discord_id: int, guild_id: int | None = None) -> dict | None:
         """Get bankruptcy state for a player."""
+        normalized_id = normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                SELECT discord_id, last_bankruptcy_at, penalty_games_remaining,
+                SELECT discord_id, guild_id, last_bankruptcy_at, penalty_games_remaining,
                        COALESCE(bankruptcy_count, 0) as bankruptcy_count
                 FROM bankruptcy_state
-                WHERE discord_id = ?
+                WHERE discord_id = ? AND guild_id = ?
                 """,
-                (discord_id,),
+                (discord_id, normalized_id),
             )
             row = cursor.fetchone()
             if not row:
                 return None
             return {
                 "discord_id": row["discord_id"],
+                "guild_id": row["guild_id"],
                 "last_bankruptcy_at": row["last_bankruptcy_at"],
                 "penalty_games_remaining": row["penalty_games_remaining"],
                 "bankruptcy_count": row["bankruptcy_count"],
             }
 
-    def get_bulk_states(self, discord_ids: list[int]) -> dict[int, dict]:
+    def get_bulk_states(self, discord_ids: list[int], guild_id: int | None = None) -> dict[int, dict]:
         """Get bankruptcy states for multiple players in one query.
 
         Args:
             discord_ids: List of Discord IDs to fetch states for.
+            guild_id: Guild ID for multi-guild support.
 
         Returns:
             Dict mapping discord_id to state dict. Only includes users
@@ -90,43 +94,46 @@ class BankruptcyRepository(BaseRepository):
         """
         if not discord_ids:
             return {}
+        normalized_id = normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             placeholders = ",".join("?" * len(discord_ids))
             cursor.execute(
                 f"""
-                SELECT discord_id, last_bankruptcy_at, penalty_games_remaining,
+                SELECT discord_id, guild_id, last_bankruptcy_at, penalty_games_remaining,
                        COALESCE(bankruptcy_count, 0) as bankruptcy_count
                 FROM bankruptcy_state
-                WHERE discord_id IN ({placeholders})
+                WHERE discord_id IN ({placeholders}) AND guild_id = ?
                 """,
-                discord_ids,
+                (*discord_ids, normalized_id),
             )
             return {row["discord_id"]: dict(row) for row in cursor.fetchall()}
 
     def upsert_state(
-        self, discord_id: int, last_bankruptcy_at: int, penalty_games_remaining: int
+        self, discord_id: int, guild_id: int | None, last_bankruptcy_at: int, penalty_games_remaining: int
     ) -> None:
         """Create or update bankruptcy state, incrementing bankruptcy_count."""
+        normalized_id = normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                INSERT INTO bankruptcy_state (discord_id, last_bankruptcy_at, penalty_games_remaining, bankruptcy_count, updated_at)
-                VALUES (?, ?, ?, 1, CURRENT_TIMESTAMP)
-                ON CONFLICT(discord_id) DO UPDATE SET
+                INSERT INTO bankruptcy_state (discord_id, guild_id, last_bankruptcy_at, penalty_games_remaining, bankruptcy_count, updated_at)
+                VALUES (?, ?, ?, ?, 1, CURRENT_TIMESTAMP)
+                ON CONFLICT(discord_id, guild_id) DO UPDATE SET
                     last_bankruptcy_at = excluded.last_bankruptcy_at,
                     penalty_games_remaining = excluded.penalty_games_remaining,
                     bankruptcy_count = COALESCE(bankruptcy_state.bankruptcy_count, 0) + 1,
                     updated_at = CURRENT_TIMESTAMP
                 """,
-                (discord_id, last_bankruptcy_at, penalty_games_remaining),
+                (discord_id, normalized_id, last_bankruptcy_at, penalty_games_remaining),
             )
 
     def reset_cooldown_only(
-        self, discord_id: int, last_bankruptcy_at: int, penalty_games_remaining: int
+        self, discord_id: int, guild_id: int | None, last_bankruptcy_at: int, penalty_games_remaining: int
     ) -> None:
         """Reset cooldown and penalty without incrementing bankruptcy_count."""
+        normalized_id = normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -135,17 +142,18 @@ class BankruptcyRepository(BaseRepository):
                 SET last_bankruptcy_at = ?,
                     penalty_games_remaining = ?,
                     updated_at = CURRENT_TIMESTAMP
-                WHERE discord_id = ?
+                WHERE discord_id = ? AND guild_id = ?
                 """,
-                (last_bankruptcy_at, penalty_games_remaining, discord_id),
+                (last_bankruptcy_at, penalty_games_remaining, discord_id, normalized_id),
             )
 
-    def decrement_penalty_games(self, discord_id: int) -> int:
+    def decrement_penalty_games(self, discord_id: int, guild_id: int | None = None) -> int:
         """
         Decrement penalty games remaining by 1 if > 0.
 
         Returns the new count.
         """
+        normalized_id = normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -153,24 +161,25 @@ class BankruptcyRepository(BaseRepository):
                 UPDATE bankruptcy_state
                 SET penalty_games_remaining = MAX(0, penalty_games_remaining - 1),
                     updated_at = CURRENT_TIMESTAMP
-                WHERE discord_id = ?
+                WHERE discord_id = ? AND guild_id = ?
                 """,
-                (discord_id,),
+                (discord_id, normalized_id),
             )
             cursor.execute(
-                "SELECT penalty_games_remaining FROM bankruptcy_state WHERE discord_id = ?",
-                (discord_id,),
+                "SELECT penalty_games_remaining FROM bankruptcy_state WHERE discord_id = ? AND guild_id = ?",
+                (discord_id, normalized_id),
             )
             row = cursor.fetchone()
             return row["penalty_games_remaining"] if row else 0
 
-    def get_penalty_games(self, discord_id: int) -> int:
+    def get_penalty_games(self, discord_id: int, guild_id: int | None = None) -> int:
         """Get the number of penalty games remaining for a player."""
+        normalized_id = normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT penalty_games_remaining FROM bankruptcy_state WHERE discord_id = ?",
-                (discord_id,),
+                "SELECT penalty_games_remaining FROM bankruptcy_state WHERE discord_id = ? AND guild_id = ?",
+                (discord_id, normalized_id),
             )
             row = cursor.fetchone()
             return row["penalty_games_remaining"] if row else 0
@@ -204,9 +213,9 @@ class BankruptcyService(IBankruptcyService):
         )
         self.penalty_rate = penalty_rate if penalty_rate is not None else BANKRUPTCY_PENALTY_RATE
 
-    def get_state(self, discord_id: int) -> BankruptcyState:
+    def get_state(self, discord_id: int, guild_id: int | None = None) -> BankruptcyState:
         """Get the current bankruptcy state for a player."""
-        state = self.bankruptcy_repo.get_state(discord_id)
+        state = self.bankruptcy_repo.get_state(discord_id, guild_id)
         now = int(time.time())
 
         if not state:
@@ -230,12 +239,13 @@ class BankruptcyService(IBankruptcyService):
             cooldown_ends_at=cooldown_ends if is_on_cooldown else None,
         )
 
-    def get_bulk_states(self, discord_ids: list[int]) -> dict[int, BankruptcyState]:
+    def get_bulk_states(self, discord_ids: list[int], guild_id: int | None = None) -> dict[int, BankruptcyState]:
         """Get bankruptcy states for multiple players efficiently.
 
         Args:
             discord_ids: List of Discord IDs to fetch states for.
                 Duplicates are automatically de-duped before processing.
+            guild_id: Guild ID for multi-guild support.
 
         Returns:
             Dict mapping discord_id to BankruptcyState. Players without
@@ -245,7 +255,7 @@ class BankruptcyService(IBankruptcyService):
         if not discord_ids:
             return {}
         unique_ids = list(set(discord_ids))  # De-dupe for efficiency
-        raw_states = self.bankruptcy_repo.get_bulk_states(unique_ids)
+        raw_states = self.bankruptcy_repo.get_bulk_states(unique_ids, guild_id)
         now = int(time.time())
         result = {}
         for discord_id in unique_ids:
@@ -271,15 +281,15 @@ class BankruptcyService(IBankruptcyService):
                 )
         return result
 
-    def can_declare_bankruptcy(self, discord_id: int) -> dict:
+    def can_declare_bankruptcy(self, discord_id: int, guild_id: int | None = None) -> dict:
         """
         Check if a player can declare bankruptcy.
 
         Returns:
             Dict with 'allowed' (bool) and 'reason' (str if not allowed)
         """
-        balance = self.player_repo.get_balance(discord_id)
-        state = self.get_state(discord_id)
+        balance = self.player_repo.get_balance(discord_id, guild_id)
+        state = self.get_state(discord_id, guild_id)
 
         if balance >= 0:
             return {
@@ -297,7 +307,7 @@ class BankruptcyService(IBankruptcyService):
 
         return {"allowed": True, "debt": abs(balance)}
 
-    def declare_bankruptcy(self, discord_id: int) -> dict:
+    def declare_bankruptcy(self, discord_id: int, guild_id: int | None = None) -> dict:
         """
         Declare bankruptcy for a player.
 
@@ -306,7 +316,7 @@ class BankruptcyService(IBankruptcyService):
         Returns:
             Dict with 'success', 'debt_cleared', 'penalty_games'
         """
-        check = self.can_declare_bankruptcy(discord_id)
+        check = self.can_declare_bankruptcy(discord_id, guild_id)
         if not check["allowed"]:
             return {"success": False, **check}
 
@@ -314,11 +324,12 @@ class BankruptcyService(IBankruptcyService):
         now = int(time.time())
 
         # Clear debt and give fresh start balance
-        self.player_repo.update_balance(discord_id, BANKRUPTCY_FRESH_START_BALANCE)
+        self.player_repo.update_balance(discord_id, guild_id, BANKRUPTCY_FRESH_START_BALANCE)
 
         # Record bankruptcy and set penalty
         self.bankruptcy_repo.upsert_state(
             discord_id=discord_id,
+            guild_id=guild_id,
             last_bankruptcy_at=now,
             penalty_games_remaining=self.penalty_games,
         )
@@ -330,18 +341,19 @@ class BankruptcyService(IBankruptcyService):
             "penalty_rate": self.penalty_rate,
         }
 
-    def apply_penalty_to_winnings(self, discord_id: int, amount: int) -> dict[str, int]:
+    def apply_penalty_to_winnings(self, discord_id: int, amount: int, guild_id: int | None = None) -> dict[str, int]:
         """
         Apply bankruptcy penalty to winnings if applicable.
 
         Args:
             discord_id: The player's Discord ID
             amount: The original winnings amount
+            guild_id: Guild ID for multi-guild support
 
         Returns:
             Dict with 'original', 'penalized', 'penalty_applied'
         """
-        penalty_games = self.bankruptcy_repo.get_penalty_games(discord_id)
+        penalty_games = self.bankruptcy_repo.get_penalty_games(discord_id, guild_id)
 
         if penalty_games <= 0:
             return {"original": amount, "penalized": amount, "penalty_applied": 0}
@@ -356,7 +368,7 @@ class BankruptcyService(IBankruptcyService):
             "penalty_applied": penalty_applied,
         }
 
-    def on_game_won(self, discord_id: int) -> int:
+    def on_game_won(self, discord_id: int, guild_id: int | None = None) -> int:
         """
         Called when a player wins a game. Decrements their penalty counter.
 
@@ -365,7 +377,7 @@ class BankruptcyService(IBankruptcyService):
 
         Returns the remaining penalty games.
         """
-        return self.bankruptcy_repo.decrement_penalty_games(discord_id)
+        return self.bankruptcy_repo.decrement_penalty_games(discord_id, guild_id)
 
     # =========================================================================
     # Result-returning methods (new API)
@@ -373,7 +385,7 @@ class BankruptcyService(IBankruptcyService):
     # The old dict-returning methods are kept for backward compatibility.
     # =========================================================================
 
-    def validate_bankruptcy(self, discord_id: int) -> Result[int]:
+    def validate_bankruptcy(self, discord_id: int, guild_id: int | None = None) -> Result[int]:
         """
         Check if a player can declare bankruptcy.
 
@@ -385,8 +397,8 @@ class BankruptcyService(IBankruptcyService):
             - NOT_IN_DEBT: Player has non-negative balance
             - BANKRUPTCY_COOLDOWN: Cooldown hasn't expired
         """
-        balance = self.player_repo.get_balance(discord_id)
-        state = self.get_state(discord_id)
+        balance = self.player_repo.get_balance(discord_id, guild_id)
+        state = self.get_state(discord_id, guild_id)
 
         if balance >= 0:
             return Result.fail(
@@ -405,7 +417,7 @@ class BankruptcyService(IBankruptcyService):
 
         return Result.ok(abs(balance))
 
-    def execute_bankruptcy(self, discord_id: int) -> Result[BankruptcyDeclaration]:
+    def execute_bankruptcy(self, discord_id: int, guild_id: int | None = None) -> Result[BankruptcyDeclaration]:
         """
         Declare bankruptcy for a player.
 
@@ -415,7 +427,7 @@ class BankruptcyService(IBankruptcyService):
             Result.ok(BankruptcyDeclaration) on success
             Result.fail(error_message, code) on failure
         """
-        validation = self.validate_bankruptcy(discord_id)
+        validation = self.validate_bankruptcy(discord_id, guild_id)
         if not validation.success:
             return Result.fail(validation.error, code=validation.error_code)
 
@@ -423,11 +435,12 @@ class BankruptcyService(IBankruptcyService):
         now = int(time.time())
 
         # Clear debt and give fresh start balance
-        self.player_repo.update_balance(discord_id, BANKRUPTCY_FRESH_START_BALANCE)
+        self.player_repo.update_balance(discord_id, guild_id, BANKRUPTCY_FRESH_START_BALANCE)
 
         # Record bankruptcy and set penalty
         self.bankruptcy_repo.upsert_state(
             discord_id=discord_id,
+            guild_id=guild_id,
             last_bankruptcy_at=now,
             penalty_games_remaining=self.penalty_games,
         )
@@ -442,7 +455,7 @@ class BankruptcyService(IBankruptcyService):
         )
 
     def calculate_penalized_winnings(
-        self, discord_id: int, amount: int
+        self, discord_id: int, amount: int, guild_id: int | None = None
     ) -> Result[PenaltyApplication]:
         """
         Calculate penalized winnings for a player under bankruptcy penalty.
@@ -453,7 +466,7 @@ class BankruptcyService(IBankruptcyService):
         Returns:
             Result.ok(PenaltyApplication) - always succeeds
         """
-        penalty_games = self.bankruptcy_repo.get_penalty_games(discord_id)
+        penalty_games = self.bankruptcy_repo.get_penalty_games(discord_id, guild_id)
 
         if penalty_games <= 0:
             return Result.ok(

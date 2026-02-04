@@ -300,7 +300,7 @@ class WrappedService:
         return wrapped
 
     def get_player_wrapped(
-        self, discord_id: int, year_month: str
+        self, discord_id: int, year_month: str, guild_id: int | None = None
     ) -> PlayerWrapped | None:
         """
         Generate personal wrapped summary for a player.
@@ -308,6 +308,7 @@ class WrappedService:
         Args:
             discord_id: Player's Discord ID
             year_month: Month in "YYYY-MM" format
+            guild_id: Guild ID for guild-specific stats
 
         Returns:
             PlayerWrapped object or None if no data
@@ -315,7 +316,7 @@ class WrappedService:
         start_ts, end_ts = self._get_month_timestamps(year_month)
 
         # Get player info
-        player = self.player_repo.get_by_id(discord_id)
+        player = self.player_repo.get_by_id(discord_id, guild_id)
         if not player:
             return None
 
@@ -381,7 +382,7 @@ class WrappedService:
         # Get degen score if available
         degen_score = None
         if self.gambling_stats_service:
-            degen = self.gambling_stats_service.calculate_degen_score(discord_id)
+            degen = self.gambling_stats_service.calculate_degen_score(discord_id, guild_id)
             if degen:
                 degen_score = degen.total
 

@@ -63,8 +63,9 @@ class AdvancedStatsCommands(commands.Cog):
             return
 
         # Verify both players are registered
-        p1 = self.player_repo.get_by_id(player1.id)
-        p2 = self.player_repo.get_by_id(player2.id)
+        guild_id = interaction.guild.id if interaction.guild else None
+        p1 = self.player_repo.get_by_id(player1.id, guild_id)
+        p2 = self.player_repo.get_by_id(player2.id, guild_id)
 
         if not p1:
             await safe_followup(

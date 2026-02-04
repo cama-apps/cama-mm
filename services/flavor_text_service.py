@@ -200,13 +200,14 @@ class PlayerContext:
         bankruptcy_service: BankruptcyService | None = None,
         loan_service: LoanService | None = None,
         gambling_stats_service: GamblingStatsService | None = None,
+        guild_id: int | None = None,
     ) -> PlayerContext | None:
         """
         Build PlayerContext from various services.
 
         Returns None if player not found.
         """
-        player = player_repo.get_by_id(discord_id)
+        player = player_repo.get_by_id(discord_id, guild_id)
         if not player:
             return None
 
@@ -222,7 +223,7 @@ class PlayerContext:
         negative_loans = 0
         total_fees_paid = 0
         if loan_service:
-            loan_state = loan_service.get_state(discord_id)
+            loan_state = loan_service.get_state(discord_id, guild_id)
             total_loans = loan_state.total_loans_taken
             negative_loans = getattr(loan_state, "negative_loans_taken", 0) or 0
             total_fees_paid = getattr(loan_state, "total_fees_paid", 0) or 0
@@ -236,7 +237,7 @@ class PlayerContext:
         bankruptcy_count = 0
         if gambling_stats_service:
             try:
-                stats = gambling_stats_service.get_player_stats(discord_id)
+                stats = gambling_stats_service.get_player_stats(discord_id, guild_id)
                 if stats:
                     # GambaStats is a dataclass, access attributes directly
                     degen_score = stats.degen_score.total if stats.degen_score else None

@@ -184,7 +184,7 @@ class WrappedCog(commands.Cog):
 
             # Personal wrapped if viewing self or specific user
             player_wrapped = self.wrapped_service.get_player_wrapped(
-                target_user.id, month
+                target_user.id, month, guild_id
             )
             if player_wrapped:
                 personal_buffer = draw_wrapped_personal(player_wrapped, self.hero_names)

@@ -11,6 +11,8 @@ from services.match_discovery_service import (
     MatchDiscoveryService,
 )
 
+TEST_GUILD_ID = 12345
+
 
 class TestMatchDiscoveryService:
     """Tests for MatchDiscoveryService."""
@@ -256,7 +258,7 @@ class TestMatchRepositoryWipeMethods:
         repo = MatchRepository(temp_db_path)
 
         # Create and enrich a match
-        match_id = repo.record_match([1, 2, 3, 4, 5], [6, 7, 8, 9, 10], 1)
+        match_id = repo.record_match([1, 2, 3, 4, 5], [6, 7, 8, 9, 10], 1, TEST_GUILD_ID)
         repo.update_match_enrichment(
             match_id=match_id,
             valve_match_id=99999,
@@ -268,7 +270,7 @@ class TestMatchRepositoryWipeMethods:
         )
 
         # Verify enriched
-        match = repo.get_most_recent_match()
+        match = repo.get_most_recent_match(TEST_GUILD_ID)
         assert match["valve_match_id"] == 99999
 
         # Wipe it
@@ -276,7 +278,7 @@ class TestMatchRepositoryWipeMethods:
         assert success is True
 
         # Verify wiped
-        match = repo.get_most_recent_match()
+        match = repo.get_most_recent_match(TEST_GUILD_ID)
         assert match["valve_match_id"] is None
 
     def test_wipe_match_enrichment_not_found(self, temp_db_path):
@@ -299,7 +301,7 @@ class TestMatchRepositoryWipeMethods:
         repo = MatchRepository(temp_db_path)
 
         # Create matches with different enrichment sources
-        match1 = repo.record_match([1, 2, 3, 4, 5], [6, 7, 8, 9, 10], 1)
+        match1 = repo.record_match([1, 2, 3, 4, 5], [6, 7, 8, 9, 10], 1, TEST_GUILD_ID)
         repo.update_match_enrichment(
             match_id=match1,
             valve_match_id=11111,
@@ -310,7 +312,7 @@ class TestMatchRepositoryWipeMethods:
             enrichment_source="manual",
         )
 
-        match2 = repo.record_match([11, 12, 13, 14, 15], [16, 17, 18, 19, 20], 2)
+        match2 = repo.record_match([11, 12, 13, 14, 15], [16, 17, 18, 19, 20], 2, TEST_GUILD_ID)
         repo.update_match_enrichment(
             match_id=match2,
             valve_match_id=22222,
@@ -322,7 +324,7 @@ class TestMatchRepositoryWipeMethods:
             enrichment_confidence=0.9,
         )
 
-        match3 = repo.record_match([21, 22, 23, 24, 25], [26, 27, 28, 29, 30], 1)
+        match3 = repo.record_match([21, 22, 23, 24, 25], [26, 27, 28, 29, 30], 1, TEST_GUILD_ID)
         repo.update_match_enrichment(
             match_id=match3,
             valve_match_id=33333,
@@ -342,7 +344,7 @@ class TestMatchRepositoryWipeMethods:
         assert wiped == 2
 
         # Verify manual one still enriched
-        unenriched = repo.get_matches_without_enrichment()
+        unenriched = repo.get_matches_without_enrichment(TEST_GUILD_ID)
         assert len(unenriched) == 2  # The two auto ones are now unenriched
 
         # Get the manual match and verify it's still enriched
@@ -368,7 +370,7 @@ class TestMatchRepositoryWipeMethods:
         assert repo.get_auto_discovered_count() == 0
 
         # Add an auto-discovered match
-        match_id = repo.record_match([1, 2, 3, 4, 5], [6, 7, 8, 9, 10], 1)
+        match_id = repo.record_match([1, 2, 3, 4, 5], [6, 7, 8, 9, 10], 1, TEST_GUILD_ID)
         repo.update_match_enrichment(
             match_id=match_id,
             valve_match_id=99999,
@@ -392,7 +394,7 @@ class TestMatchRepositoryWipeMethods:
         SchemaManager(temp_db_path).initialize()
         repo = MatchRepository(temp_db_path)
 
-        match_id = repo.record_match([1, 2, 3, 4, 5], [6, 7, 8, 9, 10], 1)
+        match_id = repo.record_match([1, 2, 3, 4, 5], [6, 7, 8, 9, 10], 1, TEST_GUILD_ID)
         repo.update_match_enrichment(
             match_id=match_id,
             valve_match_id=99999,

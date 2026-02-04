@@ -758,12 +758,13 @@ class BettingCommands(commands.Cog):
             return
 
         user_id = interaction.user.id
-        balance = self.player_service.get_balance(user_id)
+        guild_id = guild.id if guild else None
+        balance = self.player_service.get_balance(user_id, guild_id)
 
         # Check for bankruptcy penalty
         penalty_info = ""
         if self.bankruptcy_service:
-            state = self.bankruptcy_service.get_state(user_id)
+            state = self.bankruptcy_service.get_state(user_id, guild_id)
             if state.penalty_games_remaining > 0:
                 penalty_rate_pct = int(BANKRUPTCY_PENALTY_RATE * 100)
                 penalty_info = (
@@ -774,7 +775,7 @@ class BettingCommands(commands.Cog):
         # Check for loan info
         loan_info = ""
         if self.loan_service:
-            loan_state = self.loan_service.get_state(user_id)
+            loan_state = self.loan_service.get_state(user_id, guild_id)
             # Show outstanding loan prominently
             if loan_state.has_outstanding_loan:
                 loan_info = (
@@ -810,10 +811,11 @@ class BettingCommands(commands.Cog):
     @app_commands.command(name="gamba", description="Spin the Wheel of Fortune! (once per day)")
     async def gamba(self, interaction: discord.Interaction):
         user_id = interaction.user.id
+        guild_id = interaction.guild.id if interaction.guild else None
         now = time.time()
 
         # Check if player is registered
-        player = self.player_service.get_player(user_id)
+        player = self.player_service.get_player(user_id, guild_id)
         if not player:
             await interaction.response.send_message(
                 "You need to `/register` before you can spin the wheel.",
@@ -827,11 +829,11 @@ class BettingCommands(commands.Cog):
             # Atomic check-and-claim: prevents race condition where concurrent
             # requests could both pass the cooldown check
             claimed = self.player_service.player_repo.try_claim_wheel_spin(
-                user_id, int(now), WHEEL_COOLDOWN_SECONDS
+                user_id, guild_id, int(now), WHEEL_COOLDOWN_SECONDS
             )
             if not claimed:
                 # Spin was not claimed - still on cooldown. Get remaining time.
-                last_spin = self.player_service.player_repo.get_last_wheel_spin(user_id)
+                last_spin = self.player_service.player_repo.get_last_wheel_spin(user_id, guild_id)
                 if last_spin:
                     remaining = WHEEL_COOLDOWN_SECONDS - (now - last_spin)
                     hours = int(remaining // 3600)
@@ -845,11 +847,10 @@ class BettingCommands(commands.Cog):
                 return
         else:
             # Admin bypass - still set the timestamp for consistency
-            self.player_service.player_repo.set_last_wheel_spin(user_id, int(now))
+            self.player_service.player_repo.set_last_wheel_spin(user_id, guild_id, int(now))
 
         # Check for 1% explosion chance (overrides normal result)
         is_explosion = random.random() < WHEEL_EXPLOSION_CHANCE
-        guild_id = interaction.guild.id if interaction.guild else None
 
         if is_explosion:
             # THE WHEEL EXPLODES!
@@ -865,16 +866,16 @@ class BettingCommands(commands.Cog):
 
             # Apply explosion reward (67 JC)
             garnished_amount = 0
-            new_balance = self.player_service.get_balance(user_id)
+            new_balance = self.player_service.get_balance(user_id, guild_id)
 
             garnishment_service = getattr(self.bot, "garnishment_service", None)
             if garnishment_service and new_balance < 0:
-                result = garnishment_service.add_income(user_id, WHEEL_EXPLOSION_REWARD)
+                result = garnishment_service.add_income(user_id, WHEEL_EXPLOSION_REWARD, guild_id)
                 garnished_amount = result.get("garnished", 0)
                 new_balance = result.get("new_balance", new_balance + WHEEL_EXPLOSION_REWARD)
             else:
-                self.player_service.player_repo.add_balance(user_id, WHEEL_EXPLOSION_REWARD)
-                new_balance = self.player_service.get_balance(user_id)
+                self.player_service.player_repo.add_balance(user_id, guild_id, WHEEL_EXPLOSION_REWARD)
+                new_balance = self.player_service.get_balance(user_id, guild_id)
 
             next_spin_time = int(now) + WHEEL_COOLDOWN_SECONDS
 
@@ -916,30 +917,30 @@ class BettingCommands(commands.Cog):
         # Apply the result
         result_value = result_wedge[1]
         garnished_amount = 0
-        new_balance = self.player_service.get_balance(user_id)
+        new_balance = self.player_service.get_balance(user_id, guild_id)
 
         if result_value > 0:
             # Positive result: use garnishment service if available
             garnishment_service = getattr(self.bot, "garnishment_service", None)
             if garnishment_service and new_balance < 0:
                 # Player is in debt, apply garnishment
-                result = garnishment_service.add_income(user_id, result_value)
+                result = garnishment_service.add_income(user_id, result_value, guild_id)
                 garnished_amount = result.get("garnished", 0)
                 new_balance = result.get("new_balance", new_balance + result_value)
             else:
                 # Not in debt, add directly
-                self.player_service.player_repo.add_balance(user_id, result_value)
-                new_balance = self.player_service.get_balance(user_id)
+                self.player_service.player_repo.add_balance(user_id, guild_id, result_value)
+                new_balance = self.player_service.get_balance(user_id, guild_id)
         elif result_value < 0:
             # Bankrupt: subtract penalty (ignores MAX_DEBT floor - can go deeper into debt)
-            self.player_service.player_repo.add_balance(user_id, result_value)
-            new_balance = self.player_service.get_balance(user_id)
+            self.player_service.player_repo.add_balance(user_id, guild_id, result_value)
+            new_balance = self.player_service.get_balance(user_id, guild_id)
         # result_value == 0: "Lose a Turn" - no balance change, but extended cooldown
         if result_value == 0:
             # Apply the 1-week penalty cooldown for "Lose a Turn"
             # Set the spin time forward so the effective cooldown is the penalty duration
             penalty_spin_time = int(now) + (WHEEL_LOSE_PENALTY_COOLDOWN - WHEEL_COOLDOWN_SECONDS)
-            self.player_service.player_repo.set_last_wheel_spin(user_id, penalty_spin_time)
+            self.player_service.player_repo.set_last_wheel_spin(user_id, guild_id, penalty_spin_time)
             next_spin_time = int(now) + WHEEL_LOSE_PENALTY_COOLDOWN
         else:
             next_spin_time = int(now) + WHEEL_COOLDOWN_SECONDS
@@ -1008,8 +1009,8 @@ class BettingCommands(commands.Cog):
         guild_id = interaction.guild.id if interaction.guild else None
 
         # Check if both players are registered
-        sender = self.player_service.get_player(interaction.user.id)
-        recipient = self.player_service.get_player(player.id)
+        sender = self.player_service.get_player(interaction.user.id, guild_id)
+        recipient = self.player_service.get_player(player.id, guild_id)
 
         if not sender:
             await interaction.followup.send(
@@ -1030,7 +1031,7 @@ class BettingCommands(commands.Cog):
         total_cost = amount + fee
 
         # Check sender balance first (most fundamental constraint)
-        sender_balance = self.player_service.get_balance(interaction.user.id)
+        sender_balance = self.player_service.get_balance(interaction.user.id, guild_id)
         if sender_balance < total_cost:
             await interaction.followup.send(
                 f"Insufficient balance. You need {total_cost} {JOPACOIN_EMOTE} "
@@ -1041,7 +1042,7 @@ class BettingCommands(commands.Cog):
 
         # Check if sender has outstanding loan (blocked from tipping)
         if self.loan_service:
-            loan_state = self.loan_service.get_state(interaction.user.id)
+            loan_state = self.loan_service.get_state(interaction.user.id, guild_id)
             if loan_state.has_outstanding_loan:
                 await interaction.followup.send(
                     f"You cannot tip while you have an outstanding loan. "
@@ -1055,6 +1056,7 @@ class BettingCommands(commands.Cog):
             result = self.player_service.player_repo.tip_atomic(
                 from_discord_id=interaction.user.id,
                 to_discord_id=player.id,
+                guild_id=guild_id,
                 amount=amount,
                 fee=fee,
             )
@@ -1130,10 +1132,12 @@ class BettingCommands(commands.Cog):
         if not await safe_defer(interaction, ephemeral=False):
             return
 
+        guild_id = guild.id if guild else None
         try:
             result = self.player_service.player_repo.pay_debt_atomic(
                 from_discord_id=interaction.user.id,
                 to_discord_id=player.id,
+                guild_id=guild_id,
                 amount=amount,
             )
 
@@ -1175,9 +1179,10 @@ class BettingCommands(commands.Cog):
             return
 
         user_id = interaction.user.id
+        guild_id = guild.id if guild else None
 
         # Check if player is registered
-        player = self.player_service.get_player(user_id)
+        player = self.player_service.get_player(user_id, guild_id)
         if not player:
             await interaction.followup.send(
                 "You need to `/register` before you can declare bankruptcy. "
@@ -1187,7 +1192,7 @@ class BettingCommands(commands.Cog):
             return
 
         # Check if bankruptcy is allowed
-        check = self.bankruptcy_service.can_declare_bankruptcy(user_id)
+        check = self.bankruptcy_service.can_declare_bankruptcy(user_id, guild_id)
 
         if not check["allowed"]:
             if check["reason"] == "not_in_debt":
@@ -1211,7 +1216,7 @@ class BettingCommands(commands.Cog):
                 return
 
         # Declare bankruptcy
-        result = self.bankruptcy_service.declare_bankruptcy(user_id)
+        result = self.bankruptcy_service.declare_bankruptcy(user_id, guild_id)
 
         if not result["success"]:
             await interaction.followup.send(
@@ -1230,7 +1235,6 @@ class BettingCommands(commands.Cog):
         # Try to get AI-generated flavor text
         ai_flavor = None
         if self.flavor_text_service:
-            guild_id = interaction.guild.id if interaction.guild else None
             try:
                 ai_flavor = await self.flavor_text_service.generate_event_flavor(
                     guild_id=guild_id,
@@ -1275,14 +1279,14 @@ class BettingCommands(commands.Cog):
         guild_id = interaction.guild.id if interaction.guild else None
 
         # Check if registered
-        if not self.player_service.get_player(user_id):
+        if not self.player_service.get_player(user_id, guild_id):
             await interaction.response.send_message(
                 "You need to `/register` before taking loans.", ephemeral=True
             )
             return
 
         # Check eligibility
-        check = self.loan_service.can_take_loan(user_id, amount)
+        check = self.loan_service.can_take_loan(user_id, amount, guild_id)
 
         if not check["allowed"]:
             if check["reason"] == "has_outstanding_loan":
@@ -1887,7 +1891,7 @@ class DisburseVoteView(discord.ui.View):
         guild_id = interaction.guild.id if interaction.guild else None
 
         # Check if user is registered
-        player = self.cog.player_service.get_player(interaction.user.id)
+        player = self.cog.player_service.get_player(interaction.user.id, guild_id)
         if not player:
             await interaction.response.send_message(
                 "You must be registered to vote. Use `/register` first.",

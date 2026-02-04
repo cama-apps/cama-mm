@@ -133,9 +133,9 @@ class UnifiedLeaderboardView(discord.ui.View):
     async def _fetch_balance_data(self, state: TabState) -> None:
         """Fetch balance leaderboard data."""
         rating_system = CamaRatingSystem()
-        players = self.cog.player_repo.get_leaderboard(limit=self.limit)
-        total_count = self.cog.player_repo.get_player_count()
-        debtors = self.cog.player_repo.get_players_with_negative_balance()
+        players = self.cog.player_repo.get_leaderboard(self.guild_id, limit=self.limit)
+        total_count = self.cog.player_repo.get_player_count(self.guild_id)
+        debtors = self.cog.player_repo.get_players_with_negative_balance(self.guild_id)
 
         players_with_stats = []
         for player in players:
@@ -249,8 +249,8 @@ class UnifiedLeaderboardView(discord.ui.View):
     async def _fetch_glicko_data(self, state: TabState) -> None:
         """Fetch Glicko-2 rating leaderboard data."""
         rating_system = CamaRatingSystem()
-        players = self.cog.player_repo.get_leaderboard_by_glicko(limit=self.limit)
-        total_rated = self.cog.player_repo.get_rated_player_count(rating_type="glicko")
+        players = self.cog.player_repo.get_leaderboard_by_glicko(self.guild_id, limit=self.limit)
+        total_rated = self.cog.player_repo.get_rated_player_count(self.guild_id, rating_type="glicko")
 
         players_with_stats = []
         for player in players:
@@ -277,8 +277,8 @@ class UnifiedLeaderboardView(discord.ui.View):
     async def _fetch_openskill_data(self, state: TabState) -> None:
         """Fetch OpenSkill rating leaderboard data."""
         os_system = CamaOpenSkillSystem()
-        players = self.cog.player_repo.get_leaderboard_by_openskill(limit=self.limit)
-        total_rated = self.cog.player_repo.get_rated_player_count(rating_type="openskill")
+        players = self.cog.player_repo.get_leaderboard_by_openskill(self.guild_id, limit=self.limit)
+        total_rated = self.cog.player_repo.get_rated_player_count(self.guild_id, rating_type="openskill")
 
         players_with_stats = []
         for player in players:
@@ -1100,21 +1100,22 @@ class InfoCommands(commands.Cog):
                 return
 
             # Otherwise show server-wide stats
-            players = self.player_repo.get_all() if self.player_repo else []
-            match_count = self.match_repo.get_match_count() if self.match_repo else 0
+            guild_id = rl_gid
+            players = self.player_repo.get_all(guild_id) if self.player_repo else []
+            match_count = self.match_repo.get_match_count(guild_id) if self.match_repo else 0
             match_predictions = (
-                self.match_repo.get_recent_match_predictions(limit=200)
+                self.match_repo.get_recent_match_predictions(guild_id, limit=200)
                 if self.match_repo
                 else []
             )
             rating_history_entries = (
-                self.match_repo.get_recent_rating_history(limit=500) if self.match_repo else []
+                self.match_repo.get_recent_rating_history(guild_id, limit=500) if self.match_repo else []
             )
             biggest_upsets = (
-                self.match_repo.get_biggest_upsets(limit=5) if self.match_repo else []
+                self.match_repo.get_biggest_upsets(guild_id, limit=5) if self.match_repo else []
             )
             player_performance = (
-                self.match_repo.get_player_performance_stats() if self.match_repo else []
+                self.match_repo.get_player_performance_stats(guild_id) if self.match_repo else []
             )
 
             stats = compute_calibration_stats(
@@ -1472,8 +1473,9 @@ class InfoCommands(commands.Cog):
         rating_system: CamaRatingSystem,
     ):
         """Show detailed calibration stats for an individual player."""
+        guild_id = interaction.guild_id or 0
         # Get player data
-        player = self.player_repo.get_by_id(user.id) if self.player_repo else None
+        player = self.player_repo.get_by_id(user.id, guild_id) if self.player_repo else None
         if not player:
             await safe_followup(
                 interaction,
@@ -1490,7 +1492,7 @@ class InfoCommands(commands.Cog):
         )
 
         # Get all players for percentile calculation
-        all_players = self.player_repo.get_all() if self.player_repo else []
+        all_players = self.player_repo.get_all(guild_id) if self.player_repo else []
         rated_players = [p for p in all_players if p.glicko_rating is not None]
 
         # Calculate percentile
@@ -1814,7 +1816,7 @@ class InfoCommands(commands.Cog):
             embed.add_field(name="⭐ Fantasy Points", value=fp_text, inline=False)
 
         # OpenSkill Rating (Fantasy-Weighted)
-        os_data = self.player_repo.get_openskill_rating(user.id) if self.player_repo else None
+        os_data = self.player_repo.get_openskill_rating(user.id, guild_id) if self.player_repo else None
         if os_data:
             os_mu, os_sigma = os_data
             os_ordinal = os_system.ordinal(os_mu, os_sigma)

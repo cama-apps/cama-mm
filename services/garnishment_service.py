@@ -19,7 +19,9 @@ class GarnishmentService:
             garnishment_rate if garnishment_rate is not None else GARNISHMENT_PERCENTAGE
         )
 
-    def add_income(self, discord_id: int, amount: int) -> dict[str, int]:
+    def add_income(
+        self, discord_id: int, amount: int, guild_id: int | None = None
+    ) -> dict[str, int]:
         """
         Add income to a player, applying garnishment if they have debt.
 
@@ -30,6 +32,7 @@ class GarnishmentService:
         Args:
             discord_id: Player's Discord ID
             amount: Income amount (bet winnings, participation reward, etc.)
+            guild_id: Guild ID for multi-guild support
 
         Returns:
             Dict with:
@@ -41,5 +44,5 @@ class GarnishmentService:
             return {"gross": amount, "garnished": 0, "net": amount}
 
         return self.player_repo.add_balance_with_garnishment(
-            discord_id, amount, self.garnishment_rate
+            discord_id, guild_id, amount, self.garnishment_rate
         )

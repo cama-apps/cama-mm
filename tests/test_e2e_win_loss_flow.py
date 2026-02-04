@@ -11,6 +11,9 @@ from database import Database
 from repositories.player_repository import PlayerRepository
 from services.player_service import PlayerService
 
+# Legacy Database.add_player() uses guild_id=0 by default
+TEST_GUILD_ID = 0
+
 
 def _create_players(db: Database, start_id: int = 91001, count: int = 10):
     ids = list(range(start_id, start_id + count))
@@ -61,8 +64,8 @@ def test_record_to_stats_and_leaderboard_flow(e2e_test_db):
     repo = PlayerRepository(e2e_test_db.db_path)
     service = PlayerService(repo)
 
-    winner_stats = service.get_stats(radiant[0])
-    loser_stats = service.get_stats(dire[0])
+    winner_stats = service.get_stats(radiant[0], guild_id=TEST_GUILD_ID)
+    loser_stats = service.get_stats(dire[0], guild_id=TEST_GUILD_ID)
 
     assert winner_stats["player"].wins == 1
     assert winner_stats["player"].losses == 0
@@ -103,12 +106,12 @@ def test_multi_match_accumulation_and_nonparticipant(e2e_test_db):
     service = PlayerService(repo)
 
     for pid in radiant + dire:
-        stats = service.get_stats(pid)
+        stats = service.get_stats(pid, guild_id=TEST_GUILD_ID)
         assert stats["player"].wins == 1
         assert stats["player"].losses == 1
         assert stats["win_rate"] == pytest.approx(50.0)
 
-    bench_stats = service.get_stats(bench)
+    bench_stats = service.get_stats(bench, guild_id=TEST_GUILD_ID)
     assert bench_stats["player"].wins == 0
     assert bench_stats["player"].losses == 0
     assert bench_stats["win_rate"] is None

@@ -67,9 +67,9 @@ class RecalibrationService:
         )
         self.min_games = min_games if min_games is not None else RECALIBRATION_MIN_GAMES
 
-    def get_state(self, discord_id: int) -> RecalibrationState:
+    def get_state(self, discord_id: int, guild_id: int) -> RecalibrationState:
         """Get the current recalibration state for a player."""
-        state = self.recalibration_repo.get_state(discord_id)
+        state = self.recalibration_repo.get_state(discord_id, guild_id)
         now = int(time.time())
 
         if not state:
@@ -93,15 +93,18 @@ class RecalibrationService:
             cooldown_ends_at=cooldown_ends if is_on_cooldown else None,
         )
 
-    def can_recalibrate(self, discord_id: int) -> dict:
+    def can_recalibrate(self, discord_id: int, guild_id: int | None) -> dict:
         """
         Check if a player can recalibrate.
 
         Returns:
             Dict with 'allowed' (bool) and 'reason' (str if not allowed)
         """
+        # Normalize guild_id (None -> 0)
+        normalized_guild_id = guild_id if guild_id is not None else 0
+
         # Check if player exists
-        player = self.player_repo.get_by_id(discord_id)
+        player = self.player_repo.get_by_id(discord_id, normalized_guild_id)
         if not player:
             return {
                 "allowed": False,
@@ -109,7 +112,7 @@ class RecalibrationService:
             }
 
         # Check if player has a rating
-        glicko_data = self.player_repo.get_glicko_rating(discord_id)
+        glicko_data = self.player_repo.get_glicko_rating(discord_id, normalized_guild_id)
         if not glicko_data:
             return {
                 "allowed": False,
@@ -119,7 +122,7 @@ class RecalibrationService:
         rating, rd, volatility = glicko_data
 
         # Check minimum games requirement
-        games_played = self.player_repo.get_game_count(discord_id)
+        games_played = self.player_repo.get_game_count(discord_id, normalized_guild_id)
         if games_played < self.min_games:
             return {
                 "allowed": False,
@@ -129,7 +132,7 @@ class RecalibrationService:
             }
 
         # Check cooldown
-        state = self.get_state(discord_id)
+        state = self.get_state(discord_id, normalized_guild_id)
         if state.is_on_cooldown:
             return {
                 "allowed": False,
@@ -145,7 +148,7 @@ class RecalibrationService:
             "games_played": games_played,
         }
 
-    def recalibrate(self, discord_id: int) -> dict:
+    def recalibrate(self, discord_id: int, guild_id: int | None) -> dict:
         """
         Execute recalibration for a player.
 
@@ -157,12 +160,15 @@ class RecalibrationService:
         Returns:
             Dict with success status and details
         """
-        check = self.can_recalibrate(discord_id)
+        # Normalize guild_id (None -> 0)
+        normalized_guild_id = guild_id if guild_id is not None else 0
+
+        check = self.can_recalibrate(discord_id, guild_id)
         if not check["allowed"]:
             return {"success": False, **check}
 
         now = int(time.time())
-        state = self.get_state(discord_id)
+        state = self.get_state(discord_id, normalized_guild_id)
 
         # Get current rating to preserve
         old_rating = check["current_rating"]
@@ -172,6 +178,7 @@ class RecalibrationService:
         # Update player's Glicko rating (preserve rating, reset RD and volatility)
         self.player_repo.update_glicko_rating(
             discord_id=discord_id,
+            guild_id=normalized_guild_id,
             rating=old_rating,
             rd=self.initial_rd,
             volatility=self.initial_volatility,
@@ -180,6 +187,7 @@ class RecalibrationService:
         # Record recalibration state
         self.recalibration_repo.upsert_state(
             discord_id=discord_id,
+            guild_id=normalized_guild_id,
             last_recalibration_at=now,
             total_recalibrations=state.total_recalibrations + 1,
             rating_at_recalibration=old_rating,
@@ -205,28 +213,28 @@ class RecalibrationService:
             "cooldown_ends_at": cooldown_ends_at,
         }
 
-    def reset_cooldown(self, discord_id: int) -> dict:
+    def reset_cooldown(self, discord_id: int, guild_id: int) -> dict:
         """
         Reset recalibration cooldown for a player (admin action).
 
         Returns:
             Dict with success status
         """
-        player = self.player_repo.get_by_id(discord_id)
+        player = self.player_repo.get_by_id(discord_id, guild_id)
         if not player:
             return {
                 "success": False,
                 "reason": "not_registered",
             }
 
-        state = self.get_state(discord_id)
+        state = self.get_state(discord_id, guild_id)
         if state.last_recalibration_at is None:
             return {
                 "success": False,
                 "reason": "no_recalibration_history",
             }
 
-        self.recalibration_repo.reset_cooldown(discord_id)
+        self.recalibration_repo.reset_cooldown(discord_id, guild_id)
 
         logger.info(f"Admin reset recalibration cooldown for player {discord_id}")
 
