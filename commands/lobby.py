@@ -242,6 +242,75 @@ class LobbyCommands(commands.Cog):
         except Exception as exc:
             logger.warning(f"Failed to archive lobby thread: {exc}")
 
+    async def _auto_join_lobby(
+        self, interaction: discord.Interaction, lobby
+    ) -> tuple[bool, str | None]:
+        """
+        Auto-join user to lobby if not already in it.
+
+        Returns:
+            (joined, message) tuple:
+            - joined: True if user was joined, False if already in or couldn't join
+            - message: Warning message if roles not set, None otherwise
+        """
+        user_id = interaction.user.id
+
+        # Already in lobby (regular or conditional)
+        if user_id in lobby.players or user_id in lobby.conditional_players:
+            return False, None
+
+        # Check if player has roles set
+        player = self.player_service.get_player(user_id)
+        if not player or not player.preferred_roles:
+            return False, "⚠️ Set your preferred roles with `/setroles` to auto-join."
+
+        # Check for pending match
+        guild_id = interaction.guild.id if interaction.guild else None
+        match_service = getattr(self.bot, "match_service", None)
+        if match_service:
+            pending_match = match_service.get_last_shuffle(guild_id)
+            if pending_match:
+                return False, None  # Don't show warning, the main command handles this
+
+        # Attempt to join
+        success, reason = self.lobby_service.join_lobby(user_id)
+        if not success:
+            logger.info(f"Auto-join failed for {user_id}: {reason}")
+            return False, None
+
+        # Refresh lobby state
+        lobby = self.lobby_service.get_lobby()
+
+        # Update displays
+        await self._sync_lobby_displays(lobby)
+
+        # Post join activity in thread
+        thread_id = self.lobby_service.get_lobby_thread_id()
+        if thread_id:
+            await self._post_join_activity(thread_id, interaction.user)
+
+        # Rally/ready notifications
+        from bot import notify_lobby_rally, notify_lobby_ready
+
+        channel_id = self.lobby_service.get_lobby_channel_id()
+        if channel_id and thread_id:
+            try:
+                channel = self.bot.get_channel(channel_id)
+                if not channel:
+                    channel = await self.bot.fetch_channel(channel_id)
+                thread = self.bot.get_channel(thread_id)
+                if not thread:
+                    thread = await self.bot.fetch_channel(thread_id)
+
+                if not self.lobby_service.is_ready(lobby):
+                    await notify_lobby_rally(channel, thread, lobby, guild_id or 0)
+                else:
+                    await notify_lobby_ready(channel, lobby)
+            except Exception as exc:
+                logger.warning(f"Failed to send rally/ready notification on auto-join: {exc}")
+
+        return True, None
+
     @app_commands.command(name="lobby", description="Create or view the matchmaking lobby")
     async def lobby(self, interaction: discord.Interaction):
         logger.info(f"Lobby command: User {interaction.user.id} ({interaction.user})")
@@ -290,9 +359,22 @@ class LobbyCommands(commands.Cog):
                         message = await channel.fetch_message(message_id)
                     else:
                         message = await interaction.channel.fetch_message(message_id)
-                    await self._update_thread_embed(lobby)
 
-                    await interaction.followup.send(f"[View Lobby]({message.jump_url})", ephemeral=True)
+                    # Auto-join the user if not already in lobby
+                    joined, warning = await self._auto_join_lobby(interaction, lobby)
+
+                    # Refresh embed after potential join
+                    await self._update_thread_embed(self.lobby_service.get_lobby())
+
+                    # Build response based on join result
+                    if joined:
+                        response = f"✅ Joined! [View Lobby]({message.jump_url})"
+                    elif warning:
+                        response = f"{warning} [View Lobby]({message.jump_url})"
+                    else:
+                        response = f"[View Lobby]({message.jump_url})"
+
+                    await interaction.followup.send(response, ephemeral=True)
                     return
                 except Exception:
                     # Fall through to create a new one
@@ -342,10 +424,18 @@ class LobbyCommands(commands.Cog):
                     origin_channel_id=origin_channel_id,  # Where /lobby was run (for rally)
                 )
 
-                # Complete the deferred response
-                await interaction.followup.send(
-                    f"✅ Lobby created! [View Lobby]({channel_msg.jump_url})", ephemeral=True
-                )
+                # Auto-join the user who created the lobby
+                joined, warning = await self._auto_join_lobby(interaction, lobby)
+
+                # Build response based on join result
+                if joined:
+                    response = f"✅ Lobby created and joined! [View Lobby]({channel_msg.jump_url})"
+                elif warning:
+                    response = f"✅ Lobby created! {warning} [View Lobby]({channel_msg.jump_url})"
+                else:
+                    response = f"✅ Lobby created! [View Lobby]({channel_msg.jump_url})"
+
+                await interaction.followup.send(response, ephemeral=True)
                 return
 
             except discord.Forbidden:
