@@ -19,6 +19,7 @@ def validate_can_spend(
     discord_id: int,
     amount: int,
     max_debt: int | None = None,
+    guild_id: int | None = None,
 ) -> Result[int]:
     """
     Check if a player can spend the specified amount.
@@ -32,6 +33,7 @@ def validate_can_spend(
         discord_id: The player's Discord ID
         amount: Amount to spend
         max_debt: Maximum allowed debt (defaults to config.MAX_DEBT)
+        guild_id: Guild ID for multi-guild support
 
     Returns:
         Result.ok(new_balance) if spending is allowed
@@ -50,7 +52,7 @@ def validate_can_spend(
     if max_debt is None:
         max_debt = MAX_DEBT
 
-    balance = player_repo.get_balance(discord_id)
+    balance = player_repo.get_balance(discord_id, guild_id)
     new_balance = balance - amount
 
     if new_balance < -max_debt:
@@ -66,6 +68,7 @@ def validate_can_spend(
 def validate_positive_balance(
     player_repo: "IPlayerRepository",
     discord_id: int,
+    guild_id: int | None = None,
 ) -> Result[int]:
     """
     Check if a player has a non-negative balance.
@@ -73,12 +76,13 @@ def validate_positive_balance(
     Args:
         player_repo: Player repository for balance lookup
         discord_id: The player's Discord ID
+        guild_id: Guild ID for multi-guild support
 
     Returns:
         Result.ok(balance) if balance >= 0
         Result.fail(error, code) if balance < 0
     """
-    balance = player_repo.get_balance(discord_id)
+    balance = player_repo.get_balance(discord_id, guild_id)
 
     if balance < 0:
         return Result.fail(
@@ -93,6 +97,7 @@ def validate_has_amount(
     player_repo: "IPlayerRepository",
     discord_id: int,
     amount: int,
+    guild_id: int | None = None,
 ) -> Result[int]:
     """
     Check if a player has at least the specified amount.
@@ -103,12 +108,13 @@ def validate_has_amount(
         player_repo: Player repository for balance lookup
         discord_id: The player's Discord ID
         amount: Required amount
+        guild_id: Guild ID for multi-guild support
 
     Returns:
         Result.ok(balance) if balance >= amount
         Result.fail(error, code) if balance < amount
     """
-    balance = player_repo.get_balance(discord_id)
+    balance = player_repo.get_balance(discord_id, guild_id)
 
     if balance < amount:
         return Result.fail(

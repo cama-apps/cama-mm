@@ -121,15 +121,16 @@ class LobbyCommands(commands.Cog):
         try:
             channel = interaction.channel
             message = await channel.fetch_message(message_id)
-            embed = self.lobby_service.build_lobby_embed(lobby)
+            guild_id = interaction.guild.id if interaction.guild else None
+            embed = self.lobby_service.build_lobby_embed(lobby, guild_id)
             if embed:
                 await message.edit(embed=embed, allowed_mentions=discord.AllowedMentions.none())
         except Exception as exc:
             logger.warning(f"Failed to update lobby message: {exc}")
 
-    async def _sync_lobby_displays(self, lobby) -> None:
+    async def _sync_lobby_displays(self, lobby, guild_id: int | None = None) -> None:
         """Update channel message embed (which is also the thread starter)."""
-        embed = self.lobby_service.build_lobby_embed(lobby)
+        embed = self.lobby_service.build_lobby_embed(lobby, guild_id)
 
         # Update channel message - this also updates the thread starter view
         message_id = self.lobby_service.get_lobby_message_id()
@@ -145,7 +146,7 @@ class LobbyCommands(commands.Cog):
             except Exception as exc:
                 logger.warning(f"Failed to update channel message: {exc}")
 
-    async def _update_thread_embed(self, lobby, embed=None) -> None:
+    async def _update_thread_embed(self, lobby, embed=None, guild_id: int | None = None) -> None:
         """Update the pinned embed in the lobby thread."""
         thread_id = self.lobby_service.get_lobby_thread_id()
         embed_message_id = self.lobby_service.get_lobby_embed_message_id()
@@ -160,7 +161,7 @@ class LobbyCommands(commands.Cog):
 
             message = await thread.fetch_message(embed_message_id)
             if not embed:
-                embed = self.lobby_service.build_lobby_embed(lobby)
+                embed = self.lobby_service.build_lobby_embed(lobby, guild_id)
             if embed:
                 await message.edit(embed=embed)
         except Exception as exc:
@@ -254,18 +255,18 @@ class LobbyCommands(commands.Cog):
             - message: Warning message if roles not set, None otherwise
         """
         user_id = interaction.user.id
+        guild_id = interaction.guild.id if interaction.guild else None
 
         # Already in lobby (regular or conditional)
         if user_id in lobby.players or user_id in lobby.conditional_players:
             return False, None
 
         # Check if player has roles set
-        player = self.player_service.get_player(user_id)
+        player = self.player_service.get_player(user_id, guild_id)
         if not player or not player.preferred_roles:
             return False, "⚠️ Set your preferred roles with `/setroles` to auto-join."
 
         # Check for pending match
-        guild_id = interaction.guild.id if interaction.guild else None
         match_service = getattr(self.bot, "match_service", None)
         if match_service:
             pending_match = match_service.get_last_shuffle(guild_id)
@@ -282,7 +283,7 @@ class LobbyCommands(commands.Cog):
         lobby = self.lobby_service.get_lobby()
 
         # Update displays
-        await self._sync_lobby_displays(lobby)
+        await self._sync_lobby_displays(lobby, guild_id)
 
         # Post join activity in thread
         thread_id = self.lobby_service.get_lobby_thread_id()
@@ -317,7 +318,8 @@ class LobbyCommands(commands.Cog):
         if not await safe_defer(interaction, ephemeral=False):
             return
 
-        player = self.player_service.get_player(interaction.user.id)
+        guild_id = interaction.guild.id if interaction.guild else None
+        player = self.player_service.get_player(interaction.user.id, guild_id)
         if not player:
             await interaction.followup.send(
                 "❌ You're not registered! Use `/register` first.", ephemeral=True
@@ -325,7 +327,6 @@ class LobbyCommands(commands.Cog):
             return
 
         # Block if a match is pending recording
-        guild_id = interaction.guild.id if interaction.guild else None
         match_service = getattr(self.bot, "match_service", None)
         if match_service:
             pending_match = match_service.get_last_shuffle(guild_id)
@@ -342,7 +343,7 @@ class LobbyCommands(commands.Cog):
         # Acquire lock to prevent race condition when multiple users call /lobby simultaneously
         async with self.lobby_service.creation_lock:
             lobby = self.lobby_service.get_or_create_lobby(creator_id=interaction.user.id)
-            embed = self.lobby_service.build_lobby_embed(lobby)
+            embed = self.lobby_service.build_lobby_embed(lobby, guild_id)
 
             # If message/thread already exists, refresh it; otherwise create new
             message_id = self.lobby_service.get_lobby_message_id()
@@ -364,7 +365,7 @@ class LobbyCommands(commands.Cog):
                     joined, warning = await self._auto_join_lobby(interaction, lobby)
 
                     # Refresh embed after potential join
-                    await self._update_thread_embed(self.lobby_service.get_lobby())
+                    await self._update_thread_embed(self.lobby_service.get_lobby(), guild_id=guild_id)
 
                     # Build response based on join result
                     if joined:
@@ -464,6 +465,7 @@ class LobbyCommands(commands.Cog):
         if not await safe_defer(interaction, ephemeral=True):
             return
 
+        guild_id = interaction.guild.id if interaction.guild else None
         lobby = self.lobby_service.get_lobby()
         if not lobby:
             await interaction.followup.send("⚠️ No active lobby.", ephemeral=True)
@@ -506,7 +508,7 @@ class LobbyCommands(commands.Cog):
             )
 
             # Update both channel message and thread embed
-            await self._sync_lobby_displays(lobby)
+            await self._sync_lobby_displays(lobby, guild_id)
 
             # Remove kicked player's lobby reactions (sword and frogling)
             await self._remove_user_lobby_reactions(player)
@@ -541,8 +543,10 @@ class LobbyCommands(commands.Cog):
         if not await safe_defer(interaction, ephemeral=True):
             return
 
+        guild_id = interaction.guild.id if interaction.guild else None
+
         # Check registration
-        player = self.player_service.get_player(interaction.user.id)
+        player = self.player_service.get_player(interaction.user.id, guild_id)
         if not player:
             await interaction.followup.send(
                 "❌ You're not registered! Use `/register` first.", ephemeral=True
@@ -565,7 +569,6 @@ class LobbyCommands(commands.Cog):
             return
 
         # Block if a match is pending recording
-        guild_id = interaction.guild.id if interaction.guild else None
         match_service = getattr(self.bot, "match_service", None)
         if match_service:
             pending_match = match_service.get_last_shuffle(guild_id)
@@ -589,7 +592,7 @@ class LobbyCommands(commands.Cog):
         lobby = self.lobby_service.get_lobby()
 
         # Update displays and post activity
-        await self._sync_lobby_displays(lobby)
+        await self._sync_lobby_displays(lobby, guild_id)
         thread_id = self.lobby_service.get_lobby_thread_id()
         if thread_id:
             await self._post_join_activity(thread_id, interaction.user)
@@ -623,6 +626,7 @@ class LobbyCommands(commands.Cog):
         if not await safe_defer(interaction, ephemeral=True):
             return
 
+        guild_id = interaction.guild.id if interaction.guild else None
         lobby = self.lobby_service.get_lobby()
         if not lobby:
             await interaction.followup.send("⚠️ No active lobby.", ephemeral=True)
@@ -642,7 +646,7 @@ class LobbyCommands(commands.Cog):
             self.lobby_service.leave_lobby_conditional(interaction.user.id)
 
         # Update displays
-        await self._sync_lobby_displays(lobby)
+        await self._sync_lobby_displays(lobby, guild_id)
 
         # Remove user's reactions
         await self._remove_user_lobby_reactions(interaction.user)

@@ -5,6 +5,8 @@ from repositories.match_repository import MatchRepository
 from repositories.player_repository import PlayerRepository
 from services.match_service import MatchService
 
+TEST_GUILD_ID = 12345
+
 
 def _seed_players(repo: PlayerRepository, count: int = 10):
     for i in range(count):
@@ -12,6 +14,7 @@ def _seed_players(repo: PlayerRepository, count: int = 10):
         repo.add(
             discord_id=pid,
             discord_username=f"Player{pid}",
+            guild_id=TEST_GUILD_ID,
             preferred_roles=["1", "2", "3", "4", "5"],
             initial_mmr=3000,
             glicko_rating=1500.0,
@@ -33,14 +36,14 @@ def test_match_service_repo_injected_shuffle_and_record(repo_db_path):
 
     player_ids = _seed_players(player_repo, 10)
 
-    shuffle_result = service.shuffle_players(player_ids, guild_id=1)
+    shuffle_result = service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
     assert shuffle_result["radiant_team"]
-    pending = match_repo.get_pending_match(1)
+    pending = match_repo.get_pending_match(TEST_GUILD_ID)
     assert pending is not None
 
-    result = service.record_match("radiant", guild_id=1)
+    result = service.record_match("radiant", guild_id=TEST_GUILD_ID)
     assert result["match_id"] > 0
-    assert match_repo.get_pending_match(1) is None
+    assert match_repo.get_pending_match(TEST_GUILD_ID) is None
 
     recorded = match_repo.get_match(result["match_id"])
     assert recorded is not None
@@ -78,6 +81,7 @@ def test_goodness_score_respects_role_matchup_weight(repo_db_path, monkeypatch):
         player_repo.add(
             discord_id=pid,
             discord_username=name,
+            guild_id=TEST_GUILD_ID,
             preferred_roles=roles,
             initial_mmr=mmr,
             glicko_rating=None,
@@ -99,7 +103,7 @@ def test_goodness_score_respects_role_matchup_weight(repo_db_path, monkeypatch):
 
     monkeypatch.setattr(service.shuffler, "shuffle", fake_shuffle)
 
-    result = service.shuffle_players(player_ids, guild_id=1)
+    result = service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
 
     # value diff = |6500 - 6800| = 300
     # role delta = 400; weighted by 0.18 -> 72

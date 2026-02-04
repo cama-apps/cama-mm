@@ -217,6 +217,15 @@ class SchemaManager:
             ("create_double_or_nothing_table", self._migration_create_double_or_nothing_table),
             ("add_last_double_or_nothing_column", self._migration_add_last_double_or_nothing),
             ("create_wrapped_generation_table", self._migration_create_wrapped_generation_table),
+            # Guild isolation migrations (Phase 1)
+            ("add_guild_id_to_players", self._migration_add_guild_id_to_players),
+            ("add_guild_id_to_matches", self._migration_add_guild_id_to_matches),
+            ("add_guild_id_to_match_participants", self._migration_add_guild_id_to_match_participants),
+            ("add_guild_id_to_rating_history", self._migration_add_guild_id_to_rating_history),
+            ("add_guild_id_to_player_pairings", self._migration_add_guild_id_to_player_pairings),
+            ("add_guild_id_to_loan_state", self._migration_add_guild_id_to_loan_state),
+            ("add_guild_id_to_bankruptcy_state", self._migration_add_guild_id_to_bankruptcy_state),
+            ("add_guild_id_to_recalibration_state", self._migration_add_guild_id_to_recalibration_state),
         ]
 
     # --- Migrations ---
@@ -1040,4 +1049,368 @@ class SchemaManager:
         )
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_wrapped_guild_month ON wrapped_generation(guild_id, year_month)"
+        )
+
+    # =========================================================================
+    # Guild Isolation Migrations
+    # These migrations add guild_id to tables to support multi-server isolation.
+    # Existing data is assigned to the original server (806299990791159808).
+    # =========================================================================
+
+    # Hardcoded guild ID for migrating existing data (one-time migration)
+    _LEGACY_GUILD_ID = 806299990791159808
+
+    def _migration_add_guild_id_to_players(self, cursor) -> None:
+        """
+        Add guild_id to players table, changing to composite primary key.
+
+        SQLite doesn't support altering primary keys, so we recreate the table.
+        Existing players are assigned to the legacy guild.
+        """
+        # Check if guild_id column already exists
+        cursor.execute("PRAGMA table_info(players)")
+        columns = {row[1] for row in cursor.fetchall()}
+        if "guild_id" in columns:
+            return
+
+        # Create new table with composite primary key
+        cursor.execute(
+            """
+            CREATE TABLE players_new (
+                discord_id INTEGER NOT NULL,
+                guild_id INTEGER NOT NULL DEFAULT 0,
+                discord_username TEXT NOT NULL,
+                dotabuff_url TEXT,
+                initial_mmr INTEGER,
+                current_mmr REAL,
+                wins INTEGER DEFAULT 0,
+                losses INTEGER DEFAULT 0,
+                preferred_roles TEXT,
+                main_role TEXT,
+                glicko_rating REAL,
+                glicko_rd REAL,
+                glicko_volatility REAL,
+                os_mu REAL,
+                os_sigma REAL,
+                steam_id INTEGER,
+                jopacoin_balance INTEGER DEFAULT 3,
+                exclusion_count INTEGER DEFAULT 0,
+                lowest_balance_ever INTEGER,
+                last_match_date TIMESTAMP,
+                first_calibrated_at INTEGER,
+                is_captain_eligible INTEGER DEFAULT 0,
+                last_wheel_spin INTEGER,
+                last_double_or_nothing INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (discord_id, guild_id)
+            )
+            """
+        )
+
+        # Copy existing data with legacy guild_id
+        cursor.execute(
+            f"""
+            INSERT INTO players_new (
+                discord_id, guild_id, discord_username, dotabuff_url, initial_mmr,
+                current_mmr, wins, losses, preferred_roles, main_role,
+                glicko_rating, glicko_rd, glicko_volatility, os_mu, os_sigma,
+                steam_id, jopacoin_balance, exclusion_count, lowest_balance_ever,
+                last_match_date, first_calibrated_at, is_captain_eligible,
+                last_wheel_spin, last_double_or_nothing, created_at, updated_at
+            )
+            SELECT
+                discord_id, {self._LEGACY_GUILD_ID}, discord_username, dotabuff_url, initial_mmr,
+                current_mmr, wins, losses, preferred_roles, main_role,
+                glicko_rating, glicko_rd, glicko_volatility, os_mu, os_sigma,
+                steam_id, COALESCE(jopacoin_balance, 3), COALESCE(exclusion_count, 0),
+                lowest_balance_ever, last_match_date, first_calibrated_at,
+                COALESCE(is_captain_eligible, 0), last_wheel_spin, last_double_or_nothing,
+                created_at, updated_at
+            FROM players
+            """
+        )
+
+        # Drop old table and rename
+        cursor.execute("DROP TABLE players")
+        cursor.execute("ALTER TABLE players_new RENAME TO players")
+
+        # Recreate indexes
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_players_steam_id ON players(steam_id)")
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_players_guild_id ON players(guild_id)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_players_leaderboard "
+            "ON players(guild_id, jopacoin_balance DESC, wins DESC, glicko_rating DESC)"
+        )
+
+    def _migration_add_guild_id_to_matches(self, cursor) -> None:
+        """Add guild_id column to matches table."""
+        self._add_column_if_not_exists(cursor, "matches", "guild_id", "INTEGER NOT NULL DEFAULT 0")
+
+        # Update existing matches with legacy guild_id
+        cursor.execute(
+            f"UPDATE matches SET guild_id = {self._LEGACY_GUILD_ID} WHERE guild_id = 0"
+        )
+
+        # Add index for guild-filtered queries
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_matches_guild_id ON matches(guild_id)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_matches_guild_date ON matches(guild_id, match_date DESC)"
+        )
+
+    def _migration_add_guild_id_to_match_participants(self, cursor) -> None:
+        """Add guild_id column to match_participants table."""
+        self._add_column_if_not_exists(
+            cursor, "match_participants", "guild_id", "INTEGER NOT NULL DEFAULT 0"
+        )
+
+        # Update existing participants with legacy guild_id
+        cursor.execute(
+            f"UPDATE match_participants SET guild_id = {self._LEGACY_GUILD_ID} WHERE guild_id = 0"
+        )
+
+        # Add index
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_match_participants_guild "
+            "ON match_participants(guild_id, discord_id)"
+        )
+
+    def _migration_add_guild_id_to_rating_history(self, cursor) -> None:
+        """Add guild_id column to rating_history table."""
+        self._add_column_if_not_exists(
+            cursor, "rating_history", "guild_id", "INTEGER NOT NULL DEFAULT 0"
+        )
+
+        # Update existing history with legacy guild_id
+        cursor.execute(
+            f"UPDATE rating_history SET guild_id = {self._LEGACY_GUILD_ID} WHERE guild_id = 0"
+        )
+
+        # Add index
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_rating_history_guild "
+            "ON rating_history(guild_id, discord_id)"
+        )
+
+    def _migration_add_guild_id_to_player_pairings(self, cursor) -> None:
+        """
+        Add guild_id to player_pairings table, changing to composite primary key.
+
+        New key: (guild_id, player1_id, player2_id)
+        """
+        # Check if guild_id column already exists
+        cursor.execute("PRAGMA table_info(player_pairings)")
+        columns = {row[1] for row in cursor.fetchall()}
+        if "guild_id" in columns:
+            return
+
+        # Create new table with composite primary key including guild_id
+        cursor.execute(
+            """
+            CREATE TABLE player_pairings_new (
+                guild_id INTEGER NOT NULL DEFAULT 0,
+                player1_id INTEGER NOT NULL,
+                player2_id INTEGER NOT NULL,
+                games_together INTEGER DEFAULT 0,
+                wins_together INTEGER DEFAULT 0,
+                games_against INTEGER DEFAULT 0,
+                player1_wins_against INTEGER DEFAULT 0,
+                last_match_id INTEGER,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (guild_id, player1_id, player2_id),
+                CHECK (player1_id < player2_id)
+            )
+            """
+        )
+
+        # Copy existing data with legacy guild_id
+        cursor.execute(
+            f"""
+            INSERT INTO player_pairings_new (
+                guild_id, player1_id, player2_id, games_together, wins_together,
+                games_against, player1_wins_against, last_match_id, updated_at
+            )
+            SELECT
+                {self._LEGACY_GUILD_ID}, player1_id, player2_id, games_together, wins_together,
+                games_against, player1_wins_against, last_match_id, updated_at
+            FROM player_pairings
+            """
+        )
+
+        # Drop old table and rename
+        cursor.execute("DROP TABLE player_pairings")
+        cursor.execute("ALTER TABLE player_pairings_new RENAME TO player_pairings")
+
+        # Recreate indexes
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_player_pairings_guild "
+            "ON player_pairings(guild_id)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_player_pairings_player1 "
+            "ON player_pairings(guild_id, player1_id)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_player_pairings_player2 "
+            "ON player_pairings(guild_id, player2_id)"
+        )
+
+    def _migration_add_guild_id_to_loan_state(self, cursor) -> None:
+        """
+        Add guild_id to loan_state table, changing to composite primary key.
+
+        New key: (discord_id, guild_id)
+        """
+        # Check if guild_id column already exists
+        cursor.execute("PRAGMA table_info(loan_state)")
+        columns = {row[1] for row in cursor.fetchall()}
+        if "guild_id" in columns:
+            return
+
+        # Create new table with composite primary key
+        cursor.execute(
+            """
+            CREATE TABLE loan_state_new (
+                discord_id INTEGER NOT NULL,
+                guild_id INTEGER NOT NULL DEFAULT 0,
+                last_loan_at INTEGER,
+                total_loans_taken INTEGER DEFAULT 0,
+                total_fees_paid INTEGER DEFAULT 0,
+                negative_loans_taken INTEGER DEFAULT 0,
+                outstanding_principal INTEGER DEFAULT 0,
+                outstanding_fee INTEGER DEFAULT 0,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (discord_id, guild_id)
+            )
+            """
+        )
+
+        # Copy existing data with legacy guild_id
+        cursor.execute(
+            f"""
+            INSERT INTO loan_state_new (
+                discord_id, guild_id, last_loan_at, total_loans_taken, total_fees_paid,
+                negative_loans_taken, outstanding_principal, outstanding_fee, updated_at
+            )
+            SELECT
+                discord_id, {self._LEGACY_GUILD_ID}, last_loan_at,
+                COALESCE(total_loans_taken, 0), COALESCE(total_fees_paid, 0),
+                COALESCE(negative_loans_taken, 0), COALESCE(outstanding_principal, 0),
+                COALESCE(outstanding_fee, 0), updated_at
+            FROM loan_state
+            """
+        )
+
+        # Drop old table and rename
+        cursor.execute("DROP TABLE loan_state")
+        cursor.execute("ALTER TABLE loan_state_new RENAME TO loan_state")
+
+        # Add index
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_loan_state_guild ON loan_state(guild_id)"
+        )
+
+    def _migration_add_guild_id_to_bankruptcy_state(self, cursor) -> None:
+        """
+        Add guild_id to bankruptcy_state table, changing to composite primary key.
+
+        New key: (discord_id, guild_id)
+        """
+        # Check if guild_id column already exists
+        cursor.execute("PRAGMA table_info(bankruptcy_state)")
+        columns = {row[1] for row in cursor.fetchall()}
+        if "guild_id" in columns:
+            return
+
+        # Create new table with composite primary key
+        cursor.execute(
+            """
+            CREATE TABLE bankruptcy_state_new (
+                discord_id INTEGER NOT NULL,
+                guild_id INTEGER NOT NULL DEFAULT 0,
+                last_bankruptcy_at INTEGER,
+                penalty_games_remaining INTEGER DEFAULT 0,
+                bankruptcy_count INTEGER DEFAULT 0,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (discord_id, guild_id)
+            )
+            """
+        )
+
+        # Copy existing data with legacy guild_id
+        cursor.execute(
+            f"""
+            INSERT INTO bankruptcy_state_new (
+                discord_id, guild_id, last_bankruptcy_at, penalty_games_remaining,
+                bankruptcy_count, updated_at
+            )
+            SELECT
+                discord_id, {self._LEGACY_GUILD_ID}, last_bankruptcy_at,
+                COALESCE(penalty_games_remaining, 0), COALESCE(bankruptcy_count, 0), updated_at
+            FROM bankruptcy_state
+            """
+        )
+
+        # Drop old table and rename
+        cursor.execute("DROP TABLE bankruptcy_state")
+        cursor.execute("ALTER TABLE bankruptcy_state_new RENAME TO bankruptcy_state")
+
+        # Add index
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_bankruptcy_state_guild ON bankruptcy_state(guild_id)"
+        )
+
+    def _migration_add_guild_id_to_recalibration_state(self, cursor) -> None:
+        """
+        Add guild_id to recalibration_state table, changing to composite primary key.
+
+        New key: (discord_id, guild_id)
+        """
+        # Check if guild_id column already exists
+        cursor.execute("PRAGMA table_info(recalibration_state)")
+        columns = {row[1] for row in cursor.fetchall()}
+        if "guild_id" in columns:
+            return
+
+        # Create new table with composite primary key
+        cursor.execute(
+            """
+            CREATE TABLE recalibration_state_new (
+                discord_id INTEGER NOT NULL,
+                guild_id INTEGER NOT NULL DEFAULT 0,
+                last_recalibration_at INTEGER,
+                total_recalibrations INTEGER DEFAULT 0,
+                rating_at_recalibration REAL,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (discord_id, guild_id)
+            )
+            """
+        )
+
+        # Copy existing data with legacy guild_id
+        cursor.execute(
+            f"""
+            INSERT INTO recalibration_state_new (
+                discord_id, guild_id, last_recalibration_at, total_recalibrations,
+                rating_at_recalibration, updated_at
+            )
+            SELECT
+                discord_id, {self._LEGACY_GUILD_ID}, last_recalibration_at,
+                COALESCE(total_recalibrations, 0), rating_at_recalibration, updated_at
+            FROM recalibration_state
+            """
+        )
+
+        # Drop old table and rename
+        cursor.execute("DROP TABLE recalibration_state")
+        cursor.execute("ALTER TABLE recalibration_state_new RENAME TO recalibration_state")
+
+        # Add index
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_recalibration_state_guild "
+            "ON recalibration_state(guild_id)"
         )

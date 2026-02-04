@@ -103,27 +103,27 @@ class LobbyService:
         """Get the channel where /lobby was originally run (for rally notifications)."""
         return self.lobby_manager.origin_channel_id
 
-    def get_lobby_players(self, lobby: Lobby) -> tuple[list[int], list]:
+    def get_lobby_players(self, lobby: Lobby, guild_id: int | None = None) -> tuple[list[int], list]:
         """Get regular (non-conditional) player IDs and Player objects."""
         player_ids = list(lobby.players)
-        players = self.player_repo.get_by_ids(player_ids)
+        players = self.player_repo.get_by_ids(player_ids, guild_id)
         return player_ids, players
 
-    def get_conditional_players(self, lobby: Lobby) -> tuple[list[int], list]:
+    def get_conditional_players(self, lobby: Lobby, guild_id: int | None = None) -> tuple[list[int], list]:
         """Get conditional (frogling) player IDs and Player objects."""
         player_ids = list(lobby.conditional_players)
-        players = self.player_repo.get_by_ids(player_ids)
+        players = self.player_repo.get_by_ids(player_ids, guild_id)
         return player_ids, players
 
-    def build_lobby_embed(self, lobby: Lobby) -> object | None:
+    def build_lobby_embed(self, lobby: Lobby, guild_id: int | None = None) -> object | None:
         if not lobby:
             return None
-        player_ids, players = self.get_lobby_players(lobby)
-        conditional_ids, conditional_players = self.get_conditional_players(lobby)
+        player_ids, players = self.get_lobby_players(lobby, guild_id)
+        conditional_ids, conditional_players = self.get_conditional_players(lobby, guild_id)
 
         # Fetch captain-eligible IDs from all lobby players
         all_ids = player_ids + conditional_ids
-        captain_eligible_ids = set(self.player_repo.get_captain_eligible_players(all_ids)) if all_ids else set()
+        captain_eligible_ids = set(self.player_repo.get_captain_eligible_players(all_ids, guild_id)) if all_ids else set()
 
         return create_lobby_embed(
             lobby, players, player_ids,

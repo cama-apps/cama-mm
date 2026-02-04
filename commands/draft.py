@@ -369,8 +369,10 @@ class DraftCommands(commands.Cog):
             f"setting eligible={eligible.value}"
         )
 
+        guild_id = interaction.guild.id if interaction.guild else None
+
         # Check if user is registered
-        player = self.player_repo.get_by_id(interaction.user.id)
+        player = self.player_repo.get_by_id(interaction.user.id, guild_id)
         if not player:
             await interaction.response.send_message(
                 "❌ You must be registered first. Use `/register` to sign up.",
@@ -379,7 +381,7 @@ class DraftCommands(commands.Cog):
             return
 
         is_eligible = eligible.value == "yes"
-        self.player_repo.set_captain_eligible(interaction.user.id, is_eligible)
+        self.player_repo.set_captain_eligible(interaction.user.id, guild_id, is_eligible)
 
         if is_eligible:
             await interaction.response.send_message(
@@ -507,13 +509,13 @@ class DraftCommands(commands.Cog):
         state.current_pick_index = 1  # Second pick
 
         # Ensure fake players exist in DB for display
-        await self._ensure_sample_players_exist()
+        await self._ensure_sample_players_exist(guild_id)
 
         embed = await self._build_draft_embed(interaction.guild, state)
 
         # Get available players for buttons
         available_ids = state.available_player_ids
-        available_players = self.player_repo.get_by_ids(available_ids)
+        available_players = self.player_repo.get_by_ids(available_ids, guild_id)
         available_players.sort(key=lambda p: p.glicko_rating or 1500.0, reverse=True)
 
         view = DraftingView(
@@ -560,7 +562,7 @@ class DraftCommands(commands.Cog):
         state.excluded_player_ids = [-111, -112]
 
         # Ensure fake players exist
-        await self._ensure_sample_players_exist()
+        await self._ensure_sample_players_exist(guild_id)
 
         # Create mock pending_state for betting display
         now_ts = int(time.time())
@@ -586,7 +588,7 @@ class DraftCommands(commands.Cog):
             embed=embed,
         )
 
-    async def _ensure_sample_players_exist(self):
+    async def _ensure_sample_players_exist(self, guild_id: int):
         """Create sample fake players if they don't exist."""
         sample_players = [
             (-101, "SampleCapt1", 1650.0, ["1", "2"]),
@@ -604,12 +606,13 @@ class DraftCommands(commands.Cog):
         ]
 
         for pid, name, rating, roles in sample_players:
-            existing = self.player_repo.get_by_id(pid)
+            existing = self.player_repo.get_by_id(pid, guild_id)
             if not existing:
                 try:
                     self.player_repo.add(
                         discord_id=pid,
                         discord_username=name,
+                        guild_id=guild_id,
                         initial_mmr=None,
                         glicko_rating=rating,
                         glicko_rd=100.0,
@@ -665,7 +668,7 @@ class DraftCommands(commands.Cog):
             lobby_player_ids = regular_players + promoted_conditional
 
         # Get player ratings for captain selection
-        players = self.player_repo.get_by_ids(lobby_player_ids)
+        players = self.player_repo.get_by_ids(lobby_player_ids, guild_id)
         player_ratings = {p.discord_id: p.glicko_rating or 1500.0 for p in players}
 
         if force_random_captains:
@@ -681,7 +684,7 @@ class DraftCommands(commands.Cog):
             eligible_captain_ids = lobby_player_ids.copy()
         else:
             # Normal captain eligibility check
-            eligible_captain_ids = self.player_repo.get_captain_eligible_players(lobby_player_ids)
+            eligible_captain_ids = self.player_repo.get_captain_eligible_players(lobby_player_ids, guild_id)
 
             # If captains are specified, add them to eligible list if not already there
             if specified_captain1_id and specified_captain1_id not in eligible_captain_ids:
@@ -722,7 +725,7 @@ class DraftCommands(commands.Cog):
                 await asyncio.sleep(5)
 
             # Re-query eligibility after the wait
-            eligible_captain_ids = self.player_repo.get_captain_eligible_players(lobby_player_ids)
+            eligible_captain_ids = self.player_repo.get_captain_eligible_players(lobby_player_ids, guild_id)
             if specified_captain1_id and specified_captain1_id not in eligible_captain_ids:
                 eligible_captain_ids.append(specified_captain1_id)
             if specified_captain2_id and specified_captain2_id not in eligible_captain_ids:
@@ -758,7 +761,7 @@ class DraftCommands(commands.Cog):
             return False
 
         # Get exclusion counts for player pool selection
-        exclusion_counts = self.player_repo.get_exclusion_counts(lobby_player_ids)
+        exclusion_counts = self.player_repo.get_exclusion_counts(lobby_player_ids, guild_id)
 
         # Select player pool (10 players, captains always included)
         # Use balanced pool selection when possible, fall back to exclusion-count-only
@@ -840,7 +843,7 @@ class DraftCommands(commands.Cog):
 
         # Update exclusion counts for excluded players
         for excluded_id in pool_result.excluded_ids:
-            self.player_repo.increment_exclusion_count(excluded_id)
+            self.player_repo.increment_exclusion_count(excluded_id, guild_id)
 
         # Create draft state
         try:
@@ -1385,7 +1388,7 @@ class DraftCommands(commands.Cog):
 
         # Get available players for buttons, sorted by rating descending
         available_ids = state.available_player_ids
-        available_players = self.player_repo.get_by_ids(available_ids)
+        available_players = self.player_repo.get_by_ids(available_ids, guild_id)
         available_players.sort(key=lambda p: p.glicko_rating or 1500.0, reverse=True)
 
         # Create view with player buttons
@@ -1417,7 +1420,7 @@ class DraftCommands(commands.Cog):
 
         # Get all players for role display
         all_player_ids = state.radiant_player_ids + state.dire_player_ids
-        all_players = {p.discord_id: p for p in self.player_repo.get_by_ids(all_player_ids)}
+        all_players = {p.discord_id: p for p in self.player_repo.get_by_ids(all_player_ids, state.guild_id)}
 
         radiant_captain_name = await self._get_member_name(guild, state.radiant_captain_id)
         dire_captain_name = await self._get_member_name(guild, state.dire_captain_id)
@@ -1455,7 +1458,7 @@ class DraftCommands(commands.Cog):
 
         # Build available players display with roles and preferences, sorted by rating
         available_ids = state.available_player_ids
-        available_players = self.player_repo.get_by_ids(available_ids)
+        available_players = self.player_repo.get_by_ids(available_ids, state.guild_id)
         # Sort by rating descending
         available_players.sort(key=lambda p: p.glicko_rating or 1500.0, reverse=True)
         available_display = []
@@ -1544,7 +1547,7 @@ class DraftCommands(commands.Cog):
 
         # Excluded players section
         if state.excluded_player_ids:
-            excluded_players = self.player_repo.get_by_ids(state.excluded_player_ids)
+            excluded_players = self.player_repo.get_by_ids(state.excluded_player_ids, state.guild_id)
             excluded_players.sort(key=lambda p: p.glicko_rating or 1500.0, reverse=True)
             excluded_display = []
             for p in excluded_players:
@@ -1598,7 +1601,7 @@ class DraftCommands(commands.Cog):
             else:
                 # Still drafting - update with new buttons, sorted by rating
                 available_ids = state.available_player_ids
-                available_players = self.player_repo.get_by_ids(available_ids)
+                available_players = self.player_repo.get_by_ids(available_ids, state.guild_id)
                 available_players.sort(key=lambda p: p.glicko_rating or 1500.0, reverse=True)
 
                 view = DraftingView(
@@ -1706,7 +1709,7 @@ class DraftCommands(commands.Cog):
             # Decay exclusion counts for included players (same as shuffle mode)
             included_player_ids = state.radiant_player_ids + state.dire_player_ids
             for pid in included_player_ids:
-                self.player_repo.decay_exclusion_count(pid)
+                self.player_repo.decay_exclusion_count(pid, guild_id)
 
             # Save thread ID before resetting lobby
             lobby_service = getattr(self.bot, "lobby_service", None)
@@ -1832,8 +1835,8 @@ class DraftCommands(commands.Cog):
         first_pick_team = "Radiant" if state.radiant_hero_pick_order == 1 else "Dire"
 
         # Calculate approximate team values for parity display
-        radiant_players = self.player_repo.get_by_ids(state.radiant_player_ids)
-        dire_players = self.player_repo.get_by_ids(state.dire_player_ids)
+        radiant_players = self.player_repo.get_by_ids(state.radiant_player_ids, guild_id)
+        dire_players = self.player_repo.get_by_ids(state.dire_player_ids, guild_id)
 
         radiant_value = sum(p.glicko_rating or 1500.0 for p in radiant_players)
         dire_value = sum(p.glicko_rating or 1500.0 for p in dire_players)
@@ -1896,7 +1899,7 @@ class DraftCommands(commands.Cog):
         """Build the draft complete embed."""
         # Get all players for role display
         all_player_ids = state.radiant_player_ids + state.dire_player_ids
-        all_players = {p.discord_id: p for p in self.player_repo.get_by_ids(all_player_ids)}
+        all_players = {p.discord_id: p for p in self.player_repo.get_by_ids(all_player_ids, state.guild_id)}
 
         # Helper to get roles as numbers for a player
         def get_role_nums(player_id: int) -> str:
@@ -1975,7 +1978,7 @@ class DraftCommands(commands.Cog):
 
         # Excluded players section
         if state.excluded_player_ids:
-            excluded_players = self.player_repo.get_by_ids(state.excluded_player_ids)
+            excluded_players = self.player_repo.get_by_ids(state.excluded_player_ids, state.guild_id)
             excluded_players.sort(key=lambda p: p.glicko_rating or 1500.0, reverse=True)
             excluded_display = []
             for p in excluded_players:
@@ -1991,7 +1994,7 @@ class DraftCommands(commands.Cog):
                 inline=False,
             )
 
-        # Balance stats
+        # Balance stats (build_draft_complete_embed)
         balance_info = f"**Value diff:** {value_diff:.0f}"
         embed.add_field(name="📊 Balance", value=balance_info, inline=False)
 
@@ -2161,7 +2164,8 @@ class DraftCommands(commands.Cog):
             if member:
                 return member.display_name
         # Fallback to username from player repo
-        player = self.player_repo.get_by_id(user_id)
+        guild_id = guild.id if guild else None
+        player = self.player_repo.get_by_id(user_id, guild_id)
         if player:
             return player.name
         return f"Unknown ({user_id})"

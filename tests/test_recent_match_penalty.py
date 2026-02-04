@@ -7,6 +7,8 @@ from domain.models.player import Player
 from repositories.match_repository import MatchRepository
 from shuffler import BalancedShuffler
 
+TEST_GUILD_ID = 12345
+
 
 @pytest.fixture
 def shuffler():
@@ -70,7 +72,7 @@ class TestGetLastMatchParticipantIds:
 
     def test_empty_when_no_matches(self, match_repository):
         """Returns empty set when no matches recorded."""
-        result = match_repository.get_last_match_participant_ids()
+        result = match_repository.get_last_match_participant_ids(TEST_GUILD_ID)
         assert result == set()
 
     def test_returns_participants_from_last_match(self, match_repository):
@@ -78,9 +80,9 @@ class TestGetLastMatchParticipantIds:
         # Record a match
         team1_ids = [1001, 1002, 1003, 1004, 1005]
         team2_ids = [1006, 1007, 1008, 1009, 1010]
-        match_repository.record_match(team1_ids, team2_ids, winning_team=1)
+        match_repository.record_match(team1_ids, team2_ids, winning_team=1, guild_id=TEST_GUILD_ID)
 
-        result = match_repository.get_last_match_participant_ids()
+        result = match_repository.get_last_match_participant_ids(TEST_GUILD_ID)
 
         assert result == set(team1_ids + team2_ids)
         assert len(result) == 10
@@ -90,14 +92,14 @@ class TestGetLastMatchParticipantIds:
         # Record first match
         old_team1 = [101, 102, 103, 104, 105]
         old_team2 = [106, 107, 108, 109, 110]
-        match_repository.record_match(old_team1, old_team2, winning_team=1)
+        match_repository.record_match(old_team1, old_team2, winning_team=1, guild_id=TEST_GUILD_ID)
 
         # Record second match with different players
         new_team1 = [201, 202, 203, 204, 205]
         new_team2 = [206, 207, 208, 209, 210]
-        match_repository.record_match(new_team1, new_team2, winning_team=2)
+        match_repository.record_match(new_team1, new_team2, winning_team=2, guild_id=TEST_GUILD_ID)
 
-        result = match_repository.get_last_match_participant_ids()
+        result = match_repository.get_last_match_participant_ids(TEST_GUILD_ID)
 
         # Should only have participants from the second match
         assert result == set(new_team1 + new_team2)

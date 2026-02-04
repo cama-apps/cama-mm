@@ -153,6 +153,9 @@ class TestOpenDotaPlayerService:
         assert result["last_match_id"] == 8181518332
 
 
+TEST_GUILD_ID = 12345
+
+
 class TestPlayerRepositorySteamId:
     """Tests for PlayerRepository steam_id methods."""
 
@@ -170,7 +173,7 @@ class TestPlayerRepositorySteamId:
         repo = PlayerRepository(temp_db_path)
 
         # Add a player
-        repo.add(discord_id=100, discord_username="TestUser")
+        repo.add(discord_id=100, discord_username="TestUser", guild_id=TEST_GUILD_ID)
 
         # Initially no steam_id
         assert repo.get_steam_id(100) is None
@@ -189,10 +192,10 @@ class TestPlayerRepositorySteamId:
         SchemaManager(temp_db_path).initialize()
         repo = PlayerRepository(temp_db_path)
 
-        repo.add(discord_id=100, discord_username="TestUser")
+        repo.add(discord_id=100, discord_username="TestUser", guild_id=TEST_GUILD_ID)
         repo.set_steam_id(100, 12345678)
 
-        player = repo.get_by_steam_id(12345678)
+        player = repo.get_by_steam_id(12345678, guild_id=TEST_GUILD_ID)
         assert player is not None
         assert player.discord_id == 100
         assert player.name == "TestUser"
@@ -205,7 +208,7 @@ class TestPlayerRepositorySteamId:
         SchemaManager(temp_db_path).initialize()
         repo = PlayerRepository(temp_db_path)
 
-        player = repo.get_by_steam_id(99999999)
+        player = repo.get_by_steam_id(99999999, guild_id=TEST_GUILD_ID)
         assert player is None
 
     def test_get_all_with_dotabuff_no_steam_id(self, temp_db_path):
@@ -220,6 +223,7 @@ class TestPlayerRepositorySteamId:
         repo.add(
             discord_id=100,
             discord_username="HasBoth",
+            guild_id=TEST_GUILD_ID,
             dotabuff_url="https://dotabuff.com/players/123",
         )
         repo.set_steam_id(100, 12345)
@@ -227,11 +231,12 @@ class TestPlayerRepositorySteamId:
         repo.add(
             discord_id=101,
             discord_username="NeedsSteamId",
+            guild_id=TEST_GUILD_ID,
             dotabuff_url="https://dotabuff.com/players/456",
         )
         # No steam_id set
 
-        repo.add(discord_id=102, discord_username="NoDotabuff")
+        repo.add(discord_id=102, discord_username="NoDotabuff", guild_id=TEST_GUILD_ID)
         # No dotabuff_url
 
         needs_backfill = repo.get_all_with_dotabuff_no_steam_id()

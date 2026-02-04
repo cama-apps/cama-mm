@@ -342,7 +342,7 @@ class MatchService:
             raise ValueError("betting_mode must be 'house' or 'pool'")
         if rating_system not in ("glicko", "openskill"):
             raise ValueError("rating_system must be 'glicko' or 'openskill'")
-        players = self.player_repo.get_by_ids(player_ids)
+        players = self.player_repo.get_by_ids(player_ids, guild_id)
         if len(players) != len(player_ids):
             raise ValueError(
                 f"Could not load all players: expected {len(player_ids)}, got {len(players)}"
@@ -350,7 +350,7 @@ class MatchService:
 
         # Apply RD decay for shuffle priority calculation (not persisted)
         # This ensures returning players get appropriate priority boost
-        last_match_dates = self.player_repo.get_last_match_dates(player_ids)
+        last_match_dates = self.player_repo.get_last_match_dates(player_ids, guild_id)
         now = datetime.now(timezone.utc)
         for player in players:
             if player.discord_id and player.glicko_rd is not None:
@@ -373,14 +373,14 @@ class MatchService:
             players = players[:14]
             player_ids = player_ids[:14]
 
-        exclusion_counts_by_id = self.player_repo.get_exclusion_counts(player_ids)
+        exclusion_counts_by_id = self.player_repo.get_exclusion_counts(player_ids, guild_id)
         # Shuffler expects name->count mapping; this is internal to shuffler only
         exclusion_counts = {
             pl.name: exclusion_counts_by_id.get(pid, 0) for pid, pl in zip(player_ids, players)
         }
 
         # Get recent match participants and convert to player names
-        recent_match_ids = self.match_repo.get_last_match_participant_ids()
+        recent_match_ids = self.match_repo.get_last_match_participant_ids(guild_id)
         recent_match_names = {
             p.name for p in players if p.discord_id in recent_match_ids
         }
@@ -510,9 +510,9 @@ class MatchService:
         # Update exclusion counts
         included_player_ids = set(radiant_team_ids + dire_team_ids)
         for pid in excluded_ids:
-            self.player_repo.increment_exclusion_count(pid)
+            self.player_repo.increment_exclusion_count(pid, guild_id)
         for pid in included_player_ids:
-            self.player_repo.decay_exclusion_count(pid)
+            self.player_repo.decay_exclusion_count(pid, guild_id)
 
         # Persist last shuffle for recording
         now_ts = int(time.time())
@@ -557,9 +557,9 @@ class MatchService:
             "balancing_rating_system": rating_system,
         }
 
-    def _load_glicko_player(self, player_id: int) -> tuple[Player, int]:
-        rating_data = self.player_repo.get_glicko_rating(player_id)
-        last_dates = self.player_repo.get_last_match_date(player_id)
+    def _load_glicko_player(self, player_id: int, guild_id: int | None = None) -> tuple[Player, int]:
+        rating_data = self.player_repo.get_glicko_rating(player_id, guild_id)
+        last_dates = self.player_repo.get_last_match_date(player_id, guild_id)
         last_match_dt = None
         created_at_dt = None
 
@@ -580,7 +580,7 @@ class MatchService:
             rating, rd, vol = rating_data
             base_player = self.rating_system.create_player_from_rating(rating, rd, vol)
         else:
-            player_obj = self.player_repo.get_by_id(player_id)
+            player_obj = self.player_repo.get_by_id(player_id, guild_id)
             if player_obj and player_obj.mmr is not None:
                 base_player = self.rating_system.create_player_from_mmr(player_obj.mmr)
             else:
@@ -646,6 +646,7 @@ class MatchService:
                 team1_ids=radiant_team_ids,
                 team2_ids=dire_team_ids,
                 winning_team=1 if winning_team == "radiant" else 2,
+                guild_id=guild_id,
                 dotabuff_match_id=dotabuff_match_id,
                 lobby_type=lobby_type,
                 balancing_rating_system=balancing_rating_system,
@@ -653,34 +654,34 @@ class MatchService:
 
             # Persist win/loss counters for all players in the match (prefer single transaction).
             if hasattr(self.player_repo, "apply_match_outcome"):
-                self.player_repo.apply_match_outcome(winning_ids, losing_ids)  # type: ignore[attr-defined]
+                self.player_repo.apply_match_outcome(winning_ids, losing_ids, guild_id)  # type: ignore[attr-defined]
             else:
                 for pid in winning_ids:
-                    self.player_repo.increment_wins(pid)
+                    self.player_repo.increment_wins(pid, guild_id)
                 for pid in losing_ids:
-                    self.player_repo.increment_losses(pid)
+                    self.player_repo.increment_losses(pid, guild_id)
 
             distributions = {"winners": [], "losers": []}
             if self.betting_service:
                 # Reward participation only for the losing team; winners get the win bonus separately.
-                self.betting_service.award_participation(losing_ids)
+                self.betting_service.award_participation(losing_ids, guild_id)
                 distributions = self.betting_service.settle_bets(
                     match_id, guild_id, winning_team, pending_state=last_shuffle
                 )
-                self.betting_service.award_win_bonus(winning_ids)
+                self.betting_service.award_win_bonus(winning_ids, guild_id)
                 if excluded_player_ids:
-                    self.betting_service.award_exclusion_bonus(excluded_player_ids)
+                    self.betting_service.award_exclusion_bonus(excluded_player_ids, guild_id)
                 # Award half exclusion bonus to conditional players who were excluded
                 excluded_conditional_ids = last_shuffle.get("excluded_conditional_player_ids", [])
                 if excluded_conditional_ids:
-                    self.betting_service.award_exclusion_bonus_half(excluded_conditional_ids)
+                    self.betting_service.award_exclusion_bonus_half(excluded_conditional_ids, guild_id)
 
             # Repay outstanding loans for all participants
             loan_repayments = []
             if self.loan_service:
                 all_participant_ids = winning_ids + losing_ids
                 for player_id in all_participant_ids:
-                    state = self.loan_service.get_state(player_id)
+                    state = self.loan_service.get_state(player_id, guild_id)
                     if state.has_outstanding_loan:
                         result = self.loan_service.repay_loan(player_id, guild_id)
                         if result.get("success"):
@@ -690,8 +691,8 @@ class MatchService:
                             })
 
             # Build Glicko players
-            radiant_glicko = [self._load_glicko_player(pid) for pid in radiant_team_ids]
-            dire_glicko = [self._load_glicko_player(pid) for pid in dire_team_ids]
+            radiant_glicko = [self._load_glicko_player(pid, guild_id) for pid in radiant_team_ids]
+            dire_glicko = [self._load_glicko_player(pid, guild_id) for pid in dire_team_ids]
 
             # Calculate streak multipliers for each player
             all_player_ids_for_streak = radiant_team_ids + dire_team_ids
@@ -701,7 +702,7 @@ class MatchService:
             for pid in all_player_ids_for_streak:
                 won = (pid in radiant_team_ids and winning_team == "radiant") or \
                       (pid in dire_team_ids and winning_team == "dire")
-                recent_outcomes = self.match_repo.get_player_recent_outcomes(pid, limit=20)
+                recent_outcomes = self.match_repo.get_player_recent_outcomes(pid, guild_id, limit=20)
                 streak_length, multiplier = self.rating_system.calculate_streak_multiplier(
                     recent_outcomes, won=won
                 )
@@ -765,16 +766,16 @@ class MatchService:
                 if pid in expected_ids
             ]
             if hasattr(self.player_repo, "update_glicko_ratings_bulk"):
-                updated_count = self.player_repo.update_glicko_ratings_bulk(updates)  # type: ignore[attr-defined]
+                updated_count = self.player_repo.update_glicko_ratings_bulk(updates, guild_id)  # type: ignore[attr-defined]
             else:
                 for pid, rating, rd, vol in updates:
-                    self.player_repo.update_glicko_rating(pid, rating, rd, vol)
+                    self.player_repo.update_glicko_rating(pid, guild_id, rating, rd, vol)
                     updated_count += 1
 
             # Update last_match_date for participants
             now_iso = datetime.now(timezone.utc).isoformat()
             for pid in expected_ids:
-                self.player_repo.update_last_match_date(pid, now_iso)
+                self.player_repo.update_last_match_date(pid, guild_id, now_iso)
 
             # Track first calibration for players who just became calibrated
             now_unix = int(time.time())
@@ -782,9 +783,9 @@ class MatchService:
                 if rd <= CALIBRATION_RD_THRESHOLD:
                     # Check if player doesn't have first_calibrated_at set yet
                     if hasattr(self.player_repo, "get_first_calibrated_at"):
-                        first_cal = self.player_repo.get_first_calibrated_at(pid)
+                        first_cal = self.player_repo.get_first_calibrated_at(pid, guild_id)
                         if first_cal is None:
-                            self.player_repo.set_first_calibrated_at(pid, now_unix)
+                            self.player_repo.set_first_calibrated_at(pid, guild_id, now_unix)
 
             # Store match prediction snapshot (pre-match)
             if hasattr(self.match_repo, "add_match_prediction"):
@@ -802,7 +803,7 @@ class MatchService:
             # Phase 2 (update_openskill_ratings_for_match) will recalculate with
             # fantasy weights after enrichment, using the baseline stored here.
             all_player_ids = radiant_team_ids + dire_team_ids
-            os_ratings = self.player_repo.get_openskill_ratings_bulk(all_player_ids)
+            os_ratings = self.player_repo.get_openskill_ratings_bulk(all_player_ids, guild_id)
 
             radiant_os_data = [
                 (pid, *os_ratings.get(pid, (None, None)))
@@ -820,7 +821,7 @@ class MatchService:
 
             # Update player OpenSkill ratings immediately
             os_updates = [(pid, mu, sigma) for pid, (mu, sigma) in os_results.items()]
-            self.player_repo.update_openskill_ratings_bulk(os_updates)
+            self.player_repo.update_openskill_ratings_bulk(os_updates, guild_id)
 
             # Store os_* data in pre_match dict for rating_history
             DEFAULT_MU = CamaOpenSkillSystem.DEFAULT_MU
@@ -840,6 +841,7 @@ class MatchService:
                     continue
                 self.match_repo.add_rating_history(
                     discord_id=pid,
+                    guild_id=guild_id,
                     rating=rating,
                     match_id=match_id,
                     rating_before=pre["rating_before"],
@@ -862,6 +864,7 @@ class MatchService:
             if self.pairings_repo:
                 self.pairings_repo.update_pairings_for_match(
                     match_id=match_id,
+                    guild_id=guild_id,
                     team1_ids=radiant_team_ids,
                     team2_ids=dire_team_ids,
                     winning_team=1 if winning_team == "radiant" else 2,
@@ -883,7 +886,7 @@ class MatchService:
             with self._recording_lock:
                 self._recording_in_progress.discard(normalized_gid)
 
-    def update_openskill_ratings_for_match(self, match_id: int) -> dict:
+    def update_openskill_ratings_for_match(self, match_id: int, guild_id: int | None = None) -> dict:
         """
         Update OpenSkill ratings for a match using fantasy points as weights.
 
@@ -892,6 +895,7 @@ class MatchService:
 
         Args:
             match_id: The internal match ID to update ratings for
+            guild_id: Guild ID for multi-guild support
 
         Returns:
             Dict with:
@@ -962,7 +966,7 @@ class MatchService:
             logger.debug(f"Match {match_id}: using Phase 1 baseline for {len(os_baseline)} players")
         else:
             # Legacy fallback: use current player ratings (pre-Phase 1 matches)
-            os_ratings = self.player_repo.get_openskill_ratings_bulk(discord_ids)
+            os_ratings = self.player_repo.get_openskill_ratings_bulk(discord_ids, guild_id)
             logger.debug(f"Match {match_id}: no Phase 1 baseline, using current ratings")
 
         # Build team data for OpenSkill update
@@ -1000,7 +1004,7 @@ class MatchService:
 
         # Persist updated ratings
         updates = [(pid, mu, sigma) for pid, (mu, sigma, _) in results.items()]
-        updated_count = self.player_repo.update_openskill_ratings_bulk(updates)
+        updated_count = self.player_repo.update_openskill_ratings_bulk(updates, guild_id)
 
         # Record in rating history (bulk update existing entries for this match)
         history_updates = []
@@ -1167,15 +1171,18 @@ class MatchService:
                         dire_ids = match.get("team2_players", [])
                         has_fantasy = False
 
+                # Get guild_id from match for per-guild updates
+                match_guild_id = match.get("guild_id")
+
                 if has_fantasy:
                     # Use FP-weighted update (with blending)
-                    result = self._backfill_match_with_fantasy(match_id, participants, winning_team)
+                    result = self._backfill_match_with_fantasy(match_id, match_guild_id, participants, winning_team)
                     if result.get("success"):
                         matches_with_fantasy += 1
                 else:
                     # Use equal-weight update
                     result = self._backfill_match_equal_weight(
-                        match_id, radiant_ids, dire_ids, winning_team
+                        match_id, match_guild_id, radiant_ids, dire_ids, winning_team
                     )
                     if result.get("success"):
                         matches_equal_weight += 1
@@ -1214,6 +1221,7 @@ class MatchService:
     def _backfill_match_with_fantasy(
         self,
         match_id: int,
+        guild_id: int | None,
         participants: list[dict],
         winning_team: int,
     ) -> dict:
@@ -1230,7 +1238,7 @@ class MatchService:
 
         # Get current ratings (from DB, after potential reset)
         all_ids = [p["discord_id"] for p in participants]
-        os_ratings = self.player_repo.get_openskill_ratings_bulk(all_ids)
+        os_ratings = self.player_repo.get_openskill_ratings_bulk(all_ids, guild_id)
 
         # Build team data: (discord_id, mu, sigma, fantasy_points)
         team1_data = []
@@ -1253,7 +1261,7 @@ class MatchService:
             )
             # Persist updated ratings
             updates = [(pid, mu, sigma) for pid, (mu, sigma, _) in results.items()]
-            self.player_repo.update_openskill_ratings_bulk(updates)
+            self.player_repo.update_openskill_ratings_bulk(updates, guild_id)
             return {"success": True, "players_updated": len(updates)}
         except Exception as e:
             return {"success": False, "error": str(e)}
@@ -1261,6 +1269,7 @@ class MatchService:
     def _backfill_match_equal_weight(
         self,
         match_id: int,
+        guild_id: int | None,
         radiant_ids: list[int],
         dire_ids: list[int],
         winning_team: int,
@@ -1275,7 +1284,7 @@ class MatchService:
 
         # Get current ratings (from DB, after potential reset)
         all_ids = radiant_ids + dire_ids
-        os_ratings = self.player_repo.get_openskill_ratings_bulk(all_ids)
+        os_ratings = self.player_repo.get_openskill_ratings_bulk(all_ids, guild_id)
 
         # Build team data: (discord_id, mu, sigma)
         radiant_data = [
@@ -1293,13 +1302,13 @@ class MatchService:
             )
             # Persist updated ratings
             updates = [(pid, mu, sigma) for pid, (mu, sigma) in results.items()]
-            self.player_repo.update_openskill_ratings_bulk(updates)
+            self.player_repo.update_openskill_ratings_bulk(updates, guild_id)
             return {"success": True, "players_updated": len(updates)}
         except Exception as e:
             return {"success": False, "error": str(e)}
 
     def get_openskill_predictions_for_match(
-        self, team1_ids: list[int], team2_ids: list[int]
+        self, team1_ids: list[int], team2_ids: list[int], guild_id: int | None = None
     ) -> dict:
         """
         Get OpenSkill predicted win probability for a match.
@@ -1315,7 +1324,7 @@ class MatchService:
 
         # Get current ratings
         all_ids = team1_ids + team2_ids
-        os_ratings = self.player_repo.get_openskill_ratings_bulk(all_ids)
+        os_ratings = self.player_repo.get_openskill_ratings_bulk(all_ids, guild_id)
 
         # Build ratings for each team
         team1_ratings = []
@@ -1438,19 +1447,20 @@ class MatchService:
         # Old winners: wins-- | Old losers: losses--
         # New winners: wins++ | New losers: losses++
         # Since old winners become new losers and vice versa, we can just swap
+        normalized_guild_id = guild_id if guild_id is not None else 0
         with self.player_repo.connection() as conn:
             cursor = conn.cursor()
             # Decrement wins for old winners (they become losers)
             for pid in old_winner_ids:
                 cursor.execute(
-                    "UPDATE players SET wins = wins - 1, losses = losses + 1 WHERE discord_id = ?",
-                    (pid,),
+                    "UPDATE players SET wins = wins - 1, losses = losses + 1 WHERE discord_id = ? AND guild_id = ?",
+                    (pid, normalized_guild_id),
                 )
             # Decrement losses for old losers (they become winners)
             for pid in old_loser_ids:
                 cursor.execute(
-                    "UPDATE players SET losses = losses - 1, wins = wins + 1 WHERE discord_id = ?",
-                    (pid,),
+                    "UPDATE players SET losses = losses - 1, wins = wins + 1 WHERE discord_id = ? AND guild_id = ?",
+                    (pid, normalized_guild_id),
                 )
 
         # 5. Restore pre-match ratings from rating_history
@@ -1486,7 +1496,7 @@ class MatchService:
                 )
             else:
                 # Fallback to current rating
-                player, _ = self._load_glicko_player(pid)
+                player, _ = self._load_glicko_player(pid, guild_id)
             radiant_glicko.append((player, pid))
 
         for pid in dire_ids:
@@ -1498,7 +1508,7 @@ class MatchService:
                     entry["volatility_before"],
                 )
             else:
-                player, _ = self._load_glicko_player(pid)
+                player, _ = self._load_glicko_player(pid, guild_id)
             dire_glicko.append((player, pid))
 
         # Update Glicko-2 with correct winner
@@ -1516,7 +1526,7 @@ class MatchService:
             (pid, rating, rd, vol)
             for rating, rd, vol, pid in team1_updated + team2_updated
         ]
-        self.player_repo.update_glicko_ratings_bulk(new_glicko_updates)
+        self.player_repo.update_glicko_ratings_bulk(new_glicko_updates, guild_id)
 
         # Update rating history with new values
         glicko_by_id = {pid: (rating, rd, vol) for pid, rating, rd, vol in new_glicko_updates}
@@ -1555,7 +1565,7 @@ class MatchService:
 
             # Persist new OpenSkill ratings
             new_os_updates = [(pid, mu, sigma) for pid, (mu, sigma) in os_results.items()]
-            self.player_repo.update_openskill_ratings_bulk(new_os_updates)
+            self.player_repo.update_openskill_ratings_bulk(new_os_updates, guild_id)
 
             # Update rating history OpenSkill after values
             for pid, (new_mu, new_sigma) in os_results.items():
@@ -1613,7 +1623,7 @@ class MatchService:
                     combined_deltas[pid] = combined_deltas.get(pid, 0) + delta
 
                 if combined_deltas:
-                    self.player_repo.add_balance_many(combined_deltas)
+                    self.player_repo.add_balance_many(combined_deltas, guild_id)
 
                 bet_correction_summary = {
                     "bets_affected": len(all_bets),
@@ -1626,6 +1636,7 @@ class MatchService:
         if self.pairings_repo:
             # Reverse original pairings
             self.pairings_repo.reverse_pairings_for_match(
+                guild_id=guild_id,
                 team1_ids=radiant_ids,
                 team2_ids=dire_ids,
                 original_winning_team=old_winning_team_num,
@@ -1633,6 +1644,7 @@ class MatchService:
             # Apply new pairings with correct winner
             self.pairings_repo.update_pairings_for_match(
                 match_id=match_id,
+                guild_id=guild_id,
                 team1_ids=radiant_ids,
                 team2_ids=dire_ids,
                 winning_team=new_winning_team_num,

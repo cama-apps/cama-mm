@@ -12,6 +12,8 @@ from database import Database
 from repositories.player_repository import PlayerRepository
 from services.player_service import PlayerService
 
+TEST_GUILD_ID = 12345
+
 
 class TestRoleDeduplication:
     """Tests for the role deduplication in /setroles command."""
@@ -108,10 +110,12 @@ class TestPlayerServiceSetRoles:
 
     def test_set_roles_persists_to_database(self, test_db, player_service):
         """Test that set_roles correctly persists roles to the database."""
-        user_id = 12345
-        test_db.add_player(
+        user_id = 12346  # Different ID to avoid collision with TEST_GUILD_ID
+        player_repo = PlayerRepository(test_db.db_path)
+        player_repo.add(
             discord_id=user_id,
             discord_username="TestPlayer",
+            guild_id=TEST_GUILD_ID,
             initial_mmr=2000,
             glicko_rating=1500.0,
             glicko_rd=350.0,
@@ -119,33 +123,35 @@ class TestPlayerServiceSetRoles:
         )
 
         # Set roles through the service
-        player_service.set_roles(user_id, ["1", "2", "3"])
+        player_service.set_roles(user_id, TEST_GUILD_ID, ["1", "2", "3"])
 
         # Verify persisted in database
-        player = test_db.get_player(user_id)
+        player = player_repo.get_by_id(user_id, TEST_GUILD_ID)
         assert player.preferred_roles == ["1", "2", "3"]
 
     def test_set_roles_updates_existing_roles(self, test_db, player_service):
         """Test that set_roles updates existing roles."""
-        user_id = 12345
-        test_db.add_player(
+        user_id = 12347
+        player_repo = PlayerRepository(test_db.db_path)
+        player_repo.add(
             discord_id=user_id,
             discord_username="TestPlayer",
+            guild_id=TEST_GUILD_ID,
             initial_mmr=2000,
             preferred_roles=["1", "2"],
         )
 
         # Update roles
-        player_service.set_roles(user_id, ["4", "5"])
+        player_service.set_roles(user_id, TEST_GUILD_ID, ["4", "5"])
 
         # Verify updated
-        player = test_db.get_player(user_id)
+        player = player_repo.get_by_id(user_id, TEST_GUILD_ID)
         assert player.preferred_roles == ["4", "5"]
 
     def test_set_roles_unregistered_player_raises(self, player_service):
         """Test that set_roles raises for unregistered player."""
         with pytest.raises(ValueError, match="Player not registered"):
-            player_service.set_roles(99999, ["1", "2"])
+            player_service.set_roles(99999, TEST_GUILD_ID, ["1", "2"])
 
 
 class TestMMRPromptViewSignature:
@@ -244,9 +250,11 @@ class TestSetRolesE2E:
     def test_e2e_duplicate_roles_deduplicated_and_persisted(self, test_db, player_service):
         """E2E: Duplicate roles input is deduplicated and correctly persisted."""
         user_id = 54321
-        test_db.add_player(
+        player_repo = PlayerRepository(test_db.db_path)
+        player_repo.add(
             discord_id=user_id,
             discord_username="E2EPlayer",
+            guild_id=TEST_GUILD_ID,
             initial_mmr=3000,
             glicko_rating=1800.0,
             glicko_rd=350.0,
@@ -258,18 +266,20 @@ class TestSetRolesE2E:
         assert role_list == ["1"]  # Deduplicated
 
         # Pass to service (as the command would)
-        player_service.set_roles(user_id, role_list)
+        player_service.set_roles(user_id, TEST_GUILD_ID, role_list)
 
         # Verify final state in database
-        player = test_db.get_player(user_id)
+        player = player_repo.get_by_id(user_id, TEST_GUILD_ID)
         assert player.preferred_roles == ["1"]
 
     def test_e2e_mixed_duplicates_preserve_order(self, test_db, player_service):
         """E2E: Mixed duplicates preserve first-occurrence order and persist correctly."""
         user_id = 54322
-        test_db.add_player(
+        player_repo = PlayerRepository(test_db.db_path)
+        player_repo.add(
             discord_id=user_id,
             discord_username="E2EPlayer2",
+            guild_id=TEST_GUILD_ID,
             initial_mmr=2500,
         )
 
@@ -277,17 +287,19 @@ class TestSetRolesE2E:
         role_list = self._simulate_setroles_command("54321123")
         assert role_list == ["5", "4", "3", "2", "1"]
 
-        player_service.set_roles(user_id, role_list)
+        player_service.set_roles(user_id, TEST_GUILD_ID, role_list)
 
-        player = test_db.get_player(user_id)
+        player = player_repo.get_by_id(user_id, TEST_GUILD_ID)
         assert player.preferred_roles == ["5", "4", "3", "2", "1"]
 
     def test_e2e_comma_separated_with_duplicates(self, test_db, player_service):
         """E2E: Comma-separated input with duplicates is handled correctly."""
         user_id = 54323
-        test_db.add_player(
+        player_repo = PlayerRepository(test_db.db_path)
+        player_repo.add(
             discord_id=user_id,
             discord_username="E2EPlayer3",
+            guild_id=TEST_GUILD_ID,
             initial_mmr=2000,
         )
 
@@ -295,9 +307,9 @@ class TestSetRolesE2E:
         role_list = self._simulate_setroles_command("1, 2, 1, 3, 2")
         assert role_list == ["1", "2", "3"]
 
-        player_service.set_roles(user_id, role_list)
+        player_service.set_roles(user_id, TEST_GUILD_ID, role_list)
 
-        player = test_db.get_player(user_id)
+        player = player_repo.get_by_id(user_id, TEST_GUILD_ID)
         assert player.preferred_roles == ["1", "2", "3"]
 
     def test_e2e_invalid_role_rejected(self, test_db, player_service):

@@ -149,7 +149,7 @@ class HeroGridCommands(commands.Cog):
             return
 
         # Build player names dict (preserving order)
-        players = self.player_repo.get_by_ids(player_ids)
+        players = self.player_repo.get_by_ids(player_ids, guild_id)
         player_names = {}
         for p in players:
             player_names[p.discord_id] = p.name

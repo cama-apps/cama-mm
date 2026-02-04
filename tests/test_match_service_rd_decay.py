@@ -5,6 +5,8 @@ from datetime import datetime, timedelta, timezone
 
 from services.match_service import MatchService
 
+TEST_GUILD_ID = 12345
+
 
 class FakePlayerRepo:
     def __init__(self, rating_tuple, last_match_date=None, created_at=None):
@@ -12,13 +14,13 @@ class FakePlayerRepo:
         self.last_match_date = last_match_date
         self.created_at = created_at
 
-    def get_glicko_rating(self, _pid):
+    def get_glicko_rating(self, _pid, guild_id=None):
         return self.rating_tuple
 
-    def get_last_match_date(self, _pid):
+    def get_last_match_date(self, _pid, guild_id=None):
         return (self.last_match_date, self.created_at)
 
-    def get_by_id(self, _pid):
+    def get_by_id(self, _pid, guild_id=None):
         return None  # Not used when rating data exists
 
     # Unused repo methods in this test

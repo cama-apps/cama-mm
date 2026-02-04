@@ -20,6 +20,8 @@ from services.lobby_service import LobbyService
 from services.match_service import MatchService
 from services.player_service import PlayerService
 
+TEST_GUILD_ID = 12345
+
 
 class MockDiscordUser:
     """Mock Discord user for testing."""
@@ -93,22 +95,24 @@ class TestAdminCommands:
     @pytest.mark.timeout(60)
     async def test_admin_override_record_command(self, test_db):
         """Test end-to-end admin override via /record command."""
-        # Create 10 players
+        # Create services first so we can use player_repo
+        lobby_repo = LobbyRepository(test_db.db_path)
+        player_repo = PlayerRepository(test_db.db_path)
+        match_repo = MatchRepository(test_db.db_path)
+
+        # Create 10 players using PlayerRepository with guild_id
         player_ids = list(range(600001, 600011))
         for pid in player_ids:
-            test_db.add_player(
+            player_repo.add(
                 discord_id=pid,
                 discord_username=f"Player{pid}",
+                guild_id=TEST_GUILD_ID,
                 initial_mmr=1500,
                 glicko_rating=1500.0,
                 glicko_rd=350.0,
                 glicko_volatility=0.06,
             )
 
-        # Create services
-        lobby_repo = LobbyRepository(test_db.db_path)
-        player_repo = PlayerRepository(test_db.db_path)
-        match_repo = MatchRepository(test_db.db_path)
         match_service = MatchService(
             player_repo=player_repo, match_repo=match_repo, use_glicko=True
         )
@@ -124,11 +128,11 @@ class TestAdminCommands:
         mock_bot.player_service = player_service
 
         # Shuffle players to create a pending match
-        match_service.shuffle_players(player_ids, guild_id=12345)
+        match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
 
         # Verify match is pending
-        assert match_service.get_last_shuffle(12345) is not None
-        assert match_service.can_record_match(12345) is False  # No submissions yet
+        assert match_service.get_last_shuffle(TEST_GUILD_ID) is not None
+        assert match_service.can_record_match(TEST_GUILD_ID) is False  # No submissions yet
 
         # Create admin interaction
         admin_id = 999999
@@ -137,7 +141,7 @@ class TestAdminCommands:
         # Mock guild
         from types import SimpleNamespace
 
-        mock_guild = SimpleNamespace(id=12345)
+        mock_guild = SimpleNamespace(id=TEST_GUILD_ID)
         mock_interaction.guild = mock_guild
 
         # Mock admin permissions
@@ -166,7 +170,7 @@ class TestAdminCommands:
         assert "Match recorded" in message
 
         # Verify match was actually recorded (state cleared)
-        assert match_service.get_last_shuffle(12345) is None
+        assert match_service.get_last_shuffle(TEST_GUILD_ID) is None
 
         # Verify that the match was recorded in the database
         conn = test_db.get_connection()
@@ -194,22 +198,26 @@ class TestAdminCommands:
     @pytest.mark.timeout(60)
     async def test_non_admin_record_requires_3_submissions(self, test_db):
         """Test that non-admin /record command requires 3 submissions."""
-        # Create 10 players
+        test_guild_id = 12346  # Different guild ID for this test
+
+        # Create services first so we can use player_repo
+        lobby_repo = LobbyRepository(test_db.db_path)
+        player_repo = PlayerRepository(test_db.db_path)
+        match_repo = MatchRepository(test_db.db_path)
+
+        # Create 10 players using PlayerRepository with guild_id
         player_ids = list(range(600101, 600111))
         for pid in player_ids:
-            test_db.add_player(
+            player_repo.add(
                 discord_id=pid,
                 discord_username=f"Player{pid}",
+                guild_id=test_guild_id,
                 initial_mmr=1500,
                 glicko_rating=1500.0,
                 glicko_rd=350.0,
                 glicko_volatility=0.06,
             )
 
-        # Create services
-        lobby_repo = LobbyRepository(test_db.db_path)
-        player_repo = PlayerRepository(test_db.db_path)
-        match_repo = MatchRepository(test_db.db_path)
         match_service = MatchService(
             player_repo=player_repo, match_repo=match_repo, use_glicko=True
         )
@@ -225,7 +233,7 @@ class TestAdminCommands:
         mock_bot.player_service = player_service
 
         # Shuffle players to create a pending match
-        match_service.shuffle_players(player_ids, guild_id=12346)
+        match_service.shuffle_players(player_ids, guild_id=test_guild_id)
 
         # Create non-admin interaction
         user_id = 100001
@@ -234,7 +242,7 @@ class TestAdminCommands:
         # Mock guild
         from types import SimpleNamespace
 
-        mock_guild = SimpleNamespace(id=12346)
+        mock_guild = SimpleNamespace(id=test_guild_id)
         mock_interaction.guild = mock_guild
 
         # Mock non-admin permissions
@@ -259,8 +267,8 @@ class TestAdminCommands:
             assert "1/3" in message or "Radiant: 1/3" in message
 
             # Verify match is still pending
-            assert match_service.get_last_shuffle(12346) is not None
-            assert match_service.can_record_match(12346) is False
+            assert match_service.get_last_shuffle(test_guild_id) is not None
+            assert match_service.can_record_match(test_guild_id) is False
 
             # Second submission from different user
             mock_interaction2 = MockDiscordInteraction(100002, "User2")
@@ -272,7 +280,7 @@ class TestAdminCommands:
             await match_commands.record.callback(match_commands, mock_interaction2, result_choice)
 
             # Still not ready
-            assert match_service.can_record_match(12346) is False
+            assert match_service.can_record_match(test_guild_id) is False
 
             # Third submission from different user
             mock_interaction3 = MockDiscordInteraction(100003, "User3")
@@ -282,8 +290,8 @@ class TestAdminCommands:
             mock_interaction3.followup = AsyncMock()
 
             # Before third submission, should not be ready
-            assert match_service.can_record_match(12346) is False
-            assert match_service.get_non_admin_submission_count(12346) == 2
+            assert match_service.can_record_match(test_guild_id) is False
+            assert match_service.get_non_admin_submission_count(test_guild_id) == 2
 
             await match_commands.record.callback(match_commands, mock_interaction3, result_choice)
 
@@ -297,7 +305,7 @@ class TestAdminCommands:
                 f"Expected 'Match recorded' in message, got: {message}"
             )
             # State should be cleared after recording
-            assert match_service.get_last_shuffle(12346) is None
+            assert match_service.get_last_shuffle(test_guild_id) is None
 
 
 if __name__ == "__main__":

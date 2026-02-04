@@ -367,9 +367,10 @@ class RatingAnalysisCommands(commands.Cog):
         # Default to the command invoker if no user specified
         target = user or interaction.user
         discord_id = target.id
+        guild_id = interaction.guild.id if interaction.guild else None
 
         # Fetch player data
-        player = self.player_repo.get_by_id(discord_id)
+        player = self.player_repo.get_by_id(discord_id, guild_id)
         if not player:
             await safe_followup(
                 interaction,
@@ -378,7 +379,7 @@ class RatingAnalysisCommands(commands.Cog):
             return
 
         # Get OpenSkill rating
-        os_data = self.player_repo.get_openskill_rating(discord_id)
+        os_data = self.player_repo.get_openskill_rating(discord_id, guild_id)
 
         embed = discord.Embed(
             title=f"OpenSkill Rating: {target.display_name}",

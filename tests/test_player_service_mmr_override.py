@@ -4,18 +4,21 @@ import pytest
 
 from services.player_service import PlayerService
 
+TEST_GUILD_ID = 12345
+
 
 class FakeRepo:
     def __init__(self):
         self.add_calls = []
 
-    def get_by_id(self, _discord_id):
+    def get_by_id(self, _discord_id, _guild_id):
         return None
 
     def add(
         self,
         discord_id: int,
         discord_username: str,
+        guild_id: int,
         dotabuff_url: str | None = None,
         steam_id: int | None = None,
         initial_mmr: int | None = None,
@@ -31,6 +34,7 @@ class FakeRepo:
             {
                 "discord_id": discord_id,
                 "discord_username": discord_username,
+                "guild_id": guild_id,
                 "dotabuff_url": dotabuff_url,
                 "steam_id": steam_id,
                 "initial_mmr": initial_mmr,
@@ -57,6 +61,7 @@ def test_register_player_uses_override(monkeypatch):
     result = service.register_player(
         discord_id=123,
         discord_username="user#123",
+        guild_id=TEST_GUILD_ID,
         steam_id=42,
         mmr_override=4000,
     )
@@ -81,5 +86,5 @@ def test_register_player_requires_mmr_if_no_override(monkeypatch):
     monkeypatch.setattr("services.player_service.OpenDotaAPI", lambda: DummyAPI())
 
     with pytest.raises(ValueError):
-        service.register_player(discord_id=1, discord_username="u", steam_id=2)
+        service.register_player(discord_id=1, discord_username="u", guild_id=TEST_GUILD_ID, steam_id=2)
 

@@ -36,6 +36,9 @@ def services(repo_db_path):
     }
 
 
+TEST_GUILD_ID = 12345
+
+
 @pytest.fixture
 def registered_player(services):
     """Create a registered player with starting balance."""
@@ -44,10 +47,11 @@ def registered_player(services):
     player_repo.add(
         discord_id=discord_id,
         discord_username="TestPlayer",
+        guild_id=TEST_GUILD_ID,
         glicko_rating=1500,
         glicko_rd=350,
     )
-    player_repo.update_balance(discord_id, 10)
+    player_repo.update_balance(discord_id, TEST_GUILD_ID, 10)
     return discord_id
 
 
@@ -58,7 +62,7 @@ class TestValidateLoan:
         """Valid loan request returns LoanApproval."""
         loan_service = services["loan_service"]
 
-        result = loan_service.validate_loan(registered_player, 50)
+        result = loan_service.validate_loan(registered_player, 50, TEST_GUILD_ID)
 
         assert result.success is True
         assert isinstance(result.value, LoanApproval)
@@ -134,9 +138,9 @@ class TestExecuteLoan:
         loan_service = services["loan_service"]
         player_repo = services["player_repo"]
 
-        initial_balance = player_repo.get_balance(registered_player)
+        initial_balance = player_repo.get_balance(registered_player, TEST_GUILD_ID)
 
-        result = loan_service.execute_loan(registered_player, 50)
+        result = loan_service.execute_loan(registered_player, 50, TEST_GUILD_ID)
 
         assert result.success is True
         assert isinstance(result.value, LoanResult)
@@ -150,18 +154,18 @@ class TestExecuteLoan:
         loan_service = services["loan_service"]
         player_repo = services["player_repo"]
 
-        loan_service.execute_loan(registered_player, 50)
+        loan_service.execute_loan(registered_player, 50, TEST_GUILD_ID)
 
         # Balance should be increased by loan amount
-        assert player_repo.get_balance(registered_player) == 60  # 10 + 50
+        assert player_repo.get_balance(registered_player, TEST_GUILD_ID) == 60  # 10 + 50
 
     def test_loan_creates_outstanding(self, services, registered_player):
         """Loan creates outstanding debt record."""
         loan_service = services["loan_service"]
 
-        loan_service.execute_loan(registered_player, 50)
+        loan_service.execute_loan(registered_player, 50, TEST_GUILD_ID)
 
-        state = loan_service.get_state(registered_player)
+        state = loan_service.get_state(registered_player, TEST_GUILD_ID)
         assert state.has_outstanding_loan is True
         assert state.outstanding_principal == 50
         assert state.outstanding_fee == 10
@@ -172,12 +176,12 @@ class TestExecuteLoan:
         player_repo = services["player_repo"]
 
         # Put player in debt
-        player_repo.add_balance(registered_player, -15)  # -5 balance
+        player_repo.add_balance(registered_player, TEST_GUILD_ID, -15)  # -5 balance
 
-        result = loan_service.execute_loan(registered_player, 50)
+        result = loan_service.execute_loan(registered_player, 50, TEST_GUILD_ID)
 
         assert result.value.was_negative_loan is True
-        state = loan_service.get_state(registered_player)
+        state = loan_service.get_state(registered_player, TEST_GUILD_ID)
         assert state.negative_loans_taken == 1
 
 
@@ -189,9 +193,9 @@ class TestExecuteRepayment:
         loan_service = services["loan_service"]
 
         # Take a loan first
-        loan_service.execute_loan(registered_player, 50)
+        loan_service.execute_loan(registered_player, 50, TEST_GUILD_ID)
 
-        result = loan_service.execute_repayment(registered_player)
+        result = loan_service.execute_repayment(registered_player, TEST_GUILD_ID)
 
         assert result.success is True
         assert isinstance(result.value, RepaymentResult)
@@ -203,10 +207,10 @@ class TestExecuteRepayment:
         """Repayment clears outstanding loan."""
         loan_service = services["loan_service"]
 
-        loan_service.execute_loan(registered_player, 50)
-        loan_service.execute_repayment(registered_player)
+        loan_service.execute_loan(registered_player, 50, TEST_GUILD_ID)
+        loan_service.execute_repayment(registered_player, TEST_GUILD_ID)
 
-        state = loan_service.get_state(registered_player)
+        state = loan_service.get_state(registered_player, TEST_GUILD_ID)
         assert state.has_outstanding_loan is False
         assert state.outstanding_principal == 0
         assert state.outstanding_fee == 0
@@ -215,8 +219,8 @@ class TestExecuteRepayment:
         """Repayment fee goes to nonprofit fund."""
         loan_service = services["loan_service"]
 
-        loan_service.execute_loan(registered_player, 50)
-        result = loan_service.execute_repayment(registered_player)
+        loan_service.execute_loan(registered_player, 50, TEST_GUILD_ID)
+        result = loan_service.execute_repayment(registered_player, TEST_GUILD_ID)
 
         # Fee (10) should be in nonprofit fund
         assert result.value.nonprofit_total >= 10
@@ -225,7 +229,7 @@ class TestExecuteRepayment:
         """Can't repay without outstanding loan."""
         loan_service = services["loan_service"]
 
-        result = loan_service.execute_repayment(registered_player)
+        result = loan_service.execute_repayment(registered_player, TEST_GUILD_ID)
 
         assert result.success is False
         assert result.error_code == error_codes.NO_OUTSTANDING_LOAN

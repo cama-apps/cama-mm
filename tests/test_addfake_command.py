@@ -28,13 +28,13 @@ class FakePlayerRepo:
     def __init__(self):
         self.players = {}
 
-    def get_by_id(self, discord_id):
+    def get_by_id(self, discord_id, guild_id=None):
         return self.players.get(discord_id)
 
-    def get_by_ids(self, ids):
+    def get_by_ids(self, ids, guild_id=None):
         return [self.players[i] for i in ids if i in self.players]
 
-    def add(self, discord_id, discord_username, initial_mmr=None, glicko_rating=None,
+    def add(self, discord_id, discord_username, guild_id=None, initial_mmr=None, glicko_rating=None,
             glicko_rd=None, glicko_volatility=None, preferred_roles=None):
         self.players[discord_id] = SimpleNamespace(
             discord_id=discord_id,

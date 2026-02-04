@@ -656,7 +656,8 @@ async def on_raw_reaction_add(payload):
             return
 
         # Rest of the handler is for sword/frogling (lobby joining)
-        player = player_service.get_player(payload.user_id)
+        guild_id = payload.guild_id
+        player = player_service.get_player(payload.user_id, guild_id)
         if not player:
             try:
                 await message.remove_reaction(payload.emoji, user)

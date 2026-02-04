@@ -97,7 +97,7 @@ async def test_handle_announce_success_deducts_balance(monkeypatch):
     await commands._handle_announce(interaction, target=target)
 
     player_service.player_repo.add_balance.assert_called_once_with(
-        interaction.user.id, -SHOP_ANNOUNCE_TARGET_COST
+        interaction.user.id, None, -SHOP_ANNOUNCE_TARGET_COST
     )
     # shop uses safe_defer then safe_followup, so check followup.send
     interaction.followup.send.assert_awaited_once()
@@ -157,7 +157,7 @@ async def test_handle_mystery_gift_success_deducts_balance():
 
     # Verify balance was deducted
     player_service.player_repo.add_balance.assert_called_once_with(
-        interaction.user.id, -SHOP_MYSTERY_GIFT_COST
+        interaction.user.id, None, -SHOP_MYSTERY_GIFT_COST
     )
 
     # Verify public announcement was sent

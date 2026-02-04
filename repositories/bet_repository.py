@@ -95,8 +95,8 @@ class BetRepository(BaseRepository, IBetRepository):
                     )
 
             cursor.execute(
-                "SELECT COALESCE(jopacoin_balance, 0) as balance FROM players WHERE discord_id = ?",
-                (discord_id,),
+                "SELECT COALESCE(jopacoin_balance, 0) as balance FROM players WHERE discord_id = ? AND guild_id = ?",
+                (discord_id, normalized_guild),
             )
             row = cursor.fetchone()
             if not row:
@@ -125,9 +125,9 @@ class BetRepository(BaseRepository, IBetRepository):
                 """
                 UPDATE players
                 SET jopacoin_balance = COALESCE(jopacoin_balance, 0) - ?, updated_at = CURRENT_TIMESTAMP
-                WHERE discord_id = ?
+                WHERE discord_id = ? AND guild_id = ?
                 """,
-                (effective_bet, discord_id),
+                (effective_bet, discord_id, normalized_guild),
             )
 
             cursor.execute(
@@ -222,8 +222,8 @@ class BetRepository(BaseRepository, IBetRepository):
                     )
 
             cursor.execute(
-                "SELECT COALESCE(jopacoin_balance, 0) as balance FROM players WHERE discord_id = ?",
-                (discord_id,),
+                "SELECT COALESCE(jopacoin_balance, 0) as balance FROM players WHERE discord_id = ? AND guild_id = ?",
+                (discord_id, normalized_guild),
             )
             prow = cursor.fetchone()
             if not prow:
@@ -252,9 +252,9 @@ class BetRepository(BaseRepository, IBetRepository):
                 """
                 UPDATE players
                 SET jopacoin_balance = COALESCE(jopacoin_balance, 0) - ?, updated_at = CURRENT_TIMESTAMP
-                WHERE discord_id = ?
+                WHERE discord_id = ? AND guild_id = ?
                 """,
-                (effective_bet, discord_id),
+                (effective_bet, discord_id, normalized_guild),
             )
             cursor.execute(
                 """
@@ -678,13 +678,14 @@ class BetRepository(BaseRepository, IBetRepository):
             )
             return cursor.rowcount
 
-    def get_player_bet_history(self, discord_id: int) -> list[dict]:
+    def get_player_bet_history(self, discord_id: int, guild_id: int | None = None) -> list[dict]:
         """
         Get all settled bets for a player with outcome derived from match result.
 
         Returns list of dicts with: bet_id, amount, leverage, effective_bet, team_bet_on,
         bet_time, match_id, payout, outcome ('won'/'lost'), profit (net P&L for this bet)
         """
+        normalized_guild_id = guild_id if guild_id is not None else 0
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -705,10 +706,10 @@ class BetRepository(BaseRepository, IBetRepository):
                     END as outcome
                 FROM bets b
                 JOIN matches m ON b.match_id = m.match_id
-                WHERE b.discord_id = ? AND b.match_id IS NOT NULL
+                WHERE b.discord_id = ? AND b.guild_id = ? AND b.match_id IS NOT NULL
                 ORDER BY b.bet_time ASC
                 """,
-                (discord_id,),
+                (discord_id, normalized_guild_id),
             )
             rows = cursor.fetchall()
             results = []
@@ -779,12 +780,13 @@ class BetRepository(BaseRepository, IBetRepository):
                 results.append(data)
             return results
 
-    def get_player_matches_without_self_bet(self, discord_id: int) -> dict:
+    def get_player_matches_without_self_bet(self, discord_id: int, guild_id: int | None = None) -> dict:
         """
         Count matches where player participated but didn't bet on themselves.
 
         Returns dict with: matches_played, matches_bet_on_self, paper_hands_count
         """
+        normalized_guild_id = guild_id if guild_id is not None else 0
         with self.connection() as conn:
             cursor = conn.cursor()
             # Get all matches the player participated in
@@ -795,9 +797,9 @@ class BetRepository(BaseRepository, IBetRepository):
                     mp.team_number,
                     CASE WHEN mp.team_number = 1 THEN 'radiant' ELSE 'dire' END as player_team
                 FROM match_participants mp
-                WHERE mp.discord_id = ?
+                WHERE mp.discord_id = ? AND mp.guild_id = ?
                 """,
-                (discord_id,),
+                (discord_id, normalized_guild_id),
             )
             player_matches = {row["match_id"]: row["player_team"] for row in cursor.fetchall()}
 
@@ -810,9 +812,9 @@ class BetRepository(BaseRepository, IBetRepository):
                 f"""
                 SELECT match_id, team_bet_on
                 FROM bets
-                WHERE discord_id = ? AND match_id IN ({placeholders})
+                WHERE discord_id = ? AND guild_id = ? AND match_id IN ({placeholders})
                 """,
-                (discord_id, *player_matches.keys()),
+                (discord_id, normalized_guild_id, *player_matches.keys()),
             )
             bets_by_match = {row["match_id"]: row["team_bet_on"] for row in cursor.fetchall()}
 
@@ -830,43 +832,45 @@ class BetRepository(BaseRepository, IBetRepository):
                 "paper_hands_count": paper_hands_count,
             }
 
-    def get_player_leverage_distribution(self, discord_id: int) -> dict[int, int]:
+    def get_player_leverage_distribution(self, discord_id: int, guild_id: int | None = None) -> dict[int, int]:
         """Get count of bets at each leverage level for a player."""
+        normalized_guild_id = guild_id if guild_id is not None else 0
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
                 SELECT COALESCE(leverage, 1) as leverage, COUNT(*) as count
                 FROM bets
-                WHERE discord_id = ? AND match_id IS NOT NULL
+                WHERE discord_id = ? AND guild_id = ? AND match_id IS NOT NULL
                 GROUP BY COALESCE(leverage, 1)
                 """,
-                (discord_id,),
+                (discord_id, normalized_guild_id),
             )
             return {row["leverage"]: row["count"] for row in cursor.fetchall()}
 
-    def get_player_bankruptcy_count(self, discord_id: int) -> int:
+    def get_player_bankruptcy_count(self, discord_id: int, guild_id: int | None = None) -> int:
         """Get the number of times a player has declared bankruptcy."""
+        normalized_guild_id = guild_id if guild_id is not None else 0
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
                 SELECT COALESCE(bankruptcy_count, 0) as count
                 FROM bankruptcy_state
-                WHERE discord_id = ?
+                WHERE discord_id = ? AND guild_id = ?
                 """,
-                (discord_id,),
+                (discord_id, normalized_guild_id),
             )
             row = cursor.fetchone()
             return row["count"] if row else 0
 
-    def count_player_loss_chasing(self, discord_id: int) -> dict:
+    def count_player_loss_chasing(self, discord_id: int, guild_id: int | None = None) -> dict:
         """
         Analyze loss chasing behavior: how often does player increase bet after a loss?
 
         Returns dict with: sequences_analyzed, times_increased_after_loss, loss_chase_rate
         """
-        history = self.get_player_bet_history(discord_id)
+        history = self.get_player_bet_history(discord_id, guild_id)
         if len(history) < 2:
             return {"sequences_analyzed": 0, "times_increased_after_loss": 0, "loss_chase_rate": 0.0}
 
@@ -1205,7 +1209,7 @@ class BetRepository(BaseRepository, IBetRepository):
 
         return balance_deltas
 
-    def get_bets_on_player_matches(self, target_discord_id: int) -> list[dict]:
+    def get_bets_on_player_matches(self, target_discord_id: int, guild_id: int | None = None) -> list[dict]:
         """
         Get all bets by OTHER players on matches where target_discord_id participated.
 
@@ -1215,6 +1219,7 @@ class BetRepository(BaseRepository, IBetRepository):
         Returns list of dicts with: bettor_id, match_id, team_bet_on, effective_bet,
         payout, player_team, bet_direction ('for'/'against'), won (bool)
         """
+        normalized_guild_id = guild_id if guild_id is not None else 0
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -1241,11 +1246,14 @@ class BetRepository(BaseRepository, IBetRepository):
                 JOIN matches m ON mp.match_id = m.match_id
                 JOIN bets b ON b.match_id = m.match_id
                     AND b.discord_id != ?
+                    AND b.guild_id = ?
                 WHERE mp.discord_id = ?
+                    AND mp.guild_id = ?
                     AND m.winning_team IS NOT NULL
+                    AND m.guild_id = ?
                 ORDER BY b.match_id, b.bet_time
                 """,
-                (target_discord_id, target_discord_id),
+                (target_discord_id, normalized_guild_id, target_discord_id, normalized_guild_id, normalized_guild_id),
             )
             rows = cursor.fetchall()
             results = []

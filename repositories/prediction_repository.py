@@ -278,7 +278,7 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
             # Get prediction and validate
             cursor.execute(
                 """
-                SELECT status, closes_at FROM predictions WHERE prediction_id = ?
+                SELECT status, closes_at, guild_id FROM predictions WHERE prediction_id = ?
                 """,
                 (prediction_id,),
             )
@@ -289,6 +289,9 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                 raise ValueError("Betting is closed for this prediction.")
             if bet_time >= pred["closes_at"]:
                 raise ValueError("Betting period has ended.")
+
+            # Get guild_id from prediction for player balance operations
+            pred_guild_id = pred["guild_id"]
 
             # Check for existing bet on opposite side
             cursor.execute(
@@ -307,8 +310,8 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
 
             # Check balance
             cursor.execute(
-                "SELECT COALESCE(jopacoin_balance, 0) as balance FROM players WHERE discord_id = ?",
-                (discord_id,),
+                "SELECT COALESCE(jopacoin_balance, 0) as balance FROM players WHERE discord_id = ? AND guild_id = ?",
+                (discord_id, pred_guild_id),
             )
             player = cursor.fetchone()
             if not player:
@@ -327,9 +330,9 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                 """
                 UPDATE players
                 SET jopacoin_balance = jopacoin_balance - ?, updated_at = CURRENT_TIMESTAMP
-                WHERE discord_id = ?
+                WHERE discord_id = ? AND guild_id = ?
                 """,
-                (amount, discord_id),
+                (amount, discord_id, pred_guild_id),
             )
 
             # Insert bet

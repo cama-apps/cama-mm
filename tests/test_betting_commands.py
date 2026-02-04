@@ -345,8 +345,8 @@ async def test_loan_checks_eligibility_for_registered_user():
     )
     await commands.loan.callback(commands, interaction, amount=50)
 
-    # Should check eligibility
-    loan_service.can_take_loan.assert_called_once_with(456, 50)
+    # Should check eligibility (includes guild_id now)
+    loan_service.can_take_loan.assert_called_once_with(456, 50, 123)
     # Should take the loan
     loan_service.take_loan.assert_called_once_with(456, 50, 123)
 
@@ -554,7 +554,7 @@ async def test_tip_successful_transfer():
     # Both players are registered
     sender = MagicMock(name="Sender")
     recipient = MagicMock(name="Recipient")
-    player_service.get_player.side_effect = lambda discord_id: (
+    player_service.get_player.side_effect = lambda discord_id, guild_id=None: (
         sender if discord_id == 123 else recipient if discord_id == 456 else None
     )
     player_service.get_balance.return_value = 100  # Sender has 100 coins
@@ -596,6 +596,7 @@ async def test_tip_successful_transfer():
     player_service.player_repo.tip_atomic.assert_called_once_with(
         from_discord_id=123,
         to_discord_id=456,
+        guild_id=789,
         amount=50,
         fee=1,
     )
@@ -633,7 +634,7 @@ async def test_tip_insufficient_balance():
     # Both players are registered
     sender = MagicMock(name="Sender")
     recipient = MagicMock(name="Recipient")
-    player_service.get_player.side_effect = lambda discord_id: (
+    player_service.get_player.side_effect = lambda discord_id, guild_id=None: (
         sender if discord_id == 123 else recipient if discord_id == 456 else None
     )
     player_service.get_balance.return_value = 20  # Sender only has 20 coins
@@ -715,7 +716,7 @@ async def test_tip_recipient_not_registered():
 
     # Sender is registered, recipient is NOT
     sender = MagicMock(name="Sender")
-    player_service.get_player.side_effect = lambda discord_id: (
+    player_service.get_player.side_effect = lambda discord_id, guild_id=None: (
         sender if discord_id == 123 else None
     )
 
@@ -833,7 +834,7 @@ async def test_tip_with_outstanding_loan_blocked():
     # Both players are registered
     sender = MagicMock(name="Sender")
     recipient = MagicMock(name="Recipient")
-    player_service.get_player.side_effect = lambda discord_id: (
+    player_service.get_player.side_effect = lambda discord_id, guild_id=None: (
         sender if discord_id == 130 else recipient if discord_id == 460 else None
     )
     player_service.get_balance.return_value = 100  # Sender has 100 coins
@@ -888,7 +889,7 @@ async def test_tip_fee_calculation_minimum_1_coin():
     # Both players are registered
     sender = MagicMock(name="Sender")
     recipient = MagicMock(name="Recipient")
-    player_service.get_player.side_effect = lambda discord_id: (
+    player_service.get_player.side_effect = lambda discord_id, guild_id=None: (
         sender if discord_id == 131 else recipient if discord_id == 461 else None
     )
     player_service.get_balance.return_value = 10  # Sender has 10 coins
@@ -924,6 +925,7 @@ async def test_tip_fee_calculation_minimum_1_coin():
     player_service.player_repo.tip_atomic.assert_called_once_with(
         from_discord_id=131,
         to_discord_id=461,
+        guild_id=792,
         amount=1,
         fee=1,
     )
@@ -946,7 +948,7 @@ async def test_tip_fee_calculation_percentage():
     # Both players are registered
     sender = MagicMock(name="Sender")
     recipient = MagicMock(name="Recipient")
-    player_service.get_player.side_effect = lambda discord_id: (
+    player_service.get_player.side_effect = lambda discord_id, guild_id=None: (
         sender if discord_id == 132 else recipient if discord_id == 462 else None
     )
     player_service.get_balance.return_value = 300  # Sender has 300 coins
@@ -982,6 +984,7 @@ async def test_tip_fee_calculation_percentage():
     player_service.player_repo.tip_atomic.assert_called_once_with(
         from_discord_id=132,
         to_discord_id=462,
+        guild_id=793,
         amount=150,
         fee=2,
     )
@@ -1005,7 +1008,7 @@ async def test_tip_fee_goes_to_nonprofit():
     # Both players are registered
     sender = MagicMock(name="Sender")
     recipient = MagicMock(name="Recipient")
-    player_service.get_player.side_effect = lambda discord_id: (
+    player_service.get_player.side_effect = lambda discord_id, guild_id=None: (
         sender if discord_id == 133 else recipient if discord_id == 463 else None
     )
     player_service.get_balance.return_value = 200  # Sender has 200 coins
@@ -1047,6 +1050,7 @@ async def test_tip_fee_goes_to_nonprofit():
     player_service.player_repo.tip_atomic.assert_called_once_with(
         from_discord_id=133,
         to_discord_id=463,
+        guild_id=794,
         amount=100,
         fee=1,
     )
@@ -1067,7 +1071,7 @@ async def test_tip_transaction_logged():
     # Both players are registered
     sender = MagicMock(name="Sender")
     recipient = MagicMock(name="Recipient")
-    player_service.get_player.side_effect = lambda discord_id: (
+    player_service.get_player.side_effect = lambda discord_id, guild_id=None: (
         sender if discord_id == 134 else recipient if discord_id == 464 else None
     )
     player_service.get_balance.return_value = 500  # Sender has 500 coins
@@ -1102,6 +1106,7 @@ async def test_tip_transaction_logged():
     player_service.player_repo.tip_atomic.assert_called_once_with(
         from_discord_id=134,
         to_discord_id=464,
+        guild_id=795,
         amount=250,
         fee=3,
     )
@@ -1129,7 +1134,7 @@ async def test_tip_unexpected_error_handling():
     # Both players are registered
     sender = MagicMock(name="Sender")
     recipient = MagicMock(name="Recipient")
-    player_service.get_player.side_effect = lambda discord_id: (
+    player_service.get_player.side_effect = lambda discord_id, guild_id=None: (
         sender if discord_id == 137 else recipient if discord_id == 467 else None
     )
     player_service.get_balance.return_value = 100  # Sender has 100 coins
@@ -1181,7 +1186,7 @@ async def test_tip_value_error_handling():
     # Both players are registered
     sender = MagicMock(name="Sender")
     recipient = MagicMock(name="Recipient")
-    player_service.get_player.side_effect = lambda discord_id: (
+    player_service.get_player.side_effect = lambda discord_id, guild_id=None: (
         sender if discord_id == 138 else recipient if discord_id == 468 else None
     )
     player_service.get_balance.return_value = 100  # Sender has 100 coins
@@ -1232,7 +1237,7 @@ async def test_tip_no_loan_service_still_works():
     # Both players are registered
     sender = MagicMock(name="Sender")
     recipient = MagicMock(name="Recipient")
-    player_service.get_player.side_effect = lambda discord_id: (
+    player_service.get_player.side_effect = lambda discord_id, guild_id=None: (
         sender if discord_id == 135 else recipient if discord_id == 465 else None
     )
     player_service.get_balance.return_value = 100  # Sender has 100 coins
@@ -1269,6 +1274,7 @@ async def test_tip_no_loan_service_still_works():
     player_service.player_repo.tip_atomic.assert_called_once_with(
         from_discord_id=135,
         to_discord_id=465,
+        guild_id=796,
         amount=50,
         fee=1,
     )
@@ -1286,7 +1292,7 @@ async def test_tip_insufficient_balance_boundary():
     # Both players are registered
     sender = MagicMock(name="Sender")
     recipient = MagicMock(name="Recipient")
-    player_service.get_player.side_effect = lambda discord_id: (
+    player_service.get_player.side_effect = lambda discord_id, guild_id=None: (
         sender if discord_id == 136 else recipient if discord_id == 466 else None
     )
     # Sender has exactly 50 coins, but needs 51 (50 + 1 fee)

@@ -112,6 +112,8 @@ class EnrichmentCommands(commands.Cog):
             )
             return
 
+        guild_id = interaction.guild.id if interaction.guild else None
+
         # Determine which internal match to enrich
         if internal_match_id:
             match = self.match_repo.get_match(internal_match_id)
@@ -124,7 +126,7 @@ class EnrichmentCommands(commands.Cog):
                 return
         else:
             # Use most recent match
-            match = self.match_repo.get_most_recent_match()
+            match = self.match_repo.get_most_recent_match(guild_id)
             if not match:
                 await safe_followup(
                     interaction,
@@ -312,9 +314,10 @@ class EnrichmentCommands(commands.Cog):
 
         target_id = user.id if user else interaction.user.id
         target_name = user.display_name if user else interaction.user.display_name
+        guild_id = interaction.guild.id if interaction.guild else None
 
         # Validate player exists
-        player = self.player_repo.get_by_id(target_id)
+        player = self.player_repo.get_by_id(target_id, guild_id)
         if not player:
             await safe_followup(
                 interaction,
@@ -327,7 +330,7 @@ class EnrichmentCommands(commands.Cog):
         limit = max(1, min(limit, 10))
 
         # Get matches
-        matches = self.match_repo.get_player_matches(target_id, limit=limit)
+        matches = self.match_repo.get_player_matches(target_id, guild_id, limit=limit)
         if not matches:
             await safe_followup(
                 interaction,
@@ -484,6 +487,7 @@ class EnrichmentCommands(commands.Cog):
         """View detailed stats for a specific match with the enriched embed."""
         target_id = user.id if user else interaction.user.id
         target_name = user.display_name if user else interaction.user.display_name
+        guild_id = interaction.guild.id if interaction.guild else None
 
         logger.info(
             f"Viewmatch command: User {interaction.user.id}, match_id={match_id}, target={target_id}"
@@ -504,13 +508,13 @@ class EnrichmentCommands(commands.Cog):
                 return
         else:
             # Try to get target's most recent match first
-            user_matches = self.match_repo.get_player_matches(target_id, limit=1)
+            user_matches = self.match_repo.get_player_matches(target_id, guild_id, limit=1)
             if user_matches:
                 match_id = user_matches[0]["match_id"]
                 match_data = self.match_repo.get_match(match_id)
             else:
                 # Fall back to globally most recent
-                match_data = self.match_repo.get_most_recent_match()
+                match_data = self.match_repo.get_most_recent_match(guild_id)
 
             if not match_data:
                 await safe_followup(

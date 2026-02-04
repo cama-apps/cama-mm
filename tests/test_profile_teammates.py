@@ -10,6 +10,8 @@ from database import Database
 from repositories.pairings_repository import PairingsRepository
 from repositories.player_repository import PlayerRepository
 
+TEST_GUILD_ID = 12345
+
 
 @pytest.fixture
 def temp_db_path(tmp_path):
@@ -38,6 +40,7 @@ def register_players(player_repo, player_ids):
         player_repo.add(
             discord_id=pid,
             discord_username=f"Player{pid}",
+            guild_id=TEST_GUILD_ID,
             initial_mmr=3000,
         )
 
@@ -74,7 +77,7 @@ class TestTeammatesEmbed:
         """Test that unregistered users get an appropriate error."""
         user = MockUser(99999, "UnregisteredUser")
 
-        embed, file = await profile_cog._build_teammates_embed(user, user.id)
+        embed, file = await profile_cog._build_teammates_embed(user, user.id, guild_id=TEST_GUILD_ID)
 
         assert embed.title == "Not Registered"
         assert "not registered" in embed.description.lower()
@@ -86,7 +89,7 @@ class TestTeammatesEmbed:
         register_players(player_repo, [1001])
         user = MockUser(1001)
 
-        embed, file = await profile_cog._build_teammates_embed(user, user.id)
+        embed, file = await profile_cog._build_teammates_embed(user, user.id, guild_id=TEST_GUILD_ID)
 
         assert "Teammates" in embed.title
         assert file is None
@@ -105,6 +108,7 @@ class TestTeammatesEmbed:
         for i in range(4):
             pairings_repo.update_pairings_for_match(
                 match_id=100 + i,
+                guild_id=TEST_GUILD_ID,
                 team1_ids=[1, 2, 6, 7, 8],
                 team2_ids=[10, 11, 12, 13, 14],
                 winning_team=1,
@@ -114,13 +118,14 @@ class TestTeammatesEmbed:
         for i in range(4):
             pairings_repo.update_pairings_for_match(
                 match_id=200 + i,
+                guild_id=TEST_GUILD_ID,
                 team1_ids=[1, 3, 6, 7, 8],
                 team2_ids=[10, 11, 12, 13, 14],
                 winning_team=2,
             )
 
         user = MockUser(1)
-        embed, file = await profile_cog._build_teammates_embed(user, user.id)
+        embed, file = await profile_cog._build_teammates_embed(user, user.id, guild_id=TEST_GUILD_ID)
 
         assert "Teammates" in embed.title
         assert file is None
@@ -149,13 +154,14 @@ class TestTeammatesEmbed:
         for i in range(4):
             pairings_repo.update_pairings_for_match(
                 match_id=100 + i,
+                guild_id=TEST_GUILD_ID,
                 team1_ids=[1, 2, 3, 4, 5],
                 team2_ids=[10, 11, 12, 13, 14],
                 winning_team=1,
             )
 
         user = MockUser(1)
-        embed, _ = await profile_cog._build_teammates_embed(user, user.id)
+        embed, _ = await profile_cog._build_teammates_embed(user, user.id, guild_id=TEST_GUILD_ID)
 
         # Find the dominates field
         dominates_field = next((f for f in embed.fields if "Dominates" in f.name), None)
@@ -174,13 +180,14 @@ class TestTeammatesEmbed:
         for i in range(4):
             pairings_repo.update_pairings_for_match(
                 match_id=100 + i,
+                guild_id=TEST_GUILD_ID,
                 team1_ids=[1, 2, 3, 4, 5],
                 team2_ids=[10, 11, 12, 13, 14],
                 winning_team=2,
             )
 
         user = MockUser(1)
-        embed, _ = await profile_cog._build_teammates_embed(user, user.id)
+        embed, _ = await profile_cog._build_teammates_embed(user, user.id, guild_id=TEST_GUILD_ID)
 
         # Find the struggles field
         struggles_field = next((f for f in embed.fields if "Struggles" in f.name), None)
@@ -199,6 +206,7 @@ class TestTeammatesEmbed:
         for i in range(6):
             pairings_repo.update_pairings_for_match(
                 match_id=100 + i,
+                guild_id=TEST_GUILD_ID,
                 team1_ids=[1, 2, 6, 7, 8],
                 team2_ids=[10, 11, 12, 13, 14],
                 winning_team=1,
@@ -208,7 +216,7 @@ class TestTeammatesEmbed:
         # (already created above)
 
         user = MockUser(1)
-        embed, _ = await profile_cog._build_teammates_embed(user, user.id)
+        embed, _ = await profile_cog._build_teammates_embed(user, user.id, guild_id=TEST_GUILD_ID)
 
         # Find most played with field
         most_with = next((f for f in embed.fields if "Most Played With" in f.name), None)
@@ -231,6 +239,7 @@ class TestTeammatesEmbed:
         for i in range(2):
             pairings_repo.update_pairings_for_match(
                 match_id=100 + i,
+                guild_id=TEST_GUILD_ID,
                 team1_ids=[1, 2, 3, 4, 5],
                 team2_ids=[6, 7, 8, 9, 10],
                 winning_team=1,
@@ -238,13 +247,14 @@ class TestTeammatesEmbed:
         for i in range(2):
             pairings_repo.update_pairings_for_match(
                 match_id=102 + i,
+                guild_id=TEST_GUILD_ID,
                 team1_ids=[1, 2, 3, 4, 5],
                 team2_ids=[6, 7, 8, 9, 10],
                 winning_team=2,
             )
 
         user = MockUser(1)
-        embed, _ = await profile_cog._build_teammates_embed(user, user.id)
+        embed, _ = await profile_cog._build_teammates_embed(user, user.id, guild_id=TEST_GUILD_ID)
 
         # Find even teammates field (may not appear if min_games not met or below threshold)
         even_teammates = next((f for f in embed.fields if "Even Teammates" in f.name), None)
@@ -261,13 +271,14 @@ class TestTeammatesEmbed:
         # Record a match
         pairings_repo.update_pairings_for_match(
             match_id=1,
+            guild_id=TEST_GUILD_ID,
             team1_ids=[1, 2, 3, 4, 5],
             team2_ids=[6, 7, 8, 9, 10],
             winning_team=1,
         )
 
         user = MockUser(1)
-        embed, _ = await profile_cog._build_teammates_embed(user, user.id)
+        embed, _ = await profile_cog._build_teammates_embed(user, user.id, guild_id=TEST_GUILD_ID)
 
         # Footer should mention minimum games
         assert embed.footer is not None
@@ -295,13 +306,14 @@ class TestTeammatesEmbedEdgeCases:
         for i in range(2):
             pairings_repo.update_pairings_for_match(
                 match_id=100 + i,
+                guild_id=TEST_GUILD_ID,
                 team1_ids=[1, 2, 3, 4, 5],
                 team2_ids=[6, 7, 8, 9, 10],
                 winning_team=1,
             )
 
         user = MockUser(1)
-        embed, _ = await profile_cog._build_teammates_embed(user, user.id)
+        embed, _ = await profile_cog._build_teammates_embed(user, user.id, guild_id=TEST_GUILD_ID)
 
         # Best teammates should show "No data yet" since min_games=3
         best_field = next((f for f in embed.fields if "Best Teammates" in f.name), None)
@@ -320,7 +332,7 @@ class TestTeammatesEmbedEdgeCases:
         register_players(player_repo, [1001])
         user = MockUser(1001)
 
-        embed, file = await profile_cog._build_teammates_embed(user, user.id)
+        embed, file = await profile_cog._build_teammates_embed(user, user.id, guild_id=TEST_GUILD_ID)
 
         # Should return an error embed
         assert "unavailable" in embed.description.lower() or "error" in embed.title.lower()

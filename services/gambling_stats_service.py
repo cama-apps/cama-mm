@@ -204,9 +204,9 @@ class GamblingStatsService:
         self.bankruptcy_service = bankruptcy_service
         self.loan_service = loan_service
 
-    def get_player_stats(self, discord_id: int) -> GambaStats | None:
+    def get_player_stats(self, discord_id: int, guild_id: int | None = None) -> GambaStats | None:
         """Get complete gambling statistics for a player."""
-        history = self.bet_repo.get_player_bet_history(discord_id)
+        history = self.bet_repo.get_player_bet_history(discord_id, guild_id)
 
         if not history:
             return None
@@ -224,7 +224,7 @@ class GamblingStatsService:
         avg_bet_size = total_wagered / total_bets if total_bets > 0 else 0
 
         # Leverage distribution
-        leverage_distribution = self.bet_repo.get_player_leverage_distribution(discord_id)
+        leverage_distribution = self.bet_repo.get_player_leverage_distribution(discord_id, guild_id)
 
         # Streak analysis
         current_streak, best_streak, worst_streak = self._calculate_streaks(history)
@@ -235,12 +235,12 @@ class GamblingStatsService:
         biggest_loss = min((b["profit"] for b in history if b["profit"] < 0), default=0)
 
         # Paper hands
-        paper_hands_data = self.bet_repo.get_player_matches_without_self_bet(discord_id)
+        paper_hands_data = self.bet_repo.get_player_matches_without_self_bet(discord_id, guild_id)
         paper_hands_count = paper_hands_data["paper_hands_count"]
         matches_played = paper_hands_data["matches_played"]
 
         # Degen score
-        degen_score = self.calculate_degen_score(discord_id)
+        degen_score = self.calculate_degen_score(discord_id, guild_id)
 
         return GambaStats(
             discord_id=discord_id,
@@ -265,11 +265,11 @@ class GamblingStatsService:
             matches_played=matches_played,
         )
 
-    def calculate_degen_score(self, discord_id: int) -> DegenScoreBreakdown:
+    def calculate_degen_score(self, discord_id: int, guild_id: int | None = None) -> DegenScoreBreakdown:
         """Calculate the degen score with component breakdown."""
-        history = self.bet_repo.get_player_bet_history(discord_id)
-        leverage_dist = self.bet_repo.get_player_leverage_distribution(discord_id)
-        loss_chase_data = self.bet_repo.count_player_loss_chasing(discord_id)
+        history = self.bet_repo.get_player_bet_history(discord_id, guild_id)
+        leverage_dist = self.bet_repo.get_player_leverage_distribution(discord_id, guild_id)
+        loss_chase_data = self.bet_repo.count_player_loss_chasing(discord_id, guild_id)
 
         flavor_texts = []
         total_bets = sum(leverage_dist.values())
@@ -303,7 +303,7 @@ class GamblingStatsService:
             bet_size_score = 0
 
         # 3. Debt depth (0-20) - lowest balance ever reached
-        lowest_balance = self.player_repo.get_lowest_balance(discord_id)
+        lowest_balance = self.player_repo.get_lowest_balance(discord_id, guild_id)
         if lowest_balance is not None and lowest_balance < 0:
             # Scale: 0 = 0pts, -500 = 20pts
             from config import MAX_DEBT
@@ -349,7 +349,7 @@ class GamblingStatsService:
         # 7. Negative loan bonus (+25 each, can exceed 100)
         negative_loan_bonus = 0
         if self.loan_service:
-            loan_state = self.loan_service.get_state(discord_id)
+            loan_state = self.loan_service.get_state(discord_id, guild_id)
             negative_loans = loan_state.negative_loans_taken
             negative_loan_bonus = negative_loans * NEGATIVE_LOAN_BONUS
             if negative_loans >= 1:
@@ -666,13 +666,13 @@ class GamblingStatsService:
             flavor_texts=flavor_texts[:3],
         )
 
-    def get_betting_impact_stats(self, discord_id: int) -> BettingImpactStats | None:
+    def get_betting_impact_stats(self, discord_id: int, guild_id: int | None = None) -> BettingImpactStats | None:
         """
         Calculate how others' bets performed on matches this player participated in.
 
         Returns None if player has no match participation with external bets.
         """
-        bets = self.bet_repo.get_bets_on_player_matches(discord_id)
+        bets = self.bet_repo.get_bets_on_player_matches(discord_id, guild_id)
 
         if not bets:
             return None
@@ -825,7 +825,7 @@ class GamblingStatsService:
             unique_haters=len(haters),
         )
 
-    def get_cumulative_pnl_series(self, discord_id: int) -> list[tuple[int, int, dict]]:
+    def get_cumulative_pnl_series(self, discord_id: int, guild_id: int | None = None) -> list[tuple[int, int, dict]]:
         """
         Get cumulative P&L series for charting.
 
@@ -834,13 +834,13 @@ class GamblingStatsService:
         Events are sorted by time (bet_time for bets, spin_time for wheel spins).
         """
         # Get bet history
-        bet_history = self.bet_repo.get_player_bet_history(discord_id)
+        bet_history = self.bet_repo.get_player_bet_history(discord_id, guild_id)
 
         # Get wheel spin history
-        wheel_history = self.player_repo.get_wheel_spin_history(discord_id)
+        wheel_history = self.player_repo.get_wheel_spin_history(discord_id, guild_id)
 
         # Get Double or Nothing history
-        don_history = self.player_repo.get_double_or_nothing_history(discord_id)
+        don_history = self.player_repo.get_double_or_nothing_history(discord_id, guild_id)
 
         # Convert to unified format with timestamps for sorting
         events = []

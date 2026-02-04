@@ -26,6 +26,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
         team1_ids: list[int],
         team2_ids: list[int],
         winning_team: int,
+        guild_id: int,
         radiant_team_ids: list[int] | None = None,
         dire_team_ids: list[int] | None = None,
         dotabuff_match_id: str | None = None,
@@ -43,6 +44,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
             team1_ids: Discord IDs of Radiant players
             team2_ids: Discord IDs of Dire players
             winning_team: 1 (Radiant won) or 2 (Dire won)
+            guild_id: Guild ID for multi-server isolation
             radiant_team_ids: Deprecated; ignored (team1 is Radiant)
             dire_team_ids: Deprecated; ignored (team2 is Dire)
             dotabuff_match_id: Optional external match ID
@@ -59,11 +61,12 @@ class MatchRepository(BaseRepository, IMatchRepository):
             # Insert match record (team1=Radiant, team2=Dire)
             cursor.execute(
                 """
-                INSERT INTO matches (team1_players, team2_players, winning_team,
+                INSERT INTO matches (guild_id, team1_players, team2_players, winning_team,
                                     dotabuff_match_id, notes, lobby_type, balancing_rating_system)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
                 (
+                    guild_id,
                     json.dumps(team1_ids),
                     json.dumps(team2_ids),
                     winning_team,
@@ -82,19 +85,19 @@ class MatchRepository(BaseRepository, IMatchRepository):
             for player_id in team1_ids:
                 cursor.execute(
                     """
-                    INSERT INTO match_participants (match_id, discord_id, team_number, won, side)
-                    VALUES (?, ?, 1, ?, ?)
+                    INSERT INTO match_participants (match_id, discord_id, guild_id, team_number, won, side)
+                    VALUES (?, ?, ?, 1, ?, ?)
                 """,
-                    (match_id, player_id, team1_won, "radiant"),
+                    (match_id, player_id, guild_id, team1_won, "radiant"),
                 )
 
             for player_id in team2_ids:
                 cursor.execute(
                     """
-                    INSERT INTO match_participants (match_id, discord_id, team_number, won, side)
-                    VALUES (?, ?, 2, ?, ?)
+                    INSERT INTO match_participants (match_id, discord_id, guild_id, team_number, won, side)
+                    VALUES (?, ?, ?, 2, ?, ?)
                 """,
-                    (match_id, player_id, not team1_won, "dire"),
+                    (match_id, player_id, guild_id, not team1_won, "dire"),
                 )
 
             return match_id
@@ -102,6 +105,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
     def add_rating_history(
         self,
         discord_id: int,
+        guild_id: int,
         rating: float,
         match_id: int | None = None,
         rating_before: float | None = None,
@@ -127,6 +131,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 """
                 INSERT INTO rating_history (
                     discord_id,
+                    guild_id,
                     rating,
                     rating_before,
                     rd_before,
@@ -145,10 +150,11 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     streak_length,
                     streak_multiplier
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
                 (
                     discord_id,
+                    guild_id,
                     rating,
                     rating_before,
                     rd_before,
@@ -243,8 +249,8 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 else "glicko",
             }
 
-    def get_player_matches(self, discord_id: int, limit: int = 10) -> list[dict]:
-        """Get recent matches for a player."""
+    def get_player_matches(self, discord_id: int, guild_id: int, limit: int = 10) -> list[dict]:
+        """Get recent matches for a player in a guild."""
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -252,11 +258,11 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 SELECT m.*, mp.team_number, mp.won, mp.side
                 FROM matches m
                 JOIN match_participants mp ON m.match_id = mp.match_id
-                WHERE mp.discord_id = ?
+                WHERE mp.discord_id = ? AND mp.guild_id = ?
                 ORDER BY m.match_date DESC
                 LIMIT ?
             """,
-                (discord_id, limit),
+                (discord_id, guild_id, limit),
             )
 
             rows = cursor.fetchall()
@@ -276,18 +282,18 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 for row in rows
             ]
 
-    def get_rating_history(self, discord_id: int, limit: int = 20) -> list[dict]:
-        """Get rating history for a player."""
+    def get_rating_history(self, discord_id: int, guild_id: int, limit: int = 20) -> list[dict]:
+        """Get rating history for a player in a guild."""
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
                 SELECT * FROM rating_history
-                WHERE discord_id = ?
+                WHERE discord_id = ? AND guild_id = ?
                 ORDER BY timestamp DESC
                 LIMIT ?
             """,
-                (discord_id, limit),
+                (discord_id, guild_id, limit),
             )
 
             rows = cursor.fetchall()
@@ -302,15 +308,16 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 for row in rows
             ]
 
-    def get_player_recent_outcomes(self, discord_id: int, limit: int = 20) -> list[bool]:
+    def get_player_recent_outcomes(self, discord_id: int, guild_id: int, limit: int = 20) -> list[bool]:
         """
-        Get recent match outcomes for a player.
+        Get recent match outcomes for a player in a guild.
 
         Returns a list of booleans (True=win, False=loss) in reverse chronological
         order (most recent first). Uses the `won` column from rating_history.
 
         Args:
             discord_id: Player's Discord ID
+            guild_id: Guild ID
             limit: Maximum number of outcomes to return
 
         Returns:
@@ -321,17 +328,17 @@ class MatchRepository(BaseRepository, IMatchRepository):
             cursor.execute(
                 """
                 SELECT won FROM rating_history
-                WHERE discord_id = ? AND won IS NOT NULL
+                WHERE discord_id = ? AND guild_id = ? AND won IS NOT NULL
                 ORDER BY id DESC
                 LIMIT ?
             """,
-                (discord_id, limit),
+                (discord_id, guild_id, limit),
             )
             rows = cursor.fetchall()
             return [bool(row["won"]) for row in rows]
 
-    def get_player_rating_history_detailed(self, discord_id: int, limit: int = 50) -> list[dict]:
-        """Get detailed rating history for a player including prediction and OpenSkill data."""
+    def get_player_rating_history_detailed(self, discord_id: int, guild_id: int, limit: int = 50) -> list[dict]:
+        """Get detailed rating history for a player in a guild including prediction and OpenSkill data."""
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -339,11 +346,11 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 SELECT rh.*, m.lobby_type
                 FROM rating_history rh
                 LEFT JOIN matches m ON rh.match_id = m.match_id
-                WHERE rh.discord_id = ?
+                WHERE rh.discord_id = ? AND rh.guild_id = ?
                 ORDER BY rh.timestamp DESC
                 LIMIT ?
             """,
-                (discord_id, limit),
+                (discord_id, guild_id, limit),
             )
             rows = cursor.fetchall()
             return [
@@ -430,18 +437,19 @@ class MatchRepository(BaseRepository, IMatchRepository):
 
             return {"team1": team1_ratings, "team2": team2_ratings}
 
-    def get_recent_rating_history(self, limit: int = 200) -> list[dict]:
-        """Get recent rating history entries for all players."""
+    def get_recent_rating_history(self, guild_id: int, limit: int = 200) -> list[dict]:
+        """Get recent rating history entries for all players in a guild."""
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
                 SELECT *
                 FROM rating_history
+                WHERE guild_id = ?
                 ORDER BY timestamp DESC
                 LIMIT ?
             """,
-                (limit,),
+                (guild_id, limit),
             )
             rows = cursor.fetchall()
             return [
@@ -462,9 +470,9 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 for row in rows
             ]
 
-    def delete_all_matches(self) -> int:
+    def delete_all_matches(self, guild_id: int) -> int:
         """
-        Delete all matches (for testing).
+        Delete all matches in a guild (for testing).
 
         Returns:
             Number of matches deleted
@@ -472,21 +480,27 @@ class MatchRepository(BaseRepository, IMatchRepository):
         with self.connection() as conn:
             cursor = conn.cursor()
 
-            cursor.execute("SELECT COUNT(*) FROM matches")
+            cursor.execute("SELECT COUNT(*) FROM matches WHERE guild_id = ?", (guild_id,))
             count = cursor.fetchone()[0]
 
-            cursor.execute("DELETE FROM match_predictions")
-            cursor.execute("DELETE FROM matches")
-            cursor.execute("DELETE FROM match_participants")
-            cursor.execute("DELETE FROM rating_history")
+            # Get match IDs for this guild to clean up predictions
+            cursor.execute("SELECT match_id FROM matches WHERE guild_id = ?", (guild_id,))
+            match_ids = [row["match_id"] for row in cursor.fetchall()]
+            if match_ids:
+                placeholders = ",".join("?" * len(match_ids))
+                cursor.execute(f"DELETE FROM match_predictions WHERE match_id IN ({placeholders})", match_ids)
+
+            cursor.execute("DELETE FROM matches WHERE guild_id = ?", (guild_id,))
+            cursor.execute("DELETE FROM match_participants WHERE guild_id = ?", (guild_id,))
+            cursor.execute("DELETE FROM rating_history WHERE guild_id = ?", (guild_id,))
 
             return count
 
-    def get_match_count(self) -> int:
-        """Get total match count."""
+    def get_match_count(self, guild_id: int) -> int:
+        """Get total match count for a guild."""
         with self.connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT COUNT(*) as count FROM matches")
+            cursor.execute("SELECT COUNT(*) as count FROM matches WHERE guild_id = ?", (guild_id,))
             row = cursor.fetchone()
             return row["count"] if row else 0
 
@@ -531,8 +545,9 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 ),
             )
 
-    def get_recent_match_predictions(self, limit: int = 200) -> list[dict]:
-        """Get recent match predictions with outcomes."""
+    def get_recent_match_predictions(self, guild_id: int | None, limit: int = 200) -> list[dict]:
+        """Get recent match predictions with outcomes for a guild."""
+        normalized_guild_id = guild_id if guild_id is not None else 0
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -548,10 +563,11 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     m.match_date
                 FROM match_predictions mp
                 JOIN matches m ON m.match_id = mp.match_id
+                WHERE m.guild_id = ?
                 ORDER BY m.match_date DESC
                 LIMIT ?
             """,
-                (limit,),
+                (normalized_guild_id, limit),
             )
             rows = cursor.fetchall()
             return [
@@ -568,11 +584,14 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 for row in rows
             ]
 
-    def get_most_recent_match(self) -> dict | None:
-        """Get the most recently recorded match."""
+    def get_most_recent_match(self, guild_id: int) -> dict | None:
+        """Get the most recently recorded match in a guild."""
         with self.connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT * FROM matches ORDER BY match_date DESC LIMIT 1")
+            cursor.execute(
+                "SELECT * FROM matches WHERE guild_id = ? ORDER BY match_date DESC, match_id DESC LIMIT 1",
+                (guild_id,),
+            )
             row = cursor.fetchone()
 
             if not row:
@@ -589,27 +608,27 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 "notes": row["notes"],
             }
 
-    def get_last_match_participant_ids(self) -> set[int]:
-        """Get Discord IDs of participants from the most recently recorded match."""
-        match = self.get_most_recent_match()
+    def get_last_match_participant_ids(self, guild_id: int) -> set[int]:
+        """Get Discord IDs of participants from the most recently recorded match in a guild."""
+        match = self.get_most_recent_match(guild_id)
         if not match:
             return set()
         team1_ids = match.get("team1_players", [])
         team2_ids = match.get("team2_players", [])
         return set(team1_ids + team2_ids)
 
-    def get_matches_without_enrichment(self, limit: int = 10) -> list[dict]:
-        """Get matches that don't have Valve enrichment data yet."""
+    def get_matches_without_enrichment(self, guild_id: int, limit: int = 10) -> list[dict]:
+        """Get matches that don't have Valve enrichment data yet in a guild."""
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
                 SELECT * FROM matches
-                WHERE valve_match_id IS NULL
+                WHERE guild_id = ? AND valve_match_id IS NULL
                 ORDER BY match_date DESC
                 LIMIT ?
                 """,
-                (limit,),
+                (guild_id, limit),
             )
             rows = cursor.fetchall()
             return [
@@ -863,9 +882,9 @@ class MatchRepository(BaseRepository, IMatchRepository):
             rows = cursor.fetchall()
             return [dict(row) for row in rows]
 
-    def get_player_hero_stats(self, discord_id: int) -> dict:
+    def get_player_hero_stats(self, discord_id: int, guild_id: int) -> dict:
         """
-        Get hero statistics for a player from enriched matches.
+        Get hero statistics for a player from enriched matches in a guild.
 
         Returns:
             Dict with:
@@ -881,11 +900,11 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 SELECT mp.hero_id
                 FROM match_participants mp
                 JOIN matches m ON mp.match_id = m.match_id
-                WHERE mp.discord_id = ? AND mp.hero_id IS NOT NULL AND mp.hero_id > 0
+                WHERE mp.discord_id = ? AND mp.guild_id = ? AND mp.hero_id IS NOT NULL AND mp.hero_id > 0
                 ORDER BY m.match_date DESC
                 LIMIT 1
                 """,
-                (discord_id,),
+                (discord_id, guild_id),
             )
             row = cursor.fetchone()
             last_hero_id = row["hero_id"] if row else None
@@ -895,12 +914,12 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 """
                 SELECT mp.hero_id, COUNT(*) as games, SUM(CASE WHEN mp.won THEN 1 ELSE 0 END) as wins
                 FROM match_participants mp
-                WHERE mp.discord_id = ? AND mp.hero_id IS NOT NULL AND mp.hero_id > 0
+                WHERE mp.discord_id = ? AND mp.guild_id = ? AND mp.hero_id IS NOT NULL AND mp.hero_id > 0
                 GROUP BY mp.hero_id
                 ORDER BY games DESC
                 LIMIT 5
                 """,
-                (discord_id,),
+                (discord_id, guild_id),
             )
             rows = cursor.fetchall()
             hero_counts = [(row["hero_id"], row["games"], row["wins"]) for row in rows]
@@ -1124,8 +1143,9 @@ class MatchRepository(BaseRepository, IMatchRepository):
 
             return len(match_ids)
 
-    def get_biggest_upsets(self, limit: int = 5) -> list[dict]:
+    def get_biggest_upsets(self, guild_id: int | None, limit: int = 5) -> list[dict]:
         """Get matches where the underdog won, sorted by upset magnitude."""
+        normalized_guild_id = guild_id if guild_id is not None else 0
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -1141,7 +1161,8 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     m.team2_players
                 FROM match_predictions mp
                 JOIN matches m ON m.match_id = mp.match_id
-                WHERE m.winning_team IS NOT NULL
+                WHERE m.guild_id = ?
+                  AND m.winning_team IS NOT NULL
                   AND (
                     (m.winning_team = 1 AND mp.expected_radiant_win_prob < 0.5)
                     OR (m.winning_team = 2 AND mp.expected_radiant_win_prob > 0.5)
@@ -1153,7 +1174,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     END ASC
                 LIMIT ?
             """,
-                (limit,),
+                (normalized_guild_id, limit),
             )
             rows = cursor.fetchall()
             results = []
@@ -1174,8 +1195,9 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 })
             return results
 
-    def get_player_performance_stats(self) -> list[dict]:
+    def get_player_performance_stats(self, guild_id: int | None) -> list[dict]:
         """Get player expected vs actual win stats from rating history."""
+        normalized_guild_id = guild_id if guild_id is not None else 0
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -1186,11 +1208,12 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     SUM(CASE WHEN won = 1 THEN 1 ELSE 0 END) as actual_wins,
                     SUM(expected_team_win_prob) as expected_wins
                 FROM rating_history
-                WHERE expected_team_win_prob IS NOT NULL
+                WHERE guild_id = ? AND expected_team_win_prob IS NOT NULL
                 GROUP BY discord_id
                 HAVING COUNT(*) >= 5
                 ORDER BY (SUM(CASE WHEN won = 1 THEN 1 ELSE 0 END) - SUM(expected_team_win_prob)) DESC
-            """
+            """,
+                (normalized_guild_id,),
             )
             rows = cursor.fetchall()
             return [
@@ -1243,9 +1266,9 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 for row in rows
             ]
 
-    def get_player_lobby_type_stats(self, discord_id: int) -> list[dict]:
+    def get_player_lobby_type_stats(self, discord_id: int, guild_id: int) -> list[dict]:
         """
-        Get individual player's rating swing statistics by lobby type.
+        Get individual player's rating swing statistics by lobby type in a guild.
 
         Same return format as get_lobby_type_stats but filtered to one player.
         """
@@ -1261,10 +1284,10 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     AVG(rh.expected_team_win_prob) as expected_win_rate
                 FROM rating_history rh
                 JOIN matches m ON rh.match_id = m.match_id
-                WHERE rh.rating_before IS NOT NULL AND rh.discord_id = ?
+                WHERE rh.rating_before IS NOT NULL AND rh.discord_id = ? AND rh.guild_id = ?
                 GROUP BY m.lobby_type
                 """,
-                (discord_id,),
+                (discord_id, guild_id),
             )
             rows = cursor.fetchall()
             return [
@@ -1278,12 +1301,13 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 for row in rows
             ]
 
-    def get_player_hero_stats(self, discord_id: int, limit: int = 10) -> list[dict]:
+    def get_player_hero_stats_detailed(self, discord_id: int, guild_id: int, limit: int = 10) -> list[dict]:
         """
-        Get a player's recent hero performance from enriched matches.
+        Get a player's recent hero performance from enriched matches in a guild.
 
         Args:
             discord_id: Player's Discord ID
+            guild_id: Guild ID
             limit: Maximum number of hero performances to return
 
         Returns:
@@ -1306,12 +1330,12 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     AVG(mp.hero_damage) as avg_damage,
                     MAX(mp.match_id) as last_match_id
                 FROM match_participants mp
-                WHERE mp.discord_id = ? AND mp.hero_id IS NOT NULL
+                WHERE mp.discord_id = ? AND mp.guild_id = ? AND mp.hero_id IS NOT NULL
                 GROUP BY mp.hero_id
                 ORDER BY last_match_id DESC
                 LIMIT ?
                 """,
-                (discord_id, limit),
+                (discord_id, guild_id, limit),
             )
             rows = cursor.fetchall()
             return [
@@ -1329,9 +1353,9 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 for row in rows
             ]
 
-    def get_player_hero_role_breakdown(self, discord_id: int) -> dict:
+    def get_player_hero_role_breakdown(self, discord_id: int, guild_id: int) -> dict:
         """
-        Get breakdown of core vs support heroes played by a player.
+        Get breakdown of core vs support heroes played by a player in a guild.
 
         Returns:
             Dict with total_games, core_games, support_games based on hero_id classification.
@@ -1342,17 +1366,17 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 """
                 SELECT hero_id, COUNT(*) as games
                 FROM match_participants
-                WHERE discord_id = ? AND hero_id IS NOT NULL
+                WHERE discord_id = ? AND guild_id = ? AND hero_id IS NOT NULL
                 GROUP BY hero_id
                 """,
-                (discord_id,),
+                (discord_id, guild_id),
             )
             rows = cursor.fetchall()
             return [{"hero_id": row["hero_id"], "games": row["games"]} for row in rows]
 
-    def get_player_fantasy_stats(self, discord_id: int) -> dict:
+    def get_player_fantasy_stats(self, discord_id: int, guild_id: int) -> dict:
         """
-        Get fantasy point statistics for a player from enriched matches.
+        Get fantasy point statistics for a player from enriched matches in a guild.
 
         Returns:
             Dict with:
@@ -1375,9 +1399,9 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     AVG(fantasy_points) as avg_fp,
                     MAX(fantasy_points) as best_fp
                 FROM match_participants
-                WHERE discord_id = ? AND fantasy_points IS NOT NULL
+                WHERE discord_id = ? AND guild_id = ? AND fantasy_points IS NOT NULL
                 """,
-                (discord_id,),
+                (discord_id, guild_id),
             )
             row = cursor.fetchone()
 
@@ -1396,10 +1420,10 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 """
                 SELECT match_id
                 FROM match_participants
-                WHERE discord_id = ? AND fantasy_points = ?
+                WHERE discord_id = ? AND guild_id = ? AND fantasy_points = ?
                 LIMIT 1
                 """,
-                (discord_id, row["best_fp"]),
+                (discord_id, guild_id, row["best_fp"]),
             )
             best_row = cursor.fetchone()
             best_match_id = best_row["match_id"] if best_row else None
@@ -1410,11 +1434,11 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 SELECT mp.match_id, mp.fantasy_points, mp.won, mp.hero_id
                 FROM match_participants mp
                 JOIN matches m ON mp.match_id = m.match_id
-                WHERE mp.discord_id = ? AND mp.fantasy_points IS NOT NULL
+                WHERE mp.discord_id = ? AND mp.guild_id = ? AND mp.fantasy_points IS NOT NULL
                 ORDER BY m.match_date DESC
                 LIMIT 10
                 """,
-                (discord_id,),
+                (discord_id, guild_id),
             )
             recent = [
                 {
@@ -1574,12 +1598,13 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 for row in rows
             ]
 
-    def get_player_openskill_history(self, discord_id: int, limit: int = 10) -> list[dict]:
+    def get_player_openskill_history(self, discord_id: int, guild_id: int, limit: int = 10) -> list[dict]:
         """
-        Get a player's recent OpenSkill rating changes.
+        Get a player's recent OpenSkill rating changes in a guild.
 
         Args:
             discord_id: Player's Discord ID
+            guild_id: Guild ID
             limit: Maximum number of history entries to return
 
         Returns:
@@ -1594,13 +1619,13 @@ class MatchRepository(BaseRepository, IMatchRepository):
                        rh.fantasy_weight, rh.won, rh.match_id, m.match_date
                 FROM rating_history rh
                 JOIN matches m ON rh.match_id = m.match_id
-                WHERE rh.discord_id = ?
+                WHERE rh.discord_id = ? AND rh.guild_id = ?
                   AND rh.os_mu_before IS NOT NULL
                   AND rh.os_mu_after IS NOT NULL
                 ORDER BY m.match_date DESC
                 LIMIT ?
                 """,
-                (discord_id, limit),
+                (discord_id, guild_id, limit),
             )
             rows = cursor.fetchall()
             return [
@@ -1851,17 +1876,21 @@ class MatchRepository(BaseRepository, IMatchRepository):
     # Hero Stats Methods for Profile Heroes Tab
     # -------------------------------------------------------------------------
 
-    def get_player_hero_detailed_stats(self, discord_id: int, limit: int = 20) -> list[dict]:
+    def get_player_hero_detailed_stats(
+        self, discord_id: int, guild_id: int | None = None, limit: int = 20
+    ) -> list[dict]:
         """
         Get comprehensive per-hero stats from enriched matches.
 
         Args:
             discord_id: Player's Discord ID
+            guild_id: Guild ID to filter by (None normalizes to 0)
             limit: Maximum number of heroes to return
 
         Returns:
             List of dicts with hero_id, games, wins, avg stats, ordered by games desc
         """
+        normalized_guild_id = guild_id if guild_id is not None else 0
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -1881,12 +1910,12 @@ class MatchRepository(BaseRepository, IMatchRepository):
                        SUM(COALESCE(obs_placed, 0)) as total_obs,
                        SUM(COALESCE(sen_placed, 0)) as total_sens
                 FROM match_participants
-                WHERE discord_id = ? AND hero_id IS NOT NULL AND hero_id > 0
+                WHERE discord_id = ? AND guild_id = ? AND hero_id IS NOT NULL AND hero_id > 0
                 GROUP BY hero_id
                 ORDER BY games DESC
                 LIMIT ?
                 """,
-                (discord_id, limit),
+                (discord_id, normalized_guild_id, limit),
             )
             rows = cursor.fetchall()
             return [
@@ -1909,16 +1938,18 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 for row in rows
             ]
 
-    def get_player_lane_stats(self, discord_id: int) -> list[dict]:
+    def get_player_lane_stats(self, discord_id: int, guild_id: int | None = None) -> list[dict]:
         """
         Get performance by lane from enriched matches.
 
         Args:
             discord_id: Player's Discord ID
+            guild_id: Guild ID to filter by (None normalizes to 0)
 
         Returns:
             List of dicts with lane_role, games, wins, avg stats
         """
+        normalized_guild_id = guild_id if guild_id is not None else 0
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -1933,11 +1964,11 @@ class MatchRepository(BaseRepository, IMatchRepository):
                        AVG(xpm) as avg_xpm,
                        AVG(lane_efficiency) as avg_lane_eff
                 FROM match_participants
-                WHERE discord_id = ? AND lane_role IS NOT NULL
+                WHERE discord_id = ? AND guild_id = ? AND lane_role IS NOT NULL
                 GROUP BY lane_role
                 ORDER BY games DESC
                 """,
-                (discord_id,),
+                (discord_id, normalized_guild_id),
             )
             rows = cursor.fetchall()
             return [
@@ -1955,16 +1986,20 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 for row in rows
             ]
 
-    def get_player_ward_stats_by_lane(self, discord_id: int) -> list[dict]:
+    def get_player_ward_stats_by_lane(
+        self, discord_id: int, guild_id: int | None = None
+    ) -> list[dict]:
         """
         Get ward stats by lane from enriched matches.
 
         Args:
             discord_id: Player's Discord ID
+            guild_id: Guild ID to filter by (None normalizes to 0)
 
         Returns:
             List of dicts with lane_role, games, total/avg obs/sens
         """
+        normalized_guild_id = guild_id if guild_id is not None else 0
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -1976,12 +2011,12 @@ class MatchRepository(BaseRepository, IMatchRepository):
                        AVG(COALESCE(obs_placed, 0)) as avg_obs,
                        AVG(COALESCE(sen_placed, 0)) as avg_sens
                 FROM match_participants
-                WHERE discord_id = ?
+                WHERE discord_id = ? AND guild_id = ?
                   AND (obs_placed IS NOT NULL OR sen_placed IS NOT NULL)
                 GROUP BY lane_role
                 ORDER BY lane_role
                 """,
-                (discord_id,),
+                (discord_id, normalized_guild_id),
             )
             rows = cursor.fetchall()
             return [
@@ -1996,16 +2031,20 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 for row in rows
             ]
 
-    def get_player_hero_lane_performance(self, discord_id: int) -> list[dict]:
+    def get_player_hero_lane_performance(
+        self, discord_id: int, guild_id: int | None = None
+    ) -> list[dict]:
         """
         Get per-hero lane performance from enriched matches.
 
         Args:
             discord_id: Player's Discord ID
+            guild_id: Guild ID to filter by (None normalizes to 0)
 
         Returns:
             List of dicts with hero_id, lane_role, games, wins, avg stats
         """
+        normalized_guild_id = guild_id if guild_id is not None else 0
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -2016,13 +2055,13 @@ class MatchRepository(BaseRepository, IMatchRepository):
                        AVG(lane_efficiency) as avg_lane_eff,
                        AVG(gpm) as avg_gpm
                 FROM match_participants
-                WHERE discord_id = ?
+                WHERE discord_id = ? AND guild_id = ?
                   AND hero_id IS NOT NULL AND hero_id > 0
                   AND lane_role IS NOT NULL
                 GROUP BY hero_id, lane_role
                 ORDER BY hero_id, games DESC
                 """,
-                (discord_id,),
+                (discord_id, normalized_guild_id),
             )
             rows = cursor.fetchall()
             return [
@@ -2038,18 +2077,20 @@ class MatchRepository(BaseRepository, IMatchRepository):
             ]
 
     def get_player_hero_vs_opponent_heroes(
-        self, discord_id: int, min_games: int = 2
+        self, discord_id: int, guild_id: int | None = None, min_games: int = 2
     ) -> list[dict]:
         """
         Get hero vs opponent hero matchups from enriched matches.
 
         Args:
             discord_id: Player's Discord ID
+            guild_id: Guild ID to filter by (None normalizes to 0)
             min_games: Minimum games for a matchup to be included
 
         Returns:
             List of dicts with my_hero, opponent_hero, games, wins
         """
+        normalized_guild_id = guild_id if guild_id is not None else 0
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -2061,7 +2102,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 FROM match_participants mp
                 JOIN match_participants opp ON mp.match_id = opp.match_id
                      AND mp.team_number != opp.team_number
-                WHERE mp.discord_id = ?
+                WHERE mp.discord_id = ? AND mp.guild_id = ?
                   AND mp.hero_id IS NOT NULL AND mp.hero_id > 0
                   AND opp.hero_id IS NOT NULL AND opp.hero_id > 0
                 GROUP BY mp.hero_id, opp.hero_id
@@ -2069,7 +2110,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 ORDER BY games DESC
                 LIMIT 30
                 """,
-                (discord_id, min_games),
+                (discord_id, normalized_guild_id, min_games),
             )
             rows = cursor.fetchall()
             return [
@@ -2104,16 +2145,20 @@ class MatchRepository(BaseRepository, IMatchRepository):
             )
             return cursor.fetchone()["count"]
 
-    def get_player_overall_hero_stats(self, discord_id: int) -> dict:
+    def get_player_overall_hero_stats(
+        self, discord_id: int, guild_id: int | None = None
+    ) -> dict:
         """
         Get aggregated hero stats for a player (for tab header).
 
         Args:
             discord_id: Player's Discord ID
+            guild_id: Guild ID to filter by (None normalizes to 0)
 
         Returns:
             Dict with total_games, avg_kills, avg_deaths, avg_assists, etc.
         """
+        normalized_guild_id = guild_id if guild_id is not None else 0
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -2128,9 +2173,9 @@ class MatchRepository(BaseRepository, IMatchRepository):
                        SUM(COALESCE(obs_placed, 0)) as total_obs,
                        SUM(COALESCE(sen_placed, 0)) as total_sens
                 FROM match_participants
-                WHERE discord_id = ? AND hero_id IS NOT NULL AND hero_id > 0
+                WHERE discord_id = ? AND guild_id = ? AND hero_id IS NOT NULL AND hero_id > 0
                 """,
-                (discord_id,),
+                (discord_id, normalized_guild_id),
             )
             row = cursor.fetchone()
             return {
@@ -2145,17 +2190,21 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 "total_sens": row["total_sens"] or 0,
             }
 
-    def get_player_nemesis_heroes(self, discord_id: int, min_games: int = 2) -> list[dict]:
+    def get_player_nemesis_heroes(
+        self, discord_id: int, guild_id: int | None = None, min_games: int = 2
+    ) -> list[dict]:
         """
         Get heroes on enemy team that the player loses to most often.
 
         Args:
             discord_id: Player's Discord ID
+            guild_id: Guild ID to filter by (None normalizes to 0)
             min_games: Minimum games against to be included
 
         Returns:
             List of dicts with enemy_hero, games, wins, losses, loss_rate
         """
+        normalized_guild_id = guild_id if guild_id is not None else 0
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -2167,14 +2216,14 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 FROM match_participants mp
                 JOIN match_participants opp ON mp.match_id = opp.match_id
                      AND mp.team_number != opp.team_number
-                WHERE mp.discord_id = ?
+                WHERE mp.discord_id = ? AND mp.guild_id = ?
                   AND opp.hero_id IS NOT NULL AND opp.hero_id > 0
                 GROUP BY opp.hero_id
                 HAVING COUNT(*) >= ?
                 ORDER BY (losses * 1.0 / games) DESC, games DESC
                 LIMIT 10
                 """,
-                (discord_id, min_games),
+                (discord_id, normalized_guild_id, min_games),
             )
             rows = cursor.fetchall()
             return [
@@ -2188,17 +2237,21 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 for row in rows
             ]
 
-    def get_player_easiest_opponents(self, discord_id: int, min_games: int = 2) -> list[dict]:
+    def get_player_easiest_opponents(
+        self, discord_id: int, guild_id: int | None = None, min_games: int = 2
+    ) -> list[dict]:
         """
         Get heroes on enemy team that the player wins against most often.
 
         Args:
             discord_id: Player's Discord ID
+            guild_id: Guild ID to filter by (None normalizes to 0)
             min_games: Minimum games against to be included
 
         Returns:
             List of dicts with enemy_hero, games, wins, losses, win_rate
         """
+        normalized_guild_id = guild_id if guild_id is not None else 0
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -2210,14 +2263,14 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 FROM match_participants mp
                 JOIN match_participants opp ON mp.match_id = opp.match_id
                      AND mp.team_number != opp.team_number
-                WHERE mp.discord_id = ?
+                WHERE mp.discord_id = ? AND mp.guild_id = ?
                   AND opp.hero_id IS NOT NULL AND opp.hero_id > 0
                 GROUP BY opp.hero_id
                 HAVING COUNT(*) >= ?
                 ORDER BY (wins * 1.0 / games) DESC, games DESC
                 LIMIT 10
                 """,
-                (discord_id, min_games),
+                (discord_id, normalized_guild_id, min_games),
             )
             rows = cursor.fetchall()
             return [
@@ -2231,17 +2284,21 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 for row in rows
             ]
 
-    def get_player_best_hero_synergies(self, discord_id: int, min_games: int = 2) -> list[dict]:
+    def get_player_best_hero_synergies(
+        self, discord_id: int, guild_id: int | None = None, min_games: int = 2
+    ) -> list[dict]:
         """
         Get heroes on same team (teammates' heroes) player wins with most.
 
         Args:
             discord_id: Player's Discord ID
+            guild_id: Guild ID to filter by (None normalizes to 0)
             min_games: Minimum games with to be included
 
         Returns:
             List of dicts with ally_hero, games, wins, win_rate
         """
+        normalized_guild_id = guild_id if guild_id is not None else 0
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -2253,14 +2310,14 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 JOIN match_participants ally ON mp.match_id = ally.match_id
                      AND mp.team_number = ally.team_number
                      AND mp.discord_id != ally.discord_id
-                WHERE mp.discord_id = ?
+                WHERE mp.discord_id = ? AND mp.guild_id = ?
                   AND ally.hero_id IS NOT NULL AND ally.hero_id > 0
                 GROUP BY ally.hero_id
                 HAVING COUNT(*) >= ?
                 ORDER BY (wins * 1.0 / games) DESC, games DESC
                 LIMIT 10
                 """,
-                (discord_id, min_games),
+                (discord_id, normalized_guild_id, min_games),
             )
             rows = cursor.fetchall()
             return [

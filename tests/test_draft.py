@@ -9,6 +9,8 @@ from domain.services.draft_service import DraftService
 from repositories.player_repository import PlayerRepository
 from services.draft_state_manager import DraftStateManager
 
+TEST_GUILD_ID = 12345
+
 
 class TestDraftState:
     """Tests for DraftState domain model."""
@@ -532,14 +534,15 @@ class TestCaptainEligibility:
             discord_id=1001,
             discord_username="TestPlayer",
             initial_mmr=3000,
+            guild_id=TEST_GUILD_ID,
         )
 
         # Set as captain-eligible
-        result = player_repository.set_captain_eligible(1001, True)
+        result = player_repository.set_captain_eligible(1001, TEST_GUILD_ID, True)
         assert result is True
 
         # Verify eligibility
-        assert player_repository.get_captain_eligible(1001) is True
+        assert player_repository.get_captain_eligible(1001, TEST_GUILD_ID) is True
 
     def test_set_captain_eligible_false(self, player_repository: PlayerRepository):
         """Player can be set as not captain-eligible."""
@@ -548,16 +551,17 @@ class TestCaptainEligibility:
             discord_id=1002,
             discord_username="TestPlayer2",
             initial_mmr=3000,
+            guild_id=TEST_GUILD_ID,
         )
 
         # Set as captain-eligible first
-        player_repository.set_captain_eligible(1002, True)
-        assert player_repository.get_captain_eligible(1002) is True
+        player_repository.set_captain_eligible(1002, TEST_GUILD_ID, True)
+        assert player_repository.get_captain_eligible(1002, TEST_GUILD_ID) is True
 
         # Remove eligibility
-        result = player_repository.set_captain_eligible(1002, False)
+        result = player_repository.set_captain_eligible(1002, TEST_GUILD_ID, False)
         assert result is True
-        assert player_repository.get_captain_eligible(1002) is False
+        assert player_repository.get_captain_eligible(1002, TEST_GUILD_ID) is False
 
     def test_get_captain_eligible_default_false(self, player_repository: PlayerRepository):
         """New players default to not captain-eligible."""
@@ -565,18 +569,19 @@ class TestCaptainEligibility:
             discord_id=1003,
             discord_username="TestPlayer3",
             initial_mmr=3000,
+            guild_id=TEST_GUILD_ID,
         )
 
         # Should default to False
-        assert player_repository.get_captain_eligible(1003) is False
+        assert player_repository.get_captain_eligible(1003, TEST_GUILD_ID) is False
 
     def test_get_captain_eligible_nonexistent_player(self, player_repository: PlayerRepository):
         """Non-existent player returns False for captain eligibility."""
-        assert player_repository.get_captain_eligible(9999) is False
+        assert player_repository.get_captain_eligible(9999, TEST_GUILD_ID) is False
 
     def test_set_captain_eligible_nonexistent_player(self, player_repository: PlayerRepository):
         """Setting eligibility for non-existent player returns False."""
-        result = player_repository.set_captain_eligible(9999, True)
+        result = player_repository.set_captain_eligible(9999, TEST_GUILD_ID, True)
         assert result is False
 
     def test_get_captain_eligible_players(self, player_repository: PlayerRepository):
@@ -587,22 +592,23 @@ class TestCaptainEligibility:
                 discord_id=2000 + i,
                 discord_username=f"Player{i}",
                 initial_mmr=3000 + i * 100,
+                guild_id=TEST_GUILD_ID,
             )
 
         # Set some as captain-eligible
-        player_repository.set_captain_eligible(2001, True)
-        player_repository.set_captain_eligible(2003, True)
-        player_repository.set_captain_eligible(2005, True)
+        player_repository.set_captain_eligible(2001, TEST_GUILD_ID, True)
+        player_repository.set_captain_eligible(2003, TEST_GUILD_ID, True)
+        player_repository.set_captain_eligible(2005, TEST_GUILD_ID, True)
 
         # Query subset of players
         all_ids = [2001, 2002, 2003, 2004, 2005]
-        eligible = player_repository.get_captain_eligible_players(all_ids)
+        eligible = player_repository.get_captain_eligible_players(all_ids, TEST_GUILD_ID)
 
         assert sorted(eligible) == [2001, 2003, 2005]
 
     def test_get_captain_eligible_players_empty_list(self, player_repository: PlayerRepository):
         """Empty input list returns empty result."""
-        result = player_repository.get_captain_eligible_players([])
+        result = player_repository.get_captain_eligible_players([], TEST_GUILD_ID)
         assert result == []
 
     def test_get_captain_eligible_players_none_eligible(self, player_repository: PlayerRepository):
@@ -613,9 +619,10 @@ class TestCaptainEligibility:
                 discord_id=3000 + i,
                 discord_username=f"Player{i}",
                 initial_mmr=3000,
+                guild_id=TEST_GUILD_ID,
             )
 
-        eligible = player_repository.get_captain_eligible_players([3001, 3002, 3003])
+        eligible = player_repository.get_captain_eligible_players([3001, 3002, 3003], TEST_GUILD_ID)
         assert eligible == []
 
     def test_get_captain_eligible_players_subset(self, player_repository: PlayerRepository):
@@ -626,15 +633,16 @@ class TestCaptainEligibility:
                 discord_id=4000 + i,
                 discord_username=f"Player{i}",
                 initial_mmr=3000,
+                guild_id=TEST_GUILD_ID,
             )
 
         # Set players 1, 2, 3 as eligible
-        player_repository.set_captain_eligible(4001, True)
-        player_repository.set_captain_eligible(4002, True)
-        player_repository.set_captain_eligible(4003, True)
+        player_repository.set_captain_eligible(4001, TEST_GUILD_ID, True)
+        player_repository.set_captain_eligible(4002, TEST_GUILD_ID, True)
+        player_repository.set_captain_eligible(4003, TEST_GUILD_ID, True)
 
         # Only query for 2 and 4 - should return only 2
-        eligible = player_repository.get_captain_eligible_players([4002, 4004])
+        eligible = player_repository.get_captain_eligible_players([4002, 4004], TEST_GUILD_ID)
         assert eligible == [4002]
 
 

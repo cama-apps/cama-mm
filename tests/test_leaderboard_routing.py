@@ -47,16 +47,20 @@ def mock_discord_helpers():
             yield {"defer": mock_defer, "followup": mock_followup}
 
 
-def register_players(player_repo, player_ids):
+TEST_GUILD_ID = 12345
+
+
+def register_players(player_repo, player_ids, guild_id=TEST_GUILD_ID):
     """Helper to register test players with varied balances."""
     for i, pid in enumerate(player_ids):
         player_repo.add(
             discord_id=pid,
             discord_username=f"Player{pid}",
+            guild_id=guild_id,
             initial_mmr=3000,
         )
         # Set varied balances for leaderboard testing
-        player_repo.update_balance(pid, (len(player_ids) - i) * 10)
+        player_repo.update_balance(pid, guild_id, (len(player_ids) - i) * 10)
 
 
 class MockInteraction:
@@ -461,7 +465,7 @@ class TestGamblingLeaderboardIntegration:
             loan_service=None,
         )
 
-    def _seed_test_data(self, gambling_repos, guild_id=0):
+    def _seed_test_data(self, gambling_repos, guild_id=TEST_GUILD_ID):
         """Seed test data: players, matches, and bets directly in DB."""
         player_repo = gambling_repos["player_repo"]
         match_repo = gambling_repos["match_repo"]
@@ -471,6 +475,7 @@ class TestGamblingLeaderboardIntegration:
             player_repo.add(
                 discord_id=pid,
                 discord_username=f"Player{pid}",
+                guild_id=guild_id,
                 initial_mmr=3000,
             )
 
@@ -479,11 +484,13 @@ class TestGamblingLeaderboardIntegration:
             team1_ids=[1001, 1002],
             team2_ids=[1003],
             winning_team=1,  # Radiant won
+            guild_id=guild_id,
         )
         match2_id = match_repo.record_match(
             team1_ids=[1001],
             team2_ids=[1002, 1003],
             winning_team=2,  # Dire won
+            guild_id=guild_id,
         )
 
         # Insert bets directly into database (at least 3 per player)
