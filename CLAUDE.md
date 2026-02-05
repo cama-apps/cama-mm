@@ -176,12 +176,40 @@ class MatchService:
     def __init__(self, player_repo: IPlayerRepository, match_repo: IMatchRepository, ...):
 ```
 
-### Guild-Aware Design
-All features support multi-guild operation. Guild ID is tracked in:
-- `pending_matches.guild_id`
-- `bets.guild_id`
-- `guild_config.guild_id`
-Use `guild_id=None` (normalized to 0) for DMs or tests.
+### Guild-Aware Design (Multi-Guild Isolation)
+All data is segmented by `guild_id` to support running the bot in multiple Discord servers with complete isolation. Each guild has its own players, ratings, balances, matches, and economy.
+
+**Composite Primary Keys:**
+Most tables use `(discord_id, guild_id)` as the composite primary key:
+- `players` - Player data is per-guild (same Discord user can have different ratings in different guilds)
+- `matches` - Matches belong to a specific guild
+- `bets`, `predictions`, `lobbies` - All guild-scoped
+- `rating_history`, `recalibration_state`, `bankruptcy_state`, `loan_state` - Per-guild tracking
+
+**guild_id Normalization:**
+- `guild_id=None` is normalized to `0` in all repositories via `normalize_guild_id()`
+- Use `guild_id=None` or `guild_id=0` for DMs or single-guild tests
+- Commands extract guild_id via: `guild_id = interaction.guild.id if interaction.guild else None`
+
+**Cross-Guild Exceptions:**
+These intentionally remain cross-guild:
+- `player_steam_ids` - Steam accounts are globally unique, not per-guild
+- Steam ID lookups (`get_steam_ids`, `get_discord_id_by_steam_id`) - Global for match discovery
+
+**Implementation Pattern:**
+```python
+# In commands - always extract guild_id first
+guild_id = interaction.guild.id if interaction.guild else None
+
+# Pass to all service/repository calls
+player = player_repo.get_by_id(discord_id, guild_id)
+balance = player_repo.get_balance(discord_id, guild_id)
+state = bankruptcy_service.get_state(discord_id, guild_id)
+
+# Repositories normalize None to 0
+def get_by_id(self, discord_id: int, guild_id: int) -> Player | None:
+    # guild_id is required, caller must normalize if needed
+```
 
 ### Atomic Database Operations
 Critical operations use `BEGIN IMMEDIATE` for write locks:
@@ -351,16 +379,18 @@ execute_sql_query(question) -> dict
 
 ### players
 ```sql
-discord_id INTEGER PRIMARY KEY
+discord_id INTEGER NOT NULL
+guild_id INTEGER NOT NULL DEFAULT 0
 discord_username TEXT NOT NULL
 glicko_rating REAL, glicko_rd REAL, glicko_volatility REAL
 os_mu REAL, os_sigma REAL  -- OpenSkill Plackett-Luce
 preferred_roles TEXT  -- JSON array ["1", "2"]
 jopacoin_balance INTEGER DEFAULT 3
 exclusion_count INTEGER DEFAULT 0
-steam_id INTEGER UNIQUE  -- Legacy primary steam_id (see player_steam_ids)
+steam_id INTEGER  -- Legacy primary steam_id (see player_steam_ids)
 last_wheel_spin INTEGER  -- Unix timestamp for /gamba cooldown
 lowest_balance_ever INTEGER  -- For degen scoring
+PRIMARY KEY (discord_id, guild_id)  -- Composite key for multi-guild isolation
 ```
 
 ### player_steam_ids (Multi-Steam ID Support)
@@ -377,6 +407,7 @@ UNIQUE (steam_id)  -- Steam ID can only belong to one player
 ### matches
 ```sql
 match_id INTEGER PRIMARY KEY AUTOINCREMENT
+guild_id INTEGER NOT NULL DEFAULT 0  -- Guild isolation
 team1_players TEXT, team2_players TEXT  -- JSON arrays (Radiant/Dire)
 winning_team INTEGER  -- 1=Radiant, 2=Dire
 lobby_type TEXT  -- 'shuffle' or 'draft'
