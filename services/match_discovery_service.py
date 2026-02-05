@@ -42,7 +42,7 @@ class MatchDiscoveryService:
         self.opendota_api = opendota_api or OpenDotaAPI()
         self.match_service = match_service
 
-    def discover_all_matches(self, dry_run: bool = False) -> dict:
+    def discover_all_matches(self, guild_id: int | None = None, dry_run: bool = False) -> dict:
         """
         Discover Dota 2 match IDs for all unenriched internal matches.
 
@@ -60,7 +60,8 @@ class MatchDiscoveryService:
         """
         logger.info(f"Starting match discovery (dry_run={dry_run})")
 
-        unenriched = self.match_repo.get_matches_without_enrichment(limit=1000)
+        normalized_guild = guild_id if guild_id is not None else 0
+        unenriched = self.match_repo.get_matches_without_enrichment(normalized_guild, limit=1000)
         results = {
             "total_unenriched": len(unenriched),
             "discovered": 0,

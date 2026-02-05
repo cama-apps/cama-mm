@@ -318,7 +318,7 @@ class GamblingStatsService:
             debt_depth_score = 0
 
         # 4. Bankruptcy count (0-15) - each = 5pts, max 15
-        bankruptcy_count = self.bet_repo.get_player_bankruptcy_count(discord_id)
+        bankruptcy_count = self.bet_repo.get_player_bankruptcy_count(discord_id, guild_id)
         bankruptcy_score = min(bankruptcy_count * 5, BANKRUPTCY_WEIGHT)
         if bankruptcy_count >= 3:
             flavor_texts.append(f"{bankruptcy_count} bankruptcies")
@@ -327,10 +327,7 @@ class GamblingStatsService:
 
         # 5. Bet frequency (0-10) - % of matches bet on
         matches_bet_on = len(set(b["match_id"] for b in history))
-        with self.match_repo.connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT COUNT(*) as count FROM matches WHERE winning_team IS NOT NULL")
-            total_matches = cursor.fetchone()["count"]
+        total_matches = self.bet_repo.get_total_settled_matches(guild_id)
 
         if total_matches > 0:
             frequency_rate = matches_bet_on / total_matches
@@ -420,7 +417,7 @@ class GamblingStatsService:
         # Batch fetch all data needed for degen score calculation
         bulk_leverage = self.bet_repo.get_bulk_leverage_distribution(guild_id, discord_ids)
         bulk_loss_chase = self.bet_repo.get_bulk_loss_chasing_data(guild_id, discord_ids)
-        bulk_bankruptcy = self.bet_repo.get_bulk_bankruptcy_counts(discord_ids)
+        bulk_bankruptcy = self.bet_repo.get_bulk_bankruptcy_counts(discord_ids, guild_id)
         total_matches = self.bet_repo.get_total_settled_matches(guild_id)
 
         # Batch fetch lowest balances for all players
@@ -429,9 +426,10 @@ class GamblingStatsService:
             placeholders = ",".join("?" * len(discord_ids))
             with self.player_repo.connection() as conn:
                 cursor = conn.cursor()
+                normalized_guild = guild_id if guild_id is not None else 0
                 cursor.execute(
-                    f"SELECT discord_id, lowest_balance_ever FROM players WHERE discord_id IN ({placeholders})",
-                    discord_ids,
+                    f"SELECT discord_id, lowest_balance_ever FROM players WHERE guild_id = ? AND discord_id IN ({placeholders})",
+                    [normalized_guild] + discord_ids,
                 )
                 for row in cursor.fetchall():
                     lowest_balances[row["discord_id"]] = row["lowest_balance_ever"]
@@ -443,13 +441,14 @@ class GamblingStatsService:
             placeholders = ",".join("?" * len(discord_ids))
             with self.bet_repo.connection() as conn:
                 cursor = conn.cursor()
+                normalized_guild = guild_id if guild_id is not None else 0
                 cursor.execute(
                     f"""
                     SELECT discord_id, COALESCE(negative_loans_taken, 0) as negative_loans
                     FROM loan_state
-                    WHERE discord_id IN ({placeholders})
+                    WHERE guild_id = ? AND discord_id IN ({placeholders})
                     """,
-                    discord_ids,
+                    [normalized_guild] + discord_ids,
                 )
                 for row in cursor.fetchall():
                     negative_loans_by_id[row["discord_id"]] = row["negative_loans"]
@@ -516,13 +515,16 @@ class GamblingStatsService:
 
         # Count total loans taken (server-wide aggregate stat)
         total_loans = 0
+        normalized_guild = guild_id if guild_id is not None else 0
         with self.bet_repo.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
                 SELECT COALESCE(SUM(total_loans_taken), 0) as total
                 FROM loan_state
-                """
+                WHERE guild_id = ?
+                """,
+                (normalized_guild,),
             )
             row = cursor.fetchone()
             if row:

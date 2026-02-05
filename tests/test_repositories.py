@@ -192,7 +192,7 @@ class TestMatchRepository:
 
     def test_get_lobby_type_stats_empty(self, match_repository):
         """Test lobby type stats with no data returns empty list."""
-        stats = match_repository.get_lobby_type_stats()
+        stats = match_repository.get_lobby_type_stats(TEST_GUILD_ID)
         assert stats == []
 
     def test_get_lobby_type_stats_shuffle_only(self, match_repository):
@@ -226,7 +226,7 @@ class TestMatchRepository:
             won=False,
         )
 
-        stats = match_repository.get_lobby_type_stats()
+        stats = match_repository.get_lobby_type_stats(TEST_GUILD_ID)
         assert len(stats) == 1
         assert stats[0]["lobby_type"] == "shuffle"
         assert stats[0]["games"] == 2
@@ -272,7 +272,7 @@ class TestMatchRepository:
             won=False,
         )
 
-        stats = match_repository.get_lobby_type_stats()
+        stats = match_repository.get_lobby_type_stats(TEST_GUILD_ID)
         assert len(stats) == 2
 
         shuffle_stats = next(s for s in stats if s["lobby_type"] == "shuffle")

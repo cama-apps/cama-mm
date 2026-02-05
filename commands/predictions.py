@@ -979,8 +979,9 @@ class PredictionCommands(commands.Cog):
         await safe_defer(interaction, ephemeral=True)
 
         if history:
+            guild_id = interaction.guild_id
             positions = self.prediction_service.get_user_resolved_positions(
-                interaction.user.id
+                interaction.user.id, guild_id
             )
 
             if not positions:
@@ -1028,8 +1029,9 @@ class PredictionCommands(commands.Cog):
 
             await safe_followup(interaction, embed=embed)
         else:
+            guild_id = interaction.guild_id
             positions = self.prediction_service.get_user_active_positions(
-                interaction.user.id
+                interaction.user.id, guild_id
             )
 
             if not positions:

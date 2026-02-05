@@ -52,7 +52,7 @@ class RatingComparisonService:
         self.player_repo = player_repo
         self.match_service = match_service
 
-    def analyze_rating_systems(self) -> ComparisonResult | None:
+    def analyze_rating_systems(self, guild_id: int | None = None) -> ComparisonResult | None:
         """
         Analyze Glicko-2 and OpenSkill predictions against actual match outcomes.
 
@@ -60,7 +60,7 @@ class RatingComparisonService:
             ComparisonResult with statistics for both systems, or None if insufficient data
         """
         # Get all matches with Glicko-2 predictions
-        matches = self.match_repo.get_all_matches_with_predictions()
+        matches = self.match_repo.get_all_matches_with_predictions(guild_id)
         if not matches:
             logger.warning("No matches with predictions found")
             return None
@@ -226,14 +226,14 @@ class RatingComparisonService:
         else:
             return "90-100%"
 
-    def get_comparison_summary(self) -> dict:
+    def get_comparison_summary(self, guild_id: int | None = None) -> dict:
         """
         Get a summary of rating system comparison suitable for display.
 
         Returns:
             Dict with comparison metrics and analysis
         """
-        result = self.analyze_rating_systems()
+        result = self.analyze_rating_systems(guild_id)
         if not result:
             return {
                 "error": "Insufficient data for comparison",
@@ -273,13 +273,13 @@ class RatingComparisonService:
             "match_data": result.match_data,  # For charting
         }
 
-    def get_calibration_curve_data(self) -> dict:
+    def get_calibration_curve_data(self, guild_id: int | None = None) -> dict:
         """
         Get data formatted for calibration curve plotting.
 
         Returns predicted probability bins vs actual win rates for both systems.
         """
-        result = self.analyze_rating_systems()
+        result = self.analyze_rating_systems(guild_id)
         if not result:
             return {"error": "Insufficient data"}
 

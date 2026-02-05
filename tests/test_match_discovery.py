@@ -337,10 +337,10 @@ class TestMatchRepositoryWipeMethods:
         )
 
         # Verify counts
-        assert repo.get_auto_discovered_count() == 2
+        assert repo.get_auto_discovered_count(TEST_GUILD_ID) == 2
 
         # Wipe auto-discovered
-        wiped = repo.wipe_auto_discovered_enrichments()
+        wiped = repo.wipe_auto_discovered_enrichments(TEST_GUILD_ID)
         assert wiped == 2
 
         # Verify manual one still enriched
@@ -367,7 +367,7 @@ class TestMatchRepositoryWipeMethods:
         repo = MatchRepository(temp_db_path)
 
         # Initially zero
-        assert repo.get_auto_discovered_count() == 0
+        assert repo.get_auto_discovered_count(TEST_GUILD_ID) == 0
 
         # Add an auto-discovered match
         match_id = repo.record_match([1, 2, 3, 4, 5], [6, 7, 8, 9, 10], 1, TEST_GUILD_ID)
@@ -382,7 +382,7 @@ class TestMatchRepositoryWipeMethods:
             enrichment_confidence=0.9,
         )
 
-        assert repo.get_auto_discovered_count() == 1
+        assert repo.get_auto_discovered_count(TEST_GUILD_ID) == 1
 
     def test_enrichment_source_and_confidence_stored(self, temp_db_path):
         """Test enrichment source and confidence are properly stored."""

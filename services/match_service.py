@@ -1082,7 +1082,7 @@ class MatchService:
                     f"No rating_history entry found for match {match_id}, player {discord_id}"
                 )
 
-    def backfill_openskill_ratings(self, reset_first: bool = True) -> dict:
+    def backfill_openskill_ratings(self, guild_id: int | None = None, reset_first: bool = True) -> dict:
         """
         Backfill OpenSkill ratings from ALL matches.
 
@@ -1110,7 +1110,8 @@ class MatchService:
         players_touched = set()
 
         # Get ALL matches in chronological order (not just enriched)
-        all_matches = self.match_repo.get_all_matches_chronological()
+        normalized_guild = guild_id if guild_id is not None else 0
+        all_matches = self.match_repo.get_all_matches_chronological(normalized_guild)
         total_matches = len(all_matches)
         logger.info(f"Found {total_matches} total matches to process")
 
@@ -1126,7 +1127,7 @@ class MatchService:
         # Reset all players' OpenSkill ratings if requested
         # Seed from initial_mmr (what they started with), falling back to DEFAULT_MU
         if reset_first:
-            all_players = self.player_repo.get_all()
+            all_players = self.player_repo.get_all(normalized_guild)
             reset_updates = []
             for p in all_players:
                 if p.discord_id is None:
@@ -1139,7 +1140,7 @@ class MatchService:
                     seed_mu = self.openskill_system.DEFAULT_MU
                 reset_updates.append((p.discord_id, seed_mu, self.openskill_system.DEFAULT_SIGMA))
             if reset_updates:
-                self.player_repo.update_openskill_ratings_bulk(reset_updates)
+                self.player_repo.update_openskill_ratings_bulk(reset_updates, normalized_guild)
                 logger.info(f"Reset {len(reset_updates)} players to seeded OpenSkill ratings")
 
         # Process each match in chronological order

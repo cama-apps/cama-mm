@@ -1292,7 +1292,7 @@ class InfoCommands(commands.Cog):
             embed.add_field(name="⚖️ Rating Stability", value=stability_text, inline=False)
 
             # Lobby type impact
-            lobby_stats = self.match_repo.get_lobby_type_stats() if self.match_repo else []
+            lobby_stats = self.match_repo.get_lobby_type_stats(guild_id) if self.match_repo else []
             if lobby_stats:
                 lobby_lines = []
                 shuffle_stats = next((s for s in lobby_stats if s["lobby_type"] == "shuffle"), None)
@@ -1486,7 +1486,7 @@ class InfoCommands(commands.Cog):
 
         # Get detailed rating history with predictions
         history = (
-            self.match_repo.get_player_rating_history_detailed(user.id, limit=50)
+            self.match_repo.get_player_rating_history_detailed(user.id, guild_id, limit=50)
             if self.match_repo
             else []
         )
@@ -1672,7 +1672,7 @@ class InfoCommands(commands.Cog):
             )
 
         # Lobby type breakdown for this player
-        player_lobby_stats = self.match_repo.get_player_lobby_type_stats(user.id) if self.match_repo else []
+        player_lobby_stats = self.match_repo.get_player_lobby_type_stats(user.id, guild_id) if self.match_repo else []
         if player_lobby_stats and len(player_lobby_stats) > 1:
             lobby_lines = []
             shuffle_stats = next((s for s in player_lobby_stats if s["lobby_type"] == "shuffle"), None)
@@ -1754,10 +1754,10 @@ class InfoCommands(commands.Cog):
             embed.add_field(name="⚡ Highlights", value="\n".join(highlights), inline=False)
 
         # Hero performance from enriched matches
-        hero_stats = self.match_repo.get_player_hero_stats(user.id, limit=8) if self.match_repo else []
+        hero_stats = self.match_repo.get_player_hero_stats_detailed(user.id, guild_id, limit=8) if self.match_repo else []
         if hero_stats:
             # Calculate role alignment
-            hero_breakdown = self.match_repo.get_player_hero_role_breakdown(user.id) if self.match_repo else []
+            hero_breakdown = self.match_repo.get_player_hero_role_breakdown(user.id, guild_id) if self.match_repo else []
             total_hero_games = sum(h["games"] for h in hero_breakdown)
             core_games = sum(h["games"] for h in hero_breakdown if classify_hero_role(h["hero_id"]) == "Core")
             support_games = total_hero_games - core_games
@@ -1795,7 +1795,7 @@ class InfoCommands(commands.Cog):
             embed.add_field(name="🦸 Recent Heroes", value=hero_text, inline=False)
 
         # Fantasy stats from enriched matches
-        fantasy_stats = self.match_repo.get_player_fantasy_stats(user.id) if self.match_repo else None
+        fantasy_stats = self.match_repo.get_player_fantasy_stats(user.id, guild_id) if self.match_repo else None
         if fantasy_stats and fantasy_stats["total_games"] > 0:
             fp_text = (
                 f"**Avg FP:** {fantasy_stats['avg_fp']:.1f} | "

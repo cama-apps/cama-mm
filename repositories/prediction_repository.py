@@ -419,8 +419,9 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
             row = cursor.fetchone()
             return dict(row) if row else None
 
-    def get_user_active_positions(self, discord_id: int) -> list[dict]:
+    def get_user_active_positions(self, discord_id: int, guild_id: int | None = None) -> list[dict]:
         """Get all active (unresolved) positions for a user."""
+        normalized_guild = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -434,16 +435,17 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                     SUM(pb.amount) as total_amount
                 FROM prediction_bets pb
                 JOIN predictions p ON pb.prediction_id = p.prediction_id
-                WHERE pb.discord_id = ? AND p.status IN ('open', 'locked')
+                WHERE pb.discord_id = ? AND p.guild_id = ? AND p.status IN ('open', 'locked')
                 GROUP BY p.prediction_id, pb.position
                 ORDER BY p.closes_at ASC
                 """,
-                (discord_id,),
+                (discord_id, normalized_guild),
             )
             return [dict(row) for row in cursor.fetchall()]
 
-    def get_user_resolved_positions(self, discord_id: int, limit: int = 20) -> list[dict]:
+    def get_user_resolved_positions(self, discord_id: int, guild_id: int | None = None, limit: int = 20) -> list[dict]:
         """Get user's resolved positions with payout info."""
+        normalized_guild = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -458,12 +460,12 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                     MAX(pb.payout) as payout
                 FROM prediction_bets pb
                 JOIN predictions p ON pb.prediction_id = p.prediction_id
-                WHERE pb.discord_id = ? AND p.status = 'resolved'
+                WHERE pb.discord_id = ? AND p.guild_id = ? AND p.status = 'resolved'
                 GROUP BY p.prediction_id, pb.position
                 ORDER BY p.resolved_at DESC
                 LIMIT ?
                 """,
-                (discord_id, limit),
+                (discord_id, normalized_guild, limit),
             )
             return [dict(row) for row in cursor.fetchall()]
 
@@ -535,6 +537,14 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
         with self.atomic_transaction() as conn:
             cursor = conn.cursor()
 
+            # Get guild_id from prediction for player balance operations
+            cursor.execute(
+                "SELECT guild_id FROM predictions WHERE prediction_id = ?",
+                (prediction_id,),
+            )
+            pred_row = cursor.fetchone()
+            pred_guild_id = pred_row["guild_id"] if pred_row else 0
+
             # Get all bets grouped by user and position
             cursor.execute(
                 """
@@ -604,9 +614,9 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                     UPDATE players
                     SET jopacoin_balance = COALESCE(jopacoin_balance, 0) + ?,
                         updated_at = CURRENT_TIMESTAMP
-                    WHERE discord_id = ?
+                    WHERE discord_id = ? AND guild_id = ?
                     """,
-                    (delta, discord_id),
+                    (delta, discord_id, pred_guild_id),
                 )
 
             # Update payout on winning bets
@@ -632,6 +642,14 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
         with self.atomic_transaction() as conn:
             cursor = conn.cursor()
 
+            # Get guild_id from prediction for player balance operations
+            cursor.execute(
+                "SELECT guild_id FROM predictions WHERE prediction_id = ?",
+                (prediction_id,),
+            )
+            pred_row = cursor.fetchone()
+            pred_guild_id = pred_row["guild_id"] if pred_row else 0
+
             # Get all bets grouped by user
             cursor.execute(
                 """
@@ -656,9 +674,9 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                     UPDATE players
                     SET jopacoin_balance = COALESCE(jopacoin_balance, 0) + ?,
                         updated_at = CURRENT_TIMESTAMP
-                    WHERE discord_id = ?
+                    WHERE discord_id = ? AND guild_id = ?
                     """,
-                    (bet["total_amount"], bet["discord_id"]),
+                    (bet["total_amount"], bet["discord_id"], pred_guild_id),
                 )
                 total_refunded += bet["total_amount"]
                 refunded.append({
@@ -668,12 +686,13 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
 
             return {"refunded": refunded, "total_refunded": total_refunded}
 
-    def get_user_prediction_stats(self, discord_id: int) -> dict | None:
+    def get_user_prediction_stats(self, discord_id: int, guild_id: int | None = None) -> dict | None:
         """
         Get prediction betting stats for a user.
 
         Returns dict with total_bets, wins, losses, total_wagered, net_pnl, etc.
         """
+        normalized_guild = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -689,9 +708,9 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                     MAX(CASE WHEN payout IS NULL AND p.status = 'resolved' THEN amount ELSE 0 END) as worst_loss
                 FROM prediction_bets pb
                 JOIN predictions p ON pb.prediction_id = p.prediction_id
-                WHERE pb.discord_id = ?
+                WHERE pb.discord_id = ? AND p.guild_id = ?
                 """,
-                (discord_id,),
+                (discord_id, normalized_guild),
             )
             row = cursor.fetchone()
             if not row or row["total_bets"] == 0:

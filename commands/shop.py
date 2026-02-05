@@ -298,7 +298,7 @@ class ShopCommands(commands.Cog):
                     stats["net_pnl"] = gamba_stats.net_pnl
                     stats["degen_score"] = gamba_stats.degen_score.total if gamba_stats.degen_score else None
                 stats["bankruptcies"] = self.gambling_stats_service.bet_repo.get_player_bankruptcy_count(
-                    discord_id
+                    discord_id, guild_id
                 )
             except Exception:
                 pass

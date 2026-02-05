@@ -471,9 +471,9 @@ class BetRepository(BaseRepository, IBetRepository):
                     """
                     UPDATE players
                     SET jopacoin_balance = COALESCE(jopacoin_balance, 0) + ?, updated_at = CURRENT_TIMESTAMP
-                    WHERE discord_id = ?
+                    WHERE discord_id = ? AND guild_id = ?
                     """,
-                    [(delta, discord_id) for discord_id, delta in balance_deltas.items()],
+                    [(delta, discord_id, normalized_guild) for discord_id, delta in balance_deltas.items()],
                 )
 
             # Store payout for winning bets
@@ -667,9 +667,9 @@ class BetRepository(BaseRepository, IBetRepository):
                 """
                 UPDATE players
                 SET jopacoin_balance = COALESCE(jopacoin_balance, 0) + ?, updated_at = CURRENT_TIMESTAMP
-                WHERE discord_id = ?
+                WHERE discord_id = ? AND guild_id = ?
                 """,
-                [(delta, discord_id) for discord_id, delta in refund_deltas.items()],
+                [(delta, discord_id, normalized_guild) for discord_id, delta in refund_deltas.items()],
             )
 
             cursor.execute(
@@ -1008,7 +1008,7 @@ class BetRepository(BaseRepository, IBetRepository):
 
         return result
 
-    def get_bulk_bankruptcy_counts(self, discord_ids: list[int]) -> dict[int, int]:
+    def get_bulk_bankruptcy_counts(self, discord_ids: list[int], guild_id: int | None = None) -> dict[int, int]:
         """
         Get bankruptcy counts for multiple players in a single query.
 
@@ -1017,6 +1017,7 @@ class BetRepository(BaseRepository, IBetRepository):
         if not discord_ids:
             return {}
 
+        normalized_guild = self.normalize_guild_id(guild_id)
         placeholders = ",".join("?" * len(discord_ids))
 
         with self.connection() as conn:
@@ -1025,9 +1026,9 @@ class BetRepository(BaseRepository, IBetRepository):
                 f"""
                 SELECT discord_id, COALESCE(bankruptcy_count, 0) as count
                 FROM bankruptcy_state
-                WHERE discord_id IN ({placeholders})
+                WHERE guild_id = ? AND discord_id IN ({placeholders})
                 """,
-                discord_ids,
+                [normalized_guild] + discord_ids,
             )
             rows = cursor.fetchall()
 
@@ -1042,12 +1043,14 @@ class BetRepository(BaseRepository, IBetRepository):
         Get total count of settled matches (for degen score frequency calculation).
 
         Args:
-            guild_id: Optional guild filter. If None, counts all matches.
+            guild_id: Guild filter for match count.
         """
+        normalized_guild = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT COUNT(*) as count FROM matches WHERE winning_team IS NOT NULL"
+                "SELECT COUNT(*) as count FROM matches WHERE guild_id = ? AND winning_team IS NOT NULL",
+                (normalized_guild,),
             )
             row = cursor.fetchone()
             return row["count"] if row else 0

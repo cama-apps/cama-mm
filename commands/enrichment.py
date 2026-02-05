@@ -640,7 +640,8 @@ class EnrichmentCommands(commands.Cog):
             ephemeral=True,
         )
 
-        results = discovery_service.discover_all_matches(dry_run=dry_run)
+        guild_id = interaction.guild_id
+        results = discovery_service.discover_all_matches(guild_id=guild_id, dry_run=dry_run)
 
         # Build summary
         lines = [
@@ -789,7 +790,8 @@ class EnrichmentCommands(commands.Cog):
         if not await safe_defer(interaction, ephemeral=True):
             return
 
-        enriched_count = self.match_repo.get_enriched_count()
+        guild_id = interaction.guild_id
+        enriched_count = self.match_repo.get_enriched_count(guild_id)
 
         if enriched_count == 0:
             await safe_followup(
@@ -799,7 +801,7 @@ class EnrichmentCommands(commands.Cog):
             )
             return
 
-        wiped = self.match_repo.wipe_all_enrichments()
+        wiped = self.match_repo.wipe_all_enrichments(guild_id)
 
         await safe_followup(
             interaction,

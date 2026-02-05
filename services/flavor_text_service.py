@@ -248,7 +248,7 @@ class PlayerContext:
                         bet_win_rate = stats.win_rate * 100
                 # Get bankruptcy count from bet_repo
                 bankruptcy_count = gambling_stats_service.bet_repo.get_player_bankruptcy_count(
-                    discord_id
+                    discord_id, guild_id
                 )
             except Exception:
                 pass
@@ -348,6 +348,7 @@ class FlavorTextService:
             self.bankruptcy_service,
             self.loan_service,
             self.gambling_stats_service,
+            guild_id=guild_id,
         )
 
         if not context:

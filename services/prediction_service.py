@@ -202,13 +202,13 @@ class PredictionService:
         """Get user's position on a prediction."""
         return self.prediction_repo.get_user_bet_on_prediction(prediction_id, discord_id)
 
-    def get_user_active_positions(self, discord_id: int) -> list[dict]:
+    def get_user_active_positions(self, discord_id: int, guild_id: int | None = None) -> list[dict]:
         """Get all active positions for a user."""
-        return self.prediction_repo.get_user_active_positions(discord_id)
+        return self.prediction_repo.get_user_active_positions(discord_id, guild_id)
 
-    def get_user_resolved_positions(self, discord_id: int, limit: int = 20) -> list[dict]:
+    def get_user_resolved_positions(self, discord_id: int, guild_id: int | None = None, limit: int = 20) -> list[dict]:
         """Get user's resolved positions with payout info."""
-        return self.prediction_repo.get_user_resolved_positions(discord_id, limit)
+        return self.prediction_repo.get_user_resolved_positions(discord_id, guild_id, limit)
 
     def add_resolution_vote(
         self,

@@ -32,7 +32,7 @@ class TestGetMultiPlayerHeroStats:
         player_repository.add(discord_id=100, discord_username="Alice", guild_id=TEST_GUILD_ID)
         player_repository.add(discord_id=200, discord_username="Bob", guild_id=TEST_GUILD_ID)
         match_repository.record_match(team1_ids=[100], team2_ids=[200], winning_team=1, guild_id=TEST_GUILD_ID)
-        result = match_repository.get_multi_player_hero_stats([100, 200])
+        result = match_repository.get_multi_player_hero_stats([100, 200], TEST_GUILD_ID)
         assert result == []
 
     def test_single_player_with_data(self, match_repository, player_repository):
@@ -45,7 +45,7 @@ class TestGetMultiPlayerHeroStats:
             hero_damage=20000, tower_damage=5000, last_hits=200,
             denies=10, net_worth=20000,
         )
-        result = match_repository.get_multi_player_hero_stats([100])
+        result = match_repository.get_multi_player_hero_stats([100], TEST_GUILD_ID)
         assert len(result) == 1
         assert result[0]["discord_id"] == 100
         assert result[0]["hero_id"] == 1
@@ -68,7 +68,7 @@ class TestGetMultiPlayerHeroStats:
             hero_damage=15000, tower_damage=2000, last_hits=100,
             denies=5, net_worth=12000,
         )
-        result = match_repository.get_multi_player_hero_stats([100, 200])
+        result = match_repository.get_multi_player_hero_stats([100, 200], TEST_GUILD_ID)
         assert len(result) == 2
         discord_ids = {r["discord_id"] for r in result}
         assert discord_ids == {100, 200}
@@ -102,7 +102,7 @@ class TestGetMultiPlayerHeroStats:
             denies=15, net_worth=25000,
         )
 
-        result = match_repository.get_multi_player_hero_stats([100])
+        result = match_repository.get_multi_player_hero_stats([100], TEST_GUILD_ID)
         assert len(result) == 1
         assert result[0]["games"] == 3
         assert result[0]["wins"] == 2
@@ -110,7 +110,7 @@ class TestGetMultiPlayerHeroStats:
 
 class TestGetPlayersWithEnrichedData:
     def test_empty_db(self, match_repository):
-        result = match_repository.get_players_with_enriched_data()
+        result = match_repository.get_players_with_enriched_data(TEST_GUILD_ID)
         assert result == []
 
     def test_returns_sorted_by_games(self, match_repository, player_repository):
@@ -136,7 +136,7 @@ class TestGetPlayersWithEnrichedData:
             denies=5, net_worth=12000,
         )
 
-        result = match_repository.get_players_with_enriched_data()
+        result = match_repository.get_players_with_enriched_data(TEST_GUILD_ID)
         assert len(result) == 2
         assert result[0]["discord_id"] == 100  # More games first
         assert result[0]["total_games"] == 2
@@ -150,7 +150,7 @@ class TestGetPlayersWithEnrichedData:
         # Match with no enrichment
         match_repository.record_match(team1_ids=[100], team2_ids=[200], winning_team=1, guild_id=TEST_GUILD_ID)
 
-        result = match_repository.get_players_with_enriched_data()
+        result = match_repository.get_players_with_enriched_data(TEST_GUILD_ID)
         assert result == []
 
 
@@ -313,7 +313,7 @@ class TestHeroGridIntegration:
         )
 
         # Query
-        grid_data = match_repo.get_multi_player_hero_stats([100, 200])
+        grid_data = match_repo.get_multi_player_hero_stats([100, 200], TEST_GUILD_ID)
         assert len(grid_data) == 2
 
         # Build player names

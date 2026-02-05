@@ -99,7 +99,7 @@ class RatingAnalysisCommands(commands.Cog):
         try:
             result = await loop.run_in_executor(
                 None,
-                lambda: self.match_service.backfill_openskill_ratings(reset_first=True),
+                lambda: self.match_service.backfill_openskill_ratings(guild_id=interaction.guild_id, reset_first=True),
             )
         except Exception as e:
             logger.error(f"Backfill error: {e}")
@@ -146,8 +146,9 @@ class RatingAnalysisCommands(commands.Cog):
         # Run in executor
         loop = asyncio.get_event_loop()
         try:
+            guild_id = interaction.guild_id
             comparison_data = await loop.run_in_executor(
-                None, comparison_service.get_comparison_summary
+                None, lambda: comparison_service.get_comparison_summary(guild_id)
             )
         except Exception as e:
             logger.error(f"Comparison error: {e}")
@@ -253,8 +254,9 @@ class RatingAnalysisCommands(commands.Cog):
 
         loop = asyncio.get_event_loop()
         try:
+            guild_id = interaction.guild_id
             curve_data = await loop.run_in_executor(
-                None, comparison_service.get_calibration_curve_data
+                None, lambda: comparison_service.get_calibration_curve_data(guild_id)
             )
         except Exception as e:
             logger.error(f"Calibration curve error: {e}")
@@ -305,10 +307,11 @@ class RatingAnalysisCommands(commands.Cog):
             self.match_repo, self.player_repo, self.match_service
         )
 
+        guild_id = interaction.guild_id
         loop = asyncio.get_event_loop()
         try:
             comparison_data = await loop.run_in_executor(
-                None, comparison_service.get_comparison_summary
+                None, lambda: comparison_service.get_comparison_summary(guild_id)
             )
         except Exception as e:
             logger.error(f"Trend analysis error: {e}")

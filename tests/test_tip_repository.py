@@ -69,7 +69,7 @@ class TestTipRepository:
         )
 
         # Retrieve the tip
-        tips = tip_repo.get_tips_by_sender(1)
+        tips = tip_repo.get_tips_by_sender(1, guild_id=99999)
         assert len(tips) == 1
         tip = tips[0]
         assert tip["sender_id"] == 1

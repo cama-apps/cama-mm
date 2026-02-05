@@ -543,7 +543,7 @@ class TestPredictionCornerCases:
         prediction_repo.place_bet_atomic(pred2, 123, "no", 20)
         # No bet on pred3
 
-        positions = prediction_repo.get_user_active_positions(123)
+        positions = prediction_repo.get_user_active_positions(123, TEST_GUILD_ID)
         assert len(positions) == 2
         assert any(p["prediction_id"] == pred1 and p["position"] == "yes" for p in positions)
         assert any(p["prediction_id"] == pred2 and p["position"] == "no" for p in positions)
@@ -952,7 +952,7 @@ class TestPredictionCornerCases:
         prediction_service.place_bet(pred1["prediction_id"], registered_player, "yes", 10)
         prediction_service.place_bet(pred2["prediction_id"], registered_player, "no", 20)
 
-        positions = prediction_service.get_user_active_positions(registered_player)
+        positions = prediction_service.get_user_active_positions(registered_player, TEST_GUILD_ID)
         assert len(positions) == 2
 
     def test_large_pool_integer_rounding(self, prediction_repo, player_repo):
@@ -1110,14 +1110,14 @@ class TestPredictionCornerCases:
         prediction_service.place_bet(pred_id, registered_player2, "no", 70)
 
         # No resolved positions yet
-        assert len(prediction_service.get_user_resolved_positions(registered_player)) == 0
+        assert len(prediction_service.get_user_resolved_positions(registered_player, TEST_GUILD_ID)) == 0
 
         # Resolve the prediction
         prediction_service.prediction_repo.update_prediction_status(pred_id, "locked")
         prediction_service.resolve(pred_id, "yes", 999)
 
         # Now should have resolved position
-        positions = prediction_service.get_user_resolved_positions(registered_player)
+        positions = prediction_service.get_user_resolved_positions(registered_player, TEST_GUILD_ID)
         assert len(positions) == 1
         assert positions[0]["prediction_id"] == pred_id
         assert positions[0]["position"] == "yes"
@@ -1126,7 +1126,7 @@ class TestPredictionCornerCases:
         assert positions[0]["payout"] == 100  # Won the entire pool
 
         # Loser should also have a resolved position
-        loser_positions = prediction_service.get_user_resolved_positions(registered_player2)
+        loser_positions = prediction_service.get_user_resolved_positions(registered_player2, TEST_GUILD_ID)
         assert len(loser_positions) == 1
         assert loser_positions[0]["position"] == "no"
         assert loser_positions[0]["outcome"] == "yes"

@@ -265,9 +265,10 @@ class SQLQueryService:
         asker_username = None
         if asker_discord_id:
             try:
+                normalized_guild = guild_id if guild_id is not None else 0
                 row = self.ai_query_repo.execute_readonly(
-                    "SELECT discord_username FROM players WHERE discord_id = ?",
-                    params=(asker_discord_id,),
+                    "SELECT discord_username FROM players WHERE discord_id = ? AND guild_id = ?",
+                    params=(asker_discord_id, normalized_guild),
                     max_rows=1,
                 )
                 if row:

@@ -48,53 +48,57 @@ class TipRepository(BaseRepository):
             )
             return cursor.lastrowid
 
-    def get_tips_by_sender(self, sender_id: int, limit: int = 10) -> list[dict]:
+    def get_tips_by_sender(self, sender_id: int, guild_id: int | None = None, limit: int = 10) -> list[dict]:
         """
         Get tips sent by a user.
 
         Args:
             sender_id: Discord ID of the sender
+            guild_id: Guild ID to filter by
             limit: Maximum number of tips to return
 
         Returns:
             List of tip transaction dicts
         """
+        normalized_guild = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
                 SELECT id, sender_id, recipient_id, amount, fee, guild_id, timestamp
                 FROM tip_transactions
-                WHERE sender_id = ?
+                WHERE sender_id = ? AND guild_id = ?
                 ORDER BY timestamp DESC
                 LIMIT ?
                 """,
-                (sender_id, limit),
+                (sender_id, normalized_guild, limit),
             )
             return [dict(row) for row in cursor.fetchall()]
 
-    def get_tips_by_recipient(self, recipient_id: int, limit: int = 10) -> list[dict]:
+    def get_tips_by_recipient(self, recipient_id: int, guild_id: int | None = None, limit: int = 10) -> list[dict]:
         """
         Get tips received by a user.
 
         Args:
             recipient_id: Discord ID of the recipient
+            guild_id: Guild ID to filter by
             limit: Maximum number of tips to return
 
         Returns:
             List of tip transaction dicts
         """
+        normalized_guild = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
                 SELECT id, sender_id, recipient_id, amount, fee, guild_id, timestamp
                 FROM tip_transactions
-                WHERE recipient_id = ?
+                WHERE recipient_id = ? AND guild_id = ?
                 ORDER BY timestamp DESC
                 LIMIT ?
                 """,
-                (recipient_id, limit),
+                (recipient_id, normalized_guild, limit),
             )
             return [dict(row) for row in cursor.fetchall()]
 

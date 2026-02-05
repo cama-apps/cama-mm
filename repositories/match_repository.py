@@ -993,17 +993,21 @@ class MatchRepository(BaseRepository, IMatchRepository):
 
             return True
 
-    def wipe_auto_discovered_enrichments(self) -> int:
+    def wipe_auto_discovered_enrichments(self, guild_id: int | None = None) -> int:
         """
-        Clear all enrichments that were auto-discovered.
+        Clear all enrichments that were auto-discovered for a guild.
 
         Returns count of matches wiped.
         """
+        normalized_guild = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
 
             # Get match IDs that are auto-discovered
-            cursor.execute("SELECT match_id FROM matches WHERE enrichment_source = 'auto'")
+            cursor.execute(
+                "SELECT match_id FROM matches WHERE guild_id = ? AND enrichment_source = 'auto'",
+                (normalized_guild,),
+            )
             match_ids = [row["match_id"] for row in cursor.fetchall()]
 
             if not match_ids:
@@ -1021,8 +1025,9 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     enrichment_data = NULL,
                     enrichment_source = NULL,
                     enrichment_confidence = NULL
-                WHERE enrichment_source = 'auto'
-                """
+                WHERE guild_id = ? AND enrichment_source = 'auto'
+                """,
+                (normalized_guild,),
             )
 
             # Clear participant stats for those matches (including fantasy fields)
@@ -1061,31 +1066,43 @@ class MatchRepository(BaseRepository, IMatchRepository):
 
             return len(match_ids)
 
-    def get_auto_discovered_count(self) -> int:
+    def get_auto_discovered_count(self, guild_id: int | None = None) -> int:
         """Get count of auto-discovered enriched matches."""
+        normalized_guild = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT COUNT(*) as count FROM matches WHERE enrichment_source = 'auto'")
+            cursor.execute(
+                "SELECT COUNT(*) as count FROM matches WHERE guild_id = ? AND enrichment_source = 'auto'",
+                (normalized_guild,),
+            )
             return cursor.fetchone()["count"]
 
-    def get_enriched_count(self) -> int:
+    def get_enriched_count(self, guild_id: int | None = None) -> int:
         """Get count of all enriched matches (any source)."""
+        normalized_guild = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT COUNT(*) as count FROM matches WHERE valve_match_id IS NOT NULL")
+            cursor.execute(
+                "SELECT COUNT(*) as count FROM matches WHERE guild_id = ? AND valve_match_id IS NOT NULL",
+                (normalized_guild,),
+            )
             return cursor.fetchone()["count"]
 
-    def wipe_all_enrichments(self) -> int:
+    def wipe_all_enrichments(self, guild_id: int | None = None) -> int:
         """
-        Clear ALL enrichments (both auto and manual).
+        Clear ALL enrichments (both auto and manual) for a guild.
 
         Returns count of matches wiped.
         """
+        normalized_guild = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
 
             # Get match IDs that are enriched
-            cursor.execute("SELECT match_id FROM matches WHERE valve_match_id IS NOT NULL")
+            cursor.execute(
+                "SELECT match_id FROM matches WHERE guild_id = ? AND valve_match_id IS NOT NULL",
+                (normalized_guild,),
+            )
             match_ids = [row["match_id"] for row in cursor.fetchall()]
 
             if not match_ids:
@@ -1103,8 +1120,9 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     enrichment_data = NULL,
                     enrichment_source = NULL,
                     enrichment_confidence = NULL
-                WHERE valve_match_id IS NOT NULL
-                """
+                WHERE guild_id = ? AND valve_match_id IS NOT NULL
+                """,
+                (normalized_guild,),
             )
 
             # Clear participant stats for those matches (including fantasy fields)
@@ -1227,7 +1245,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 for row in rows
             ]
 
-    def get_lobby_type_stats(self) -> list[dict]:
+    def get_lobby_type_stats(self, guild_id: int | None = None) -> list[dict]:
         """
         Get server-wide rating swing statistics by lobby type.
 
@@ -1238,6 +1256,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
         - actual_win_rate: percentage of games won
         - expected_win_rate: average expected win probability
         """
+        normalized_guild = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -1250,9 +1269,10 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     AVG(rh.expected_team_win_prob) as expected_win_rate
                 FROM rating_history rh
                 JOIN matches m ON rh.match_id = m.match_id
-                WHERE rh.rating_before IS NOT NULL
+                WHERE rh.guild_id = ? AND rh.rating_before IS NOT NULL
                 GROUP BY m.lobby_type
-                """
+                """,
+                (normalized_guild,),
             )
             rows = cursor.fetchall()
             return [
@@ -1489,7 +1509,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 for row in rows
             ]
 
-    def get_enriched_matches_chronological(self) -> list[dict]:
+    def get_enriched_matches_chronological(self, guild_id: int | None = None) -> list[dict]:
         """
         Get all matches with fantasy data in chronological order for backfill.
 
@@ -1499,6 +1519,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
         Returns:
             List of dicts with match_id, winning_team, match_date, team1_players, team2_players
         """
+        normalized_guild = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -1507,9 +1528,10 @@ class MatchRepository(BaseRepository, IMatchRepository):
                        m.team1_players, m.team2_players
                 FROM matches m
                 JOIN match_participants mp ON m.match_id = mp.match_id
-                WHERE mp.fantasy_points IS NOT NULL
+                WHERE m.guild_id = ? AND mp.fantasy_points IS NOT NULL
                 ORDER BY m.match_date ASC
-                """
+                """,
+                (normalized_guild,),
             )
             rows = cursor.fetchall()
             return [
@@ -1523,7 +1545,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 for row in rows
             ]
 
-    def get_all_matches_chronological(self) -> list[dict]:
+    def get_all_matches_chronological(self, guild_id: int | None = None) -> list[dict]:
         """
         Get ALL matches in chronological order for backfill.
 
@@ -1534,6 +1556,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
         Returns:
             List of dicts with match_id, winning_team, match_date, team1_players, team2_players
         """
+        normalized_guild = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -1541,9 +1564,10 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 SELECT match_id, winning_team, match_date,
                        team1_players, team2_players
                 FROM matches
-                WHERE winning_team IN (1, 2)
+                WHERE guild_id = ? AND winning_team IN (1, 2)
                 ORDER BY match_date ASC
-                """
+                """,
+                (normalized_guild,),
             )
             rows = cursor.fetchall()
             return [
@@ -1557,7 +1581,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 for row in rows
             ]
 
-    def get_all_matches_with_predictions(self) -> list[dict]:
+    def get_all_matches_with_predictions(self, guild_id: int | None = None) -> list[dict]:
         """
         Get all matches with Glicko-2 prediction data for analysis.
 
@@ -1567,6 +1591,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
         Returns:
             List of dicts with match data and prediction info
         """
+        normalized_guild = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -1578,8 +1603,10 @@ class MatchRepository(BaseRepository, IMatchRepository):
                        mp.radiant_rd, mp.dire_rd
                 FROM matches m
                 JOIN match_predictions mp ON m.match_id = mp.match_id
+                WHERE m.guild_id = ?
                 ORDER BY m.match_date ASC
-                """
+                """,
+                (normalized_guild,),
             )
             rows = cursor.fetchall()
             return [
@@ -2123,25 +2150,28 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 for row in rows
             ]
 
-    def get_player_enriched_match_count(self, discord_id: int) -> int:
+    def get_player_enriched_match_count(self, discord_id: int, guild_id: int | None = None) -> int:
         """
         Get count of enriched matches with hero data for a player.
 
         Args:
             discord_id: Player's Discord ID
+            guild_id: Guild ID to filter by
 
         Returns:
             Count of matches with hero_id set
         """
+        normalized_guild = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
                 SELECT COUNT(*) as count
-                FROM match_participants
-                WHERE discord_id = ? AND hero_id IS NOT NULL AND hero_id > 0
+                FROM match_participants mp
+                JOIN matches m ON mp.match_id = m.match_id
+                WHERE mp.discord_id = ? AND m.guild_id = ? AND mp.hero_id IS NOT NULL AND mp.hero_id > 0
                 """,
-                (discord_id,),
+                (discord_id, normalized_guild),
             )
             return cursor.fetchone()["count"]
 
@@ -2330,12 +2360,13 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 for row in rows
             ]
 
-    def get_multi_player_hero_stats(self, discord_ids: list[int]) -> list[dict]:
+    def get_multi_player_hero_stats(self, discord_ids: list[int], guild_id: int | None = None) -> list[dict]:
         """
         Get hero stats for multiple players in a single query.
 
         Args:
             discord_ids: List of Discord IDs to query
+            guild_id: Guild ID to filter by
 
         Returns:
             List of dicts with discord_id, hero_id, games, wins
@@ -2344,21 +2375,24 @@ class MatchRepository(BaseRepository, IMatchRepository):
         if not discord_ids:
             return []
 
+        normalized_guild = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             placeholders = ",".join("?" * len(discord_ids))
             cursor.execute(
                 f"""
-                SELECT discord_id, hero_id,
+                SELECT mp.discord_id, mp.hero_id,
                        COUNT(*) as games,
-                       SUM(CASE WHEN won THEN 1 ELSE 0 END) as wins
-                FROM match_participants
-                WHERE discord_id IN ({placeholders})
-                  AND hero_id IS NOT NULL AND hero_id > 0
-                GROUP BY discord_id, hero_id
-                ORDER BY discord_id, games DESC
+                       SUM(CASE WHEN mp.won THEN 1 ELSE 0 END) as wins
+                FROM match_participants mp
+                JOIN matches m ON mp.match_id = m.match_id
+                WHERE mp.discord_id IN ({placeholders})
+                  AND m.guild_id = ?
+                  AND mp.hero_id IS NOT NULL AND mp.hero_id > 0
+                GROUP BY mp.discord_id, mp.hero_id
+                ORDER BY mp.discord_id, games DESC
                 """,
-                discord_ids,
+                discord_ids + [normalized_guild],
             )
             rows = cursor.fetchall()
             return [
@@ -2371,23 +2405,26 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 for row in rows
             ]
 
-    def get_players_with_enriched_data(self) -> list[dict]:
+    def get_players_with_enriched_data(self, guild_id: int | None = None) -> list[dict]:
         """
         Get all players that have at least one enriched match with hero data.
 
         Returns:
             List of dicts with discord_id, total_games ordered by total_games DESC
         """
+        normalized_guild = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                SELECT discord_id, COUNT(*) as total_games
-                FROM match_participants
-                WHERE hero_id IS NOT NULL AND hero_id > 0
-                GROUP BY discord_id
+                SELECT mp.discord_id, COUNT(*) as total_games
+                FROM match_participants mp
+                JOIN matches m ON mp.match_id = m.match_id
+                WHERE m.guild_id = ? AND mp.hero_id IS NOT NULL AND mp.hero_id > 0
+                GROUP BY mp.discord_id
                 ORDER BY total_games DESC
-                """
+                """,
+                (normalized_guild,),
             )
             rows = cursor.fetchall()
             return [

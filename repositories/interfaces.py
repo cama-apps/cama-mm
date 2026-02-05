@@ -505,7 +505,7 @@ class IPredictionRepository(ABC):
         ...
 
     @abstractmethod
-    def get_user_active_positions(self, discord_id: int) -> list[dict]:
+    def get_user_active_positions(self, discord_id: int, guild_id: int | None = None) -> list[dict]:
         """Get all active (unresolved) positions for a user."""
         ...
 

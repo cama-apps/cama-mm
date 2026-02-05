@@ -34,7 +34,7 @@ class HeroGridCommands(commands.Cog):
             (player_ids, source_label) where source_label is None for the all-players fallback.
         """
         if source_value == "all":
-            enriched_players = self.match_repo.get_players_with_enriched_data()
+            enriched_players = self.match_repo.get_players_with_enriched_data(guild_id)
             return [p["discord_id"] for p in enriched_players], None
 
         # Priority 1: Active lobby
@@ -77,7 +77,7 @@ class HeroGridCommands(commands.Cog):
 
         # Priority 5: All players (only for "auto", not "lobby")
         if source_value == "auto":
-            enriched_players = self.match_repo.get_players_with_enriched_data()
+            enriched_players = self.match_repo.get_players_with_enriched_data(guild_id)
             return [p["discord_id"] for p in enriched_players], None
 
         # source_value == "lobby" and nothing found
@@ -139,7 +139,7 @@ class HeroGridCommands(commands.Cog):
         min_games = max(1, min(min_games, 10))
 
         # Fetch grid data
-        grid_data = self.match_repo.get_multi_player_hero_stats(player_ids)
+        grid_data = self.match_repo.get_multi_player_hero_stats(player_ids, guild_id)
 
         if not grid_data:
             await safe_followup(

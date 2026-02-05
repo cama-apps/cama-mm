@@ -1023,7 +1023,7 @@ class ProfileCommands(commands.Cog):
             ), None
 
         # Get prediction stats
-        stats = prediction_service.prediction_repo.get_user_prediction_stats(target_discord_id)
+        stats = prediction_service.prediction_repo.get_user_prediction_stats(target_discord_id, guild_id)
 
         if not stats:
             return discord.Embed(
@@ -1073,7 +1073,7 @@ class ProfileCommands(commands.Cog):
         )
 
         # Active positions
-        positions = prediction_service.get_user_active_positions(target_discord_id)
+        positions = prediction_service.get_user_active_positions(target_discord_id, guild_id)
         if positions:
             position_lines = []
             for pos in positions[:3]:
@@ -1110,7 +1110,7 @@ class ProfileCommands(commands.Cog):
             )
 
         # Recent resolved
-        resolved = prediction_service.get_user_resolved_positions(target_discord_id)
+        resolved = prediction_service.get_user_resolved_positions(target_discord_id, guild_id)
         if resolved:
             recent_lines = []
             for pos in resolved[:3]:
@@ -1529,7 +1529,7 @@ class ProfileCommands(commands.Cog):
             ), []
 
         # Get enriched match count
-        enriched_count = match_repo.get_player_enriched_match_count(target_discord_id)
+        enriched_count = match_repo.get_player_enriched_match_count(target_discord_id, guild_id)
 
         if enriched_count == 0:
             return discord.Embed(
