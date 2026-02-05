@@ -192,6 +192,16 @@ ENRICHMENT_DISCOVERY_TIME_WINDOW = _parse_int("ENRICHMENT_DISCOVERY_TIME_WINDOW"
 ENRICHMENT_MIN_PLAYER_MATCH = _parse_int("ENRICHMENT_MIN_PLAYER_MATCH", 10)  # All 10 players required for strict validation
 ENRICHMENT_RETRY_DELAYS = _parse_int_list("ENRICHMENT_RETRY_DELAYS", [1, 5, 20, 60, 180])  # Exponential backoff delays (seconds)
 
+# AFK Detection configuration
+AFK_CHECK_ACTIVITY_WINDOW_SECONDS = _parse_int("AFK_CHECK_ACTIVITY_WINDOW_SECONDS", 120)  # 2 minutes
+AFK_CHECK_DEFAULT_WAIT_TIME = _parse_int("AFK_CHECK_DEFAULT_WAIT_TIME", 30)  # 30 seconds (DEPRECATED - not used by continuous monitoring)
+AFK_CHECK_TRACK_TYPING = _parse_bool("AFK_CHECK_TRACK_TYPING", True)  # Enable typing detection
+
+# RC Monitoring (Continuous Real-Time) configuration
+RC_MONITORING_DEFAULT_DURATION_MINUTES = _parse_int("RC_MONITORING_DEFAULT_DURATION_MINUTES", 5)  # 5 minutes default
+RC_MONITORING_MAX_DURATION_MINUTES = _parse_int("RC_MONITORING_MAX_DURATION_MINUTES", 10)  # 10 minutes max
+RC_MONITORING_REFRESH_INTERVAL_SECONDS = _parse_int("RC_MONITORING_REFRESH_INTERVAL_SECONDS", 5)  # Update every 5 seconds
+
 # Wrapped (monthly summary) configuration
 WRAPPED_ENABLED = _parse_bool("WRAPPED_ENABLED", True)
 WRAPPED_MIN_GAMES = _parse_int("WRAPPED_MIN_GAMES", 3)  # Min games to appear in wrapped

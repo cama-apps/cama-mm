@@ -211,6 +211,7 @@ class SchemaManager:
             ("add_last_wheel_spin_to_players", self._migration_add_last_wheel_spin_to_players),
             ("create_wheel_spins_table", self._migration_create_wheel_spins_table),
             ("add_balancing_rating_system_column", self._migration_add_balancing_rating_system_column),
+            ("add_designated_player_to_lobby", self._migration_add_designated_player_to_lobby),
             ("create_match_corrections_table", self._migration_create_match_corrections_table),
             ("create_player_steam_ids_table", self._migration_create_player_steam_ids_table),
             ("add_streak_columns_to_rating_history", self._migration_add_streak_columns),
@@ -943,6 +944,12 @@ class SchemaManager:
         """Track which rating system was used for team balancing (experiment)."""
         self._add_column_if_not_exists(
             cursor, "matches", "balancing_rating_system", "TEXT DEFAULT 'glicko'"
+        )
+
+    def _migration_add_designated_player_to_lobby(self, cursor) -> None:
+        """Add designated_player_id for temporary lobby permissions."""
+        self._add_column_if_not_exists(
+            cursor, "lobby_state", "designated_player_id", "INTEGER"
         )
 
     def _migration_create_match_corrections_table(self, cursor) -> None:

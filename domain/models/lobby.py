@@ -19,6 +19,7 @@ class Lobby:
     players: set[int] = field(default_factory=set)
     conditional_players: set[int] = field(default_factory=set)  # "Frogling" players
     status: str = "open"
+    designated_player_id: int | None = None  # Temporary AFK removal permissions
 
     def add_player(self, discord_id: int) -> bool:
         """Add a player to the regular queue. Removes from conditional if present."""
@@ -95,6 +96,7 @@ class Lobby:
             "players": list(self.players),
             "conditional_players": list(self.conditional_players),
             "status": self.status,
+            "designated_player_id": self.designated_player_id,
         }
 
     @classmethod
@@ -110,6 +112,7 @@ class Lobby:
             players=players,
             conditional_players=conditional_players,
             status=data.get("status", "open"),
+            designated_player_id=data.get("designated_player_id"),
         )
 
 

@@ -176,40 +176,12 @@ class MatchService:
     def __init__(self, player_repo: IPlayerRepository, match_repo: IMatchRepository, ...):
 ```
 
-### Guild-Aware Design (Multi-Guild Isolation)
-All data is segmented by `guild_id` to support running the bot in multiple Discord servers with complete isolation. Each guild has its own players, ratings, balances, matches, and economy.
-
-**Composite Primary Keys:**
-Most tables use `(discord_id, guild_id)` as the composite primary key:
-- `players` - Player data is per-guild (same Discord user can have different ratings in different guilds)
-- `matches` - Matches belong to a specific guild
-- `bets`, `predictions`, `lobbies` - All guild-scoped
-- `rating_history`, `recalibration_state`, `bankruptcy_state`, `loan_state` - Per-guild tracking
-
-**guild_id Normalization:**
-- `guild_id=None` is normalized to `0` in all repositories via `normalize_guild_id()`
-- Use `guild_id=None` or `guild_id=0` for DMs or single-guild tests
-- Commands extract guild_id via: `guild_id = interaction.guild.id if interaction.guild else None`
-
-**Cross-Guild Exceptions:**
-These intentionally remain cross-guild:
-- `player_steam_ids` - Steam accounts are globally unique, not per-guild
-- Steam ID lookups (`get_steam_ids`, `get_discord_id_by_steam_id`) - Global for match discovery
-
-**Implementation Pattern:**
-```python
-# In commands - always extract guild_id first
-guild_id = interaction.guild.id if interaction.guild else None
-
-# Pass to all service/repository calls
-player = player_repo.get_by_id(discord_id, guild_id)
-balance = player_repo.get_balance(discord_id, guild_id)
-state = bankruptcy_service.get_state(discord_id, guild_id)
-
-# Repositories normalize None to 0
-def get_by_id(self, discord_id: int, guild_id: int) -> Player | None:
-    # guild_id is required, caller must normalize if needed
-```
+### Guild-Aware Design
+All features support multi-guild operation. Guild ID is tracked in:
+- `pending_matches.guild_id`
+- `bets.guild_id`
+- `guild_config.guild_id`
+Use `guild_id=None` (normalized to 0) for DMs or tests.
 
 ### Atomic Database Operations
 Critical operations use `BEGIN IMMEDIATE` for write locks:
@@ -375,22 +347,54 @@ generate_flavor_text(event, context) -> str
 execute_sql_query(question) -> dict
 ```
 
+### PlayerService (`services/player_service.py`)
+```python
+register_player(discord_id, username, steam_id) -> dict  # Fetches MMR from OpenDota
+set_roles(discord_id, roles) -> None
+get_stats(discord_id) -> dict  # rating, uncertainty, win_rate, balance
+```
+
+### AFKDetectionService (`services/afk_detection_service.py`)
+Detects AFK players using multiple activity signals. Stateless checks (no DB persistence).
+
+```python
+check_player_activity(player_id, guild, lobby_message_id, lobby_thread, activity_window_seconds) -> ActivityStatus
+format_activity_status(status) -> str  # Format with emoji indicators
+```
+
+**Activity Signals Checked (within configurable window, default 2 min):**
+1. **Discord online/DND status** - Via `member.status` (requires presences intent)
+2. **Voice channel presence** - In voice and not deafened
+3. **Recent messages** - Posted in lobby thread within window
+4. **Recent ⚔️ reactions** - Reacted to lobby message (tracked via events)
+5. **Typing indicator** - Currently typing or typed recently (tracked via events)
+
+**Supporting Infrastructure:**
+- `TypingTracker` (`utils/typing_tracker.py`) - Thread-safe typing event tracker
+- `ReactionTracker` (`utils/reaction_tracker.py`) - Reaction timestamp tracker
+- Event handlers in `bot.py`: `on_typing`, `on_raw_reaction_add`, `on_raw_reaction_remove`
+
+**Features:**
+- Non-invasive (report-only, no kicks)
+- Multiple signals for accurate detection
+- Thread-safe via tracker locks
+- Guild-aware per-guild tracking
+- Configurable activity window
+
 ## Database Schema (Key Tables)
 
 ### players
 ```sql
-discord_id INTEGER NOT NULL
-guild_id INTEGER NOT NULL DEFAULT 0
+discord_id INTEGER PRIMARY KEY
 discord_username TEXT NOT NULL
 glicko_rating REAL, glicko_rd REAL, glicko_volatility REAL
 os_mu REAL, os_sigma REAL  -- OpenSkill Plackett-Luce
 preferred_roles TEXT  -- JSON array ["1", "2"]
 jopacoin_balance INTEGER DEFAULT 3
 exclusion_count INTEGER DEFAULT 0
-steam_id INTEGER  -- Legacy primary steam_id (see player_steam_ids)
+steam_id INTEGER UNIQUE  -- Legacy primary steam_id (see player_steam_ids)
 last_wheel_spin INTEGER  -- Unix timestamp for /gamba cooldown
 lowest_balance_ever INTEGER  -- For degen scoring
-PRIMARY KEY (discord_id, guild_id)  -- Composite key for multi-guild isolation
 ```
 
 ### player_steam_ids (Multi-Steam ID Support)
@@ -407,7 +411,6 @@ UNIQUE (steam_id)  -- Steam ID can only belong to one player
 ### matches
 ```sql
 match_id INTEGER PRIMARY KEY AUTOINCREMENT
-guild_id INTEGER NOT NULL DEFAULT 0  -- Guild isolation
 team1_players TEXT, team2_players TEXT  -- JSON arrays (Radiant/Dire)
 winning_team INTEGER  -- 1=Radiant, 2=Dire
 lobby_type TEXT  -- 'shuffle' or 'draft'
@@ -464,7 +467,8 @@ resolution_votes TEXT  -- JSON {discord_id: outcome}
 | `/leave` | Leave the matchmaking lobby | - |
 | `/kick` | Remove a user from lobby | `user` |
 | `/resetlobby` | Reset lobby state | Admin only |
-| `/shuffle` | Create balanced teams (pool betting) | - |
+| `/rc` or `/readycheck` | Check player readiness with hybrid monitoring | `duration`: minutes (1-60, default 30) |
+| `/shuffle` | Create balanced teams | `betting_mode`: house/pool |
 | `/record` | Record match result | `result`: Radiant/Dire/Abort |
 | `/startdraft` | Start captain's draft | - |
 | `/setcaptain` | Set your team's captain | - |
@@ -575,6 +579,12 @@ def sample_players():
 | `DEBUG_LOG_PATH` | None | Enable JSONL debug logging when set |
 | `LOBBY_READY_THRESHOLD` | 10 | Min players to shuffle |
 | `LOBBY_MAX_PLAYERS` | 14 | Max players in lobby |
+| `AFK_CHECK_ACTIVITY_WINDOW_SECONDS` | 120 | Activity window for /rc (2 minutes) |
+| `AFK_CHECK_DEFAULT_WAIT_TIME` | 30 | DEPRECATED - not used by continuous monitoring |
+| `AFK_CHECK_TRACK_TYPING` | True | Enable typing detection |
+| `RC_MONITORING_DEFAULT_DURATION_MINUTES` | 30 | Default monitoring duration for /rc |
+| `RC_MONITORING_MAX_DURATION_MINUTES` | 60 | Maximum monitoring duration for /rc |
+| `RC_MONITORING_REFRESH_INTERVAL_SECONDS` | 10 | Update interval for /rc live embed |
 | `OFF_ROLE_MULTIPLIER` | 0.95 | Rating effectiveness off-role |
 | `OFF_ROLE_FLAT_PENALTY` | 350.0 | Penalty per off-role player |
 | `LEVERAGE_TIERS` | 2,3,5 | Available bet leverage options |
@@ -635,6 +645,7 @@ See `config.py` for the full list (50+ options).
 - **5 Roles**: 1=Carry, 2=Mid, 3=Offlane, 4=Soft Support, 5=Hard Support (stored as strings)
 - **Team Convention**: team1=Radiant, team2=Dire, winning_team: 1 or 2
 - **Match Types**: `lobby_type` = "shuffle" (random balanced) or "draft" (captain's pick)
+- **/rc (Ready Check)**: Hybrid activity monitoring with button confirmations; updates every 10s for 1-60 minutes (default 30 min); combines passive signals (status, voice, messages, reactions, typing) + active "Ready" button; designated player (most total games) or admins can remove AFK players; temporary permissions cleared on shuffle; pings players with no ready + no activity; shows live countdown timer
 - **Betting Window**: 15 minutes (BET_LOCK_SECONDS=900) after shuffle; admins can extend via `/extendbetting`
 - **Voting Threshold**: 2 non-admin votes OR 1 admin vote to record match
 - **Leverage**: Multiplies effective bet; losses can cause debt up to MAX_DEBT

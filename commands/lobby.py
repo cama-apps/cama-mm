@@ -1,5 +1,5 @@
 """
-Lobby commands: /lobby, /kick, /resetlobby.
+Lobby commands: /lobby, /kick, /resetlobby, /rc, /stopreadycheck.
 
 Uses Discord threads for lobby management similar to /prediction.
 """
@@ -14,7 +14,7 @@ from discord.ext import commands
 from config import LOBBY_CHANNEL_ID
 from services.lobby_service import LobbyService
 from services.permissions import has_admin_permission
-from utils.formatting import FROGLING_EMOJI_ID, JOPACOIN_EMOJI_ID
+from utils.formatting import FROGLING_EMOJI_ID, JOPACOIN_EMOJI_ID, get_player_display_name
 from utils.interaction_safety import safe_defer
 from utils.pin_helpers import safe_unpin_all_bot_messages
 
@@ -740,6 +740,394 @@ class LobbyCommands(commands.Cog):
                 "✅ Lobby reset. You can create a new lobby with `/lobby`.",
                 ephemeral=True,
             )
+
+    @app_commands.command(
+        name="rc",
+        description="Ping players to check readiness with Discord status and voice check",
+    )
+    async def ready_check(self, interaction: discord.Interaction):
+        """
+        Ping all lobby players once in DMs and lobby thread with Ready button.
+
+        Checks Discord status (online/DND) and voice channel presence at invocation.
+        Players click Ready button in either DM or thread to confirm.
+        """
+        logger.info(f"/rc command invoked by user {interaction.user.id}")
+
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+
+        # Check if lobby exists
+        lobby = self.lobby_service.get_lobby()
+        if not lobby:
+            await interaction.followup.send(
+                "❌ No active lobby. Use `/lobby` to create one!", ephemeral=True
+            )
+            return
+
+        if lobby.get_player_count() == 0:
+            await interaction.followup.send(
+                "❌ Lobby is empty. No players to check!", ephemeral=True
+            )
+            return
+
+        # Get lobby info
+        player_ids, players = self.lobby_service.get_lobby_players(lobby)
+        guild = interaction.guild
+        guild_id = guild.id if guild else None
+
+        # Check for admin presence and select designated player
+        admin_in_lobby = any(has_admin_permission(pid, guild_id) for pid in player_ids)
+        designated_player_id = None
+        designated_display = "Admins have control"
+
+        if not admin_in_lobby and players:
+            # Find player with most total games
+            designated_player = max(players, key=lambda p: p.get_total_games())
+            designated_player_id = designated_player.discord_id
+
+            # Set in lobby state
+            self.lobby_service.lobby_manager.set_designated_player(designated_player_id)
+
+            # Announce in message
+            designated_member = guild.get_member(designated_player_id) if guild else None
+            designated_display = (
+                designated_member.mention
+                if designated_member
+                else f"<@{designated_player_id}>"
+            )
+
+        # Start ready check state tracking
+        ready_check_service = getattr(self.bot, "ready_check_service", None)
+        if ready_check_service:
+            ready_check_service.start_check(
+                guild_id or 0, player_ids, designated_player_id, admin_in_lobby
+            )
+
+        # Get lobby thread
+        thread_id = self.lobby_service.get_lobby_thread_id()
+        lobby_thread = None
+
+        if thread_id and guild:
+            try:
+                lobby_thread = await self.bot.fetch_channel(thread_id)
+            except Exception as exc:
+                logger.warning(f"Could not fetch lobby thread {thread_id}: {exc}")
+
+        if not lobby_thread:
+            await interaction.followup.send(
+                "❌ Could not find lobby thread. Make sure the lobby is created properly.",
+                ephemeral=True
+            )
+            return
+
+        # Check Discord status and voice for each player
+        online_players = []
+        voice_players = []
+
+        for pid in player_ids:
+            member = guild.get_member(pid) if guild else None
+            if member:
+                # Check Discord status
+                if member.status in [discord.Status.online, discord.Status.dnd]:
+                    online_players.append(pid)
+
+                # Check voice channel
+                if member.voice and not (member.voice.self_deaf or member.voice.deaf):
+                    voice_players.append(pid)
+
+        # Send DM to each player with Ready button
+        from utils.ready_check_view import ReadyCheckView
+        view = ReadyCheckView(self)
+
+        dm_sent_count = 0
+        for pid in player_ids:
+            try:
+                user = await self.bot.fetch_user(pid)
+                await user.send(
+                    f"🎮 **Ready Check** for lobby in {guild.name if guild else 'the server'}!\n"
+                    f"Click the button below to confirm you're ready.",
+                    view=view
+                )
+                dm_sent_count += 1
+            except Exception as exc:
+                logger.debug(f"Could not send DM to {pid}: {exc}")
+
+        # Send message in lobby thread with Ready button
+        thread_msg = await lobby_thread.send(
+            f"🎮 **Ready Check!**\n"
+            f"**Lobby Control:** {designated_display}\n\n"
+            f"All players: Click the **Ready** button below to confirm!\n"
+            f"({dm_sent_count}/{len(player_ids)} DMs sent)",
+            view=view
+        )
+
+        # Build initial status embed
+        ready_players = ready_check_service.get_state(guild_id or 0).ready_players if ready_check_service else set()
+
+        embed = self._build_ready_check_status_embed(
+            player_ids=player_ids,
+            players=players,
+            ready_players=ready_players,
+            online_players=online_players,
+            voice_players=voice_players,
+            guild=guild,
+            designated_display=designated_display,
+        )
+
+        status_msg = await lobby_thread.send(embed=embed)
+
+        # Store status message for updates when players click Ready
+        if ready_check_service:
+            ready_check_service.set_status_message(
+                guild_id or 0,
+                status_msg.id,
+                lobby_thread.id,
+                online_players,
+                voice_players,
+            )
+
+        await interaction.followup.send(
+            f"✅ Ready check sent! Pinged {dm_sent_count} players in DMs + lobby thread.",
+            ephemeral=True
+        )
+
+        logger.info(f"Ready check sent for guild {guild_id}")
+
+    @app_commands.command(
+        name="readycheck",
+        description="Ping players to check readiness with Discord status and voice check",
+    )
+    async def readycheck_alias(self, interaction: discord.Interaction):
+        """Alias for /rc command."""
+        await self.ready_check(interaction)
+
+    @app_commands.command(
+        name="stopreadycheck",
+        description="Stop ready check and remove players who didn't ready up",
+    )
+    async def stop_ready_check(self, interaction: discord.Interaction):
+        """
+        Stop the active ready check and kick players who didn't ready up.
+
+        Only keeps players who clicked the Ready button in the lobby.
+        """
+        logger.info(f"/stopreadycheck command invoked by user {interaction.user.id}")
+
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+
+        guild_id = interaction.guild.id if interaction.guild else 0
+
+        # Get ready check service
+        ready_check_service = getattr(self.bot, "ready_check_service", None)
+        if not ready_check_service:
+            await interaction.followup.send(
+                "❌ Ready check service not available.", ephemeral=True
+            )
+            return
+
+        # Get active ready check state
+        state = ready_check_service.get_state(guild_id)
+        if not state:
+            await interaction.followup.send(
+                "❌ No active ready check to stop.", ephemeral=True
+            )
+            return
+
+        # Get lobby
+        lobby = self.lobby_service.get_lobby()
+        if not lobby:
+            await interaction.followup.send(
+                "❌ No active lobby found.", ephemeral=True
+            )
+            return
+
+        # Get lists of ready and not ready players
+        ready_players = list(state.ready_players)
+        not_ready_players = [pid for pid in state.total_players if pid not in state.ready_players]
+
+        # Remove not ready players from lobby
+        removed_count = 0
+        for pid in not_ready_players:
+            if lobby.remove_player(pid):
+                removed_count += 1
+            elif lobby.remove_conditional_player(pid):
+                removed_count += 1
+
+        # Persist lobby changes
+        if removed_count > 0:
+            self.lobby_service.lobby_manager._persist_lobby()
+
+        # Cancel ready check
+        ready_check_service.cancel_check(guild_id)
+
+        # Clear designated player
+        self.lobby_service.lobby_manager.set_designated_player(None)
+
+        # Build result message
+        result_msg = (
+            f"✅ **Ready check stopped!**\n\n"
+            f"**Kept in lobby:** {len(ready_players)} player(s) who readied up\n"
+            f"**Removed:** {removed_count} player(s) who didn't ready up"
+        )
+
+        if ready_players:
+            guild = interaction.guild
+            player_mentions = []
+            for pid in ready_players[:25]:  # Limit to 25 for Discord
+                player = self.player_service.get_player(pid, guild_id)
+                if player:
+                    display = get_player_display_name(player, pid, guild)
+                    player_mentions.append(display)
+                else:
+                    player_mentions.append(f"<@{pid}>")
+
+            result_msg += f"\n\n**Ready players:**\n" + "\n".join(f"• {name}" for name in player_mentions)
+
+        await interaction.followup.send(result_msg, ephemeral=False)
+
+        # Update lobby embed if it exists
+        thread_id = self.lobby_service.get_lobby_thread_id()
+        if thread_id:
+            try:
+                lobby_thread = await self.bot.fetch_channel(thread_id)
+                embed_message_id = self.lobby_service.get_lobby_embed_message_id()
+                if embed_message_id:
+                    embed_message = await lobby_thread.fetch_message(embed_message_id)
+                    # Rebuild lobby embed
+                    await self._update_lobby_embed_message(embed_message)
+            except Exception as exc:
+                logger.warning(f"Failed to update lobby embed: {exc}")
+
+        logger.info(
+            f"Ready check stopped for guild {guild_id}: "
+            f"kept {len(ready_players)}, removed {removed_count}"
+        )
+
+    def _build_ready_check_status_embed(
+        self,
+        player_ids: list[int],
+        players: list,
+        ready_players: set[int],
+        online_players: list[int],
+        voice_players: list[int],
+        guild: discord.Guild | None,
+        designated_display: str,
+    ) -> discord.Embed:
+        """Build status embed showing ready confirmations and Discord/voice status."""
+        ready_count = len(ready_players)
+        total = len(player_ids)
+
+        # Categorize players
+        ready_list = []
+        not_ready_online = []
+        not_ready_voice = []
+        not_ready_offline = []
+
+        for pid in player_ids:
+            player = next((p for p in players if p.discord_id == pid), None)
+            display = get_player_display_name(player, pid, guild) if player else f"<@{pid}>"
+
+            if pid in ready_players:
+                ready_list.append(display)
+            elif pid in voice_players:
+                not_ready_voice.append(f"{display} (in voice)")
+            elif pid in online_players:
+                not_ready_online.append(f"{display} (online)")
+            else:
+                not_ready_offline.append(f"<@{pid}> (offline)")
+
+        # Build embed
+        color = discord.Color.green() if ready_count == total else discord.Color.orange()
+        embed = discord.Embed(
+            title="🎮 Ready Check Status",
+            description=f"**Lobby Control:** {designated_display}\n**Ready:** {ready_count}/{total} players",
+            color=color,
+        )
+
+        # Ready section
+        if ready_list:
+            embed.add_field(
+                name=f"✅ Ready ({len(ready_list)})",
+                value="\n".join(f"• {name}" for name in ready_list[:25]) or "None",
+                inline=False,
+            )
+
+        # Not ready sections
+        not_ready_all = not_ready_voice + not_ready_online + not_ready_offline
+        if not_ready_all:
+            embed.add_field(
+                name=f"⏳ Waiting ({len(not_ready_all)})",
+                value="\n".join(f"• {name}" for name in not_ready_all[:25]),
+                inline=False,
+            )
+
+        embed.set_footer(text="Click the Ready button in your DM or above to confirm!")
+
+        return embed
+
+    async def update_ready_check_embed(self, guild_id: int):
+        """
+        Update ready check status embed after button click.
+
+        Called by ReadyCheckView when a player clicks the Ready button.
+        """
+        try:
+            # Get ready check service
+            ready_check_service = getattr(self.bot, "ready_check_service", None)
+            if not ready_check_service:
+                return
+
+            state = ready_check_service.get_state(guild_id)
+            if not state:
+                return
+
+            # Get status message
+            if not state.status_message_id or not state.status_channel_id:
+                logger.debug(f"No status message stored for guild {guild_id}")
+                return
+
+            # Fetch channel and message
+            try:
+                channel = await self.bot.fetch_channel(state.status_channel_id)
+                status_msg = await channel.fetch_message(state.status_message_id)
+            except Exception as exc:
+                logger.warning(f"Could not fetch status message: {exc}")
+                return
+
+            # Get lobby and player data
+            lobby = self.lobby_service.get_lobby()
+            if not lobby:
+                return
+
+            player_ids, players = self.lobby_service.get_lobby_players(lobby)
+            guild = self.bot.get_guild(guild_id) if guild_id else None
+
+            # Get designated player display
+            designated_display = "Admins have control"
+            if not state.admin_in_lobby and state.designated_player_id:
+                member = guild.get_member(state.designated_player_id) if guild else None
+                designated_display = (
+                    member.mention if member else f"<@{state.designated_player_id}>"
+                )
+
+            # Rebuild embed with updated ready players
+            embed = self._build_ready_check_status_embed(
+                player_ids=list(state.total_players),
+                players=players,
+                ready_players=state.ready_players,
+                online_players=state.online_players,
+                voice_players=state.voice_players,
+                guild=guild,
+                designated_display=designated_display,
+            )
+
+            await status_msg.edit(embed=embed)
+            logger.info(f"Updated ready check status embed for guild {guild_id}")
+
+        except Exception as exc:
+            logger.warning(f"Error updating ready check embed: {exc}")
 
 
 async def setup(bot: commands.Bot):

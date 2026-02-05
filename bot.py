@@ -205,6 +205,12 @@ def _init_services():
     bot.disburse_service = disburse_service
     bot.recalibration_service = recalibration_service
 
+    # Create ready check service for /rc command button confirmations
+    from services.ready_check_service import ReadyCheckService
+
+    ready_check_service = ReadyCheckService()
+    bot.ready_check_service = ready_check_service
+
     # Create gambling stats service for degen score and leaderboards
     gambling_stats_service = GamblingStatsService(
         bet_repo=bet_repo,
@@ -572,6 +578,18 @@ async def on_ready():
         logger.info(f"Post-sync: {len(post_sync_commands)} commands available")
     except Exception as exc:
         logger.error(f"Failed to sync commands: {exc}", exc_info=True)
+
+    # Register persistent ready check view
+    try:
+        from utils.ready_check_view import ReadyCheckView
+
+        lobby_cog = bot.get_cog("LobbyCommands")
+        if lobby_cog:
+            view = ReadyCheckView(lobby_cog)
+            bot.add_view(view)
+            logger.info("Registered persistent ReadyCheckView")
+    except Exception as exc:
+        logger.error(f"Failed to register ReadyCheckView: {exc}", exc_info=True)
 
 
 @bot.tree.error

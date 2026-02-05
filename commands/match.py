@@ -199,6 +199,12 @@ class MatchCommands(commands.Cog):
         except Exception as exc:
             logger.warning(f"Failed to abort lobby thread: {exc}")
 
+    def _create_progress_bar(self, current: int, total: int, length: int = 10) -> str:
+        """Create a progress bar using block characters."""
+        filled = int((current / total) * length) if total > 0 else 0
+        bar = "█" * filled + "░" * (length - filled)
+        return f"{bar} {current}/{total}"
+
     def _format_team_lines(self, team, roles, player_ids, players, guild):
         """Return formatted lines with roles and ratings for a team."""
         lines = []
@@ -445,6 +451,7 @@ class MatchCommands(commands.Cog):
         # `guild` and `guild_id` already computed before the match check
         mode = "pool"  # betting_mode.value if betting_mode else "pool"
         rs = rating_system.value if rating_system else "glicko"
+
         try:
             result = self.match_service.shuffle_players(
                 player_ids, guild_id=guild_id, betting_mode=mode, rating_system=rs
@@ -545,7 +552,7 @@ class MatchCommands(commands.Cog):
         all_excluded_names = []
         if excluded_ids:
             for pid in excluded_ids:
-                player_obj = self.player_service.get_player(pid, guild_id)
+                player_obj = self.player_service.get_player(pid)
                 if player_obj:
                     display_name = get_player_display_name(player_obj, discord_id=pid, guild=guild)
                     all_excluded_names.append(display_name)
@@ -555,7 +562,7 @@ class MatchCommands(commands.Cog):
         # Add excluded conditional players with frogling emoji
         if excluded_conditional_ids:
             for pid in excluded_conditional_ids:
-                player_obj = self.player_service.get_player(pid, guild_id)
+                player_obj = self.player_service.get_player(pid)
                 if player_obj:
                     display_name = get_player_display_name(player_obj, discord_id=pid, guild=guild)
                     all_excluded_names.append(f"{FROGLING_EMOTE} {display_name}")
@@ -565,7 +572,7 @@ class MatchCommands(commands.Cog):
             # Give conditional players half the exclusion count bonus
             # (jopacoin bonus is awarded at record time in match_service)
             for pid in excluded_conditional_ids:
-                self.player_repo.increment_exclusion_count_half(pid, guild_id)
+                self.player_repo.increment_exclusion_count_half(pid)
 
             # Store excluded conditional IDs in shuffle state for jopacoin bonus at record time
             pending_state = self.match_service.get_last_shuffle(guild_id)
@@ -580,7 +587,7 @@ class MatchCommands(commands.Cog):
         if conditional_player_ids_included:
             conditional_names = []
             for pid in conditional_player_ids_included:
-                player_obj = self.player_service.get_player(pid, guild_id)
+                player_obj = self.player_service.get_player(pid)
                 if player_obj:
                     display_name = get_player_display_name(player_obj, discord_id=pid, guild=guild)
                     conditional_names.append(display_name)
@@ -668,6 +675,18 @@ class MatchCommands(commands.Cog):
                 )
         except Exception as exc:
             logger.warning(f"Failed to store shuffle message URL: {exc}", exc_info=True)
+
+        # Clear designated player when shuffle completes
+        lobby_service = getattr(self.bot, "lobby_service", None)
+        if lobby_service:
+            lobby_service.lobby_manager.set_designated_player(None)
+            logger.info("Cleared designated player on shuffle")
+
+        # Cancel ready check
+        ready_check_service = getattr(self.bot, "ready_check_service", None)
+        if ready_check_service:
+            ready_check_service.cancel_check(guild_id or 0)
+            logger.info(f"Cancelled ready check for guild {guild_id}")
 
         # Schedule betting reminders (5-minute warning and close) if applicable
         pending_state = self.match_service.get_last_shuffle(guild_id)

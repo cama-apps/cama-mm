@@ -112,6 +112,23 @@ class LobbyManagerService:
         if self.lobby:
             self._persist_lobby()
 
+    def set_designated_player(self, discord_id: int | None) -> None:
+        """Set or clear designated player who can remove AFK players."""
+        if not self.lobby:
+            return
+        self.lobby.designated_player_id = discord_id
+        self._persist_lobby()
+
+    def get_designated_player(self) -> int | None:
+        """Get current designated player ID."""
+        return self.lobby.designated_player_id if self.lobby else None
+
+    def is_designated_player(self, discord_id: int) -> bool:
+        """Check if Discord ID is the designated player."""
+        if not self.lobby:
+            return False
+        return self.lobby.designated_player_id == discord_id
+
     def reset_lobby(self) -> None:
         logger = logging.getLogger("cama_bot.services.lobby_manager")
         logger.info(f"reset_lobby called. Current lobby: {self.lobby}")
@@ -141,6 +158,7 @@ class LobbyManagerService:
             thread_id=self.lobby_thread_id,
             embed_message_id=self.lobby_embed_message_id,
             origin_channel_id=self.origin_channel_id,
+            designated_player_id=self.lobby.designated_player_id,
         )
 
     def _clear_persistent_lobby(self) -> None:
