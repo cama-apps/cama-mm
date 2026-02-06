@@ -402,6 +402,8 @@ class NeonDegenService:
                         text += "\n" + ansi_block(llm)
                     self._set_cooldown(discord_id, guild_id)
                     return NeonResult(layer=2, text_block=text)
+                # Negative loan roll failed - don't fall through to layer 1
+                return None
 
             # Layer 1: Normal loan
             if not self._check_cooldown(discord_id, guild_id):
