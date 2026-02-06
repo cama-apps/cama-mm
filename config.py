@@ -134,6 +134,11 @@ SHOP_MYSTERY_GIFT_COST = _parse_int("SHOP_MYSTERY_GIFT_COST", 10000)
 SHOP_DOUBLE_OR_NOTHING_COST = _parse_int("SHOP_DOUBLE_OR_NOTHING_COST", 50)
 DOUBLE_OR_NOTHING_COOLDOWN_SECONDS = _parse_int("DOUBLE_OR_NOTHING_COOLDOWN_SECONDS", 2592000)  # 30 days
 
+# Soft Avoid configuration
+SHOP_SOFT_AVOID_COST = _parse_int("SHOP_SOFT_AVOID_COST", 500)  # Cost to soft avoid a player
+SOFT_AVOID_GAMES_DURATION = _parse_int("SOFT_AVOID_GAMES_DURATION", 10)  # Number of games avoid lasts
+SOFT_AVOID_PENALTY = _parse_float("SOFT_AVOID_PENALTY", 500.0)  # Penalty added to shuffler when pair on same team
+
 # Wheel of Fortune configuration
 WHEEL_COOLDOWN_SECONDS = _parse_int("WHEEL_COOLDOWN_SECONDS", 86400)  # 24 hours
 WHEEL_LOSE_PENALTY_COOLDOWN = _parse_int("WHEEL_LOSE_PENALTY_COOLDOWN", 432000)  # 5 days for LOSE

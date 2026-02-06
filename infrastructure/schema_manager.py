@@ -226,6 +226,8 @@ class SchemaManager:
             ("add_guild_id_to_loan_state", self._migration_add_guild_id_to_loan_state),
             ("add_guild_id_to_bankruptcy_state", self._migration_add_guild_id_to_bankruptcy_state),
             ("add_guild_id_to_recalibration_state", self._migration_add_guild_id_to_recalibration_state),
+            # Soft avoid feature
+            ("create_soft_avoids_table", self._migration_create_soft_avoids_table),
         ]
 
     # --- Migrations ---
@@ -1413,4 +1415,36 @@ class SchemaManager:
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_recalibration_state_guild "
             "ON recalibration_state(guild_id)"
+        )
+
+    def _migration_create_soft_avoids_table(self, cursor) -> None:
+        """Create table for soft avoid feature."""
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS soft_avoids (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL DEFAULT 0,
+                avoider_discord_id INTEGER NOT NULL,
+                avoided_discord_id INTEGER NOT NULL,
+                games_remaining INTEGER NOT NULL DEFAULT 10,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                UNIQUE (guild_id, avoider_discord_id, avoided_discord_id)
+            )
+            """
+        )
+        # Index for looking up avoids by avoider
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_soft_avoids_avoider "
+            "ON soft_avoids(guild_id, avoider_discord_id)"
+        )
+        # Index for looking up avoids targeting a player
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_soft_avoids_avoided "
+            "ON soft_avoids(guild_id, avoided_discord_id)"
+        )
+        # Index for efficient expired avoid cleanup
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_soft_avoids_expired "
+            "ON soft_avoids(guild_id, games_remaining) WHERE games_remaining <= 0"
         )

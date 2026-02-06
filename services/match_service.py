@@ -37,6 +37,7 @@ class MatchService:
         betting_service: BettingService | None = None,
         pairings_repo: IPairingsRepository | None = None,
         loan_service=None,
+        soft_avoid_repo=None,
     ):
         """
         Initialize MatchService with required repository dependencies.
@@ -48,6 +49,7 @@ class MatchService:
             betting_service: Optional betting service for wager handling
             pairings_repo: Optional repository for pairwise player statistics
             loan_service: Optional loan service for deferred repayment
+            soft_avoid_repo: Optional repository for soft avoid feature
         """
         self.player_repo = player_repo
         self.match_repo = match_repo
@@ -65,6 +67,7 @@ class MatchService:
         self.betting_service = betting_service
         self.pairings_repo = pairings_repo
         self.loan_service = loan_service
+        self.soft_avoid_repo = soft_avoid_repo
         # Guard against concurrent finalizations per guild
         self._recording_lock = threading.Lock()
         self._recording_in_progress: set[int] = set()
@@ -182,6 +185,7 @@ class MatchService:
             "shuffle_channel_id": state.get("shuffle_channel_id"),
             "betting_mode": state.get("betting_mode", "pool"),
             "is_draft": state.get("is_draft", False),
+            "effective_avoid_ids": state.get("effective_avoid_ids", []),
         }
 
     def _persist_match_state(self, guild_id: int | None, state: dict) -> None:
@@ -392,12 +396,17 @@ class MatchService:
             use_openskill=use_openskill,
         )
 
+        # Load active soft avoids for these players
+        avoids = []
+        if self.soft_avoid_repo:
+            avoids = self.soft_avoid_repo.get_active_avoids_for_players(guild_id, player_ids)
+
         if len(players) > 10:
             team1, team2, excluded_players = shuffler.shuffle_from_pool(
-                players, exclusion_counts, recent_match_names
+                players, exclusion_counts, recent_match_names, avoids=avoids
             )
         else:
-            team1, team2 = shuffler.shuffle(players)
+            team1, team2 = shuffler.shuffle(players, avoids=avoids)
             excluded_players = []
 
         off_role_mult = shuffler.off_role_multiplier
@@ -465,8 +474,22 @@ class MatchService:
             recent_in_match = len(selected_names & recent_match_names)
             recent_match_penalty = recent_in_match * shuffler.recent_match_penalty_weight
 
+        # Calculate soft avoid penalty (for display only - already factored into shuffler)
+        soft_avoid_penalty = 0.0
+        if avoids:
+            radiant_ids_set = {p.discord_id for p in radiant_team.players if p.discord_id}
+            dire_ids_set = {p.discord_id for p in dire_team.players if p.discord_id}
+            for avoid in avoids:
+                avoider = avoid.avoider_discord_id
+                avoided = avoid.avoided_discord_id
+                # Check if both on same team (penalty was applied)
+                both_radiant = avoider in radiant_ids_set and avoided in radiant_ids_set
+                both_dire = avoider in dire_ids_set and avoided in dire_ids_set
+                if both_radiant or both_dire:
+                    soft_avoid_penalty += shuffler.soft_avoid_penalty
+
         goodness_score = (
-            value_diff + off_role_penalty + weighted_role_matchup_delta + excluded_penalty + recent_match_penalty
+            value_diff + off_role_penalty + weighted_role_matchup_delta + excluded_penalty + recent_match_penalty + soft_avoid_penalty
         )
 
         # Calculate Glicko-2 win probability for Radiant
@@ -514,6 +537,25 @@ class MatchService:
         for pid in included_player_ids:
             self.player_repo.decay_exclusion_count(pid, guild_id)
 
+        # Calculate effective soft avoids (opposite teams) - will be decremented on record_match
+        effective_avoid_ids = []
+        if self.soft_avoid_repo and avoids:
+            radiant_set = set(radiant_team_ids)
+            dire_set = set(dire_team_ids)
+            for avoid in avoids:
+                avoider = avoid.avoider_discord_id
+                avoided = avoid.avoided_discord_id
+                # Both must be in the match (not excluded)
+                if avoider not in included_player_ids or avoided not in included_player_ids:
+                    continue
+                # They must be on opposite teams (avoid "worked")
+                on_opposite = (
+                    (avoider in radiant_set and avoided in dire_set) or
+                    (avoider in dire_set and avoided in radiant_set)
+                )
+                if on_opposite:
+                    effective_avoid_ids.append(avoid.id)
+
         # Persist last shuffle for recording
         now_ts = int(time.time())
         shuffle_state = {
@@ -537,6 +579,7 @@ class MatchService:
             "betting_mode": betting_mode,
             "is_draft": False,
             "balancing_rating_system": rating_system,
+            "effective_avoid_ids": effective_avoid_ids,  # Avoids to decrement on record
         }
         self.set_last_shuffle(guild_id, shuffle_state)
         self._persist_match_state(guild_id, shuffle_state)
@@ -869,6 +912,11 @@ class MatchService:
                     team2_ids=dire_team_ids,
                     winning_team=1 if winning_team == "radiant" else 2,
                 )
+
+            # Decrement soft avoids that were effective (opposite teams)
+            effective_avoid_ids = last_shuffle.get("effective_avoid_ids", [])
+            if self.soft_avoid_repo and effective_avoid_ids:
+                self.soft_avoid_repo.decrement_avoids(guild_id, effective_avoid_ids)
 
             # Clear state after successful record
             self.clear_last_shuffle(guild_id)

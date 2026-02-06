@@ -99,7 +99,7 @@ def find_guild_id_issues_in_file(filepath: Path) -> List[Tuple[int, str]]:
     Returns list of (line_number, issue_description) tuples.
     """
     issues = []
-    content = filepath.read_text()
+    content = filepath.read_text(encoding='utf-8')
 
     # Pattern: using guild_id before it's defined in a function
     # This is a simplified check - we look for functions that use guild_id
@@ -195,7 +195,7 @@ class TestNoMissingGuildIdParams:
         This catches patterns like:
             player_repo.get_by_id(user_id)  # Missing guild_id!
         """
-        content = filepath.read_text()
+        content = filepath.read_text(encoding='utf-8')
         lines = content.split('\n')
         issues = []
 
@@ -220,7 +220,7 @@ class TestNoMissingGuildIdParams:
                         continue
 
                     # Skip if this is in a test file's fake class
-                    if 'class Fake' in filepath.read_text()[:filepath.read_text().find(line)]:
+                    if 'class Fake' in content[:content.find(line)]:
                         continue
 
                     # Skip comments
@@ -265,7 +265,7 @@ class TestGuildIdPatternConsistency:
         Verify that guild_id is extracted using the standard pattern:
         guild_id = interaction.guild.id if interaction.guild else None
         """
-        content = filepath.read_text()
+        content = filepath.read_text(encoding='utf-8')
 
         # Count how many times we see guild_id assignment
         standard_pattern = r'guild_id\s*=\s*interaction\.guild\.id\s+if\s+interaction\.guild\s+else\s+None'
