@@ -406,11 +406,11 @@ def get_existing_command_names():
     return {command.name for command in bot.tree.walk_commands()}
 
 
-async def update_lobby_message(message, lobby):
+async def update_lobby_message(message, lobby, guild_id=None):
     """Refresh lobby embed on the pinned lobby message (also updates thread since msg is thread starter)."""
     _init_services()  # Ensure services are initialized
     try:
-        embed = lobby_service.build_lobby_embed(lobby)
+        embed = lobby_service.build_lobby_embed(lobby, guild_id)
         if embed:
             await message.edit(embed=embed, allowed_mentions=discord.AllowedMentions.none())
             logger.info(f"Updated lobby embed: {lobby.get_player_count()} players")
@@ -716,7 +716,7 @@ async def on_raw_reaction_add(payload):
                 pass
             return
 
-        await update_lobby_message(message, lobby)
+        await update_lobby_message(message, lobby, payload.guild_id)
 
         # Mention user in thread to subscribe them
         thread_id = lobby_service.get_lobby_thread_id()
@@ -775,7 +775,7 @@ async def on_raw_reaction_remove(payload):
             left = lobby_service.leave_lobby_conditional(payload.user_id)
 
         if left:
-            await update_lobby_message(message, lobby)
+            await update_lobby_message(message, lobby, payload.guild_id)
 
             # Post leave message in thread
             thread_id = lobby_service.get_lobby_thread_id()

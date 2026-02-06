@@ -130,6 +130,8 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         if not discord_ids:
             return []
 
+        guild_id = self.normalize_guild_id(guild_id)
+
         with self.connection() as conn:
             cursor = conn.cursor()
 
