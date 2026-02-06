@@ -223,6 +223,52 @@ async def test_wheel_bankrupt_subtracts_balance():
 
 
 @pytest.mark.asyncio
+async def test_wheel_bankrupt_credits_nonprofit_fund():
+    """Verify Bankrupt wedge losses are credited to the nonprofit fund."""
+    bot = MagicMock()
+    betting_service = MagicMock()
+    match_service = MagicMock()
+    player_service = MagicMock()
+    loan_service = MagicMock()
+
+    # User is registered
+    player_service.get_player.return_value = MagicMock(name="TestPlayer")
+    player_service.get_balance.return_value = 50
+
+    # Mock repository
+    player_service.player_repo = MagicMock()
+    player_service.player_repo.get_last_wheel_spin.return_value = None
+    player_service.player_repo.set_last_wheel_spin = MagicMock()
+    player_service.player_repo.try_claim_wheel_spin = MagicMock(return_value=True)
+    player_service.player_repo.log_wheel_spin = MagicMock(return_value=1)
+    player_service.player_repo.add_balance = MagicMock()
+
+    message = MagicMock()
+    message.edit = AsyncMock()
+
+    interaction = MagicMock()
+    interaction.guild = MagicMock()
+    interaction.guild.id = 123
+    interaction.user.id = 1004
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock(return_value=message)
+
+    cmds = BettingCommands(
+        bot, betting_service, match_service, player_service, loan_service=loan_service
+    )
+
+    # Mock random to get Bankrupt (index 0) and disable explosion
+    with patch("commands.betting.random.randint", return_value=0):
+        with patch("commands.betting.random.random", return_value=1.0):  # No explosion
+            with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
+                await cmds.gamba.callback(cmds, interaction)
+
+    # Should credit the nonprofit fund with the absolute loss value
+    bankrupt_value = WHEEL_WEDGES[0][1]
+    loan_service.add_to_nonprofit_fund.assert_called_once_with(123, abs(int(bankrupt_value)))
+
+
+@pytest.mark.asyncio
 async def test_wheel_bankrupt_ignores_max_debt():
     """Verify Bankrupt can push balance below MAX_DEBT floor."""
     bot = MagicMock()

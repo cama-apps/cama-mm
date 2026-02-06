@@ -989,6 +989,12 @@ class BettingCommands(commands.Cog):
             # Bankrupt: subtract penalty (ignores MAX_DEBT floor - can go deeper into debt)
             self.player_service.player_repo.add_balance(user_id, guild_id, result_value)
             new_balance = self.player_service.get_balance(user_id, guild_id)
+            # Add losses to nonprofit fund
+            if self.loan_service:
+                try:
+                    self.loan_service.add_to_nonprofit_fund(guild_id, abs(int(result_value)))
+                except Exception:
+                    logger.warning("Failed to add wheel loss to nonprofit fund")
         # result_value == 0: "Lose a Turn" - no balance change, but extended cooldown
         if result_value == 0:
             # Apply the 1-week penalty cooldown for "Lose a Turn"
