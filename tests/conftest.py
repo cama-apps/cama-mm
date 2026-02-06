@@ -19,6 +19,20 @@ from domain.models.player import Player
 from repositories.lobby_repository import LobbyRepository
 from repositories.match_repository import MatchRepository
 from repositories.player_repository import PlayerRepository
+from utils.role_assignment_cache import clear_role_assignment_cache
+
+
+@pytest.fixture(autouse=True)
+def clear_caches():
+    """
+    Clear global caches before and after each test to prevent cross-test contamination.
+
+    The role assignment cache is process-global (LRU cache) and can cause
+    intermittent failures in parallel test execution if stale data persists.
+    """
+    clear_role_assignment_cache()
+    yield
+    clear_role_assignment_cache()
 
 
 @pytest.fixture(scope="session")
