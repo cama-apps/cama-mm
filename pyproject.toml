@@ -39,7 +39,8 @@ python_files = "test_*.py"
 python_classes = "Test*"
 python_functions = "test_*"
 # Group tests by module/class to share session-scoped fixtures efficiently
-addopts = "--dist=loadscope"
+# Limit workers to 8 to avoid Python 3.14.2 interpreter crashes under heavy parallel load
+addopts = "--dist=loadscope -n 8"
 markers = [
     "timeout: mark test with a timeout",
     "forceserial: mark test to run in isolation (avoid parallel test state pollution)",
