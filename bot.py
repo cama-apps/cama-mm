@@ -76,6 +76,7 @@ from repositories.recalibration_repository import RecalibrationRepository
 from repositories.disburse_repository import DisburseRepository
 from repositories.prediction_repository import PredictionRepository
 from repositories.tip_repository import TipRepository
+from repositories.soft_avoid_repository import SoftAvoidRepository
 from services.match_service import MatchService
 from services.prediction_service import PredictionService
 from services.permissions import has_admin_permission  # noqa: F401 - used by tests
@@ -154,6 +155,9 @@ def _init_services():
     disburse_repo = DisburseRepository(DB_PATH)
     disburse_service = DisburseService(disburse_repo, player_repo, loan_repo)
 
+    # Create soft avoid repository for soft avoid feature
+    soft_avoid_repo = SoftAvoidRepository(DB_PATH)
+
     # Create betting service with garnishment and bankruptcy support
     betting_service = BettingService(
         bet_repo,
@@ -181,6 +185,7 @@ def _init_services():
         betting_service=betting_service,
         pairings_repo=pairings_repo,
         loan_service=loan_service,
+        soft_avoid_repo=soft_avoid_repo,
     )
 
     # Expose on bot for cogs
@@ -204,6 +209,7 @@ def _init_services():
     bot.loan_service = loan_service
     bot.disburse_service = disburse_service
     bot.recalibration_service = recalibration_service
+    bot.soft_avoid_repo = soft_avoid_repo
 
     # Create gambling stats service for degen score and leaderboards
     gambling_stats_service = GamblingStatsService(

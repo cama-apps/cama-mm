@@ -20,6 +20,8 @@ from config import (
     SHOP_DOUBLE_OR_NOTHING_COST,
     SHOP_MYSTERY_GIFT_COST,
     SHOP_PROTECT_HERO_COST,
+    SHOP_SOFT_AVOID_COST,
+    SOFT_AVOID_GAMES_DURATION,
 )
 from services.flavor_text_service import EVENT_EXAMPLES, FlavorEvent
 from services.permissions import has_admin_permission
@@ -101,7 +103,7 @@ class ShopCommands(commands.Cog):
     @app_commands.command(name="shop", description="Spend jopacoin in the shop")
     @app_commands.describe(
         item="What to buy",
-        target="User to tag (required for 'Announce + Tag' option)",
+        target="User to tag/avoid (required for 'Announce + Tag' and 'Soft Avoid' options)",
         hero="Hero to protect from bans (required for 'Protect Hero' option)",
     )
     @app_commands.choices(
@@ -125,6 +127,10 @@ class ShopCommands(commands.Cog):
             app_commands.Choice(
                 name=f"Double or Nothing ({SHOP_DOUBLE_OR_NOTHING_COST} jopacoin)",
                 value="double_or_nothing",
+            ),
+            app_commands.Choice(
+                name=f"Soft Avoid ({SHOP_SOFT_AVOID_COST} jopacoin for {SOFT_AVOID_GAMES_DURATION} games)",
+                value="soft_avoid",
             ),
         ]
     )
@@ -180,6 +186,15 @@ class ShopCommands(commands.Cog):
             await self._handle_mystery_gift(interaction)
         elif item.value == "double_or_nothing":
             await self._handle_double_or_nothing(interaction)
+        elif item.value == "soft_avoid":
+            if not target:
+                await interaction.response.send_message(
+                    "You selected 'Soft Avoid' but didn't specify a target. "
+                    "Please provide a user to avoid being teamed with!",
+                    ephemeral=True,
+                )
+                return
+            await self._handle_soft_avoid(interaction, target=target)
 
     async def _handle_announce(
         self,
@@ -780,6 +795,127 @@ class ShopCommands(commands.Cog):
             embed.set_thumbnail(url=interaction.user.avatar.url)
 
         await safe_followup(interaction, content=interaction.user.mention, embed=embed)
+
+    async def _handle_soft_avoid(
+        self,
+        interaction: discord.Interaction,
+        target: discord.Member,
+    ):
+        """Handle the soft avoid purchase."""
+        user_id = interaction.user.id
+        guild_id = interaction.guild.id if interaction.guild else None
+        cost = SHOP_SOFT_AVOID_COST
+
+        # Can't avoid yourself
+        if target.id == user_id:
+            await interaction.response.send_message(
+                "You can't soft avoid yourself.",
+                ephemeral=True,
+            )
+            return
+
+        # Check if registered
+        player = self.player_service.get_player(user_id, guild_id)
+        if not player:
+            await interaction.response.send_message(
+                "You need to `/register` before you can shop.",
+                ephemeral=True,
+            )
+            return
+
+        # Check if target is registered
+        target_player = self.player_service.get_player(target.id, guild_id)
+        if not target_player:
+            await interaction.response.send_message(
+                "The target player is not registered.",
+                ephemeral=True,
+            )
+            return
+
+        # Check if soft_avoid_repo is available
+        soft_avoid_repo = getattr(self.bot, "soft_avoid_repo", None)
+        if not soft_avoid_repo:
+            await interaction.response.send_message(
+                "Soft avoid feature is currently unavailable.",
+                ephemeral=True,
+            )
+            return
+
+        # Check balance
+        balance = self.player_service.get_balance(user_id, guild_id)
+        if balance < cost:
+            await interaction.response.send_message(
+                f"You need {cost} {JOPACOIN_EMOTE} for this, but you only have {balance}.",
+                ephemeral=True,
+            )
+            return
+
+        # Deduct cost
+        self.player_service.player_repo.add_balance(user_id, guild_id, -cost)
+
+        # Create or extend avoid
+        avoid = soft_avoid_repo.create_or_extend_avoid(
+            guild_id=guild_id,
+            avoider_id=user_id,
+            avoided_id=target.id,
+            games=SOFT_AVOID_GAMES_DURATION,
+        )
+
+        # Build confirmation embed (ephemeral)
+        embed = discord.Embed(
+            title="Soft Avoid Active",
+            description=(
+                f"You are now soft-avoiding **{target.display_name}**.\n\n"
+                f"**Games remaining:** {avoid.games_remaining}\n\n"
+                f"When shuffling, the system will try to place you on opposite teams. "
+                f"The avoid count decreases each game where you're both playing "
+                f"and successfully placed on opposite teams."
+            ),
+            color=0x7289DA,
+        )
+        embed.set_footer(text=f"Cost: {cost} jopacoin")
+
+        # Ephemeral response (private)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="myavoids", description="View your active soft avoids")
+    async def myavoids(self, interaction: discord.Interaction):
+        """View your active soft avoids."""
+        user_id = interaction.user.id
+        guild_id = interaction.guild.id if interaction.guild else None
+
+        # Check if soft_avoid_repo is available
+        soft_avoid_repo = getattr(self.bot, "soft_avoid_repo", None)
+        if not soft_avoid_repo:
+            await interaction.response.send_message(
+                "Soft avoid feature is currently unavailable.",
+                ephemeral=True,
+            )
+            return
+
+        # Get user's avoids
+        avoids = soft_avoid_repo.get_user_avoids(guild_id, user_id)
+
+        if not avoids:
+            await interaction.response.send_message(
+                "You have no active soft avoids.",
+                ephemeral=True,
+            )
+            return
+
+        # Build the list
+        lines = []
+        for avoid in avoids:
+            lines.append(f"<@{avoid.avoided_discord_id}> - **{avoid.games_remaining}** games")
+
+        embed = discord.Embed(
+            title="Your Active Soft Avoids",
+            description="\n".join(lines),
+            color=0x7289DA,
+        )
+
+        # Ephemeral response (private)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 async def setup(bot: commands.Bot):
