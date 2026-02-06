@@ -537,6 +537,8 @@ class AdminCommands(commands.Cog):
             )
             return
 
+        guild_id = interaction.guild.id if interaction.guild else None
+
         # Handle nonprofit fund target
         if nonprofit:
             if not self.loan_service:
@@ -545,8 +547,6 @@ class AdminCommands(commands.Cog):
                     ephemeral=True,
                 )
                 return
-
-            guild_id = interaction.guild.id if interaction.guild else None
             old_balance = self.loan_service.get_nonprofit_fund(guild_id)
 
             if amount >= 0:
@@ -643,6 +643,7 @@ class AdminCommands(commands.Cog):
         # Note: Can't use None because COALESCE in upsert keeps old value
         self.loan_service.loan_repo.upsert_state(
             discord_id=user.id,
+            guild_id=guild_id,
             last_loan_at=0,
             total_loans_taken=state.total_loans_taken,
             total_fees_paid=state.total_fees_paid,

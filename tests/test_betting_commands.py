@@ -339,6 +339,8 @@ async def test_loan_checks_eligibility_for_registered_user():
     interaction.guild.id = 123
     interaction.user.id = 456
     interaction.response.send_message = AsyncMock()
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock()
 
     commands = BettingCommands(
         bot, betting_service, match_service, player_service, loan_service=loan_service

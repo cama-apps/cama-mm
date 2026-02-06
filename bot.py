@@ -281,6 +281,18 @@ def _init_services():
     bot.sql_query_service = sql_query_service
     bot.flavor_text_service = flavor_text_service
 
+    # Create Neon Degen Terminal service (JOPA-T/v3.7 easter egg system)
+    from services.neon_degen_service import NeonDegenService
+    neon_degen_service = NeonDegenService(
+        player_repo=player_repo,
+        bet_repo=bet_repo,
+        bankruptcy_service=bankruptcy_service,
+        gambling_stats_service=gambling_stats_service,
+        ai_service=ai_service,
+        flavor_text_service=flavor_text_service,
+    )
+    bot.neon_degen_service = neon_degen_service
+
     # Create wrapped service for monthly summaries
     from repositories.wrapped_repository import WrappedRepository
     from services.wrapped_service import WrappedService
@@ -653,6 +665,26 @@ async def on_raw_reaction_add(payload):
                         await thread.send(f"{JOPACOIN_EMOTE} {user.mention} is here for the gamba!")
                     except Exception as exc:
                         logger.warning(f"Failed to post gamba subscription in thread: {exc}")
+
+                # Neon Degen Terminal hook (~35% chance, auto-deletes)
+                try:
+                    from services.neon_degen_service import NeonDegenService
+                    neon = getattr(bot, "neon_degen_service", None)
+                    if isinstance(neon, NeonDegenService):
+                        neon_result = await neon.on_gamba_spectator(
+                            payload.user_id, payload.guild_id, user.display_name
+                        )
+                        if neon_result and neon_result.text_block:
+                            neon_msg = await channel.send(neon_result.text_block)
+                            async def _delete_after(m, delay):
+                                try:
+                                    await asyncio.sleep(delay)
+                                    await m.delete()
+                                except Exception:
+                                    pass
+                            asyncio.create_task(_delete_after(neon_msg, 60))
+                except Exception as exc:
+                    logger.debug(f"Neon gamba spectator hook failed: {exc}")
             return
 
         # Rest of the handler is for sword/frogling (lobby joining)

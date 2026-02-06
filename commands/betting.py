@@ -157,6 +157,46 @@ class BettingCommands(commands.Cog):
         self.disburse_service = disburse_service
         self.tip_repository = tip_repository
 
+    def _get_neon_service(self):
+        """Get the NeonDegenService from the bot, or None if unavailable."""
+        from services.neon_degen_service import NeonDegenService
+        svc = getattr(self.bot, "neon_degen_service", None)
+        return svc if isinstance(svc, NeonDegenService) else None
+
+    async def _send_neon_result(self, interaction: discord.Interaction, neon_result) -> None:
+        """Send a NeonResult to the channel, auto-deleting after 60s."""
+        try:
+            if neon_result is None:
+                return
+            msg = None
+            if neon_result.gif_file:
+                import discord as _discord
+                gif_file = _discord.File(neon_result.gif_file, filename="jopat_terminal.gif")
+                if neon_result.text_block:
+                    msg = await interaction.channel.send(neon_result.text_block, file=gif_file)
+                else:
+                    msg = await interaction.channel.send(file=gif_file)
+            elif neon_result.text_block:
+                msg = await interaction.channel.send(neon_result.text_block)
+            elif neon_result.footer_text:
+                msg = await interaction.channel.send(neon_result.footer_text)
+            # Auto-delete after 60 seconds
+            if msg:
+                import asyncio
+                asyncio.create_task(self._delete_after(msg, 60))
+        except Exception as exc:
+            logger.debug(f"Failed to send neon result: {exc}")
+
+    @staticmethod
+    async def _delete_after(msg, delay: float) -> None:
+        """Delete a message after a delay, ignoring errors."""
+        try:
+            import asyncio
+            await asyncio.sleep(delay)
+            await msg.delete()
+        except Exception:
+            pass
+
     async def _update_shuffle_message_wagers(self, guild_id: int | None) -> None:
         """
         Refresh the shuffle message's wager field with current totals.
@@ -511,6 +551,14 @@ class BettingCommands(commands.Cog):
                 ephemeral=True,
             )
 
+        # Neon Degen Terminal hook
+        neon = self._get_neon_service()
+        if neon:
+            neon_result = await neon.on_bet_placed(
+                interaction.user.id, guild_id, amount, lev, team.value
+            )
+            await self._send_neon_result(interaction, neon_result)
+
     @app_commands.command(name="mybets", description="Show your active bets")
     async def mybets(self, interaction: discord.Interaction):
         guild = interaction.guild if interaction.guild else None
@@ -808,6 +856,12 @@ class BettingCommands(commands.Cog):
                 ephemeral=True,
             )
 
+        # Neon Degen Terminal hook
+        neon = self._get_neon_service()
+        if neon:
+            neon_result = await neon.on_balance_check(user_id, guild_id, balance)
+            await self._send_neon_result(interaction, neon_result)
+
     @app_commands.command(name="gamba", description="Spin the Wheel of Fortune! (once per day)")
     async def gamba(self, interaction: discord.Interaction):
         user_id = interaction.user.id
@@ -958,6 +1012,16 @@ class BettingCommands(commands.Cog):
         result_embed = self._wheel_result_embed(result_wedge, new_balance, garnished_amount, next_spin_time)
         await message.edit(embed=result_embed)
 
+        # Neon Degen Terminal hook (for BANKRUPT results)
+        neon = self._get_neon_service()
+        if neon and result_wedge[1] < 0:
+            neon_result = await neon.on_wheel_result(
+                user_id, guild_id,
+                result_value=result_wedge[1],
+                new_balance=new_balance,
+            )
+            await self._send_neon_result(interaction, neon_result)
+
     @app_commands.command(name="tip", description="Give jopacoin to another player")
     @app_commands.describe(
         player="Player to tip",
@@ -1086,6 +1150,18 @@ class BettingCommands(commands.Cog):
             f"({fee} {JOPACOIN_EMOTE} fee to nonprofit)",
             ephemeral=False,
         )
+
+        # Neon Degen Terminal hook
+        neon = self._get_neon_service()
+        if neon:
+            neon_result = await neon.on_tip(
+                interaction.user.id, guild_id,
+                sender_name=interaction.user.display_name,
+                recipient_name=player.display_name,
+                amount=amount,
+                fee=fee,
+            )
+            await self._send_neon_result(interaction, neon_result)
 
         # Log the transaction (non-critical - failure here doesn't affect the tip)
         if self.tip_repository:
@@ -1261,6 +1337,27 @@ class BettingCommands(commands.Cog):
             ephemeral=False,
         )
 
+        # Neon Degen Terminal hook
+        neon = self._get_neon_service()
+        if neon:
+            filing_number = self._get_bankruptcy_filing_number(user_id, guild_id)
+            neon_result = await neon.on_bankruptcy(
+                user_id, guild_id,
+                debt_cleared=result["debt_cleared"],
+                filing_number=filing_number,
+            )
+            await self._send_neon_result(interaction, neon_result)
+
+    def _get_bankruptcy_filing_number(self, discord_id: int, guild_id: int | None) -> int:
+        """Get the current bankruptcy filing number for a user."""
+        try:
+            gambling_stats = getattr(self.bot, "gambling_stats_service", None)
+            if gambling_stats and gambling_stats.bet_repo:
+                return gambling_stats.bet_repo.get_player_bankruptcy_count(discord_id, guild_id)
+        except Exception:
+            pass
+        return 1
+
     @app_commands.command(name="loan", description="Borrow jopacoin (with a fee)")
     @app_commands.describe(amount="Amount to borrow (max 100)")
     async def loan(
@@ -1285,12 +1382,15 @@ class BettingCommands(commands.Cog):
             )
             return
 
+        # Defer early - AI flavor text calls below can take several seconds
+        await interaction.response.defer()
+
         # Check eligibility
         check = self.loan_service.can_take_loan(user_id, amount, guild_id)
 
         if not check["allowed"]:
             if check["reason"] == "has_outstanding_loan":
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     f"You already have an outstanding loan of **{check['outstanding_total']}** {JOPACOIN_EMOTE} "
                     f"(principal: {check['outstanding_principal']}, fee: {check['outstanding_fee']}).\n\n"
                     "Repay it by playing in a match first!",
@@ -1318,7 +1418,7 @@ class BettingCommands(commands.Cog):
                         logger.warning(f"Failed to generate AI flavor for loan cooldown: {e}")
                 if not msg:
                     msg = random.choice(LOAN_DENIED_COOLDOWN_MESSAGES)
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     f"{msg}\n\n⏳ Cooldown ends in **{hours}h {minutes}m**.",
                 )
                 return
@@ -1341,17 +1441,17 @@ class BettingCommands(commands.Cog):
                         logger.warning(f"Failed to generate AI flavor for loan denied: {e}")
                 if not msg:
                     msg = random.choice(LOAN_DENIED_DEBT_MESSAGES)
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     f"{msg}\n\nCurrent balance: **{check['current_balance']}** {JOPACOIN_EMOTE}",
                 )
                 return
             elif check["reason"] == "exceeds_max":
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     f"Maximum loan amount is **{check['max_amount']}** {JOPACOIN_EMOTE}.",
                 )
                 return
             elif check["reason"] == "invalid_amount":
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     "Loan amount must be positive.",
                 )
                 return
@@ -1360,7 +1460,7 @@ class BettingCommands(commands.Cog):
         result = self.loan_service.take_loan(user_id, amount, guild_id)
 
         if not result["success"]:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "Failed to process loan. Please try again.", ephemeral=True
             )
             return
@@ -1462,7 +1562,18 @@ class BettingCommands(commands.Cog):
                 text=f"Loan #{result['total_loans_taken']} | Fee donated to Gambling Addiction Nonprofit"
             )
 
-        await interaction.response.send_message(embed=embed)
+        await interaction.followup.send(embed=embed)
+
+        # Neon Degen Terminal hook
+        neon = self._get_neon_service()
+        if neon:
+            neon_result = await neon.on_loan(
+                user_id, guild_id,
+                amount=result["amount"],
+                total_owed=result["total_owed"],
+                is_negative=result.get("was_negative_loan", False),
+            )
+            await self._send_neon_result(interaction, neon_result)
 
     @app_commands.command(name="nonprofit", description="View the Gambling Addiction Nonprofit fund")
     async def nonprofit(self, interaction: discord.Interaction):

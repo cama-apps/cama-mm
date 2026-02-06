@@ -1050,6 +1050,30 @@ class MatchCommands(commands.Cog):
             guild_id, winning_result, thread_id=thread_id_for_finalize
         )
 
+        # Neon Degen Terminal hook (match recorded footer / streak)
+        from services.neon_degen_service import NeonDegenService
+        _neon_svc = getattr(self.bot, "neon_degen_service", None)
+        neon = _neon_svc if isinstance(_neon_svc, NeonDegenService) else None
+        if neon:
+            try:
+                neon_result = await neon.on_match_recorded(guild_id)
+                if neon_result:
+                    msg = None
+                    if neon_result.text_block:
+                        msg = await interaction.channel.send(neon_result.text_block)
+                    elif neon_result.footer_text:
+                        msg = await interaction.channel.send(neon_result.footer_text)
+                    if msg:
+                        async def _delete_after(m, delay):
+                            try:
+                                await asyncio.sleep(delay)
+                                await m.delete()
+                            except Exception:
+                                pass
+                        asyncio.create_task(_delete_after(msg, 60))
+            except Exception as exc:
+                logger.debug(f"Neon match hook failed: {exc}")
+
         # Trigger auto-discovery in background if enabled
         match_id = record_result.get("match_id")
         if match_id:
