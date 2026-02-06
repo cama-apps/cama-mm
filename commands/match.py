@@ -405,12 +405,12 @@ class MatchCommands(commands.Cog):
 
         # Build the player list for shuffling
         # Priority: regular players first, then fill with conditional if needed
-        player_ids, players = self.lobby_service.get_lobby_players(lobby)
+        player_ids, players = self.lobby_service.get_lobby_players(lobby, guild_id)
         conditional_player_ids_included = []
         excluded_conditional_ids = []
 
         # Always get conditional players to track who wasn't included
-        all_conditional_ids, all_conditional_players = self.lobby_service.get_conditional_players(lobby)
+        all_conditional_ids, all_conditional_players = self.lobby_service.get_conditional_players(lobby, guild_id)
 
         if regular_count < 10:
             # Need to include some conditional players to reach exactly 10
