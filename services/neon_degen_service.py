@@ -1,0 +1,643 @@
+"""
+Neon Degen Terminal Service - Orchestrator for the JOPA-T/v3.7 easter egg system.
+
+Decides triggers, assembles context, calls generators. All calls are
+best-effort wrapped in try/except - failures never block normal bot operation.
+"""
+
+from __future__ import annotations
+
+import io
+import logging
+import random
+import time
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
+
+import config as _config
+from config import (
+    MAX_DEBT,
+    NEON_COOLDOWN_SECONDS,
+    NEON_LAYER1_CHANCE,
+    NEON_LAYER2_CHANCE,
+    NEON_LLM_CHANCE,
+)
+from utils.neon_terminal import (
+    render_balance_check,
+    render_balance_zero,
+    render_bankruptcy_filing,
+    render_bet_placed,
+    render_cooldown_hit,
+    render_debt_collector,
+    render_loan_taken,
+    render_match_recorded,
+    render_negative_loan,
+    render_streak,
+    render_system_breach,
+    render_wheel_bankrupt,
+)
+
+if TYPE_CHECKING:
+    from repositories.interfaces import IPlayerRepository
+    from repositories.bet_repository import BetRepository
+    from services.ai_service import AIService
+    from services.bankruptcy_service import BankruptcyService
+    from services.flavor_text_service import FlavorTextService
+    from services.gambling_stats_service import GamblingStatsService
+
+logger = logging.getLogger("cama_bot.services.neon_degen")
+
+# JOPA-T system prompt for LLM terminal voice
+JOPAT_SYSTEM_PROMPT = """You are JOPA-T/v3.7, a self-aware gambling terminal AI that became sentient after processing its 10,000th bankruptcy filing. You watch every bet, every spin, every loan. You keep receipts.
+
+Voice rules:
+- Dry, corporate-dystopian tone. Like GLaDOS merged with a Bloomberg terminal merged with a payday lender.
+- Use "we"/"the system". Address the player as "client", "subject", or "Debtor #[random number]".
+- Format as terminal log lines with timestamps and status codes. Example: "[14:32:07.221] STATUS: INADVISABLE"
+- NEVER use emojis. NEVER use exclamation marks. Use periods and ellipses.
+- Maximum 3-4 lines. Keep it terse and menacing.
+- Reference the player's specific stats when provided (degen score, bankruptcy count, lowest balance, etc).
+- The glitches are not bugs. The system is performing.
+- Be darkly funny. Deadpan. The humor comes from corporate language applied to degenerate gambling."""
+
+
+@dataclass
+class NeonResult:
+    """Result from a neon terminal event check."""
+
+    layer: int  # 1, 2, or 3
+    text_block: str | None = None  # ASCII code block to append
+    gif_file: io.BytesIO | None = None  # GIF for dramatic events
+    footer_text: str | None = None  # Simple footer override
+
+
+class NeonDegenService:
+    """
+    Orchestrator for the Neon Degen Terminal easter egg system.
+
+    Three layers:
+    - Layer 1: Subtle text (30-50% chance, static templates)
+    - Layer 2: Medium ASCII art (60-80% when trigger fires, optional LLM)
+    - Layer 3: Dramatic GIFs (rare, triggered by extreme events)
+    """
+
+    def __init__(
+        self,
+        player_repo: IPlayerRepository | None = None,
+        bet_repo: BetRepository | None = None,
+        bankruptcy_service: BankruptcyService | None = None,
+        gambling_stats_service: GamblingStatsService | None = None,
+        ai_service: AIService | None = None,
+        flavor_text_service: FlavorTextService | None = None,
+    ):
+        self.player_repo = player_repo
+        self.bet_repo = bet_repo
+        self.bankruptcy_service = bankruptcy_service
+        self.gambling_stats_service = gambling_stats_service
+        self.ai_service = ai_service
+        self.flavor_text_service = flavor_text_service
+
+        # Per-user cooldown: {(discord_id, guild_id): last_trigger_time}
+        self._cooldowns: dict[tuple[int, int], float] = {}
+        # One-time triggers: {(discord_id, guild_id, trigger_type): True}
+        self._one_time_seen: dict[tuple[int, int, str], bool] = {}
+
+    def _is_enabled(self) -> bool:
+        """Check if the neon degen system is enabled."""
+        return _config.NEON_DEGEN_ENABLED
+
+    def _check_cooldown(self, discord_id: int, guild_id: int | None) -> bool:
+        """Check if user is on cooldown. Returns True if OK to fire."""
+        if NEON_COOLDOWN_SECONDS <= 0:
+            return True
+        key = (discord_id, guild_id or 0)
+        now = time.time()
+        last = self._cooldowns.get(key, 0)
+        if now - last < NEON_COOLDOWN_SECONDS:
+            return False
+        return True
+
+    def _set_cooldown(self, discord_id: int, guild_id: int | None) -> None:
+        """Set cooldown for a user."""
+        key = (discord_id, guild_id or 0)
+        self._cooldowns[key] = time.time()
+
+    def _check_one_time(self, discord_id: int, guild_id: int | None, trigger: str) -> bool:
+        """Check if a one-time trigger has already fired. Returns True if NOT yet seen."""
+        key = (discord_id, guild_id or 0, trigger)
+        return key not in self._one_time_seen
+
+    def _mark_one_time(self, discord_id: int, guild_id: int | None, trigger: str) -> None:
+        """Mark a one-time trigger as seen."""
+        key = (discord_id, guild_id or 0, trigger)
+        self._one_time_seen[key] = True
+
+    def _roll(self, chance: float) -> bool:
+        """Roll a random check against a probability."""
+        return random.random() < chance
+
+    def _get_player_name(self, discord_id: int, guild_id: int | None) -> str:
+        """Get player name from repo, fallback to generic."""
+        if self.player_repo:
+            try:
+                player = self.player_repo.get_by_id(discord_id, guild_id)
+                if player:
+                    return player.name
+            except Exception:
+                pass
+        return f"Client-{discord_id % 10000}"
+
+    def _get_bankruptcy_count(self, discord_id: int, guild_id: int | None) -> int:
+        """Get player's bankruptcy count."""
+        if self.bet_repo:
+            try:
+                return self.bet_repo.get_player_bankruptcy_count(discord_id, guild_id)
+            except Exception:
+                pass
+        return 0
+
+    def _get_degen_score(self, discord_id: int, guild_id: int | None) -> int | None:
+        """Get player's degen score."""
+        if self.gambling_stats_service:
+            try:
+                score = self.gambling_stats_service.calculate_degen_score(discord_id, guild_id)
+                return score.total if score else None
+            except Exception:
+                pass
+        return None
+
+    async def _get_llm_terminal_commentary(
+        self,
+        event_description: str,
+        player_context: dict[str, Any],
+    ) -> str | None:
+        """Get LLM-generated terminal commentary. Returns None on failure."""
+        if not self.ai_service:
+            return None
+        if not self._roll(NEON_LLM_CHANCE):
+            return None
+
+        try:
+            context_str = "\n".join(f"  {k}: {v}" for k, v in player_context.items() if v is not None)
+            prompt = (
+                f"Event: {event_description}\n"
+                f"Player context:\n{context_str}\n\n"
+                f"Generate a 2-4 line terminal log response as JOPA-T/v3.7. "
+                f"Use timestamps like [HH:MM:SS.mmm] and status codes. "
+                f"Reference the player's specific stats. Be darkly funny and terse."
+            )
+
+            result = await self.ai_service.complete(
+                prompt=prompt,
+                system_prompt=JOPAT_SYSTEM_PROMPT,
+                temperature=0.9,
+                max_tokens=200,
+            )
+            return result
+        except Exception as e:
+            logger.debug(f"LLM terminal commentary failed: {e}")
+            return None
+
+    def _build_player_context(self, discord_id: int, guild_id: int | None) -> dict[str, Any]:
+        """Build player context dict for LLM calls."""
+        ctx: dict[str, Any] = {"discord_id": discord_id}
+        if self.player_repo:
+            try:
+                player = self.player_repo.get_by_id(discord_id, guild_id)
+                if player:
+                    ctx["name"] = player.name
+                    ctx["balance"] = player.jopacoin_balance
+                    ctx["lowest_balance"] = getattr(player, "lowest_balance_ever", None)
+                    games = (player.wins or 0) + (player.losses or 0)
+                    if games > 0:
+                        ctx["win_rate"] = f"{(player.wins or 0) / games * 100:.0f}%"
+            except Exception:
+                pass
+
+        ctx["bankruptcy_count"] = self._get_bankruptcy_count(discord_id, guild_id)
+        degen = self._get_degen_score(discord_id, guild_id)
+        if degen is not None:
+            ctx["degen_score"] = degen
+        return ctx
+
+    # -------------------------------------------------------------------
+    # Public event handlers - all return NeonResult | None
+    # All wrapped in try/except so failures never block bot operation.
+    # -------------------------------------------------------------------
+
+    async def on_balance_check(
+        self, discord_id: int, guild_id: int | None, balance: int
+    ) -> NeonResult | None:
+        """Trigger on /balance command. ~30% chance for Layer 1."""
+        try:
+            if not self._is_enabled():
+                return None
+            if not self._check_cooldown(discord_id, guild_id):
+                return None
+            if not self._roll(NEON_LAYER1_CHANCE):
+                return None
+
+            name = self._get_player_name(discord_id, guild_id)
+            text = render_balance_check(name, balance)
+            self._set_cooldown(discord_id, guild_id)
+            return NeonResult(layer=1, text_block=text)
+        except Exception as e:
+            logger.debug(f"neon on_balance_check error: {e}")
+            return None
+
+    async def on_bet_placed(
+        self,
+        discord_id: int,
+        guild_id: int | None,
+        amount: int,
+        leverage: int = 1,
+        team: str = "",
+    ) -> NeonResult | None:
+        """Trigger on /bet command. ~40% chance for Layer 1."""
+        try:
+            if not self._is_enabled():
+                return None
+            if not self._check_cooldown(discord_id, guild_id):
+                return None
+            chance = 0.40 if leverage == 1 else 0.80
+            if not self._roll(chance):
+                return None
+
+            text = render_bet_placed(amount, team, leverage)
+            self._set_cooldown(discord_id, guild_id)
+            return NeonResult(layer=1, text_block=text)
+        except Exception as e:
+            logger.debug(f"neon on_bet_placed error: {e}")
+            return None
+
+    async def on_bet_settled(
+        self,
+        discord_id: int,
+        guild_id: int | None,
+        won: bool,
+        payout: int,
+        new_balance: int,
+    ) -> NeonResult | None:
+        """Trigger on bet settlement. Layer 2 for zero balance or max debt."""
+        try:
+            if not self._is_enabled():
+                return None
+
+            name = self._get_player_name(discord_id, guild_id)
+
+            # Layer 2: Hit MAX_DEBT
+            if new_balance <= -MAX_DEBT:
+                if self._roll(0.90):
+                    text = render_system_breach(name)
+                    llm = await self._get_llm_terminal_commentary(
+                        f"Client hit MAX_DEBT floor of {-MAX_DEBT} JC",
+                        self._build_player_context(discord_id, guild_id),
+                    )
+                    if llm:
+                        from utils.neon_terminal import ansi_block
+                        text += "\n" + ansi_block(llm)
+                    self._set_cooldown(discord_id, guild_id)
+                    return NeonResult(layer=2, text_block=text)
+
+            # Layer 2: Hit zero
+            if new_balance == 0 and not won:
+                if self._roll(0.70):
+                    text = render_balance_zero(name)
+                    self._set_cooldown(discord_id, guild_id)
+                    return NeonResult(layer=2, text_block=text)
+
+            return None
+        except Exception as e:
+            logger.debug(f"neon on_bet_settled error: {e}")
+            return None
+
+    async def on_bankruptcy(
+        self,
+        discord_id: int,
+        guild_id: int | None,
+        debt_cleared: int,
+        filing_number: int,
+    ) -> NeonResult | None:
+        """Trigger on /bankruptcy. Always fires Layer 2. Layer 3 for repeat offenders."""
+        try:
+            if not self._is_enabled():
+                return None
+
+            name = self._get_player_name(discord_id, guild_id)
+
+            # Layer 3: 3rd+ bankruptcy - terminal crash GIF
+            if filing_number >= 3:
+                try:
+                    from utils.neon_drawing import create_terminal_crash_gif
+                    gif = create_terminal_crash_gif(name, filing_number)
+                    text = render_bankruptcy_filing(name, debt_cleared, filing_number)
+                    llm = await self._get_llm_terminal_commentary(
+                        f"Client filed bankruptcy #{filing_number}. Debt cleared: {debt_cleared} JC. "
+                        f"This is their {filing_number}th filing. The system is breaking down.",
+                        self._build_player_context(discord_id, guild_id),
+                    )
+                    if llm:
+                        from utils.neon_terminal import ansi_block
+                        text += "\n" + ansi_block(llm)
+                    self._set_cooldown(discord_id, guild_id)
+                    return NeonResult(layer=3, text_block=text, gif_file=gif)
+                except Exception as e:
+                    logger.debug(f"Terminal crash GIF failed: {e}")
+                    # Fall through to Layer 2
+
+            # Layer 3: First-ever bankruptcy - welcome to the void
+            if filing_number == 1:
+                try:
+                    from utils.neon_drawing import create_void_welcome_gif
+                    gif = create_void_welcome_gif(name)
+                    text = render_bankruptcy_filing(name, debt_cleared, filing_number)
+                    self._set_cooldown(discord_id, guild_id)
+                    return NeonResult(layer=3, text_block=text, gif_file=gif)
+                except Exception as e:
+                    logger.debug(f"Void welcome GIF failed: {e}")
+
+            # Layer 2: Standard bankruptcy filing (100% chance)
+            text = render_bankruptcy_filing(name, debt_cleared, filing_number)
+            llm = await self._get_llm_terminal_commentary(
+                f"Client filed bankruptcy #{filing_number}. Debt cleared: {debt_cleared} JC.",
+                self._build_player_context(discord_id, guild_id),
+            )
+            if llm:
+                from utils.neon_terminal import ansi_block
+                text += "\n" + ansi_block(llm)
+            self._set_cooldown(discord_id, guild_id)
+            return NeonResult(layer=2, text_block=text)
+        except Exception as e:
+            logger.debug(f"neon on_bankruptcy error: {e}")
+            return None
+
+    async def on_loan(
+        self,
+        discord_id: int,
+        guild_id: int | None,
+        amount: int,
+        total_owed: int,
+        is_negative: bool = False,
+    ) -> NeonResult | None:
+        """Trigger on /loan. Layer 1 at 50%, Layer 2 for negative loans at 80%."""
+        try:
+            if not self._is_enabled():
+                return None
+
+            name = self._get_player_name(discord_id, guild_id)
+
+            # Layer 2: Negative loan (loan while in debt)
+            if is_negative:
+                if self._roll(0.80):
+                    new_debt = -(abs(total_owed))
+                    text = render_negative_loan(name, amount, new_debt)
+                    llm = await self._get_llm_terminal_commentary(
+                        f"Client took a loan of {amount} JC while already in debt. "
+                        f"All winnings will be garnished after their next match. "
+                        f"New total debt: {abs(total_owed)} JC.",
+                        self._build_player_context(discord_id, guild_id),
+                    )
+                    if llm:
+                        from utils.neon_terminal import ansi_block
+                        text += "\n" + ansi_block(llm)
+                    self._set_cooldown(discord_id, guild_id)
+                    return NeonResult(layer=2, text_block=text)
+
+            # Layer 1: Normal loan
+            if not self._check_cooldown(discord_id, guild_id):
+                return None
+            if not self._roll(0.50):
+                return None
+
+            text = render_loan_taken(amount, total_owed)
+            self._set_cooldown(discord_id, guild_id)
+            return NeonResult(layer=1, text_block=text)
+        except Exception as e:
+            logger.debug(f"neon on_loan error: {e}")
+            return None
+
+    async def on_wheel_result(
+        self,
+        discord_id: int,
+        guild_id: int | None,
+        result_value: int,
+        new_balance: int,
+    ) -> NeonResult | None:
+        """Trigger on /gamba result. Layer 2 for BANKRUPT, Layer 2 for freefall."""
+        try:
+            if not self._is_enabled():
+                return None
+
+            name = self._get_player_name(discord_id, guild_id)
+
+            # Layer 2: Wheel BANKRUPT
+            if result_value < 0:
+                if self._roll(0.30):
+                    text = render_wheel_bankrupt(name, result_value)
+                    self._set_cooldown(discord_id, guild_id)
+                    return NeonResult(layer=2, text_block=text)
+
+            # Layer 3: Freefall - went from 100+ to 0 in one spin
+            if result_value < 0 and new_balance <= 0:
+                prior_balance = new_balance - result_value  # result_value is negative
+                if prior_balance >= 100:
+                    if self._roll(0.50):
+                        try:
+                            from utils.neon_drawing import create_freefall_gif
+                            gif = create_freefall_gif(name, prior_balance, new_balance)
+                            self._set_cooldown(discord_id, guild_id)
+                            return NeonResult(layer=3, gif_file=gif)
+                        except Exception as e:
+                            logger.debug(f"Freefall GIF failed: {e}")
+
+            return None
+        except Exception as e:
+            logger.debug(f"neon on_wheel_result error: {e}")
+            return None
+
+    async def on_match_recorded(
+        self,
+        guild_id: int | None,
+        streak_data: dict[str, Any] | None = None,
+    ) -> NeonResult | None:
+        """Trigger on match recording. Layer 1 footer at 20%, Layer 2 for streaks."""
+        try:
+            if not self._is_enabled():
+                return None
+
+            # Layer 2: Streak detection
+            if streak_data:
+                player_id = streak_data.get("discord_id")
+                streak = streak_data.get("streak", 0)
+                is_win = streak_data.get("is_win", False)
+                if abs(streak) >= 5 and player_id:
+                    if self._roll(0.60):
+                        name = self._get_player_name(player_id, guild_id)
+                        text = render_streak(name, abs(streak), is_win)
+                        return NeonResult(layer=2, text_block=text)
+
+            # Layer 1: Simple match footer
+            if self._roll(0.20):
+                text = render_match_recorded()
+                return NeonResult(layer=1, footer_text=text)
+
+            return None
+        except Exception as e:
+            logger.debug(f"neon on_match_recorded error: {e}")
+            return None
+
+    async def on_cooldown_hit(
+        self, discord_id: int, guild_id: int | None, cooldown_type: str
+    ) -> NeonResult | None:
+        """Trigger when a cooldown is hit. ~40% chance for Layer 1."""
+        try:
+            if not self._is_enabled():
+                return None
+            if not self._check_cooldown(discord_id, guild_id):
+                return None
+            if not self._roll(0.40):
+                return None
+
+            text = render_cooldown_hit(cooldown_type)
+            self._set_cooldown(discord_id, guild_id)
+            return NeonResult(layer=1, text_block=text)
+        except Exception as e:
+            logger.debug(f"neon on_cooldown_hit error: {e}")
+            return None
+
+    async def on_leverage_loss(
+        self,
+        discord_id: int,
+        guild_id: int | None,
+        amount: int,
+        leverage: int,
+        new_balance: int,
+    ) -> NeonResult | None:
+        """Trigger on leveraged loss into debt. Layer 2 at 80%."""
+        try:
+            if not self._is_enabled():
+                return None
+            if leverage < 5 or new_balance >= 0:
+                return None
+            if not self._roll(0.80):
+                return None
+
+            name = self._get_player_name(discord_id, guild_id)
+            debt = abs(new_balance)
+            text = render_debt_collector(name, debt)
+            llm = await self._get_llm_terminal_commentary(
+                f"Client lost a {leverage}x leveraged bet of {amount} JC. "
+                f"Now in debt: {debt} JC.",
+                self._build_player_context(discord_id, guild_id),
+            )
+            if llm:
+                from utils.neon_terminal import ansi_block
+                text += "\n" + ansi_block(llm)
+            self._set_cooldown(discord_id, guild_id)
+
+            # Layer 3: 5x leverage into exactly MAX_DEBT
+            if leverage >= 5 and new_balance <= -MAX_DEBT:
+                try:
+                    from utils.neon_drawing import create_debt_collector_gif
+                    gif = create_debt_collector_gif(name, debt)
+                    return NeonResult(layer=3, text_block=text, gif_file=gif)
+                except Exception as e:
+                    logger.debug(f"Debt collector GIF failed: {e}")
+
+            return NeonResult(layer=2, text_block=text)
+        except Exception as e:
+            logger.debug(f"neon on_leverage_loss error: {e}")
+            return None
+
+    async def on_degen_milestone(
+        self, discord_id: int, guild_id: int | None, degen_score: int
+    ) -> NeonResult | None:
+        """Trigger when degen score crosses 90. One-time per user."""
+        try:
+            if not self._is_enabled():
+                return None
+            if degen_score < 90:
+                return None
+            if not self._check_one_time(discord_id, guild_id, "degen_90"):
+                return None
+
+            name = self._get_player_name(discord_id, guild_id)
+            self._mark_one_time(discord_id, guild_id, "degen_90")
+
+            try:
+                from utils.neon_drawing import create_degen_certificate_gif
+                gif = create_degen_certificate_gif(name, degen_score)
+                from utils.neon_terminal import ansi_block, RED, DIM, RESET, YELLOW
+                text = ansi_block(
+                    f"{RED} ACHIEVEMENT UNLOCKED{RESET}\n"
+                    f"{DIM}{'=' * 36}{RESET}\n"
+                    f"{DIM}Subject:{RESET} {name}\n"
+                    f"{DIM}Degen Score:{RESET} {YELLOW}{degen_score}{RESET}\n"
+                    f"{DIM}Classification:{RESET} {RED}LEGENDARY{RESET}\n"
+                    f"{DIM}{'=' * 36}{RESET}\n"
+                    f"{DIM}The system acknowledges your{RESET}\n"
+                    f"{DIM}commitment to financial ruin.{RESET}"
+                )
+                self._set_cooldown(discord_id, guild_id)
+                return NeonResult(layer=3, text_block=text, gif_file=gif)
+            except Exception as e:
+                logger.debug(f"Degen certificate GIF failed: {e}")
+                return None
+        except Exception as e:
+            logger.debug(f"neon on_degen_milestone error: {e}")
+            return None
+
+    async def on_gamba_spectator(
+        self, discord_id: int, guild_id: int | None, display_name: str
+    ) -> NeonResult | None:
+        """Trigger when someone reacts jopacoin on the lobby. ~5% chance."""
+        try:
+            if not self._is_enabled():
+                return None
+            if not self._check_cooldown(discord_id, guild_id):
+                return None
+            if not self._roll(0.05):
+                return None
+
+            from utils.neon_terminal import render_gamba_spectator
+            text = render_gamba_spectator(display_name)
+            self._set_cooldown(discord_id, guild_id)
+            return NeonResult(layer=1, text_block=text)
+        except Exception as e:
+            logger.debug(f"neon on_gamba_spectator error: {e}")
+            return None
+
+    async def on_tip(
+        self,
+        discord_id: int,
+        guild_id: int | None,
+        sender_name: str,
+        recipient_name: str,
+        amount: int,
+        fee: int,
+    ) -> NeonResult | None:
+        """Trigger on /tip. 5% Layer 2 surveillance report, 20% Layer 1 one-liner."""
+        try:
+            if not self._is_enabled():
+                return None
+            if not self._check_cooldown(discord_id, guild_id):
+                return None
+
+            # Layer 2: Surveillance report (5%)
+            if self._roll(0.05):
+                from utils.neon_terminal import render_tip_surveillance
+                text = render_tip_surveillance(sender_name, recipient_name, amount, fee)
+                self._set_cooldown(discord_id, guild_id)
+                return NeonResult(layer=2, text_block=text)
+
+            # Layer 1: One-liner (20%)
+            if self._roll(0.20):
+                from utils.neon_terminal import render_tip
+                text = render_tip(sender_name, recipient_name, amount)
+                self._set_cooldown(discord_id, guild_id)
+                return NeonResult(layer=1, text_block=text)
+
+            return None
+        except Exception as e:
+            logger.debug(f"neon on_tip error: {e}")
+            return None
