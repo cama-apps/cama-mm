@@ -18,6 +18,7 @@ class Lobby:
     created_at: datetime
     players: set[int] = field(default_factory=set)
     conditional_players: set[int] = field(default_factory=set)  # "Frogling" players
+    player_join_times: dict[int, float] = field(default_factory=dict)  # discord_id -> unix timestamp
     status: str = "open"
 
     def add_player(self, discord_id: int) -> bool:
@@ -29,11 +30,14 @@ class Lobby:
         # Remove from conditional if switching
         self.conditional_players.discard(discord_id)
         self.players.add(discord_id)
+        # Preserve original join time if switching queues
+        self.player_join_times.setdefault(discord_id, datetime.now().timestamp())
         return True
 
     def remove_player(self, discord_id: int) -> bool:
         if discord_id in self.players:
             self.players.remove(discord_id)
+            self.player_join_times.pop(discord_id, None)
             return True
         return False
 
@@ -46,11 +50,14 @@ class Lobby:
         # Remove from regular if switching
         self.players.discard(discord_id)
         self.conditional_players.add(discord_id)
+        # Preserve original join time if switching queues
+        self.player_join_times.setdefault(discord_id, datetime.now().timestamp())
         return True
 
     def remove_conditional_player(self, discord_id: int) -> bool:
         if discord_id in self.conditional_players:
             self.conditional_players.remove(discord_id)
+            self.player_join_times.pop(discord_id, None)
             return True
         return False
 
@@ -94,6 +101,7 @@ class Lobby:
             "created_at": self.created_at.isoformat(),
             "players": list(self.players),
             "conditional_players": list(self.conditional_players),
+            "player_join_times": {str(k): v for k, v in self.player_join_times.items()},
             "status": self.status,
         }
 
@@ -103,12 +111,14 @@ class Lobby:
         created_at_dt = datetime.fromisoformat(created_at) if created_at else datetime.now()
         players = set(data.get("players", []))
         conditional_players = set(data.get("conditional_players", []))
+        player_join_times = {int(k): v for k, v in data.get("player_join_times", {}).items()}
         return cls(
             lobby_id=data.get("lobby_id", 1),
             created_by=data.get("created_by", 0),
             created_at=created_at_dt,
             players=players,
             conditional_players=conditional_players,
+            player_join_times=player_join_times,
             status=data.get("status", "open"),
         )
 

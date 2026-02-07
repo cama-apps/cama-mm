@@ -89,6 +89,7 @@ from utils.formatting import FROGLING_EMOJI_ID, FROGLING_EMOTE, JOPACOIN_EMOJI_I
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
+intents.presences = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -630,8 +631,30 @@ def _is_jopacoin_emoji(emoji) -> bool:
 
 @bot.event
 async def on_raw_reaction_add(payload):
-    """Handle reaction adds for lobby joining (⚔️ for regular, :frogling: for conditional, :jopacoin: for gamba notifications)."""
+    """Handle reaction adds for lobby joining, readycheck confirmations, and gamba notifications."""
     if not bot.user or payload.user_id == bot.user.id:
+        return
+
+    # Handle readycheck ✅ reactions
+    if payload.emoji.name == "✅":
+        _init_services()
+        rc_msg_id = lobby_service.get_readycheck_message_id()
+        if rc_msg_id and payload.message_id == rc_msg_id:
+            try:
+                added = lobby_service.add_readycheck_reaction(
+                    payload.user_id, f"<@{payload.user_id}>"
+                )
+                if added:
+                    cog = bot.get_cog("LobbyCommands")
+                    embed = cog.rebuild_readycheck_embed() if cog else None
+                    if embed:
+                        channel = bot.get_channel(payload.channel_id)
+                        if not channel:
+                            channel = await bot.fetch_channel(payload.channel_id)
+                        message = await channel.fetch_message(payload.message_id)
+                        await message.edit(embed=embed)
+            except Exception as exc:
+                logger.error(f"Error handling readycheck reaction: {exc}", exc_info=True)
         return
 
     is_sword = _is_sword_emoji(payload.emoji)
@@ -783,8 +806,28 @@ async def on_raw_reaction_add(payload):
 
 @bot.event
 async def on_raw_reaction_remove(payload):
-    """Handle reaction removes for lobby leaving (⚔️ for regular, :frogling: for conditional)."""
+    """Handle reaction removes for lobby leaving and readycheck un-confirms."""
     if not bot.user or payload.user_id == bot.user.id:
+        return
+
+    # Handle readycheck ✅ un-reaction
+    if payload.emoji.name == "✅":
+        _init_services()
+        rc_msg_id = lobby_service.get_readycheck_message_id()
+        if rc_msg_id and payload.message_id == rc_msg_id:
+            try:
+                removed = lobby_service.remove_readycheck_reaction(payload.user_id)
+                if removed:
+                    cog = bot.get_cog("LobbyCommands")
+                    embed = cog.rebuild_readycheck_embed() if cog else None
+                    if embed:
+                        channel = bot.get_channel(payload.channel_id)
+                        if not channel:
+                            channel = await bot.fetch_channel(payload.channel_id)
+                        message = await channel.fetch_message(payload.message_id)
+                        await message.edit(embed=embed)
+            except Exception as exc:
+                logger.error(f"Error handling readycheck reaction remove: {exc}", exc_info=True)
         return
 
     is_sword = _is_sword_emoji(payload.emoji)

@@ -34,6 +34,12 @@ class LobbyManagerService:
         self.origin_channel_id: int | None = None  # Channel where /lobby was originally run
         self.lobby: Lobby | None = None
         self._creation_lock = asyncio.Lock()
+        # Readycheck state (in-memory only, cleared on lobby reset)
+        self.readycheck_message_id: int | None = None
+        self.readycheck_channel_id: int | None = None
+        self.readycheck_lobby_ids: set[int] = set()
+        self.readycheck_reacted: dict[int, str] = {}  # {discord_id: "<@discord_id>"}
+        self.readycheck_player_data: dict[int, dict] = {}  # {discord_id: {group, signals, name, ...}}
         self._load_state()
 
     @property
@@ -123,6 +129,11 @@ class LobbyManagerService:
         self.lobby_thread_id = None
         self.lobby_embed_message_id = None
         self.origin_channel_id = None
+        self.readycheck_message_id = None
+        self.readycheck_channel_id = None
+        self.readycheck_lobby_ids = set()
+        self.readycheck_reacted = {}
+        self.readycheck_player_data = {}
         self._clear_persistent_lobby()
         logger.info("reset_lobby completed - cleared persistent lobby")
 
@@ -141,6 +152,7 @@ class LobbyManagerService:
             thread_id=self.lobby_thread_id,
             embed_message_id=self.lobby_embed_message_id,
             origin_channel_id=self.origin_channel_id,
+            player_join_times=self.lobby.player_join_times,
         )
 
     def _clear_persistent_lobby(self) -> None:

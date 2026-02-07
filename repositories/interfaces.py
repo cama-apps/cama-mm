@@ -322,6 +322,7 @@ class ILobbyRepository(ABC):
         embed_message_id: int | None = None,
         conditional_players: list[int] | None = None,
         origin_channel_id: int | None = None,
+        player_join_times: dict[int, float] | None = None,
     ) -> None: ...
 
     @abstractmethod

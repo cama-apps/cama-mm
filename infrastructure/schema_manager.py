@@ -228,6 +228,8 @@ class SchemaManager:
             ("add_guild_id_to_recalibration_state", self._migration_add_guild_id_to_recalibration_state),
             # Soft avoid feature
             ("create_soft_avoids_table", self._migration_create_soft_avoids_table),
+            # Ready check join times
+            ("add_player_join_times_to_lobby", self._migration_add_player_join_times_to_lobby),
         ]
 
     # --- Migrations ---
@@ -1447,4 +1449,10 @@ class SchemaManager:
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_soft_avoids_expired "
             "ON soft_avoids(guild_id, games_remaining) WHERE games_remaining <= 0"
+        )
+
+    def _migration_add_player_join_times_to_lobby(self, cursor) -> None:
+        """Add player_join_times column to lobby_state for ready check join timestamps."""
+        self._add_column_if_not_exists(
+            cursor, "lobby_state", "player_join_times", "TEXT DEFAULT '{}'"
         )

@@ -5,6 +5,7 @@ Uses Discord threads for lobby management similar to /prediction.
 """
 
 import logging
+import time
 from typing import TYPE_CHECKING
 
 import discord
@@ -14,9 +15,10 @@ from discord.ext import commands
 from config import LOBBY_CHANNEL_ID
 from services.lobby_service import LobbyService
 from services.permissions import has_admin_permission
-from utils.formatting import FROGLING_EMOJI_ID, JOPACOIN_EMOJI_ID
+from utils.formatting import FROGLING_EMOJI_ID, FROGLING_EMOTE, JOPACOIN_EMOJI_ID, format_duration_short
 from utils.interaction_safety import safe_defer
 from utils.pin_helpers import safe_unpin_all_bot_messages
+from utils.rate_limiter import GLOBAL_RATE_LIMITER
 
 if TYPE_CHECKING:
     from services.player_service import PlayerService
@@ -31,6 +33,15 @@ class LobbyCommands(commands.Cog):
         self.bot = bot
         self.lobby_service = lobby_service
         self.player_service = player_service
+
+    def rebuild_readycheck_embed(self) -> discord.Embed | None:
+        """Rebuild the readycheck embed from stored data. Used by bot.py reaction handler."""
+        player_data = self.lobby_service.get_readycheck_player_data()
+        if not player_data:
+            return None
+        reacted = self.lobby_service.get_readycheck_reacted()
+        embed, _ = build_readycheck_embed(player_data, reacted)
+        return embed
 
     async def _get_lobby_target_channel(
         self, interaction: discord.Interaction
@@ -740,6 +751,256 @@ class LobbyCommands(commands.Cog):
                 "✅ Lobby reset. You can create a new lobby with `/lobby`.",
                 ephemeral=True,
             )
+
+
+    @app_commands.command(
+        name="readycheck",
+        description="Check lobby players' online status and ping those who are away",
+    )
+    async def readycheck(self, interaction: discord.Interaction):
+        logger.info(f"Readycheck command: User {interaction.user.id} ({interaction.user})")
+        if not await safe_defer(interaction, ephemeral=False):
+            return
+
+        guild_id = interaction.guild.id if interaction.guild else None
+
+        lobby = self.lobby_service.get_lobby()
+        if not lobby:
+            await interaction.followup.send("⚠️ No active lobby.", ephemeral=True)
+            return
+
+        if lobby.get_total_count() < 10:
+            await interaction.followup.send(
+                f"⚠️ Need at least 10 players for a ready check ({lobby.get_total_count()}/10).",
+                ephemeral=True,
+            )
+            return
+
+        guild = interaction.guild
+        if not guild:
+            await interaction.followup.send("❌ This command must be used in a server.", ephemeral=True)
+            return
+
+        # Global shared rate limit (1 per 120s per guild) — checked after
+        # preconditions so failed attempts don't consume the cooldown
+        # TODO: re-enable after testing
+        # rl = GLOBAL_RATE_LIMITER.check(
+        #     scope="readycheck",
+        #     guild_id=guild_id or 0,
+        #     user_id=0,
+        #     limit=1,
+        #     per_seconds=120,
+        # )
+        # if not rl.allowed:
+        #     await interaction.followup.send(
+        #         f"⏳ Ready check on cooldown. Try again in {rl.retry_after_seconds}s.",
+        #         ephemeral=True,
+        #     )
+        #     return
+
+        all_player_ids = list(lobby.players | lobby.conditional_players)
+        current_lobby_set = set(all_player_ids)
+
+        # Classify every player — store structured data for later rebuilds
+        player_data: dict[int, dict] = {}
+
+        for pid in all_player_ids:
+            member = guild.get_member(pid)
+            if not member:
+                try:
+                    member = await guild.fetch_member(pid)
+                except Exception:
+                    player = self.player_service.get_player(pid, guild_id)
+                    fallback_name = player.name if player else f"User {pid}"
+                    player_data[pid] = {
+                        "group": "afk",
+                        "signals": "🔴",
+                        "name": fallback_name,
+                        "is_conditional": pid in lobby.conditional_players,
+                        "join_ts": lobby.player_join_times.get(pid),
+                        "is_member": False,
+                    }
+                    continue
+
+            signals = []
+            is_afk = False
+
+            if member.voice is not None:
+                is_deafened = bool(
+                    getattr(member.voice, "self_deaf", False)
+                    or getattr(member.voice, "deaf", False)
+                )
+                if is_deafened:
+                    signals.append("🔇")
+                    is_afk = True
+                else:
+                    signals.append("🔊")
+
+            if _is_playing_dota(member):
+                signals.append("🎮")
+
+            status = member.status
+            if status in (discord.Status.online, discord.Status.dnd):
+                signals.append("🟢")
+            elif status == discord.Status.idle:
+                signals.append("🟡")
+                is_afk = True
+            else:
+                signals.append("🔴")
+                is_afk = True
+
+            player_data[pid] = {
+                "group": "afk" if is_afk else "active",
+                "signals": "".join(signals),
+                "name": member.display_name,
+                "is_conditional": pid in lobby.conditional_players,
+                "join_ts": lobby.player_join_times.get(pid),
+                "is_member": True,
+            }
+
+        # Check if refreshing an existing readycheck
+        existing_msg_id = self.lobby_service.get_readycheck_message_id()
+        existing_channel_id = self.lobby_service.get_readycheck_channel_id()
+        is_refresh = False
+        msg = None
+
+        if existing_msg_id and existing_channel_id:
+            try:
+                ch = self.bot.get_channel(existing_channel_id)
+                if not ch:
+                    ch = await self.bot.fetch_channel(existing_channel_id)
+                msg = await ch.fetch_message(existing_msg_id)
+                is_refresh = True
+            except (discord.NotFound, discord.HTTPException):
+                msg = None
+
+        # On refresh: update data + prune reacted. On new: store fresh.
+        if is_refresh:
+            self.lobby_service.update_readycheck_data(current_lobby_set, player_data)
+        reacted = self.lobby_service.get_readycheck_reacted() if is_refresh else {}
+
+        # Build embed from stored data (excludes reacted from Active/AFK)
+        embed, mention_ids = build_readycheck_embed(player_data, reacted)
+
+        # Resolve target channel
+        target_channel = None
+        lobby_channel_id = self.lobby_service.get_lobby_channel_id()
+        if lobby_channel_id:
+            try:
+                target_channel = self.bot.get_channel(lobby_channel_id)
+                if not target_channel:
+                    target_channel = await self.bot.fetch_channel(lobby_channel_id)
+            except Exception:
+                target_channel = None
+
+        # Ping AFK players (exclude those who already reacted)
+        allowed_mentions = discord.AllowedMentions(
+            users=[discord.Object(id=uid) for uid in mention_ids]
+        )
+        ping_content = None
+        if mention_ids:
+            tags = " ".join(f"<@{uid}>" for uid in mention_ids)
+            ping_content = f"**Possibly AFK:** {tags}"
+
+        if is_refresh and msg:
+            await msg.edit(embed=embed)
+            self.lobby_service.update_readycheck_data(current_lobby_set, player_data)
+            if ping_content:
+                await msg.channel.send(ping_content, allowed_mentions=allowed_mentions)
+            await interaction.followup.send(
+                f"✅ Ready check refreshed! [View]({msg.jump_url})", ephemeral=True
+            )
+        else:
+            if target_channel and target_channel.id != interaction.channel.id:
+                msg = await target_channel.send(embed=embed)
+                try:
+                    await msg.add_reaction("✅")
+                except Exception:
+                    pass
+                if ping_content:
+                    await target_channel.send(ping_content, allowed_mentions=allowed_mentions)
+                await interaction.followup.send(
+                    f"✅ Ready check posted! [View]({msg.jump_url})", ephemeral=True
+                )
+            else:
+                msg = await interaction.followup.send(embed=embed)
+                try:
+                    await msg.add_reaction("✅")
+                except Exception:
+                    pass
+                if ping_content:
+                    await interaction.channel.send(ping_content, allowed_mentions=allowed_mentions)
+
+            self.lobby_service.set_readycheck_state(
+                msg.id, msg.channel.id, current_lobby_set, player_data
+            )
+
+
+def build_readycheck_embed(
+    player_data: dict[int, dict],
+    reacted: dict[int, str],
+) -> tuple[discord.Embed, list[int]]:
+    """Build the readycheck embed from stored classification data.
+
+    Returns (embed, mention_ids) where mention_ids are AFK members to ping.
+    """
+    now = time.time()
+    embed = discord.Embed(
+        title="Ready Check",
+        description=f"**{len(player_data)}** players in lobby",
+        color=discord.Color.blue(),
+    )
+
+    active_lines: list[str] = []
+    afk_lines: list[str] = []
+    mention_ids: list[int] = []
+
+    for pid, d in player_data.items():
+        if pid in reacted:
+            continue
+        frogling = f" {FROGLING_EMOTE}" if d["is_conditional"] else ""
+        join_ts = d.get("join_ts")
+        time_str = f" ({format_duration_short(now - join_ts)})" if join_ts else ""
+        if d["group"] == "active":
+            active_lines.append(f"{d['name']} {d['signals']}{frogling}{time_str}")
+        else:
+            if d["is_member"]:
+                mention_ids.append(pid)
+                afk_lines.append(f"<@{pid}> {d['signals']}{frogling}{time_str}")
+            else:
+                afk_lines.append(f"{d['name']} {d['signals']}{frogling}{time_str}")
+
+    if active_lines:
+        embed.add_field(
+            name=f"✅ Likely Active ({len(active_lines)})",
+            value="\n".join(active_lines),
+            inline=False,
+        )
+    if afk_lines:
+        embed.add_field(
+            name=f"⚠️ Possibly AFK ({len(afk_lines)})",
+            value="\n".join(afk_lines),
+            inline=False,
+        )
+    if reacted:
+        embed.add_field(
+            name=f"✅ Reacted to Ready Check ({len(reacted)})",
+            value="\n".join(reacted.values()),
+            inline=False,
+        )
+
+    embed.set_footer(text="React with ✅ to confirm you are ready")
+    return embed, mention_ids
+
+
+def _is_playing_dota(member: discord.Member) -> bool:
+    """Check if a member is currently playing Dota 2."""
+    for activity in member.activities:
+        if isinstance(activity, discord.Game) and activity.name and "dota" in activity.name.lower():
+            return True
+        if isinstance(activity, discord.Activity) and activity.name and "dota" in activity.name.lower():
+            return True
+    return False
 
 
 async def setup(bot: commands.Bot):
