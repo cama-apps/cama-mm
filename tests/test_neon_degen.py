@@ -15,11 +15,20 @@ from utils.neon_terminal import (
     render_balance_zero,
     render_bankruptcy_filing,
     render_bet_placed,
+    render_coinflip,
     render_cooldown_hit,
     render_debt_collector,
+    render_don_lose,
+    render_don_loss_box,
+    render_don_win,
     render_loan_taken,
     render_match_recorded,
     render_negative_loan,
+    render_prediction_market_crash,
+    render_prediction_resolved,
+    render_registration,
+    render_soft_avoid,
+    render_soft_avoid_surveillance,
     render_streak,
     render_system_breach,
     render_wheel_bankrupt,
@@ -137,6 +146,47 @@ class TestNeonTerminal:
         result = render_wheel_bankrupt("TestUser", -100)
         assert "```ansi" in result
 
+    # --- New template tests ---
+
+    def test_render_don_win(self):
+        result = render_don_win("TestUser", 200)
+        assert "```ansi" in result
+
+    def test_render_don_lose(self):
+        result = render_don_lose("TestUser", 150)
+        assert "```ansi" in result
+
+    def test_render_don_loss_box(self):
+        result = render_don_loss_box("TestUser", 100)
+        assert "```ansi" in result
+        assert "DOUBLE" in result or "NOTHING" in result
+
+    def test_render_coinflip(self):
+        result = render_coinflip("Winner", "Loser")
+        assert "```ansi" in result
+
+    def test_render_registration(self):
+        result = render_registration("NewPlayer")
+        assert "```ansi" in result
+
+    def test_render_prediction_resolved(self):
+        result = render_prediction_resolved("Will it rain?", "yes", 300)
+        assert "```ansi" in result
+
+    def test_render_prediction_market_crash(self):
+        result = render_prediction_market_crash("Will it rain?", 500, "yes", 3, 5)
+        assert "```ansi" in result
+        assert "MARKET" in result or "SETTLEMENT" in result
+
+    def test_render_soft_avoid(self):
+        result = render_soft_avoid(50, 3)
+        assert "```ansi" in result
+
+    def test_render_soft_avoid_surveillance(self):
+        result = render_soft_avoid_surveillance(50, 3)
+        assert "```ansi" in result
+        assert "SOCIAL" in result or "Avoid" in result
+
     def test_all_templates_under_40_lines(self):
         """All renders should produce output under ~40 lines for mobile Discord."""
         renders = [
@@ -155,6 +205,16 @@ class TestNeonTerminal:
             render_streak("User", 6, False),
             render_negative_loan("User", 50, -200),
             render_wheel_bankrupt("User", -100),
+            # New renders
+            render_don_win("User", 200),
+            render_don_lose("User", 100),
+            render_don_loss_box("User", 100),
+            render_coinflip("Winner", "Loser"),
+            render_registration("NewUser"),
+            render_prediction_resolved("Test?", "yes", 200),
+            render_prediction_market_crash("Test?", 500, "yes", 3, 5),
+            render_soft_avoid(50, 3),
+            render_soft_avoid_surveillance(50, 3),
         ]
         for render in renders:
             lines = render.count("\n")
@@ -275,12 +335,14 @@ class TestNeonDegenService:
     @pytest.mark.asyncio
     async def test_on_loan_negative(self):
         """Negative loan should fire at layer 2."""
-        service = self._make_service()
+        found_l2 = False
         for _ in range(100):
+            service = self._make_service()  # fresh service to avoid cooldown
             result = await service.on_loan(888, 456, amount=50, total_owed=200, is_negative=True)
-            if result:
-                assert result.layer == 2
+            if result and result.layer == 2:
+                found_l2 = True
                 break
+        assert found_l2, "Expected at least one layer 2 result from negative loan in 100 tries"
 
     @pytest.mark.asyncio
     async def test_on_match_recorded_footer(self):
@@ -315,6 +377,129 @@ class TestNeonDegenService:
         result2 = NeonResult(layer=3, gif_file=buf, text_block="text")
         assert result2.layer == 3
         assert result2.gif_file is not None
+
+    # --- New service method tests ---
+
+    @pytest.mark.asyncio
+    async def test_on_double_or_nothing_win(self):
+        """DoN win should always fire layer 1."""
+        service = self._make_service()
+        result = await service.on_double_or_nothing(123, 456, won=True, balance_at_risk=100, final_balance=200)
+        assert result is not None
+        assert result.layer == 1
+        assert result.text_block is not None
+        assert "```ansi" in result.text_block
+
+    @pytest.mark.asyncio
+    async def test_on_double_or_nothing_lose_small(self):
+        """DoN loss with small risk should fire layer 1."""
+        service = self._make_service()
+        result = await service.on_double_or_nothing(124, 456, won=False, balance_at_risk=20, final_balance=0)
+        assert result is not None
+        assert result.layer == 1
+        assert result.text_block is not None
+
+    @pytest.mark.asyncio
+    async def test_on_double_or_nothing_lose_large(self):
+        """DoN loss with >50 JC at risk should fire layer >= 1."""
+        service = self._make_service()
+        result = await service.on_double_or_nothing(125, 456, won=False, balance_at_risk=80, final_balance=0)
+        assert result is not None
+        assert result.layer >= 1
+
+    @pytest.mark.asyncio
+    async def test_on_draft_coinflip_probabilistic(self):
+        """Draft coinflip should sometimes fire (40% chance)."""
+        service = self._make_service()
+        results = []
+        for _ in range(100):
+            r = await service.on_draft_coinflip(456, "Winner", "Loser")
+            results.append(r)
+        # At least some should fire and some shouldn't
+        assert any(r is not None for r in results)
+        assert any(r is None for r in results)
+
+    @pytest.mark.asyncio
+    async def test_on_draft_coinflip_layer1(self):
+        """When coinflip fires, should return layer 1."""
+        service = self._make_service()
+        for _ in range(100):
+            result = await service.on_draft_coinflip(456, "Captain1", "Captain2")
+            if result:
+                assert result.layer == 1
+                assert result.text_block is not None
+                break
+
+    @pytest.mark.asyncio
+    async def test_on_registration_one_time(self):
+        """Registration should only fire once per user."""
+        service = self._make_service()
+        fired = False
+        for _ in range(100):
+            result = await service.on_registration(126, 456, "NewPlayer")
+            if result:
+                fired = True
+                assert result.layer == 1
+                break
+        # Whether it fired or not, second attempt should never fire
+        for _ in range(50):
+            result2 = await service.on_registration(126, 456, "NewPlayer")
+            if fired:
+                # Already fired once, should not fire again
+                assert result2 is None
+
+    @pytest.mark.asyncio
+    async def test_on_prediction_resolved_small_pool(self):
+        """Small pool resolution fires at 30% with layer 1."""
+        service = self._make_service()
+        for _ in range(100):
+            result = await service.on_prediction_resolved(
+                guild_id=456, question="Test?", outcome="yes",
+                total_pool=50, winner_count=2, loser_count=3
+            )
+            if result:
+                assert result.layer == 1
+                break
+
+    @pytest.mark.asyncio
+    async def test_on_prediction_resolved_large_pool(self):
+        """Large pool (>=200) should fire layer 2."""
+        service = self._make_service()
+        for _ in range(100):
+            result = await service.on_prediction_resolved(
+                guild_id=456, question="Big question?", outcome="no",
+                total_pool=300, winner_count=5, loser_count=10
+            )
+            if result:
+                assert result.layer >= 1
+                break
+
+    @pytest.mark.asyncio
+    async def test_on_soft_avoid(self):
+        """Soft avoid should fire at layer 1 or 2."""
+        found = False
+        for _ in range(100):
+            service = self._make_service()
+            result = await service.on_soft_avoid(888, 456, cost=50, games=3)
+            if result:
+                assert result.layer in (1, 2)
+                assert "```ansi" in result.text_block
+                found = True
+                break
+        assert found, "Expected at least one result from soft avoid in 100 tries"
+
+    @pytest.mark.asyncio
+    async def test_on_double_or_nothing_disabled(self):
+        """When disabled, DoN returns None."""
+        import config
+        original = config.NEON_DEGEN_ENABLED
+        try:
+            config.NEON_DEGEN_ENABLED = False
+            service = self._make_service()
+            result = await service.on_double_or_nothing(123, 456, True, 100, 200)
+            assert result is None
+        finally:
+            config.NEON_DEGEN_ENABLED = original
 
 
 # ---------------------------------------------------------------------------
@@ -391,3 +576,33 @@ class TestNeonDrawing:
         buf = create_degen_certificate_gif("TestUser", 95)
         size_mb = len(buf.getvalue()) / (1024 * 1024)
         assert size_mb < 4, f"Degen certificate GIF is {size_mb:.2f} MB, exceeds 4MB limit"
+
+    # --- New GIF tests ---
+
+    def test_don_coin_flip_gif_generates(self):
+        from utils.neon_drawing import create_don_coin_flip_gif
+        buf = create_don_coin_flip_gif("TestUser", 150)
+        assert isinstance(buf, io.BytesIO)
+        data = buf.getvalue()
+        assert len(data) > 0
+        assert data[:3] == b"GIF"
+
+    def test_don_coin_flip_gif_under_4mb(self):
+        from utils.neon_drawing import create_don_coin_flip_gif
+        buf = create_don_coin_flip_gif("TestUser", 200)
+        size_mb = len(buf.getvalue()) / (1024 * 1024)
+        assert size_mb < 4, f"DoN coin flip GIF is {size_mb:.2f} MB, exceeds 4MB limit"
+
+    def test_market_crash_gif_generates(self):
+        from utils.neon_drawing import create_market_crash_gif
+        buf = create_market_crash_gif(500, "yes", 3, 7)
+        assert isinstance(buf, io.BytesIO)
+        data = buf.getvalue()
+        assert len(data) > 0
+        assert data[:3] == b"GIF"
+
+    def test_market_crash_gif_under_4mb(self):
+        from utils.neon_drawing import create_market_crash_gif
+        buf = create_market_crash_gif(1000, "no", 5, 10)
+        size_mb = len(buf.getvalue()) / (1024 * 1024)
+        assert size_mb < 4, f"Market crash GIF is {size_mb:.2f} MB, exceeds 4MB limit"

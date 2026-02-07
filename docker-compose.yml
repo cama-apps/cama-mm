@@ -1,9 +1,17 @@
 services:
   bot:
-    build: .
-    restart: always
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: "always"
     env_file: .env
     volumes:
       - ./data:/app/data
     environment:
       - DB_PATH=/app/data/cama_shuffle.db
+    cap_add:
+      - SYS_PTRACE
+    security_opt:
+      - seccomp:unconfined
+    stdin_open: true
+    tty: true
