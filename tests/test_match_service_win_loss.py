@@ -1,5 +1,8 @@
 """
 Integration tests for MatchService win/loss recording.
+
+NOTE: This file is superseded by test_match_e2e.py which consolidates
+match recording tests. This file is kept for now for compatibility.
 """
 
 import pytest
@@ -7,8 +10,7 @@ import pytest
 from repositories.match_repository import MatchRepository
 from repositories.player_repository import PlayerRepository
 from services.match_service import MatchService
-
-TEST_GUILD_ID = 12345
+from tests.conftest import TEST_GUILD_ID
 
 
 def _add_players(player_repo: PlayerRepository, start_id: int = 94001, guild_id: int = TEST_GUILD_ID):

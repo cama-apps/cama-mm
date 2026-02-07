@@ -8,8 +8,7 @@ from database import Database
 from repositories.match_repository import MatchRepository
 from repositories.player_repository import PlayerRepository
 from services.match_service import MatchService
-
-TEST_GUILD_ID = 123
+from tests.conftest import TEST_GUILD_ID
 
 
 class TestAdminOverride:
