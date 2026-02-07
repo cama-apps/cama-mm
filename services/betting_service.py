@@ -10,8 +10,12 @@ from config import (
     AUTO_BLIND_ENABLED,
     AUTO_BLIND_PERCENTAGE,
     AUTO_BLIND_THRESHOLD,
+    BOMB_POT_ANTE,
+    BOMB_POT_BLIND_PERCENTAGE,
+    BOMB_POT_PARTICIPATION_BONUS,
     HOUSE_PAYOUT_MULTIPLIER,
     JOPACOIN_EXCLUSION_REWARD,
+    JOPACOIN_PER_GAME,
     JOPACOIN_WIN_REWARD,
     LEVERAGE_TIERS,
     MAX_DEBT,
@@ -139,37 +143,70 @@ class BettingService:
         self.bet_repo.create_bet(guild_id, discord_id, team, amount, now_ts)
 
     def award_participation(
-        self, player_ids: list[int], guild_id: int | None = None
+        self,
+        player_ids: list[int],
+        guild_id: int | None = None,
+        is_bomb_pot: bool = False,
+        bomb_pot_bonus_only: bool = False,
     ) -> dict[int, dict[str, int]]:
         """
-        Give each participant 1 jopacoin for playing.
+        Give each participant jopacoin for playing.
+
+        Base reward is JOPACOIN_PER_GAME (1). In bomb pot matches, all players
+        receive an additional BOMB_POT_PARTICIPATION_BONUS (+1 JC).
+
+        Args:
+            player_ids: List of player Discord IDs to reward
+            guild_id: Guild ID for multi-guild support
+            is_bomb_pot: Whether this is a bomb pot match (adds bomb pot bonus)
+            bomb_pot_bonus_only: If True, only give the bomb pot bonus (for winners
+                who already get their reward through award_win_bonus)
 
         Note: Bankruptcy penalty games are NOT decremented here - only wins count
         toward clearing bankruptcy (like Dota 2 low priority). See award_win_bonus().
 
-        Returns dict of {discord_id: {gross, garnished, net}} for each player.
+        Returns dict of {discord_id: {gross, garnished, net, bomb_pot_bonus}} for each player.
         """
         results: dict[int, dict[str, int]] = {}
         if not player_ids:
             return results
 
+        # Calculate reward amount
+        if bomb_pot_bonus_only:
+            # Only give the bomb pot bonus (for winners in bomb pot mode)
+            base_reward = 0
+            bomb_pot_bonus = BOMB_POT_PARTICIPATION_BONUS if is_bomb_pot else 0
+        else:
+            # Normal participation (base + bomb pot bonus if applicable)
+            base_reward = JOPACOIN_PER_GAME
+            bomb_pot_bonus = BOMB_POT_PARTICIPATION_BONUS if is_bomb_pot else 0
+
+        total_reward = base_reward + bomb_pot_bonus
+
+        # Skip if nothing to award
+        if total_reward <= 0:
+            for pid in player_ids:
+                results[pid] = {"gross": 0, "garnished": 0, "net": 0, "bomb_pot_bonus": 0}
+            return results
+
         # If garnishment service is available, use it for individual processing
         if self.garnishment_service:
             for pid in player_ids:
-                result = self.garnishment_service.add_income(pid, 1, guild_id=guild_id)
+                result = self.garnishment_service.add_income(pid, total_reward, guild_id=guild_id)
+                result["bomb_pot_bonus"] = bomb_pot_bonus
                 results[pid] = result
             return results
 
         # Otherwise, bulk add without garnishment tracking
-        deltas = dict.fromkeys(player_ids, 1)
+        deltas = dict.fromkeys(player_ids, total_reward)
         if hasattr(self.player_repo, "add_balance_many"):
             self.player_repo.add_balance_many(deltas, guild_id=guild_id)  # type: ignore[attr-defined]
         else:
             for pid in player_ids:
-                self.player_repo.add_balance(pid, guild_id, 1)
+                self.player_repo.add_balance(pid, guild_id, total_reward)
 
         for pid in player_ids:
-            results[pid] = {"gross": 1, "garnished": 0, "net": 1}
+            results[pid] = {"gross": total_reward, "garnished": 0, "net": total_reward, "bomb_pot_bonus": bomb_pot_bonus}
         return results
 
     def settle_bets(
@@ -475,19 +512,26 @@ class BettingService:
         radiant_ids: list[int],
         dire_ids: list[int],
         shuffle_timestamp: int,
+        is_bomb_pot: bool = False,
     ) -> dict[str, Any]:
         """
         Create auto-liquidity blind bets for all eligible players after shuffle.
 
-        Eligible players are those with balance >= AUTO_BLIND_THRESHOLD.
-        Each eligible player bets 5% of their balance (rounded to nearest int)
-        on their own team with 1x leverage.
+        Normal mode:
+        - Eligible players are those with balance >= AUTO_BLIND_THRESHOLD
+        - Each eligible player bets 5% of their balance (rounded to nearest int)
+
+        Bomb pot mode (is_bomb_pot=True):
+        - ALL players participate (mandatory, no threshold check)
+        - Each player bets 10% of their balance + flat 10 JC ante
+        - Players can go negative (up to max_debt) to meet the ante
 
         Args:
             guild_id: The guild ID (or None for DMs)
             radiant_ids: List of Discord IDs on Radiant team
             dire_ids: List of Discord IDs on Dire team
             shuffle_timestamp: The shuffle timestamp for bet timing
+            is_bomb_pot: Whether this is a bomb pot match (higher stakes, mandatory)
 
         Returns:
             {
@@ -495,7 +539,8 @@ class BettingService:
                 "total_radiant": int,
                 "total_dire": int,
                 "bets": [{"discord_id": int, "team": str, "amount": int}, ...],
-                "skipped": [{"discord_id": int, "reason": str}, ...]
+                "skipped": [{"discord_id": int, "reason": str}, ...],
+                "is_bomb_pot": bool
             }
         """
         if not AUTO_BLIND_ENABLED:
@@ -505,6 +550,7 @@ class BettingService:
                 "total_dire": 0,
                 "bets": [],
                 "skipped": [],
+                "is_bomb_pot": is_bomb_pot,
             }
 
         result: dict[str, Any] = {
@@ -513,7 +559,11 @@ class BettingService:
             "total_dire": 0,
             "bets": [],
             "skipped": [],
+            "is_bomb_pot": is_bomb_pot,
         }
+
+        # Choose percentage based on mode
+        blind_percentage = BOMB_POT_BLIND_PERCENTAGE if is_bomb_pot else AUTO_BLIND_PERCENTAGE
 
         # Process each team
         for team, player_ids in [("radiant", radiant_ids), ("dire", dire_ids)]:
@@ -521,24 +571,34 @@ class BettingService:
                 try:
                     balance = self.player_repo.get_balance(discord_id, guild_id)
 
-                    # Skip players below threshold
-                    if balance < AUTO_BLIND_THRESHOLD:
-                        result["skipped"].append({
-                            "discord_id": discord_id,
-                            "reason": f"balance {balance} < threshold {AUTO_BLIND_THRESHOLD}",
-                        })
-                        continue
+                    if is_bomb_pot:
+                        # Bomb pot: mandatory ante for everyone, no threshold check
+                        # Calculate: 10% of balance + flat ante
+                        percentage_amount = round(balance * blind_percentage) if balance > 0 else 0
+                        blind_amount = percentage_amount + BOMB_POT_ANTE
 
-                    # Calculate blind amount (round to nearest integer)
-                    blind_amount = round(balance * AUTO_BLIND_PERCENTAGE)
+                        # Ensure minimum bet is at least the ante
+                        if blind_amount < BOMB_POT_ANTE:
+                            blind_amount = BOMB_POT_ANTE
+                    else:
+                        # Normal mode: skip players below threshold
+                        if balance < AUTO_BLIND_THRESHOLD:
+                            result["skipped"].append({
+                                "discord_id": discord_id,
+                                "reason": f"balance {balance} < threshold {AUTO_BLIND_THRESHOLD}",
+                            })
+                            continue
 
-                    # Skip if rounded amount is less than 1
-                    if blind_amount < 1:
-                        result["skipped"].append({
-                            "discord_id": discord_id,
-                            "reason": f"blind amount {blind_amount} < 1",
-                        })
-                        continue
+                        # Calculate blind amount (round to nearest integer)
+                        blind_amount = round(balance * blind_percentage)
+
+                        # Skip if rounded amount is less than 1
+                        if blind_amount < 1:
+                            result["skipped"].append({
+                                "discord_id": discord_id,
+                                "reason": f"blind amount {blind_amount} < 1",
+                            })
+                            continue
 
                     # Calculate current odds for this team before placing bet
                     current_totals = self.bet_repo.get_total_bets_by_guild(
@@ -569,6 +629,7 @@ class BettingService:
                         max_debt=self.max_debt,
                         is_blind=True,
                         odds_at_placement=odds_at_placement,
+                        allow_negative=is_bomb_pot,  # Bomb pot antes can go into debt
                     )
 
                     result["created"] += 1

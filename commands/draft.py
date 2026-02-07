@@ -14,7 +14,7 @@ from discord.ext import commands
 
 import math
 
-from config import BET_LOCK_SECONDS, JOPACOIN_MIN_BET, LOBBY_READY_THRESHOLD
+from config import BET_LOCK_SECONDS, BOMB_POT_CHANCE, JOPACOIN_MIN_BET, LOBBY_READY_THRESHOLD
 from domain.models.draft import SNAKE_DRAFT_ORDER, DraftPhase, DraftState
 from rating_system import CamaRatingSystem
 from domain.services.draft_service import DraftService
@@ -1711,6 +1711,7 @@ class DraftCommands(commands.Cog):
 
             # === NEW: Create auto-blind bets (same as shuffle mode) ===
             betting_service = getattr(self.bot, "betting_service", None)
+            is_bomb_pot = pending_state.get("is_bomb_pot", False) if pending_state else False
             if betting_service and pending_state:
                 try:
                     blind_result = betting_service.create_auto_blind_bets(
@@ -1718,12 +1719,16 @@ class DraftCommands(commands.Cog):
                         radiant_ids=state.radiant_player_ids,
                         dire_ids=state.dire_player_ids,
                         shuffle_timestamp=pending_state.get("shuffle_timestamp"),
+                        is_bomb_pot=is_bomb_pot,
                     )
                     if blind_result and blind_result.get("created", 0) > 0:
                         # Store blind bets result in pending state for embed display
                         pending_state["blind_bets_result"] = blind_result
                         self.match_service.set_last_shuffle(guild_id, pending_state)
-                        logger.info(f"Created {blind_result['created']} blind bets for draft")
+                        logger.info(
+                            f"Created {blind_result['created']} blind bets for draft"
+                            f"{' (BOMB POT)' if is_bomb_pot else ''}"
+                        )
                 except Exception as exc:
                     logger.warning(f"Failed to create blind bets for draft: {exc}")
 
@@ -1878,6 +1883,11 @@ class DraftCommands(commands.Cog):
             radiant_mean, radiant_rms_rd, dire_mean, dire_rms_rd
         )
 
+        # Determine if this is a bomb pot match (~10% chance)
+        is_bomb_pot = random.random() < BOMB_POT_CHANCE
+        if is_bomb_pot:
+            logger.info(f"💣 BOMB POT triggered for draft in guild {guild_id}")
+
         # Create shuffle state dict compatible with match_service
         shuffle_state = {
             "radiant_team_ids": state.radiant_player_ids,
@@ -1900,6 +1910,7 @@ class DraftCommands(commands.Cog):
             "origin_channel_id": state.draft_channel_id,  # For betting reminders
             "betting_mode": "pool",  # Default to pool mode for drafts
             "is_draft": True,  # Mark as draft for any special handling
+            "is_bomb_pot": is_bomb_pot,  # Bomb pot mode for higher stakes
         }
 
         self.match_service.set_last_shuffle(guild_id, shuffle_state)
@@ -1972,11 +1983,22 @@ class DraftCommands(commands.Cog):
         first_hero_team = "Radiant" if state.radiant_hero_pick_order == 1 else "Dire"
         first_pick_emoji = "🟢" if first_hero_team == "Radiant" else "🔴"
 
-        embed = discord.Embed(
-            title="⚔️ IMMORTAL DRAFT - Complete!",
-            description=f"{first_pick_emoji} **{first_hero_team}** picks first in hero draft",
-            color=discord.Color.gold(),
-        )
+        # Check for bomb pot
+        is_bomb_pot = pending_state.get("is_bomb_pot", False) if pending_state else False
+
+        # Build embed with bomb pot banner if applicable
+        if is_bomb_pot:
+            embed = discord.Embed(
+                title="💣 BOMB POT 💣 IMMORTAL DRAFT - Complete!",
+                description=f"{first_pick_emoji} **{first_hero_team}** picks first in hero draft",
+                color=discord.Color.orange(),
+            )
+        else:
+            embed = discord.Embed(
+                title="⚔️ IMMORTAL DRAFT - Complete!",
+                description=f"{first_pick_emoji} **{first_hero_team}** picks first in hero draft",
+                color=discord.Color.gold(),
+            )
 
         # Team fields with rating totals in header
         embed.add_field(
@@ -2040,12 +2062,21 @@ class DraftCommands(commands.Cog):
             # Blind bets summary (if any)
             blind_bets = pending_state.get("blind_bets_result")
             if blind_bets and blind_bets.get("created", 0) > 0:
-                blind_note = (
-                    f"**Auto-liquidity:** {blind_bets['created']} players contributed blind bets\n"
-                    f"🟢 Radiant: {blind_bets['total_radiant']} {JOPACOIN_EMOTE} | "
-                    f"🔴 Dire: {blind_bets['total_dire']} {JOPACOIN_EMOTE}"
-                )
-                embed.add_field(name="🎲 Blind Bets", value=blind_note, inline=False)
+                if is_bomb_pot:
+                    blind_note = (
+                        f"💣 **BOMB POT:** All 10 players ante'd in! (10% + 10 {JOPACOIN_EMOTE} ante)\n"
+                        f"🟢 Radiant: {blind_bets['total_radiant']} {JOPACOIN_EMOTE} | "
+                        f"🔴 Dire: {blind_bets['total_dire']} {JOPACOIN_EMOTE}\n"
+                        f"_+1 bonus {JOPACOIN_EMOTE} for ALL players this match!_"
+                    )
+                    embed.add_field(name="💣 Bomb Pot Stakes", value=blind_note, inline=False)
+                else:
+                    blind_note = (
+                        f"**Auto-liquidity:** {blind_bets['created']} players contributed blind bets\n"
+                        f"🟢 Radiant: {blind_bets['total_radiant']} {JOPACOIN_EMOTE} | "
+                        f"🔴 Dire: {blind_bets['total_dire']} {JOPACOIN_EMOTE}"
+                    )
+                    embed.add_field(name="🎲 Blind Bets", value=blind_note, inline=False)
 
             # Current wagers (same display as shuffle mode)
             guild_id = state.guild_id
