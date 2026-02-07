@@ -18,13 +18,13 @@ class FakeRepo:
     def get_by_id(self, _id, guild_id=None):
         return object() if self.exists else None
 
-    def get_game_count(self, _id):
+    def get_game_count(self, _id, guild_id=None):
         return self.game_count
 
-    def get_glicko_rating(self, _id):
+    def get_glicko_rating(self, _id, guild_id=None):
         return self.rating_data
 
-    def update_glicko_rating(self, discord_id, rating, rd, vol):
+    def update_glicko_rating(self, discord_id, guild_id, rating, rd, vol):
         self.updates.append((discord_id, rating, rd, vol))
 
 

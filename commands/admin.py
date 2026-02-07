@@ -354,7 +354,7 @@ class AdminCommands(commands.Cog):
             )
             return
 
-        deleted = self.player_repo.delete(user.id)
+        deleted = self.player_repo.delete(user.id, guild_id)
         if deleted:
             await safe_followup(
                 interaction,
@@ -763,7 +763,7 @@ class AdminCommands(commands.Cog):
 
         games = 0
         if hasattr(self.player_repo, "get_game_count"):
-            games = self.player_repo.get_game_count(user.id)
+            games = self.player_repo.get_game_count(user.id, guild_id)
         if games >= ADMIN_RATING_ADJUSTMENT_MAX_GAMES:
             await interaction.response.send_message(
                 "❌ Player has too many games for initial rating adjustment.",
@@ -774,7 +774,7 @@ class AdminCommands(commands.Cog):
         # Keep existing RD and volatility if available
         rd = 300.0
         vol = 0.06
-        rating_data = self.player_repo.get_glicko_rating(user.id)
+        rating_data = self.player_repo.get_glicko_rating(user.id, guild_id)
         if rating_data:
             _current_rating, current_rd, current_vol = rating_data
             if current_rd is not None:
@@ -782,7 +782,7 @@ class AdminCommands(commands.Cog):
             if current_vol is not None:
                 vol = current_vol
 
-        self.player_repo.update_glicko_rating(user.id, rating, rd, vol)
+        self.player_repo.update_glicko_rating(user.id, guild_id, rating, rd, vol)
 
         await interaction.response.send_message(
             f"✅ Set initial rating for {user.mention} to {rating} (RD kept at {rd:.1f}).",
