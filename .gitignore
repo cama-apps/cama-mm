@@ -176,6 +176,8 @@ desktop.ini
 *.sqlite
 *.sqlite3
 *.db-journal
+*.db-shm
+*.db-wal
 *.db.backup.*
 
 # Scripts and temporary tools
