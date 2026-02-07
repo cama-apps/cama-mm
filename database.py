@@ -749,16 +749,21 @@ class Database:
         embed_message_id: int | None = None,
         conditional_players: list[int] | None = None,
         origin_channel_id: int | None = None,
+        player_join_times: dict[int, float] | None = None,
     ) -> None:
         payload = json.dumps(players)
         conditional_payload = json.dumps(conditional_players or [])
+        join_times_payload = json.dumps(
+            {str(k): v for k, v in (player_join_times or {}).items()}
+        )
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
                 INSERT INTO lobby_state (lobby_id, players, conditional_players, status, created_by, created_at,
-                                         message_id, channel_id, thread_id, embed_message_id, origin_channel_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                         message_id, channel_id, thread_id, embed_message_id, origin_channel_id,
+                                         player_join_times)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(lobby_id) DO UPDATE SET
                     players = excluded.players,
                     conditional_players = excluded.conditional_players,
@@ -770,10 +775,11 @@ class Database:
                     thread_id = excluded.thread_id,
                     embed_message_id = excluded.embed_message_id,
                     origin_channel_id = excluded.origin_channel_id,
+                    player_join_times = excluded.player_join_times,
                     updated_at = CURRENT_TIMESTAMP
             """,
                 (lobby_id, payload, conditional_payload, status, created_by, created_at, message_id, channel_id,
-                 thread_id, embed_message_id, origin_channel_id),
+                 thread_id, embed_message_id, origin_channel_id, join_times_payload),
             )
 
     def load_lobby_state(self, lobby_id: int) -> dict | None:
@@ -784,10 +790,13 @@ class Database:
             if not row:
                 return None
             row_dict = dict(row)
+            raw_join_times = row_dict.get("player_join_times", "{}")
+            join_times = json.loads(raw_join_times) if raw_join_times else {}
             return {
                 "lobby_id": row_dict["lobby_id"],
                 "players": json.loads(row_dict["players"]) if row_dict.get("players") else [],
                 "conditional_players": json.loads(row_dict["conditional_players"]) if row_dict.get("conditional_players") else [],
+                "player_join_times": {int(k): v for k, v in join_times.items()},
                 "status": row_dict["status"],
                 "created_by": row_dict["created_by"],
                 "created_at": row_dict["created_at"],

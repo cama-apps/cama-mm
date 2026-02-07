@@ -278,6 +278,17 @@ class AdminCommands(commands.Cog):
             success, _ = self.lobby_service.join_lobby(fake_id)
             if success:
                 fake_users_added.append(fake_name)
+                # Backdate join time for readycheck testing variety
+                import time as _time
+                offsets = [60, 5 * 60, 15 * 60, 30 * 60, 3600, 2 * 3600, 4 * 3600, 8 * 3600, 12 * 3600, 86400]
+                offset = offsets[(len(fake_users_added) - 1) % len(offsets)]
+                lobby_ref = self.lobby_service.get_lobby()
+                if lobby_ref and fake_id in lobby_ref.player_join_times:
+                    lobby_ref.player_join_times[fake_id] = _time.time() - offset
+
+        # Persist backdated join times to DB
+        if fake_users_added:
+            self.lobby_service.lobby_manager._persist_lobby()
 
         # Update lobby message if it exists
         lobby = self.lobby_service.get_lobby()

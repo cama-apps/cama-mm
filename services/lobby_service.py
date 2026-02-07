@@ -103,6 +103,68 @@ class LobbyService:
         """Get the channel where /lobby was originally run (for rally notifications)."""
         return self.lobby_manager.origin_channel_id
 
+    # -- Readycheck state --
+
+    def set_readycheck_state(
+        self,
+        message_id: int,
+        channel_id: int,
+        lobby_ids: set[int],
+        player_data: dict[int, dict],
+    ) -> None:
+        """Store readycheck message info and classification data. Resets reacted set."""
+        mgr = self.lobby_manager
+        mgr.readycheck_message_id = message_id
+        mgr.readycheck_channel_id = channel_id
+        mgr.readycheck_lobby_ids = lobby_ids
+        mgr.readycheck_player_data = player_data
+        mgr.readycheck_reacted = {}
+
+    def update_readycheck_data(
+        self, lobby_ids: set[int], player_data: dict[int, dict]
+    ) -> None:
+        """Update classification data on refresh (preserves reacted)."""
+        mgr = self.lobby_manager
+        mgr.readycheck_lobby_ids = lobby_ids
+        mgr.readycheck_player_data = player_data
+        # Prune reacted to current lobby members
+        mgr.readycheck_reacted = {
+            k: v for k, v in mgr.readycheck_reacted.items() if k in lobby_ids
+        }
+
+    def get_readycheck_message_id(self) -> int | None:
+        return self.lobby_manager.readycheck_message_id
+
+    def get_readycheck_channel_id(self) -> int | None:
+        return self.lobby_manager.readycheck_channel_id
+
+    def get_readycheck_lobby_ids(self) -> set[int]:
+        return self.lobby_manager.readycheck_lobby_ids
+
+    def get_readycheck_reacted(self) -> dict[int, str]:
+        return self.lobby_manager.readycheck_reacted
+
+    def get_readycheck_player_data(self) -> dict[int, dict]:
+        return self.lobby_manager.readycheck_player_data
+
+    def add_readycheck_reaction(self, discord_id: int, tag: str) -> bool:
+        """Record a ✅ reaction. Returns True if newly added."""
+        mgr = self.lobby_manager
+        if discord_id in mgr.readycheck_reacted:
+            return False
+        if discord_id not in mgr.readycheck_lobby_ids:
+            return False
+        mgr.readycheck_reacted[discord_id] = tag
+        return True
+
+    def remove_readycheck_reaction(self, discord_id: int) -> bool:
+        """Remove a ✅ reaction. Returns True if was present."""
+        mgr = self.lobby_manager
+        if discord_id not in mgr.readycheck_reacted:
+            return False
+        del mgr.readycheck_reacted[discord_id]
+        return True
+
     def get_lobby_players(self, lobby: Lobby, guild_id: int | None = None) -> tuple[list[int], list]:
         """Get regular (non-conditional) player IDs and Player objects."""
         player_ids = list(lobby.players)

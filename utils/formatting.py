@@ -149,3 +149,15 @@ def get_player_display_name(
             pass
 
     return base_name
+
+
+def format_duration_short(seconds: float) -> str:
+    """Format a duration as a concise string like '1m', '2h', '1d'."""
+    s = int(seconds)
+    if s < 60:
+        return f"{max(s, 1)}s"
+    if s < 3600:
+        return f"{s // 60}m"
+    if s < 86400:
+        return f"{s // 3600}h"
+    return f"{s // 86400}d"
