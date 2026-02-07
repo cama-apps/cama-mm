@@ -5,6 +5,7 @@ Betting commands for jopacoin wagers.
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import math
 import random
@@ -202,12 +203,14 @@ class BettingCommands(commands.Cog):
         Refresh the shuffle message's wager field with current totals.
         Updates both the main channel message and the thread copy.
         """
-        pending_state = self.match_service.get_last_shuffle(guild_id)
+        pending_state = await asyncio.to_thread(self.match_service.get_last_shuffle, guild_id)
         if not pending_state:
             return
 
         # Get betting display info
-        totals = self.betting_service.get_pot_odds(guild_id, pending_state=pending_state)
+        totals = await asyncio.to_thread(
+            functools.partial(self.betting_service.get_pot_odds, guild_id, pending_state=pending_state)
+        )
         lock_until = pending_state.get("bet_lock_until")
         betting_mode = pending_state.get("betting_mode", "pool")
         field_name, field_value = format_betting_display(
@@ -215,7 +218,7 @@ class BettingCommands(commands.Cog):
         )
 
         # Update main channel message
-        message_info = self.match_service.get_shuffle_message_info(guild_id)
+        message_info = await asyncio.to_thread(self.match_service.get_shuffle_message_info, guild_id)
         message_id = message_info.get("message_id") if message_info else None
         channel_id = message_info.get("channel_id") if message_info else None
         if message_id and channel_id:
@@ -286,17 +289,19 @@ class BettingCommands(commands.Cog):
 
         reminder_type: "warning" (5 minutes left) or "closed" (betting closed).
         """
-        pending_state = self.match_service.get_last_shuffle(guild_id)
+        pending_state = await asyncio.to_thread(self.match_service.get_last_shuffle, guild_id)
         if not pending_state:
             return
 
-        message_info = self.match_service.get_shuffle_message_info(guild_id)
+        message_info = await asyncio.to_thread(self.match_service.get_shuffle_message_info, guild_id)
         message_id = message_info.get("message_id") if message_info else None
         channel_id = message_info.get("channel_id") if message_info else None
         thread_message_id = message_info.get("thread_message_id") if message_info else None
         thread_id = message_info.get("thread_id") if message_info else None
 
-        totals = self.betting_service.get_pot_odds(guild_id, pending_state=pending_state)
+        totals = await asyncio.to_thread(
+            functools.partial(self.betting_service.get_pot_odds, guild_id, pending_state=pending_state)
+        )
         betting_mode = pending_state.get("betting_mode", "pool")
 
         # Format bets with odds for pool mode
@@ -575,7 +580,7 @@ class BettingCommands(commands.Cog):
             )
             return
 
-        pending_state = self.match_service.get_last_shuffle(guild_id)
+        pending_state = await asyncio.to_thread(self.match_service.get_last_shuffle, guild_id)
         if not pending_state:
             await interaction.followup.send("❌ No active match to bet on.", ephemeral=True)
             return
@@ -585,8 +590,11 @@ class BettingCommands(commands.Cog):
         effective_bet = amount * lev
 
         try:
-            self.betting_service.place_bet(
-                guild_id, user_id, team.value, amount, pending_state, leverage=lev
+            await asyncio.to_thread(
+                functools.partial(
+                    self.betting_service.place_bet,
+                    guild_id, user_id, team.value, amount, pending_state, leverage=lev,
+                )
             )
         except ValueError as exc:
             await interaction.followup.send(f"❌ {exc}", ephemeral=True)
@@ -642,9 +650,12 @@ class BettingCommands(commands.Cog):
             return
 
         guild_id = interaction.guild.id if interaction.guild else None
-        pending_state = self.match_service.get_last_shuffle(guild_id)
-        bets = self.betting_service.get_pending_bets(
-            guild_id, interaction.user.id, pending_state=pending_state
+        pending_state = await asyncio.to_thread(self.match_service.get_last_shuffle, guild_id)
+        bets = await asyncio.to_thread(
+            functools.partial(
+                self.betting_service.get_pending_bets,
+                guild_id, interaction.user.id, pending_state=pending_state,
+            )
         )
         if not bets:
             await interaction.followup.send("You have no active bets.", ephemeral=True)
@@ -692,7 +703,9 @@ class BettingCommands(commands.Cog):
         # Add EV info for pool mode
         betting_mode = pending_state.get("betting_mode", "pool") if pending_state else "pool"
         if betting_mode == "pool":
-            totals = self.betting_service.get_pot_odds(guild_id, pending_state=pending_state)
+            totals = await asyncio.to_thread(
+                functools.partial(self.betting_service.get_pot_odds, guild_id, pending_state=pending_state)
+            )
             total_pool = totals["radiant"] + totals["dire"]
             my_team_total = totals[bets[0]["team_bet_on"]]
 
@@ -739,18 +752,22 @@ class BettingCommands(commands.Cog):
             return
 
         guild_id = interaction.guild.id if interaction.guild else None
-        pending_state = self.match_service.get_last_shuffle(guild_id)
+        pending_state = await asyncio.to_thread(self.match_service.get_last_shuffle, guild_id)
         if not pending_state:
             await interaction.followup.send("No active match to show bets for.", ephemeral=True)
             return
 
-        all_bets = self.betting_service.get_all_pending_bets(guild_id, pending_state=pending_state)
+        all_bets = await asyncio.to_thread(
+            functools.partial(self.betting_service.get_all_pending_bets, guild_id, pending_state=pending_state)
+        )
         if not all_bets:
             await interaction.followup.send("No bets placed yet.", ephemeral=True)
             return
 
         # Get current odds
-        totals = self.betting_service.get_pot_odds(guild_id, pending_state=pending_state)
+        totals = await asyncio.to_thread(
+            functools.partial(self.betting_service.get_pot_odds, guild_id, pending_state=pending_state)
+        )
         total_pool = totals["radiant"] + totals["dire"]
         radiant_mult = total_pool / totals["radiant"] if totals["radiant"] > 0 else None
         dire_mult = total_pool / totals["dire"] if totals["dire"] > 0 else None
@@ -868,12 +885,12 @@ class BettingCommands(commands.Cog):
 
         user_id = interaction.user.id
         guild_id = guild.id if guild else None
-        balance = self.player_service.get_balance(user_id, guild_id)
+        balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
 
         # Check for bankruptcy penalty
         penalty_info = ""
         if self.bankruptcy_service:
-            state = self.bankruptcy_service.get_state(user_id, guild_id)
+            state = await asyncio.to_thread(self.bankruptcy_service.get_state, user_id, guild_id)
             if state.penalty_games_remaining > 0:
                 penalty_rate_pct = int(BANKRUPTCY_PENALTY_RATE * 100)
                 penalty_info = (
@@ -884,7 +901,7 @@ class BettingCommands(commands.Cog):
         # Check for loan info
         loan_info = ""
         if self.loan_service:
-            loan_state = self.loan_service.get_state(user_id, guild_id)
+            loan_state = await asyncio.to_thread(self.loan_service.get_state, user_id, guild_id)
             # Show outstanding loan prominently
             if loan_state.has_outstanding_loan:
                 loan_info = (
@@ -930,7 +947,7 @@ class BettingCommands(commands.Cog):
         now = time.time()
 
         # Check if player is registered
-        player = self.player_service.get_player(user_id, guild_id)
+        player = await asyncio.to_thread(self.player_service.get_player, user_id, guild_id)
         if not player:
             await interaction.response.send_message(
                 "You need to `/register` before you can spin the wheel.",
@@ -943,12 +960,15 @@ class BettingCommands(commands.Cog):
         if not is_admin:
             # Atomic check-and-claim: prevents race condition where concurrent
             # requests could both pass the cooldown check
-            claimed = self.player_service.player_repo.try_claim_wheel_spin(
-                user_id, guild_id, int(now), WHEEL_COOLDOWN_SECONDS
+            claimed = await asyncio.to_thread(
+                self.player_service.player_repo.try_claim_wheel_spin,
+                user_id, guild_id, int(now), WHEEL_COOLDOWN_SECONDS,
             )
             if not claimed:
                 # Spin was not claimed - still on cooldown. Get remaining time.
-                last_spin = self.player_service.player_repo.get_last_wheel_spin(user_id, guild_id)
+                last_spin = await asyncio.to_thread(
+                    self.player_service.player_repo.get_last_wheel_spin, user_id, guild_id
+                )
                 if last_spin:
                     remaining = WHEEL_COOLDOWN_SECONDS - (now - last_spin)
                     hours = int(remaining // 3600)
@@ -970,7 +990,9 @@ class BettingCommands(commands.Cog):
                 return
         else:
             # Admin bypass - still set the timestamp for consistency
-            self.player_service.player_repo.set_last_wheel_spin(user_id, guild_id, int(now))
+            await asyncio.to_thread(
+                self.player_service.player_repo.set_last_wheel_spin, user_id, guild_id, int(now)
+            )
 
         # Check for 1% explosion chance (overrides normal result)
         is_explosion = random.random() < WHEEL_EXPLOSION_CHANCE
@@ -989,25 +1011,32 @@ class BettingCommands(commands.Cog):
 
             # Apply explosion reward (67 JC)
             garnished_amount = 0
-            new_balance = self.player_service.get_balance(user_id, guild_id)
+            new_balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
 
             garnishment_service = getattr(self.bot, "garnishment_service", None)
             if garnishment_service and new_balance < 0:
-                result = garnishment_service.add_income(user_id, WHEEL_EXPLOSION_REWARD, guild_id)
+                result = await asyncio.to_thread(
+                    garnishment_service.add_income, user_id, WHEEL_EXPLOSION_REWARD, guild_id
+                )
                 garnished_amount = result.get("garnished", 0)
                 new_balance = result.get("new_balance", new_balance + WHEEL_EXPLOSION_REWARD)
             else:
-                self.player_service.player_repo.add_balance(user_id, guild_id, WHEEL_EXPLOSION_REWARD)
-                new_balance = self.player_service.get_balance(user_id, guild_id)
+                await asyncio.to_thread(
+                    self.player_service.player_repo.add_balance, user_id, guild_id, WHEEL_EXPLOSION_REWARD
+                )
+                new_balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
 
             next_spin_time = int(now) + WHEEL_COOLDOWN_SECONDS
 
             # Log the explosion as a special result
-            self.player_service.player_repo.log_wheel_spin(
-                discord_id=user_id,
-                guild_id=guild_id,
-                result=WHEEL_EXPLOSION_REWARD,
-                spin_time=int(now),
+            await asyncio.to_thread(
+                functools.partial(
+                    self.player_service.player_repo.log_wheel_spin,
+                    discord_id=user_id,
+                    guild_id=guild_id,
+                    result=WHEEL_EXPLOSION_REWARD,
+                    spin_time=int(now),
+                )
             )
 
             await asyncio.sleep(0.5)
@@ -1040,7 +1069,7 @@ class BettingCommands(commands.Cog):
         # Apply the result
         result_value = result_wedge[1]
         garnished_amount = 0
-        new_balance = self.player_service.get_balance(user_id, guild_id)
+        new_balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
 
         # Shell outcome tracking for embed
         shell_victim: discord.Member | None = None
@@ -1052,15 +1081,20 @@ class BettingCommands(commands.Cog):
         if result_value == "RED_SHELL":
             # Mario Kart Red Shell: Steal 2-10 JC from player ranked above
             shell_amount = random.randint(2, 10)
-            player_above = self.player_service.player_repo.get_player_above(user_id, guild_id)
+            player_above = await asyncio.to_thread(
+                self.player_service.player_repo.get_player_above, user_id, guild_id
+            )
 
             if player_above:
                 # Atomic steal from player above (can push victim below MAX_DEBT - intentional)
-                steal_result = self.player_service.player_repo.steal_atomic(
-                    thief_discord_id=user_id,
-                    victim_discord_id=player_above.discord_id,
-                    guild_id=guild_id,
-                    amount=shell_amount,
+                steal_result = await asyncio.to_thread(
+                    functools.partial(
+                        self.player_service.player_repo.steal_atomic,
+                        thief_discord_id=user_id,
+                        victim_discord_id=player_above.discord_id,
+                        guild_id=guild_id,
+                        amount=shell_amount,
+                    )
                 )
                 shell_victim_new_balance = steal_result["victim_new_balance"]
                 new_balance = steal_result["thief_new_balance"]
@@ -1075,27 +1109,34 @@ class BettingCommands(commands.Cog):
         elif result_value == "BLUE_SHELL":
             # Mario Kart Blue Shell: Steal 4-20 JC from richest player
             shell_amount = random.randint(4, 20)
-            leaderboard = self.player_service.player_repo.get_leaderboard(guild_id, limit=1)
+            leaderboard = await asyncio.to_thread(
+                functools.partial(self.player_service.player_repo.get_leaderboard, guild_id, limit=1)
+            )
 
             if leaderboard and leaderboard[0].discord_id == user_id:
                 # Self-hit! User is the richest - LOSE coins (can go below MAX_DEBT - intentional)
                 shell_self_hit = True
-                self.player_service.player_repo.add_balance(user_id, guild_id, -shell_amount)
-                new_balance = self.player_service.get_balance(user_id, guild_id)
+                await asyncio.to_thread(
+                    self.player_service.player_repo.add_balance, user_id, guild_id, -shell_amount
+                )
+                new_balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
                 # Credit nonprofit fund with the self-hit loss
                 if self.loan_service:
                     try:
-                        self.loan_service.add_to_nonprofit_fund(guild_id, shell_amount)
+                        await asyncio.to_thread(self.loan_service.add_to_nonprofit_fund, guild_id, shell_amount)
                     except Exception:
                         logger.warning("Failed to add blue shell self-hit to nonprofit fund")
             elif leaderboard:
                 # Atomic steal from richest (can push victim below MAX_DEBT - intentional)
                 richest = leaderboard[0]
-                steal_result = self.player_service.player_repo.steal_atomic(
-                    thief_discord_id=user_id,
-                    victim_discord_id=richest.discord_id,
-                    guild_id=guild_id,
-                    amount=shell_amount,
+                steal_result = await asyncio.to_thread(
+                    functools.partial(
+                        self.player_service.player_repo.steal_atomic,
+                        thief_discord_id=user_id,
+                        victim_discord_id=richest.discord_id,
+                        guild_id=guild_id,
+                        amount=shell_amount,
+                    )
                 )
                 shell_victim_new_balance = steal_result["victim_new_balance"]
                 new_balance = steal_result["thief_new_balance"]
@@ -1112,21 +1153,29 @@ class BettingCommands(commands.Cog):
             garnishment_service = getattr(self.bot, "garnishment_service", None)
             if garnishment_service and new_balance < 0:
                 # Player is in debt, apply garnishment
-                result = garnishment_service.add_income(user_id, result_value, guild_id)
+                result = await asyncio.to_thread(
+                    garnishment_service.add_income, user_id, result_value, guild_id
+                )
                 garnished_amount = result.get("garnished", 0)
                 new_balance = result.get("new_balance", new_balance + result_value)
             else:
                 # Not in debt, add directly
-                self.player_service.player_repo.add_balance(user_id, guild_id, result_value)
-                new_balance = self.player_service.get_balance(user_id, guild_id)
+                await asyncio.to_thread(
+                    self.player_service.player_repo.add_balance, user_id, guild_id, result_value
+                )
+                new_balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
         elif isinstance(result_value, int) and result_value < 0:
             # Bankrupt: subtract penalty (ignores MAX_DEBT floor - can go deeper into debt)
-            self.player_service.player_repo.add_balance(user_id, guild_id, result_value)
-            new_balance = self.player_service.get_balance(user_id, guild_id)
+            await asyncio.to_thread(
+                self.player_service.player_repo.add_balance, user_id, guild_id, result_value
+            )
+            new_balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
             # Add losses to nonprofit fund
             if self.loan_service:
                 try:
-                    self.loan_service.add_to_nonprofit_fund(guild_id, abs(int(result_value)))
+                    await asyncio.to_thread(
+                        self.loan_service.add_to_nonprofit_fund, guild_id, abs(int(result_value))
+                    )
                 except Exception:
                     logger.warning("Failed to add wheel loss to nonprofit fund")
         # result_value == 0: "Lose a Turn" - no balance change, but extended cooldown
@@ -1134,7 +1183,9 @@ class BettingCommands(commands.Cog):
             # Apply the 1-week penalty cooldown for "Lose a Turn"
             # Set the spin time forward so the effective cooldown is the penalty duration
             penalty_spin_time = int(now) + (WHEEL_LOSE_PENALTY_COOLDOWN - WHEEL_COOLDOWN_SECONDS)
-            self.player_service.player_repo.set_last_wheel_spin(user_id, guild_id, penalty_spin_time)
+            await asyncio.to_thread(
+                self.player_service.player_repo.set_last_wheel_spin, user_id, guild_id, penalty_spin_time
+            )
             next_spin_time = int(now) + WHEEL_LOSE_PENALTY_COOLDOWN
         else:
             next_spin_time = int(now) + WHEEL_COOLDOWN_SECONDS
@@ -1153,11 +1204,14 @@ class BettingCommands(commands.Cog):
         else:
             log_result = result_value
 
-        self.player_service.player_repo.log_wheel_spin(
-            discord_id=user_id,
-            guild_id=guild_id,
-            result=log_result,
-            spin_time=int(now),
+        await asyncio.to_thread(
+            functools.partial(
+                self.player_service.player_repo.log_wheel_spin,
+                discord_id=user_id,
+                guild_id=guild_id,
+                result=log_result,
+                spin_time=int(now),
+            )
         )
 
         # Send final result embed
@@ -1243,8 +1297,8 @@ class BettingCommands(commands.Cog):
         guild_id = interaction.guild.id if interaction.guild else None
 
         # Check if both players are registered
-        sender = self.player_service.get_player(interaction.user.id, guild_id)
-        recipient = self.player_service.get_player(player.id, guild_id)
+        sender = await asyncio.to_thread(self.player_service.get_player, interaction.user.id, guild_id)
+        recipient = await asyncio.to_thread(self.player_service.get_player, player.id, guild_id)
 
         if not sender:
             await interaction.followup.send(
@@ -1265,7 +1319,7 @@ class BettingCommands(commands.Cog):
         total_cost = amount + fee
 
         # Check sender balance first (most fundamental constraint)
-        sender_balance = self.player_service.get_balance(interaction.user.id, guild_id)
+        sender_balance = await asyncio.to_thread(self.player_service.get_balance, interaction.user.id, guild_id)
         if sender_balance < total_cost:
             await interaction.followup.send(
                 f"Insufficient balance. You need {total_cost} {JOPACOIN_EMOTE} "
@@ -1276,7 +1330,7 @@ class BettingCommands(commands.Cog):
 
         # Check if sender has outstanding loan (blocked from tipping)
         if self.loan_service:
-            loan_state = self.loan_service.get_state(interaction.user.id, guild_id)
+            loan_state = await asyncio.to_thread(self.loan_service.get_state, interaction.user.id, guild_id)
             if loan_state.has_outstanding_loan:
                 await interaction.followup.send(
                     f"You cannot tip while you have an outstanding loan. "
@@ -1287,12 +1341,15 @@ class BettingCommands(commands.Cog):
 
         # Perform atomic transfer (fee goes to nonprofit)
         try:
-            result = self.player_service.player_repo.tip_atomic(
-                from_discord_id=interaction.user.id,
-                to_discord_id=player.id,
-                guild_id=guild_id,
-                amount=amount,
-                fee=fee,
+            result = await asyncio.to_thread(
+                functools.partial(
+                    self.player_service.player_repo.tip_atomic,
+                    from_discord_id=interaction.user.id,
+                    to_discord_id=player.id,
+                    guild_id=guild_id,
+                    amount=amount,
+                    fee=fee,
+                )
             )
         except ValueError as exc:
             # Transfer failed - user error (insufficient funds, not found, etc.)
@@ -1310,7 +1367,7 @@ class BettingCommands(commands.Cog):
         # Add fee to nonprofit fund (non-critical - failure here doesn't affect the tip)
         if self.loan_service and fee > 0:
             try:
-                self.loan_service.add_to_nonprofit_fund(guild_id, fee)
+                await asyncio.to_thread(self.loan_service.add_to_nonprofit_fund, guild_id, fee)
             except Exception as nonprofit_exc:
                 logger.warning(f"Failed to add tip fee to nonprofit fund: {nonprofit_exc}")
 
@@ -1336,12 +1393,15 @@ class BettingCommands(commands.Cog):
         # Log the transaction (non-critical - failure here doesn't affect the tip)
         if self.tip_repository:
             try:
-                self.tip_repository.log_tip(
-                    sender_id=interaction.user.id,
-                    recipient_id=player.id,
-                    amount=amount,
-                    fee=fee,
-                    guild_id=guild_id,
+                await asyncio.to_thread(
+                    functools.partial(
+                        self.tip_repository.log_tip,
+                        sender_id=interaction.user.id,
+                        recipient_id=player.id,
+                        amount=amount,
+                        fee=fee,
+                        guild_id=guild_id,
+                    )
                 )
             except Exception as log_exc:
                 # Log failure but don't notify user - tip already succeeded
@@ -1380,11 +1440,14 @@ class BettingCommands(commands.Cog):
 
         guild_id = guild.id if guild else None
         try:
-            result = self.player_service.player_repo.pay_debt_atomic(
-                from_discord_id=interaction.user.id,
-                to_discord_id=player.id,
-                guild_id=guild_id,
-                amount=amount,
+            result = await asyncio.to_thread(
+                functools.partial(
+                    self.player_service.player_repo.pay_debt_atomic,
+                    from_discord_id=interaction.user.id,
+                    to_discord_id=player.id,
+                    guild_id=guild_id,
+                    amount=amount,
+                )
             )
 
             await interaction.followup.send(
@@ -1428,7 +1491,7 @@ class BettingCommands(commands.Cog):
         guild_id = guild.id if guild else None
 
         # Check if player is registered
-        player = self.player_service.get_player(user_id, guild_id)
+        player = await asyncio.to_thread(self.player_service.get_player, user_id, guild_id)
         if not player:
             await interaction.followup.send(
                 "You need to `/register` before you can declare bankruptcy. "
@@ -1438,7 +1501,7 @@ class BettingCommands(commands.Cog):
             return
 
         # Check if bankruptcy is allowed
-        check = self.bankruptcy_service.can_declare_bankruptcy(user_id, guild_id)
+        check = await asyncio.to_thread(self.bankruptcy_service.can_declare_bankruptcy, user_id, guild_id)
 
         if not check["allowed"]:
             if check["reason"] == "not_in_debt":
@@ -1470,7 +1533,7 @@ class BettingCommands(commands.Cog):
                 return
 
         # Declare bankruptcy
-        result = self.bankruptcy_service.declare_bankruptcy(user_id, guild_id)
+        result = await asyncio.to_thread(self.bankruptcy_service.declare_bankruptcy, user_id, guild_id)
 
         if not result["success"]:
             await interaction.followup.send(
@@ -1518,7 +1581,7 @@ class BettingCommands(commands.Cog):
         # Neon Degen Terminal hook
         neon = self._get_neon_service()
         if neon:
-            filing_number = self._get_bankruptcy_filing_number(user_id, guild_id)
+            filing_number = await self._get_bankruptcy_filing_number(user_id, guild_id)
             neon_result = await neon.on_bankruptcy(
                 user_id, guild_id,
                 debt_cleared=result["debt_cleared"],
@@ -1535,12 +1598,14 @@ class BettingCommands(commands.Cog):
             except Exception:
                 pass
 
-    def _get_bankruptcy_filing_number(self, discord_id: int, guild_id: int | None) -> int:
+    async def _get_bankruptcy_filing_number(self, discord_id: int, guild_id: int | None) -> int:
         """Get the current bankruptcy filing number for a user."""
         try:
             gambling_stats = getattr(self.bot, "gambling_stats_service", None)
             if gambling_stats and gambling_stats.bet_repo:
-                return gambling_stats.bet_repo.get_player_bankruptcy_count(discord_id, guild_id)
+                return await asyncio.to_thread(
+                    gambling_stats.bet_repo.get_player_bankruptcy_count, discord_id, guild_id
+                )
         except Exception:
             pass
         return 1
@@ -1563,7 +1628,7 @@ class BettingCommands(commands.Cog):
         guild_id = interaction.guild.id if interaction.guild else None
 
         # Check if registered
-        if not self.player_service.get_player(user_id, guild_id):
+        if not await asyncio.to_thread(self.player_service.get_player, user_id, guild_id):
             await interaction.response.send_message(
                 "You need to `/register` before taking loans.", ephemeral=True
             )
@@ -1573,7 +1638,7 @@ class BettingCommands(commands.Cog):
         await interaction.response.defer()
 
         # Check eligibility
-        check = self.loan_service.can_take_loan(user_id, amount, guild_id)
+        check = await asyncio.to_thread(self.loan_service.can_take_loan, user_id, amount, guild_id)
 
         if not check["allowed"]:
             if check["reason"] == "has_outstanding_loan":
@@ -1652,7 +1717,7 @@ class BettingCommands(commands.Cog):
                 return
 
         # Take the loan
-        result = self.loan_service.take_loan(user_id, amount, guild_id)
+        result = await asyncio.to_thread(self.loan_service.take_loan, user_id, amount, guild_id)
 
         if not result["success"]:
             await interaction.followup.send(
@@ -1780,7 +1845,7 @@ class BettingCommands(commands.Cog):
             return
 
         guild_id = interaction.guild.id if interaction.guild else None
-        total = self.loan_service.get_nonprofit_fund(guild_id)
+        total = await asyncio.to_thread(self.loan_service.get_nonprofit_fund, guild_id)
 
         embed = discord.Embed(
             title="💝 Jopacoin Nonprofit for Gambling Addiction",
@@ -1810,7 +1875,7 @@ class BettingCommands(commands.Cog):
 
         # Show last disbursement info if available
         if self.disburse_service:
-            last_disburse = self.disburse_service.get_last_disbursement(guild_id)
+            last_disburse = await asyncio.to_thread(self.disburse_service.get_last_disbursement, guild_id)
             if last_disburse:
                 import datetime
 
@@ -1894,7 +1959,7 @@ class BettingCommands(commands.Cog):
         self, interaction: discord.Interaction, guild_id: int | None
     ):
         """Create a new disbursement proposal."""
-        can, reason = self.disburse_service.can_propose(guild_id)
+        can, reason = await asyncio.to_thread(self.disburse_service.can_propose, guild_id)
         if not can:
             if reason == "active_proposal_exists":
                 await interaction.response.send_message(
@@ -1921,7 +1986,7 @@ class BettingCommands(commands.Cog):
             return
 
         try:
-            proposal = self.disburse_service.create_proposal(guild_id)
+            proposal = await asyncio.to_thread(self.disburse_service.create_proposal, guild_id)
         except ValueError as e:
             await interaction.response.send_message(str(e), ephemeral=True)
             return
@@ -1934,15 +1999,16 @@ class BettingCommands(commands.Cog):
 
         # Store message ID for updates
         msg = await interaction.original_response()
-        self.disburse_service.set_proposal_message(
-            guild_id, msg.id, interaction.channel_id
+        await asyncio.to_thread(
+            self.disburse_service.set_proposal_message,
+            guild_id, msg.id, interaction.channel_id,
         )
 
     async def _disburse_status(
         self, interaction: discord.Interaction, guild_id: int | None
     ):
         """Show current proposal status, replacing the old message to keep it visible."""
-        proposal = self.disburse_service.get_proposal(guild_id)
+        proposal = await asyncio.to_thread(self.disburse_service.get_proposal, guild_id)
         if not proposal:
             await interaction.response.send_message(
                 "No active disbursement proposal. Use `/disburse propose` to create one.",
@@ -1970,8 +2036,9 @@ class BettingCommands(commands.Cog):
 
         # Update stored message reference to point to the new message
         msg = await interaction.original_response()
-        self.disburse_service.set_proposal_message(
-            guild_id, msg.id, interaction.channel_id
+        await asyncio.to_thread(
+            self.disburse_service.set_proposal_message,
+            guild_id, msg.id, interaction.channel_id,
         )
 
     async def _disburse_reset(
@@ -1985,7 +2052,7 @@ class BettingCommands(commands.Cog):
             )
             return
 
-        success = self.disburse_service.reset_proposal(guild_id)
+        success = await asyncio.to_thread(self.disburse_service.reset_proposal, guild_id)
         if success:
             await interaction.response.send_message(
                 "Disbursement proposal has been reset.", ephemeral=False
@@ -2006,7 +2073,7 @@ class BettingCommands(commands.Cog):
             )
             return
 
-        proposal = self.disburse_service.get_proposal(guild_id)
+        proposal = await asyncio.to_thread(self.disburse_service.get_proposal, guild_id)
         if not proposal:
             await interaction.response.send_message(
                 "No active disbursement proposal. Use `/disburse status` to check.",
@@ -2015,7 +2082,7 @@ class BettingCommands(commands.Cog):
             return
 
         # Create admin-only embed with voter details
-        embed = self._create_disburse_votes_embed(proposal)
+        embed = await self._create_disburse_votes_embed(proposal)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     def _create_disburse_embed(self, proposal) -> discord.Embed:
@@ -2092,7 +2159,7 @@ class BettingCommands(commands.Cog):
 
         return embed
 
-    def _create_disburse_votes_embed(self, proposal) -> discord.Embed:
+    async def _create_disburse_votes_embed(self, proposal) -> discord.Embed:
         """Create admin-only embed showing detailed voter information."""
         votes = proposal.votes
         total_votes = proposal.total_votes
@@ -2131,7 +2198,9 @@ class BettingCommands(commands.Cog):
 
         # Individual votes
         guild_id = proposal.guild_id if proposal.guild_id != 0 else None
-        individual_votes = self.disburse_service.disburse_repo.get_individual_votes(guild_id)
+        individual_votes = await asyncio.to_thread(
+            self.disburse_service.disburse_repo.get_individual_votes, guild_id
+        )
 
         if individual_votes:
             voter_lines = []
@@ -2161,7 +2230,7 @@ class BettingCommands(commands.Cog):
 
     async def update_disburse_message(self, guild_id: int | None):
         """Update the disbursement proposal message with current vote counts."""
-        proposal = self.disburse_service.get_proposal(guild_id)
+        proposal = await asyncio.to_thread(self.disburse_service.get_proposal, guild_id)
         if not proposal or not proposal.message_id or not proposal.channel_id:
             return
 
@@ -2197,7 +2266,7 @@ class DisburseVoteView(discord.ui.View):
         guild_id = interaction.guild.id if interaction.guild else None
 
         # Check if user is registered
-        player = self.cog.player_service.get_player(interaction.user.id, guild_id)
+        player = await asyncio.to_thread(self.cog.player_service.get_player, interaction.user.id, guild_id)
         if not player:
             await interaction.response.send_message(
                 "You must be registered to vote. Use `/register` first.",
@@ -2206,7 +2275,7 @@ class DisburseVoteView(discord.ui.View):
             return
 
         # Check for active proposal
-        proposal = self.disburse_service.get_proposal(guild_id)
+        proposal = await asyncio.to_thread(self.disburse_service.get_proposal, guild_id)
         if not proposal:
             await interaction.response.send_message(
                 "This vote has ended or been reset.", ephemeral=True
@@ -2214,8 +2283,9 @@ class DisburseVoteView(discord.ui.View):
             return
 
         try:
-            result = self.disburse_service.add_vote(
-                guild_id, interaction.user.id, method
+            result = await asyncio.to_thread(
+                self.disburse_service.add_vote,
+                guild_id, interaction.user.id, method,
             )
         except ValueError as e:
             await interaction.response.send_message(str(e), ephemeral=True)
@@ -2225,7 +2295,7 @@ class DisburseVoteView(discord.ui.View):
         if result["quorum_reached"]:
             # Execute disbursement
             try:
-                disbursement = self.disburse_service.execute_disbursement(guild_id)
+                disbursement = await asyncio.to_thread(self.disburse_service.execute_disbursement, guild_id)
 
                 # Handle cancel specially
                 if disbursement.get("cancelled"):

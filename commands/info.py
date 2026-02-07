@@ -3,6 +3,7 @@ Information commands for the bot: /help, /leaderboard
 """
 
 import asyncio
+import functools
 import logging
 import time
 from dataclasses import dataclass, field
@@ -133,9 +134,11 @@ class UnifiedLeaderboardView(discord.ui.View):
     async def _fetch_balance_data(self, state: TabState) -> None:
         """Fetch balance leaderboard data."""
         rating_system = CamaRatingSystem()
-        players = self.cog.player_repo.get_leaderboard(self.guild_id, limit=self.limit)
-        total_count = self.cog.player_repo.get_player_count(self.guild_id)
-        debtors = self.cog.player_repo.get_players_with_negative_balance(self.guild_id)
+        players = await asyncio.to_thread(
+            functools.partial(self.cog.player_repo.get_leaderboard, self.guild_id, limit=self.limit)
+        )
+        total_count = await asyncio.to_thread(self.cog.player_repo.get_player_count, self.guild_id)
+        debtors = await asyncio.to_thread(self.cog.player_repo.get_players_with_negative_balance, self.guild_id)
 
         players_with_stats = []
         for player in players:
@@ -174,8 +177,8 @@ class UnifiedLeaderboardView(discord.ui.View):
             state.data = None
             return
 
-        leaderboard = self.cog.gambling_stats_service.get_leaderboard(
-            self.guild_id, limit=self.limit
+        leaderboard = await asyncio.to_thread(
+            functools.partial(self.cog.gambling_stats_service.get_leaderboard, self.guild_id, limit=self.limit)
         )
 
         # Pre-fetch guild members
@@ -196,7 +199,7 @@ class UnifiedLeaderboardView(discord.ui.View):
         # Batch fetch bankruptcy states
         bankruptcy_states = {}
         if self.cog.bankruptcy_service and all_discord_ids:
-            bankruptcy_states = self.cog.bankruptcy_service.get_bulk_states(list(all_discord_ids))
+            bankruptcy_states = await asyncio.to_thread(self.cog.bankruptcy_service.get_bulk_states, list(all_discord_ids))
 
         state.data = leaderboard
         state.extra = {
@@ -220,10 +223,12 @@ class UnifiedLeaderboardView(discord.ui.View):
             state.data = None
             return
 
-        leaderboard = self.cog.prediction_service.prediction_repo.get_prediction_leaderboard(
+        leaderboard = await asyncio.to_thread(
+            self.cog.prediction_service.prediction_repo.get_prediction_leaderboard,
             self.guild_id, self.limit
         )
-        server_stats = self.cog.prediction_service.prediction_repo.get_server_prediction_stats(
+        server_stats = await asyncio.to_thread(
+            self.cog.prediction_service.prediction_repo.get_server_prediction_stats,
             self.guild_id
         )
 
@@ -249,8 +254,12 @@ class UnifiedLeaderboardView(discord.ui.View):
     async def _fetch_glicko_data(self, state: TabState) -> None:
         """Fetch Glicko-2 rating leaderboard data."""
         rating_system = CamaRatingSystem()
-        players = self.cog.player_repo.get_leaderboard_by_glicko(self.guild_id, limit=self.limit)
-        total_rated = self.cog.player_repo.get_rated_player_count(self.guild_id, rating_type="glicko")
+        players = await asyncio.to_thread(
+            functools.partial(self.cog.player_repo.get_leaderboard_by_glicko, self.guild_id, limit=self.limit)
+        )
+        total_rated = await asyncio.to_thread(
+            functools.partial(self.cog.player_repo.get_rated_player_count, self.guild_id, rating_type="glicko")
+        )
 
         players_with_stats = []
         for player in players:
@@ -277,8 +286,12 @@ class UnifiedLeaderboardView(discord.ui.View):
     async def _fetch_openskill_data(self, state: TabState) -> None:
         """Fetch OpenSkill rating leaderboard data."""
         os_system = CamaOpenSkillSystem()
-        players = self.cog.player_repo.get_leaderboard_by_openskill(self.guild_id, limit=self.limit)
-        total_rated = self.cog.player_repo.get_rated_player_count(self.guild_id, rating_type="openskill")
+        players = await asyncio.to_thread(
+            functools.partial(self.cog.player_repo.get_leaderboard_by_openskill, self.guild_id, limit=self.limit)
+        )
+        total_rated = await asyncio.to_thread(
+            functools.partial(self.cog.player_repo.get_rated_player_count, self.guild_id, rating_type="openskill")
+        )
 
         players_with_stats = []
         for player in players:
@@ -309,9 +322,13 @@ class UnifiedLeaderboardView(discord.ui.View):
             state.data = None
             return
 
-        top_senders = tip_repo.get_top_senders(self.guild_id, limit=self.limit)
-        top_receivers = tip_repo.get_top_receivers(self.guild_id, limit=self.limit)
-        total_volume = tip_repo.get_total_tip_volume(self.guild_id)
+        top_senders = await asyncio.to_thread(
+            functools.partial(tip_repo.get_top_senders, self.guild_id, limit=self.limit)
+        )
+        top_receivers = await asyncio.to_thread(
+            functools.partial(tip_repo.get_top_receivers, self.guild_id, limit=self.limit)
+        )
+        total_volume = await asyncio.to_thread(tip_repo.get_total_tip_volume, self.guild_id)
 
         # Pre-fetch guild members
         guild = self.interaction.guild
@@ -1101,28 +1118,43 @@ class InfoCommands(commands.Cog):
 
             # Otherwise show server-wide stats
             guild_id = rl_gid
-            players = self.player_repo.get_all(guild_id) if self.player_repo else []
-            match_count = self.match_repo.get_match_count(guild_id) if self.match_repo else 0
+            players = await asyncio.to_thread(self.player_repo.get_all, guild_id) if self.player_repo else []
+            match_count = await asyncio.to_thread(self.match_repo.get_match_count, guild_id) if self.match_repo else 0
             match_predictions = (
-                self.match_repo.get_recent_match_predictions(guild_id, limit=200)
+                await asyncio.to_thread(
+                    functools.partial(self.match_repo.get_recent_match_predictions, guild_id, limit=200)
+                )
                 if self.match_repo
                 else []
             )
             rating_history_entries = (
-                self.match_repo.get_recent_rating_history(guild_id, limit=500) if self.match_repo else []
+                await asyncio.to_thread(
+                    functools.partial(self.match_repo.get_recent_rating_history, guild_id, limit=500)
+                )
+                if self.match_repo
+                else []
             )
             biggest_upsets = (
-                self.match_repo.get_biggest_upsets(guild_id, limit=5) if self.match_repo else []
+                await asyncio.to_thread(
+                    functools.partial(self.match_repo.get_biggest_upsets, guild_id, limit=5)
+                )
+                if self.match_repo
+                else []
             )
             player_performance = (
-                self.match_repo.get_player_performance_stats(guild_id) if self.match_repo else []
+                await asyncio.to_thread(self.match_repo.get_player_performance_stats, guild_id)
+                if self.match_repo
+                else []
             )
 
-            stats = compute_calibration_stats(
-                players=players,
-                match_count=match_count,
-                match_predictions=match_predictions,
-                rating_history_entries=rating_history_entries,
+            stats = await asyncio.to_thread(
+                functools.partial(
+                    compute_calibration_stats,
+                    players=players,
+                    match_count=match_count,
+                    match_predictions=match_predictions,
+                    rating_history_entries=rating_history_entries,
+                )
             )
 
             def display_name(player) -> str:
@@ -1292,7 +1324,7 @@ class InfoCommands(commands.Cog):
             embed.add_field(name="⚖️ Rating Stability", value=stability_text, inline=False)
 
             # Lobby type impact
-            lobby_stats = self.match_repo.get_lobby_type_stats(guild_id) if self.match_repo else []
+            lobby_stats = await asyncio.to_thread(self.match_repo.get_lobby_type_stats, guild_id) if self.match_repo else []
             if lobby_stats:
                 lobby_lines = []
                 shuffle_stats = next((s for s in lobby_stats if s["lobby_type"] == "shuffle"), None)
@@ -1443,10 +1475,13 @@ class InfoCommands(commands.Cog):
             rating_values = [p.glicko_rating for p in players if p.glicko_rating is not None]
             chart_file = None
             if rating_values:
-                chart_buffer = draw_rating_distribution(
-                    rating_values,
-                    avg_rating=stats["avg_rating"],
-                    median_rating=stats["median_rating"],
+                chart_buffer = await asyncio.to_thread(
+                    functools.partial(
+                        draw_rating_distribution,
+                        rating_values,
+                        avg_rating=stats["avg_rating"],
+                        median_rating=stats["median_rating"],
+                    )
                 )
                 chart_file = discord.File(chart_buffer, filename="rating_distribution.png")
                 embed.set_image(url="attachment://rating_distribution.png")
@@ -1475,7 +1510,7 @@ class InfoCommands(commands.Cog):
         """Show detailed calibration stats for an individual player."""
         guild_id = interaction.guild_id or 0
         # Get player data
-        player = self.player_repo.get_by_id(user.id, guild_id) if self.player_repo else None
+        player = await asyncio.to_thread(self.player_repo.get_by_id, user.id, guild_id) if self.player_repo else None
         if not player:
             await safe_followup(
                 interaction,
@@ -1486,13 +1521,15 @@ class InfoCommands(commands.Cog):
 
         # Get detailed rating history with predictions
         history = (
-            self.match_repo.get_player_rating_history_detailed(user.id, guild_id, limit=50)
+            await asyncio.to_thread(
+                functools.partial(self.match_repo.get_player_rating_history_detailed, user.id, guild_id, limit=50)
+            )
             if self.match_repo
             else []
         )
 
         # Get all players for percentile calculation
-        all_players = self.player_repo.get_all(guild_id) if self.player_repo else []
+        all_players = await asyncio.to_thread(self.player_repo.get_all, guild_id) if self.player_repo else []
         rated_players = [p for p in all_players if p.glicko_rating is not None]
 
         # Calculate percentile
@@ -1569,7 +1606,7 @@ class InfoCommands(commands.Cog):
             # Get OpenSkill expected outcome for this match
             os_expected = None
             if match_id and self.match_repo:
-                os_ratings = self.match_repo.get_os_ratings_for_match(match_id)
+                os_ratings = await asyncio.to_thread(self.match_repo.get_os_ratings_for_match, match_id)
                 if os_ratings["team1"] and os_ratings["team2"]:
                     team_num = h.get("team_number")
                     if team_num == 1:
@@ -1672,7 +1709,7 @@ class InfoCommands(commands.Cog):
             )
 
         # Lobby type breakdown for this player
-        player_lobby_stats = self.match_repo.get_player_lobby_type_stats(user.id, guild_id) if self.match_repo else []
+        player_lobby_stats = await asyncio.to_thread(self.match_repo.get_player_lobby_type_stats, user.id, guild_id) if self.match_repo else []
         if player_lobby_stats and len(player_lobby_stats) > 1:
             lobby_lines = []
             shuffle_stats = next((s for s in player_lobby_stats if s["lobby_type"] == "shuffle"), None)
@@ -1754,10 +1791,12 @@ class InfoCommands(commands.Cog):
             embed.add_field(name="⚡ Highlights", value="\n".join(highlights), inline=False)
 
         # Hero performance from enriched matches
-        hero_stats = self.match_repo.get_player_hero_stats_detailed(user.id, guild_id, limit=8) if self.match_repo else []
+        hero_stats = await asyncio.to_thread(
+            functools.partial(self.match_repo.get_player_hero_stats_detailed, user.id, guild_id, limit=8)
+        ) if self.match_repo else []
         if hero_stats:
             # Calculate role alignment
-            hero_breakdown = self.match_repo.get_player_hero_role_breakdown(user.id, guild_id) if self.match_repo else []
+            hero_breakdown = await asyncio.to_thread(self.match_repo.get_player_hero_role_breakdown, user.id, guild_id) if self.match_repo else []
             total_hero_games = sum(h["games"] for h in hero_breakdown)
             core_games = sum(h["games"] for h in hero_breakdown if classify_hero_role(h["hero_id"]) == "Core")
             support_games = total_hero_games - core_games
@@ -1795,7 +1834,7 @@ class InfoCommands(commands.Cog):
             embed.add_field(name="🦸 Recent Heroes", value=hero_text, inline=False)
 
         # Fantasy stats from enriched matches
-        fantasy_stats = self.match_repo.get_player_fantasy_stats(user.id, guild_id) if self.match_repo else None
+        fantasy_stats = await asyncio.to_thread(self.match_repo.get_player_fantasy_stats, user.id, guild_id) if self.match_repo else None
         if fantasy_stats and fantasy_stats["total_games"] > 0:
             fp_text = (
                 f"**Avg FP:** {fantasy_stats['avg_fp']:.1f} | "
@@ -1816,7 +1855,7 @@ class InfoCommands(commands.Cog):
             embed.add_field(name="⭐ Fantasy Points", value=fp_text, inline=False)
 
         # OpenSkill Rating (Fantasy-Weighted)
-        os_data = self.player_repo.get_openskill_rating(user.id, guild_id) if self.player_repo else None
+        os_data = await asyncio.to_thread(self.player_repo.get_openskill_rating, user.id, guild_id) if self.player_repo else None
         if os_data:
             os_mu, os_sigma = os_data
             os_ordinal = os_system.ordinal(os_mu, os_sigma)

@@ -3,6 +3,7 @@ Draft commands for Immortal Draft mode: /setcaptain, /startdraft, /restartdraft
 """
 
 import asyncio
+import functools
 import logging
 import random
 import time
@@ -372,7 +373,7 @@ class DraftCommands(commands.Cog):
         guild_id = interaction.guild.id if interaction.guild else None
 
         # Check if user is registered
-        player = self.player_repo.get_by_id(interaction.user.id, guild_id)
+        player = await asyncio.to_thread(self.player_repo.get_by_id, interaction.user.id, guild_id)
         if not player:
             await interaction.response.send_message(
                 "❌ You must be registered first. Use `/register` to sign up.",
@@ -381,7 +382,7 @@ class DraftCommands(commands.Cog):
             return
 
         is_eligible = eligible.value == "yes"
-        self.player_repo.set_captain_eligible(interaction.user.id, guild_id, is_eligible)
+        await asyncio.to_thread(self.player_repo.set_captain_eligible, interaction.user.id, guild_id, is_eligible)
 
         if is_eligible:
             await interaction.response.send_message(
@@ -444,9 +445,9 @@ class DraftCommands(commands.Cog):
 
         # Clear any pending match if one was created from the draft
         if self.match_service:
-            pending_state = self.match_service.get_last_shuffle(guild_id)
+            pending_state = await asyncio.to_thread(self.match_service.get_last_shuffle, guild_id)
             if pending_state and pending_state.get("is_draft"):
-                self.match_service.clear_last_shuffle(guild_id)
+                await asyncio.to_thread(self.match_service.clear_last_shuffle, guild_id)
 
         # Clear the draft state
         self.draft_state_manager.clear_state(guild_id)
@@ -515,7 +516,7 @@ class DraftCommands(commands.Cog):
 
         # Get available players for buttons
         available_ids = state.available_player_ids
-        available_players = self.player_repo.get_by_ids(available_ids, guild_id)
+        available_players = await asyncio.to_thread(self.player_repo.get_by_ids, available_ids, guild_id)
         available_players.sort(key=lambda p: p.glicko_rating or 1500.0, reverse=True)
 
         view = DraftingView(
@@ -606,18 +607,21 @@ class DraftCommands(commands.Cog):
         ]
 
         for pid, name, rating, roles in sample_players:
-            existing = self.player_repo.get_by_id(pid, guild_id)
+            existing = await asyncio.to_thread(self.player_repo.get_by_id, pid, guild_id)
             if not existing:
                 try:
-                    self.player_repo.add(
-                        discord_id=pid,
-                        discord_username=name,
-                        guild_id=guild_id,
-                        initial_mmr=None,
-                        glicko_rating=rating,
-                        glicko_rd=100.0,
-                        glicko_volatility=0.06,
-                        preferred_roles=roles,
+                    await asyncio.to_thread(
+                        functools.partial(
+                            self.player_repo.add,
+                            discord_id=pid,
+                            discord_username=name,
+                            guild_id=guild_id,
+                            initial_mmr=None,
+                            glicko_rating=rating,
+                            glicko_rd=100.0,
+                            glicko_volatility=0.06,
+                            preferred_roles=roles,
+                        )
                     )
                 except ValueError:
                     pass
@@ -668,7 +672,7 @@ class DraftCommands(commands.Cog):
             lobby_player_ids = regular_players + promoted_conditional
 
         # Get player ratings for captain selection
-        players = self.player_repo.get_by_ids(lobby_player_ids, guild_id)
+        players = await asyncio.to_thread(self.player_repo.get_by_ids, lobby_player_ids, guild_id)
         player_ratings = {p.discord_id: p.glicko_rating or 1500.0 for p in players}
 
         if force_random_captains:
@@ -684,7 +688,7 @@ class DraftCommands(commands.Cog):
             eligible_captain_ids = lobby_player_ids.copy()
         else:
             # Normal captain eligibility check
-            eligible_captain_ids = self.player_repo.get_captain_eligible_players(lobby_player_ids, guild_id)
+            eligible_captain_ids = await asyncio.to_thread(self.player_repo.get_captain_eligible_players, lobby_player_ids, guild_id)
 
             # If captains are specified, add them to eligible list if not already there
             if specified_captain1_id and specified_captain1_id not in eligible_captain_ids:
@@ -725,7 +729,7 @@ class DraftCommands(commands.Cog):
                 await asyncio.sleep(5)
 
             # Re-query eligibility after the wait
-            eligible_captain_ids = self.player_repo.get_captain_eligible_players(lobby_player_ids, guild_id)
+            eligible_captain_ids = await asyncio.to_thread(self.player_repo.get_captain_eligible_players, lobby_player_ids, guild_id)
             if specified_captain1_id and specified_captain1_id not in eligible_captain_ids:
                 eligible_captain_ids.append(specified_captain1_id)
             if specified_captain2_id and specified_captain2_id not in eligible_captain_ids:
@@ -761,7 +765,7 @@ class DraftCommands(commands.Cog):
             return False
 
         # Get exclusion counts for player pool selection
-        exclusion_counts = self.player_repo.get_exclusion_counts(lobby_player_ids, guild_id)
+        exclusion_counts = await asyncio.to_thread(self.player_repo.get_exclusion_counts, lobby_player_ids, guild_id)
 
         # Select player pool (10 players, captains always included)
         # Use balanced pool selection when possible, fall back to exclusion-count-only
@@ -789,9 +793,9 @@ class DraftCommands(commands.Cog):
                     try:
                         match_repo = getattr(self.match_service, "match_repo", None)
                         if match_repo:
-                            last_match = match_repo.get_last_match()
+                            last_match = await asyncio.to_thread(match_repo.get_last_match)
                             if last_match:
-                                participants = match_repo.get_match_participants(last_match["match_id"])
+                                participants = await asyncio.to_thread(match_repo.get_match_participants, last_match["match_id"])
                                 recent_ids = {p["discord_id"] for p in participants}
                                 recent_match_names = {
                                     player_map[pid].name
@@ -843,7 +847,7 @@ class DraftCommands(commands.Cog):
 
         # Update exclusion counts for excluded players
         for excluded_id in pool_result.excluded_ids:
-            self.player_repo.increment_exclusion_count(excluded_id, guild_id)
+            await asyncio.to_thread(self.player_repo.increment_exclusion_count, excluded_id, guild_id)
 
         # Create draft state
         try:
@@ -1000,7 +1004,7 @@ class DraftCommands(commands.Cog):
 
         # Check for pending match from shuffle
         if self.match_service:
-            pending_match = self.match_service.get_last_shuffle(guild_id)
+            pending_match = await asyncio.to_thread(self.match_service.get_last_shuffle, guild_id)
             if pending_match:
                 await interaction.followup.send(
                     "❌ There's an active shuffled match that needs to be recorded! "
@@ -1409,7 +1413,7 @@ class DraftCommands(commands.Cog):
 
         # Get available players for buttons, sorted by rating descending
         available_ids = state.available_player_ids
-        available_players = self.player_repo.get_by_ids(available_ids, guild_id)
+        available_players = await asyncio.to_thread(self.player_repo.get_by_ids, available_ids, guild_id)
         available_players.sort(key=lambda p: p.glicko_rating or 1500.0, reverse=True)
 
         # Create view with player buttons
@@ -1441,7 +1445,8 @@ class DraftCommands(commands.Cog):
 
         # Get all players for role display
         all_player_ids = state.radiant_player_ids + state.dire_player_ids
-        all_players = {p.discord_id: p for p in self.player_repo.get_by_ids(all_player_ids, state.guild_id)}
+        all_players_list = await asyncio.to_thread(self.player_repo.get_by_ids, all_player_ids, state.guild_id)
+        all_players = {p.discord_id: p for p in all_players_list}
 
         radiant_captain_name = await self._get_member_name(guild, state.radiant_captain_id)
         dire_captain_name = await self._get_member_name(guild, state.dire_captain_id)
@@ -1479,7 +1484,7 @@ class DraftCommands(commands.Cog):
 
         # Build available players display with roles and preferences, sorted by rating
         available_ids = state.available_player_ids
-        available_players = self.player_repo.get_by_ids(available_ids, state.guild_id)
+        available_players = await asyncio.to_thread(self.player_repo.get_by_ids, available_ids, state.guild_id)
         # Sort by rating descending
         available_players.sort(key=lambda p: p.glicko_rating or 1500.0, reverse=True)
         available_display = []
@@ -1568,7 +1573,7 @@ class DraftCommands(commands.Cog):
 
         # Excluded players section
         if state.excluded_player_ids:
-            excluded_players = self.player_repo.get_by_ids(state.excluded_player_ids, state.guild_id)
+            excluded_players = await asyncio.to_thread(self.player_repo.get_by_ids, state.excluded_player_ids, state.guild_id)
             excluded_players.sort(key=lambda p: p.glicko_rating or 1500.0, reverse=True)
             excluded_display = []
             for p in excluded_players:
@@ -1622,7 +1627,7 @@ class DraftCommands(commands.Cog):
             else:
                 # Still drafting - update with new buttons, sorted by rating
                 available_ids = state.available_player_ids
-                available_players = self.player_repo.get_by_ids(available_ids, state.guild_id)
+                available_players = await asyncio.to_thread(self.player_repo.get_by_ids, available_ids, state.guild_id)
                 available_players.sort(key=lambda p: p.glicko_rating or 1500.0, reverse=True)
 
                 view = DraftingView(
@@ -1707,19 +1712,22 @@ class DraftCommands(commands.Cog):
                 return
 
             # Get pending state for betting display
-            pending_state = self.match_service.get_last_shuffle(guild_id)
+            pending_state = await asyncio.to_thread(self.match_service.get_last_shuffle, guild_id)
 
             # === NEW: Create auto-blind bets (same as shuffle mode) ===
             betting_service = getattr(self.bot, "betting_service", None)
             is_bomb_pot = pending_state.get("is_bomb_pot", False) if pending_state else False
             if betting_service and pending_state:
                 try:
-                    blind_result = betting_service.create_auto_blind_bets(
-                        guild_id=guild_id,
-                        radiant_ids=state.radiant_player_ids,
-                        dire_ids=state.dire_player_ids,
-                        shuffle_timestamp=pending_state.get("shuffle_timestamp"),
-                        is_bomb_pot=is_bomb_pot,
+                    blind_result = await asyncio.to_thread(
+                        functools.partial(
+                            betting_service.create_auto_blind_bets,
+                            guild_id=guild_id,
+                            radiant_ids=state.radiant_player_ids,
+                            dire_ids=state.dire_player_ids,
+                            shuffle_timestamp=pending_state.get("shuffle_timestamp"),
+                            is_bomb_pot=is_bomb_pot,
+                        )
                     )
                     if blind_result and blind_result.get("created", 0) > 0:
                         # Store blind bets result in pending state for embed display
@@ -1735,14 +1743,14 @@ class DraftCommands(commands.Cog):
             # Decay exclusion counts for included players (same as shuffle mode)
             included_player_ids = state.radiant_player_ids + state.dire_player_ids
             for pid in included_player_ids:
-                self.player_repo.decay_exclusion_count(pid, guild_id)
+                await asyncio.to_thread(self.player_repo.decay_exclusion_count, pid, guild_id)
 
             # Save thread ID before resetting lobby
             lobby_service = getattr(self.bot, "lobby_service", None)
             thread_id = lobby_service.get_lobby_thread_id() if lobby_service else None
 
             # Reset lobby only after successful match creation
-            self.lobby_manager.reset_lobby()
+            await asyncio.to_thread(self.lobby_manager.reset_lobby)
 
             embed = await self._build_draft_complete_embed(interaction.guild, state, pending_state)
             message = await interaction.response.edit_message(embed=embed, view=None)
@@ -1752,12 +1760,15 @@ class DraftCommands(commands.Cog):
                 # Get the message we just sent (interaction response)
                 original_message = await interaction.original_response()
                 if original_message:
-                    self.match_service.set_shuffle_message_info(
-                        guild_id,
-                        message_id=original_message.id,
-                        channel_id=original_message.channel.id,
-                        jump_url=original_message.jump_url,
-                        origin_channel_id=state.draft_channel_id,
+                    await asyncio.to_thread(
+                        functools.partial(
+                            self.match_service.set_shuffle_message_info,
+                            guild_id,
+                            message_id=original_message.id,
+                            channel_id=original_message.channel.id,
+                            jump_url=original_message.jump_url,
+                            origin_channel_id=state.draft_channel_id,
+                        )
                     )
             except Exception as exc:
                 logger.warning(f"Failed to store draft message info: {exc}")
@@ -1861,8 +1872,8 @@ class DraftCommands(commands.Cog):
         first_pick_team = "Radiant" if state.radiant_hero_pick_order == 1 else "Dire"
 
         # Calculate approximate team values for parity display
-        radiant_players = self.player_repo.get_by_ids(state.radiant_player_ids, guild_id)
-        dire_players = self.player_repo.get_by_ids(state.dire_player_ids, guild_id)
+        radiant_players = await asyncio.to_thread(self.player_repo.get_by_ids, state.radiant_player_ids, guild_id)
+        dire_players = await asyncio.to_thread(self.player_repo.get_by_ids, state.dire_player_ids, guild_id)
 
         radiant_value = sum(p.glicko_rating or 1500.0 for p in radiant_players)
         dire_value = sum(p.glicko_rating or 1500.0 for p in dire_players)
@@ -1914,7 +1925,7 @@ class DraftCommands(commands.Cog):
         }
 
         self.match_service.set_last_shuffle(guild_id, shuffle_state)
-        self.match_service._persist_match_state(guild_id, shuffle_state)
+        await asyncio.to_thread(self.match_service._persist_match_state, guild_id, shuffle_state)
 
         logger.info(
             f"Created pending match from draft for guild {guild_id}: "
@@ -1931,7 +1942,8 @@ class DraftCommands(commands.Cog):
         """Build the draft complete embed."""
         # Get all players for role display
         all_player_ids = state.radiant_player_ids + state.dire_player_ids
-        all_players = {p.discord_id: p for p in self.player_repo.get_by_ids(all_player_ids, state.guild_id)}
+        all_players_list = await asyncio.to_thread(self.player_repo.get_by_ids, all_player_ids, state.guild_id)
+        all_players = {p.discord_id: p for p in all_players_list}
 
         # Helper to get roles as numbers for a player
         def get_role_nums(player_id: int) -> str:
@@ -2021,7 +2033,7 @@ class DraftCommands(commands.Cog):
 
         # Excluded players section
         if state.excluded_player_ids:
-            excluded_players = self.player_repo.get_by_ids(state.excluded_player_ids, state.guild_id)
+            excluded_players = await asyncio.to_thread(self.player_repo.get_by_ids, state.excluded_player_ids, state.guild_id)
             excluded_players.sort(key=lambda p: p.glicko_rating or 1500.0, reverse=True)
             excluded_display = []
             for p in excluded_players:
@@ -2080,7 +2092,7 @@ class DraftCommands(commands.Cog):
 
             # Current wagers (same display as shuffle mode)
             guild_id = state.guild_id
-            totals = betting_service.get_pot_odds(guild_id, pending_state=pending_state)
+            totals = await asyncio.to_thread(functools.partial(betting_service.get_pot_odds, guild_id, pending_state=pending_state))
             lock_until = pending_state.get("bet_lock_until")
             wager_field_name, wager_field_value = format_betting_display(
                 totals["radiant"], totals["dire"], betting_mode, lock_until
@@ -2217,7 +2229,7 @@ class DraftCommands(commands.Cog):
                 return member.display_name
         # Fallback to username from player repo
         guild_id = guild.id if guild else None
-        player = self.player_repo.get_by_id(user_id, guild_id)
+        player = await asyncio.to_thread(self.player_repo.get_by_id, user_id, guild_id)
         if player:
             return player.name
         return f"Unknown ({user_id})"
