@@ -783,20 +783,19 @@ class LobbyCommands(commands.Cog):
 
         # Global shared rate limit (1 per 120s per guild) — checked after
         # preconditions so failed attempts don't consume the cooldown
-        # TODO: re-enable after testing
-        # rl = GLOBAL_RATE_LIMITER.check(
-        #     scope="readycheck",
-        #     guild_id=guild_id or 0,
-        #     user_id=0,
-        #     limit=1,
-        #     per_seconds=120,
-        # )
-        # if not rl.allowed:
-        #     await interaction.followup.send(
-        #         f"⏳ Ready check on cooldown. Try again in {rl.retry_after_seconds}s.",
-        #         ephemeral=True,
-        #     )
-        #     return
+        rl = GLOBAL_RATE_LIMITER.check(
+            scope="readycheck",
+            guild_id=guild_id or 0,
+            user_id=0,
+            limit=1,
+            per_seconds=120,
+        )
+        if not rl.allowed:
+            await interaction.followup.send(
+                f"⏳ Ready check on cooldown. Try again in {rl.retry_after_seconds}s.",
+                ephemeral=True,
+            )
+            return
 
         all_player_ids = list(lobby.players | lobby.conditional_players)
         current_lobby_set = set(all_player_ids)
