@@ -4,6 +4,7 @@ import io
 import math
 import random
 from PIL import Image, ImageDraw, ImageFont
+from pilmoji import Pilmoji
 
 from config import WHEEL_TARGET_EV
 
@@ -26,6 +27,33 @@ def _get_cached_font(size: int, font_key: str, bold: bool = False) -> ImageFont.
 
 # Cached static overlay (pointer, center circle, center text) - drawn once per size
 _CACHED_STATIC_OVERLAY: dict[int, Image.Image] = {}
+
+# Cache for pre-rendered emoji text images (avoids pilmoji calls per GIF frame)
+_CACHED_EMOJI_TEXT: dict[tuple[str, int, str], Image.Image] = {}
+
+
+def _has_emoji(text: str) -> bool:
+    """Check if text contains emoji characters."""
+    # Check for characters in emoji ranges (beyond basic ASCII/Latin)
+    return any(ord(c) > 0x1F00 for c in text)
+
+
+def _get_emoji_text_image(
+    text: str, font: ImageFont.FreeTypeFont | ImageFont.ImageFont, size: int, fill: str = "#ffffff"
+) -> Image.Image:
+    """
+    Pre-render emoji text to a transparent image, cached for performance.
+
+    This avoids calling pilmoji for every GIF frame by caching the rendered result.
+    """
+    cache_key = (text, size, fill)
+    if cache_key not in _CACHED_EMOJI_TEXT:
+        # Create transparent image sized for the text
+        temp_img = Image.new("RGBA", (size * 4, size * 2), (0, 0, 0, 0))
+        with Pilmoji(temp_img) as pilmoji:
+            pilmoji.text((0, 0), text, font=font, fill=fill)
+        _CACHED_EMOJI_TEXT[cache_key] = temp_img
+    return _CACHED_EMOJI_TEXT[cache_key]
 
 
 def _get_static_overlay(size: int) -> Image.Image:
@@ -87,6 +115,7 @@ def _create_static_overlay(size: int) -> Image.Image:
 
 # Base wheel wedge configuration: (label, base_value, color)
 # BANKRUPT value will be adjusted based on WHEEL_TARGET_EV
+# Shell wedges are spread out for visual variety (BLUE with 25s, RED between 70-80)
 _BASE_WHEEL_WEDGES = [
     ("BANKRUPT", -100, "#1a1a1a"),
     ("BANKRUPT", -100, "#1a1a1a"),
@@ -101,6 +130,7 @@ _BASE_WHEEL_WEDGES = [
     ("20", 20, "#5dba57"),
     ("25", 25, "#3498db"),
     ("25", 25, "#3498db"),
+    ("🔵 BLUE", "BLUE_SHELL", "#3498db"),  # Mario Kart: Steal from richest (with 25s - same blue)
     ("30", 30, "#2980b9"),
     ("35", 35, "#1f6dad"),
     ("40", 40, "#9b59b6"),
@@ -109,11 +139,10 @@ _BASE_WHEEL_WEDGES = [
     ("50", 50, "#7d3c98"),
     ("60", 60, "#e67e22"),
     ("70", 70, "#d35400"),
+    ("🔴 RED", "RED_SHELL", "#e74c3c"),   # Mario Kart: Steal from player above (between 70-80)
     ("80", 80, "#c0392b"),
     ("100", 100, "#f1c40f"),
     ("100", 100, "#f1c40f"),
-    ("🔴 RED", "RED_SHELL", "#e74c3c"),   # Mario Kart: Steal from player above
-    ("🔵 BLUE", "BLUE_SHELL", "#3498db"),  # Mario Kart: Steal from richest
 ]
 
 
@@ -300,23 +329,36 @@ def create_wheel_image(
             text = label
         else:
             text = str(value)
-        bbox = draw.textbbox((0, 0), text, font=small_font)
-        text_w = bbox[2] - bbox[0]
-        text_h = bbox[3] - bbox[1]
 
-        # Text shadow
-        draw.text(
-            (text_x - text_w / 2 + 1, text_y - text_h / 2 + 1),
-            text,
-            fill="#000000",
-            font=small_font,
-        )
-        draw.text(
-            (text_x - text_w / 2, text_y - text_h / 2),
-            text,
-            fill="#ffffff",
-            font=small_font,
-        )
+        # Use pilmoji for emoji labels (shell wedges), standard draw for others
+        if _has_emoji(text):
+            # Get cached emoji text image
+            emoji_img = _get_emoji_text_image(text, small_font, max(12, size // 35))
+            # Composite the emoji text onto the main image
+            paste_x = int(text_x - emoji_img.width / 2)
+            paste_y = int(text_y - emoji_img.height / 2)
+            temp = Image.new("RGBA", img.size, (0, 0, 0, 0))
+            temp.paste(emoji_img, (paste_x, paste_y), emoji_img)
+            img = Image.alpha_composite(img, temp)
+            draw = ImageDraw.Draw(img)
+        else:
+            bbox = draw.textbbox((0, 0), text, font=small_font)
+            text_w = bbox[2] - bbox[0]
+            text_h = bbox[3] - bbox[1]
+
+            # Text shadow
+            draw.text(
+                (text_x - text_w / 2 + 1, text_y - text_h / 2 + 1),
+                text,
+                fill="#000000",
+                font=small_font,
+            )
+            draw.text(
+                (text_x - text_w / 2, text_y - text_h / 2),
+                text,
+                fill="#ffffff",
+                font=small_font,
+            )
 
     # Draw center circle
     draw.ellipse(
@@ -527,23 +569,36 @@ def create_wheel_frame_for_gif(
             text = label
         else:
             text = str(value)
-        bbox = draw.textbbox((0, 0), text, font=small_font)
-        text_w = bbox[2] - bbox[0]
-        text_h = bbox[3] - bbox[1]
 
-        # Text shadow
-        draw.text(
-            (text_x - text_w / 2 + 1, text_y - text_h / 2 + 1),
-            text,
-            fill="#000000",
-            font=small_font,
-        )
-        draw.text(
-            (text_x - text_w / 2, text_y - text_h / 2),
-            text,
-            fill="#ffffff",
-            font=small_font,
-        )
+        # Use pilmoji for emoji labels (shell wedges), standard draw for others
+        if _has_emoji(text):
+            # Get cached emoji text image (rendered once, reused across all frames)
+            emoji_img = _get_emoji_text_image(text, small_font, max(12, size // 32))
+            # Composite the emoji text onto the main image
+            paste_x = int(text_x - emoji_img.width / 2)
+            paste_y = int(text_y - emoji_img.height / 2)
+            temp = Image.new("RGBA", img.size, (0, 0, 0, 0))
+            temp.paste(emoji_img, (paste_x, paste_y), emoji_img)
+            img = Image.alpha_composite(img, temp)
+            draw = ImageDraw.Draw(img)
+        else:
+            bbox = draw.textbbox((0, 0), text, font=small_font)
+            text_w = bbox[2] - bbox[0]
+            text_h = bbox[3] - bbox[1]
+
+            # Text shadow
+            draw.text(
+                (text_x - text_w / 2 + 1, text_y - text_h / 2 + 1),
+                text,
+                fill="#000000",
+                font=small_font,
+            )
+            draw.text(
+                (text_x - text_w / 2, text_y - text_h / 2),
+                text,
+                fill="#ffffff",
+                font=small_font,
+            )
 
     # Draw winner glow effect AFTER all wedges (so it's on top)
     if selected_idx is not None:

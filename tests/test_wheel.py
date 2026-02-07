@@ -123,11 +123,15 @@ async def test_wheel_positive_applies_garnishment():
 
     commands = BettingCommands(bot, betting_service, match_service, player_service)
 
-    # Mock random to get a positive result (index 13 = "30") and disable explosion
-    with patch("commands.betting.random.randint", return_value=13):
-        with patch("commands.betting.random.random", return_value=1.0):  # No explosion
-            with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
-                await commands.gamba.callback(commands, interaction)
+    # Find a positive value wedge dynamically (30)
+    target_idx = next(i for i, w in enumerate(WHEEL_WEDGES) if w[1] == 30)
+
+    # Mock _create_wheel_gif_file to avoid GIF generation calling random.randint
+    with patch.object(commands, "_create_wheel_gif_file", return_value=MagicMock()):
+        with patch("commands.betting.random.randint", return_value=target_idx):
+            with patch("commands.betting.random.random", return_value=1.0):  # No explosion
+                with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
+                    await commands.gamba.callback(commands, interaction)
 
     # Should call garnishment service (user_id, amount, guild_id)
     garnishment_service.add_income.assert_called_once_with(1002, 30, 123)
@@ -386,11 +390,15 @@ async def test_wheel_jackpot_result():
 
     commands = BettingCommands(bot, betting_service, match_service, player_service)
 
-    # Mock random to get Jackpot (index 22) and disable explosion
-    with patch("commands.betting.random.randint", return_value=22):
-        with patch("commands.betting.random.random", return_value=1.0):  # No explosion
-            with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
-                await commands.gamba.callback(commands, interaction)
+    # Find jackpot (100) wedge dynamically
+    jackpot_idx = next(i for i, w in enumerate(WHEEL_WEDGES) if w[1] == 100)
+
+    # Mock _create_wheel_gif_file to avoid GIF generation calling random.randint
+    with patch.object(commands, "_create_wheel_gif_file", return_value=MagicMock()):
+        with patch("commands.betting.random.randint", return_value=jackpot_idx):
+            with patch("commands.betting.random.random", return_value=1.0):  # No explosion
+                with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
+                    await commands.gamba.callback(commands, interaction)
 
     # Should add 100
     player_service.player_repo.add_balance.assert_called_once_with(1007, 123, 100)
