@@ -12,7 +12,7 @@ from tests.conftest import TEST_GUILD_ID, TEST_GUILD_ID_SECONDARY
 
 
 @pytest.fixture
-def garnishment_service(player_repository):
+def garnishment_service_full_rate(player_repository):
     """Create a GarnishmentService with 100% garnishment rate."""
     return GarnishmentService(player_repository, garnishment_rate=1.0)
 
@@ -43,11 +43,11 @@ class TestGarnishmentService:
     """Test GarnishmentService functionality."""
 
     def test_no_garnishment_when_positive_balance(
-        self, garnishment_service, player_repository, test_player
+        self, garnishment_service_full_rate, player_repository, test_player
     ):
         """Test that no garnishment is applied when balance is positive."""
         # Player starts with 3 JC (positive)
-        result = garnishment_service.add_income(test_player, 100, TEST_GUILD_ID)
+        result = garnishment_service_full_rate.add_income(test_player, 100, TEST_GUILD_ID)
 
         assert result["gross"] == 100
         assert result["garnished"] == 0
@@ -58,13 +58,13 @@ class TestGarnishmentService:
         assert balance == 103
 
     def test_full_garnishment_when_in_debt(
-        self, garnishment_service, player_repository, test_player
+        self, garnishment_service_full_rate, player_repository, test_player
     ):
         """Test that full garnishment is applied when in debt with 100% rate."""
         # Put player in debt
         player_repository.update_balance(test_player, TEST_GUILD_ID, -50)
 
-        result = garnishment_service.add_income(test_player, 30, TEST_GUILD_ID)
+        result = garnishment_service_full_rate.add_income(test_player, 30, TEST_GUILD_ID)
 
         assert result["gross"] == 30
         assert result["garnished"] == 30  # 100% of 30
@@ -92,24 +92,24 @@ class TestGarnishmentService:
         assert balance == -60
 
     def test_zero_income_no_garnishment(
-        self, garnishment_service, player_repository, test_player
+        self, garnishment_service_full_rate, player_repository, test_player
     ):
         """Test that zero income results in no garnishment."""
         player_repository.update_balance(test_player, TEST_GUILD_ID, -50)
 
-        result = garnishment_service.add_income(test_player, 0, TEST_GUILD_ID)
+        result = garnishment_service_full_rate.add_income(test_player, 0, TEST_GUILD_ID)
 
         assert result["gross"] == 0
         assert result["garnished"] == 0
         assert result["net"] == 0
 
     def test_negative_income_no_garnishment(
-        self, garnishment_service, player_repository, test_player
+        self, garnishment_service_full_rate, player_repository, test_player
     ):
         """Test that negative income (like a loss) has no garnishment."""
         player_repository.update_balance(test_player, TEST_GUILD_ID, -50)
 
-        result = garnishment_service.add_income(test_player, -20, TEST_GUILD_ID)
+        result = garnishment_service_full_rate.add_income(test_player, -20, TEST_GUILD_ID)
 
         assert result["gross"] == -20
         assert result["garnished"] == 0
@@ -120,13 +120,13 @@ class TestGarnishmentTransitions:
     """Test garnishment behavior around the zero-balance boundary."""
 
     def test_income_pays_off_debt_completely(
-        self, garnishment_service, player_repository, test_player
+        self, garnishment_service_full_rate, player_repository, test_player
     ):
         """Test that income can fully pay off debt."""
         # Put player in small debt
         player_repository.update_balance(test_player, TEST_GUILD_ID, -30)
 
-        result = garnishment_service.add_income(test_player, 50, TEST_GUILD_ID)
+        result = garnishment_service_full_rate.add_income(test_player, 50, TEST_GUILD_ID)
 
         assert result["gross"] == 50
         assert result["garnished"] == 50  # All applied to balance
@@ -137,12 +137,12 @@ class TestGarnishmentTransitions:
         assert balance == 20
 
     def test_exactly_at_zero_balance(
-        self, garnishment_service, player_repository, test_player
+        self, garnishment_service_full_rate, player_repository, test_player
     ):
         """Test income when balance is exactly zero."""
         player_repository.update_balance(test_player, TEST_GUILD_ID, 0)
 
-        result = garnishment_service.add_income(test_player, 100, TEST_GUILD_ID)
+        result = garnishment_service_full_rate.add_income(test_player, 100, TEST_GUILD_ID)
 
         # At zero balance, no debt, so no garnishment
         assert result["gross"] == 100
