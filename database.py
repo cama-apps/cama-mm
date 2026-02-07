@@ -48,6 +48,7 @@ class Database:
         raw_path = db_path or os.getenv("DB_PATH", DEFAULT_DB_PATH)
         self._is_memory = raw_path == ":memory:"
         self._memory_connection: sqlite3.Connection | None = None
+        self._anchor_connection: sqlite3.Connection | None = None
         self._use_uri = False
 
         if self._is_memory:
@@ -57,7 +58,7 @@ class Database:
             # For in-memory databases with cache=shared, we must keep at least one
             # connection open at all times or the database is destroyed.
             # Open it now BEFORE schema initialization.
-            self._memory_connection = sqlite3.connect(self.db_path, uri=True)
+            self._memory_connection = sqlite3.connect(self.db_path, uri=True, check_same_thread=False)
             self._memory_connection.row_factory = sqlite3.Row
         else:
             self.db_path = raw_path
@@ -66,6 +67,14 @@ class Database:
         # Initialize schema via SchemaManager
         self.schema_manager = SchemaManager(self.db_path, use_uri=self._use_uri)
         self.init_database()
+
+        # For file-based DBs, keep an idle anchor connection open so WAL mode
+        # stays active between operations.  Without this, every per-operation
+        # connection close triggers a WAL checkpoint + file removal, negating
+        # all WAL benefits (concurrent reads, reduced fsync).
+        if not self._is_memory:
+            self._anchor_connection = sqlite3.connect(self.db_path)
+            self._anchor_connection.execute("PRAGMA journal_mode=WAL")
 
         # region agent log
         _database_debug_log(
@@ -81,7 +90,7 @@ class Database:
         """Get database connection."""
         if self._is_memory:
             if self._memory_connection is None:
-                conn = sqlite3.connect(self.db_path, uri=self._use_uri)
+                conn = sqlite3.connect(self.db_path, uri=self._use_uri, check_same_thread=False)
                 conn.row_factory = sqlite3.Row
                 self._memory_connection = conn
             return self._memory_connection

@@ -4,6 +4,8 @@ Lobby commands: /lobby, /kick, /resetlobby.
 Uses Discord threads for lobby management similar to /prediction.
 """
 
+import asyncio
+import functools
 import logging
 import time
 from typing import TYPE_CHECKING
@@ -133,7 +135,7 @@ class LobbyCommands(commands.Cog):
             channel = interaction.channel
             message = await channel.fetch_message(message_id)
             guild_id = interaction.guild.id if interaction.guild else None
-            embed = self.lobby_service.build_lobby_embed(lobby, guild_id)
+            embed = await asyncio.to_thread(self.lobby_service.build_lobby_embed, lobby, guild_id)
             if embed:
                 await message.edit(embed=embed, allowed_mentions=discord.AllowedMentions.none())
         except Exception as exc:
@@ -141,7 +143,7 @@ class LobbyCommands(commands.Cog):
 
     async def _sync_lobby_displays(self, lobby, guild_id: int | None = None) -> None:
         """Update channel message embed (which is also the thread starter)."""
-        embed = self.lobby_service.build_lobby_embed(lobby, guild_id)
+        embed = await asyncio.to_thread(self.lobby_service.build_lobby_embed, lobby, guild_id)
 
         # Update channel message - this also updates the thread starter view
         message_id = self.lobby_service.get_lobby_message_id()
@@ -172,7 +174,7 @@ class LobbyCommands(commands.Cog):
 
             message = await thread.fetch_message(embed_message_id)
             if not embed:
-                embed = self.lobby_service.build_lobby_embed(lobby, guild_id)
+                embed = await asyncio.to_thread(self.lobby_service.build_lobby_embed, lobby, guild_id)
             if embed:
                 await message.edit(embed=embed)
         except Exception as exc:
@@ -273,19 +275,19 @@ class LobbyCommands(commands.Cog):
             return False, None
 
         # Check if player has roles set
-        player = self.player_service.get_player(user_id, guild_id)
+        player = await asyncio.to_thread(self.player_service.get_player, user_id, guild_id)
         if not player or not player.preferred_roles:
             return False, "⚠️ Set your preferred roles with `/setroles` to auto-join."
 
         # Check for pending match
         match_service = getattr(self.bot, "match_service", None)
         if match_service:
-            pending_match = match_service.get_last_shuffle(guild_id)
+            pending_match = await asyncio.to_thread(match_service.get_last_shuffle, guild_id)
             if pending_match:
                 return False, None  # Don't show warning, the main command handles this
 
         # Attempt to join
-        success, reason = self.lobby_service.join_lobby(user_id)
+        success, reason = await asyncio.to_thread(self.lobby_service.join_lobby, user_id)
         if not success:
             logger.info(f"Auto-join failed for {user_id}: {reason}")
             return False, None
@@ -330,7 +332,7 @@ class LobbyCommands(commands.Cog):
             return
 
         guild_id = interaction.guild.id if interaction.guild else None
-        player = self.player_service.get_player(interaction.user.id, guild_id)
+        player = await asyncio.to_thread(self.player_service.get_player, interaction.user.id, guild_id)
         if not player:
             await interaction.followup.send(
                 "❌ You're not registered! Use `/register` first.", ephemeral=True
@@ -340,7 +342,7 @@ class LobbyCommands(commands.Cog):
         # Block if a match is pending recording
         match_service = getattr(self.bot, "match_service", None)
         if match_service:
-            pending_match = match_service.get_last_shuffle(guild_id)
+            pending_match = await asyncio.to_thread(match_service.get_last_shuffle, guild_id)
             if pending_match:
                 jump_url = pending_match.get("shuffle_message_jump_url")
                 message_text = "❌ There's a pending match that needs to be recorded!"
@@ -353,8 +355,10 @@ class LobbyCommands(commands.Cog):
 
         # Acquire lock to prevent race condition when multiple users call /lobby simultaneously
         async with self.lobby_service.creation_lock:
-            lobby = self.lobby_service.get_or_create_lobby(creator_id=interaction.user.id)
-            embed = self.lobby_service.build_lobby_embed(lobby, guild_id)
+            lobby = await asyncio.to_thread(
+                functools.partial(self.lobby_service.get_or_create_lobby, creator_id=interaction.user.id)
+            )
+            embed = await asyncio.to_thread(self.lobby_service.build_lobby_embed, lobby, guild_id)
 
             # If message/thread already exists, refresh it; otherwise create new
             message_id = self.lobby_service.get_lobby_message_id()
@@ -428,12 +432,15 @@ class LobbyCommands(commands.Cog):
 
                 # Store all IDs (embed is on channel_msg, which is also the thread starter)
                 # Also store origin_channel_id for rally notifications
-                self.lobby_service.set_lobby_message_id(
-                    message_id=channel_msg.id,
-                    channel_id=target_channel.id,  # Where the embed lives (dedicated or interaction)
-                    thread_id=thread.id,
-                    embed_message_id=channel_msg.id,  # The channel msg IS the embed in thread
-                    origin_channel_id=origin_channel_id,  # Where /lobby was run (for rally)
+                await asyncio.to_thread(
+                    functools.partial(
+                        self.lobby_service.set_lobby_message_id,
+                        message_id=channel_msg.id,
+                        channel_id=target_channel.id,  # Where the embed lives (dedicated or interaction)
+                        thread_id=thread.id,
+                        embed_message_id=channel_msg.id,  # The channel msg IS the embed in thread
+                        origin_channel_id=origin_channel_id,  # Where /lobby was run (for rally)
+                    )
                 )
 
                 # Auto-join the user who created the lobby
@@ -510,9 +517,9 @@ class LobbyCommands(commands.Cog):
 
         # Remove from whichever set they're in
         if in_regular:
-            removed = self.lobby_service.leave_lobby(player.id)
+            removed = await asyncio.to_thread(self.lobby_service.leave_lobby, player.id)
         else:
-            removed = self.lobby_service.leave_lobby_conditional(player.id)
+            removed = await asyncio.to_thread(self.lobby_service.leave_lobby_conditional, player.id)
         if removed:
             await interaction.followup.send(
                 f"✅ Kicked {player.mention} from the lobby.", ephemeral=True
@@ -557,7 +564,7 @@ class LobbyCommands(commands.Cog):
         guild_id = interaction.guild.id if interaction.guild else None
 
         # Check registration
-        player = self.player_service.get_player(interaction.user.id, guild_id)
+        player = await asyncio.to_thread(self.player_service.get_player, interaction.user.id, guild_id)
         if not player:
             await interaction.followup.send(
                 "❌ You're not registered! Use `/register` first.", ephemeral=True
@@ -582,7 +589,7 @@ class LobbyCommands(commands.Cog):
         # Block if a match is pending recording
         match_service = getattr(self.bot, "match_service", None)
         if match_service:
-            pending_match = match_service.get_last_shuffle(guild_id)
+            pending_match = await asyncio.to_thread(match_service.get_last_shuffle, guild_id)
             if pending_match:
                 jump_url = pending_match.get("shuffle_message_jump_url")
                 message_text = "❌ There's a pending match that needs to be recorded!"
@@ -594,7 +601,7 @@ class LobbyCommands(commands.Cog):
                 return
 
         # Attempt to join
-        success, reason = self.lobby_service.join_lobby(interaction.user.id)
+        success, reason = await asyncio.to_thread(self.lobby_service.join_lobby, interaction.user.id)
         if not success:
             await interaction.followup.send(f"❌ {reason}", ephemeral=True)
             return
@@ -652,9 +659,9 @@ class LobbyCommands(commands.Cog):
 
         # Remove from appropriate queue
         if in_regular:
-            self.lobby_service.leave_lobby(interaction.user.id)
+            await asyncio.to_thread(self.lobby_service.leave_lobby, interaction.user.id)
         else:
-            self.lobby_service.leave_lobby_conditional(interaction.user.id)
+            await asyncio.to_thread(self.lobby_service.leave_lobby_conditional, interaction.user.id)
 
         # Update displays
         await self._sync_lobby_displays(lobby, guild_id)
@@ -681,7 +688,7 @@ class LobbyCommands(commands.Cog):
         guild_id = interaction.guild.id if interaction.guild else None
         match_service = getattr(self.bot, "match_service", None)
         if match_service:
-            pending_match = match_service.get_last_shuffle(guild_id)
+            pending_match = await asyncio.to_thread(match_service.get_last_shuffle, guild_id)
             if pending_match:
                 if can_respond:
                     jump_url = pending_match.get("shuffle_message_jump_url")
@@ -739,7 +746,7 @@ class LobbyCommands(commands.Cog):
         else:
             lobby_channel = interaction.channel
         await safe_unpin_all_bot_messages(lobby_channel, self.bot.user)
-        self.lobby_service.reset_lobby()
+        await asyncio.to_thread(self.lobby_service.reset_lobby)
 
         # Clear lobby rally cooldowns
         from bot import clear_lobby_rally_cooldowns
@@ -809,7 +816,7 @@ class LobbyCommands(commands.Cog):
                 try:
                     member = await guild.fetch_member(pid)
                 except Exception:
-                    player = self.player_service.get_player(pid, guild_id)
+                    player = await asyncio.to_thread(self.player_service.get_player, pid, guild_id)
                     fallback_name = player.name if player else f"User {pid}"
                     player_data[pid] = {
                         "group": "afk",

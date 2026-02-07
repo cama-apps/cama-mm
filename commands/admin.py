@@ -2,6 +2,8 @@
 Admin commands: maintenance helpers and testing utilities.
 """
 
+import asyncio
+import functools
 import logging
 import random
 import time
@@ -115,7 +117,7 @@ class AdminCommands(commands.Cog):
                 )
             return
 
-        lobby = self.lobby_service.get_or_create_lobby()
+        lobby = await asyncio.to_thread(self.lobby_service.get_or_create_lobby)
         current = lobby.get_player_count()
         if current + count > self.lobby_service.max_players:
             if can_respond:
@@ -129,53 +131,58 @@ class AdminCommands(commands.Cog):
                 )
             return
 
-        fake_users_added = []
         role_choices = list(ROLE_EMOJIS.keys())
-
-        # Find highest existing fake user index to continue from there
-        lobby = self.lobby_service.get_lobby()
-        existing_fake_ids = [pid for pid in lobby.players if pid < 0]
-        next_index = max([-pid for pid in existing_fake_ids], default=0) + 1
 
         # guild_id for fake users - use None for global (they're not guild-specific)
         addfake_guild_id = interaction.guild.id if interaction.guild else None
 
-        for _ in range(count):
-            fake_id = -next_index
-            fake_name = f"FakeUser{next_index}"
-            next_index += 1
+        def _add_fake_users():
+            fake_users_added = []
+            # Find highest existing fake user index to continue from there
+            lobby_snap = self.lobby_service.get_lobby()
+            existing_fake_ids = [pid for pid in lobby_snap.players if pid < 0]
+            next_index = max([-pid for pid in existing_fake_ids], default=0) + 1
 
-            existing = self.player_repo.get_by_id(fake_id, addfake_guild_id)
-            if not existing:
-                rating = random.randint(1000, 2000)
-                rd = random.uniform(50, 350)
-                vol = 0.06
-                num_roles = random.randint(1, min(5, len(role_choices)))
-                roles = random.sample(role_choices, k=num_roles)
-                try:
-                    self.player_repo.add(
-                        discord_id=fake_id,
-                        discord_username=fake_name,
-                        guild_id=addfake_guild_id,
-                        initial_mmr=None,
-                        glicko_rating=rating,
-                        glicko_rd=rd,
-                        glicko_volatility=vol,
-                        preferred_roles=roles,
-                    )
-                except ValueError:
-                    pass
+            for _ in range(count):
+                fake_id = -next_index
+                fake_name = f"FakeUser{next_index}"
+                next_index += 1
 
-            # Set captain eligibility if requested
-            if captain_eligible:
-                self.player_repo.set_captain_eligible(fake_id, addfake_guild_id, True)
+                existing = self.player_repo.get_by_id(fake_id, addfake_guild_id)
+                if not existing:
+                    rating = random.randint(1000, 2000)
+                    rd = random.uniform(50, 350)
+                    vol = 0.06
+                    num_roles = random.randint(1, min(5, len(role_choices)))
+                    roles = random.sample(role_choices, k=num_roles)
+                    try:
+                        self.player_repo.add(
+                            discord_id=fake_id,
+                            discord_username=fake_name,
+                            guild_id=addfake_guild_id,
+                            initial_mmr=None,
+                            glicko_rating=rating,
+                            glicko_rd=rd,
+                            glicko_volatility=vol,
+                            preferred_roles=roles,
+                        )
+                    except ValueError:
+                        pass
 
-            success, _ = self.lobby_service.join_lobby(fake_id)
-            if success:
-                fake_users_added.append(fake_name)
+                # Set captain eligibility if requested
+                if captain_eligible:
+                    self.player_repo.set_captain_eligible(fake_id, addfake_guild_id, True)
+
+                success, _ = self.lobby_service.join_lobby(fake_id)
+                if success:
+                    fake_users_added.append(fake_name)
+
+            return fake_users_added
+
+        fake_users_added = await asyncio.to_thread(_add_fake_users)
 
         # Update lobby message if it exists
-        lobby = self.lobby_service.get_lobby()  # Get fresh lobby state
+        lobby = self.lobby_service.get_lobby()  # In-memory read
         message_id = self.lobby_service.get_lobby_message_id()
         channel_id = self.lobby_service.get_lobby_channel_id()
         if message_id and channel_id and lobby:
@@ -184,7 +191,9 @@ class AdminCommands(commands.Cog):
                 if not channel:
                     channel = await self.bot.fetch_channel(channel_id)
                 message = await channel.fetch_message(message_id)
-                embed = self.lobby_service.build_lobby_embed(lobby, addfake_guild_id)
+                embed = await asyncio.to_thread(
+                    self.lobby_service.build_lobby_embed, lobby, addfake_guild_id
+                )
                 if embed:
                     await message.edit(embed=embed)
             except Exception as exc:
@@ -221,7 +230,7 @@ class AdminCommands(commands.Cog):
 
         await interaction.response.defer(ephemeral=True)
 
-        lobby = self.lobby_service.get_or_create_lobby()
+        lobby = await asyncio.to_thread(self.lobby_service.get_or_create_lobby)
         current = lobby.get_player_count()
         ready_threshold = self.lobby_service.ready_threshold
 
@@ -238,60 +247,65 @@ class AdminCommands(commands.Cog):
 
         role_choices = list(ROLE_EMOJIS.keys())
 
-        # Find highest existing fake user index
-        existing_fake_ids = [pid for pid in lobby.players if pid < 0]
-        next_index = max([-pid for pid in existing_fake_ids], default=0) + 1
-
         # guild_id for fake users
         fill_guild_id = interaction.guild.id if interaction.guild else None
 
-        fake_users_added = []
-        for _ in range(needed):
-            fake_id = -next_index
-            fake_name = f"FakeUser{next_index}"
-            next_index += 1
+        def _fill_lobby():
+            fake_users_added = []
+            # Find highest existing fake user index
+            existing_fake_ids = [pid for pid in lobby.players if pid < 0]
+            next_index = max([-pid for pid in existing_fake_ids], default=0) + 1
 
-            existing = self.player_repo.get_by_id(fake_id, fill_guild_id)
-            if not existing:
-                rating = random.randint(1000, 2000)
-                rd = random.uniform(50, 350)
-                vol = 0.06
-                num_roles = random.randint(1, min(5, len(role_choices)))
-                roles = random.sample(role_choices, k=num_roles)
-                try:
-                    self.player_repo.add(
-                        discord_id=fake_id,
-                        discord_username=fake_name,
-                        guild_id=fill_guild_id,
-                        initial_mmr=None,
-                        glicko_rating=rating,
-                        glicko_rd=rd,
-                        glicko_volatility=vol,
-                        preferred_roles=roles,
-                    )
-                except ValueError:
-                    pass
+            for _ in range(needed):
+                fake_id = -next_index
+                fake_name = f"FakeUser{next_index}"
+                next_index += 1
 
-            if captain_eligible:
-                self.player_repo.set_captain_eligible(fake_id, fill_guild_id, True)
+                existing = self.player_repo.get_by_id(fake_id, fill_guild_id)
+                if not existing:
+                    rating = random.randint(1000, 2000)
+                    rd = random.uniform(50, 350)
+                    vol = 0.06
+                    num_roles = random.randint(1, min(5, len(role_choices)))
+                    roles = random.sample(role_choices, k=num_roles)
+                    try:
+                        self.player_repo.add(
+                            discord_id=fake_id,
+                            discord_username=fake_name,
+                            guild_id=fill_guild_id,
+                            initial_mmr=None,
+                            glicko_rating=rating,
+                            glicko_rd=rd,
+                            glicko_volatility=vol,
+                            preferred_roles=roles,
+                        )
+                    except ValueError:
+                        pass
 
-            success, _ = self.lobby_service.join_lobby(fake_id)
-            if success:
-                fake_users_added.append(fake_name)
-                # Backdate join time for readycheck testing variety
-                import time as _time
-                offsets = [60, 5 * 60, 15 * 60, 30 * 60, 3600, 2 * 3600, 4 * 3600, 8 * 3600, 12 * 3600, 86400]
-                offset = offsets[(len(fake_users_added) - 1) % len(offsets)]
-                lobby_ref = self.lobby_service.get_lobby()
-                if lobby_ref and fake_id in lobby_ref.player_join_times:
-                    lobby_ref.player_join_times[fake_id] = _time.time() - offset
+                if captain_eligible:
+                    self.player_repo.set_captain_eligible(fake_id, fill_guild_id, True)
 
-        # Persist backdated join times to DB
-        if fake_users_added:
-            self.lobby_service.lobby_manager._persist_lobby()
+                success, _ = self.lobby_service.join_lobby(fake_id)
+                if success:
+                    fake_users_added.append((fake_name, fake_id))
+                    # Backdate join time for readycheck testing variety
+                    import time as _time
+                    offsets = [60, 5 * 60, 15 * 60, 30 * 60, 3600, 2 * 3600, 4 * 3600, 8 * 3600, 12 * 3600, 86400]
+                    offset = offsets[(len(fake_users_added) - 1) % len(offsets)]
+                    lobby_ref = self.lobby_service.get_lobby()
+                    if lobby_ref and fake_id in lobby_ref.player_join_times:
+                        lobby_ref.player_join_times[fake_id] = _time.time() - offset
+
+            # Persist backdated join times to DB
+            if fake_users_added:
+                self.lobby_service.lobby_manager._persist_lobby()
+
+            return [name for name, _ in fake_users_added]
+
+        fake_users_added = await asyncio.to_thread(_fill_lobby)
 
         # Update lobby message if it exists
-        lobby = self.lobby_service.get_lobby()
+        lobby = self.lobby_service.get_lobby()  # In-memory read
         message_id = self.lobby_service.get_lobby_message_id()
         channel_id = self.lobby_service.get_lobby_channel_id()
         if message_id and channel_id and lobby:
@@ -300,7 +314,9 @@ class AdminCommands(commands.Cog):
                 if not channel:
                     channel = await self.bot.fetch_channel(channel_id)
                 message = await channel.fetch_message(message_id)
-                embed = self.lobby_service.build_lobby_embed(lobby, fill_guild_id)
+                embed = await asyncio.to_thread(
+                    self.lobby_service.build_lobby_embed, lobby, fill_guild_id
+                )
                 if embed:
                     await message.edit(embed=embed)
             except Exception as exc:
@@ -345,7 +361,7 @@ class AdminCommands(commands.Cog):
             return
 
         guild_id = interaction.guild.id if interaction.guild else None
-        player = self.player_repo.get_by_id(user.id, guild_id)
+        player = await asyncio.to_thread(self.player_repo.get_by_id, user.id, guild_id)
         if not player:
             await safe_followup(
                 interaction,
@@ -354,7 +370,7 @@ class AdminCommands(commands.Cog):
             )
             return
 
-        deleted = self.player_repo.delete(user.id, guild_id)
+        deleted = await asyncio.to_thread(self.player_repo.delete, user.id, guild_id)
         if deleted:
             await safe_followup(
                 interaction,
@@ -435,11 +451,14 @@ class AdminCommands(commands.Cog):
             return
 
         try:
-            result = player_service.register_player(
-                discord_id=user.id,
-                discord_username=str(user),
-                steam_id=steam_id,
-                mmr_override=mmr,
+            result = await asyncio.to_thread(
+                functools.partial(
+                    player_service.register_player,
+                    discord_id=user.id,
+                    discord_username=str(user),
+                    steam_id=steam_id,
+                    mmr_override=mmr,
+                )
             )
             await safe_followup(
                 interaction,
@@ -558,11 +577,17 @@ class AdminCommands(commands.Cog):
                     ephemeral=True,
                 )
                 return
-            old_balance = self.loan_service.get_nonprofit_fund(guild_id)
+            old_balance = await asyncio.to_thread(
+                self.loan_service.get_nonprofit_fund, guild_id
+            )
 
             if amount >= 0:
-                self.loan_service.add_to_nonprofit_fund(guild_id, amount)
-                new_balance = self.loan_service.get_nonprofit_fund(guild_id)
+                await asyncio.to_thread(
+                    self.loan_service.add_to_nonprofit_fund, guild_id, amount
+                )
+                new_balance = await asyncio.to_thread(
+                    self.loan_service.get_nonprofit_fund, guild_id
+                )
                 await interaction.response.send_message(
                     f"✅ Added **{amount}** jopacoin to the nonprofit fund\n"
                     f"Fund balance: {old_balance} → {new_balance}",
@@ -578,8 +603,12 @@ class AdminCommands(commands.Cog):
                     )
                     return
                 # Negative add to subtract
-                self.loan_service.loan_repo.add_to_nonprofit_fund(guild_id, amount)
-                new_balance = self.loan_service.get_nonprofit_fund(guild_id)
+                await asyncio.to_thread(
+                    self.loan_service.loan_repo.add_to_nonprofit_fund, guild_id, amount
+                )
+                new_balance = await asyncio.to_thread(
+                    self.loan_service.get_nonprofit_fund, guild_id
+                )
                 await interaction.response.send_message(
                     f"✅ Took **{abs_amount}** jopacoin from the nonprofit fund\n"
                     f"Fund balance: {old_balance} → {new_balance}",
@@ -593,7 +622,7 @@ class AdminCommands(commands.Cog):
             return
 
         # Handle user target (original behavior)
-        player = self.player_repo.get_by_id(user.id, guild_id)
+        player = await asyncio.to_thread(self.player_repo.get_by_id, user.id, guild_id)
         if not player:
             await interaction.response.send_message(
                 f"⚠️ {user.mention} is not registered.",
@@ -601,9 +630,13 @@ class AdminCommands(commands.Cog):
             )
             return
 
-        old_balance = self.player_repo.get_balance(user.id, guild_id)
-        self.player_repo.add_balance(user.id, guild_id, amount)
-        new_balance = self.player_repo.get_balance(user.id, guild_id)
+        old_balance = await asyncio.to_thread(
+            self.player_repo.get_balance, user.id, guild_id
+        )
+        await asyncio.to_thread(self.player_repo.add_balance, user.id, guild_id, amount)
+        new_balance = await asyncio.to_thread(
+            self.player_repo.get_balance, user.id, guild_id
+        )
 
         action = "gave" if amount >= 0 else "took"
         abs_amount = abs(amount)
@@ -639,7 +672,7 @@ class AdminCommands(commands.Cog):
             return
 
         guild_id = interaction.guild.id if interaction.guild else None
-        player = self.player_repo.get_by_id(user.id, guild_id)
+        player = await asyncio.to_thread(self.player_repo.get_by_id, user.id, guild_id)
         if not player:
             await interaction.response.send_message(
                 f"⚠️ {user.mention} is not registered.",
@@ -648,19 +681,22 @@ class AdminCommands(commands.Cog):
             return
 
         # Get current state
-        state = self.loan_service.get_state(user.id, guild_id)
+        state = await asyncio.to_thread(self.loan_service.get_state, user.id, guild_id)
 
         # Reset the cooldown by setting last_loan_at to 0 (epoch = no cooldown)
         # Note: Can't use None because COALESCE in upsert keeps old value
-        self.loan_service.loan_repo.upsert_state(
-            discord_id=user.id,
-            guild_id=guild_id,
-            last_loan_at=0,
-            total_loans_taken=state.total_loans_taken,
-            total_fees_paid=state.total_fees_paid,
-            negative_loans_taken=state.negative_loans_taken,
-            outstanding_principal=state.outstanding_principal,
-            outstanding_fee=state.outstanding_fee,
+        await asyncio.to_thread(
+            functools.partial(
+                self.loan_service.loan_repo.upsert_state,
+                discord_id=user.id,
+                guild_id=guild_id,
+                last_loan_at=0,
+                total_loans_taken=state.total_loans_taken,
+                total_fees_paid=state.total_fees_paid,
+                negative_loans_taken=state.negative_loans_taken,
+                outstanding_principal=state.outstanding_principal,
+                outstanding_fee=state.outstanding_fee,
+            )
         )
 
         await interaction.response.send_message(
@@ -694,7 +730,7 @@ class AdminCommands(commands.Cog):
             return
 
         guild_id = interaction.guild.id if interaction.guild else None
-        player = self.player_repo.get_by_id(user.id, guild_id)
+        player = await asyncio.to_thread(self.player_repo.get_by_id, user.id, guild_id)
         if not player:
             await interaction.response.send_message(
                 f"⚠️ {user.mention} is not registered.",
@@ -703,7 +739,9 @@ class AdminCommands(commands.Cog):
             return
 
         # Get current state
-        state = self.bankruptcy_service.bankruptcy_repo.get_state(user.id, guild_id)
+        state = await asyncio.to_thread(
+            self.bankruptcy_service.bankruptcy_repo.get_state, user.id, guild_id
+        )
 
         if not state:
             await interaction.response.send_message(
@@ -713,11 +751,14 @@ class AdminCommands(commands.Cog):
             return
 
         # Reset cooldown AND clear penalty games (without incrementing bankruptcy count)
-        self.bankruptcy_service.bankruptcy_repo.reset_cooldown_only(
-            discord_id=user.id,
-            guild_id=guild_id,
-            last_bankruptcy_at=0,  # Far in the past = no cooldown
-            penalty_games_remaining=0,  # Clear penalty games
+        await asyncio.to_thread(
+            functools.partial(
+                self.bankruptcy_service.bankruptcy_repo.reset_cooldown_only,
+                discord_id=user.id,
+                guild_id=guild_id,
+                last_bankruptcy_at=0,  # Far in the past = no cooldown
+                penalty_games_remaining=0,  # Clear penalty games
+            )
         )
 
         await interaction.response.send_message(
@@ -753,7 +794,7 @@ class AdminCommands(commands.Cog):
             return
 
         guild_id = interaction.guild.id if interaction.guild else None
-        player = self.player_repo.get_by_id(user.id, guild_id)
+        player = await asyncio.to_thread(self.player_repo.get_by_id, user.id, guild_id)
         if not player:
             await interaction.response.send_message(
                 f"⚠️ {user.mention} is not registered.",
@@ -763,7 +804,9 @@ class AdminCommands(commands.Cog):
 
         games = 0
         if hasattr(self.player_repo, "get_game_count"):
-            games = self.player_repo.get_game_count(user.id, guild_id)
+            games = await asyncio.to_thread(
+                self.player_repo.get_game_count, user.id, guild_id
+            )
         if games >= ADMIN_RATING_ADJUSTMENT_MAX_GAMES:
             await interaction.response.send_message(
                 "❌ Player has too many games for initial rating adjustment.",
@@ -774,7 +817,9 @@ class AdminCommands(commands.Cog):
         # Keep existing RD and volatility if available
         rd = 300.0
         vol = 0.06
-        rating_data = self.player_repo.get_glicko_rating(user.id, guild_id)
+        rating_data = await asyncio.to_thread(
+            self.player_repo.get_glicko_rating, user.id, guild_id
+        )
         if rating_data:
             _current_rating, current_rd, current_vol = rating_data
             if current_rd is not None:
@@ -782,7 +827,9 @@ class AdminCommands(commands.Cog):
             if current_vol is not None:
                 vol = current_vol
 
-        self.player_repo.update_glicko_rating(user.id, guild_id, rating, rd, vol)
+        await asyncio.to_thread(
+            self.player_repo.update_glicko_rating, user.id, guild_id, rating, rd, vol
+        )
 
         await interaction.response.send_message(
             f"✅ Set initial rating for {user.mention} to {rating} (RD kept at {rd:.1f}).",
@@ -816,7 +863,9 @@ class AdminCommands(commands.Cog):
             return
 
         guild_id = interaction.guild.id if interaction.guild else None
-        result = self.recalibration_service.can_recalibrate(user.id, guild_id)
+        result = await asyncio.to_thread(
+            self.recalibration_service.can_recalibrate, user.id, guild_id
+        )
         if not result["allowed"]:
             reason = result["reason"]
             if reason == "not_registered":
@@ -852,7 +901,9 @@ class AdminCommands(commands.Cog):
             return
 
         # Execute recalibration
-        recal_result = self.recalibration_service.recalibrate(user.id, guild_id)
+        recal_result = await asyncio.to_thread(
+            self.recalibration_service.recalibrate, user.id, guild_id
+        )
         if not recal_result["success"]:
             await interaction.response.send_message(
                 f"❌ Recalibration failed: {recal_result.get('reason', 'unknown error')}",
@@ -902,7 +953,7 @@ class AdminCommands(commands.Cog):
             return
 
         guild_id = interaction.guild.id if interaction.guild else None
-        player = self.player_repo.get_by_id(user.id, guild_id)
+        player = await asyncio.to_thread(self.player_repo.get_by_id, user.id, guild_id)
         if not player:
             await interaction.response.send_message(
                 f"⚠️ {user.mention} is not registered.",
@@ -910,7 +961,9 @@ class AdminCommands(commands.Cog):
             )
             return
 
-        result = self.recalibration_service.reset_cooldown(user.id, guild_id)
+        result = await asyncio.to_thread(
+            self.recalibration_service.reset_cooldown, user.id, guild_id
+        )
         if not result["success"]:
             reason = result["reason"]
             if reason == "no_recalibration_history":
@@ -967,7 +1020,7 @@ class AdminCommands(commands.Cog):
         guild_id = interaction.guild.id if interaction.guild else None
 
         # Check for pending match
-        pending_state = match_service.get_last_shuffle(guild_id)
+        pending_state = await asyncio.to_thread(match_service.get_last_shuffle, guild_id)
         if not pending_state:
             await interaction.response.send_message(
                 "❌ No active match to extend betting for.",
@@ -990,8 +1043,10 @@ class AdminCommands(commands.Cog):
 
         # Update state
         pending_state["bet_lock_until"] = new_lock_until
-        match_service.set_last_shuffle(guild_id, pending_state)
-        match_service._persist_match_state(guild_id, pending_state)
+        match_service.set_last_shuffle(guild_id, pending_state)  # In-memory only
+        await asyncio.to_thread(
+            match_service._persist_match_state, guild_id, pending_state
+        )
 
         # Cancel existing and reschedule betting reminder tasks
         match_cog = self.bot.get_cog("MatchCommands")
@@ -1019,8 +1074,12 @@ class AdminCommands(commands.Cog):
                         betting_mode = pending_state.get("betting_mode", "pool")
 
                         if betting_service:
-                            totals = betting_service.get_pot_odds(
-                                guild_id, pending_state=pending_state
+                            totals = await asyncio.to_thread(
+                                functools.partial(
+                                    betting_service.get_pot_odds,
+                                    guild_id,
+                                    pending_state=pending_state,
+                                )
                             )
 
                         new_field_name, new_field_value = format_betting_display(
@@ -1118,11 +1177,14 @@ class AdminCommands(commands.Cog):
         guild_id = interaction.guild.id if interaction.guild else None
 
         try:
-            result = match_service.correct_match_result(
-                match_id=match_id,
-                new_winning_team=correct_result.value,
-                guild_id=guild_id,
-                corrected_by=interaction.user.id,
+            result = await asyncio.to_thread(
+                functools.partial(
+                    match_service.correct_match_result,
+                    match_id=match_id,
+                    new_winning_team=correct_result.value,
+                    guild_id=guild_id,
+                    corrected_by=interaction.user.id,
+                )
             )
 
             # Build response message
@@ -1209,7 +1271,7 @@ class AdminCommands(commands.Cog):
             return
 
         guild_id = interaction.guild.id if interaction.guild else None
-        player = self.player_repo.get_by_id(user.id, guild_id)
+        player = await asyncio.to_thread(self.player_repo.get_by_id, user.id, guild_id)
         if not player:
             await interaction.response.send_message(
                 f"⚠️ {user.mention} is not registered.",
@@ -1226,9 +1288,16 @@ class AdminCommands(commands.Cog):
             return
 
         try:
-            current_ids = self.player_repo.get_steam_ids(user.id)
+            current_ids = await asyncio.to_thread(self.player_repo.get_steam_ids, user.id)
             is_first = len(current_ids) == 0
-            self.player_repo.add_steam_id(user.id, steam_id, is_primary=set_primary or is_first)
+            await asyncio.to_thread(
+                functools.partial(
+                    self.player_repo.add_steam_id,
+                    user.id,
+                    steam_id,
+                    is_primary=set_primary or is_first,
+                )
+            )
 
             primary_note = " (set as primary)" if set_primary or is_first else ""
             await interaction.response.send_message(
@@ -1268,7 +1337,7 @@ class AdminCommands(commands.Cog):
             return
 
         guild_id = interaction.guild.id if interaction.guild else None
-        player = self.player_repo.get_by_id(user.id, guild_id)
+        player = await asyncio.to_thread(self.player_repo.get_by_id, user.id, guild_id)
         if not player:
             await interaction.response.send_message(
                 f"⚠️ {user.mention} is not registered.",
@@ -1276,7 +1345,7 @@ class AdminCommands(commands.Cog):
             )
             return
 
-        current_ids = self.player_repo.get_steam_ids(user.id)
+        current_ids = await asyncio.to_thread(self.player_repo.get_steam_ids, user.id)
         if steam_id not in current_ids:
             await interaction.response.send_message(
                 f"❌ Steam ID `{steam_id}` is not linked to {user.mention}.",
@@ -1284,9 +1353,9 @@ class AdminCommands(commands.Cog):
             )
             return
 
-        removed = self.player_repo.remove_steam_id(user.id, steam_id)
+        removed = await asyncio.to_thread(self.player_repo.remove_steam_id, user.id, steam_id)
         if removed:
-            remaining = self.player_repo.get_steam_ids(user.id)
+            remaining = await asyncio.to_thread(self.player_repo.get_steam_ids, user.id)
             if remaining:
                 await interaction.response.send_message(
                     f"✅ Removed Steam ID `{steam_id}` from {user.mention}'s account.\n"
@@ -1332,7 +1401,7 @@ class AdminCommands(commands.Cog):
             return
 
         guild_id = interaction.guild.id if interaction.guild else None
-        player = self.player_repo.get_by_id(user.id, guild_id)
+        player = await asyncio.to_thread(self.player_repo.get_by_id, user.id, guild_id)
         if not player:
             await interaction.response.send_message(
                 f"⚠️ {user.mention} is not registered.",
@@ -1340,7 +1409,7 @@ class AdminCommands(commands.Cog):
             )
             return
 
-        current_ids = self.player_repo.get_steam_ids(user.id)
+        current_ids = await asyncio.to_thread(self.player_repo.get_steam_ids, user.id)
         if steam_id not in current_ids:
             await interaction.response.send_message(
                 f"❌ Steam ID `{steam_id}` is not linked to {user.mention}.\n"
@@ -1349,7 +1418,7 @@ class AdminCommands(commands.Cog):
             )
             return
 
-        if self.player_repo.set_primary_steam_id(user.id, steam_id):
+        if await asyncio.to_thread(self.player_repo.set_primary_steam_id, user.id, steam_id):
             await interaction.response.send_message(
                 f"✅ Set `{steam_id}` as {user.mention}'s primary Steam account.",
                 ephemeral=True,
@@ -1397,67 +1466,75 @@ class AdminCommands(commands.Cog):
             pool_size = random.randint(4, 6)
             player_hero_pools[i] = random.sample(HERO_POOL, k=pool_size)
 
-        # 1. Create fake players
         seed_guild_id = interaction.guild.id if interaction.guild else None
-        player_ids = []
-        for i in range(NUM_PLAYERS):
-            pid = BASE_ID - i  # -1001, -1002, ...
-            player_ids.append(pid)
-            existing = self.player_repo.get_by_id(pid, seed_guild_id)
-            if not existing:
-                self.player_repo.add(
-                    discord_id=pid,
-                    discord_username=f"GridTest{i + 1}",
-                    guild_id=seed_guild_id,
-                    glicko_rating=random.randint(1000, 2000),
-                    glicko_rd=random.uniform(50, 200),
-                    glicko_volatility=0.06,
-                    preferred_roles=random.sample(["1", "2", "3", "4", "5"], k=random.randint(1, 3)),
-                )
 
-        # 2. Record matches with enrichment
-        matches_created = 0
-        for _ in range(NUM_MATCHES):
-            shuffled = random.sample(player_ids, k=10)
-            team1 = shuffled[:5]
-            team2 = shuffled[5:]
-            winning_team = random.choice([1, 2])
-
-            match_id = match_repo.record_match(
-                team1_ids=team1,
-                team2_ids=team2,
-                winning_team=winning_team,
-                lobby_type="shuffle",
-            )
-
-            # Enrich each participant
-            for team_ids in [team1, team2]:
-                for pid in team_ids:
-                    idx = player_ids.index(pid)
-                    pool = player_hero_pools[idx]
-                    # 70% chance pick from preferred pool, 30% any hero
-                    if random.random() < 0.7:
-                        hero_id = random.choice(pool)
-                    else:
-                        hero_id = random.choice(HERO_POOL)
-
-                    match_repo.update_participant_stats(
-                        match_id=match_id,
+        def _seed_data():
+            # 1. Create fake players
+            player_ids = []
+            for i in range(NUM_PLAYERS):
+                pid = BASE_ID - i  # -1001, -1002, ...
+                player_ids.append(pid)
+                existing = self.player_repo.get_by_id(pid, seed_guild_id)
+                if not existing:
+                    self.player_repo.add(
                         discord_id=pid,
-                        hero_id=hero_id,
-                        kills=random.randint(0, 25),
-                        deaths=random.randint(0, 15),
-                        assists=random.randint(0, 30),
-                        gpm=random.randint(200, 800),
-                        xpm=random.randint(200, 700),
-                        hero_damage=random.randint(5000, 50000),
-                        tower_damage=random.randint(500, 15000),
-                        last_hits=random.randint(20, 400),
-                        denies=random.randint(0, 40),
-                        net_worth=random.randint(5000, 40000),
+                        discord_username=f"GridTest{i + 1}",
+                        guild_id=seed_guild_id,
+                        glicko_rating=random.randint(1000, 2000),
+                        glicko_rd=random.uniform(50, 200),
+                        glicko_volatility=0.06,
+                        preferred_roles=random.sample(
+                            ["1", "2", "3", "4", "5"], k=random.randint(1, 3)
+                        ),
                     )
 
-            matches_created += 1
+            # 2. Record matches with enrichment
+            matches_created = 0
+            for _ in range(NUM_MATCHES):
+                shuffled = random.sample(player_ids, k=10)
+                team1 = shuffled[:5]
+                team2 = shuffled[5:]
+                winning_team = random.choice([1, 2])
+
+                mid = match_repo.record_match(
+                    team1_ids=team1,
+                    team2_ids=team2,
+                    winning_team=winning_team,
+                    lobby_type="shuffle",
+                )
+
+                # Enrich each participant
+                for team_ids in [team1, team2]:
+                    for pid in team_ids:
+                        idx = player_ids.index(pid)
+                        pool = player_hero_pools[idx]
+                        # 70% chance pick from preferred pool, 30% any hero
+                        if random.random() < 0.7:
+                            hero_id = random.choice(pool)
+                        else:
+                            hero_id = random.choice(HERO_POOL)
+
+                        match_repo.update_participant_stats(
+                            match_id=mid,
+                            discord_id=pid,
+                            hero_id=hero_id,
+                            kills=random.randint(0, 25),
+                            deaths=random.randint(0, 15),
+                            assists=random.randint(0, 30),
+                            gpm=random.randint(200, 800),
+                            xpm=random.randint(200, 700),
+                            hero_damage=random.randint(5000, 50000),
+                            tower_damage=random.randint(500, 15000),
+                            last_hits=random.randint(20, 400),
+                            denies=random.randint(0, 40),
+                            net_worth=random.randint(5000, 40000),
+                        )
+
+                matches_created += 1
+
+            return matches_created
+
+        matches_created = await asyncio.to_thread(_seed_data)
 
         await interaction.followup.send(
             f"✅ Seeded {NUM_PLAYERS} players and {matches_created} enriched matches.\n"

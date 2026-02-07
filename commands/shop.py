@@ -4,6 +4,8 @@ Shop commands for spending jopacoin.
 
 from __future__ import annotations
 
+import asyncio
+import functools
 import logging
 import random
 import time
@@ -209,7 +211,7 @@ class ShopCommands(commands.Cog):
         cost = SHOP_ANNOUNCE_TARGET_COST if target else SHOP_ANNOUNCE_COST
 
         # Check if registered
-        player = self.player_service.get_player(user_id, guild_id)
+        player = await asyncio.to_thread(self.player_service.get_player, user_id, guild_id)
         if not player:
             await interaction.response.send_message(
                 "You need to `/register` before you can shop. "
@@ -219,7 +221,7 @@ class ShopCommands(commands.Cog):
             return
 
         # Check balance
-        balance = self.player_service.get_balance(user_id, guild_id)
+        balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
         if balance < cost:
             await interaction.response.send_message(
                 f"You need {cost} {JOPACOIN_EMOTE} for this, but you only have {balance}. "
@@ -233,12 +235,12 @@ class ShopCommands(commands.Cog):
             return
 
         # Deduct cost
-        self.player_service.player_repo.add_balance(user_id, guild_id, -cost)
+        await asyncio.to_thread(self.player_service.player_repo.add_balance, user_id, guild_id, -cost)
         new_balance = balance - cost
 
         # Build stats comparison for targeted flex
-        buyer_stats = self._get_flex_stats(user_id, guild_id)
-        target_stats = self._get_flex_stats(target.id, guild_id) if target else None
+        buyer_stats = await self._get_flex_stats(user_id, guild_id)
+        target_stats = (await self._get_flex_stats(target.id, guild_id)) if target else None
 
         # Generate AI flavor text
         ai_flavor = None
@@ -282,10 +284,11 @@ class ShopCommands(commands.Cog):
         else:
             await safe_followup(interaction, embed=embed)
 
-    def _get_flex_stats(self, discord_id: int, guild_id: int | None = None) -> dict:
+    async def _get_flex_stats(self, discord_id: int, guild_id: int | None = None) -> dict:
         """Get stats for flex comparison."""
+        balance = await asyncio.to_thread(self.player_service.get_balance, discord_id, guild_id)
         stats = {
-            "balance": self.player_service.get_balance(discord_id, guild_id),
+            "balance": balance,
             "wins": 0,
             "losses": 0,
             "win_rate": None,
@@ -296,7 +299,7 @@ class ShopCommands(commands.Cog):
             "bankruptcies": 0,
         }
 
-        player = self.player_service.get_player(discord_id, guild_id)
+        player = await asyncio.to_thread(self.player_service.get_player, discord_id, guild_id)
         if player:
             stats["wins"] = player.wins or 0
             stats["losses"] = player.losses or 0
@@ -307,13 +310,16 @@ class ShopCommands(commands.Cog):
 
         if self.gambling_stats_service:
             try:
-                gamba_stats = self.gambling_stats_service.get_player_stats(discord_id, guild_id)
+                gamba_stats = await asyncio.to_thread(
+                    self.gambling_stats_service.get_player_stats, discord_id, guild_id
+                )
                 if gamba_stats:
                     stats["total_bets"] = gamba_stats.total_bets
                     stats["net_pnl"] = gamba_stats.net_pnl
                     stats["degen_score"] = gamba_stats.degen_score.total if gamba_stats.degen_score else None
-                stats["bankruptcies"] = self.gambling_stats_service.bet_repo.get_player_bankruptcy_count(
-                    discord_id, guild_id
+                stats["bankruptcies"] = await asyncio.to_thread(
+                    self.gambling_stats_service.bet_repo.get_player_bankruptcy_count,
+                    discord_id, guild_id,
                 )
             except Exception:
                 pass
@@ -470,7 +476,7 @@ class ShopCommands(commands.Cog):
         cost = SHOP_PROTECT_HERO_COST
 
         # Check if registered
-        player = self.player_service.get_player(user_id, guild_id)
+        player = await asyncio.to_thread(self.player_service.get_player, user_id, guild_id)
         if not player:
             await interaction.response.send_message(
                 "You need to `/register` before you can shop.",
@@ -487,7 +493,7 @@ class ShopCommands(commands.Cog):
             return
 
         # Check if there's an active shuffle
-        pending_state = self.match_service.get_last_shuffle(guild_id)
+        pending_state = await asyncio.to_thread(self.match_service.get_last_shuffle, guild_id)
         if not pending_state:
             await interaction.response.send_message(
                 "There's no active shuffle. You can only protect a hero during an active game.",
@@ -508,7 +514,7 @@ class ShopCommands(commands.Cog):
             return
 
         # Check balance
-        balance = self.player_service.get_balance(user_id, guild_id)
+        balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
         if balance < cost:
             await interaction.response.send_message(
                 f"You need {cost} {JOPACOIN_EMOTE} for this, but you only have {balance}.",
@@ -521,7 +527,7 @@ class ShopCommands(commands.Cog):
             return
 
         # Deduct cost
-        self.player_service.player_repo.add_balance(user_id, guild_id, -cost)
+        await asyncio.to_thread(self.player_service.player_repo.add_balance, user_id, guild_id, -cost)
 
         # Get hero info
         hero_id = int(hero)
@@ -592,7 +598,7 @@ class ShopCommands(commands.Cog):
         cost = SHOP_MYSTERY_GIFT_COST
 
         # Check if registered
-        player = self.player_service.get_player(user_id, guild_id)
+        player = await asyncio.to_thread(self.player_service.get_player, user_id, guild_id)
         if not player:
             await interaction.response.send_message(
                 "You need to `/register` before you can shop.",
@@ -601,7 +607,7 @@ class ShopCommands(commands.Cog):
             return
 
         # Check balance
-        balance = self.player_service.get_balance(user_id, guild_id)
+        balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
         if balance < cost:
             await interaction.response.send_message(
                 f"You need {cost} {JOPACOIN_EMOTE} for this, but you only have {balance}.",
@@ -610,7 +616,7 @@ class ShopCommands(commands.Cog):
             return
 
         # Deduct cost
-        self.player_service.player_repo.add_balance(user_id, guild_id, -cost)
+        await asyncio.to_thread(self.player_service.player_repo.add_balance, user_id, guild_id, -cost)
 
         # Build the announcement embed
         embed = discord.Embed(
@@ -633,7 +639,7 @@ class ShopCommands(commands.Cog):
         cost = SHOP_DOUBLE_OR_NOTHING_COST
 
         # Check if registered
-        player = self.player_service.get_player(user_id, guild_id)
+        player = await asyncio.to_thread(self.player_service.get_player, user_id, guild_id)
         if not player:
             await interaction.response.send_message(
                 "You need to `/register` before you can gamble. "
@@ -644,7 +650,9 @@ class ShopCommands(commands.Cog):
 
         # Check cooldown (admins bypass)
         is_admin = has_admin_permission(interaction)
-        last_spin = self.player_service.player_repo.get_last_double_or_nothing(user_id, guild_id)
+        last_spin = await asyncio.to_thread(
+            self.player_service.player_repo.get_last_double_or_nothing, user_id, guild_id
+        )
         now = int(time.time())
         if last_spin is not None and not is_admin:
             elapsed = now - last_spin
@@ -679,7 +687,6 @@ class ShopCommands(commands.Cog):
                             elif neon_result.footer_text:
                                 msg = await interaction.channel.send(neon_result.footer_text)
                             if msg:
-                                import asyncio
                                 async def _del(m, d):
                                     try:
                                         await asyncio.sleep(d)
@@ -692,7 +699,7 @@ class ShopCommands(commands.Cog):
                 return
 
         # Check balance
-        balance = self.player_service.get_balance(user_id, guild_id)
+        balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
 
         if balance < 0:
             await interaction.response.send_message(
@@ -715,7 +722,7 @@ class ShopCommands(commands.Cog):
             return
 
         # Deduct cost first
-        self.player_service.player_repo.add_balance(user_id, guild_id, -cost)
+        await asyncio.to_thread(self.player_service.player_repo.add_balance, user_id, guild_id, -cost)
         balance_after_cost = balance - cost
 
         # 50/50 flip
@@ -736,14 +743,14 @@ class ShopCommands(commands.Cog):
         elif won:
             # WIN: Double the remaining balance
             winnings = balance_after_cost
-            self.player_service.player_repo.add_balance(user_id, guild_id, winnings)
+            await asyncio.to_thread(self.player_service.player_repo.add_balance, user_id, guild_id, winnings)
             final_balance = balance_after_cost * 2
             result_title = "DOUBLE!"
             result_color = 0x00FF00  # Green
             flavor_event = FlavorEvent.DOUBLE_OR_NOTHING_WIN
         else:
             # LOSE: Zero out the balance
-            self.player_service.player_repo.update_balance(user_id, guild_id, 0)
+            await asyncio.to_thread(self.player_service.player_repo.update_balance, user_id, guild_id, 0)
             final_balance = 0
             result_title = "NOTHING!"
             result_color = 0xFF0000  # Red
@@ -779,14 +786,17 @@ class ShopCommands(commands.Cog):
                 result_message = "The coin has decided your fate."
 
         # Log the result
-        self.player_service.player_repo.log_double_or_nothing(
-            discord_id=user_id,
-            guild_id=guild_id,
-            cost=cost,
-            balance_before=balance_after_cost,
-            balance_after=final_balance,
-            won=won,
-            spin_time=now,
+        await asyncio.to_thread(
+            functools.partial(
+                self.player_service.player_repo.log_double_or_nothing,
+                discord_id=user_id,
+                guild_id=guild_id,
+                cost=cost,
+                balance_before=balance_after_cost,
+                balance_after=final_balance,
+                won=won,
+                spin_time=now,
+            )
         )
 
         # Build result embed
@@ -839,7 +849,7 @@ class ShopCommands(commands.Cog):
             return
 
         # Check if registered
-        player = self.player_service.get_player(user_id, guild_id)
+        player = await asyncio.to_thread(self.player_service.get_player, user_id, guild_id)
         if not player:
             await interaction.response.send_message(
                 "You need to `/register` before you can shop.",
@@ -848,7 +858,7 @@ class ShopCommands(commands.Cog):
             return
 
         # Check if target is registered
-        target_player = self.player_service.get_player(target.id, guild_id)
+        target_player = await asyncio.to_thread(self.player_service.get_player, target.id, guild_id)
         if not target_player:
             await interaction.response.send_message(
                 "The target player is not registered.",
@@ -866,7 +876,7 @@ class ShopCommands(commands.Cog):
             return
 
         # Check balance
-        balance = self.player_service.get_balance(user_id, guild_id)
+        balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
         if balance < cost:
             await interaction.response.send_message(
                 f"You need {cost} {JOPACOIN_EMOTE} for this, but you only have {balance}.",
@@ -875,14 +885,17 @@ class ShopCommands(commands.Cog):
             return
 
         # Deduct cost
-        self.player_service.player_repo.add_balance(user_id, guild_id, -cost)
+        await asyncio.to_thread(self.player_service.player_repo.add_balance, user_id, guild_id, -cost)
 
         # Create or extend avoid
-        avoid = soft_avoid_repo.create_or_extend_avoid(
-            guild_id=guild_id,
-            avoider_id=user_id,
-            avoided_id=target.id,
-            games=SOFT_AVOID_GAMES_DURATION,
+        avoid = await asyncio.to_thread(
+            functools.partial(
+                soft_avoid_repo.create_or_extend_avoid,
+                guild_id=guild_id,
+                avoider_id=user_id,
+                avoided_id=target.id,
+                games=SOFT_AVOID_GAMES_DURATION,
+            )
         )
 
         # Build confirmation embed (ephemeral)
@@ -920,7 +933,6 @@ class ShopCommands(commands.Cog):
                     elif neon_result.footer_text:
                         msg = await interaction.channel.send(neon_result.footer_text)
                     if msg:
-                        import asyncio
                         async def _del_neon(m, d):
                             try:
                                 await asyncio.sleep(d)
@@ -947,7 +959,7 @@ class ShopCommands(commands.Cog):
             return
 
         # Get user's avoids
-        avoids = soft_avoid_repo.get_user_avoids(guild_id, user_id)
+        avoids = await asyncio.to_thread(soft_avoid_repo.get_user_avoids, guild_id, user_id)
 
         if not avoids:
             await interaction.response.send_message(
@@ -995,7 +1007,6 @@ class ShopCommands(commands.Cog):
                     elif neon_result.footer_text:
                         msg = await interaction.channel.send(neon_result.footer_text)
                     if msg:
-                        import asyncio
                         async def _del_neon(m, d):
                             try:
                                 await asyncio.sleep(d)

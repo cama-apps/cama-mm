@@ -2,6 +2,7 @@
 Pairwise statistics commands: /matchup, /rebuildpairings
 """
 
+import asyncio
 import logging
 
 import discord
@@ -64,8 +65,8 @@ class AdvancedStatsCommands(commands.Cog):
 
         # Verify both players are registered
         guild_id = interaction.guild.id if interaction.guild else None
-        p1 = self.player_repo.get_by_id(player1.id, guild_id)
-        p2 = self.player_repo.get_by_id(player2.id, guild_id)
+        p1 = await asyncio.to_thread(self.player_repo.get_by_id, player1.id, guild_id)
+        p2 = await asyncio.to_thread(self.player_repo.get_by_id, player2.id, guild_id)
 
         if not p1:
             await safe_followup(
@@ -82,7 +83,7 @@ class AdvancedStatsCommands(commands.Cog):
             )
             return
 
-        h2h = self.pairings_repo.get_head_to_head(player1.id, player2.id)
+        h2h = await asyncio.to_thread(self.pairings_repo.get_head_to_head, player1.id, player2.id)
 
         embed = discord.Embed(
             title=f"{player1.display_name} vs {player2.display_name}",
@@ -162,7 +163,7 @@ class AdvancedStatsCommands(commands.Cog):
             return
 
         try:
-            count = self.pairings_repo.rebuild_all_pairings()
+            count = await asyncio.to_thread(self.pairings_repo.rebuild_all_pairings)
             await safe_followup(
                 interaction,
                 content=f"Rebuilt pairwise statistics. {count} pairings calculated from match history.",

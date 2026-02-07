@@ -2,6 +2,8 @@
 Discord commands for prediction markets.
 """
 
+import asyncio
+import functools
 import logging
 import re
 import time
@@ -99,15 +101,20 @@ class PredictionBetModal(discord.ui.Modal):
             return
 
         try:
-            result = self.prediction_service.place_bet(
-                prediction_id=self.prediction_id,
-                discord_id=interaction.user.id,
-                position=self.position,
-                amount=amount,
+            result = await asyncio.to_thread(
+                functools.partial(
+                    self.prediction_service.place_bet,
+                    prediction_id=self.prediction_id,
+                    discord_id=interaction.user.id,
+                    position=self.position,
+                    amount=amount,
+                )
             )
 
             # Get prediction for thread posting
-            pred = self.prediction_service.get_prediction(self.prediction_id)
+            pred = await asyncio.to_thread(
+                self.prediction_service.get_prediction, self.prediction_id
+            )
             new_odds = result["odds"][self.position]
 
             # Acknowledge the modal (no visible response)
@@ -201,7 +208,9 @@ class PersistentPredictionView(discord.ui.View):
             )
             return
 
-        pred = self.cog.prediction_service.get_prediction(prediction_id)
+        pred = await asyncio.to_thread(
+            self.cog.prediction_service.get_prediction, prediction_id
+        )
         if not pred:
             await interaction.response.send_message(
                 "Prediction not found.", ephemeral=True
@@ -223,7 +232,9 @@ class PersistentPredictionView(discord.ui.View):
             return
 
         guild_id = interaction.guild.id if interaction.guild else None
-        player = self.cog.player_service.get_player(interaction.user.id, guild_id)
+        player = await asyncio.to_thread(
+            self.cog.player_service.get_player, interaction.user.id, guild_id
+        )
         if not player:
             await interaction.response.send_message(
                 "You must be registered to bet. Use `/register` first.",
@@ -239,7 +250,9 @@ class PersistentPredictionView(discord.ui.View):
             )
             return
 
-        odds_info = self.cog.prediction_service.get_odds(prediction_id)
+        odds_info = await asyncio.to_thread(
+            self.cog.prediction_service.get_odds, prediction_id
+        )
         current_odds = odds_info["odds"].get(position, 0)
 
         modal = PredictionBetModal(
@@ -262,8 +275,9 @@ class PersistentPredictionView(discord.ui.View):
             )
             return
 
-        position = self.cog.prediction_service.get_user_position(
-            prediction_id, interaction.user.id
+        position = await asyncio.to_thread(
+            self.cog.prediction_service.get_user_position,
+            prediction_id, interaction.user.id,
         )
 
         if not position:
@@ -272,7 +286,9 @@ class PersistentPredictionView(discord.ui.View):
             )
             return
 
-        pred = self.cog.prediction_service.get_prediction(prediction_id)
+        pred = await asyncio.to_thread(
+            self.cog.prediction_service.get_prediction, prediction_id
+        )
         odds = pred.get("odds", {}) if pred else {}
         current_odds = odds.get(position["position"], 0)
         potential_win = int(position["total_amount"] * current_odds)
@@ -300,7 +316,7 @@ class PredictionCommands(commands.Cog):
         self.prediction_service = prediction_service
         self.player_service = player_service
 
-    def _create_prediction_embed(self, pred: dict) -> discord.Embed:
+    async def _create_prediction_embed(self, pred: dict) -> discord.Embed:
         """Create the embed for a prediction."""
         status_emoji = {
             "open": "🔮",
@@ -383,7 +399,9 @@ class PredictionCommands(commands.Cog):
 
         # Resolution votes if applicable
         if pred["status"] == "locked":
-            votes = self.prediction_service.get_resolution_votes(pred["prediction_id"])
+            votes = await asyncio.to_thread(
+                self.prediction_service.get_resolution_votes, pred["prediction_id"]
+            )
             yes_votes = votes.get("yes", 0)
             no_votes = votes.get("no", 0)
             needed = self.prediction_service.MIN_RESOLUTION_VOTES
@@ -441,11 +459,13 @@ class PredictionCommands(commands.Cog):
 
             message = await thread.fetch_message(message_id)
 
-            pred = self.prediction_service.get_prediction(prediction_id)
+            pred = await asyncio.to_thread(
+                self.prediction_service.get_prediction, prediction_id
+            )
             if not pred:
                 return
 
-            embed = self._create_prediction_embed(pred)
+            embed = await self._create_prediction_embed(pred)
             await message.edit(embed=embed)
         except Exception as e:
             logger.warning(f"Failed to update prediction embed: {e}")
@@ -464,7 +484,9 @@ class PredictionCommands(commands.Cog):
         guild_id = interaction.guild.id if interaction.guild else None
 
         # Check if user is registered
-        player = self.player_service.get_player(interaction.user.id, guild_id)
+        player = await asyncio.to_thread(
+            self.player_service.get_player, interaction.user.id, guild_id
+        )
         if not player:
             await safe_followup(
                 interaction,
@@ -479,12 +501,15 @@ class PredictionCommands(commands.Cog):
             return
 
         try:
-            result = self.prediction_service.create_prediction(
-                guild_id=guild_id,
-                creator_id=interaction.user.id,
-                question=question,
-                closes_at=closes_at,
-                channel_id=interaction.channel_id,
+            result = await asyncio.to_thread(
+                functools.partial(
+                    self.prediction_service.create_prediction,
+                    guild_id=guild_id,
+                    creator_id=interaction.user.id,
+                    question=question,
+                    closes_at=closes_at,
+                    channel_id=interaction.channel_id,
+                )
             )
         except ValueError as e:
             await safe_followup(interaction, content=f"❌ {e}")
@@ -512,10 +537,12 @@ class PredictionCommands(commands.Cog):
             thread = await channel_msg.create_thread(name=thread_name)
 
             # Get prediction with odds
-            pred = self.prediction_service.get_prediction(prediction_id)
+            pred = await asyncio.to_thread(
+                self.prediction_service.get_prediction, prediction_id
+            )
 
             # Create and send embed in thread
-            embed = self._create_prediction_embed(pred)
+            embed = await self._create_prediction_embed(pred)
             view = self._create_prediction_view()
 
             embed_msg = await thread.send(embed=embed, view=view)
@@ -527,11 +554,14 @@ class PredictionCommands(commands.Cog):
                 pass
 
             # Update prediction with Discord IDs
-            self.prediction_service.update_discord_ids(
-                prediction_id=prediction_id,
-                thread_id=thread.id,
-                embed_message_id=embed_msg.id,
-                channel_message_id=channel_msg.id,
+            await asyncio.to_thread(
+                functools.partial(
+                    self.prediction_service.update_discord_ids,
+                    prediction_id=prediction_id,
+                    thread_id=thread.id,
+                    embed_message_id=embed_msg.id,
+                    channel_message_id=channel_msg.id,
+                )
             )
 
         except discord.Forbidden:
@@ -567,25 +597,33 @@ class PredictionCommands(commands.Cog):
         is_admin = has_admin_permission(interaction)
 
         try:
-            vote_result = self.prediction_service.add_resolution_vote(
-                prediction_id=prediction_id,
-                user_id=interaction.user.id,
-                outcome=outcome.value,
-                is_admin=is_admin,
+            vote_result = await asyncio.to_thread(
+                functools.partial(
+                    self.prediction_service.add_resolution_vote,
+                    prediction_id=prediction_id,
+                    user_id=interaction.user.id,
+                    outcome=outcome.value,
+                    is_admin=is_admin,
+                )
             )
         except ValueError as e:
             await safe_followup(interaction, content=f"❌ {e}")
             return
 
-        pred = self.prediction_service.get_prediction(prediction_id)
+        pred = await asyncio.to_thread(
+            self.prediction_service.get_prediction, prediction_id
+        )
 
         if vote_result["can_resolve"]:
             # Resolve the prediction
             try:
-                settlement = self.prediction_service.resolve(
-                    prediction_id=prediction_id,
-                    outcome=outcome.value,
-                    resolved_by=interaction.user.id,
+                settlement = await asyncio.to_thread(
+                    functools.partial(
+                        self.prediction_service.resolve,
+                        prediction_id=prediction_id,
+                        outcome=outcome.value,
+                        resolved_by=interaction.user.id,
+                    )
                 )
 
                 # Build resolution message
@@ -633,7 +671,6 @@ class PredictionCommands(commands.Cog):
                             loser_count=len(losers),
                         )
                         if neon_result:
-                            import asyncio
                             msg = None
                             if neon_result.gif_file:
                                 import discord as _discord
@@ -741,9 +778,12 @@ class PredictionCommands(commands.Cog):
             return
 
         try:
-            result = self.prediction_service.cancel_by_admin(
-                prediction_id=prediction_id,
-                admin_id=interaction.user.id,
+            result = await asyncio.to_thread(
+                functools.partial(
+                    self.prediction_service.cancel_by_admin,
+                    prediction_id=prediction_id,
+                    admin_id=interaction.user.id,
+                )
             )
         except ValueError as e:
             await safe_followup(interaction, content=f"❌ {e}")
@@ -759,7 +799,9 @@ class PredictionCommands(commands.Cog):
         )
 
         # Post to thread, lock, and archive
-        pred = self.prediction_service.get_prediction(prediction_id)
+        pred = await asyncio.to_thread(
+            self.prediction_service.get_prediction, prediction_id
+        )
         if pred and pred.get("thread_id"):
             try:
                 thread = self.bot.get_channel(pred["thread_id"])
@@ -803,7 +845,9 @@ class PredictionCommands(commands.Cog):
             return
 
         try:
-            result = self.prediction_service.close_betting_early(prediction_id)
+            result = await asyncio.to_thread(
+                self.prediction_service.close_betting_early, prediction_id
+            )
         except ValueError as e:
             await safe_followup(interaction, content=f"❌ {e}")
             return
@@ -817,7 +861,9 @@ class PredictionCommands(commands.Cog):
         )
 
         # Post to thread and update thread name
-        pred = self.prediction_service.get_prediction(prediction_id)
+        pred = await asyncio.to_thread(
+            self.prediction_service.get_prediction, prediction_id
+        )
         if pred and pred.get("thread_id"):
             try:
                 thread = self.bot.get_channel(pred["thread_id"])
@@ -828,9 +874,12 @@ class PredictionCommands(commands.Cog):
                         f"`/predictionresolve {prediction_id} YES` or `/predictionresolve {prediction_id} NO`"
                     )
                     # Save the close message ID so we can edit it when resolved
-                    self.prediction_service.update_discord_ids(
-                        prediction_id=prediction_id,
-                        close_message_id=close_msg.id,
+                    await asyncio.to_thread(
+                        functools.partial(
+                            self.prediction_service.update_discord_ids,
+                            prediction_id=prediction_id,
+                            close_message_id=close_msg.id,
+                        )
                     )
                     # Update thread name to show it's closed
                     question = pred.get("question", "")[:40]
@@ -876,26 +925,31 @@ class PredictionCommands(commands.Cog):
         limit = max(1, min(limit, 25))  # Cap between 1 and 25
 
         # Always auto-lock expired predictions first
-        self.prediction_service.check_and_lock_expired(guild_id)
+        await asyncio.to_thread(
+            self.prediction_service.check_and_lock_expired, guild_id
+        )
 
         if show_all:
             # Get all predictions
             all_preds = []
             for s in ["open", "locked", "resolved", "cancelled"]:
-                all_preds.extend(
-                    self.prediction_service.prediction_repo.get_predictions_by_status(
-                        guild_id, s
-                    )
+                status_preds = await asyncio.to_thread(
+                    self.prediction_service.prediction_repo.get_predictions_by_status,
+                    guild_id, s,
                 )
+                all_preds.extend(status_preds)
             preds = sorted(all_preds, key=lambda p: p.get("created_at", 0), reverse=True)
         else:
             # Active only (open + locked)
-            preds = self.prediction_service.get_active_predictions(guild_id)
+            preds = await asyncio.to_thread(
+                self.prediction_service.get_active_predictions, guild_id
+            )
 
         # Enrich with odds info
         for pred in preds:
-            totals = self.prediction_service.prediction_repo.get_prediction_totals(
-                pred["prediction_id"]
+            totals = await asyncio.to_thread(
+                self.prediction_service.prediction_repo.get_prediction_totals,
+                pred["prediction_id"],
             )
             pred.update(totals)
             pred["odds"] = self.prediction_service.calculate_odds(
@@ -925,8 +979,9 @@ class PredictionCommands(commands.Cog):
                 outcome_emoji = "✅" if outcome == "yes" else "❌"
 
                 # Get resolution summary
-                summary = self.prediction_service.prediction_repo.get_resolution_summary(
-                    pred["prediction_id"]
+                summary = await asyncio.to_thread(
+                    self.prediction_service.prediction_repo.get_resolution_summary,
+                    pred["prediction_id"],
                 )
                 winners = summary["winners"]
                 losers = summary["losers"]
@@ -1019,8 +1074,9 @@ class PredictionCommands(commands.Cog):
 
         if history:
             guild_id = interaction.guild_id
-            positions = self.prediction_service.get_user_resolved_positions(
-                interaction.user.id, guild_id
+            positions = await asyncio.to_thread(
+                self.prediction_service.get_user_resolved_positions,
+                interaction.user.id, guild_id,
             )
 
             if not positions:
@@ -1069,8 +1125,9 @@ class PredictionCommands(commands.Cog):
             await safe_followup(interaction, embed=embed)
         else:
             guild_id = interaction.guild_id
-            positions = self.prediction_service.get_user_active_positions(
-                interaction.user.id, guild_id
+            positions = await asyncio.to_thread(
+                self.prediction_service.get_user_active_positions,
+                interaction.user.id, guild_id,
             )
 
             if not positions:
@@ -1090,7 +1147,9 @@ class PredictionCommands(commands.Cog):
                 status_emoji = {"open": "🟢", "locked": "🔒"}.get(pos["status"], "❓")
 
                 # Get current odds for this prediction
-                odds_info = self.prediction_service.get_odds(pos["prediction_id"])
+                odds_info = await asyncio.to_thread(
+                    self.prediction_service.get_odds, pos["prediction_id"]
+                )
                 current_odds = odds_info["odds"].get(pos["position"], 0)
                 pool = odds_info["total_pool"]
                 yes_total = odds_info["yes_total"]
