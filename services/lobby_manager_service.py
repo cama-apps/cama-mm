@@ -7,6 +7,7 @@ domain models should not depend on infrastructure (repositories).
 
 import asyncio
 import logging
+import threading
 from datetime import datetime
 
 from domain.models.lobby import Lobby
@@ -34,6 +35,7 @@ class LobbyManagerService:
         self.origin_channel_id: int | None = None  # Channel where /lobby was originally run
         self.lobby: Lobby | None = None
         self._creation_lock = asyncio.Lock()
+        self._state_lock = threading.RLock()  # Protects all in-memory state mutations
         # Readycheck state (in-memory only, cleared on lobby reset)
         self.readycheck_message_id: int | None = None
         self.readycheck_channel_id: int | None = None
@@ -48,55 +50,60 @@ class LobbyManagerService:
         return self._creation_lock
 
     def get_or_create_lobby(self, creator_id: int | None = None) -> Lobby:
-        if self.lobby is None or self.lobby.status != "open":
-            self.lobby = Lobby(
-                lobby_id=self.DEFAULT_LOBBY_ID,
-                created_by=creator_id or 0,
-                created_at=datetime.now(),
-            )
-            self._persist_lobby()
-        return self.lobby
+        with self._state_lock:
+            if self.lobby is None or self.lobby.status != "open":
+                self.lobby = Lobby(
+                    lobby_id=self.DEFAULT_LOBBY_ID,
+                    created_by=creator_id or 0,
+                    created_at=datetime.now(),
+                )
+                self._persist_lobby()
+            return self.lobby
 
     def get_lobby(self) -> Lobby | None:
         return self.lobby if self.lobby and self.lobby.status == "open" else None
 
     def join_lobby(self, discord_id: int, max_players: int = 12) -> bool:
-        lobby = self.get_or_create_lobby()
-        # Check total count (regular + conditional) against max
-        if lobby.get_total_count() >= max_players:
-            return False
-        success = lobby.add_player(discord_id)
-        if success:
-            self._persist_lobby()
-        return success
+        with self._state_lock:
+            lobby = self.get_or_create_lobby()
+            # Check total count (regular + conditional) against max
+            if lobby.get_total_count() >= max_players:
+                return False
+            success = lobby.add_player(discord_id)
+            if success:
+                self._persist_lobby()
+            return success
 
     def join_lobby_conditional(self, discord_id: int, max_players: int = 12) -> bool:
         """Add player to conditional queue (frogling)."""
-        lobby = self.get_or_create_lobby()
-        # Check total count (regular + conditional) against max
-        if lobby.get_total_count() >= max_players:
-            return False
-        success = lobby.add_conditional_player(discord_id)
-        if success:
-            self._persist_lobby()
-        return success
+        with self._state_lock:
+            lobby = self.get_or_create_lobby()
+            # Check total count (regular + conditional) against max
+            if lobby.get_total_count() >= max_players:
+                return False
+            success = lobby.add_conditional_player(discord_id)
+            if success:
+                self._persist_lobby()
+            return success
 
     def leave_lobby(self, discord_id: int) -> bool:
-        if not self.lobby:
-            return False
-        success = self.lobby.remove_player(discord_id)
-        if success:
-            self._persist_lobby()
-        return success
+        with self._state_lock:
+            if not self.lobby:
+                return False
+            success = self.lobby.remove_player(discord_id)
+            if success:
+                self._persist_lobby()
+            return success
 
     def leave_lobby_conditional(self, discord_id: int) -> bool:
         """Remove player from conditional queue."""
-        if not self.lobby:
-            return False
-        success = self.lobby.remove_conditional_player(discord_id)
-        if success:
-            self._persist_lobby()
-        return success
+        with self._state_lock:
+            if not self.lobby:
+                return False
+            success = self.lobby.remove_conditional_player(discord_id)
+            if success:
+                self._persist_lobby()
+            return success
 
     def set_lobby_message(
         self,
@@ -107,35 +114,37 @@ class LobbyManagerService:
         origin_channel_id: int | None = None,
     ) -> None:
         """Set the lobby message, channel, and thread IDs, persisting to database."""
-        self.lobby_message_id = message_id
-        self.lobby_channel_id = channel_id
-        if thread_id is not None:
-            self.lobby_thread_id = thread_id
-        if embed_message_id is not None:
-            self.lobby_embed_message_id = embed_message_id
-        if origin_channel_id is not None:
-            self.origin_channel_id = origin_channel_id
-        if self.lobby:
-            self._persist_lobby()
+        with self._state_lock:
+            self.lobby_message_id = message_id
+            self.lobby_channel_id = channel_id
+            if thread_id is not None:
+                self.lobby_thread_id = thread_id
+            if embed_message_id is not None:
+                self.lobby_embed_message_id = embed_message_id
+            if origin_channel_id is not None:
+                self.origin_channel_id = origin_channel_id
+            if self.lobby:
+                self._persist_lobby()
 
     def reset_lobby(self) -> None:
-        logger = logging.getLogger("cama_bot.services.lobby_manager")
-        logger.info(f"reset_lobby called. Current lobby: {self.lobby}")
-        if self.lobby:
-            self.lobby.status = "closed"
-        self.lobby = None
-        self.lobby_message_id = None
-        self.lobby_channel_id = None
-        self.lobby_thread_id = None
-        self.lobby_embed_message_id = None
-        self.origin_channel_id = None
-        self.readycheck_message_id = None
-        self.readycheck_channel_id = None
-        self.readycheck_lobby_ids = set()
-        self.readycheck_reacted = {}
-        self.readycheck_player_data = {}
-        self._clear_persistent_lobby()
-        logger.info("reset_lobby completed - cleared persistent lobby")
+        with self._state_lock:
+            logger = logging.getLogger("cama_bot.services.lobby_manager")
+            logger.info(f"reset_lobby called. Current lobby: {self.lobby}")
+            if self.lobby:
+                self.lobby.status = "closed"
+            self.lobby = None
+            self.lobby_message_id = None
+            self.lobby_channel_id = None
+            self.lobby_thread_id = None
+            self.lobby_embed_message_id = None
+            self.origin_channel_id = None
+            self.readycheck_message_id = None
+            self.readycheck_channel_id = None
+            self.readycheck_lobby_ids = set()
+            self.readycheck_reacted = {}
+            self.readycheck_player_data = {}
+            self._clear_persistent_lobby()
+            logger.info("reset_lobby completed - cleared persistent lobby")
 
     def _persist_lobby(self) -> None:
         if not self.lobby:

@@ -799,5 +799,91 @@ class TestExclusionPenaltyWeightDefault:
         )
 
 
+class TestJopacoinBalancing:
+    """Tests for jopacoin balance-based team balancing."""
+
+    def test_player_value_jopacoin(self):
+        """Player.get_value(use_jopacoin=True) returns jopacoin balance."""
+        player = Player(name="Rich", mmr=2000, glicko_rating=1800, jopacoin_balance=500)
+        assert player.get_value(use_jopacoin=True) == 500.0
+
+    def test_player_value_jopacoin_negative(self):
+        """Jopacoin value can be negative (players in debt)."""
+        player = Player(name="Broke", mmr=5000, glicko_rating=2500, jopacoin_balance=-200)
+        assert player.get_value(use_jopacoin=True) == -200.0
+
+    def test_player_value_jopacoin_zero(self):
+        """Jopacoin value is zero when balance is zero."""
+        player = Player(name="Zero", mmr=3000, jopacoin_balance=0)
+        assert player.get_value(use_jopacoin=True) == 0.0
+
+    def test_player_value_jopacoin_overrides_glicko(self):
+        """use_jopacoin takes priority over use_glicko."""
+        player = Player(name="P", glicko_rating=2000, jopacoin_balance=42)
+        assert player.get_value(use_glicko=True, use_jopacoin=True) == 42.0
+
+    def test_player_value_jopacoin_overrides_openskill(self):
+        """use_jopacoin takes priority over use_openskill."""
+        player = Player(name="P", os_mu=50.0, os_sigma=3.0, jopacoin_balance=7)
+        assert player.get_value(use_openskill=True, use_jopacoin=True) == 7.0
+
+    def test_team_value_jopacoin(self):
+        """Team value sums jopacoin balances when use_jopacoin=True."""
+        players = [
+            Player(name="P1", mmr=2000, preferred_roles=["1"], jopacoin_balance=100),
+            Player(name="P2", mmr=1800, preferred_roles=["2"], jopacoin_balance=200),
+            Player(name="P3", mmr=1600, preferred_roles=["3"], jopacoin_balance=50),
+            Player(name="P4", mmr=1400, preferred_roles=["4"], jopacoin_balance=75),
+            Player(name="P5", mmr=1200, preferred_roles=["5"], jopacoin_balance=25),
+        ]
+        team = Team(players, role_assignments=["1", "2", "3", "4", "5"])
+        value = team.get_team_value(use_jopacoin=True)
+        assert value == 450.0
+
+    def test_team_value_jopacoin_off_role_penalty(self):
+        """Off-role penalty still applies with jopacoin balancing."""
+        players = [
+            Player(name="P1", mmr=2000, preferred_roles=["1"], jopacoin_balance=100),
+            Player(name="P2", mmr=1800, preferred_roles=["2"], jopacoin_balance=200),
+            Player(name="P3", mmr=1600, preferred_roles=["3"], jopacoin_balance=50),
+            Player(name="P4", mmr=1400, preferred_roles=["4"], jopacoin_balance=75),
+            Player(name="P5", mmr=1200, preferred_roles=["5"], jopacoin_balance=25),
+        ]
+        # Swap P1 and P2 roles (both off-role)
+        team = Team(players, role_assignments=["2", "1", "3", "4", "5"])
+        value = team.get_team_value(use_jopacoin=True, off_role_multiplier=0.9)
+        # P1 off-role: 100*0.9=90, P2 off-role: 200*0.9=180, rest on-role: 50+75+25=150
+        assert value == pytest.approx(420.0)
+
+    def test_shuffler_jopacoin_balancing(self):
+        """BalancedShuffler produces balanced teams by jopacoin balance."""
+        players = [
+            Player(name=f"P{i}", mmr=1500, preferred_roles=[str((i % 5) + 1)],
+                   jopacoin_balance=(i + 1) * 100)
+            for i in range(10)
+        ]
+        shuffler = BalancedShuffler(use_jopacoin=True)
+        team1, team2 = shuffler.shuffle(players)
+
+        team1_value = team1.get_team_value(use_jopacoin=True)
+        team2_value = team2.get_team_value(use_jopacoin=True)
+        # Total pool is 100+200+...+1000 = 5500, each team should be close to 2750
+        assert abs(team1_value - team2_value) <= 500
+
+    def test_get_player_by_role_jopacoin(self):
+        """get_player_by_role returns jopacoin-based value when use_jopacoin=True."""
+        players = [
+            Player(name="P1", preferred_roles=["1"], jopacoin_balance=100),
+            Player(name="P2", preferred_roles=["2"], jopacoin_balance=200),
+            Player(name="P3", preferred_roles=["3"], jopacoin_balance=50),
+            Player(name="P4", preferred_roles=["4"], jopacoin_balance=75),
+            Player(name="P5", preferred_roles=["5"], jopacoin_balance=25),
+        ]
+        team = Team(players, role_assignments=["1", "2", "3", "4", "5"])
+        player, value = team.get_player_by_role("2", use_jopacoin=True)
+        assert player.name == "P2"
+        assert value == 200.0
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

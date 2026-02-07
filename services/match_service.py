@@ -64,6 +64,7 @@ class MatchService:
             role_matchup_delta_weight=self.shuffler.role_matchup_delta_weight,
         )
         self._last_shuffle_by_guild: dict[int, dict] = {}
+        self._shuffle_state_lock = threading.RLock()  # Protects _last_shuffle_by_guild
         self.betting_service = betting_service
         self.pairings_repo = pairings_repo
         self.loan_service = loan_service
@@ -84,18 +85,20 @@ class MatchService:
         return guild_id if guild_id is not None else 0
 
     def get_last_shuffle(self, guild_id: int | None = None) -> dict | None:
-        normalized = self._normalize_guild_id(guild_id)
-        state = self._last_shuffle_by_guild.get(normalized)
-        if state:
-            return state
-        persisted = self.match_repo.get_pending_match(guild_id)
-        if persisted:
-            self._last_shuffle_by_guild[normalized] = persisted
-            return persisted
-        return None
+        with self._shuffle_state_lock:
+            normalized = self._normalize_guild_id(guild_id)
+            state = self._last_shuffle_by_guild.get(normalized)
+            if state:
+                return state
+            persisted = self.match_repo.get_pending_match(guild_id)
+            if persisted:
+                self._last_shuffle_by_guild[normalized] = persisted
+                return persisted
+            return None
 
     def set_last_shuffle(self, guild_id: int | None, payload: dict) -> None:
-        self._last_shuffle_by_guild[self._normalize_guild_id(guild_id)] = payload
+        with self._shuffle_state_lock:
+            self._last_shuffle_by_guild[self._normalize_guild_id(guild_id)] = payload
 
     def set_shuffle_message_url(self, guild_id: int | None, jump_url: str) -> None:
         """
@@ -120,40 +123,43 @@ class MatchService:
         Also stores thread message info for updating betting display in thread.
         origin_channel_id is stored for betting reminders (since reset_lobby clears it).
         """
-        state = self.get_last_shuffle(guild_id)
-        if not state:
-            return
-        if message_id is not None:
-            state["shuffle_message_id"] = message_id
-        if channel_id is not None:
-            state["shuffle_channel_id"] = channel_id
-        if jump_url is not None:
-            state["shuffle_message_jump_url"] = jump_url
-        if thread_message_id is not None:
-            state["thread_shuffle_message_id"] = thread_message_id
-        if thread_id is not None:
-            state["thread_shuffle_thread_id"] = thread_id
-        if origin_channel_id is not None:
-            state["origin_channel_id"] = origin_channel_id
-        self._persist_match_state(guild_id, state)
+        with self._shuffle_state_lock:
+            state = self.get_last_shuffle(guild_id)
+            if not state:
+                return
+            if message_id is not None:
+                state["shuffle_message_id"] = message_id
+            if channel_id is not None:
+                state["shuffle_channel_id"] = channel_id
+            if jump_url is not None:
+                state["shuffle_message_jump_url"] = jump_url
+            if thread_message_id is not None:
+                state["thread_shuffle_message_id"] = thread_message_id
+            if thread_id is not None:
+                state["thread_shuffle_thread_id"] = thread_id
+            if origin_channel_id is not None:
+                state["origin_channel_id"] = origin_channel_id
+            self._persist_match_state(guild_id, state)
 
     def get_shuffle_message_info(self, guild_id: int | None) -> dict[str, int | None]:
         """
         Return message metadata for the pending shuffle, if present.
         """
-        state = self.get_last_shuffle(guild_id) or {}
-        return {
-            "message_id": state.get("shuffle_message_id"),
-            "channel_id": state.get("shuffle_channel_id"),
-            "jump_url": state.get("shuffle_message_jump_url"),
-            "thread_message_id": state.get("thread_shuffle_message_id"),
-            "thread_id": state.get("thread_shuffle_thread_id"),
-            "origin_channel_id": state.get("origin_channel_id"),
-        }
+        with self._shuffle_state_lock:
+            state = self.get_last_shuffle(guild_id) or {}
+            return {
+                "message_id": state.get("shuffle_message_id"),
+                "channel_id": state.get("shuffle_channel_id"),
+                "jump_url": state.get("shuffle_message_jump_url"),
+                "thread_message_id": state.get("thread_shuffle_message_id"),
+                "thread_id": state.get("thread_shuffle_thread_id"),
+                "origin_channel_id": state.get("origin_channel_id"),
+            }
 
     def clear_last_shuffle(self, guild_id: int | None) -> None:
-        self._last_shuffle_by_guild.pop(self._normalize_guild_id(guild_id), None)
-        self.match_repo.clear_pending_match(guild_id)
+        with self._shuffle_state_lock:
+            self._last_shuffle_by_guild.pop(self._normalize_guild_id(guild_id), None)
+            self.match_repo.clear_pending_match(guild_id)
 
     def _ensure_pending_state(self, guild_id: int | None) -> dict:
         state = self.get_last_shuffle(guild_id)
@@ -345,8 +351,8 @@ class MatchService:
         """
         if betting_mode not in ("house", "pool"):
             raise ValueError("betting_mode must be 'house' or 'pool'")
-        if rating_system not in ("glicko", "openskill"):
-            raise ValueError("rating_system must be 'glicko' or 'openskill'")
+        if rating_system not in ("glicko", "openskill", "jopacoin"):
+            raise ValueError("rating_system must be 'glicko', 'openskill', or 'jopacoin'")
         players = self.player_repo.get_by_ids(player_ids, guild_id)
         if len(players) != len(player_ids):
             raise ValueError(
@@ -392,9 +398,11 @@ class MatchService:
 
         # Create a shuffler configured for the requested rating system
         use_openskill = rating_system == "openskill"
+        use_jopacoin = rating_system == "jopacoin"
         shuffler = BalancedShuffler(
             use_glicko=self.use_glicko,
             use_openskill=use_openskill,
+            use_jopacoin=use_jopacoin,
         )
 
         # Load active soft avoids for these players
@@ -412,10 +420,10 @@ class MatchService:
 
         off_role_mult = shuffler.off_role_multiplier
         team1_value = team1.get_team_value(
-            self.use_glicko, off_role_mult, use_openskill=use_openskill
+            self.use_glicko, off_role_mult, use_openskill=use_openskill, use_jopacoin=use_jopacoin
         )
         team2_value = team2.get_team_value(
-            self.use_glicko, off_role_mult, use_openskill=use_openskill
+            self.use_glicko, off_role_mult, use_openskill=use_openskill, use_jopacoin=use_jopacoin
         )
         value_diff = abs(team1_value - team2_value)
 

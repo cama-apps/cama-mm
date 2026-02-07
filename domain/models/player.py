@@ -33,22 +33,27 @@ class Player:
     jopacoin_balance: int = 0
     steam_id: int | None = None  # Steam32 account ID for OpenDota integration
 
-    def get_value(self, use_glicko: bool = True, use_openskill: bool = False) -> float:
+    def get_value(self, use_glicko: bool = True, use_openskill: bool = False, use_jopacoin: bool = False) -> float:
         """
         Calculate player value for team balancing.
 
         Priority order:
-        1. OpenSkill (if use_openskill=True and available)
-        2. Glicko-2 (if use_glicko=True and available)
-        3. MMR fallback
+        1. Jopacoin balance (if use_jopacoin=True)
+        2. OpenSkill (if use_openskill=True and available)
+        3. Glicko-2 (if use_glicko=True and available)
+        4. MMR fallback
 
         Args:
             use_glicko: Whether to use Glicko-2 rating (default True)
             use_openskill: Whether to use OpenSkill rating (default False)
+            use_jopacoin: Whether to use jopacoin balance (default False)
 
         Returns:
             Player value for balancing (in rating units)
         """
+        if use_jopacoin:
+            return float(self.jopacoin_balance)
+
         if use_openskill:
             if self.os_mu is not None:
                 # Convert OpenSkill mu to comparable scale with Glicko/MMR

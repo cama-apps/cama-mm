@@ -200,7 +200,7 @@ class MatchCommands(commands.Cog):
         except Exception as exc:
             logger.warning(f"Failed to abort lobby thread: {exc}")
 
-    def _format_team_lines(self, team, roles, player_ids, players, guild):
+    def _format_team_lines(self, team, roles, player_ids, players, guild, balancing_system="glicko"):
         """Return formatted lines with roles and ratings for a team."""
         lines = []
         rating_system = self.match_service.rating_system
@@ -222,7 +222,10 @@ class MatchCommands(commands.Cog):
 
             name_part = f"**{display_name}**" if is_on_role else display_name
             warn = "" if is_on_role else " ⚠️"
-            lines.append(f"{role_emoji} {name_part} ({role_name}) [{rating}]{warn}")
+            if balancing_system == "jopacoin":
+                lines.append(f"{role_emoji} {name_part} ({role_name}) [{rating}] 💰 {player.jopacoin_balance}{warn}")
+            else:
+                lines.append(f"{role_emoji} {name_part} ({role_name}) [{rating}]{warn}")
         return lines
 
     def _get_notable_winner(
@@ -298,6 +301,7 @@ class MatchCommands(commands.Cog):
         rating_system=[
             app_commands.Choice(name="Glicko-2 (default)", value="glicko"),
             app_commands.Choice(name="OpenSkill (experimental)", value="openskill"),
+            app_commands.Choice(name="Jopacoin Balance", value="jopacoin"),
         ]
     )
     async def shuffle(
@@ -470,12 +474,13 @@ class MatchCommands(commands.Cog):
         goodness_score = result.get("goodness_score")
         # Sum of raw ratings (without off-role multipliers) for display
         use_os = rs == "openskill"
+        use_jc = rs == "jopacoin"
         radiant_sum = sum(
-            player.get_value(self.match_service.use_glicko, use_openskill=use_os)
+            player.get_value(self.match_service.use_glicko, use_openskill=use_os, use_jopacoin=use_jc)
             for player in radiant_team.players
         )
         dire_sum = sum(
-            player.get_value(self.match_service.use_glicko, use_openskill=use_os)
+            player.get_value(self.match_service.use_glicko, use_openskill=use_os, use_jopacoin=use_jc)
             for player in dire_team.players
         )
         first_pick_team = result["first_pick_team"]
@@ -522,9 +527,11 @@ class MatchCommands(commands.Cog):
                     logger.warning(f"Failed to create blind bets: {exc}", exc_info=True)
 
         radiant_lines = self._format_team_lines(
-            radiant_team, radiant_roles, player_ids, players, guild
+            radiant_team, radiant_roles, player_ids, players, guild, balancing_system=rs
         )
-        dire_lines = self._format_team_lines(dire_team, dire_roles, player_ids, players, guild)
+        dire_lines = self._format_team_lines(
+            dire_team, dire_roles, player_ids, players, guild, balancing_system=rs
+        )
 
         # Sort by role number for cleaner view
         radiant_sorted = sorted(zip(radiant_roles, radiant_lines), key=lambda x: int(x[0]))
@@ -557,7 +564,9 @@ class MatchCommands(commands.Cog):
 
         # Show which rating system was used for balancing
         balancing_system = result.get("balancing_rating_system", "glicko")
-        if balancing_system == "openskill":
+        if balancing_system == "jopacoin":
+            rating_system_display = "💰 Jopacoin Balance"
+        elif balancing_system == "openskill":
             rating_system_display = "⚗️ OpenSkill (experimental)"
         else:
             rating_system_display = "📊 Glicko-2"
@@ -734,7 +743,7 @@ class MatchCommands(commands.Cog):
         else:
             lobby_channel = interaction.channel
         await safe_unpin_all_bot_messages(lobby_channel, self.bot.user)
-        self.lobby_service.reset_lobby()
+        await asyncio.to_thread(self.lobby_service.reset_lobby)
 
         # Clear lobby rally cooldowns
         from bot import clear_lobby_rally_cooldowns
@@ -1334,7 +1343,7 @@ class MatchCommands(commands.Cog):
 
         self.match_service.clear_last_shuffle(guild_id)
         await safe_unpin_all_bot_messages(interaction.channel, self.bot.user)
-        self.lobby_service.reset_lobby()
+        await asyncio.to_thread(self.lobby_service.reset_lobby)
 
         # Clear lobby rally cooldowns
         from bot import clear_lobby_rally_cooldowns
