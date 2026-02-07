@@ -63,6 +63,28 @@ class RegistrationCommands(commands.Cog):
                 f"Use `/setroles` to set your preferred roles."
             )
 
+            # Neon Degen Terminal hook (registration)
+            try:
+                from services.neon_degen_service import NeonDegenService
+                _neon_svc = getattr(self.bot, "neon_degen_service", None)
+                neon = _neon_svc if isinstance(_neon_svc, NeonDegenService) else None
+                if neon:
+                    neon_result = await neon.on_registration(
+                        interaction.user.id, guild_id, str(interaction.user)
+                    )
+                    if neon_result and neon_result.text_block:
+                        import asyncio
+                        msg = await interaction.channel.send(neon_result.text_block)
+                        async def _del_neon(m, d):
+                            try:
+                                await asyncio.sleep(d)
+                                await m.delete()
+                            except Exception:
+                                pass
+                        asyncio.create_task(_del_neon(msg, 60))
+            except Exception:
+                pass
+
         try:
             await _finalize_register()
             return

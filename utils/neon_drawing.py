@@ -471,6 +471,234 @@ def create_freefall_gif(name: str, start_balance: int, end_balance: int) -> io.B
     return _save_gif(frames, durations)
 
 
+def create_don_coin_flip_gif(name: str, balance_lost: int) -> io.BytesIO:
+    """
+    Double or Nothing coin flip LOSE GIF.
+    Coin spinning, slows down, result: NOTHING. Balance cascades to 0.
+    ~50 frames, 400x300px.
+    """
+    frames = []
+    durations = []
+    font_lg = _get_font(20, bold=True)
+    font_sm = _get_font(12)
+    font_md = _get_font(14, bold=True)
+    font_bal = _get_font(24, bold=True)
+
+    # Phase 1: Coin spinning (15 frames)
+    coin_faces = ["DOUBLE", "NOTHING"]
+    for i in range(15):
+        img = Image.new("RGBA", (WIDTH, HEIGHT), CRT_BLACK)
+        draw = ImageDraw.Draw(img)
+
+        _draw_text_centered(draw, "DOUBLE OR NOTHING", 15, NEON_YELLOW, font_md)
+        _draw_text_left(draw, f"  Client: {name}", 20, 40, DIM_GREEN, font_sm)
+        _draw_text_left(draw, f"  At Risk: {balance_lost} JC", 20, 58, NEON_YELLOW, font_sm)
+
+        # Alternating coin text (fast)
+        face = coin_faces[i % 2]
+        face_color = NEON_GREEN if face == "DOUBLE" else NEON_RED
+        _draw_text_centered(draw, face, HEIGHT // 2 - 15, face_color, font_lg)
+
+        # Coin outline (simulated as a rectangle that squishes)
+        scale = abs(math.sin(i * 0.8))
+        coin_w = int(120 * max(0.1, scale))
+        cx = WIDTH // 2
+        cy = HEIGHT // 2
+        draw.rectangle(
+            [cx - coin_w // 2, cy - 25, cx + coin_w // 2, cy + 25],
+            outline=NEON_YELLOW,
+            width=2,
+        )
+
+        frames.append(_make_frame(img))
+        durations.append(60)
+
+    # Phase 2: Slowing down, background flickers red (15 frames)
+    for i in range(15):
+        bg_red = int(30 * (i / 15))
+        bg = (10 + bg_red, 10, 15)
+        img = Image.new("RGBA", (WIDTH, HEIGHT), (*bg, 255))
+        draw = ImageDraw.Draw(img)
+
+        _draw_text_centered(draw, "DOUBLE OR NOTHING", 15, NEON_YELLOW, font_md)
+
+        # Coin slows - show NOTHING more often as it decelerates
+        if i < 5:
+            face = coin_faces[i % 2]
+        elif i < 10:
+            face = "NOTHING" if i % 3 != 0 else "DOUBLE"
+        else:
+            face = "NOTHING"
+        face_color = NEON_GREEN if face == "DOUBLE" else NEON_RED
+        _draw_text_centered(draw, face, HEIGHT // 2 - 15, face_color, font_lg)
+
+        # Status text
+        status = "CALCULATING..." if i < 12 else "RESULT:"
+        _draw_text_centered(draw, status, HEIGHT // 2 + 30, NEON_YELLOW, font_sm)
+
+        frames.append(_make_frame(img, glitch=i > 8))
+        durations.append(100 + i * 30)
+
+    # Phase 3: Balance cascades to 0, red intensifies (20 frames)
+    for i in range(20):
+        progress = i / 19
+        bg_red = int(40 + 30 * progress)
+        bg = (bg_red, 10, 15)
+        img = Image.new("RGBA", (WIDTH, HEIGHT), (*bg, 255))
+        draw = ImageDraw.Draw(img)
+
+        _draw_text_centered(draw, "DOUBLE OR NOTHING", 15, NEON_RED, font_md)
+        _draw_text_centered(draw, "RESULT: NOTHING", 40, NEON_RED, font_sm)
+
+        # Cascading balance number
+        current = int(balance_lost * (1 - progress))
+        bal_color = (
+            int(NEON_YELLOW[0] * (1 - progress) + NEON_RED[0] * progress),
+            int(NEON_YELLOW[1] * (1 - progress) + NEON_RED[1] * progress),
+            int(NEON_YELLOW[2] * (1 - progress) + NEON_RED[2] * progress),
+        )
+        _draw_text_centered(draw, str(current), HEIGHT // 2 - 15, bal_color, font_bal)
+        _draw_text_centered(draw, "JC", HEIGHT // 2 + 15, DIM_GREEN, font_sm)
+
+        # Final frame: show 0 and message
+        if i == 19:
+            _draw_text_centered(draw, "0", HEIGHT // 2 - 15, NEON_RED, font_bal)
+            _draw_text_centered(draw, "BALANCE: 0 JC", HEIGHT - 60, NEON_RED, font_md)
+            _draw_text_centered(draw, "The coin has spoken.", HEIGHT - 35, DIM_GREEN, font_sm)
+
+        is_last = i == 19
+        frames.append(_make_frame(img, glitch=progress > 0.5))
+        durations.append(60000 if is_last else 80 + int(progress * 60))
+
+    return _save_gif(frames, durations)
+
+
+def create_market_crash_gif(total_pool: int, outcome: str, winners: int, losers: int) -> io.BytesIO:
+    """
+    Market Crash GIF for large prediction market resolution.
+    Rising graph → crash → settlement display.
+    ~45 frames, 400x300px.
+    """
+    frames = []
+    durations = []
+    font_lg = _get_font(18, bold=True)
+    font_sm = _get_font(11)
+    font_md = _get_font(14, bold=True)
+
+    graph_left = 40
+    graph_right = WIDTH - 30
+    graph_top = 80
+    graph_bottom = 200
+    graph_w = graph_right - graph_left
+    graph_h = graph_bottom - graph_top
+
+    # Phase 1: Green line graph rising (15 frames)
+    for i in range(15):
+        img = Image.new("RGBA", (WIDTH, HEIGHT), CRT_BLACK)
+        draw = ImageDraw.Draw(img)
+
+        _draw_text_centered(draw, "PREDICTION MARKET", 10, NEON_GREEN, font_md)
+        _draw_text_centered(draw, f"Pool: {total_pool} JC", 32, DIM_GREEN, font_sm)
+
+        # Draw graph axes
+        draw.line([(graph_left, graph_bottom), (graph_right, graph_bottom)], fill=DIM_GREEN, width=1)
+        draw.line([(graph_left, graph_top), (graph_left, graph_bottom)], fill=DIM_GREEN, width=1)
+
+        # Rising line
+        points = []
+        num_points = min(i + 2, 15)
+        for j in range(num_points):
+            x = graph_left + int(j * graph_w / 14)
+            # Rising with some noise
+            base_y = graph_bottom - int((j / 14) * graph_h * 0.8)
+            noise = random.randint(-5, 5)
+            y = max(graph_top, min(graph_bottom, base_y + noise))
+            points.append((x, y))
+
+        if len(points) >= 2:
+            draw.line(points, fill=NEON_GREEN, width=2)
+
+        # Pool stats below graph
+        _draw_text_left(draw, f"  Participants: {winners + losers}", 20, 215, DIM_GREEN, font_sm)
+        _draw_text_left(draw, f"  Status: ACTIVE", 20, 233, NEON_GREEN, font_sm)
+
+        frames.append(_make_frame(img))
+        durations.append(100)
+
+    # Phase 2: Graph crashes, red wash (15 frames)
+    for i in range(15):
+        progress = i / 14
+        bg_red = int(40 * progress)
+        img = Image.new("RGBA", (WIDTH, HEIGHT), (10 + bg_red, 10, 15, 255))
+        draw = ImageDraw.Draw(img)
+
+        header_color = (
+            int(NEON_GREEN[0] * (1 - progress) + NEON_RED[0] * progress),
+            int(NEON_GREEN[1] * (1 - progress) + NEON_RED[1] * progress),
+            int(NEON_GREEN[2] * (1 - progress) + NEON_RED[2] * progress),
+        )
+        _draw_text_centered(draw, "PREDICTION MARKET", 10, header_color, font_md)
+
+        # Draw graph axes
+        draw.line([(graph_left, graph_bottom), (graph_right, graph_bottom)], fill=DIM_GREEN, width=1)
+        draw.line([(graph_left, graph_top), (graph_left, graph_bottom)], fill=DIM_GREEN, width=1)
+
+        # Crashing line - starts at peak, falls
+        peak_x = graph_left + int(graph_w * 0.7)
+        peak_y = graph_top + int(graph_h * 0.2)
+
+        # Draw the historical rise
+        rise_points = []
+        for j in range(10):
+            x = graph_left + int(j * (peak_x - graph_left) / 9)
+            y = graph_bottom - int((j / 9) * (graph_bottom - peak_y))
+            rise_points.append((x, y))
+
+        # Crash portion
+        crash_end_y = graph_bottom - int(graph_h * 0.1 * (1 - progress))
+        crash_x = peak_x + int((graph_right - peak_x) * progress)
+        rise_points.append((crash_x, crash_end_y))
+
+        if len(rise_points) >= 2:
+            draw.line(rise_points, fill=NEON_RED, width=2)
+
+        # Flashing "MARKET CRASH" text
+        if i % 2 == 0 or i > 10:
+            _draw_text_centered(draw, "MARKET CRASH", HEIGHT // 2 + 20, NEON_RED, font_lg)
+
+        _draw_text_left(draw, f"  Status: SETTLING", 20, 233, NEON_YELLOW, font_sm)
+
+        frames.append(_make_frame(img, glitch=i > 5))
+        durations.append(80)
+
+    # Phase 3: Settlement display (15 frames)
+    for i in range(15):
+        img = Image.new("RGBA", (WIDTH, HEIGHT), CRT_BLACK)
+        draw = ImageDraw.Draw(img)
+
+        _draw_text_centered(draw, "MARKET SETTLED", 20, NEON_YELLOW, font_lg)
+        _draw_text_centered(draw, "=" * 32, 45, DIM_GREEN, font_sm)
+
+        _draw_text_centered(draw, f"Outcome: {outcome.upper()}", 70, NEON_YELLOW, font_md)
+        _draw_text_centered(draw, f"Total Pool: {total_pool} JC", 95, NEON_RED, font_sm)
+
+        # Winners in green
+        _draw_text_left(draw, f"  Winners: {winners}", 60, 130, NEON_GREEN, font_md)
+        # Losers in red
+        _draw_text_left(draw, f"  Losers:  {losers}", 60, 155, NEON_RED, font_md)
+
+        _draw_text_centered(draw, "=" * 32, 185, DIM_GREEN, font_sm)
+        _draw_text_centered(draw, "WEALTH REDISTRIBUTED", 210, NEON_GREEN, font_md)
+        _draw_text_centered(draw, "The system takes its cut.", 240, DIM_GREEN, font_sm)
+        _draw_text_centered(draw, "JOPA-T/v3.7", HEIGHT - 25, DIM_GREEN, font_sm)
+
+        is_last = i == 14
+        frames.append(_make_frame(img))
+        durations.append(60000 if is_last else 200)
+
+    return _save_gif(frames, durations)
+
+
 def create_degen_certificate_gif(name: str, score: int) -> io.BytesIO:
     """
     Degen Certificate GIF for crossing degen score 90.

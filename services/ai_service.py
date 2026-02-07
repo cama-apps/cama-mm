@@ -142,17 +142,25 @@ class AIService:
         messages.append({"role": "user", "content": prompt})
 
         try:
-            response = await acompletion(
-                model=self.model,
-                messages=messages,
-                temperature=temperature,
+            import asyncio
+
+            response = await asyncio.wait_for(
+                acompletion(
+                    model=self.model,
+                    messages=messages,
+                    temperature=temperature,
+                    timeout=self.timeout,
+                    max_tokens=max_tokens or self.max_tokens,
+                    num_retries=0,  # No retries - fail fast
+                ),
                 timeout=self.timeout,
-                max_tokens=max_tokens or self.max_tokens,
-                num_retries=0,  # No retries - fail fast
             )
             message = response.choices[0].message
             # Only use content field - never use reasoning_content (thinking chain)
             return message.content
+        except asyncio.TimeoutError:
+            logger.warning(f"AI hard timeout after {self.timeout}s (failing fast)")
+            return None
         except litellm.RateLimitError as e:
             logger.warning(f"AI rate limited (failing fast): {e}")
             return None
@@ -181,14 +189,19 @@ class AIService:
             ToolCallResult with tool name, args, and raw response
         """
         try:
-            response = await acompletion(
-                model=self.model,
-                messages=messages,
-                tools=tools,
-                tool_choice=tool_choice,
+            import asyncio
+
+            response = await asyncio.wait_for(
+                acompletion(
+                    model=self.model,
+                    messages=messages,
+                    tools=tools,
+                    tool_choice=tool_choice,
+                    timeout=self.timeout,
+                    max_tokens=2000,  # Reasoning models need more tokens for thinking + tool call
+                    num_retries=0,  # No retries - fail fast
+                ),
                 timeout=self.timeout,
-                max_tokens=2000,  # Reasoning models need more tokens for thinking + tool call
-                num_retries=0,  # No retries - fail fast
             )
 
             message = response.choices[0].message
@@ -215,6 +228,13 @@ class AIService:
                 raw_response=response,
             )
 
+        except asyncio.TimeoutError:
+            logger.warning(f"AI tool call hard timeout after {self.timeout}s (failing fast)")
+            return ToolCallResult(
+                tool_name=None,
+                tool_args={},
+                content=None,
+            )
         except litellm.RateLimitError as e:
             logger.warning(f"AI rate limited (failing fast): {e}")
             return ToolCallResult(
