@@ -1050,8 +1050,8 @@ class BettingCommands(commands.Cog):
         shell_missed: bool = False
 
         if result_value == "RED_SHELL":
-            # Mario Kart Red Shell: Steal 1-5 JC from player ranked above
-            shell_amount = random.randint(1, 5)
+            # Mario Kart Red Shell: Steal 2-10 JC from player ranked above
+            shell_amount = random.randint(2, 10)
             player_above = self.player_service.player_repo.get_player_above(user_id, guild_id)
 
             if player_above:
@@ -1073,8 +1073,8 @@ class BettingCommands(commands.Cog):
                 shell_amount = 0
 
         elif result_value == "BLUE_SHELL":
-            # Mario Kart Blue Shell: Steal 2-10 JC from richest player
-            shell_amount = random.randint(2, 10)
+            # Mario Kart Blue Shell: Steal 4-20 JC from richest player
+            shell_amount = random.randint(4, 20)
             leaderboard = self.player_service.player_repo.get_leaderboard(guild_id, limit=1)
 
             if leaderboard and leaderboard[0].discord_id == user_id:
