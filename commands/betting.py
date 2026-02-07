@@ -1002,7 +1002,7 @@ class BettingCommands(commands.Cog):
             await interaction.response.defer()
 
             # Generate explosion animation
-            gif_file = self._create_explosion_gif_file()
+            gif_file = await asyncio.to_thread(self._create_explosion_gif_file)
             message = await interaction.followup.send(file=gif_file, wait=True)
 
             # Wait for explosion animation (~8 seconds)
@@ -1052,7 +1052,7 @@ class BettingCommands(commands.Cog):
         await interaction.response.defer()
 
         # Generate the complete animation GIF (plays once, ~20 seconds)
-        gif_file = self._create_wheel_gif_file(result_idx)
+        gif_file = await asyncio.to_thread(self._create_wheel_gif_file, result_idx)
 
         # Send via followup (since we deferred)
         message = await interaction.followup.send(file=gif_file, wait=True)
