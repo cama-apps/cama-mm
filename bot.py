@@ -718,7 +718,7 @@ async def on_raw_reaction_add(payload):
 
         # Rest of the handler is for sword/frogling (lobby joining)
         guild_id = payload.guild_id
-        player = player_service.get_player(payload.user_id, guild_id)
+        player = await asyncio.to_thread(player_service.get_player, payload.user_id, guild_id)
         if not player:
             try:
                 await message.remove_reaction(payload.emoji, user)
@@ -755,7 +755,7 @@ async def on_raw_reaction_add(payload):
                 await message.remove_reaction(frogling_emoji, user)
             except Exception:
                 pass
-            success, reason = lobby_service.join_lobby(payload.user_id)
+            success, reason = await asyncio.to_thread(lobby_service.join_lobby, payload.user_id)
             join_type = "regular"
         else:
             # Joining as conditional (frogling) - remove sword if present
@@ -763,7 +763,7 @@ async def on_raw_reaction_add(payload):
                 await message.remove_reaction("⚔️", user)
             except Exception:
                 pass
-            success, reason = lobby_service.join_lobby_conditional(payload.user_id)
+            success, reason = await asyncio.to_thread(lobby_service.join_lobby_conditional, payload.user_id)
             join_type = "conditional"
 
         if not success:
@@ -851,9 +851,9 @@ async def on_raw_reaction_remove(payload):
 
         # Remove from appropriate set based on which emoji was removed
         if is_sword:
-            left = lobby_service.leave_lobby(payload.user_id)
+            left = await asyncio.to_thread(lobby_service.leave_lobby, payload.user_id)
         else:
-            left = lobby_service.leave_lobby_conditional(payload.user_id)
+            left = await asyncio.to_thread(lobby_service.leave_lobby_conditional, payload.user_id)
 
         if left:
             await update_lobby_message(message, lobby, payload.guild_id)

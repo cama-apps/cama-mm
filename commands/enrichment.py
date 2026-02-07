@@ -3,6 +3,8 @@ Match enrichment commands: /setleague, /enrichmatch, /backfillsteamid, /matchhis
 /dotastats, /viewmatch, /recent, /rolesgraph, /lanegraph
 """
 
+import asyncio
+import functools
 import logging
 
 import discord
@@ -154,8 +156,9 @@ class EnrichmentCommands(commands.Cog):
                 return
 
         # Perform enrichment (skip_validation=True for manual admin enrichment)
-        result = self.enrichment_service.enrich_match(
-            internal_match_id, valve_match_id, skip_validation=True
+        result = await asyncio.to_thread(
+            functools.partial(self.enrichment_service.enrich_match,
+                internal_match_id, valve_match_id, skip_validation=True)
         )
 
         if not result["success"]:
@@ -732,8 +735,9 @@ class EnrichmentCommands(commands.Cog):
             else:
                 try:
                     # Re-enrich with skip_validation since we already have the correct valve_match_id
-                    result = self.enrichment_service.enrich_match(
-                        match_id, valve_match_id, source="manual", skip_validation=True
+                    result = await asyncio.to_thread(
+                        functools.partial(self.enrichment_service.enrich_match,
+                            match_id, valve_match_id, source="manual", skip_validation=True)
                     )
                     if result["success"]:
                         refilled.append({
@@ -875,7 +879,7 @@ class EnrichmentCommands(commands.Cog):
             f"Recent command: User {interaction.user.id} viewing {target_id}, limit={limit}"
         )
 
-        matches = self.opendota_player_service.get_recent_matches_detailed(target_id, limit=limit)
+        matches = await asyncio.to_thread(self.opendota_player_service.get_recent_matches_detailed, target_id, limit=limit)
 
         if not matches:
             await safe_followup(
@@ -886,7 +890,7 @@ class EnrichmentCommands(commands.Cog):
 
         # Generate image
         try:
-            image_bytes = draw_matches_table(matches)
+            image_bytes = await asyncio.to_thread(draw_matches_table, matches)
             file = discord.File(image_bytes, filename="recent_matches.png")
 
             embed = discord.Embed(
