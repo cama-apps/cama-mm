@@ -9,21 +9,9 @@ This service manages per-guild configuration settings including:
 
 import pytest
 
-from repositories.guild_config_repository import GuildConfigRepository
-from services.guild_config_service import GuildConfigService
 from tests.conftest import TEST_GUILD_ID, TEST_GUILD_ID_SECONDARY
 
-
-@pytest.fixture
-def guild_config_repo(repo_db_path):
-    """Create a GuildConfigRepository with temp database."""
-    return GuildConfigRepository(repo_db_path)
-
-
-@pytest.fixture
-def guild_config_service(guild_config_repo):
-    """Create a GuildConfigService with real repository."""
-    return GuildConfigService(guild_config_repo)
+# Uses guild_config_service fixture from conftest.py
 
 
 class TestGuildConfigService:

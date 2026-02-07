@@ -20,8 +20,6 @@ import pytest
 
 from database import Database
 from rating_system import CamaRatingSystem
-from repositories.match_repository import MatchRepository
-from repositories.player_repository import PlayerRepository
 from services.match_service import MatchService
 from tests.conftest import TEST_GUILD_ID
 
@@ -29,35 +27,25 @@ from tests.conftest import TEST_GUILD_ID
 # =============================================================================
 # FIXTURES
 # =============================================================================
+# Uses player_repository, match_repository from conftest.py
+# Local fixtures only for legacy Database API tests
 
 
 @pytest.fixture
 def test_db(repo_db_path):
-    """Create a test database using centralized fast fixture."""
+    """Create a test database using centralized fast fixture (legacy API)."""
     return Database(repo_db_path)
 
 
 @pytest.fixture
-def player_repo(repo_db_path):
-    """Create a PlayerRepository instance."""
-    return PlayerRepository(repo_db_path)
-
-
-@pytest.fixture
-def match_repo(repo_db_path):
-    """Create a MatchRepository instance."""
-    return MatchRepository(repo_db_path)
-
-
-@pytest.fixture
-def match_service(player_repo, match_repo):
-    """Create a MatchService instance."""
-    return MatchService(player_repo=player_repo, match_repo=match_repo, use_glicko=True)
+def match_service_glicko(player_repository, match_repository):
+    """Create a MatchService instance with Glicko enabled."""
+    return MatchService(player_repo=player_repository, match_repo=match_repository, use_glicko=True)
 
 
 @pytest.fixture
 def test_players_db(test_db):
-    """Create 10 test players using Database.add_player (legacy)."""
+    """Create 10 test players using Database.add_player (legacy API)."""
     player_ids = list(range(1001, 1011))
     for pid in player_ids:
         test_db.add_player(
@@ -65,23 +53,6 @@ def test_players_db(test_db):
             discord_username=f"Player{pid}",
             initial_mmr=1500,
             glicko_rating=1500.0,
-            glicko_rd=350.0,
-            glicko_volatility=0.06,
-        )
-    return player_ids
-
-
-@pytest.fixture
-def test_players(player_repo):
-    """Create 10 test players using PlayerRepository."""
-    player_ids = list(range(10001, 10011))
-    for idx, pid in enumerate(player_ids):
-        player_repo.add(
-            discord_id=pid,
-            discord_username=f"TestPlayer{idx}",
-            guild_id=TEST_GUILD_ID,
-            initial_mmr=1500 + idx * 50,
-            glicko_rating=1500.0 + idx * 20,
             glicko_rd=350.0,
             glicko_volatility=0.06,
         )
@@ -228,11 +199,11 @@ class TestRadiantDireWinLoss:
 class TestMatchServiceWinLoss:
     """Test MatchService integration for win/loss recording."""
 
-    def _add_players(self, player_repo, start_id=94001):
+    def _add_players(self, player_repository, start_id=94001):
         """Helper to add 10 players."""
         ids = list(range(start_id, start_id + 10))
         for idx, pid in enumerate(ids):
-            player_repo.add(
+            player_repository.add(
                 discord_id=pid,
                 discord_username=f"MSPlayer{pid}",
                 guild_id=TEST_GUILD_ID,
@@ -254,11 +225,11 @@ class TestMatchServiceWinLoss:
             },
         )
 
-    def test_record_match_updates_wins_and_clears_state(self, player_repo, match_repo):
+    def test_record_match_updates_wins_and_clears_state(self, player_repository, match_repository):
         """Test that recording a match updates wins/losses and clears state."""
-        match_service = MatchService(player_repo=player_repo, match_repo=match_repo, use_glicko=True)
+        match_service = MatchService(player_repo=player_repository, match_repo=match_repository, use_glicko=True)
 
-        player_ids = self._add_players(player_repo)
+        player_ids = self._add_players(player_repository)
         radiant = player_ids[:5]
         dire = player_ids[5:]
 
@@ -268,23 +239,23 @@ class TestMatchServiceWinLoss:
         assert result["winning_team"] == "radiant"
 
         for pid in radiant:
-            player = player_repo.get_by_id(pid, TEST_GUILD_ID)
+            player = player_repository.get_by_id(pid, TEST_GUILD_ID)
             assert player.wins == 1
             assert player.losses == 0
 
         for pid in dire:
-            player = player_repo.get_by_id(pid, TEST_GUILD_ID)
+            player = player_repository.get_by_id(pid, TEST_GUILD_ID)
             assert player.wins == 0
             assert player.losses == 1
 
         # State should be cleared after successful record
         assert match_service.get_last_shuffle(TEST_GUILD_ID) is None
 
-    def test_record_match_without_shuffle_fails(self, player_repo, match_repo):
+    def test_record_match_without_shuffle_fails(self, player_repository, match_repository):
         """Test that recording without a shuffle raises an error."""
-        match_service = MatchService(player_repo=player_repo, match_repo=match_repo, use_glicko=True)
+        match_service = MatchService(player_repo=player_repository, match_repo=match_repository, use_glicko=True)
 
-        player_ids = self._add_players(player_repo, start_id=95001)
+        player_ids = self._add_players(player_repository, start_id=95001)
         radiant = player_ids[:5]
         dire = player_ids[5:]
 
@@ -294,15 +265,15 @@ class TestMatchServiceWinLoss:
 
         # Ensure no wins/losses were written
         for pid in radiant + dire:
-            player = player_repo.get_by_id(pid, TEST_GUILD_ID)
+            player = player_repository.get_by_id(pid, TEST_GUILD_ID)
             assert player.wins == 0
             assert player.losses == 0
 
-    def test_double_record_prevented(self, player_repo, match_repo):
+    def test_double_record_prevented(self, player_repository, match_repository):
         """Test that recording twice without reshuffling raises an error."""
-        match_service = MatchService(player_repo=player_repo, match_repo=match_repo, use_glicko=True)
+        match_service = MatchService(player_repo=player_repository, match_repo=match_repository, use_glicko=True)
 
-        player_ids = self._add_players(player_repo, start_id=96001)
+        player_ids = self._add_players(player_repository, start_id=96001)
         radiant = player_ids[:5]
         dire = player_ids[5:]
 
@@ -315,12 +286,12 @@ class TestMatchServiceWinLoss:
 
         # Verify final state
         for pid in radiant:
-            player = player_repo.get_by_id(pid, TEST_GUILD_ID)
+            player = player_repository.get_by_id(pid, TEST_GUILD_ID)
             assert player.wins == 0
             assert player.losses == 1
 
         for pid in dire:
-            player = player_repo.get_by_id(pid, TEST_GUILD_ID)
+            player = player_repository.get_by_id(pid, TEST_GUILD_ID)
             assert player.wins == 1
             assert player.losses == 0
 
@@ -496,7 +467,7 @@ class TestRadiantDireBugFix:
 class TestMatchParticipants:
     """Test match participant recording in the database."""
 
-    def test_participants_correctly_recorded(self, test_db, test_players_db, match_repo):
+    def test_participants_correctly_recorded(self, test_db, test_players_db, match_repository):
         """Test that match participants are correctly recorded with side and won flags."""
         radiant = test_players_db[:5]
         dire = test_players_db[5:]
@@ -508,7 +479,7 @@ class TestMatchParticipants:
         )
 
         # Use repository method to get participants
-        participants = match_repo.get_match_participants(match_id)
+        participants = match_repository.get_match_participants(match_id)
 
         assert len(participants) == 10
 
