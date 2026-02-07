@@ -3,6 +3,7 @@ Match commands: /shuffle and /record.
 """
 
 import asyncio
+import functools
 import logging
 import random
 import time
@@ -446,8 +447,9 @@ class MatchCommands(commands.Cog):
         mode = "pool"  # betting_mode.value if betting_mode else "pool"
         rs = rating_system.value if rating_system else "glicko"
         try:
-            result = self.match_service.shuffle_players(
-                player_ids, guild_id=guild_id, betting_mode=mode, rating_system=rs
+            result = await asyncio.to_thread(
+                functools.partial(self.match_service.shuffle_players,
+                    player_ids, guild_id=guild_id, betting_mode=mode, rating_system=rs)
             )
         except ValueError as exc:
             logger.warning(f"Shuffle validation error: {exc}", exc_info=True)
@@ -500,12 +502,14 @@ class MatchCommands(commands.Cog):
                 try:
                     # Get IDs and timestamp from the saved pending state
                     pending_state = self.match_service.get_last_shuffle(guild_id)
-                    blind_bets_result = betting_service.create_auto_blind_bets(
-                        guild_id=guild_id,
-                        radiant_ids=pending_state["radiant_team_ids"],
-                        dire_ids=pending_state["dire_team_ids"],
-                        shuffle_timestamp=pending_state["shuffle_timestamp"],
-                        is_bomb_pot=is_bomb_pot,
+                    blind_bets_result = await asyncio.to_thread(
+                        functools.partial(betting_service.create_auto_blind_bets,
+                            guild_id=guild_id,
+                            radiant_ids=pending_state["radiant_team_ids"],
+                            dire_ids=pending_state["dire_team_ids"],
+                            shuffle_timestamp=pending_state["shuffle_timestamp"],
+                            is_bomb_pot=is_bomb_pot,
+                        )
                     )
                     if blind_bets_result["created"] > 0:
                         logger.info(
@@ -790,8 +794,9 @@ class MatchCommands(commands.Cog):
                 await self._finalize_abort(interaction, guild_id, admin_override=True)
                 return
             try:
-                submission = self.match_service.add_abort_submission(
-                    guild_id, interaction.user.id, is_admin=False
+                submission = await asyncio.to_thread(
+                    functools.partial(self.match_service.add_abort_submission,
+                        guild_id, interaction.user.id, is_admin=False)
                 )
             except ValueError as exc:
                 await interaction.followup.send(f"❌ {exc}", ephemeral=True)
@@ -807,7 +812,8 @@ class MatchCommands(commands.Cog):
             await self._finalize_abort(interaction, guild_id, admin_override=False)
             return
         try:
-            submission = self.match_service.add_record_submission(
+            submission = await asyncio.to_thread(
+                self.match_service.add_record_submission,
                 guild_id, interaction.user.id, result.value, is_admin
             )
         except ValueError as exc:
@@ -834,8 +840,9 @@ class MatchCommands(commands.Cog):
         )
 
         try:
-            record_result = self.match_service.record_match(
-                winning_result, guild_id=guild_id, dotabuff_match_id=dotabuff_match_id
+            record_result = await asyncio.to_thread(
+                functools.partial(self.match_service.record_match,
+                    winning_result, guild_id=guild_id, dotabuff_match_id=dotabuff_match_id)
             )
         except ValueError as exc:
             await interaction.followup.send(f"❌ {exc}", ephemeral=True)

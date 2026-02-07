@@ -10,6 +10,7 @@ Provides a comprehensive view of player stats across all systems:
 """
 
 import asyncio
+import functools
 import logging
 import time
 
@@ -988,18 +989,20 @@ class ProfileCommands(commands.Cog):
             pnl_series = gambling_stats_service.get_cumulative_pnl_series(target_discord_id, guild_id)
             if pnl_series and len(pnl_series) >= 2:
                 degen = stats.degen_score
-                chart_bytes = draw_gamba_chart(
-                    username=target_user.display_name,
-                    degen_score=degen.total,
-                    degen_title=degen.title,
-                    degen_emoji=degen.emoji,
-                    pnl_series=pnl_series,
-                    stats={
-                        "total_bets": stats.total_bets,
-                        "win_rate": stats.win_rate,
-                        "net_pnl": stats.net_pnl,
-                        "roi": stats.roi,
-                    },
+                chart_bytes = await asyncio.to_thread(
+                    functools.partial(draw_gamba_chart,
+                        username=target_user.display_name,
+                        degen_score=degen.total,
+                        degen_title=degen.title,
+                        degen_emoji=degen.emoji,
+                        pnl_series=pnl_series,
+                        stats={
+                            "total_bets": stats.total_bets,
+                            "win_rate": stats.win_rate,
+                            "net_pnl": stats.net_pnl,
+                            "roi": stats.roi,
+                        },
+                    )
                 )
                 chart_file = discord.File(chart_bytes, filename="gamba_chart.png")
                 embed.set_image(url="attachment://gamba_chart.png")
@@ -1192,7 +1195,9 @@ class ProfileCommands(commands.Cog):
 
         if role_dist:
             try:
-                chart_bytes = draw_role_graph(role_dist, title=f"Roles: {target_user.display_name}")
+                chart_bytes = await asyncio.to_thread(
+                    functools.partial(draw_role_graph, role_dist, title=f"Roles: {target_user.display_name}")
+                )
                 role_file = discord.File(chart_bytes, filename="role_graph.png")
                 files.append(role_file)
                 embed.set_image(url="attachment://role_graph.png")
@@ -1214,7 +1219,7 @@ class ProfileCommands(commands.Cog):
 
             if lane_dist_filtered:
                 try:
-                    lane_bytes = draw_lane_distribution(lane_dist_filtered)
+                    lane_bytes = await asyncio.to_thread(draw_lane_distribution, lane_dist_filtered)
                     lane_file = discord.File(lane_bytes, filename="lane_graph.png")
                     files.append(lane_file)
                     # Add lane chart info to embed (image will appear as second attachment)
@@ -1555,7 +1560,7 @@ class ProfileCommands(commands.Cog):
         # Generate hero performance chart
         if hero_stats:
             try:
-                chart_bytes = draw_hero_performance_chart(hero_stats, target_user.display_name)
+                chart_bytes = await asyncio.to_thread(draw_hero_performance_chart, hero_stats, target_user.display_name)
                 chart_file = discord.File(chart_bytes, filename="hero_chart.png")
                 files.append(chart_file)
                 embed.set_image(url="attachment://hero_chart.png")

@@ -32,6 +32,9 @@ class SchemaManager:
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, uri=self.use_uri)
         conn.row_factory = sqlite3.Row
+        if not self.use_uri:  # Skip WAL for in-memory databases
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=5000")
         return conn
 
     def _create_base_schema(self, cursor) -> None:
