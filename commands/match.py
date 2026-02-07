@@ -977,89 +977,91 @@ class MatchCommands(commands.Cog):
 
             distribution_text += stake_text
 
-        # Generate AI flavor text for a notable bettor
+        # Generate AI flavor text — pick targets synchronously, fire LLM calls in parallel
         ai_flavor = None
+        match_flavor = None
         notable_bettor = None  # Track for exclusion from match flavor
-        if self.flavor_text_service and (winners or losers):
+        if self.flavor_text_service:
             try:
-                # Pick the most notable bet result for flavor
-                notable_bettor = None
+                # --- Synchronous: pick notable bettor ---
                 flavor_event = None
                 event_details = {}
+                if winners or losers:
+                    leveraged_losers = [
+                        entry
+                        for entry in losers
+                        if (entry.get("leverage", 1) or 1) > 1 and not entry.get("refunded")
+                    ]
+                    if leveraged_losers:
+                        notable_bettor = max(
+                            leveraged_losers, key=lambda e: e.get("effective_bet", e["amount"])
+                        )
+                        flavor_event = FlavorEvent.LEVERAGE_LOSS
+                        event_details = {
+                            "amount": notable_bettor["amount"],
+                            "leverage": notable_bettor.get("leverage", 1),
+                            "effective_loss": notable_bettor.get(
+                                "effective_bet", notable_bettor["amount"]
+                            ),
+                            "team": notable_bettor.get("team", "unknown"),
+                        }
+                    elif winners:
+                        notable_bettor = max(winners, key=lambda e: e.get("payout", 0))
+                        flavor_event = FlavorEvent.BET_WON
+                        event_details = {
+                            "amount": notable_bettor["amount"],
+                            "payout": notable_bettor.get("payout", 0),
+                            "leverage": notable_bettor.get("leverage", 1),
+                            "team": notable_bettor.get("team", "unknown"),
+                            "multiplier": notable_bettor.get("multiplier"),
+                        }
 
-                # Prioritize biggest leveraged loss, then biggest winner
-                leveraged_losers = [
-                    entry
-                    for entry in losers
-                    if (entry.get("leverage", 1) or 1) > 1 and not entry.get("refunded")
-                ]
-                if leveraged_losers:
-                    # Pick the biggest effective loss (leverage * amount)
-                    notable_bettor = max(
-                        leveraged_losers, key=lambda e: e.get("effective_bet", e["amount"])
+                # --- Synchronous: pick notable winner ---
+                bettor_id = notable_bettor["discord_id"] if notable_bettor else None
+                notable_winner = None
+                match_details = {}
+                if record_result.get("winning_player_ids"):
+                    notable_winner, match_details = self._get_notable_winner(
+                        match_id=record_result["match_id"],
+                        winning_ids=record_result["winning_player_ids"],
+                        exclude_id=bettor_id,
                     )
-                    flavor_event = FlavorEvent.LEVERAGE_LOSS
-                    event_details = {
-                        "amount": notable_bettor["amount"],
-                        "leverage": notable_bettor.get("leverage", 1),
-                        "effective_loss": notable_bettor.get(
-                            "effective_bet", notable_bettor["amount"]
-                        ),
-                        "team": notable_bettor.get("team", "unknown"),
-                    }
-                elif winners:
-                    # Pick the biggest winner by payout
-                    notable_bettor = max(winners, key=lambda e: e.get("payout", 0))
-                    flavor_event = FlavorEvent.BET_WON
-                    event_details = {
-                        "amount": notable_bettor["amount"],
-                        "payout": notable_bettor.get("payout", 0),
-                        "leverage": notable_bettor.get("leverage", 1),
-                        "team": notable_bettor.get("team", "unknown"),
-                        "multiplier": notable_bettor.get("multiplier"),
-                    }
 
-                if notable_bettor and flavor_event:
-                    ai_flavor = await self.flavor_text_service.generate_event_flavor(
+                # --- Parallel: fire both LLM calls concurrently ---
+                async def _gen_bet_flavor():
+                    if not (notable_bettor and flavor_event):
+                        return None
+                    result = await self.flavor_text_service.generate_event_flavor(
                         guild_id=guild_id,
                         event=flavor_event,
                         discord_id=notable_bettor["discord_id"],
                         event_details=event_details,
                     )
-                    # Prepend @ mention to the notable bettor
-                    if ai_flavor:
-                        notable_id = notable_bettor["discord_id"]
-                        ai_flavor = f"<@{notable_id}> {ai_flavor}"
-            except Exception as e:
-                logger.warning(f"Failed to generate AI flavor for bet result: {e}")
+                    if result:
+                        return f"<@{notable_bettor['discord_id']}> {result}"
+                    return None
 
-        if ai_flavor:
-            distribution_text += f"\n\n💬 {ai_flavor}"
-
-        # Generate MATCH_WIN flavor (PMA - always celebrate a winner!)
-        # Exclude the notable bettor to avoid mentioning the same player twice
-        match_flavor = None
-        bettor_id = notable_bettor["discord_id"] if notable_bettor else None
-        if self.flavor_text_service and record_result.get("winning_player_ids"):
-            try:
-                notable_winner, match_details = self._get_notable_winner(
-                    match_id=record_result["match_id"],
-                    winning_ids=record_result["winning_player_ids"],
-                    exclude_id=bettor_id,
-                )
-
-                if notable_winner:
-                    match_flavor = await self.flavor_text_service.generate_event_flavor(
+                async def _gen_match_flavor():
+                    if not notable_winner:
+                        return None
+                    result = await self.flavor_text_service.generate_event_flavor(
                         guild_id=guild_id,
                         event=FlavorEvent.MATCH_WIN,
                         discord_id=notable_winner,
                         event_details=match_details,
                     )
-                    if match_flavor:
-                        match_flavor = f"<@{notable_winner}> {match_flavor}"
-            except Exception as e:
-                logger.warning(f"Failed to generate match flavor: {e}")
+                    if result:
+                        return f"<@{notable_winner}> {result}"
+                    return None
 
+                ai_flavor, match_flavor = await asyncio.gather(
+                    _gen_bet_flavor(), _gen_match_flavor()
+                )
+            except Exception as e:
+                logger.warning(f"Failed to generate AI flavor: {e}")
+
+        if ai_flavor:
+            distribution_text += f"\n\n💬 {ai_flavor}"
         if match_flavor:
             distribution_text += f"\n\n🎮 {match_flavor}"
 
@@ -1088,10 +1090,17 @@ class MatchCommands(commands.Cog):
         neon = _neon_svc if isinstance(_neon_svc, NeonDegenService) else None
         if neon:
             try:
-                neon_result = await neon.on_match_recorded(guild_id)
-                if neon_result:
+                async def _send_neon_msg(neon_result):
+                    if neon_result is None:
+                        return
                     msg = None
-                    if neon_result.text_block:
+                    if neon_result.gif_file:
+                        gif_file = discord.File(neon_result.gif_file, filename="jopat_terminal.gif")
+                        if neon_result.text_block:
+                            msg = await interaction.channel.send(neon_result.text_block, file=gif_file)
+                        else:
+                            msg = await interaction.channel.send(file=gif_file)
+                    elif neon_result.text_block:
                         msg = await interaction.channel.send(neon_result.text_block)
                     elif neon_result.footer_text:
                         msg = await interaction.channel.send(neon_result.footer_text)
@@ -1103,6 +1112,58 @@ class MatchCommands(commands.Cog):
                             except Exception:
                                 pass
                         asyncio.create_task(_delete_after(msg, 60))
+
+                neon_result = await neon.on_match_recorded(
+                    guild_id,
+                    streak_data=record_result.get("notable_streak"),
+                )
+                await _send_neon_msg(neon_result)
+
+                # Wire on_bet_settled + on_leverage_loss for losers (max ONE per match)
+                neon_sent = neon_result is not None
+                if not neon_sent and losers:
+                    for entry in losers:
+                        if entry.get("refunded"):
+                            continue
+                        loser_id = entry["discord_id"]
+                        leverage = entry.get("leverage", 1) or 1
+                        amount = entry.get("effective_bet", entry["amount"])
+                        new_bal = self.player_repo.get_balance(loser_id, guild_id)
+
+                        # on_leverage_loss: 5x leverage into debt
+                        if leverage >= 5 and new_bal < 0:
+                            lr = await neon.on_leverage_loss(
+                                loser_id, guild_id, amount, leverage, new_bal
+                            )
+                            if lr:
+                                await _send_neon_msg(lr)
+                                neon_sent = True
+                                break
+
+                        # on_bet_settled: hit MAX_DEBT or zero
+                        from config import MAX_DEBT as _MAX_DEBT
+                        if new_bal <= -_MAX_DEBT or new_bal == 0:
+                            sr = await neon.on_bet_settled(
+                                loser_id, guild_id, won=False, payout=0, new_balance=new_bal
+                            )
+                            if sr:
+                                await _send_neon_msg(sr)
+                                neon_sent = True
+                                break
+
+                # Wire on_degen_milestone for losers
+                if not neon_sent and losers:
+                    for entry in losers:
+                        if entry.get("refunded"):
+                            continue
+                        loser_id = entry["discord_id"]
+                        degen_score = neon._get_degen_score(loser_id, guild_id)
+                        if degen_score is not None and degen_score >= 90:
+                            mr = await neon.on_degen_milestone(loser_id, guild_id, degen_score)
+                            if mr:
+                                await _send_neon_msg(mr)
+                                break
+
             except Exception as exc:
                 logger.debug(f"Neon match hook failed: {exc}")
 

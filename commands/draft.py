@@ -940,6 +940,27 @@ class DraftCommands(commands.Cog):
         # Store message ID for later updates
         state.draft_message_id = message.id
 
+        # Neon Degen Terminal hook (draft coinflip)
+        try:
+            from services.neon_degen_service import NeonDegenService
+            _neon_svc = getattr(self.bot, "neon_degen_service", None)
+            neon = _neon_svc if isinstance(_neon_svc, NeonDegenService) else None
+            if neon:
+                loser_name = captain2_name if coinflip_winner_id == state.captain1_id else captain1_name
+                neon_result = await neon.on_draft_coinflip(guild_id, winner_name, loser_name)
+                if neon_result and neon_result.text_block:
+                    import asyncio
+                    msg = await interaction.channel.send(neon_result.text_block)
+                    async def _del_neon(m, d):
+                        try:
+                            await asyncio.sleep(d)
+                            await m.delete()
+                        except Exception:
+                            pass
+                    asyncio.create_task(_del_neon(msg, 60))
+        except Exception:
+            pass
+
         return True
 
     # ========================================================================

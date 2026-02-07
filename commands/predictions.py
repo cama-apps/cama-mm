@@ -618,6 +618,45 @@ class PredictionCommands(commands.Cog):
 
                 await safe_followup(interaction, content="\n".join(result_lines))
 
+                # Neon Degen Terminal hook (prediction resolved)
+                try:
+                    from services.neon_degen_service import NeonDegenService
+                    _neon_svc = getattr(self.bot, "neon_degen_service", None)
+                    neon = _neon_svc if isinstance(_neon_svc, NeonDegenService) else None
+                    if neon:
+                        neon_result = await neon.on_prediction_resolved(
+                            guild_id=interaction.guild.id if interaction.guild else None,
+                            question=pred.get("question", "") if pred else "",
+                            outcome=outcome.value,
+                            total_pool=settlement.get("total_pool", 0),
+                            winner_count=len(winners),
+                            loser_count=len(losers),
+                        )
+                        if neon_result:
+                            import asyncio
+                            msg = None
+                            if neon_result.gif_file:
+                                import discord as _discord
+                                gif_file = _discord.File(neon_result.gif_file, filename="jopat_terminal.gif")
+                                if neon_result.text_block:
+                                    msg = await interaction.channel.send(neon_result.text_block, file=gif_file)
+                                else:
+                                    msg = await interaction.channel.send(file=gif_file)
+                            elif neon_result.text_block:
+                                msg = await interaction.channel.send(neon_result.text_block)
+                            elif neon_result.footer_text:
+                                msg = await interaction.channel.send(neon_result.footer_text)
+                            if msg:
+                                async def _del_neon(m, d):
+                                    try:
+                                        await asyncio.sleep(d)
+                                        await m.delete()
+                                    except Exception:
+                                        pass
+                                asyncio.create_task(_del_neon(msg, 60))
+                except Exception:
+                    pass
+
                 # Post to thread, lock, and archive
                 if pred and pred.get("thread_id"):
                     try:

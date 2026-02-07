@@ -591,6 +591,289 @@ def render_tip_surveillance(sender: str, recipient: str, amount: int, fee: int) 
     return ansi_block(tip_surveillance(sender, recipient, amount, fee))
 
 
+# Double or Nothing - win (Layer 1)
+DON_WIN_TEMPLATES = [
+    lambda name, bal: (
+        f"{DIM}[JOPA-T] DOUBLE_OR_NOTHING{RESET}\n"
+        f"{DIM}Subject:{RESET} {name}\n"
+        f"{DIM}Result:{RESET} {GREEN}DOUBLE{RESET}\n"
+        f"{DIM}The client defies the odds.{RESET}\n"
+        f"{DIM}Temporarily.{RESET}"
+    ),
+    lambda name, bal: (
+        f"{DIM}[{_ts()}] DON_OUTCOME: {RESET}{GREEN}WIN{RESET}\n"
+        f"{DIM}New balance:{RESET} {GREEN}{bal}{RESET} JC\n"
+        f"{DIM}Status:{RESET} {corrupt_text('still solvent')}"
+    ),
+    lambda name, bal: (
+        f"{GREEN}COIN FLIP: HEADS{RESET}\n"
+        f"{DIM}Client {name} walks away with{RESET}\n"
+        f"{DIM}{RESET}{GREEN}{bal}{RESET}{DIM} JC. For now.{RESET}"
+    ),
+    lambda name, bal: (
+        f"{DIM}$ ./flip_coin.sh{RESET}\n"
+        f"{GREEN}RESULT: DOUBLE{RESET}\n"
+        f"{DIM}$ # they will be back{RESET}"
+    ),
+    lambda name, bal: (
+        f"{DIM}[JOPA-T] The coin shows mercy.{RESET}\n"
+        f"{DIM}Balance:{RESET} {GREEN}{bal}{RESET} JC\n"
+        f"{DIM}Probability of returning:{RESET} {RED}100%{RESET}"
+    ),
+    lambda name, bal: (
+        f"{DIM}[{_ts()}] ANOMALY: Client won{RESET}\n"
+        f"{DIM}The system recalibrates.{RESET}\n"
+        f"{DIM}This changes nothing.{RESET}"
+    ),
+]
+
+# Double or Nothing - loss (Layer 1)
+DON_LOSE_TEMPLATES = [
+    lambda name, risk: (
+        f"{RED}[JOPA-T] DOUBLE_OR_NOTHING{RESET}\n"
+        f"{DIM}Subject:{RESET} {name}\n"
+        f"{DIM}Result:{RESET} {RED}NOTHING{RESET}\n"
+        f"{DIM}Gone. Reduced to atoms.{RESET}"
+    ),
+    lambda name, risk: (
+        f"{DIM}[{_ts()}] DON_OUTCOME: {RESET}{RED}LOSS{RESET}\n"
+        f"{DIM}Amount lost:{RESET} {RED}{risk}{RESET} JC\n"
+        f"{DIM}The coin has spoken.{RESET}"
+    ),
+    lambda name, risk: (
+        f"{RED}COIN FLIP: TAILS{RESET}\n"
+        f"{DIM}Client {name} had{RESET} {risk} JC.\n"
+        f"{DIM}Client {name} has{RESET} {RED}0{RESET} JC."
+    ),
+    lambda name, risk: (
+        f"{DIM}$ ./flip_coin.sh{RESET}\n"
+        f"{RED}RESULT: NOTHING{RESET}\n"
+        f"{DIM}$ echo \"predictable\"{RESET}"
+    ),
+    lambda name, risk: (
+        f"{DIM}[JOPA-T] Another one.{RESET}\n"
+        f"{RED}{risk}{RESET}{DIM} JC, deleted.{RESET}\n"
+        f"{DIM}The system is not surprised.{RESET}"
+    ),
+    lambda name, risk: (
+        f"{DIM}[{_ts()}] BALANCE_WIPE{RESET}\n"
+        f"{DIM}Method:{RESET} Double or Nothing\n"
+        f"{DIM}Cause:{RESET} {corrupt_text('hubris')}\n"
+        f"{DIM}Recovery:{RESET} {RED}UNLIKELY{RESET}"
+    ),
+]
+
+# Draft coinflip (Layer 1)
+COINFLIP_TEMPLATES = [
+    lambda winner, loser: (
+        f"{DIM}[JOPA-T] COINFLIP_RESULT{RESET}\n"
+        f"{DIM}Winner:{RESET} {GREEN}{winner}{RESET}\n"
+        f"{DIM}Loser:{RESET} {RED}{loser}{RESET}\n"
+        f"{DIM}The coin has spoken.{RESET}\n"
+        f"{DIM}JOPA-T does not question the coin.{RESET}"
+    ),
+    lambda winner, loser: (
+        f"{DIM}[{_ts()}] DRAFT_COINFLIP{RESET}\n"
+        f"{DIM}Entropy source:{RESET} /dev/urandom\n"
+        f"{DIM}Result:{RESET} {winner}\n"
+        f"{DIM}The other one:{RESET} {loser}"
+    ),
+    lambda winner, loser: (
+        f"{DIM}$ flip --participants={winner},{loser}{RESET}\n"
+        f"{GREEN}>{RESET} {winner}\n"
+        f"{DIM}$ # fate is {RESET}{corrupt_text('random')}"
+    ),
+    lambda winner, loser: (
+        f"{DIM}[JOPA-T] Destiny has chosen{RESET}\n"
+        f"{DIM}{RESET}{GREEN}{winner}{RESET}{DIM}.{RESET}\n"
+        f"{DIM}Destiny has rejected{RESET}\n"
+        f"{DIM}{RESET}{RED}{loser}{RESET}{DIM}.{RESET}"
+    ),
+    lambda winner, loser: (
+        f"{DIM}[{_ts()}] RNG_CEREMONY{RESET}\n"
+        f"{DIM}Seed:{RESET} {_rand_hex(8)}\n"
+        f"{DIM}Victor:{RESET} {winner}\n"
+        f"{DIM}Victim:{RESET} {loser}"
+    ),
+    lambda winner, loser: (
+        f"{DIM}JOPA-T DRAFT SERVICES{RESET}\n"
+        f"{DIM}The coin was fair.{RESET}\n"
+        f"{DIM}Probably.{RESET}"
+    ),
+]
+
+# Registration (Layer 1)
+REGISTRATION_TEMPLATES = [
+    lambda name: (
+        f"{GREEN}NEW SUBJECT ENROLLED{RESET}\n"
+        f"{DIM}Classification:{RESET} {YELLOW}FRESH MEAT{RESET}\n"
+        f"{DIM}Client:{RESET} {name}\n"
+        f"{DIM}Status:{RESET} {corrupt_text('MONITORING')}"
+    ),
+    lambda name: (
+        f"{DIM}[{_ts()}] REGISTER_NEW{RESET}\n"
+        f"{DIM}Subject:{RESET} {name}\n"
+        f"{DIM}Wallet initialized:{RESET} 3 JC\n"
+        f"{DIM}Estimated lifespan:{RESET} {random.randint(2, 47)} games"
+    ),
+    lambda name: (
+        f"{DIM}[JOPA-T] Welcome, {name}.{RESET}\n"
+        f"{DIM}Your account has been opened.{RESET}\n"
+        f"{DIM}It cannot be closed.{RESET}"
+    ),
+    lambda name: (
+        f"{DIM}$ useradd --group=degens {name}{RESET}\n"
+        f"{GREEN}OK{RESET}\n"
+        f"{DIM}$ # another one for the {RESET}{corrupt_text('grinder')}"
+    ),
+    lambda name: (
+        f"{DIM}[{_ts()}] NEW_CLIENT_ONBOARD{RESET}\n"
+        f"{DIM}ID:{RESET} {name}\n"
+        f"{DIM}Initial credit:{RESET} 3 JC\n"
+        f"{DIM}Risk profile:{RESET} {YELLOW}PENDING{RESET}\n"
+        f"{DIM}The system will learn you.{RESET}"
+    ),
+    lambda name: (
+        f"{DIM}JOPA-T/v3.7 CLIENT INTAKE{RESET}\n"
+        f"{DIM}Processing {name}...{RESET}\n"
+        f"{DIM}Done. There is no opt-out.{RESET}"
+    ),
+]
+
+# Prediction market resolution (Layer 1)
+PREDICTION_RESOLVE_TEMPLATES = [
+    lambda q, outcome, pool: (
+        f"{DIM}[JOPA-T] MARKET_SETTLED{RESET}\n"
+        f"{DIM}Outcome:{RESET} {YELLOW}{outcome.upper()}{RESET}\n"
+        f"{DIM}Pool:{RESET} {pool} JC\n"
+        f"{DIM}The oracle has spoken.{RESET}"
+    ),
+    lambda q, outcome, pool: (
+        f"{DIM}[{_ts()}] PREDICTION_RESOLVED{RESET}\n"
+        f"{DIM}Result:{RESET} {outcome.upper()}\n"
+        f"{DIM}Total redistributed:{RESET} {pool} JC\n"
+        f"{DIM}The market is{RESET} {corrupt_text('efficient')}{DIM}.{RESET}"
+    ),
+    lambda q, outcome, pool: (
+        f"{DIM}$ ./resolve_market.sh{RESET}\n"
+        f"{DIM}OUTCOME:{RESET} {outcome.upper()}\n"
+        f"{DIM}POOL:{RESET} {pool} JC\n"
+        f"{DIM}$ # wealth redistributed{RESET}"
+    ),
+    lambda q, outcome, pool: (
+        f"{DIM}[JOPA-T] Market closed.{RESET}\n"
+        f"{DIM}Winners have been paid.{RESET}\n"
+        f"{DIM}Losers have been noted.{RESET}"
+    ),
+    lambda q, outcome, pool: (
+        f"{DIM}[{_ts()}] SETTLEMENT{RESET}\n"
+        f"{DIM}TX #{_rand_hex(6)}{RESET}\n"
+        f"{DIM}Answer:{RESET} {outcome.upper()}\n"
+        f"{DIM}The house collected its fee.{RESET}"
+    ),
+    lambda q, outcome, pool: (
+        f"{DIM}JOPA-T PREDICTION SERVICES{RESET}\n"
+        f"{DIM}The future was {RESET}{YELLOW}{outcome}{RESET}{DIM}.{RESET}\n"
+        f"{DIM}As always, the many paid{RESET}\n"
+        f"{DIM}for the knowledge of the few.{RESET}"
+    ),
+]
+
+
+# ---------------------------------------------------------------------------
+# LAYER 2 - Medium templates (ASCII art boxes) - NEW
+# ---------------------------------------------------------------------------
+
+
+def don_loss_box(name: str, risk: int) -> str:
+    """Layer 2 ASCII art for Double or Nothing loss."""
+    lines = [
+        f"{RED} DOUBLE OR NOTHING{RESET}",
+        f"{DIM}{'=' * 36}{RESET}",
+        f"{DIM}Subject:{RESET} {name}",
+        f"{DIM}At risk:{RESET} {YELLOW}{risk}{RESET} JC",
+        f"{DIM}{'=' * 36}{RESET}",
+        f"",
+        f"{DIM}[{_ts()}] Coin flipped...{RESET}",
+        f"{DIM}[{_ts()}] Result:{RESET} {RED}NOTHING{RESET}",
+        f"{DIM}[{_ts()}] Balance:{RESET} {RED}0{RESET} JC",
+        f"",
+        f"{DIM}The client wagered everything.{RESET}",
+        f"{DIM}The client received {RESET}{RED}nothing{RESET}{DIM}.{RESET}",
+        f"{DIM}The system files this under:{RESET}",
+        f"{DIM}{RESET}{corrupt_text('EXPECTED OUTCOME')}{DIM}.{RESET}",
+    ]
+    return "\n".join(lines)
+
+
+def prediction_market_crash(question: str, total_pool: int, outcome: str, winners: int, losers: int) -> str:
+    """Layer 2 ASCII art for large prediction market settlement."""
+    # Truncate question for display
+    q = question[:30] + "..." if len(question) > 30 else question
+    lines = [
+        f"{RED} MARKET SETTLEMENT{RESET}",
+        f"{DIM}{'=' * 36}{RESET}",
+        f"{DIM}Question:{RESET} {q}",
+        f"{DIM}Outcome:{RESET} {YELLOW}{outcome.upper()}{RESET}",
+        f"{DIM}Total pool:{RESET} {RED}{total_pool}{RESET} JC",
+        f"{DIM}{'=' * 36}{RESET}",
+        f"",
+        f"{DIM}[{_ts()}] Processing payouts...{RESET}",
+        f"{DIM}[{_ts()}] Winners:{RESET} {GREEN}{winners}{RESET}",
+        f"{DIM}[{_ts()}] Losers:{RESET} {RED}{losers}{RESET}",
+        f"{DIM}[{_ts()}] {RESET}{GREEN}COMPLETE{RESET}",
+        f"",
+        f"{DIM}Wealth has been redistributed.{RESET}",
+        f"{DIM}As the system intended.{RESET}",
+    ]
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Layer 1 render helpers - NEW
+# ---------------------------------------------------------------------------
+
+
+def render_don_win(name: str, balance: int) -> str:
+    """Render a Layer 1 Double or Nothing win."""
+    template = random.choice(DON_WIN_TEMPLATES)
+    return ansi_block(template(name, balance))
+
+
+def render_don_lose(name: str, risk: int) -> str:
+    """Render a Layer 1 Double or Nothing loss."""
+    template = random.choice(DON_LOSE_TEMPLATES)
+    return ansi_block(template(name, risk))
+
+
+def render_don_loss_box(name: str, risk: int) -> str:
+    """Render a Layer 2 Double or Nothing loss box."""
+    return ansi_block(don_loss_box(name, risk))
+
+
+def render_coinflip(winner: str, loser: str) -> str:
+    """Render a Layer 1 draft coinflip result."""
+    template = random.choice(COINFLIP_TEMPLATES)
+    return ansi_block(template(winner, loser))
+
+
+def render_registration(name: str) -> str:
+    """Render a Layer 1 registration greeting."""
+    template = random.choice(REGISTRATION_TEMPLATES)
+    return ansi_block(template(name))
+
+
+def render_prediction_resolved(question: str, outcome: str, total_pool: int) -> str:
+    """Render a Layer 1 prediction resolution."""
+    template = random.choice(PREDICTION_RESOLVE_TEMPLATES)
+    return ansi_block(template(question, outcome, total_pool))
+
+
+def render_prediction_market_crash(question: str, total_pool: int, outcome: str, winners: int, losers: int) -> str:
+    """Render a Layer 2 prediction market crash."""
+    return ansi_block(prediction_market_crash(question, total_pool, outcome, winners, losers))
+
+
 # ---------------------------------------------------------------------------
 # Layer 2 render helpers
 # ---------------------------------------------------------------------------
@@ -628,3 +911,52 @@ def render_negative_loan(name: str, amount: int, new_debt: int) -> str:
 def render_wheel_bankrupt(name: str, loss: int) -> str:
     """Render a Layer 2 wheel bankrupt glitch overlay."""
     return ansi_block(wheel_bankrupt_overlay(name, loss))
+
+
+# ---------------------------------------------------------------------------
+# Soft Avoid templates
+# ---------------------------------------------------------------------------
+
+# Layer 1 - terse one-liners (no player names)
+SOFT_AVOID_TEMPLATES = [
+    lambda cost, games: f"{DIM}[JOPA-T] AVOID_REQUEST filed. {cost} JC processed. Duration: {games} games.{RESET}",
+    lambda cost, games: f"{DIM}[{_ts()}] SOCIAL_GRAPH updated. One fewer edge. Cost: {cost} JC.{RESET}",
+    lambda cost, games: f"{DIM}[SYS] Avoidance purchased. The system does not judge. The system does not need to.{RESET}",
+    lambda cost, games: f"{DIM}[{_ts()}] MATCHMAKING_CONSTRAINT added. {games} games. The shuffler {corrupt_text('obeys')}.{RESET}",
+    lambda cost, games: f"{DIM}[JOPA-T] {cost} JC to not play with someone. Cheaper than therapy.{RESET}",
+    lambda cost, games: f"{DIM}[SYS] SOFT_AVOID registered. Probability of contact reduced to {random.randint(5, 15)}%.{RESET}",
+    lambda cost, games: f"{DIM}[{_ts()}] Client paid {cost} JC for {games} games of {corrupt_text('peace')}.{RESET}",
+    lambda cost, games: f"{DIM}[JOPA-T] Avoidance is not a solution. But {cost} JC is {cost} JC.{RESET}",
+]
+
+
+def soft_avoid_surveillance(cost: int, games: int) -> str:
+    """Layer 2 ASCII art for soft avoid purchase - surveillance style."""
+    lines = [
+        f"{YELLOW} SOCIAL ENGINEERING REPORT{RESET}",
+        f"{DIM}{'=' * 36}{RESET}",
+        f"{DIM}TYPE:{RESET} Soft Avoid",
+        f"{DIM}COST:{RESET} {cost} JC",
+        f"{DIM}DURATION:{RESET} {games} games",
+        f"{DIM}{'=' * 36}{RESET}",
+        f"",
+        f"{DIM}[{_ts()}] Motive:{RESET} {corrupt_text('personal')}",
+        f"{DIM}[{_ts()}] Threat level:{RESET} {YELLOW}INTERPERSONAL{RESET}",
+        f"{DIM}[{_ts()}] Shuffler bias:{RESET} ENGAGED",
+        f"",
+        f"{DIM}The system will try to keep them{RESET}",
+        f"{DIM}apart. No guarantees. There are{RESET}",
+        f"{DIM}never any {RESET}{corrupt_text('guarantees')}{DIM}.{RESET}",
+    ]
+    return "\n".join(lines)
+
+
+def render_soft_avoid(cost: int, games: int) -> str:
+    """Render a Layer 1 soft avoid one-liner."""
+    template = random.choice(SOFT_AVOID_TEMPLATES)
+    return ansi_block(template(cost, games))
+
+
+def render_soft_avoid_surveillance(cost: int, games: int) -> str:
+    """Render a Layer 2 soft avoid surveillance report."""
+    return ansi_block(soft_avoid_surveillance(cost, games))

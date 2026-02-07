@@ -929,6 +929,18 @@ class MatchService:
             if self.soft_avoid_repo and effective_avoid_ids:
                 self.soft_avoid_repo.decrement_avoids(guild_id, effective_avoid_ids)
 
+            # Find the most notable streak (longest, >=5 games) for neon hooks
+            notable_streak = None
+            for pid, (slen, _smult) in streak_data.items():
+                if slen >= 5:
+                    if notable_streak is None or slen > notable_streak["streak"]:
+                        won = (pid in radiant_team_ids and winning_team == "radiant") or \
+                              (pid in dire_team_ids and winning_team == "dire")
+                        notable_streak = {
+                            "discord_id": pid,
+                            "streak": slen,
+                            "is_win": won,
+                        }
             # Clear state after successful record
             self.clear_last_shuffle(guild_id)
 
@@ -940,6 +952,7 @@ class MatchService:
                 "losing_player_ids": losing_ids,
                 "bet_distributions": distributions,
                 "loan_repayments": loan_repayments,
+                "notable_streak": notable_streak,
             }
         finally:
             with self._recording_lock:

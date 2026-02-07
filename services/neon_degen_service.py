@@ -27,11 +27,20 @@ from utils.neon_terminal import (
     render_balance_zero,
     render_bankruptcy_filing,
     render_bet_placed,
+    render_coinflip,
     render_cooldown_hit,
     render_debt_collector,
+    render_don_lose,
+    render_don_loss_box,
+    render_don_win,
     render_loan_taken,
     render_match_recorded,
     render_negative_loan,
+    render_prediction_market_crash,
+    render_prediction_resolved,
+    render_registration,
+    render_soft_avoid,
+    render_soft_avoid_surveillance,
     render_streak,
     render_system_breach,
     render_wheel_bankrupt,
@@ -198,6 +207,62 @@ class NeonDegenService:
             logger.debug(f"LLM terminal commentary failed: {e}")
             return None
 
+    async def _generate_text(
+        self,
+        event_description: str,
+        player_context: dict[str, Any],
+        fallback_text: str,
+    ) -> str:
+        """Try LLM-generated terminal text; fall back to static template instantly."""
+        if not self.ai_service:
+            return fallback_text
+        try:
+            import re
+
+            # Strip ansi code block wrapper from fallback so LLM sees raw template
+            raw_fallback = fallback_text
+            if raw_fallback.startswith("```ansi\n") and raw_fallback.endswith("\n```"):
+                raw_fallback = raw_fallback[8:-4]
+            # Strip ANSI escape codes for the LLM
+            clean_fallback = re.sub(r"\u001b\[[0-9;]*m", "", raw_fallback)
+
+            context_str = "\n".join(
+                f"  {k}: {v}" for k, v in player_context.items() if v is not None
+            )
+            prompt = (
+                f"Event: {event_description}\n"
+                f"Player context:\n{context_str}\n\n"
+                f"Example output (match this style and length):\n{clean_fallback}\n\n"
+                f"Generate a 2-4 line terminal log response as JOPA-T/v3.7. "
+                f"Match the tone and format of the example but vary the content. "
+                f"Use timestamps like [HH:MM:SS.mmm] and status codes. "
+                f"Be darkly funny and terse. Do NOT use emojis or exclamation marks."
+            )
+            result = await self.ai_service.complete(
+                prompt=prompt,
+                system_prompt=JOPAT_SYSTEM_PROMPT,
+                temperature=0.9,
+                max_tokens=200,
+            )
+            if result:
+                from utils.neon_terminal import ansi_block
+
+                # Strip markdown code fences the LLM may have included
+                stripped = result.strip()
+                if stripped.startswith("```"):
+                    first_nl = stripped.find("\n")
+                    if first_nl != -1:
+                        stripped = stripped[first_nl + 1 :]
+                    if stripped.endswith("```"):
+                        stripped = stripped[: -3]
+                    stripped = stripped.strip()
+                if stripped:
+                    return ansi_block(stripped)
+                return ansi_block(result)
+        except Exception as e:
+            logger.debug(f"LLM text generation failed, using template: {e}")
+        return fallback_text
+
     def _build_player_context(self, discord_id: int, guild_id: int | None) -> dict[str, Any]:
         """Build player context dict for LLM calls."""
         ctx: dict[str, Any] = {"discord_id": discord_id}
@@ -239,6 +304,11 @@ class NeonDegenService:
 
             name = self._get_player_name(discord_id, guild_id)
             text = render_balance_check(name, balance)
+            ctx = self._build_player_context(discord_id, guild_id)
+            text = await self._generate_text(
+                f"Client {name} checked their balance: {balance} JC",
+                ctx, text,
+            )
             self._set_cooldown(discord_id, guild_id)
             return NeonResult(layer=1, text_block=text)
         except Exception as e:
@@ -259,11 +329,17 @@ class NeonDegenService:
                 return None
             if not self._check_cooldown(discord_id, guild_id):
                 return None
-            chance = 0.40 if leverage == 1 else 0.80
+            chance = 0.10 if leverage == 1 else 0.20
             if not self._roll(chance):
                 return None
 
             text = render_bet_placed(amount, team, leverage)
+            lev_note = f" at {leverage}x leverage" if leverage > 1 else ""
+            ctx = self._build_player_context(discord_id, guild_id)
+            text = await self._generate_text(
+                f"Client placed {amount} JC bet on {team}{lev_note}",
+                ctx, text,
+            )
             self._set_cooldown(discord_id, guild_id)
             return NeonResult(layer=1, text_block=text)
         except Exception as e:
@@ -285,17 +361,16 @@ class NeonDegenService:
 
             name = self._get_player_name(discord_id, guild_id)
 
+            ctx = self._build_player_context(discord_id, guild_id)
+
             # Layer 2: Hit MAX_DEBT
             if new_balance <= -MAX_DEBT:
                 if self._roll(0.90):
                     text = render_system_breach(name)
-                    llm = await self._get_llm_terminal_commentary(
+                    text = await self._generate_text(
                         f"Client hit MAX_DEBT floor of {-MAX_DEBT} JC",
-                        self._build_player_context(discord_id, guild_id),
+                        ctx, text,
                     )
-                    if llm:
-                        from utils.neon_terminal import ansi_block
-                        text += "\n" + ansi_block(llm)
                     self._set_cooldown(discord_id, guild_id)
                     return NeonResult(layer=2, text_block=text)
 
@@ -303,6 +378,10 @@ class NeonDegenService:
             if new_balance == 0 and not won:
                 if self._roll(0.70):
                     text = render_balance_zero(name)
+                    text = await self._generate_text(
+                        f"Client's balance hit exactly 0 JC after a lost bet",
+                        ctx, text,
+                    )
                     self._set_cooldown(discord_id, guild_id)
                     return NeonResult(layer=2, text_block=text)
 
@@ -325,20 +404,16 @@ class NeonDegenService:
 
             name = self._get_player_name(discord_id, guild_id)
 
+            ctx = self._build_player_context(discord_id, guild_id)
+            event_desc = f"Client filed bankruptcy #{filing_number}. Debt cleared: {debt_cleared} JC"
+
             # Layer 3: 3rd+ bankruptcy - terminal crash GIF
             if filing_number >= 3:
                 try:
                     from utils.neon_drawing import create_terminal_crash_gif
                     gif = create_terminal_crash_gif(name, filing_number)
                     text = render_bankruptcy_filing(name, debt_cleared, filing_number)
-                    llm = await self._get_llm_terminal_commentary(
-                        f"Client filed bankruptcy #{filing_number}. Debt cleared: {debt_cleared} JC. "
-                        f"This is their {filing_number}th filing. The system is breaking down.",
-                        self._build_player_context(discord_id, guild_id),
-                    )
-                    if llm:
-                        from utils.neon_terminal import ansi_block
-                        text += "\n" + ansi_block(llm)
+                    text = await self._generate_text(event_desc, ctx, text)
                     self._set_cooldown(discord_id, guild_id)
                     return NeonResult(layer=3, text_block=text, gif_file=gif)
                 except Exception as e:
@@ -351,6 +426,7 @@ class NeonDegenService:
                     from utils.neon_drawing import create_void_welcome_gif
                     gif = create_void_welcome_gif(name)
                     text = render_bankruptcy_filing(name, debt_cleared, filing_number)
+                    text = await self._generate_text(event_desc, ctx, text)
                     self._set_cooldown(discord_id, guild_id)
                     return NeonResult(layer=3, text_block=text, gif_file=gif)
                 except Exception as e:
@@ -358,13 +434,7 @@ class NeonDegenService:
 
             # Layer 2: Standard bankruptcy filing (100% chance)
             text = render_bankruptcy_filing(name, debt_cleared, filing_number)
-            llm = await self._get_llm_terminal_commentary(
-                f"Client filed bankruptcy #{filing_number}. Debt cleared: {debt_cleared} JC.",
-                self._build_player_context(discord_id, guild_id),
-            )
-            if llm:
-                from utils.neon_terminal import ansi_block
-                text += "\n" + ansi_block(llm)
+            text = await self._generate_text(event_desc, ctx, text)
             self._set_cooldown(discord_id, guild_id)
             return NeonResult(layer=2, text_block=text)
         except Exception as e:
@@ -386,20 +456,17 @@ class NeonDegenService:
 
             name = self._get_player_name(discord_id, guild_id)
 
+            ctx = self._build_player_context(discord_id, guild_id)
+
             # Layer 2: Negative loan (loan while in debt)
             if is_negative:
                 if self._roll(0.80):
                     new_debt = -(abs(total_owed))
                     text = render_negative_loan(name, amount, new_debt)
-                    llm = await self._get_llm_terminal_commentary(
-                        f"Client took a loan of {amount} JC while already in debt. "
-                        f"All winnings will be garnished after their next match. "
-                        f"New total debt: {abs(total_owed)} JC.",
-                        self._build_player_context(discord_id, guild_id),
+                    text = await self._generate_text(
+                        f"Client took a loan of {amount} JC while in debt",
+                        ctx, text,
                     )
-                    if llm:
-                        from utils.neon_terminal import ansi_block
-                        text += "\n" + ansi_block(llm)
                     self._set_cooldown(discord_id, guild_id)
                     return NeonResult(layer=2, text_block=text)
                 # Negative loan roll failed - don't fall through to layer 1
@@ -412,6 +479,10 @@ class NeonDegenService:
                 return None
 
             text = render_loan_taken(amount, total_owed)
+            text = await self._generate_text(
+                f"Client took a loan of {amount} JC. Total owed: {total_owed} JC",
+                ctx, text,
+            )
             self._set_cooldown(discord_id, guild_id)
             return NeonResult(layer=1, text_block=text)
         except Exception as e:
@@ -432,10 +503,16 @@ class NeonDegenService:
 
             name = self._get_player_name(discord_id, guild_id)
 
+            ctx = self._build_player_context(discord_id, guild_id)
+
             # Layer 2: Wheel BANKRUPT
             if result_value < 0:
                 if self._roll(0.30):
                     text = render_wheel_bankrupt(name, result_value)
+                    text = await self._generate_text(
+                        f"Client hit BANKRUPT on the wheel. Lost {abs(result_value)} JC",
+                        ctx, text,
+                    )
                     self._set_cooldown(discord_id, guild_id)
                     return NeonResult(layer=2, text_block=text)
 
@@ -476,11 +553,20 @@ class NeonDegenService:
                     if self._roll(0.60):
                         name = self._get_player_name(player_id, guild_id)
                         text = render_streak(name, abs(streak), is_win)
+                        ctx = self._build_player_context(player_id, guild_id)
+                        text = await self._generate_text(
+                            f"Client {name} is on a {abs(streak)}-game {'win' if is_win else 'loss'} streak",
+                            ctx, text,
+                        )
                         return NeonResult(layer=2, text_block=text)
 
             # Layer 1: Simple match footer
             if self._roll(0.20):
                 text = render_match_recorded()
+                text = await self._generate_text(
+                    "A match was just recorded. JOPA-T processes the data.",
+                    {}, text,
+                )
                 return NeonResult(layer=1, footer_text=text)
 
             return None
@@ -501,6 +587,11 @@ class NeonDegenService:
                 return None
 
             text = render_cooldown_hit(cooldown_type)
+            ctx = self._build_player_context(discord_id, guild_id)
+            text = await self._generate_text(
+                f"Client tried to use {cooldown_type} but hit the cooldown",
+                ctx, text,
+            )
             self._set_cooldown(discord_id, guild_id)
             return NeonResult(layer=1, text_block=text)
         except Exception as e:
@@ -527,14 +618,11 @@ class NeonDegenService:
             name = self._get_player_name(discord_id, guild_id)
             debt = abs(new_balance)
             text = render_debt_collector(name, debt)
-            llm = await self._get_llm_terminal_commentary(
-                f"Client lost a {leverage}x leveraged bet of {amount} JC. "
-                f"Now in debt: {debt} JC.",
-                self._build_player_context(discord_id, guild_id),
+            ctx = self._build_player_context(discord_id, guild_id)
+            text = await self._generate_text(
+                f"Client lost a {leverage}x leveraged bet of {amount} JC. Now in debt: {debt} JC",
+                ctx, text,
             )
-            if llm:
-                from utils.neon_terminal import ansi_block
-                text += "\n" + ansi_block(llm)
             self._set_cooldown(discord_id, guild_id)
 
             # Layer 3: 5x leverage into exactly MAX_DEBT
@@ -603,6 +691,11 @@ class NeonDegenService:
 
             from utils.neon_terminal import render_gamba_spectator
             text = render_gamba_spectator(display_name)
+            ctx = self._build_player_context(discord_id, guild_id)
+            text = await self._generate_text(
+                f"Client {display_name} is watching the lobby. Spectator mode.",
+                ctx, text,
+            )
             self._set_cooldown(discord_id, guild_id)
             return NeonResult(layer=1, text_block=text)
         except Exception as e:
@@ -625,10 +718,16 @@ class NeonDegenService:
             if not self._check_cooldown(discord_id, guild_id):
                 return None
 
+            ctx = self._build_player_context(discord_id, guild_id)
+
             # Layer 2: Surveillance report (5%)
             if self._roll(0.05):
                 from utils.neon_terminal import render_tip_surveillance
                 text = render_tip_surveillance(sender_name, recipient_name, amount, fee)
+                text = await self._generate_text(
+                    f"Client {sender_name} transferred {amount} JC to {recipient_name}. Fee: {fee} JC",
+                    ctx, text,
+                )
                 self._set_cooldown(discord_id, guild_id)
                 return NeonResult(layer=2, text_block=text)
 
@@ -636,10 +735,220 @@ class NeonDegenService:
             if self._roll(0.20):
                 from utils.neon_terminal import render_tip
                 text = render_tip(sender_name, recipient_name, amount)
+                text = await self._generate_text(
+                    f"Client {sender_name} tipped {amount} JC to {recipient_name}",
+                    ctx, text,
+                )
                 self._set_cooldown(discord_id, guild_id)
                 return NeonResult(layer=1, text_block=text)
 
             return None
         except Exception as e:
             logger.debug(f"neon on_tip error: {e}")
+            return None
+
+    async def on_double_or_nothing(
+        self,
+        discord_id: int,
+        guild_id: int | None,
+        won: bool,
+        balance_at_risk: int,
+        final_balance: int,
+    ) -> NeonResult | None:
+        """Trigger on Double or Nothing result. Layer 1 always on win, L2/L3 on loss."""
+        try:
+            if not self._is_enabled():
+                return None
+
+            name = self._get_player_name(discord_id, guild_id)
+            ctx = self._build_player_context(discord_id, guild_id)
+
+            if won:
+                # Layer 1: Always fire on win (100%)
+                text = render_don_win(name, final_balance)
+                text = await self._generate_text(
+                    f"Client won Double or Nothing. Balance: {final_balance} JC",
+                    ctx, text,
+                )
+                self._set_cooldown(discord_id, guild_id)
+                return NeonResult(layer=1, text_block=text)
+
+            # Loss path
+
+            # Layer 3: Large loss (>100 JC at risk) - coin flip GIF
+            if balance_at_risk > 100:
+                try:
+                    from utils.neon_drawing import create_don_coin_flip_gif
+                    gif = create_don_coin_flip_gif(name, balance_at_risk)
+                    text = render_don_loss_box(name, balance_at_risk)
+                    text = await self._generate_text(
+                        f"Client lost {balance_at_risk} JC in Double or Nothing. Balance: 0",
+                        ctx, text,
+                    )
+                    self._set_cooldown(discord_id, guild_id)
+                    return NeonResult(layer=3, text_block=text, gif_file=gif)
+                except Exception as e:
+                    logger.debug(f"DoN coin flip GIF failed: {e}")
+                    # Fall through to Layer 2
+
+            # Layer 2: Loss with >50 JC at risk (80%)
+            if balance_at_risk > 50 and self._roll(0.80):
+                text = render_don_loss_box(name, balance_at_risk)
+                text = await self._generate_text(
+                    f"Client lost {balance_at_risk} JC in Double or Nothing. Balance: 0",
+                    ctx, text,
+                )
+                self._set_cooldown(discord_id, guild_id)
+                return NeonResult(layer=2, text_block=text)
+
+            # Layer 1: Any loss (100%)
+            text = render_don_lose(name, balance_at_risk)
+            text = await self._generate_text(
+                f"Client lost {balance_at_risk} JC in Double or Nothing",
+                ctx, text,
+            )
+            self._set_cooldown(discord_id, guild_id)
+            return NeonResult(layer=1, text_block=text)
+
+        except Exception as e:
+            logger.debug(f"neon on_double_or_nothing error: {e}")
+            return None
+
+    async def on_draft_coinflip(
+        self,
+        guild_id: int | None,
+        winner_name: str,
+        loser_name: str,
+    ) -> NeonResult | None:
+        """Trigger on draft coinflip result. Layer 1 at 40% chance."""
+        try:
+            if not self._is_enabled():
+                return None
+            if not self._roll(0.40):
+                return None
+
+            text = render_coinflip(winner_name, loser_name)
+            text = await self._generate_text(
+                f"Draft coinflip: {winner_name} won, {loser_name} lost",
+                {"winner": winner_name, "loser": loser_name}, text,
+            )
+            return NeonResult(layer=1, text_block=text)
+        except Exception as e:
+            logger.debug(f"neon on_draft_coinflip error: {e}")
+            return None
+
+    async def on_registration(
+        self,
+        discord_id: int,
+        guild_id: int | None,
+        player_name: str,
+    ) -> NeonResult | None:
+        """Trigger on player registration. Layer 1 at 50%, one-time per user."""
+        try:
+            if not self._is_enabled():
+                return None
+            if not self._check_one_time(discord_id, guild_id, "registration"):
+                return None
+            if not self._roll(0.50):
+                return None
+
+            text = render_registration(player_name)
+            text = await self._generate_text(
+                f"New player '{player_name}' just registered. 3 JC starting balance.",
+                {"name": player_name}, text,
+            )
+            self._mark_one_time(discord_id, guild_id, "registration")
+            self._set_cooldown(discord_id, guild_id)
+            return NeonResult(layer=1, text_block=text)
+        except Exception as e:
+            logger.debug(f"neon on_registration error: {e}")
+            return None
+
+    async def on_prediction_resolved(
+        self,
+        guild_id: int | None,
+        question: str,
+        outcome: str,
+        total_pool: int,
+        winner_count: int,
+        loser_count: int,
+    ) -> NeonResult | None:
+        """Trigger on prediction market resolution. L1 30%, L2/L3 for large pools."""
+        try:
+            if not self._is_enabled():
+                return None
+
+            event_desc = f"Prediction resolved: '{question}' -> {outcome}. Pool: {total_pool} JC"
+            pred_ctx: dict[str, Any] = {
+                "question": question, "outcome": outcome,
+                "total_pool": total_pool, "winners": winner_count, "losers": loser_count,
+            }
+
+            # Layer 3: Massive pool (>=500 JC) - market crash GIF
+            if total_pool >= 500:
+                try:
+                    from utils.neon_drawing import create_market_crash_gif
+                    gif = create_market_crash_gif(total_pool, outcome, winner_count, loser_count)
+                    text = render_prediction_market_crash(
+                        question, total_pool, outcome, winner_count, loser_count
+                    )
+                    text = await self._generate_text(event_desc, pred_ctx, text)
+                    return NeonResult(layer=3, text_block=text, gif_file=gif)
+                except Exception as e:
+                    logger.debug(f"Market crash GIF failed: {e}")
+                    # Fall through to Layer 2
+
+            # Layer 2: Large pool (>=200 JC) at 70%
+            if total_pool >= 200 and self._roll(0.70):
+                text = render_prediction_market_crash(
+                    question, total_pool, outcome, winner_count, loser_count
+                )
+                text = await self._generate_text(event_desc, pred_ctx, text)
+                return NeonResult(layer=2, text_block=text)
+
+            # Layer 1: Any resolution at 30%
+            if not self._roll(0.30):
+                return None
+
+            text = render_prediction_resolved(question, outcome, total_pool)
+            text = await self._generate_text(event_desc, pred_ctx, text)
+            return NeonResult(layer=1, text_block=text)
+        except Exception as e:
+            logger.debug(f"neon on_prediction_resolved error: {e}")
+            return None
+
+    async def on_soft_avoid(
+        self,
+        discord_id: int,
+        guild_id: int | None,
+        cost: int,
+        games: int,
+    ) -> NeonResult | None:
+        """Trigger on soft avoid purchase. 10% Layer 2, 25% Layer 1."""
+        try:
+            if not self._is_enabled():
+                return None
+            if not self._check_cooldown(discord_id, guild_id):
+                return None
+
+            ctx = self._build_player_context(discord_id, guild_id)
+            event_desc = f"Client purchased a soft avoid for {cost} JC. Duration: {games} games"
+
+            # Layer 2: Surveillance report (10%)
+            if self._roll(0.10):
+                text = render_soft_avoid_surveillance(cost, games)
+                text = await self._generate_text(event_desc, ctx, text)
+                self._set_cooldown(discord_id, guild_id)
+                return NeonResult(layer=2, text_block=text)
+
+            # Layer 1: One-liner (25%)
+            if self._roll(0.25):
+                text = render_soft_avoid(cost, games)
+                text = await self._generate_text(event_desc, ctx, text)
+                self._set_cooldown(discord_id, guild_id)
+                return NeonResult(layer=1, text_block=text)
+
+            return None
+        except Exception as e:
+            logger.debug(f"neon on_soft_avoid error: {e}")
             return None

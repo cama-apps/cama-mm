@@ -665,6 +665,30 @@ class ShopCommands(commands.Cog):
                     f"Wait **{time_str.strip()}** before your next Double or Nothing.",
                     ephemeral=True,
                 )
+                # Neon Degen Terminal hook (cooldown hit)
+                try:
+                    from services.neon_degen_service import NeonDegenService
+                    _neon_svc = getattr(self.bot, "neon_degen_service", None)
+                    neon = _neon_svc if isinstance(_neon_svc, NeonDegenService) else None
+                    if neon:
+                        neon_result = await neon.on_cooldown_hit(user_id, guild_id, "double_or_nothing")
+                        if neon_result:
+                            msg = None
+                            if neon_result.text_block:
+                                msg = await interaction.channel.send(neon_result.text_block)
+                            elif neon_result.footer_text:
+                                msg = await interaction.channel.send(neon_result.footer_text)
+                            if msg:
+                                import asyncio
+                                async def _del(m, d):
+                                    try:
+                                        await asyncio.sleep(d)
+                                        await m.delete()
+                                    except Exception:
+                                        pass
+                                asyncio.create_task(_del(msg, 60))
+                except Exception:
+                    pass
                 return
 
         # Check balance
@@ -878,6 +902,35 @@ class ShopCommands(commands.Cog):
         # Ephemeral response (private)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
+        # Neon Degen Terminal hook (soft avoid purchase)
+        try:
+            from services.neon_degen_service import NeonDegenService
+            _neon_svc = getattr(self.bot, "neon_degen_service", None)
+            neon = _neon_svc if isinstance(_neon_svc, NeonDegenService) else None
+            if neon:
+                neon_result = await neon.on_soft_avoid(
+                    user_id, guild_id,
+                    cost=cost,
+                    games=SOFT_AVOID_GAMES_DURATION,
+                )
+                if neon_result:
+                    msg = None
+                    if neon_result.text_block:
+                        msg = await interaction.channel.send(neon_result.text_block)
+                    elif neon_result.footer_text:
+                        msg = await interaction.channel.send(neon_result.footer_text)
+                    if msg:
+                        import asyncio
+                        async def _del_neon(m, d):
+                            try:
+                                await asyncio.sleep(d)
+                                await m.delete()
+                            except Exception:
+                                pass
+                        asyncio.create_task(_del_neon(msg, 60))
+        except Exception:
+            pass
+
     @app_commands.command(name="myavoids", description="View your active soft avoids")
     async def myavoids(self, interaction: discord.Interaction):
         """View your active soft avoids."""
@@ -917,6 +970,41 @@ class ShopCommands(commands.Cog):
         # Ephemeral response (private)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
+        # Neon Degen Terminal hook (double or nothing result)
+        try:
+            from services.neon_degen_service import NeonDegenService
+            _neon_svc = getattr(self.bot, "neon_degen_service", None)
+            neon = _neon_svc if isinstance(_neon_svc, NeonDegenService) else None
+            if neon:
+                neon_result = await neon.on_double_or_nothing(
+                    user_id, guild_id,
+                    won=won,
+                    balance_at_risk=balance_after_cost,
+                    final_balance=final_balance,
+                )
+                if neon_result:
+                    msg = None
+                    if neon_result.gif_file:
+                        gif_file = discord.File(neon_result.gif_file, filename="jopat_terminal.gif")
+                        if neon_result.text_block:
+                            msg = await interaction.channel.send(neon_result.text_block, file=gif_file)
+                        else:
+                            msg = await interaction.channel.send(file=gif_file)
+                    elif neon_result.text_block:
+                        msg = await interaction.channel.send(neon_result.text_block)
+                    elif neon_result.footer_text:
+                        msg = await interaction.channel.send(neon_result.footer_text)
+                    if msg:
+                        import asyncio
+                        async def _del_neon(m, d):
+                            try:
+                                await asyncio.sleep(d)
+                                await m.delete()
+                            except Exception:
+                                pass
+                        asyncio.create_task(_del_neon(msg, 60))
+        except Exception:
+            pass
 
 async def setup(bot: commands.Bot):
     player_service = getattr(bot, "player_service", None)

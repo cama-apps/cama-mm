@@ -959,6 +959,14 @@ class BettingCommands(commands.Cog):
                     f"You already spun the wheel today! Try again in **{hours}h {minutes}m**.",
                     ephemeral=True,
                 )
+                # Neon Degen Terminal hook (cooldown hit)
+                neon = self._get_neon_service()
+                if neon:
+                    try:
+                        neon_result = await neon.on_cooldown_hit(user_id, guild_id, "gamba")
+                        await self._send_neon_result(interaction, neon_result)
+                    except Exception:
+                        pass
                 return
         else:
             # Admin bypass - still set the timestamp for consistency
@@ -1173,6 +1181,16 @@ class BettingCommands(commands.Cog):
                 new_balance=new_balance,
             )
             await self._send_neon_result(interaction, neon_result)
+
+        # Neon Degen Terminal hook (degen milestone check after gamba)
+        if neon:
+            try:
+                degen_score = neon._get_degen_score(user_id, guild_id)
+                if degen_score is not None and degen_score >= 90:
+                    milestone = await neon.on_degen_milestone(user_id, guild_id, degen_score)
+                    await self._send_neon_result(interaction, milestone)
+            except Exception:
+                pass
 
     @app_commands.command(name="tip", description="Give jopacoin to another player")
     @app_commands.describe(
@@ -1441,6 +1459,14 @@ class BettingCommands(commands.Cog):
                     f"{message}\n\nThey can file again {cooldown_str}.",
                     ephemeral=False,
                 )
+                # Neon Degen Terminal hook (cooldown hit)
+                neon = self._get_neon_service()
+                if neon:
+                    try:
+                        neon_result = await neon.on_cooldown_hit(user_id, guild_id, "bankruptcy")
+                        await self._send_neon_result(interaction, neon_result)
+                    except Exception:
+                        pass
                 return
 
         # Declare bankruptcy
@@ -1499,6 +1525,15 @@ class BettingCommands(commands.Cog):
                 filing_number=filing_number,
             )
             await self._send_neon_result(interaction, neon_result)
+
+            # Degen milestone check after bankruptcy
+            try:
+                degen_score = neon._get_degen_score(user_id, guild_id)
+                if degen_score is not None and degen_score >= 90:
+                    milestone = await neon.on_degen_milestone(user_id, guild_id, degen_score)
+                    await self._send_neon_result(interaction, milestone)
+            except Exception:
+                pass
 
     def _get_bankruptcy_filing_number(self, discord_id: int, guild_id: int | None) -> int:
         """Get the current bankruptcy filing number for a user."""
@@ -1573,6 +1608,14 @@ class BettingCommands(commands.Cog):
                 await interaction.followup.send(
                     f"{msg}\n\n⏳ Cooldown ends in **{hours}h {minutes}m**.",
                 )
+                # Neon Degen Terminal hook (cooldown hit)
+                neon = self._get_neon_service()
+                if neon:
+                    try:
+                        neon_result = await neon.on_cooldown_hit(user_id, guild_id, "loan")
+                        await self._send_neon_result(interaction, neon_result)
+                    except Exception:
+                        pass
                 return
             elif check["reason"] == "exceeds_debt_limit":
                 # Try AI flavor, fallback to static message
