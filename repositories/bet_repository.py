@@ -49,6 +49,7 @@ class BetRepository(BaseRepository, IBetRepository):
         max_debt: int = 500,
         is_blind: bool = False,
         odds_at_placement: float | None = None,
+        allow_negative: bool = False,
     ) -> int:
         """
         Atomically place a bet with optional leverage:
@@ -60,6 +61,7 @@ class BetRepository(BaseRepository, IBetRepository):
         Args:
             is_blind: True if this is an auto-liquidity blind bet
             odds_at_placement: The odds multiplier at time of bet placement (for /bets display)
+            allow_negative: If True, allows going into debt at 1x leverage (for bomb pot antes)
 
         This prevents race conditions where concurrent calls could double-spend.
         """
@@ -104,17 +106,22 @@ class BetRepository(BaseRepository, IBetRepository):
 
             balance = int(row["balance"])
 
-            # Users in debt cannot place any bets
-            if balance < 0:
+            # Users in debt cannot place any bets (unless allow_negative for bomb pot)
+            if balance < 0 and not allow_negative:
                 raise ValueError(
                     "You cannot place bets while in debt. Win some games to pay it off!"
                 )
 
-            # Balance check depends on leverage:
+            # Balance check depends on leverage and allow_negative:
             # - No leverage (1x): cannot go negative, must have enough balance
             # - With leverage (>1x): can go into debt up to -max_debt
+            # - allow_negative=True (bomb pot): can go into debt at 1x leverage up to -max_debt
             new_balance = balance - effective_bet
-            if leverage == 1:
+            if allow_negative:
+                # Bomb pot mode: allow going into debt up to max_debt at 1x leverage
+                if new_balance < -max_debt:
+                    raise ValueError(f"Bet would exceed maximum debt limit of {max_debt} jopacoin.")
+            elif leverage == 1:
                 if balance < amount:
                     raise ValueError(f"Insufficient balance. You have {balance} jopacoin.")
             else:

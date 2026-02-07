@@ -1879,3 +1879,279 @@ class TestBlindBets:
         # Verify player balances restored
         for pid in player_ids:
             assert player_repo.get_balance(pid, TEST_GUILD_ID) == 100
+
+
+class TestBombPot:
+    """Tests for bomb pot feature (higher stakes, mandatory ante, bonus participation)."""
+
+    def test_bomb_pot_blind_bets_higher_percentage(self, services):
+        """Bomb pot uses 10% instead of 5% for blind bets."""
+        player_repo = services["player_repo"]
+        betting_service = services["betting_service"]
+
+        # Set up players with 100 balance each
+        radiant_ids = [1001, 1002, 1003, 1004, 1005]
+        dire_ids = [1006, 1007, 1008, 1009, 1010]
+        for pid in radiant_ids + dire_ids:
+            player_repo.add(
+                discord_id=pid,
+                discord_username=f"Player{pid}",
+                dotabuff_url=f"https://dotabuff.com/players/{pid}",
+                initial_mmr=3000,
+                glicko_rating=1500.0,
+                guild_id=TEST_GUILD_ID,
+            )
+            player_repo.add_balance(pid, TEST_GUILD_ID, 97)  # 100 total (3 default + 97)
+
+        now_ts = int(time.time())
+
+        # Normal mode: 5% of 100 = 5 JC per player
+        normal_result = betting_service.create_auto_blind_bets(
+            guild_id=TEST_GUILD_ID,
+            radiant_ids=radiant_ids,
+            dire_ids=dire_ids,
+            shuffle_timestamp=now_ts,
+            is_bomb_pot=False,
+        )
+        # 10 players * 5 JC = 50 total
+        assert normal_result["total_radiant"] + normal_result["total_dire"] == 50
+
+        # Reset balances for bomb pot test
+        for pid in radiant_ids + dire_ids:
+            current = player_repo.get_balance(pid, TEST_GUILD_ID)
+            player_repo.add_balance(pid, TEST_GUILD_ID, 100 - current)
+
+        # Bomb pot mode: 10% of 100 = 10 JC + 10 JC ante = 20 JC per player
+        bomb_pot_result = betting_service.create_auto_blind_bets(
+            guild_id=TEST_GUILD_ID,
+            radiant_ids=radiant_ids,
+            dire_ids=dire_ids,
+            shuffle_timestamp=now_ts + 1,  # Different timestamp
+            is_bomb_pot=True,
+        )
+        # 10 players * 20 JC = 200 total
+        assert bomb_pot_result["total_radiant"] + bomb_pot_result["total_dire"] == 200
+        assert bomb_pot_result["is_bomb_pot"] is True
+
+    def test_bomb_pot_mandatory_ante_no_threshold(self, services):
+        """Bomb pot ante is mandatory - players below threshold still participate."""
+        player_repo = services["player_repo"]
+        betting_service = services["betting_service"]
+
+        # Set up players with LOW balance (below normal threshold of 50)
+        radiant_ids = [2001, 2002, 2003, 2004, 2005]
+        dire_ids = [2006, 2007, 2008, 2009, 2010]
+        for pid in radiant_ids + dire_ids:
+            player_repo.add(
+                discord_id=pid,
+                discord_username=f"Player{pid}",
+                dotabuff_url=f"https://dotabuff.com/players/{pid}",
+                initial_mmr=3000,
+                glicko_rating=1500.0,
+                guild_id=TEST_GUILD_ID,
+            )
+            # Low balance: 20 JC (below 50 threshold)
+            player_repo.add_balance(pid, TEST_GUILD_ID, 17)  # 20 total
+
+        now_ts = int(time.time())
+
+        # Normal mode: should skip all players (below threshold)
+        normal_result = betting_service.create_auto_blind_bets(
+            guild_id=TEST_GUILD_ID,
+            radiant_ids=radiant_ids,
+            dire_ids=dire_ids,
+            shuffle_timestamp=now_ts,
+            is_bomb_pot=False,
+        )
+        assert normal_result["created"] == 0
+        assert len(normal_result["skipped"]) == 10
+
+        # Bomb pot mode: should include all players (mandatory)
+        bomb_pot_result = betting_service.create_auto_blind_bets(
+            guild_id=TEST_GUILD_ID,
+            radiant_ids=radiant_ids,
+            dire_ids=dire_ids,
+            shuffle_timestamp=now_ts + 1,
+            is_bomb_pot=True,
+        )
+        assert bomb_pot_result["created"] == 10
+        assert len(bomb_pot_result["skipped"]) == 0
+
+        # Each player bets: 10% of 20 = 2 + 10 ante = 12 JC
+        # Total: 10 * 12 = 120
+        assert bomb_pot_result["total_radiant"] + bomb_pot_result["total_dire"] == 120
+
+    def test_bomb_pot_participation_bonus_losers(self, services):
+        """Losers in bomb pot get base participation + bomb pot bonus."""
+        player_repo = services["player_repo"]
+        betting_service = services["betting_service"]
+
+        losing_ids = [3001, 3002, 3003, 3004, 3005]
+        for pid in losing_ids:
+            player_repo.add(
+                discord_id=pid,
+                discord_username=f"Player{pid}",
+                dotabuff_url=f"https://dotabuff.com/players/{pid}",
+                guild_id=TEST_GUILD_ID,
+            )
+
+        # Normal mode: losers get 1 JC
+        normal_result = betting_service.award_participation(losing_ids, TEST_GUILD_ID, is_bomb_pot=False)
+        for pid in losing_ids:
+            assert normal_result[pid]["net"] == 1
+            assert normal_result[pid]["bomb_pot_bonus"] == 0
+
+        # Bomb pot mode: losers get 1 + 1 = 2 JC
+        bomb_pot_result = betting_service.award_participation(losing_ids, TEST_GUILD_ID, is_bomb_pot=True)
+        for pid in losing_ids:
+            assert bomb_pot_result[pid]["net"] == 2
+            assert bomb_pot_result[pid]["bomb_pot_bonus"] == 1
+
+    def test_bomb_pot_participation_bonus_winners_only_bonus(self, services):
+        """Winners in bomb pot get only the bomb pot bonus (not base participation)."""
+        player_repo = services["player_repo"]
+        betting_service = services["betting_service"]
+
+        winning_ids = [4001, 4002, 4003, 4004, 4005]
+        for pid in winning_ids:
+            player_repo.add(
+                discord_id=pid,
+                discord_username=f"Player{pid}",
+                dotabuff_url=f"https://dotabuff.com/players/{pid}",
+                guild_id=TEST_GUILD_ID,
+            )
+
+        # With bomb_pot_bonus_only=True, winners get only the +1 bonus
+        result = betting_service.award_participation(
+            winning_ids, TEST_GUILD_ID, is_bomb_pot=True, bomb_pot_bonus_only=True
+        )
+        for pid in winning_ids:
+            assert result[pid]["net"] == 1  # Only bomb pot bonus, no base
+            assert result[pid]["bomb_pot_bonus"] == 1
+
+    def test_bomb_pot_bonus_only_no_bomb_pot_gives_nothing(self, services):
+        """If bomb_pot_bonus_only but not bomb pot, give nothing."""
+        player_repo = services["player_repo"]
+        betting_service = services["betting_service"]
+
+        player_ids = [5001, 5002]
+        for pid in player_ids:
+            player_repo.add(
+                discord_id=pid,
+                discord_username=f"Player{pid}",
+                dotabuff_url=f"https://dotabuff.com/players/{pid}",
+                guild_id=TEST_GUILD_ID,
+            )
+
+        # bomb_pot_bonus_only=True but is_bomb_pot=False should give 0
+        result = betting_service.award_participation(
+            player_ids, TEST_GUILD_ID, is_bomb_pot=False, bomb_pot_bonus_only=True
+        )
+        for pid in player_ids:
+            assert result[pid]["net"] == 0
+            assert result[pid]["bomb_pot_bonus"] == 0
+
+    def test_bomb_pot_zero_balance_still_antes(self, services):
+        """Players with zero balance still ante in bomb pot (can go negative)."""
+        player_repo = services["player_repo"]
+        betting_service = services["betting_service"]
+
+        # Player with exactly 0 balance
+        player_id = 6001
+        player_repo.add(
+            discord_id=player_id,
+            discord_username="ZeroPlayer",
+            dotabuff_url="https://dotabuff.com/players/6001",
+            guild_id=TEST_GUILD_ID,
+        )
+        # Remove the default 3 JC
+        player_repo.add_balance(player_id, TEST_GUILD_ID, -3)
+        assert player_repo.get_balance(player_id, TEST_GUILD_ID) == 0
+
+        now_ts = int(time.time())
+
+        result = betting_service.create_auto_blind_bets(
+            guild_id=TEST_GUILD_ID,
+            radiant_ids=[player_id],
+            dire_ids=[],
+            shuffle_timestamp=now_ts,
+            is_bomb_pot=True,
+        )
+
+        # Should create bet even with 0 balance
+        assert result["created"] == 1
+        # 10% of 0 = 0 + 10 ante = 10 JC
+        assert result["total_radiant"] == 10
+        # Balance should be negative now (-10)
+        assert player_repo.get_balance(player_id, TEST_GUILD_ID) == -10
+
+    def test_bomb_pot_player_already_in_debt_can_ante(self, services):
+        """Players already in debt can still ante in bomb pot (up to max_debt)."""
+        player_repo = services["player_repo"]
+        betting_service = services["betting_service"]
+
+        # Player already in debt (-100 balance)
+        player_id = 7001
+        player_repo.add(
+            discord_id=player_id,
+            discord_username="DebtPlayer",
+            dotabuff_url="https://dotabuff.com/players/7001",
+            guild_id=TEST_GUILD_ID,
+        )
+        # Set balance to -100 (3 default - 103 = -100)
+        player_repo.add_balance(player_id, TEST_GUILD_ID, -103)
+        assert player_repo.get_balance(player_id, TEST_GUILD_ID) == -100
+
+        now_ts = int(time.time())
+
+        result = betting_service.create_auto_blind_bets(
+            guild_id=TEST_GUILD_ID,
+            radiant_ids=[player_id],
+            dire_ids=[],
+            shuffle_timestamp=now_ts,
+            is_bomb_pot=True,
+        )
+
+        # Should create bet even with negative balance
+        assert result["created"] == 1
+        # 10% of -100 = 0 (negative balance treated as 0) + 10 ante = 10 JC
+        assert result["total_radiant"] == 10
+        # Balance should be -110 now
+        assert player_repo.get_balance(player_id, TEST_GUILD_ID) == -110
+
+    def test_bomb_pot_flag_persisted_in_pending_match(self, services):
+        """Verify is_bomb_pot flag is included in persisted pending match payload."""
+        match_service = services["match_service"]
+
+        # Create a mock pending state with is_bomb_pot=True
+        pending_state = {
+            "radiant_team_ids": [1, 2, 3, 4, 5],
+            "dire_team_ids": [6, 7, 8, 9, 10],
+            "radiant_roles": ["1", "2", "3", "4", "5"],
+            "dire_roles": ["1", "2", "3", "4", "5"],
+            "radiant_value": 7500.0,
+            "dire_value": 7500.0,
+            "value_diff": 0.0,
+            "first_pick_team": "radiant",
+            "shuffle_timestamp": int(time.time()),
+            "bet_lock_until": int(time.time()) + 900,
+            "betting_mode": "pool",
+            "is_bomb_pot": True,
+        }
+
+        # Build payload using the service's method
+        payload = match_service._build_pending_match_payload(pending_state)
+
+        # Verify is_bomb_pot is included
+        assert "is_bomb_pot" in payload
+        assert payload["is_bomb_pot"] is True
+
+        # Also verify non-bomb-pot matches work
+        pending_state["is_bomb_pot"] = False
+        payload = match_service._build_pending_match_payload(pending_state)
+        assert payload["is_bomb_pot"] is False
+
+        # And default case (missing key)
+        del pending_state["is_bomb_pot"]
+        payload = match_service._build_pending_match_payload(pending_state)
+        assert payload["is_bomb_pot"] is False

@@ -186,6 +186,7 @@ class MatchService:
             "betting_mode": state.get("betting_mode", "pool"),
             "is_draft": state.get("is_draft", False),
             "effective_avoid_ids": state.get("effective_avoid_ids", []),
+            "is_bomb_pot": state.get("is_bomb_pot", False),
         }
 
     def _persist_match_state(self, guild_id: int | None, state: dict) -> None:
@@ -705,9 +706,19 @@ class MatchService:
                     self.player_repo.increment_losses(pid, guild_id)
 
             distributions = {"winners": [], "losers": []}
+            is_bomb_pot = last_shuffle.get("is_bomb_pot", False)
             if self.betting_service:
-                # Reward participation only for the losing team; winners get the win bonus separately.
-                self.betting_service.award_participation(losing_ids, guild_id)
+                # Reward participation for the losing team (1 JC base + bomb pot bonus if applicable)
+                self.betting_service.award_participation(losing_ids, guild_id, is_bomb_pot=is_bomb_pot)
+
+                # In bomb pot mode, winners ALSO get the bomb pot participation bonus (+1 JC)
+                # This is on top of their win bonus, giving all 10 players the +1 JC bomb pot bonus
+                # Use bomb_pot_bonus_only=True so they don't get the base participation (just the bonus)
+                if is_bomb_pot:
+                    self.betting_service.award_participation(
+                        winning_ids, guild_id, is_bomb_pot=True, bomb_pot_bonus_only=True
+                    )
+
                 distributions = self.betting_service.settle_bets(
                     match_id, guild_id, winning_team, pending_state=last_shuffle
                 )

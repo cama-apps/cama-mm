@@ -11,7 +11,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from config import ENRICHMENT_RETRY_DELAYS, JOPACOIN_MIN_BET
+from config import BOMB_POT_CHANCE, ENRICHMENT_RETRY_DELAYS, JOPACOIN_MIN_BET
 from services.flavor_text_service import FlavorEvent
 from services.lobby_service import LobbyService
 from services.match_discovery_service import MatchDiscoveryService
@@ -479,6 +479,19 @@ class MatchCommands(commands.Cog):
         first_pick_team = result["first_pick_team"]
         excluded_ids = result["excluded_ids"]
 
+        # Determine if this is a bomb pot match (~10% chance)
+        is_bomb_pot = random.random() < BOMB_POT_CHANCE
+
+        # Store bomb pot status in pending state and persist to DB
+        pending_state = self.match_service.get_last_shuffle(guild_id)
+        if pending_state:
+            pending_state["is_bomb_pot"] = is_bomb_pot
+            # Persist to DB so bomb pot survives bot restart
+            self.match_service._persist_match_state(guild_id, pending_state)
+
+        if is_bomb_pot:
+            logger.info(f"💣 BOMB POT triggered for guild {guild_id}")
+
         # Create auto-liquidity blind bets for pool mode
         blind_bets_result = None
         if mode == "pool":
@@ -492,12 +505,14 @@ class MatchCommands(commands.Cog):
                         radiant_ids=pending_state["radiant_team_ids"],
                         dire_ids=pending_state["dire_team_ids"],
                         shuffle_timestamp=pending_state["shuffle_timestamp"],
+                        is_bomb_pot=is_bomb_pot,
                     )
                     if blind_bets_result["created"] > 0:
                         logger.info(
                             f"Created {blind_bets_result['created']} blind bets: "
                             f"Radiant={blind_bets_result['total_radiant']}, "
                             f"Dire={blind_bets_result['total_dire']}"
+                            f"{' (BOMB POT)' if is_bomb_pot else ''}"
                         )
                 except Exception as exc:
                     logger.warning(f"Failed to create blind bets: {exc}", exc_info=True)
@@ -515,7 +530,15 @@ class MatchCommands(commands.Cog):
         for (_r_role, r_line), (_d_role, d_line) in zip(radiant_sorted, dire_sorted):
             head_to_head.append(f"{r_line}  |  {d_line}")
 
-        embed = discord.Embed(title="Balanced Team Shuffle", color=discord.Color.blue())
+        # Build embed title with bomb pot banner if applicable
+        if is_bomb_pot:
+            embed_title = "💣 BOMB POT 💣 Balanced Team Shuffle"
+            embed_color = discord.Color.orange()
+        else:
+            embed_title = "Balanced Team Shuffle"
+            embed_color = discord.Color.blue()
+
+        embed = discord.Embed(title=embed_title, color=embed_color)
         first_pick_emoji = "🟢" if first_pick_team == "Radiant" else "🔴"
         embed.add_field(
             name=f"🟢 Radiant ({radiant_sum:.0f})  |  🔴 Dire ({dire_sum:.0f})",
@@ -604,12 +627,21 @@ class MatchCommands(commands.Cog):
 
         # Show blind bet summary if any were created
         if blind_bets_result and blind_bets_result["created"] > 0:
-            blind_note = (
-                f"**Auto-liquidity:** {blind_bets_result['created']} players contributed blind bets\n"
-                f"🟢 Radiant: {blind_bets_result['total_radiant']} {JOPACOIN_EMOTE} | "
-                f"🔴 Dire: {blind_bets_result['total_dire']} {JOPACOIN_EMOTE}"
-            )
-            embed.add_field(name="🎲 Blind Bets", value=blind_note, inline=False)
+            if is_bomb_pot:
+                blind_note = (
+                    f"💣 **BOMB POT:** All 10 players ante'd in! (10% + 10 {JOPACOIN_EMOTE} ante)\n"
+                    f"🟢 Radiant: {blind_bets_result['total_radiant']} {JOPACOIN_EMOTE} | "
+                    f"🔴 Dire: {blind_bets_result['total_dire']} {JOPACOIN_EMOTE}\n"
+                    f"_+1 bonus {JOPACOIN_EMOTE} for ALL players this match!_"
+                )
+                embed.add_field(name="💣 Bomb Pot Stakes", value=blind_note, inline=False)
+            else:
+                blind_note = (
+                    f"**Auto-liquidity:** {blind_bets_result['created']} players contributed blind bets\n"
+                    f"🟢 Radiant: {blind_bets_result['total_radiant']} {JOPACOIN_EMOTE} | "
+                    f"🔴 Dire: {blind_bets_result['total_dire']} {JOPACOIN_EMOTE}"
+                )
+                embed.add_field(name="🎲 Blind Bets", value=blind_note, inline=False)
 
         # Current wagers display
         betting_service = getattr(self.bot, "betting_service", None)
