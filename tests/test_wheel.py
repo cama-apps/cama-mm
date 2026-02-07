@@ -397,20 +397,21 @@ async def test_wheel_jackpot_result():
 
 
 def test_wheel_wedges_has_correct_count():
-    """Verify WHEEL_WEDGES has exactly 24 wedges."""
-    assert len(WHEEL_WEDGES) == 24
+    """Verify WHEEL_WEDGES has exactly 26 wedges (24 base + 2 shells)."""
+    assert len(WHEEL_WEDGES) == 26
 
 
 def test_wheel_wedges_distribution():
     """Verify the distribution of wheel wedges matches spec."""
-    # Bankrupt wedges have negative values
-    bankrupt_count = sum(1 for w in WHEEL_WEDGES if w[1] < 0)
+    # Bankrupt wedges have negative integer values
+    bankrupt_count = sum(1 for w in WHEEL_WEDGES if isinstance(w[1], int) and w[1] < 0)
     lose_turn_count = sum(1 for w in WHEEL_WEDGES if w[1] == 0)
-    small_count = sum(1 for w in WHEEL_WEDGES if 5 <= w[1] <= 10)
-    medium_count = sum(1 for w in WHEEL_WEDGES if 15 <= w[1] <= 25)
-    good_count = sum(1 for w in WHEEL_WEDGES if 30 <= w[1] <= 50)
-    great_count = sum(1 for w in WHEEL_WEDGES if 60 <= w[1] <= 80)
+    small_count = sum(1 for w in WHEEL_WEDGES if isinstance(w[1], int) and 5 <= w[1] <= 10)
+    medium_count = sum(1 for w in WHEEL_WEDGES if isinstance(w[1], int) and 15 <= w[1] <= 25)
+    good_count = sum(1 for w in WHEEL_WEDGES if isinstance(w[1], int) and 30 <= w[1] <= 50)
+    great_count = sum(1 for w in WHEEL_WEDGES if isinstance(w[1], int) and 60 <= w[1] <= 80)
     jackpot_count = sum(1 for w in WHEEL_WEDGES if w[1] == 100)
+    shell_count = sum(1 for w in WHEEL_WEDGES if isinstance(w[1], str))
 
     assert bankrupt_count == 2, f"Expected 2 Bankrupt wedges, got {bankrupt_count}"
     assert lose_turn_count == 1, f"Expected 1 Lose a Turn wedge, got {lose_turn_count}"
@@ -419,11 +420,17 @@ def test_wheel_wedges_distribution():
     assert good_count == 6, f"Expected 6 good win wedges, got {good_count}"
     assert great_count == 3, f"Expected 3 great win wedges, got {great_count}"
     assert jackpot_count == 2, f"Expected 2 Jackpot wedges, got {jackpot_count}"
+    assert shell_count == 2, f"Expected 2 shell wedges, got {shell_count}"
 
 
 def test_wheel_expected_value_matches_config():
-    """Verify the expected value of the wheel matches WHEEL_TARGET_EV config."""
-    total_value = sum(w[1] for w in WHEEL_WEDGES)
+    """Verify the expected value of the wheel matches WHEEL_TARGET_EV config.
+
+    Shell wedges are excluded from EV calculation as their value depends on
+    stealing from other players (assumed average EV of 0 for shells).
+    """
+    # Only sum integer values (exclude shell wedges with string values)
+    total_value = sum(w[1] for w in WHEEL_WEDGES if isinstance(w[1], int))
     expected_value = total_value / len(WHEEL_WEDGES)
 
     # EV should be close to the configured target (within 1 due to integer rounding)
@@ -432,10 +439,20 @@ def test_wheel_expected_value_matches_config():
 
 def test_wheel_bankrupt_always_negative():
     """Verify BANKRUPT wedges are always negative (capped at -1 minimum)."""
-    bankrupt_wedges = [w for w in WHEEL_WEDGES if w[1] < 0]
+    bankrupt_wedges = [w for w in WHEEL_WEDGES if isinstance(w[1], int) and w[1] < 0]
     assert len(bankrupt_wedges) == 2, "Should have exactly 2 bankrupt wedges"
     for w in bankrupt_wedges:
         assert w[1] <= -1, f"Bankrupt value {w[1]} should be <= -1"
+
+
+def test_wheel_shell_wedges_have_string_values():
+    """Verify shell wedges have string values for special handling."""
+    shell_wedges = [w for w in WHEEL_WEDGES if isinstance(w[1], str)]
+    assert len(shell_wedges) == 2, "Should have exactly 2 shell wedges"
+
+    shell_values = {w[1] for w in shell_wedges}
+    assert "RED_SHELL" in shell_values, "Should have RED_SHELL wedge"
+    assert "BLUE_SHELL" in shell_values, "Should have BLUE_SHELL wedge"
 
 
 @pytest.mark.asyncio
@@ -573,3 +590,277 @@ async def test_wheel_admin_bypasses_cooldown():
     # Admin should be able to spin despite cooldown - file attachment means spin happened
     call_kwargs = interaction.followup.send.call_args.kwargs
     assert "file" in call_kwargs
+
+
+@pytest.mark.asyncio
+async def test_wheel_red_shell_steals_from_player_above():
+    """Verify Red Shell steals from the player ranked above on leaderboard."""
+    from domain.models.player import Player
+
+    bot = MagicMock()
+    betting_service = MagicMock()
+    match_service = MagicMock()
+    player_service = MagicMock()
+
+    # User is registered
+    player_service.get_player.return_value = MagicMock(name="TestPlayer")
+    player_service.get_balance.return_value = 50
+
+    # Mock repository - player above exists
+    player_above = Player(
+        name="RicherPlayer",
+        discord_id=2001,
+        mmr=None,
+        initial_mmr=None,
+        wins=0,
+        losses=0,
+        preferred_roles=None,
+        main_role=None,
+        glicko_rating=None,
+        glicko_rd=None,
+        glicko_volatility=None,
+        jopacoin_balance=100,
+    )
+    player_service.player_repo = MagicMock()
+    player_service.player_repo.get_last_wheel_spin.return_value = None
+    player_service.player_repo.set_last_wheel_spin = MagicMock()
+    player_service.player_repo.try_claim_wheel_spin = MagicMock(return_value=True)
+    player_service.player_repo.log_wheel_spin = MagicMock(return_value=1)
+    player_service.player_repo.get_player_above = MagicMock(return_value=player_above)
+    player_service.player_repo.steal_atomic = MagicMock(return_value={
+        "amount": 3,
+        "thief_new_balance": 53,
+        "victim_new_balance": 97,
+    })
+
+    message = MagicMock()
+    message.edit = AsyncMock()
+
+    interaction = MagicMock()
+    interaction.guild = MagicMock()
+    interaction.guild.id = 123
+    interaction.guild.get_member = MagicMock(return_value=MagicMock(mention="@RicherPlayer"))
+    interaction.user.id = 1010
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock(return_value=message)
+
+    commands = BettingCommands(bot, betting_service, match_service, player_service)
+
+    # Find RED_SHELL index dynamically
+    red_shell_idx = next(i for i, w in enumerate(WHEEL_WEDGES) if w[1] == "RED_SHELL")
+
+    # Mock _create_wheel_gif_file to avoid GIF generation calling random.randint
+    with patch.object(commands, "_create_wheel_gif_file", return_value=MagicMock()):
+        with patch("commands.betting.random.randint") as mock_randint:
+            # First call for wedge selection, second for steal amount
+            mock_randint.side_effect = [red_shell_idx, 3]  # RED_SHELL, steal 3 JC
+            with patch("commands.betting.random.random", return_value=1.0):  # No explosion
+                with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
+                    await commands.gamba.callback(commands, interaction)
+
+    # Should call get_player_above
+    player_service.player_repo.get_player_above.assert_called_once_with(1010, 123)
+
+    # Should call steal_atomic for atomic transfer
+    player_service.player_repo.steal_atomic.assert_called_once_with(
+        thief_discord_id=1010,
+        victim_discord_id=2001,
+        guild_id=123,
+        amount=3,
+    )
+
+
+@pytest.mark.asyncio
+async def test_wheel_red_shell_misses_when_first_place():
+    """Verify Red Shell misses when user is already in first place."""
+    bot = MagicMock()
+    betting_service = MagicMock()
+    match_service = MagicMock()
+    player_service = MagicMock()
+
+    # User is registered
+    player_service.get_player.return_value = MagicMock(name="TestPlayer")
+    player_service.get_balance.return_value = 1000  # Highest balance
+
+    # Mock repository - no player above (user is #1)
+    player_service.player_repo = MagicMock()
+    player_service.player_repo.get_last_wheel_spin.return_value = None
+    player_service.player_repo.set_last_wheel_spin = MagicMock()
+    player_service.player_repo.try_claim_wheel_spin = MagicMock(return_value=True)
+    player_service.player_repo.log_wheel_spin = MagicMock(return_value=1)
+    player_service.player_repo.steal_atomic = MagicMock()
+    player_service.player_repo.get_player_above = MagicMock(return_value=None)
+
+    message = MagicMock()
+    message.edit = AsyncMock()
+
+    interaction = MagicMock()
+    interaction.guild = MagicMock()
+    interaction.guild.id = 123
+    interaction.user.id = 1011
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock(return_value=message)
+
+    commands = BettingCommands(bot, betting_service, match_service, player_service)
+
+    # Find RED_SHELL index dynamically
+    red_shell_idx = next(i for i, w in enumerate(WHEEL_WEDGES) if w[1] == "RED_SHELL")
+
+    # Mock _create_wheel_gif_file to avoid GIF generation calling random.randint
+    with patch.object(commands, "_create_wheel_gif_file", return_value=MagicMock()):
+        with patch("commands.betting.random.randint", return_value=red_shell_idx):
+            with patch("commands.betting.random.random", return_value=1.0):  # No explosion
+                with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
+                    await commands.gamba.callback(commands, interaction)
+
+    # Should NOT call steal_atomic (shell missed)
+    player_service.player_repo.steal_atomic.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_wheel_blue_shell_steals_from_richest():
+    """Verify Blue Shell steals from the richest player."""
+    from domain.models.player import Player
+
+    bot = MagicMock()
+    betting_service = MagicMock()
+    match_service = MagicMock()
+    player_service = MagicMock()
+
+    # User is registered (not the richest)
+    player_service.get_player.return_value = MagicMock(name="TestPlayer")
+    player_service.get_balance.return_value = 50
+
+    # Mock repository - richest player is someone else
+    richest = Player(
+        name="RichestPlayer",
+        discord_id=3001,
+        mmr=None,
+        initial_mmr=None,
+        wins=0,
+        losses=0,
+        preferred_roles=None,
+        main_role=None,
+        glicko_rating=None,
+        glicko_rd=None,
+        glicko_volatility=None,
+        jopacoin_balance=500,
+    )
+    player_service.player_repo = MagicMock()
+    player_service.player_repo.get_last_wheel_spin.return_value = None
+    player_service.player_repo.set_last_wheel_spin = MagicMock()
+    player_service.player_repo.try_claim_wheel_spin = MagicMock(return_value=True)
+    player_service.player_repo.log_wheel_spin = MagicMock(return_value=1)
+    player_service.player_repo.get_leaderboard = MagicMock(return_value=[richest])
+    player_service.player_repo.steal_atomic = MagicMock(return_value={
+        "amount": 5,
+        "thief_new_balance": 55,
+        "victim_new_balance": 495,
+    })
+
+    message = MagicMock()
+    message.edit = AsyncMock()
+
+    interaction = MagicMock()
+    interaction.guild = MagicMock()
+    interaction.guild.id = 123
+    interaction.guild.get_member = MagicMock(return_value=MagicMock(mention="@RichestPlayer"))
+    interaction.user.id = 1012
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock(return_value=message)
+
+    commands = BettingCommands(bot, betting_service, match_service, player_service)
+
+    # Find BLUE_SHELL index dynamically
+    blue_shell_idx = next(i for i, w in enumerate(WHEEL_WEDGES) if w[1] == "BLUE_SHELL")
+
+    # Mock _create_wheel_gif_file to avoid GIF generation calling random.randint
+    with patch.object(commands, "_create_wheel_gif_file", return_value=MagicMock()):
+        with patch("commands.betting.random.randint") as mock_randint:
+            # First call for wedge selection, second for steal amount
+            mock_randint.side_effect = [blue_shell_idx, 5]  # BLUE_SHELL, steal 5 JC
+            with patch("commands.betting.random.random", return_value=1.0):  # No explosion
+                with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
+                    await commands.gamba.callback(commands, interaction)
+
+    # Should call get_leaderboard
+    player_service.player_repo.get_leaderboard.assert_called_once_with(123, limit=1)
+
+    # Should call steal_atomic for atomic transfer
+    player_service.player_repo.steal_atomic.assert_called_once_with(
+        thief_discord_id=1012,
+        victim_discord_id=3001,
+        guild_id=123,
+        amount=5,
+    )
+
+
+@pytest.mark.asyncio
+async def test_wheel_blue_shell_self_hit_when_richest():
+    """Verify Blue Shell self-hits when user is the richest player."""
+    from domain.models.player import Player
+
+    bot = MagicMock()
+    betting_service = MagicMock()
+    match_service = MagicMock()
+    player_service = MagicMock()
+    loan_service = MagicMock()
+
+    # User is registered (and is the richest)
+    player_service.get_player.return_value = MagicMock(name="TestPlayer")
+    player_service.get_balance.return_value = 500
+
+    # Mock repository - user is the richest
+    user_as_richest = Player(
+        name="TestPlayer",
+        discord_id=1013,
+        mmr=None,
+        initial_mmr=None,
+        wins=0,
+        losses=0,
+        preferred_roles=None,
+        main_role=None,
+        glicko_rating=None,
+        glicko_rd=None,
+        glicko_volatility=None,
+        jopacoin_balance=500,
+    )
+    player_service.player_repo = MagicMock()
+    player_service.player_repo.get_last_wheel_spin.return_value = None
+    player_service.player_repo.set_last_wheel_spin = MagicMock()
+    player_service.player_repo.try_claim_wheel_spin = MagicMock(return_value=True)
+    player_service.player_repo.log_wheel_spin = MagicMock(return_value=1)
+    player_service.player_repo.add_balance = MagicMock()
+    player_service.player_repo.get_leaderboard = MagicMock(return_value=[user_as_richest])
+
+    message = MagicMock()
+    message.edit = AsyncMock()
+
+    interaction = MagicMock()
+    interaction.guild = MagicMock()
+    interaction.guild.id = 123
+    interaction.user.id = 1013  # Same as richest
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock(return_value=message)
+
+    cmds = BettingCommands(
+        bot, betting_service, match_service, player_service, loan_service=loan_service
+    )
+
+    # Find BLUE_SHELL index dynamically
+    blue_shell_idx = next(i for i, w in enumerate(WHEEL_WEDGES) if w[1] == "BLUE_SHELL")
+
+    # Mock _create_wheel_gif_file to avoid GIF generation calling random.randint
+    with patch.object(cmds, "_create_wheel_gif_file", return_value=MagicMock()):
+        with patch("commands.betting.random.randint") as mock_randint:
+            # First call for wedge selection, second for self-hit amount
+            mock_randint.side_effect = [blue_shell_idx, 7]  # BLUE_SHELL, lose 7 JC
+            with patch("commands.betting.random.random", return_value=1.0):  # No explosion
+                with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
+                    await cmds.gamba.callback(cmds, interaction)
+
+    # Self-hit uses add_balance (not steal_atomic since no victim)
+    player_service.player_repo.add_balance.assert_called_once_with(1013, 123, -7)
+
+    # Should credit nonprofit fund with the loss
+    loan_service.add_to_nonprofit_fund.assert_called_once_with(123, 7)

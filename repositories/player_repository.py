@@ -862,6 +862,99 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 "to_new_balance": to_balance + amount,
             }
 
+    def steal_atomic(
+        self,
+        thief_discord_id: int,
+        victim_discord_id: int,
+        guild_id: int,
+        amount: int,
+    ) -> dict[str, int]:
+        """
+        Atomically transfer jopacoin from victim to thief (shell mechanic).
+
+        Unlike tips, this transfer:
+        - Has no fee
+        - Can push victim below MAX_DEBT (intentional - like BANKRUPT wedge)
+        - Thief doesn't need sufficient balance
+
+        Used for Red Shell and Blue Shell wheel outcomes.
+
+        Args:
+            thief_discord_id: Player receiving the stolen coins
+            victim_discord_id: Player losing the coins
+            guild_id: Guild ID
+            amount: Amount to steal
+
+        Returns:
+            Dict with 'amount', 'thief_new_balance', 'victim_new_balance'
+
+        Raises:
+            ValueError if amount <= 0 or player not found
+        """
+        if amount <= 0:
+            raise ValueError("Amount must be positive.")
+
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+
+            # Get victim balance
+            cursor.execute(
+                "SELECT COALESCE(jopacoin_balance, 0) as balance FROM players WHERE discord_id = ? AND guild_id = ?",
+                (victim_discord_id, guild_id),
+            )
+            victim_row = cursor.fetchone()
+            if not victim_row:
+                raise ValueError("Victim not found.")
+            victim_balance = int(victim_row["balance"])
+
+            # Get thief balance
+            cursor.execute(
+                "SELECT COALESCE(jopacoin_balance, 0) as balance FROM players WHERE discord_id = ? AND guild_id = ?",
+                (thief_discord_id, guild_id),
+            )
+            thief_row = cursor.fetchone()
+            if not thief_row:
+                raise ValueError("Thief not found.")
+            thief_balance = int(thief_row["balance"])
+
+            # Deduct from victim (can go below MAX_DEBT - intentional)
+            cursor.execute(
+                """
+                UPDATE players
+                SET jopacoin_balance = jopacoin_balance - ?, updated_at = CURRENT_TIMESTAMP
+                WHERE discord_id = ? AND guild_id = ?
+                """,
+                (amount, victim_discord_id, guild_id),
+            )
+
+            # Add to thief
+            cursor.execute(
+                """
+                UPDATE players
+                SET jopacoin_balance = jopacoin_balance + ?, updated_at = CURRENT_TIMESTAMP
+                WHERE discord_id = ? AND guild_id = ?
+                """,
+                (amount, thief_discord_id, guild_id),
+            )
+
+            # Track lowest balance for victim
+            new_victim_balance = victim_balance - amount
+            cursor.execute(
+                """
+                UPDATE players
+                SET lowest_balance_ever = ?
+                WHERE discord_id = ? AND guild_id = ?
+                AND (lowest_balance_ever IS NULL OR ? < lowest_balance_ever)
+                """,
+                (new_victim_balance, victim_discord_id, guild_id, new_victim_balance),
+            )
+
+            return {
+                "amount": amount,
+                "thief_new_balance": thief_balance + amount,
+                "victim_new_balance": new_victim_balance,
+            }
+
     def get_players_with_negative_balance(self, guild_id: int) -> list[dict]:
         """
         Get all players with negative balance for interest application.
@@ -2106,6 +2199,55 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 }
                 for row in cursor.fetchall()
             ]
+
+    def get_player_above(self, discord_id: int, guild_id: int) -> Player | None:
+        """
+        Get the player ranked one position higher on the balance leaderboard.
+
+        Used for Red Shell wheel mechanic - steals from the player ahead of you.
+
+        Args:
+            discord_id: The player's Discord ID
+            guild_id: Guild ID
+
+        Returns:
+            Player object of the player ranked above, or None if user is #1 or not found
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+
+            # First, get the user's balance
+            cursor.execute(
+                "SELECT COALESCE(jopacoin_balance, 0) as balance FROM players WHERE discord_id = ? AND guild_id = ?",
+                (discord_id, guild_id),
+            )
+            user_row = cursor.fetchone()
+            if not user_row:
+                return None
+
+            user_balance = int(user_row["balance"])
+
+            # Find player with the smallest balance that is greater than user's balance
+            # If there's a tie at user's balance, get the one with lower discord_id (tiebreaker)
+            cursor.execute(
+                """
+                SELECT * FROM players
+                WHERE guild_id = ? AND (
+                    COALESCE(jopacoin_balance, 0) > ?
+                    OR (COALESCE(jopacoin_balance, 0) = ? AND discord_id < ?)
+                )
+                ORDER BY COALESCE(jopacoin_balance, 0) ASC,
+                         discord_id DESC
+                LIMIT 1
+                """,
+                (guild_id, user_balance, user_balance, discord_id),
+            )
+            row = cursor.fetchone()
+
+            if not row:
+                return None
+
+            return self._row_to_player(row)
 
     def _row_to_player(self, row) -> Player:
         """Convert database row to Player object."""

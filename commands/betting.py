@@ -361,12 +361,73 @@ class BettingCommands(commands.Cog):
         return discord.File(buffer, filename="explosion.gif")
 
     def _wheel_result_embed(
-        self, result: tuple, new_balance: int, garnished: int, next_spin_time: int
+        self,
+        result: tuple,
+        new_balance: int,
+        garnished: int,
+        next_spin_time: int,
+        shell_victim: discord.Member | None = None,
+        shell_victim_new_balance: int | None = None,
+        shell_amount: int = 0,
+        shell_self_hit: bool = False,
+        shell_missed: bool = False,
     ) -> discord.Embed:
         """Build the final result embed after the wheel stops."""
-        label, value = result[0], result[1]  # (label, value, main_color, accent_color)
+        label, value = result[0], result[1]  # (label, value, color)
 
-        if value > 0:
+        if value == "RED_SHELL":
+            # Mario Kart Red Shell outcome
+            if shell_missed:
+                title = "🔴 RED SHELL MISSED! 🔴"
+                color = discord.Color.dark_gray()
+                description = (
+                    f"**{label}**\n\n"
+                    f"The Red Shell circles the track but finds no target!\n\n"
+                    f"*You're already in 1st place... there's no one ahead to hit.*"
+                )
+            else:
+                title = "🔴 RED SHELL HIT! 🔴"
+                color = discord.Color.red()
+                victim_name = shell_victim.mention if shell_victim else "the player above"
+                description = (
+                    f"**{label}**\n\n"
+                    f"💥 Red Shell locked onto {victim_name}!\n"
+                    f"You stole **{shell_amount}** {JOPACOIN_EMOTE}!\n\n"
+                    f"*Victim's new balance: **{shell_victim_new_balance}** {JOPACOIN_EMOTE}*"
+                )
+
+        elif value == "BLUE_SHELL":
+            # Mario Kart Blue Shell outcome
+            if shell_missed:
+                # Edge case: no players in leaderboard (shouldn't happen in practice)
+                title = "🔵 BLUE SHELL MISSED! 🔵"
+                color = discord.Color.dark_gray()
+                description = (
+                    f"**{label}**\n\n"
+                    f"The Blue Shell circles the track but finds no target!\n\n"
+                    f"*There's no one to hit...*"
+                )
+            elif shell_self_hit:
+                title = "🔵 BLUE SHELL... SELF-HIT! 🔵"
+                color = discord.Color.dark_blue()
+                description = (
+                    f"**{label}**\n\n"
+                    f"💥 The Blue Shell targets the leader... **THAT'S YOU!**\n"
+                    f"You lost **{shell_amount}** {JOPACOIN_EMOTE}!\n\n"
+                    f"*The price of being on top... maybe diversify next time.*"
+                )
+            else:
+                title = "🔵 BLUE SHELL STRIKE! 🔵"
+                color = discord.Color.blue()
+                victim_name = shell_victim.mention if shell_victim else "the richest player"
+                description = (
+                    f"**{label}**\n\n"
+                    f"💥 Blue Shell targets the leader: {victim_name}!\n"
+                    f"You stole **{shell_amount}** {JOPACOIN_EMOTE}!\n\n"
+                    f"*Victim's new balance: **{shell_victim_new_balance}** {JOPACOIN_EMOTE}*"
+                )
+
+        elif isinstance(value, int) and value > 0:
             # Win
             if value == 100:
                 title = "🌟 JACKPOT! 🌟"
@@ -380,7 +441,7 @@ class BettingCommands(commands.Cog):
             if garnished > 0:
                 description += f"\n\n*{garnished} {JOPACOIN_EMOTE} went to debt repayment.*"
 
-        elif value < 0:
+        elif isinstance(value, int) and value < 0:
             # Bankrupt
             title = "💀 BANKRUPT! 💀"
             color = discord.Color.red()
@@ -973,7 +1034,72 @@ class BettingCommands(commands.Cog):
         garnished_amount = 0
         new_balance = self.player_service.get_balance(user_id, guild_id)
 
-        if result_value > 0:
+        # Shell outcome tracking for embed
+        shell_victim: discord.Member | None = None
+        shell_victim_new_balance: int | None = None
+        shell_amount: int = 0
+        shell_self_hit: bool = False
+        shell_missed: bool = False
+
+        if result_value == "RED_SHELL":
+            # Mario Kart Red Shell: Steal 1-5 JC from player ranked above
+            shell_amount = random.randint(1, 5)
+            player_above = self.player_service.player_repo.get_player_above(user_id, guild_id)
+
+            if player_above:
+                # Atomic steal from player above (can push victim below MAX_DEBT - intentional)
+                steal_result = self.player_service.player_repo.steal_atomic(
+                    thief_discord_id=user_id,
+                    victim_discord_id=player_above.discord_id,
+                    guild_id=guild_id,
+                    amount=shell_amount,
+                )
+                shell_victim_new_balance = steal_result["victim_new_balance"]
+                new_balance = steal_result["thief_new_balance"]
+                # Try to get Discord member for mention
+                if interaction.guild:
+                    shell_victim = interaction.guild.get_member(player_above.discord_id)
+            else:
+                # User is #1 - shell misses
+                shell_missed = True
+                shell_amount = 0
+
+        elif result_value == "BLUE_SHELL":
+            # Mario Kart Blue Shell: Steal 2-10 JC from richest player
+            shell_amount = random.randint(2, 10)
+            leaderboard = self.player_service.player_repo.get_leaderboard(guild_id, limit=1)
+
+            if leaderboard and leaderboard[0].discord_id == user_id:
+                # Self-hit! User is the richest - LOSE coins (can go below MAX_DEBT - intentional)
+                shell_self_hit = True
+                self.player_service.player_repo.add_balance(user_id, guild_id, -shell_amount)
+                new_balance = self.player_service.get_balance(user_id, guild_id)
+                # Credit nonprofit fund with the self-hit loss
+                if self.loan_service:
+                    try:
+                        self.loan_service.add_to_nonprofit_fund(guild_id, shell_amount)
+                    except Exception:
+                        logger.warning("Failed to add blue shell self-hit to nonprofit fund")
+            elif leaderboard:
+                # Atomic steal from richest (can push victim below MAX_DEBT - intentional)
+                richest = leaderboard[0]
+                steal_result = self.player_service.player_repo.steal_atomic(
+                    thief_discord_id=user_id,
+                    victim_discord_id=richest.discord_id,
+                    guild_id=guild_id,
+                    amount=shell_amount,
+                )
+                shell_victim_new_balance = steal_result["victim_new_balance"]
+                new_balance = steal_result["thief_new_balance"]
+                # Try to get Discord member for mention
+                if interaction.guild:
+                    shell_victim = interaction.guild.get_member(richest.discord_id)
+            else:
+                # No players (shouldn't happen) - shell misses
+                shell_missed = True
+                shell_amount = 0
+
+        elif isinstance(result_value, int) and result_value > 0:
             # Positive result: use garnishment service if available
             garnishment_service = getattr(self.bot, "garnishment_service", None)
             if garnishment_service and new_balance < 0:
@@ -985,7 +1111,7 @@ class BettingCommands(commands.Cog):
                 # Not in debt, add directly
                 self.player_service.player_repo.add_balance(user_id, guild_id, result_value)
                 new_balance = self.player_service.get_balance(user_id, guild_id)
-        elif result_value < 0:
+        elif isinstance(result_value, int) and result_value < 0:
             # Bankrupt: subtract penalty (ignores MAX_DEBT floor - can go deeper into debt)
             self.player_service.player_repo.add_balance(user_id, guild_id, result_value)
             new_balance = self.player_service.get_balance(user_id, guild_id)
@@ -1006,21 +1132,41 @@ class BettingCommands(commands.Cog):
             next_spin_time = int(now) + WHEEL_COOLDOWN_SECONDS
 
         # Log the wheel spin for history tracking
+        # For shell outcomes, log the actual amount gained/lost
+        if result_value == "RED_SHELL":
+            log_result = shell_amount if not shell_missed else 0
+        elif result_value == "BLUE_SHELL":
+            if shell_missed:
+                log_result = 0
+            elif shell_self_hit:
+                log_result = -shell_amount
+            else:
+                log_result = shell_amount
+        else:
+            log_result = result_value
+
         self.player_service.player_repo.log_wheel_spin(
             discord_id=user_id,
             guild_id=guild_id,
-            result=result_value,
+            result=log_result,
             spin_time=int(now),
         )
 
         # Send final result embed
         await asyncio.sleep(0.5)  # Brief pause before result reveal
-        result_embed = self._wheel_result_embed(result_wedge, new_balance, garnished_amount, next_spin_time)
+        result_embed = self._wheel_result_embed(
+            result_wedge, new_balance, garnished_amount, next_spin_time,
+            shell_victim=shell_victim,
+            shell_victim_new_balance=shell_victim_new_balance,
+            shell_amount=shell_amount,
+            shell_self_hit=shell_self_hit,
+            shell_missed=shell_missed,
+        )
         await message.edit(embed=result_embed)
 
         # Neon Degen Terminal hook (for BANKRUPT results)
         neon = self._get_neon_service()
-        if neon and result_wedge[1] < 0:
+        if neon and isinstance(result_wedge[1], int) and result_wedge[1] < 0:
             neon_result = await neon.on_wheel_result(
                 user_id, guild_id,
                 result_value=result_wedge[1],

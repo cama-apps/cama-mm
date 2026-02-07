@@ -140,6 +140,34 @@ class IPlayerRepository(ABC):
         """Get player by any of their Steam IDs."""
         ...
 
+    @abstractmethod
+    def get_player_above(self, discord_id: int, guild_id: int):
+        """Get the player ranked one position higher on the balance leaderboard.
+
+        Used for Red Shell wheel mechanic.
+
+        Returns:
+            Player object of the player ranked above, or None if user is #1 or not found
+        """
+        ...
+
+    @abstractmethod
+    def steal_atomic(
+        self,
+        thief_discord_id: int,
+        victim_discord_id: int,
+        guild_id: int,
+        amount: int,
+    ) -> dict[str, int]:
+        """Atomically transfer jopacoin from victim to thief (shell mechanic).
+
+        Unlike tips, this transfer has no fee and can push victim below MAX_DEBT.
+
+        Returns:
+            Dict with 'amount', 'thief_new_balance', 'victim_new_balance'
+        """
+        ...
+
 
 class IBetRepository(ABC):
     VALID_TEAMS: set

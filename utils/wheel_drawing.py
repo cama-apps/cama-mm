@@ -112,10 +112,12 @@ _BASE_WHEEL_WEDGES = [
     ("80", 80, "#c0392b"),
     ("100", 100, "#f1c40f"),
     ("100", 100, "#f1c40f"),
+    ("🔴 RED", "RED_SHELL", "#e74c3c"),   # Mario Kart: Steal from player above
+    ("🔵 BLUE", "BLUE_SHELL", "#3498db"),  # Mario Kart: Steal from richest
 ]
 
 
-def _calculate_adjusted_wedges(target_ev: float) -> list[tuple[str, int, str]]:
+def _calculate_adjusted_wedges(target_ev: float) -> list[tuple[str, int | str, str]]:
     """
     Calculate wheel wedges with BANKRUPT value adjusted to hit target EV.
 
@@ -123,28 +125,42 @@ def _calculate_adjusted_wedges(target_ev: float) -> list[tuple[str, int, str]]:
     sum(all_values) / num_wedges = target_ev
 
     BANKRUPT is capped at -1 minimum (can never be positive or zero).
+    Special shell wedges (RED_SHELL, BLUE_SHELL) are excluded from EV calculation
+    since their value depends on stealing from other players.
     """
     num_wedges = len(_BASE_WHEEL_WEDGES)
 
-    # Calculate sum of non-bankrupt values
-    non_bankrupt_sum = sum(v for _, v, _ in _BASE_WHEEL_WEDGES if v >= 0)
+    # Calculate sum of non-bankrupt, non-special values (integers only)
+    non_bankrupt_sum = sum(
+        v for _, v, _ in _BASE_WHEEL_WEDGES
+        if isinstance(v, int) and v >= 0
+    )
 
-    # Count bankrupt wedges
-    num_bankrupt = sum(1 for _, v, _ in _BASE_WHEEL_WEDGES if v < 0)
+    # Count bankrupt wedges (negative integers)
+    num_bankrupt = sum(
+        1 for _, v, _ in _BASE_WHEEL_WEDGES
+        if isinstance(v, int) and v < 0
+    )
 
     # Target sum = target_ev * num_wedges
-    # Target sum = non_bankrupt_sum + (num_bankrupt * bankrupt_value)
+    # Target sum = non_bankrupt_sum + (num_bankrupt * bankrupt_value) + shell_ev
+    # For shell wedges, assume average EV of 0 (steal/self-hit balance)
     # bankrupt_value = (target_sum - non_bankrupt_sum) / num_bankrupt
     target_sum = target_ev * num_wedges
-    bankrupt_value = int((target_sum - non_bankrupt_sum) / num_bankrupt)
-
-    # BANKRUPT must always be negative (minimum -1)
-    bankrupt_value = min(bankrupt_value, -1)
+    if num_bankrupt > 0:
+        bankrupt_value = int((target_sum - non_bankrupt_sum) / num_bankrupt)
+        # BANKRUPT must always be negative (minimum -1)
+        bankrupt_value = min(bankrupt_value, -1)
+    else:
+        bankrupt_value = -100  # Fallback
 
     # Build adjusted wedges
     adjusted = []
     for label, value, color in _BASE_WHEEL_WEDGES:
-        if value < 0:  # BANKRUPT
+        if isinstance(value, str):
+            # Special wedge (RED_SHELL, BLUE_SHELL) - keep as-is
+            adjusted.append((label, value, color))
+        elif value < 0:  # BANKRUPT
             # Update label to show actual value
             adjusted.append((str(bankrupt_value), bankrupt_value, color))
         else:
@@ -277,7 +293,13 @@ def create_wheel_image(
         text_x = center + text_radius * math.cos(mid_angle)
         text_y = center + text_radius * math.sin(mid_angle)
 
-        text = label if value <= 0 else str(value)
+        # For special wedges (string values like RED_SHELL), show the label
+        # For BANKRUPT/LOSE (value <= 0), show the label
+        # For positive values, show the numeric value
+        if isinstance(value, str) or value <= 0:
+            text = label
+        else:
+            text = str(value)
         bbox = draw.textbbox((0, 0), text, font=small_font)
         text_w = bbox[2] - bbox[0]
         text_h = bbox[3] - bbox[1]
@@ -412,7 +434,7 @@ def wheel_image_to_bytes(img: Image.Image) -> io.BytesIO:
     return buffer
 
 
-def get_rotation_for_index(target_idx: int, num_wedges: int = 24) -> float:
+def get_rotation_for_index(target_idx: int, num_wedges: int = 26) -> float:
     """
     Calculate rotation needed to position a wedge at the top (under pointer).
 
@@ -498,7 +520,13 @@ def create_wheel_frame_for_gif(
         text_x = center + text_radius * math.cos(mid_angle)
         text_y = center + text_radius * math.sin(mid_angle)
 
-        text = label if value <= 0 else str(value)
+        # For special wedges (string values like RED_SHELL), show the label
+        # For BANKRUPT/LOSE (value <= 0), show the label
+        # For positive values, show the numeric value
+        if isinstance(value, str) or value <= 0:
+            text = label
+        else:
+            text = str(value)
         bbox = draw.textbbox((0, 0), text, font=small_font)
         text_w = bbox[2] - bbox[0]
         text_h = bbox[3] - bbox[1]
