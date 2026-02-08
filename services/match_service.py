@@ -809,6 +809,65 @@ class MatchService:
                             "streak": slen,
                             "is_win": won,
                         }
+
+            # --- Easter Egg Data Collection ---
+            easter_egg_data = {
+                "games_milestones": [],
+                "win_streak_records": [],
+                "rivalries_detected": [],
+            }
+
+            # Check for rivalries (10+ games together with 70%+ winrate imbalance)
+            if self.pairings_repo:
+                try:
+                    all_players = radiant_team_ids + dire_team_ids
+                    for i, p1 in enumerate(all_players):
+                        for p2 in all_players[i+1:]:
+                            pairing = self.pairings_repo.get_pairing(p1, p2, guild_id)
+                            if pairing and pairing.get("games_together", 0) >= 10:
+                                wins = pairing.get("p1_wins", 0)
+                                losses = pairing.get("p1_losses", 0)
+                                total = wins + losses
+                                if total >= 10:
+                                    winrate = (wins / total) * 100
+                                    if winrate >= 70 or winrate <= 30:
+                                        easter_egg_data["rivalries_detected"].append({
+                                            "player1_id": p1,
+                                            "player2_id": p2,
+                                            "games_together": total,
+                                            "winrate_vs": winrate,
+                                        })
+                except Exception as e:
+                    logger.debug(f"Rivalry detection error: {e}")
+
+            # Check for games milestones (10, 50, 100, 200, 500)
+            milestone_values = {10, 50, 100, 200, 500}
+            for pid in expected_ids:
+                player = self.player_repo.get_by_id(pid, guild_id)
+                if player:
+                    total_games = player.wins + player.losses
+                    if total_games in milestone_values:
+                        easter_egg_data["games_milestones"].append({
+                            "discord_id": pid,
+                            "total_games": total_games,
+                        })
+
+            # Check for personal best win streak records (for winners only)
+            for pid in winning_ids:
+                slen, _ = streak_data.get(pid, (1, 1.0))
+                if slen >= 5:
+                    # Get player's personal best
+                    if hasattr(self.player_repo, "get_personal_best_win_streak"):
+                        prev_best = self.player_repo.get_personal_best_win_streak(pid, guild_id)
+                        if slen > prev_best:
+                            # Update the record
+                            self.player_repo.update_personal_best_win_streak(pid, guild_id, slen)
+                            easter_egg_data["win_streak_records"].append({
+                                "discord_id": pid,
+                                "current_streak": slen,
+                                "previous_best": prev_best,
+                            })
+
             # Clear state after successful record
             self.clear_last_shuffle(guild_id)
 
@@ -821,6 +880,7 @@ class MatchService:
                 "bet_distributions": distributions,
                 "loan_repayments": loan_repayments,
                 "notable_streak": notable_streak,
+                "easter_egg_data": easter_egg_data,
             }
         finally:
             with self._recording_lock:

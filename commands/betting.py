@@ -620,13 +620,67 @@ class BettingCommands(commands.Cog):
                 ephemeral=True,
             )
 
-        # Neon Degen Terminal hook
+        # Neon Degen Terminal hooks
         neon = self._get_neon_service()
         if neon:
-            neon_result = await neon.on_bet_placed(
-                interaction.user.id, guild_id, amount, lev, team.value
-            )
-            await self._send_neon_result(interaction, neon_result)
+            try:
+                # Standard bet placed event
+                neon_result = await neon.on_bet_placed(
+                    interaction.user.id, guild_id, amount, lev, team.value
+                )
+                await self._send_neon_result(interaction, neon_result)
+            except Exception as e:
+                logger.debug(f"neon on_bet_placed error: {e}")
+
+            # Additional easter egg events
+            try:
+                # Get balance for all-in check (use betting_service's player_repo)
+                player_repo = self.betting_service.player_repo
+                player = await asyncio.to_thread(
+                    player_repo.get_by_id, user_id, guild_id
+                )
+                if player:
+                    # Check for all-in bet (90%+ of balance)
+                    balance_before = player.jopacoin_balance + amount  # Bet was already deducted
+                    if balance_before > 0:
+                        all_in_result = await neon.on_all_in_bet(
+                            user_id, guild_id, amount, balance_before
+                        )
+                        await self._send_neon_result(interaction, all_in_result)
+
+                    # Check for first leverage bet
+                    if lev > 1 and not player.first_leverage_used:
+                        first_lev_result = await neon.on_first_leverage_bet(
+                            user_id, guild_id, lev
+                        )
+                        await self._send_neon_result(interaction, first_lev_result)
+                        # Mark as used in database
+                        await asyncio.to_thread(
+                            player_repo.mark_first_leverage_used, user_id, guild_id
+                        )
+
+                    # Check for 100 bets milestone
+                    total_bets = await asyncio.to_thread(
+                        player_repo.increment_total_bets_placed, user_id, guild_id
+                    )
+                    if total_bets == 100:
+                        bets_milestone_result = await neon.on_100_bets_milestone(
+                            user_id, guild_id, total_bets
+                        )
+                        await self._send_neon_result(interaction, bets_milestone_result)
+
+                # Check for last-second bet
+                if pending_state:
+                    lock_time = pending_state.get("lock_time", 0)
+                    import time as _time
+                    seconds_remaining = max(0, int(lock_time - _time.time()))
+                    if 0 < seconds_remaining <= 60:
+                        last_second_result = await neon.on_last_second_bet(
+                            user_id, guild_id, seconds_remaining
+                        )
+                        await self._send_neon_result(interaction, last_second_result)
+            except Exception as e:
+                logger.debug(f"Easter egg event hooks error: {e}")
 
     @app_commands.command(name="mybets", description="Show your active bets")
     async def mybets(self, interaction: discord.Interaction):

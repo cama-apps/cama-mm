@@ -44,6 +44,19 @@ from utils.neon_terminal import (
     render_streak,
     render_system_breach,
     render_wheel_bankrupt,
+    # New event templates (Easter Egg Expansion)
+    render_all_in_bet,
+    render_last_second_bet,
+    render_bomb_pot,
+    render_lobby_join,
+    render_rivalry_detected,
+    render_games_milestone,
+    render_win_streak_record,
+    render_first_leverage,
+    render_bets_milestone,
+    render_simultaneous_events,
+    render_captain_symmetry,
+    render_unanimous_wrong,
 )
 
 if TYPE_CHECKING:
@@ -951,4 +964,385 @@ class NeonDegenService:
             return None
         except Exception as e:
             logger.debug(f"neon on_soft_avoid error: {e}")
+            return None
+
+    # -------------------------------------------------------------------
+    # NEW EVENT HANDLERS - Easter Egg Events Expansion
+    # -------------------------------------------------------------------
+
+    async def on_all_in_bet(
+        self,
+        discord_id: int,
+        guild_id: int | None,
+        amount: int,
+        balance_before: int,
+    ) -> NeonResult | None:
+        """Trigger on bet using 90%+ of balance. Layer 2 at 35%."""
+        try:
+            if not self._is_enabled():
+                return None
+            if balance_before <= 0:
+                return None
+
+            percentage = (amount / balance_before) * 100
+            if percentage < 90:
+                return None
+
+            if not self._check_cooldown(discord_id, guild_id):
+                return None
+            if not self._roll(0.35):
+                return None
+
+            name = self._get_player_name(discord_id, guild_id)
+            text = render_all_in_bet(name, amount, percentage)
+            ctx = self._build_player_context(discord_id, guild_id)
+            text = await self._generate_text(
+                f"Client {name} went ALL-IN with {amount} JC ({percentage:.0f}% of balance)",
+                ctx, text,
+            )
+            self._set_cooldown(discord_id, guild_id)
+            return NeonResult(layer=2, text_block=text)
+        except Exception as e:
+            logger.debug(f"neon on_all_in_bet error: {e}")
+            return None
+
+    async def on_last_second_bet(
+        self,
+        discord_id: int,
+        guild_id: int | None,
+        seconds_remaining: int,
+    ) -> NeonResult | None:
+        """Trigger on bet in final 60 seconds of window. Layer 2 at 5%."""
+        try:
+            if not self._is_enabled():
+                return None
+            if seconds_remaining > 60:
+                return None
+
+            if not self._check_cooldown(discord_id, guild_id):
+                return None
+            if not self._roll(0.05):
+                return None
+
+            name = self._get_player_name(discord_id, guild_id)
+            text = render_last_second_bet(name, seconds_remaining)
+            ctx = self._build_player_context(discord_id, guild_id)
+            text = await self._generate_text(
+                f"Client {name} placed bet with only {seconds_remaining}s remaining",
+                ctx, text,
+            )
+            self._set_cooldown(discord_id, guild_id)
+            return NeonResult(layer=2, text_block=text)
+        except Exception as e:
+            logger.debug(f"neon on_last_second_bet error: {e}")
+            return None
+
+    async def on_bomb_pot(
+        self,
+        guild_id: int | None,
+        pool_amount: int,
+        contributor_count: int,
+    ) -> NeonResult | None:
+        """Trigger on bomb pot event. Layer 3 GIF at 50%."""
+        try:
+            if not self._is_enabled():
+                return None
+            if not self._roll(0.50):
+                return None
+
+            # Layer 3: Bomb pot GIF
+            try:
+                from utils.neon_drawing import create_bomb_pot_gif
+                gif = create_bomb_pot_gif(pool_amount, contributor_count)
+                text = render_bomb_pot(pool_amount, contributor_count)
+                return NeonResult(layer=3, text_block=text, gif_file=gif)
+            except Exception as e:
+                logger.debug(f"Bomb pot GIF failed: {e}")
+                # Fall back to text only
+                text = render_bomb_pot(pool_amount, contributor_count)
+                return NeonResult(layer=2, text_block=text)
+        except Exception as e:
+            logger.debug(f"neon on_bomb_pot error: {e}")
+            return None
+
+    async def on_lobby_join(
+        self,
+        discord_id: int,
+        guild_id: int | None,
+        queue_position: int,
+    ) -> NeonResult | None:
+        """Trigger on lobby join. Layer 1 at 3%."""
+        try:
+            if not self._is_enabled():
+                return None
+            if not self._check_cooldown(discord_id, guild_id):
+                return None
+            if not self._roll(0.03):
+                return None
+
+            name = self._get_player_name(discord_id, guild_id)
+            text = render_lobby_join(name, queue_position)
+            ctx = self._build_player_context(discord_id, guild_id)
+            text = await self._generate_text(
+                f"Client {name} joined the queue at position {queue_position}",
+                ctx, text,
+            )
+            self._set_cooldown(discord_id, guild_id)
+            return NeonResult(layer=1, text_block=text)
+        except Exception as e:
+            logger.debug(f"neon on_lobby_join error: {e}")
+            return None
+
+    async def on_rivalry_detected(
+        self,
+        guild_id: int | None,
+        player1_id: int,
+        player2_id: int,
+        games_together: int,
+        winrate_vs: float,
+    ) -> NeonResult | None:
+        """Trigger on 10+ games with 70%+ winrate imbalance. Layer 2 at 1%."""
+        try:
+            if not self._is_enabled():
+                return None
+            if games_together < 10:
+                return None
+            if winrate_vs < 70 and winrate_vs > 30:
+                return None  # Only trigger if one-sided
+            if not self._roll(0.01):
+                return None
+
+            player1_name = self._get_player_name(player1_id, guild_id)
+            player2_name = self._get_player_name(player2_id, guild_id)
+            text = render_rivalry_detected(player1_name, player2_name, games_together, winrate_vs)
+            return NeonResult(layer=2, text_block=text)
+        except Exception as e:
+            logger.debug(f"neon on_rivalry_detected error: {e}")
+            return None
+
+    async def on_games_milestone(
+        self,
+        discord_id: int,
+        guild_id: int | None,
+        total_games: int,
+    ) -> NeonResult | None:
+        """Trigger on 10/50/100/200/500 games. Layer 2 for <100, Layer 3 GIF for 100+. 10% chance."""
+        try:
+            if not self._is_enabled():
+                return None
+            if total_games not in (10, 50, 100, 200, 500):
+                return None
+            if not self._check_cooldown(discord_id, guild_id):
+                return None
+            if not self._roll(0.10):
+                return None
+
+            name = self._get_player_name(discord_id, guild_id)
+
+            # Layer 3: 100+ games gets special treatment
+            if total_games >= 100:
+                try:
+                    from utils.neon_drawing import create_degen_certificate_gif
+                    # Use degen certificate style but for games milestone
+                    gif = create_degen_certificate_gif(name, total_games)
+                    text = render_games_milestone(name, total_games)
+                    self._set_cooldown(discord_id, guild_id)
+                    return NeonResult(layer=3, text_block=text, gif_file=gif)
+                except Exception as e:
+                    logger.debug(f"Games milestone GIF failed: {e}")
+
+            # Layer 2: Standard milestone box
+            text = render_games_milestone(name, total_games)
+            ctx = self._build_player_context(discord_id, guild_id)
+            text = await self._generate_text(
+                f"Client {name} has played {total_games} games",
+                ctx, text,
+            )
+            self._set_cooldown(discord_id, guild_id)
+            return NeonResult(layer=2, text_block=text)
+        except Exception as e:
+            logger.debug(f"neon on_games_milestone error: {e}")
+            return None
+
+    async def on_win_streak_record(
+        self,
+        discord_id: int,
+        guild_id: int | None,
+        current_streak: int,
+        previous_best: int,
+    ) -> NeonResult | None:
+        """Trigger on personal best win streak (5+ min). Layer 2 for 5-7, Layer 3 GIF for 8+. 50% chance."""
+        try:
+            if not self._is_enabled():
+                return None
+            if current_streak < 5:
+                return None
+            if current_streak <= previous_best:
+                return None  # Not a new record
+            if not self._check_cooldown(discord_id, guild_id):
+                return None
+            if not self._roll(0.50):
+                return None
+
+            name = self._get_player_name(discord_id, guild_id)
+
+            # Layer 3: 8+ streak gets GIF
+            if current_streak >= 8:
+                try:
+                    from utils.neon_drawing import create_streak_record_gif
+                    gif = create_streak_record_gif(name, current_streak)
+                    text = render_win_streak_record(name, current_streak)
+                    self._set_cooldown(discord_id, guild_id)
+                    return NeonResult(layer=3, text_block=text, gif_file=gif)
+                except Exception as e:
+                    logger.debug(f"Streak record GIF failed: {e}")
+
+            # Layer 2: Standard streak box
+            text = render_win_streak_record(name, current_streak)
+            ctx = self._build_player_context(discord_id, guild_id)
+            text = await self._generate_text(
+                f"Client {name} broke their personal win streak record: {current_streak} games",
+                ctx, text,
+            )
+            self._set_cooldown(discord_id, guild_id)
+            return NeonResult(layer=2, text_block=text)
+        except Exception as e:
+            logger.debug(f"neon on_win_streak_record error: {e}")
+            return None
+
+    async def on_first_leverage_bet(
+        self,
+        discord_id: int,
+        guild_id: int | None,
+        leverage: int,
+    ) -> NeonResult | None:
+        """Trigger on first ever 2x+ leverage bet. Layer 1 at 80% (one-time)."""
+        try:
+            if not self._is_enabled():
+                return None
+            if leverage < 2:
+                return None
+            if not self._check_one_time(discord_id, guild_id, "first_leverage"):
+                return None
+            if not self._roll(0.80):
+                return None
+
+            name = self._get_player_name(discord_id, guild_id)
+            text = render_first_leverage(name, leverage)
+            ctx = self._build_player_context(discord_id, guild_id)
+            text = await self._generate_text(
+                f"Client {name} used leverage for the first time: {leverage}x",
+                ctx, text,
+            )
+            self._mark_one_time(discord_id, guild_id, "first_leverage")
+            self._set_cooldown(discord_id, guild_id)
+            return NeonResult(layer=1, text_block=text)
+        except Exception as e:
+            logger.debug(f"neon on_first_leverage_bet error: {e}")
+            return None
+
+    async def on_100_bets_milestone(
+        self,
+        discord_id: int,
+        guild_id: int | None,
+        total_bets: int,
+    ) -> NeonResult | None:
+        """Trigger on 100 total bets placed. Layer 2 at 50% (one-time)."""
+        try:
+            if not self._is_enabled():
+                return None
+            if total_bets != 100:
+                return None
+            if not self._check_one_time(discord_id, guild_id, "100_bets"):
+                return None
+            if not self._roll(0.50):
+                return None
+
+            name = self._get_player_name(discord_id, guild_id)
+            text = render_bets_milestone(name, total_bets)
+            ctx = self._build_player_context(discord_id, guild_id)
+            text = await self._generate_text(
+                f"Client {name} has placed 100 total bets",
+                ctx, text,
+            )
+            self._mark_one_time(discord_id, guild_id, "100_bets")
+            self._set_cooldown(discord_id, guild_id)
+            return NeonResult(layer=2, text_block=text)
+        except Exception as e:
+            logger.debug(f"neon on_100_bets_milestone error: {e}")
+            return None
+
+    async def on_simultaneous_events(
+        self,
+        guild_id: int | None,
+        events: list[str],
+    ) -> NeonResult | None:
+        """Trigger when multiple gambling events fire at once. Layer 2 at 10%."""
+        try:
+            if not self._is_enabled():
+                return None
+            if len(events) < 2:
+                return None
+            if not self._roll(0.10):
+                return None
+
+            text = render_simultaneous_events(len(events), events)
+            return NeonResult(layer=2, text_block=text)
+        except Exception as e:
+            logger.debug(f"neon on_simultaneous_events error: {e}")
+            return None
+
+    async def on_captain_symmetry(
+        self,
+        guild_id: int | None,
+        captain1_id: int,
+        captain2_id: int,
+        rating_diff: int,
+    ) -> NeonResult | None:
+        """Trigger when captains within 50 rating points. Layer 1 at 20%."""
+        try:
+            if not self._is_enabled():
+                return None
+            if abs(rating_diff) > 50:
+                return None
+            if not self._roll(0.20):
+                return None
+
+            captain1_name = self._get_player_name(captain1_id, guild_id)
+            captain2_name = self._get_player_name(captain2_id, guild_id)
+            text = render_captain_symmetry(captain1_name, captain2_name, abs(rating_diff))
+            return NeonResult(layer=1, text_block=text)
+        except Exception as e:
+            logger.debug(f"neon on_captain_symmetry error: {e}")
+            return None
+
+    async def on_unanimous_wrong(
+        self,
+        guild_id: int | None,
+        consensus_percentage: float,
+        winning_side: str,
+        loser_count: int,
+    ) -> NeonResult | None:
+        """Trigger when 90%+ consensus prediction loses. Layer 3 GIF at 50%."""
+        try:
+            if not self._is_enabled():
+                return None
+            if consensus_percentage < 90:
+                return None
+            if not self._roll(0.50):
+                return None
+
+            # Layer 3: Market crash GIF
+            try:
+                from utils.neon_drawing import create_unanimous_wrong_gif
+                gif = create_unanimous_wrong_gif(consensus_percentage, winning_side, loser_count)
+                text = render_unanimous_wrong(consensus_percentage, winning_side, loser_count)
+                return NeonResult(layer=3, text_block=text, gif_file=gif)
+            except Exception as e:
+                logger.debug(f"Unanimous wrong GIF failed: {e}")
+                # Fall back to text only
+                text = render_unanimous_wrong(consensus_percentage, winning_side, loser_count)
+                return NeonResult(layer=2, text_block=text)
+        except Exception as e:
+            logger.debug(f"neon on_unanimous_wrong error: {e}")
             return None

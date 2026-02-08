@@ -1495,6 +1495,108 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             )
             return cursor.rowcount > 0
 
+    # =========================================================================
+    # Easter Egg Tracking Methods (JOPA-T expansion)
+    # =========================================================================
+
+    def update_personal_best_win_streak(
+        self, discord_id: int, guild_id: int, streak: int
+    ) -> bool:
+        """
+        Update personal best win streak if new streak is higher.
+
+        Returns True if the record was updated, False otherwise.
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE players
+                SET personal_best_win_streak = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE discord_id = ? AND guild_id = ?
+                AND (personal_best_win_streak IS NULL OR personal_best_win_streak < ?)
+                """,
+                (streak, discord_id, guild_id, streak),
+            )
+            return cursor.rowcount > 0
+
+    def get_personal_best_win_streak(self, discord_id: int, guild_id: int) -> int:
+        """Get player's personal best win streak."""
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT personal_best_win_streak FROM players WHERE discord_id = ? AND guild_id = ?",
+                (discord_id, guild_id),
+            )
+            row = cursor.fetchone()
+            return row["personal_best_win_streak"] if row and row["personal_best_win_streak"] else 0
+
+    def increment_total_bets_placed(self, discord_id: int, guild_id: int) -> int:
+        """
+        Increment total_bets_placed by 1 and return the new count.
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE players
+                SET total_bets_placed = COALESCE(total_bets_placed, 0) + 1,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE discord_id = ? AND guild_id = ?
+                """,
+                (discord_id, guild_id),
+            )
+            # Return the new count
+            cursor.execute(
+                "SELECT total_bets_placed FROM players WHERE discord_id = ? AND guild_id = ?",
+                (discord_id, guild_id),
+            )
+            row = cursor.fetchone()
+            return row["total_bets_placed"] if row and row["total_bets_placed"] else 0
+
+    def get_total_bets_placed(self, discord_id: int, guild_id: int) -> int:
+        """Get player's total bets placed."""
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT total_bets_placed FROM players WHERE discord_id = ? AND guild_id = ?",
+                (discord_id, guild_id),
+            )
+            row = cursor.fetchone()
+            return row["total_bets_placed"] if row and row["total_bets_placed"] else 0
+
+    def mark_first_leverage_used(self, discord_id: int, guild_id: int) -> bool:
+        """
+        Mark that the player has used their first leverage bet.
+
+        Returns True if this was the first time (record updated), False if already marked.
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE players
+                SET first_leverage_used = 1,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE discord_id = ? AND guild_id = ?
+                AND (first_leverage_used IS NULL OR first_leverage_used = 0)
+                """,
+                (discord_id, guild_id),
+            )
+            return cursor.rowcount > 0
+
+    def has_used_first_leverage(self, discord_id: int, guild_id: int) -> bool:
+        """Check if player has already used their first leverage bet."""
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT first_leverage_used FROM players WHERE discord_id = ? AND guild_id = ?",
+                (discord_id, guild_id),
+            )
+            row = cursor.fetchone()
+            return bool(row["first_leverage_used"]) if row and row["first_leverage_used"] else False
+
     def get_first_calibrated_at(self, discord_id: int, guild_id: int) -> int | None:
         """
         Get the Unix timestamp when the player first became calibrated.
@@ -2254,10 +2356,16 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         preferred_roles = json.loads(row["preferred_roles"]) if row["preferred_roles"] else None
 
         # Handle os_mu and os_sigma which may not exist in older schemas
-        os_mu = row["os_mu"] if "os_mu" in row.keys() else None
-        os_sigma = row["os_sigma"] if "os_sigma" in row.keys() else None
-        steam_id = row["steam_id"] if "steam_id" in row.keys() else None
-        guild_id = row["guild_id"] if "guild_id" in row.keys() else None
+        keys = row.keys()
+        os_mu = row["os_mu"] if "os_mu" in keys else None
+        os_sigma = row["os_sigma"] if "os_sigma" in keys else None
+        steam_id = row["steam_id"] if "steam_id" in keys else None
+        guild_id = row["guild_id"] if "guild_id" in keys else None
+
+        # Easter egg tracking fields (may not exist in older schemas)
+        personal_best_win_streak = row["personal_best_win_streak"] if "personal_best_win_streak" in keys else 0
+        total_bets_placed = row["total_bets_placed"] if "total_bets_placed" in keys else 0
+        first_leverage_used = bool(row["first_leverage_used"]) if "first_leverage_used" in keys else False
 
         return Player(
             name=row["discord_username"],
@@ -2276,4 +2384,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             guild_id=guild_id,
             jopacoin_balance=row["jopacoin_balance"] if row["jopacoin_balance"] else 0,
             steam_id=steam_id,
+            personal_best_win_streak=personal_best_win_streak or 0,
+            total_bets_placed=total_bets_placed or 0,
+            first_leverage_used=first_leverage_used,
         )

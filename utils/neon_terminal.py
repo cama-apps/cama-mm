@@ -960,3 +960,340 @@ def render_soft_avoid(cost: int, games: int) -> str:
 def render_soft_avoid_surveillance(cost: int, games: int) -> str:
     """Render a Layer 2 soft avoid surveillance report."""
     return ansi_block(soft_avoid_surveillance(cost, games))
+
+
+# ---------------------------------------------------------------------------
+# NEW EVENT TEMPLATES - Easter Egg Events Expansion (JOPA-T/v3.7)
+# ---------------------------------------------------------------------------
+
+# All-In Bet templates (Layer 2) - 90%+ balance wagered
+ALL_IN_BET_TEMPLATES = [
+    lambda name, amount, pct: (
+        f"{RED} ALL-IN DETECTED{RESET}\n"
+        f"{DIM}{'=' * 36}{RESET}\n"
+        f"{DIM}Subject:{RESET} {name}\n"
+        f"{DIM}Amount:{RESET} {RED}{amount}{RESET} JC\n"
+        f"{DIM}Portfolio exposure:{RESET} {RED}{pct:.0f}%{RESET}\n"
+        f"{DIM}{'=' * 36}{RESET}\n"
+        f"\n"
+        f"{DIM}[{_ts()}] Classification:{RESET} {RED}TERMINAL{RESET}\n"
+        f"{DIM}[{_ts()}] Risk assessment:{RESET} {RED}VIOLENCE{RESET}\n"
+        f"{DIM}[{_ts()}] Commitment level:{RESET} {YELLOW}MAXIMUM{RESET}\n"
+        f"\n"
+        f"{DIM}Client chose violence.{RESET}\n"
+        f"{DIM}The system respects the commitment.{RESET}"
+    ),
+    lambda name, amount, pct: (
+        f"{RED} YOLO PROTOCOL ENGAGED{RESET}\n"
+        f"{DIM}{'=' * 36}{RESET}\n"
+        f"{DIM}Client:{RESET} {name}\n"
+        f"{DIM}Wager:{RESET} {amount} JC ({pct:.0f}% of stack)\n"
+        f"{DIM}{'=' * 36}{RESET}\n"
+        f"\n"
+        f"{DIM}[{_ts()}] Proceeding with reckless{RESET}\n"
+        f"{DIM}[{_ts()}] abandon. Status:{RESET} {RED}TERMINAL{RESET}\n"
+        f"\n"
+        f"{DIM}The house appreciates the{RESET}\n"
+        f"{DIM}{RESET}{corrupt_text('enthusiasm')}{DIM}.{RESET}"
+    ),
+    lambda name, amount, pct: (
+        f"{RED} FINANCIAL VIOLENCE DETECTED{RESET}\n"
+        f"{DIM}{'=' * 36}{RESET}\n"
+        f"{DIM}Subject:{RESET} {name}\n"
+        f"{DIM}Method:{RESET} ALL-IN\n"
+        f"{DIM}Stake:{RESET} {RED}{amount}{RESET} JC\n"
+        f"{DIM}{'=' * 36}{RESET}\n"
+        f"\n"
+        f"{DIM}The system has seen this before.{RESET}\n"
+        f"{DIM}It rarely ends well.{RESET}\n"
+        f"{DIM}Proceed.{RESET}"
+    ),
+]
+
+
+# Last-Second Bet templates (Layer 2) - Final 60s of window
+LAST_SECOND_BET_TEMPLATES = [
+    lambda name, seconds_left: (
+        f"{YELLOW} BUZZER BEATER DETECTED{RESET}\n"
+        f"{DIM}{'=' * 36}{RESET}\n"
+        f"{DIM}Subject:{RESET} {name}\n"
+        f"{DIM}Time remaining:{RESET} {RED}{seconds_left}s{RESET}\n"
+        f"{DIM}{'=' * 36}{RESET}\n"
+        f"\n"
+        f"{DIM}[{_ts()}] Pattern:{RESET} LAST_SECOND\n"
+        f"{DIM}[{_ts()}] Classification:{RESET}\n"
+        f"{DIM}[{_ts()}] {RESET}{corrupt_text('INFORMATION OR DESPERATION')}\n"
+        f"\n"
+        f"{DIM}Probably desperation.{RESET}"
+    ),
+    lambda name, seconds_left: (
+        f"{YELLOW} DEADLINE PLAY{RESET}\n"
+        f"{DIM}{'=' * 36}{RESET}\n"
+        f"{DIM}Client:{RESET} {name}\n"
+        f"{DIM}Countdown:{RESET} {RED}T-{seconds_left}s{RESET}\n"
+        f"{DIM}{'=' * 36}{RESET}\n"
+        f"\n"
+        f"{DIM}The last second is when the{RESET}\n"
+        f"{DIM}truth comes out. Or the{RESET}\n"
+        f"{DIM}panic. {RESET}{corrupt_text('Usually panic.')}"
+    ),
+    lambda name, seconds_left: (
+        f"{YELLOW} EDGE OF WINDOW{RESET}\n"
+        f"{DIM}{'=' * 36}{RESET}\n"
+        f"{DIM}Subject:{RESET} {name}\n"
+        f"{DIM}Window closes:{RESET} {seconds_left}s\n"
+        f"{DIM}{'=' * 36}{RESET}\n"
+        f"\n"
+        f"{DIM}[{_ts()}] Waiting until the last{RESET}\n"
+        f"{DIM}[{_ts()}] moment. Strategic or{RESET}\n"
+        f"{DIM}[{_ts()}] {RESET}{corrupt_text('indecisive')}?"
+    ),
+]
+
+
+# Bomb Pot templates (for text overlay on GIF)
+BOMB_POT_TEMPLATES = [
+    lambda pool, contributors: (
+        f"{RED} BOMB POT DETONATED{RESET}\n"
+        f"{DIM}{'=' * 36}{RESET}\n"
+        f"{DIM}Type:{RESET} MANDATORY CONTRIBUTION\n"
+        f"{DIM}Pool size:{RESET} {RED}{pool}{RESET} JC\n"
+        f"{DIM}Victims:{RESET} {contributors}\n"
+        f"{DIM}{'=' * 36}{RESET}\n"
+        f"\n"
+        f"{DIM}[{_ts()}] Consent:{RESET} {RED}NOT REQUIRED{RESET}\n"
+        f"{DIM}[{_ts()}] Escape:{RESET} {RED}IMPOSSIBLE{RESET}\n"
+        f"\n"
+        f"{DIM}MANDATORY CONTRIBUTION.{RESET}\n"
+        f"{DIM}NO ESCAPE.{RESET}"
+    ),
+]
+
+
+# Lobby Join templates (Layer 1) - Player joins lobby
+LOBBY_JOIN_TEMPLATES = [
+    lambda name, position: f"{DIM}[JOPA-T] Queue position: #{position}. Client: {name}. Estimated time to regret: immediate.{RESET}",
+    lambda name, position: f"{DIM}[{_ts()}] QUEUE_JOIN | {name} enters the arena. Position {position}. The countdown begins.{RESET}",
+    lambda name, position: f"{DIM}[SYS] Another joins the queue. {name} at #{position}. The system {corrupt_text('welcomes')} you.{RESET}",
+    lambda name, position: f"{DIM}[{_ts()}] {name} has entered matchmaking. Position: {position}. Time until commitment: unknown.{RESET}",
+    lambda name, position: f"{DIM}[JOPA-T] {name} is queuing. Slot #{position}. The wait is part of the {corrupt_text('experience')}.{RESET}",
+    lambda name, position: f"{DIM}[SYS] Queue updated. Client {name} added. Position {position}. No backing out now.{RESET}",
+]
+
+
+# Rivalry Detected templates (Layer 2) - 70%+ winrate imbalance
+def rivalry_detected_box(player1: str, player2: str, games: int, winrate: float) -> str:
+    """Layer 2 ASCII art for rivalry detection."""
+    dominant = player1 if winrate > 50 else player2
+    victim = player2 if winrate > 50 else player1
+    actual_rate = winrate if winrate > 50 else 100 - winrate
+    lines = [
+        f"{RED} RIVALRY DETECTED{RESET}",
+        f"{DIM}{'=' * 36}{RESET}",
+        f"{DIM}Player 1:{RESET} {player1}",
+        f"{DIM}Player 2:{RESET} {player2}",
+        f"{DIM}Games together:{RESET} {games}",
+        f"{DIM}{'=' * 36}{RESET}",
+        f"",
+        f"{DIM}[{_ts()}] Pattern:{RESET} {RED}ONE-SIDED{RESET}",
+        f"{DIM}[{_ts()}] Dominant:{RESET} {GREEN}{dominant}{RESET}",
+        f"{DIM}[{_ts()}] Victim:{RESET} {RED}{victim}{RESET}",
+        f"{DIM}[{_ts()}] Win rate:{RESET} {actual_rate:.0f}%",
+        f"",
+        f"{DIM}Status: DOCUMENTED{RESET}",
+        f"{DIM}The system sees all patterns.{RESET}",
+    ]
+    return "\n".join(lines)
+
+
+# Games Milestone templates (Layer 2/3)
+def games_milestone_box(name: str, games: int) -> str:
+    """Layer 2 ASCII art for games milestone."""
+    tier = "BRONZE" if games == 10 else "SILVER" if games == 50 else "GOLD" if games == 100 else "DIAMOND" if games == 200 else "LEGENDARY"
+    tier_color = DIM if games < 50 else YELLOW if games < 100 else GREEN if games < 200 else CYAN if games < 500 else RED
+    lines = [
+        f"{tier_color} GAMES MILESTONE{RESET}",
+        f"{DIM}{'=' * 36}{RESET}",
+        f"{DIM}Subject:{RESET} {name}",
+        f"{DIM}Games completed:{RESET} {tier_color}{games}{RESET}",
+        f"{DIM}Classification:{RESET} {tier_color}{tier}{RESET}",
+        f"{DIM}{'=' * 36}{RESET}",
+        f"",
+        f"{DIM}[{_ts()}] Milestone achieved.{RESET}",
+        f"{DIM}[{_ts()}] Status: NOTED{RESET}",
+        f"",
+        f"{DIM}You cannot leave.{RESET}",
+        f"{DIM}None of them ever leave.{RESET}",
+    ]
+    return "\n".join(lines)
+
+
+# Win Streak Record templates (Layer 2/3)
+def win_streak_record_box(name: str, streak: int) -> str:
+    """Layer 2/3 ASCII art for personal best win streak."""
+    lines = [
+        f"{GREEN} ANOMALY DETECTED{RESET}",
+        f"{DIM}{'=' * 36}{RESET}",
+        f"{DIM}Subject:{RESET} {name}",
+        f"{DIM}Pattern:{RESET} {GREEN}WIN x{streak}{RESET}",
+        f"{DIM}Status:{RESET} {YELLOW}UNPRECEDENTED{RESET}",
+        f"{DIM}{'=' * 36}{RESET}",
+        f"",
+        f"{DIM}[{_ts()}] PERSONAL_RECORD_BROKEN{RESET}",
+        f"{DIM}[{_ts()}] New streak: {streak}{RESET}",
+        f"{DIM}[{_ts()}] Classification:{RESET} {GREEN}HOT{RESET}",
+        f"",
+        f"{DIM}The algorithm adjusts.{RESET}",
+        f"{DIM}The system takes {RESET}{corrupt_text('notice')}{DIM}.{RESET}",
+    ]
+    return "\n".join(lines)
+
+
+# First Leverage Bet templates (Layer 1, one-time)
+FIRST_LEVERAGE_TEMPLATES = [
+    lambda name, leverage: f"{YELLOW}[JOPA-T] MARGIN_ACCOUNT_OPENED{RESET}\n{DIM}Client:{RESET} {name}\n{DIM}First leverage:{RESET} {leverage}x\n{DIM}Status:{RESET} {RED}WELCOME TO THE DANGER ZONE{RESET}",
+    lambda name, leverage: f"{YELLOW}[{_ts()}] FIRST_LEVERAGE_BET{RESET}\n{DIM}Subject: {name} | Multiplier: {leverage}x{RESET}\n{DIM}The slippery slope begins.{RESET}",
+    lambda name, leverage: f"{YELLOW}[SYS] Leverage unlocked for {name}.{RESET}\n{DIM}{leverage}x is just the beginning.{RESET}\n{DIM}The system has seen this {RESET}{corrupt_text('trajectory')}{DIM}.{RESET}",
+    lambda name, leverage: f"{DIM}[JOPA-T] {name} discovers leverage.{RESET}\n{YELLOW}Multiplier: {leverage}x{RESET}\n{DIM}There is no going back now.{RESET}",
+]
+
+
+# 100 Bets Milestone templates (Layer 2, one-time)
+def bets_milestone_box(name: str, total_bets: int) -> str:
+    """Layer 2 ASCII art for 100 bets milestone."""
+    lines = [
+        f"{YELLOW} BETTING CENTENNIAL{RESET}",
+        f"{DIM}{'=' * 36}{RESET}",
+        f"{DIM}Subject:{RESET} {name}",
+        f"{DIM}Total wagers:{RESET} {YELLOW}{total_bets}{RESET}",
+        f"{DIM}Classification:{RESET} {RED}COMMITTED{RESET}",
+        f"{DIM}{'=' * 36}{RESET}",
+        f"",
+        f"{DIM}[{_ts()}] Milestone: {total_bets} bets{RESET}",
+        f"{DIM}[{_ts()}] Status:{RESET} {RED}TOO DEEP TO STOP{RESET}",
+        f"",
+        f"{DIM}One hundred bets.{RESET}",
+        f"{DIM}One hundred chances to {RESET}{corrupt_text('reconsider')}{DIM}.{RESET}",
+        f"{DIM}Zero taken.{RESET}",
+    ]
+    return "\n".join(lines)
+
+
+# Simultaneous Events templates (Layer 2)
+def simultaneous_events_box(event_count: int, events: list[str]) -> str:
+    """Layer 2 ASCII art for multiple simultaneous events."""
+    lines = [
+        f"{YELLOW} SYSTEM OVERLOAD{RESET}",
+        f"{DIM}{'=' * 36}{RESET}",
+        f"{DIM}Concurrent events:{RESET} {YELLOW}{event_count}{RESET}",
+        f"{DIM}{'=' * 36}{RESET}",
+        f"",
+    ]
+    for event in events[:4]:  # Max 4 events shown
+        lines.append(f"{DIM}[{_ts()}] {event}{RESET}")
+    lines.extend([
+        f"",
+        f"{DIM}Processing... Status:{RESET} {YELLOW}OVERWHELMED{RESET}",
+        f"{DIM}({RESET}{corrupt_text('not really')}{DIM}){RESET}",
+    ])
+    return "\n".join(lines)
+
+
+# Captain Symmetry templates (Layer 1)
+CAPTAIN_SYMMETRY_TEMPLATES = [
+    lambda c1, c2, diff: f"{DIM}[JOPA-T] MIRROR_MATCH detected. Captains within {diff} rating. The algorithm cannot predict this one.{RESET}",
+    lambda c1, c2, diff: f"{DIM}[{_ts()}] CAPTAIN_SYMMETRY | {c1} vs {c2}. Delta: {diff}. Outcome: {corrupt_text('uncertain')}.{RESET}",
+    lambda c1, c2, diff: f"{DIM}[SYS] Two captains. {diff} points apart. The system finds this... {corrupt_text('interesting')}.{RESET}",
+    lambda c1, c2, diff: f"{DIM}[JOPA-T] Symmetric matchup: {c1} ({diff} from {c2}). Pure {corrupt_text('chaos')}.{RESET}",
+    lambda c1, c2, diff: f"{DIM}[{_ts()}] PARITY_DETECTED | Captain delta: {diff}. Coin flip territory.{RESET}",
+]
+
+
+# Unanimous Wrong templates (Layer 3 GIF)
+def unanimous_wrong_box(consensus_pct: float, winning_side: str, loser_count: int) -> str:
+    """Layer 3 ASCII art for 90%+ consensus prediction that loses."""
+    lines = [
+        f"{RED} CONSENSUS COLLAPSE{RESET}",
+        f"{DIM}{'=' * 36}{RESET}",
+        f"{DIM}Consensus:{RESET} {RED}{consensus_pct:.0f}%{RESET} predicted wrong",
+        f"{DIM}Actual winner:{RESET} {GREEN}{winning_side}{RESET}",
+        f"{DIM}Losers:{RESET} {RED}{loser_count}{RESET}",
+        f"{DIM}{'=' * 36}{RESET}",
+        f"",
+        f"{DIM}[{_ts()}] {RESET}{RED}MARKET_FAILURE{RESET}",
+        f"{DIM}[{_ts()}] The crowd was confident.{RESET}",
+        f"{DIM}[{_ts()}] The crowd was {RESET}{RED}wrong{RESET}{DIM}.{RESET}",
+        f"",
+        f"{DIM}As usual.{RESET}",
+    ]
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Render helpers for new events
+# ---------------------------------------------------------------------------
+
+def render_all_in_bet(name: str, amount: int, percentage: float) -> str:
+    """Render a Layer 2 all-in bet detection."""
+    template = random.choice(ALL_IN_BET_TEMPLATES)
+    return ansi_block(template(name, amount, percentage))
+
+
+def render_last_second_bet(name: str, seconds_left: int) -> str:
+    """Render a Layer 2 last-second bet detection."""
+    template = random.choice(LAST_SECOND_BET_TEMPLATES)
+    return ansi_block(template(name, seconds_left))
+
+
+def render_bomb_pot(pool: int, contributors: int) -> str:
+    """Render bomb pot template."""
+    template = random.choice(BOMB_POT_TEMPLATES)
+    return ansi_block(template(pool, contributors))
+
+
+def render_lobby_join(name: str, position: int) -> str:
+    """Render a Layer 1 lobby join one-liner."""
+    template = random.choice(LOBBY_JOIN_TEMPLATES)
+    return ansi_block(template(name, position))
+
+
+def render_rivalry_detected(player1: str, player2: str, games: int, winrate: float) -> str:
+    """Render a Layer 2 rivalry detection."""
+    return ansi_block(rivalry_detected_box(player1, player2, games, winrate))
+
+
+def render_games_milestone(name: str, games: int) -> str:
+    """Render a Layer 2 games milestone."""
+    return ansi_block(games_milestone_box(name, games))
+
+
+def render_win_streak_record(name: str, streak: int) -> str:
+    """Render a Layer 2/3 win streak record."""
+    return ansi_block(win_streak_record_box(name, streak))
+
+
+def render_first_leverage(name: str, leverage: int) -> str:
+    """Render a Layer 1 first leverage bet."""
+    template = random.choice(FIRST_LEVERAGE_TEMPLATES)
+    return ansi_block(template(name, leverage))
+
+
+def render_bets_milestone(name: str, total_bets: int) -> str:
+    """Render a Layer 2 bets milestone."""
+    return ansi_block(bets_milestone_box(name, total_bets))
+
+
+def render_simultaneous_events(event_count: int, events: list[str]) -> str:
+    """Render a Layer 2 simultaneous events box."""
+    return ansi_block(simultaneous_events_box(event_count, events))
+
+
+def render_captain_symmetry(captain1: str, captain2: str, diff: int) -> str:
+    """Render a Layer 1 captain symmetry one-liner."""
+    template = random.choice(CAPTAIN_SYMMETRY_TEMPLATES)
+    return ansi_block(template(captain1, captain2, diff))
+
+
+def render_unanimous_wrong(consensus_pct: float, winning_side: str, loser_count: int) -> str:
+    """Render a Layer 3 unanimous wrong box."""
+    return ansi_block(unanimous_wrong_box(consensus_pct, winning_side, loser_count))

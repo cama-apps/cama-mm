@@ -773,3 +773,299 @@ def create_degen_certificate_gif(name: str, score: int) -> io.BytesIO:
         durations.append(60000 if is_last else 200)
 
     return _save_gif(frames, durations)
+
+
+# ---------------------------------------------------------------------------
+# NEW GIF Generators - Easter Egg Events Expansion
+# ---------------------------------------------------------------------------
+
+
+def create_bomb_pot_gif(pool: int, contributors: int) -> io.BytesIO:
+    """
+    Bomb Pot GIF - Mandatory contribution animation.
+    Countdown explosion with mandatory stakes display.
+    ~50 frames, 400x300px.
+    """
+    frames = []
+    durations = []
+    font_lg = _get_font(22, bold=True)
+    font_sm = _get_font(11)
+    font_md = _get_font(14, bold=True)
+    font_pool = _get_font(28, bold=True)
+
+    # Phase 1: Countdown (15 frames)
+    for i in range(15):
+        countdown = 15 - i
+        bg_intensity = min(80, i * 5)
+        img = Image.new("RGBA", (WIDTH, HEIGHT), (10 + bg_intensity, 10, 15, 255))
+        draw = ImageDraw.Draw(img)
+
+        _draw_text_centered(draw, "BOMB POT", 20, NEON_RED, font_lg)
+        _draw_text_centered(draw, "MANDATORY CONTRIBUTION", 50, NEON_YELLOW, font_sm)
+
+        # Big countdown number
+        count_color = NEON_GREEN if countdown > 10 else NEON_YELLOW if countdown > 5 else NEON_RED
+        _draw_text_centered(draw, str(countdown), HEIGHT // 2 - 30, count_color, font_pool)
+
+        # Pool accumulating
+        partial_pool = int(pool * (i / 14))
+        _draw_text_centered(draw, f"Pool: {partial_pool} JC", HEIGHT // 2 + 30, DIM_GREEN, font_md)
+        _draw_text_centered(draw, f"Contributors: {contributors}", HEIGHT // 2 + 55, DIM_GREEN, font_sm)
+
+        frames.append(_make_frame(img, glitch=i > 10))
+        durations.append(100)
+
+    # Phase 2: Explosion flash (10 frames)
+    for i in range(10):
+        flash = 255 - i * 25
+        bg = (min(255, 100 + flash), 50, 30)
+        img = Image.new("RGBA", (WIDTH, HEIGHT), (*bg, 255))
+        draw = ImageDraw.Draw(img)
+
+        # Shaking text effect
+        offset_x = random.randint(-10, 10) if i < 5 else 0
+        offset_y = random.randint(-5, 5) if i < 5 else 0
+
+        text = _corrupt_text("DETONATED", 0.3 if i < 5 else 0)
+        _draw_text_centered(draw, text, HEIGHT // 2 - 30 + offset_y, NEON_RED, font_lg)
+
+        if i > 3:
+            _draw_text_centered(draw, f"POOL: {pool} JC", HEIGHT // 2 + 20, NEON_YELLOW, font_pool)
+
+        frames.append(_make_frame(img, glitch=i < 5))
+        durations.append(60)
+
+    # Phase 3: Result display (15 frames)
+    for i in range(15):
+        img = Image.new("RGBA", (WIDTH, HEIGHT), CRT_BLACK)
+        draw = ImageDraw.Draw(img)
+
+        _draw_text_centered(draw, "BOMB POT COMPLETE", 25, NEON_RED, font_lg)
+        _draw_text_centered(draw, "=" * 32, 55, DIM_GREEN, font_sm)
+
+        _draw_text_centered(draw, f"POOL: {pool} JC", HEIGHT // 2 - 20, NEON_YELLOW, font_pool)
+        _draw_text_centered(draw, f"Contributors: {contributors}", HEIGHT // 2 + 25, DIM_GREEN, font_md)
+
+        _draw_text_centered(draw, "=" * 32, HEIGHT // 2 + 55, DIM_GREEN, font_sm)
+        _draw_text_centered(draw, "CONSENT: NOT REQUIRED", HEIGHT // 2 + 80, NEON_RED, font_sm)
+        _draw_text_centered(draw, "ESCAPE: IMPOSSIBLE", HEIGHT // 2 + 100, NEON_RED, font_sm)
+
+        _draw_text_centered(draw, "JOPA-T/v3.7", HEIGHT - 30, DIM_GREEN, font_sm)
+
+        is_last = i == 14
+        frames.append(_make_frame(img))
+        durations.append(60000 if is_last else 200)
+
+    return _save_gif(frames, durations)
+
+
+def create_streak_record_gif(name: str, streak: int) -> io.BytesIO:
+    """
+    Streak Record GIF - Personal best win streak animation.
+    Rising win counter with fireworks effect.
+    ~45 frames, 400x300px.
+    """
+    frames = []
+    durations = []
+    font_lg = _get_font(20, bold=True)
+    font_sm = _get_font(11)
+    font_md = _get_font(14, bold=True)
+    font_streak = _get_font(48, bold=True)
+
+    # Phase 1: Counting up (20 frames)
+    for i in range(20):
+        img = Image.new("RGBA", (WIDTH, HEIGHT), CRT_BLACK)
+        draw = ImageDraw.Draw(img)
+
+        _draw_text_centered(draw, "WIN STREAK", 20, NEON_GREEN, font_lg)
+        _draw_text_centered(draw, f"Subject: {name}", 50, DIM_GREEN, font_sm)
+
+        # Counting up
+        display_streak = int(streak * (i / 19))
+        _draw_text_centered(draw, str(display_streak), HEIGHT // 2 - 30, NEON_GREEN, font_streak)
+
+        # Progress bar
+        bar_x = 60
+        bar_y = HEIGHT // 2 + 35
+        bar_w = WIDTH - 120
+        bar_h = 12
+        draw.rectangle([bar_x, bar_y, bar_x + bar_w, bar_y + bar_h], outline=DIM_GREEN)
+        fill_w = int(bar_w * i / 19)
+        draw.rectangle([bar_x, bar_y, bar_x + fill_w, bar_y + bar_h], fill=NEON_GREEN)
+
+        frames.append(_make_frame(img))
+        durations.append(60)
+
+    # Phase 2: Flash and reveal (10 frames)
+    for i in range(10):
+        flash = 150 - i * 15
+        img = Image.new("RGBA", (WIDTH, HEIGHT), (10, flash // 3, 10, 255))
+        draw = ImageDraw.Draw(img)
+
+        _draw_text_centered(draw, "PERSONAL RECORD", 25, NEON_YELLOW, font_lg)
+        _draw_text_centered(draw, str(streak), HEIGHT // 2 - 30, NEON_GREEN, font_streak)
+        _draw_text_centered(draw, "CONSECUTIVE WINS", HEIGHT // 2 + 35, NEON_GREEN, font_md)
+
+        # Sparkle effects
+        if i < 7:
+            for _ in range(5 + i):
+                sx = random.randint(20, WIDTH - 20)
+                sy = random.randint(20, HEIGHT - 20)
+                sr = random.randint(2, 5)
+                color = random.choice([NEON_GREEN, NEON_YELLOW, NEON_CYAN])
+                draw.ellipse([sx - sr, sy - sr, sx + sr, sy + sr], fill=color)
+
+        frames.append(_make_frame(img))
+        durations.append(80)
+
+    # Phase 3: Final display (15 frames)
+    for i in range(15):
+        img = Image.new("RGBA", (WIDTH, HEIGHT), CRT_BLACK)
+        draw = ImageDraw.Draw(img)
+
+        # Border
+        draw.rectangle([10, 10, WIDTH - 10, HEIGHT - 10], outline=NEON_GREEN, width=2)
+
+        _draw_text_centered(draw, "ANOMALY DETECTED", 30, NEON_GREEN, font_lg)
+        _draw_text_centered(draw, "=" * 30, 58, DIM_GREEN, font_sm)
+
+        _draw_text_centered(draw, f"WIN x{streak}", HEIGHT // 2 - 25, NEON_GREEN, font_lg)
+        _draw_text_centered(draw, "Status: UNPRECEDENTED", HEIGHT // 2 + 5, NEON_YELLOW, font_md)
+
+        _draw_text_centered(draw, f"Subject: {name}", HEIGHT // 2 + 40, DIM_CYAN, font_sm)
+        _draw_text_centered(draw, "=" * 30, HEIGHT // 2 + 65, DIM_GREEN, font_sm)
+
+        _draw_text_centered(draw, "The algorithm adjusts.", HEIGHT - 55, DIM_GREEN, font_sm)
+        _draw_text_centered(draw, "JOPA-T/v3.7", HEIGHT - 30, DIM_GREEN, font_sm)
+
+        is_last = i == 14
+        frames.append(_make_frame(img))
+        durations.append(60000 if is_last else 200)
+
+    return _save_gif(frames, durations)
+
+
+def create_unanimous_wrong_gif(
+    consensus_pct: float, winning_side: str, loser_count: int
+) -> io.BytesIO:
+    """
+    Unanimous Wrong GIF - 90%+ consensus prediction loses.
+    Market crash visualization with red descent.
+    ~50 frames, 400x300px.
+    """
+    frames = []
+    durations = []
+    font_lg = _get_font(18, bold=True)
+    font_sm = _get_font(11)
+    font_md = _get_font(14, bold=True)
+    font_pct = _get_font(32, bold=True)
+
+    # Graph area
+    graph_left = 40
+    graph_right = WIDTH - 30
+    graph_top = 80
+    graph_bottom = 200
+    graph_w = graph_right - graph_left
+    graph_h = graph_bottom - graph_top
+
+    # Phase 1: Confidence rising (15 frames)
+    for i in range(15):
+        img = Image.new("RGBA", (WIDTH, HEIGHT), CRT_BLACK)
+        draw = ImageDraw.Draw(img)
+
+        _draw_text_centered(draw, "CONSENSUS TRACKING", 15, NEON_GREEN, font_md)
+
+        # Display percentage rising
+        display_pct = consensus_pct * (i / 14)
+        _draw_text_centered(draw, f"{display_pct:.0f}%", 45, NEON_GREEN, font_pct)
+        _draw_text_centered(draw, "PREDICTED OUTCOME", 85, DIM_GREEN, font_sm)
+
+        # Draw graph axes
+        draw.line([(graph_left, graph_bottom), (graph_right, graph_bottom)], fill=DIM_GREEN, width=1)
+        draw.line([(graph_left, graph_top), (graph_left, graph_bottom)], fill=DIM_GREEN, width=1)
+
+        # Rising confidence line
+        points = []
+        for j in range(min(i + 2, 15)):
+            x = graph_left + int(j * graph_w / 14)
+            y = graph_bottom - int((j / 14) * graph_h * 0.9)
+            points.append((x, y))
+
+        if len(points) >= 2:
+            draw.line(points, fill=NEON_GREEN, width=2)
+
+        _draw_text_left(draw, "  Status: CONFIDENT", 20, 220, NEON_GREEN, font_sm)
+
+        frames.append(_make_frame(img))
+        durations.append(80)
+
+    # Phase 2: Crash revelation (15 frames)
+    for i in range(15):
+        progress = i / 14
+        bg_red = int(60 * progress)
+        img = Image.new("RGBA", (WIDTH, HEIGHT), (10 + bg_red, 10, 15, 255))
+        draw = ImageDraw.Draw(img)
+
+        header_color = (
+            int(NEON_GREEN[0] * (1 - progress) + NEON_RED[0] * progress),
+            int(NEON_GREEN[1] * (1 - progress) + NEON_RED[1] * progress),
+            int(NEON_GREEN[2] * (1 - progress) + NEON_RED[2] * progress),
+        )
+        _draw_text_centered(draw, "CONSENSUS COLLAPSE", 15, header_color, font_md)
+        _draw_text_centered(draw, f"{consensus_pct:.0f}%", 45, NEON_RED, font_pct)
+        _draw_text_centered(draw, "WERE WRONG", 85, NEON_RED, font_sm)
+
+        # Draw crashing graph
+        draw.line([(graph_left, graph_bottom), (graph_right, graph_bottom)], fill=DIM_GREEN, width=1)
+        draw.line([(graph_left, graph_top), (graph_left, graph_bottom)], fill=DIM_GREEN, width=1)
+
+        # Draw full line then crash
+        peak_x = graph_left + int(graph_w * 0.7)
+        peak_y = graph_top + int(graph_h * 0.1)
+
+        points = []
+        for j in range(10):
+            x = graph_left + int(j * (peak_x - graph_left) / 9)
+            y = graph_bottom - int((j / 9) * (graph_bottom - peak_y))
+            points.append((x, y))
+
+        # Crash line
+        crash_y = graph_bottom - int(graph_h * 0.1 * (1 - progress))
+        crash_x = peak_x + int((graph_right - peak_x) * progress)
+        points.append((crash_x, crash_y))
+
+        if len(points) >= 2:
+            draw.line(points, fill=NEON_RED, width=2)
+
+        # Flashing "WRONG" text
+        if i % 2 == 0 or i > 10:
+            _draw_text_centered(draw, "THE CROWD WAS WRONG", HEIGHT // 2 + 30, NEON_RED, font_lg)
+
+        frames.append(_make_frame(img, glitch=i > 8))
+        durations.append(100)
+
+    # Phase 3: Final verdict (15 frames)
+    for i in range(15):
+        img = Image.new("RGBA", (WIDTH, HEIGHT), CRT_BLACK)
+        draw = ImageDraw.Draw(img)
+
+        _draw_text_centered(draw, "MARKET FAILURE", 25, NEON_RED, font_lg)
+        _draw_text_centered(draw, "=" * 32, 55, DIM_GREEN, font_sm)
+
+        _draw_text_centered(draw, f"Consensus: {consensus_pct:.0f}%", 80, NEON_RED, font_md)
+        _draw_text_centered(draw, f"Actual winner: {winning_side}", 105, NEON_GREEN, font_md)
+        _draw_text_centered(draw, f"Losers: {loser_count}", 130, NEON_RED, font_md)
+
+        _draw_text_centered(draw, "=" * 32, 160, DIM_GREEN, font_sm)
+
+        _draw_text_centered(draw, "The crowd was confident.", 190, DIM_GREEN, font_sm)
+        _draw_text_centered(draw, "The crowd was wrong.", 210, NEON_RED, font_md)
+        _draw_text_centered(draw, "As usual.", 235, DIM_GREEN, font_sm)
+
+        _draw_text_centered(draw, "JOPA-T/v3.7", HEIGHT - 25, DIM_GREEN, font_sm)
+
+        is_last = i == 14
+        frames.append(_make_frame(img))
+        durations.append(60000 if is_last else 200)
+
+    return _save_gif(frames, durations)

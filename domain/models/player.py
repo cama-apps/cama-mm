@@ -32,6 +32,10 @@ class Player:
     guild_id: int | None = None  # Guild ID for multi-server isolation
     jopacoin_balance: int = 0
     steam_id: int | None = None  # Steam32 account ID for OpenDota integration
+    # Easter egg tracking (JOPA-T expansion)
+    personal_best_win_streak: int = 0
+    total_bets_placed: int = 0
+    first_leverage_used: bool = False
 
     def get_value(self, use_glicko: bool = True, use_openskill: bool = False, use_jopacoin: bool = False) -> float:
         """

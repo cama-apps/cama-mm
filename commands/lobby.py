@@ -637,6 +637,24 @@ class LobbyCommands(commands.Cog):
 
         await interaction.followup.send("✅ Joined the lobby!", ephemeral=True)
 
+        # Neon Degen Terminal hook for lobby join
+        try:
+            neon = getattr(self.bot, "neon_degen_service", None)
+            if neon and lobby:
+                queue_position = len(lobby.players) + len(lobby.conditional_players)
+                neon_result = await neon.on_lobby_join(
+                    interaction.user.id, guild_id, queue_position
+                )
+                if neon_result and (neon_result.text_block or neon_result.footer_text):
+                    channel_id = self.lobby_service.get_lobby_channel_id()
+                    if channel_id:
+                        channel = self.bot.get_channel(channel_id)
+                        if channel:
+                            text = neon_result.text_block or neon_result.footer_text
+                            await channel.send(text)
+        except Exception as e:
+            logger.debug(f"Neon lobby join hook error: {e}")
+
     @app_commands.command(name="leave", description="Leave the matchmaking lobby")
     async def leave(self, interaction: discord.Interaction):
         """Leave the matchmaking lobby from any channel."""
