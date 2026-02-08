@@ -84,7 +84,6 @@ async def test_handle_announce_success_deducts_balance(monkeypatch):
     )
     player_service.get_player.return_value = mock_player
     player_service.get_balance.return_value = SHOP_ANNOUNCE_TARGET_COST + 10
-    player_service.player_repo = MagicMock()
 
     commands = ShopCommands(bot, player_service)
     interaction = _make_interaction()
@@ -96,7 +95,7 @@ async def test_handle_announce_success_deducts_balance(monkeypatch):
 
     await commands._handle_announce(interaction, target=target)
 
-    player_service.player_repo.add_balance.assert_called_once_with(
+    player_service.adjust_balance.assert_called_once_with(
         interaction.user.id, None, -SHOP_ANNOUNCE_TARGET_COST
     )
     # shop uses safe_defer then safe_followup, so check followup.send
@@ -148,7 +147,6 @@ async def test_handle_mystery_gift_success_deducts_balance():
     player_service = MagicMock()
     player_service.get_player.return_value = object()
     player_service.get_balance.return_value = SHOP_MYSTERY_GIFT_COST + 100
-    player_service.player_repo = MagicMock()
 
     commands = ShopCommands(bot, player_service)
     interaction = _make_interaction()
@@ -156,7 +154,7 @@ async def test_handle_mystery_gift_success_deducts_balance():
     await commands._handle_mystery_gift(interaction)
 
     # Verify balance was deducted
-    player_service.player_repo.add_balance.assert_called_once_with(
+    player_service.adjust_balance.assert_called_once_with(
         interaction.user.id, None, -SHOP_MYSTERY_GIFT_COST
     )
 

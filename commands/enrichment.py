@@ -27,19 +27,21 @@ class EnrichmentCommands(commands.Cog):
     def __init__(
         self,
         bot: commands.Bot,
-        match_repo,
-        player_repo,
+        match_service,
+        player_service,
         guild_config_service,
         enrichment_service: MatchEnrichmentService,
         opendota_player_service: OpenDotaPlayerService,
+        discovery_service=None,
         bankruptcy_repo=None,
     ):
         self.bot = bot
-        self.match_repo = match_repo
-        self.player_repo = player_repo
+        self.match_service = match_service
+        self.player_service = player_service
         self.guild_config_service = guild_config_service
         self.enrichment_service = enrichment_service
         self.opendota_player_service = opendota_player_service
+        self.discovery_service = discovery_service
         self.bankruptcy_repo = bankruptcy_repo
 
     @app_commands.command(
@@ -118,7 +120,7 @@ class EnrichmentCommands(commands.Cog):
 
         # Determine which internal match to enrich
         if internal_match_id:
-            match = self.match_repo.get_match(internal_match_id)
+            match = self.match_service.get_match_by_id(internal_match_id)
             if not match:
                 await safe_followup(
                     interaction,
@@ -128,7 +130,7 @@ class EnrichmentCommands(commands.Cog):
                 return
         else:
             # Use most recent match
-            match = self.match_repo.get_most_recent_match(guild_id)
+            match = self.match_service.get_most_recent_match(guild_id)
             if not match:
                 await safe_followup(
                     interaction,
@@ -170,8 +172,8 @@ class EnrichmentCommands(commands.Cog):
             return
 
         # Fetch enriched data for embed
-        match_data = self.match_repo.get_match(internal_match_id)
-        participants = self.match_repo.get_match_participants(internal_match_id)
+        match_data = self.match_service.get_match_by_id(internal_match_id)
+        participants = self.match_service.get_match_participants(internal_match_id)
 
         if match_data and participants:
             radiant = [p for p in participants if p.get("side") == "radiant"]
@@ -320,7 +322,7 @@ class EnrichmentCommands(commands.Cog):
         guild_id = interaction.guild.id if interaction.guild else None
 
         # Validate player exists
-        player = self.player_repo.get_by_id(target_id, guild_id)
+        player = self.player_service.get_player(target_id, guild_id)
         if not player:
             await safe_followup(
                 interaction,
@@ -333,7 +335,7 @@ class EnrichmentCommands(commands.Cog):
         limit = max(1, min(limit, 10))
 
         # Get matches
-        matches = self.match_repo.get_player_matches(target_id, guild_id, limit=limit)
+        matches = self.match_service.get_player_matches(target_id, guild_id, limit=limit)
         if not matches:
             await safe_followup(
                 interaction,
@@ -371,7 +373,7 @@ class EnrichmentCommands(commands.Cog):
             side = match.get("side", "?").capitalize()
 
             # Get participants for this match
-            participants = self.match_repo.get_match_participants(match_id)
+            participants = self.match_service.get_match_participants(match_id)
 
             # Find this player's stats
             player_stats = None
@@ -502,7 +504,7 @@ class EnrichmentCommands(commands.Cog):
 
         # Get match - default to target's most recent match
         if match_id:
-            match_data = self.match_repo.get_match(match_id)
+            match_data = self.match_service.get_match_by_id(match_id)
             if not match_data:
                 await safe_followup(
                     interaction,
@@ -511,13 +513,13 @@ class EnrichmentCommands(commands.Cog):
                 return
         else:
             # Try to get target's most recent match first
-            user_matches = self.match_repo.get_player_matches(target_id, guild_id, limit=1)
+            user_matches = self.match_service.get_player_matches(target_id, guild_id, limit=1)
             if user_matches:
                 match_id = user_matches[0]["match_id"]
-                match_data = self.match_repo.get_match(match_id)
+                match_data = self.match_service.get_match_by_id(match_id)
             else:
                 # Fall back to globally most recent
-                match_data = self.match_repo.get_most_recent_match(guild_id)
+                match_data = self.match_service.get_most_recent_match(guild_id)
 
             if not match_data:
                 await safe_followup(
@@ -528,7 +530,7 @@ class EnrichmentCommands(commands.Cog):
             match_id = match_data["match_id"]
 
         # Get participants
-        participants = self.match_repo.get_match_participants(match_id)
+        participants = self.match_service.get_match_participants(match_id)
 
         if not participants:
             await safe_followup(
@@ -625,17 +627,20 @@ class EnrichmentCommands(commands.Cog):
         if not await safe_defer(interaction, ephemeral=True):
             return
 
-        from services.match_discovery_service import MatchDiscoveryService
-
         # Handle refill_fantasy mode - re-enrich matches that have valve_match_id but no fantasy data
         if refill_fantasy:
             await self._refill_fantasy_data(interaction, dry_run)
             return
 
-        match_service = getattr(self.bot, "match_service", None)
-        discovery_service = MatchDiscoveryService(
-            self.match_repo, self.player_repo, match_service=match_service
-        )
+        if not self.discovery_service:
+            await safe_followup(
+                interaction,
+                content="Match discovery service not available.",
+                ephemeral=True,
+            )
+            return
+
+        discovery_service = self.discovery_service
 
         await safe_followup(
             interaction,
@@ -707,7 +712,7 @@ class EnrichmentCommands(commands.Cog):
 
     async def _refill_fantasy_data(self, interaction: discord.Interaction, dry_run: bool):
         """Re-enrich matches that have enrichment but no fantasy data."""
-        matches = self.match_repo.get_matches_without_fantasy_data(limit=100)
+        matches = self.match_service.get_matches_without_fantasy_data(limit=100)
 
         if not matches:
             await safe_followup(
@@ -795,7 +800,7 @@ class EnrichmentCommands(commands.Cog):
             return
 
         guild_id = interaction.guild_id
-        enriched_count = self.match_repo.get_enriched_count(guild_id)
+        enriched_count = self.match_service.get_enriched_count(guild_id)
 
         if enriched_count == 0:
             await safe_followup(
@@ -805,7 +810,7 @@ class EnrichmentCommands(commands.Cog):
             )
             return
 
-        wiped = self.match_repo.wipe_all_enrichments(guild_id)
+        wiped = self.match_service.wipe_all_enrichments(guild_id)
 
         await safe_followup(
             interaction,
@@ -835,7 +840,7 @@ class EnrichmentCommands(commands.Cog):
         if not await safe_defer(interaction, ephemeral=True):
             return
 
-        success = self.match_repo.wipe_match_enrichment(match_id)
+        success = self.match_service.wipe_match_enrichment(match_id)
 
         if success:
             await safe_followup(
@@ -911,29 +916,27 @@ class EnrichmentCommands(commands.Cog):
 
 async def setup(bot: commands.Bot):
     """Setup function called when loading the cog."""
-    match_repo = getattr(bot, "match_repo", None)
-    player_repo = getattr(bot, "player_repo", None)
-    guild_config_service = getattr(bot, "guild_config_service", None)
-    bankruptcy_repo = getattr(bot, "bankruptcy_repo", None)
     match_service = getattr(bot, "match_service", None)
+    player_service = getattr(bot, "player_service", None)
+    guild_config_service = getattr(bot, "guild_config_service", None)
+    enrichment_service = getattr(bot, "match_enrichment_service", None)
+    opendota_player_service = getattr(bot, "opendota_player_service", None)
+    discovery_service = getattr(bot, "match_discovery_service", None)
+    bankruptcy_repo = getattr(bot, "bankruptcy_repo", None)
 
-    if not all([match_repo, player_repo, guild_config_service]):
-        logger.warning("enrichment cog: required repos/services not available, skipping")
+    if not all([match_service, player_service, guild_config_service]):
+        logger.warning("enrichment cog: required services not available, skipping")
         return
-
-    enrichment_service = MatchEnrichmentService(
-        match_repo, player_repo, match_service=match_service
-    )
-    opendota_player_service = OpenDotaPlayerService(player_repo)
 
     await bot.add_cog(
         EnrichmentCommands(
             bot,
-            match_repo,
-            player_repo,
+            match_service,
+            player_service,
             guild_config_service,
             enrichment_service,
             opendota_player_service,
+            discovery_service,
             bankruptcy_repo,
         )
     )

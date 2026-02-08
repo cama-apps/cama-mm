@@ -10,7 +10,6 @@ from discord import app_commands
 from discord.ext import commands
 
 from services.permissions import has_admin_permission
-from services.rating_comparison_service import RatingComparisonService
 from utils.drawing import (
     draw_calibration_curve,
     draw_prediction_over_time,
@@ -28,13 +27,13 @@ class RatingAnalysisCommands(commands.Cog):
         self,
         bot: commands.Bot,
         match_service,
-        match_repo,
-        player_repo,
+        player_service,
+        rating_comparison_service=None,
     ):
         self.bot = bot
         self.match_service = match_service
-        self.match_repo = match_repo
-        self.player_repo = player_repo
+        self.player_service = player_service
+        self.rating_comparison_service = rating_comparison_service
 
     @app_commands.command(
         name="ratinganalysis",
@@ -139,9 +138,11 @@ class RatingAnalysisCommands(commands.Cog):
         if not await safe_defer(interaction, ephemeral=True):
             return
 
-        comparison_service = RatingComparisonService(
-            self.match_repo, self.player_repo, self.match_service
-        )
+        if not self.rating_comparison_service:
+            await safe_followup(interaction, content="Rating comparison service not available.")
+            return
+
+        comparison_service = self.rating_comparison_service
 
         # Run in executor
         loop = asyncio.get_event_loop()
@@ -248,9 +249,11 @@ class RatingAnalysisCommands(commands.Cog):
         if not await safe_defer(interaction, ephemeral=True):
             return
 
-        comparison_service = RatingComparisonService(
-            self.match_repo, self.player_repo, self.match_service
-        )
+        if not self.rating_comparison_service:
+            await safe_followup(interaction, content="Rating comparison service not available.")
+            return
+
+        comparison_service = self.rating_comparison_service
 
         loop = asyncio.get_event_loop()
         try:
@@ -303,9 +306,11 @@ class RatingAnalysisCommands(commands.Cog):
         if not await safe_defer(interaction, ephemeral=True):
             return
 
-        comparison_service = RatingComparisonService(
-            self.match_repo, self.player_repo, self.match_service
-        )
+        if not self.rating_comparison_service:
+            await safe_followup(interaction, content="Rating comparison service not available.")
+            return
+
+        comparison_service = self.rating_comparison_service
 
         guild_id = interaction.guild_id
         loop = asyncio.get_event_loop()
@@ -373,7 +378,7 @@ class RatingAnalysisCommands(commands.Cog):
         guild_id = interaction.guild.id if interaction.guild else None
 
         # Fetch player data
-        player = self.player_repo.get_by_id(discord_id, guild_id)
+        player = self.player_service.get_player(discord_id, guild_id)
         if not player:
             await safe_followup(
                 interaction,
@@ -382,7 +387,7 @@ class RatingAnalysisCommands(commands.Cog):
             return
 
         # Get OpenSkill rating
-        os_data = self.player_repo.get_openskill_rating(discord_id, guild_id)
+        os_data = self.player_service.get_openskill_rating(discord_id, guild_id)
 
         embed = discord.Embed(
             title=f"OpenSkill Rating: {target.display_name}",
@@ -437,7 +442,7 @@ class RatingAnalysisCommands(commands.Cog):
             )
 
             # Get recent rating history for this player
-            history = self.match_repo.get_player_openskill_history(discord_id, limit=5)
+            history = self.match_service.get_player_openskill_history(discord_id, guild_id, limit=5)
             if history:
                 history_lines = []
                 for h in history:
@@ -467,10 +472,10 @@ class RatingAnalysisCommands(commands.Cog):
 async def setup(bot: commands.Bot):
     """Setup function called when loading the cog."""
     match_service = getattr(bot, "match_service", None)
-    match_repo = getattr(bot, "match_repo", None)
-    player_repo = getattr(bot, "player_repo", None)
+    player_service = getattr(bot, "player_service", None)
+    rating_comparison_service = getattr(bot, "rating_comparison_service", None)
 
-    if not all([match_service, match_repo, player_repo]):
+    if not all([match_service, player_service]):
         logger.warning("rating_analysis cog: required services not available, skipping")
         return
 
@@ -478,7 +483,7 @@ async def setup(bot: commands.Bot):
         RatingAnalysisCommands(
             bot,
             match_service,
-            match_repo,
-            player_repo,
+            player_service,
+            rating_comparison_service,
         )
     )

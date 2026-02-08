@@ -8,18 +8,20 @@ import pytest
 from commands.admin import AdminCommands
 
 
-class FakeRepo:
+class FakePlayerService:
+    """Fake player service for admin command tests."""
+
     def __init__(self, *, exists=True, game_count=0, rating_data=None):
         self.exists = exists
-        self.game_count = game_count
+        self._game_count = game_count
         self.rating_data = rating_data
         self.updates = []
 
-    def get_by_id(self, _id, guild_id=None):
+    def get_player(self, _id, guild_id=None):
         return object() if self.exists else None
 
     def get_game_count(self, _id, guild_id=None):
-        return self.game_count
+        return self._game_count
 
     def get_glicko_rating(self, _id, guild_id=None):
         return self.rating_data
@@ -46,8 +48,8 @@ class DummyInteraction:
 
 @pytest.mark.asyncio
 async def test_setinitialrating_happy_path(monkeypatch):
-    repo = FakeRepo(game_count=2, rating_data=(1500.0, 100.0, 0.07))
-    admin_cmd = AdminCommands(bot=None, lobby_service=None, player_repo=repo, loan_service=None, bankruptcy_service=None)
+    service = FakePlayerService(game_count=2, rating_data=(1500.0, 100.0, 0.07))
+    admin_cmd = AdminCommands(bot=None, lobby_service=None, player_service=service, loan_service=None, bankruptcy_service=None)
 
     # Monkeypatch permission check to allow
     monkeypatch.setattr("commands.admin.has_admin_permission", lambda _i: True)
@@ -57,8 +59,8 @@ async def test_setinitialrating_happy_path(monkeypatch):
 
     await admin_cmd.setinitialrating.callback(admin_cmd, interaction, target_user, 2500.0)
 
-    assert repo.updates, "update_glicko_rating should be called"
-    _pid, rating, rd, vol = repo.updates[0]
+    assert service.updates, "update_glicko_rating should be called"
+    _pid, rating, rd, vol = service.updates[0]
     assert rating == 2500.0
     assert rd == 100.0  # RD should be preserved from existing rating_data
     assert vol == 0.07
@@ -68,8 +70,8 @@ async def test_setinitialrating_happy_path(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_setinitialrating_rejects_too_many_games(monkeypatch):
-    repo = FakeRepo(game_count=1000, rating_data=None)
-    admin_cmd = AdminCommands(bot=None, lobby_service=None, player_repo=repo, loan_service=None, bankruptcy_service=None)
+    service = FakePlayerService(game_count=1000, rating_data=None)
+    admin_cmd = AdminCommands(bot=None, lobby_service=None, player_service=service, loan_service=None, bankruptcy_service=None)
     monkeypatch.setattr("commands.admin.has_admin_permission", lambda _i: True)
 
     interaction = DummyInteraction()
@@ -77,6 +79,6 @@ async def test_setinitialrating_rejects_too_many_games(monkeypatch):
 
     await admin_cmd.setinitialrating.callback(admin_cmd, interaction, target_user, 1200.0)
 
-    assert not repo.updates, "Should not update rating when too many games"
+    assert not service.updates, "Should not update rating when too many games"
     assert any("too many games" in msg.lower() for msg, _ep in interaction.response_messages)
 

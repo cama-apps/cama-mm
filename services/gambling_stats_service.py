@@ -980,3 +980,17 @@ class GamblingStatsService:
 
         # Fallback for edge cases
         return "Unknown", "???", "❓"
+
+    # --- Convenience methods to avoid repository access from commands ---
+
+    def get_player_bankruptcy_count(self, discord_id: int, guild_id: int | None = None) -> int:
+        """Get number of bankruptcies for a player.
+
+        Args:
+            discord_id: Player's Discord ID
+            guild_id: Guild ID (None for DMs)
+
+        Returns:
+            Number of bankruptcies
+        """
+        return self.bet_repo.get_player_bankruptcy_count(discord_id, guild_id)

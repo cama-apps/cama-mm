@@ -210,15 +210,14 @@ class RegistrationCommands(commands.Cog):
         if not await safe_defer(interaction, ephemeral=True):
             return
 
-        player_repo = getattr(self.bot, "player_repo", None)
-        if not player_repo:
-            await interaction.followup.send("❌ Player repository not available.", ephemeral=True)
+        if not self.player_service:
+            await interaction.followup.send("❌ Player service not available.", ephemeral=True)
             return
 
         guild_id = interaction.guild.id if interaction.guild else None
 
         # Check if player is registered
-        player = await asyncio.to_thread(player_repo.get_by_id, interaction.user.id, guild_id)
+        player = await asyncio.to_thread(self.player_service.get_player, interaction.user.id, guild_id)
         if not player:
             await interaction.followup.send(
                 "❌ You are not registered. Use `/register` first.",
@@ -235,12 +234,12 @@ class RegistrationCommands(commands.Cog):
             return
 
         # Get current steam_ids for this player
-        current_steam_ids = await asyncio.to_thread(player_repo.get_steam_ids, interaction.user.id)
+        current_steam_ids = await asyncio.to_thread(self.player_service.get_steam_ids, interaction.user.id)
 
         # Check if already linked to this player
         if steam_id in current_steam_ids:
             if set_primary:
-                await asyncio.to_thread(player_repo.set_primary_steam_id, interaction.user.id, steam_id)
+                await asyncio.to_thread(self.player_service.set_primary_steam_id, interaction.user.id, steam_id)
                 await interaction.followup.send(
                     f"✅ Steam ID `{steam_id}` is now your primary account.",
                     ephemeral=True,
@@ -258,7 +257,7 @@ class RegistrationCommands(commands.Cog):
             is_first = len(current_steam_ids) == 0
             await asyncio.to_thread(
                 functools.partial(
-                    player_repo.add_steam_id,
+                    self.player_service.add_steam_id,
                     interaction.user.id,
                     steam_id,
                     is_primary=set_primary or is_first,
@@ -272,7 +271,7 @@ class RegistrationCommands(commands.Cog):
             return
 
         # Build response message
-        new_steam_ids = await asyncio.to_thread(player_repo.get_steam_ids, interaction.user.id)
+        new_steam_ids = await asyncio.to_thread(self.player_service.get_steam_ids, interaction.user.id)
         if len(new_steam_ids) == 1:
             await interaction.followup.send(
                 f"✅ Steam ID `{steam_id}` linked to your account!\n"
@@ -300,15 +299,14 @@ class RegistrationCommands(commands.Cog):
         if not await safe_defer(interaction, ephemeral=True):
             return
 
-        player_repo = getattr(self.bot, "player_repo", None)
-        if not player_repo:
-            await interaction.followup.send("❌ Player repository not available.", ephemeral=True)
+        if not self.player_service:
+            await interaction.followup.send("❌ Player service not available.", ephemeral=True)
             return
 
         guild_id = interaction.guild.id if interaction.guild else None
 
         # Check if player is registered
-        player = await asyncio.to_thread(player_repo.get_by_id, interaction.user.id, guild_id)
+        player = await asyncio.to_thread(self.player_service.get_player, interaction.user.id, guild_id)
         if not player:
             await interaction.followup.send(
                 "❌ You are not registered. Use `/register` first.",
@@ -317,7 +315,7 @@ class RegistrationCommands(commands.Cog):
             return
 
         # Get current steam_ids
-        current_steam_ids = await asyncio.to_thread(player_repo.get_steam_ids, interaction.user.id)
+        current_steam_ids = await asyncio.to_thread(self.player_service.get_steam_ids, interaction.user.id)
 
         if steam_id not in current_steam_ids:
             await interaction.followup.send(
@@ -338,10 +336,10 @@ class RegistrationCommands(commands.Cog):
             # A more robust implementation would track confirmation state
 
         # Remove the steam_id
-        removed = await asyncio.to_thread(player_repo.remove_steam_id, interaction.user.id, steam_id)
+        removed = await asyncio.to_thread(self.player_service.remove_steam_id, interaction.user.id, steam_id)
 
         if removed:
-            remaining = await asyncio.to_thread(player_repo.get_steam_ids, interaction.user.id)
+            remaining = await asyncio.to_thread(self.player_service.get_steam_ids, interaction.user.id)
             if remaining:
                 primary = remaining[0]  # First is always primary
                 await interaction.followup.send(
@@ -369,15 +367,14 @@ class RegistrationCommands(commands.Cog):
         if not await safe_defer(interaction, ephemeral=True):
             return
 
-        player_repo = getattr(self.bot, "player_repo", None)
-        if not player_repo:
-            await interaction.followup.send("❌ Player repository not available.", ephemeral=True)
+        if not self.player_service:
+            await interaction.followup.send("❌ Player service not available.", ephemeral=True)
             return
 
         guild_id = interaction.guild.id if interaction.guild else None
 
         # Check if player is registered
-        player = await asyncio.to_thread(player_repo.get_by_id, interaction.user.id, guild_id)
+        player = await asyncio.to_thread(self.player_service.get_player, interaction.user.id, guild_id)
         if not player:
             await interaction.followup.send(
                 "❌ You are not registered. Use `/register` first.",
@@ -386,7 +383,7 @@ class RegistrationCommands(commands.Cog):
             return
 
         # Get current steam_ids (primary first)
-        steam_ids = await asyncio.to_thread(player_repo.get_steam_ids, interaction.user.id)
+        steam_ids = await asyncio.to_thread(self.player_service.get_steam_ids, interaction.user.id)
 
         if not steam_ids:
             await interaction.followup.send(

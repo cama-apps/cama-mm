@@ -235,7 +235,7 @@ class ShopCommands(commands.Cog):
             return
 
         # Deduct cost
-        await asyncio.to_thread(self.player_service.player_repo.add_balance, user_id, guild_id, -cost)
+        await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, -cost)
         new_balance = balance - cost
 
         # Build stats comparison for targeted flex
@@ -318,7 +318,7 @@ class ShopCommands(commands.Cog):
                     stats["net_pnl"] = gamba_stats.net_pnl
                     stats["degen_score"] = gamba_stats.degen_score.total if gamba_stats.degen_score else None
                 stats["bankruptcies"] = await asyncio.to_thread(
-                    self.gambling_stats_service.bet_repo.get_player_bankruptcy_count,
+                    self.gambling_stats_service.get_player_bankruptcy_count,
                     discord_id, guild_id,
                 )
             except Exception:
@@ -527,7 +527,7 @@ class ShopCommands(commands.Cog):
             return
 
         # Deduct cost
-        await asyncio.to_thread(self.player_service.player_repo.add_balance, user_id, guild_id, -cost)
+        await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, -cost)
 
         # Get hero info
         hero_id = int(hero)
@@ -616,7 +616,7 @@ class ShopCommands(commands.Cog):
             return
 
         # Deduct cost
-        await asyncio.to_thread(self.player_service.player_repo.add_balance, user_id, guild_id, -cost)
+        await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, -cost)
 
         # Build the announcement embed
         embed = discord.Embed(
@@ -651,7 +651,7 @@ class ShopCommands(commands.Cog):
         # Check cooldown (admins bypass)
         is_admin = has_admin_permission(interaction)
         last_spin = await asyncio.to_thread(
-            self.player_service.player_repo.get_last_double_or_nothing, user_id, guild_id
+            self.player_service.get_last_double_or_nothing, user_id, guild_id
         )
         now = int(time.time())
         if last_spin is not None and not is_admin:
@@ -722,7 +722,7 @@ class ShopCommands(commands.Cog):
             return
 
         # Deduct cost first
-        await asyncio.to_thread(self.player_service.player_repo.add_balance, user_id, guild_id, -cost)
+        await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, -cost)
         balance_after_cost = balance - cost
 
         # 50/50 flip
@@ -743,14 +743,14 @@ class ShopCommands(commands.Cog):
         elif won:
             # WIN: Double the remaining balance
             winnings = balance_after_cost
-            await asyncio.to_thread(self.player_service.player_repo.add_balance, user_id, guild_id, winnings)
+            await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, winnings)
             final_balance = balance_after_cost * 2
             result_title = "DOUBLE!"
             result_color = 0x00FF00  # Green
             flavor_event = FlavorEvent.DOUBLE_OR_NOTHING_WIN
         else:
             # LOSE: Zero out the balance
-            await asyncio.to_thread(self.player_service.player_repo.update_balance, user_id, guild_id, 0)
+            await asyncio.to_thread(self.player_service.set_balance, user_id, guild_id, 0)
             final_balance = 0
             result_title = "NOTHING!"
             result_color = 0xFF0000  # Red
@@ -788,7 +788,7 @@ class ShopCommands(commands.Cog):
         # Log the result
         await asyncio.to_thread(
             functools.partial(
-                self.player_service.player_repo.log_double_or_nothing,
+                self.player_service.log_double_or_nothing,
                 discord_id=user_id,
                 guild_id=guild_id,
                 cost=cost,
@@ -830,6 +830,41 @@ class ShopCommands(commands.Cog):
 
         await safe_followup(interaction, content=interaction.user.mention, embed=embed)
 
+        # Neon Degen Terminal hook (double or nothing result)
+        try:
+            from services.neon_degen_service import NeonDegenService
+            _neon_svc = getattr(self.bot, "neon_degen_service", None)
+            neon = _neon_svc if isinstance(_neon_svc, NeonDegenService) else None
+            if neon:
+                neon_result = await neon.on_double_or_nothing(
+                    user_id, guild_id,
+                    won=won,
+                    balance_at_risk=balance_after_cost,
+                    final_balance=final_balance,
+                )
+                if neon_result:
+                    msg = None
+                    if neon_result.gif_file:
+                        gif_file = discord.File(neon_result.gif_file, filename="jopat_terminal.gif")
+                        if neon_result.text_block:
+                            msg = await interaction.channel.send(neon_result.text_block, file=gif_file)
+                        else:
+                            msg = await interaction.channel.send(file=gif_file)
+                    elif neon_result.text_block:
+                        msg = await interaction.channel.send(neon_result.text_block)
+                    elif neon_result.footer_text:
+                        msg = await interaction.channel.send(neon_result.footer_text)
+                    if msg:
+                        async def _del_neon(m, d):
+                            try:
+                                await asyncio.sleep(d)
+                                await m.delete()
+                            except Exception:
+                                pass
+                        asyncio.create_task(_del_neon(msg, 60))
+        except Exception:
+            pass
+
     async def _handle_soft_avoid(
         self,
         interaction: discord.Interaction,
@@ -866,9 +901,9 @@ class ShopCommands(commands.Cog):
             )
             return
 
-        # Check if soft_avoid_repo is available
-        soft_avoid_repo = getattr(self.bot, "soft_avoid_repo", None)
-        if not soft_avoid_repo:
+        # Check if soft_avoid_service is available
+        soft_avoid_service = getattr(self.bot, "soft_avoid_service", None)
+        if not soft_avoid_service:
             await interaction.response.send_message(
                 "Soft avoid feature is currently unavailable.",
                 ephemeral=True,
@@ -885,12 +920,12 @@ class ShopCommands(commands.Cog):
             return
 
         # Deduct cost
-        await asyncio.to_thread(self.player_service.player_repo.add_balance, user_id, guild_id, -cost)
+        await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, -cost)
 
         # Create or extend avoid
         avoid = await asyncio.to_thread(
             functools.partial(
-                soft_avoid_repo.create_or_extend_avoid,
+                soft_avoid_service.create_or_extend_avoid,
                 guild_id=guild_id,
                 avoider_id=user_id,
                 avoided_id=target.id,
@@ -949,9 +984,9 @@ class ShopCommands(commands.Cog):
         user_id = interaction.user.id
         guild_id = interaction.guild.id if interaction.guild else None
 
-        # Check if soft_avoid_repo is available
-        soft_avoid_repo = getattr(self.bot, "soft_avoid_repo", None)
-        if not soft_avoid_repo:
+        # Check if soft_avoid_service is available
+        soft_avoid_service = getattr(self.bot, "soft_avoid_service", None)
+        if not soft_avoid_service:
             await interaction.response.send_message(
                 "Soft avoid feature is currently unavailable.",
                 ephemeral=True,
@@ -959,7 +994,7 @@ class ShopCommands(commands.Cog):
             return
 
         # Get user's avoids
-        avoids = await asyncio.to_thread(soft_avoid_repo.get_user_avoids, guild_id, user_id)
+        avoids = await asyncio.to_thread(soft_avoid_service.get_user_avoids, guild_id, user_id)
 
         if not avoids:
             await interaction.response.send_message(
@@ -982,40 +1017,6 @@ class ShopCommands(commands.Cog):
         # Ephemeral response (private)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-        # Neon Degen Terminal hook (double or nothing result)
-        try:
-            from services.neon_degen_service import NeonDegenService
-            _neon_svc = getattr(self.bot, "neon_degen_service", None)
-            neon = _neon_svc if isinstance(_neon_svc, NeonDegenService) else None
-            if neon:
-                neon_result = await neon.on_double_or_nothing(
-                    user_id, guild_id,
-                    won=won,
-                    balance_at_risk=balance_after_cost,
-                    final_balance=final_balance,
-                )
-                if neon_result:
-                    msg = None
-                    if neon_result.gif_file:
-                        gif_file = discord.File(neon_result.gif_file, filename="jopat_terminal.gif")
-                        if neon_result.text_block:
-                            msg = await interaction.channel.send(neon_result.text_block, file=gif_file)
-                        else:
-                            msg = await interaction.channel.send(file=gif_file)
-                    elif neon_result.text_block:
-                        msg = await interaction.channel.send(neon_result.text_block)
-                    elif neon_result.footer_text:
-                        msg = await interaction.channel.send(neon_result.footer_text)
-                    if msg:
-                        async def _del_neon(m, d):
-                            try:
-                                await asyncio.sleep(d)
-                                await m.delete()
-                            except Exception:
-                                pass
-                        asyncio.create_task(_del_neon(msg, 60))
-        except Exception:
-            pass
 
 async def setup(bot: commands.Bot):
     player_service = getattr(bot, "player_service", None)

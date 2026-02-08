@@ -580,3 +580,300 @@ class IRecalibrationRepository(ABC):
     def reset_cooldown(self, discord_id: int, guild_id: int) -> None:
         """Reset recalibration cooldown by setting last_recalibration_at to 0."""
         ...
+
+
+class ISoftAvoidRepository(ABC):
+    """Repository for soft avoid feature data access."""
+
+    @abstractmethod
+    def create_or_extend_avoid(
+        self,
+        guild_id: int | None,
+        avoider_id: int,
+        avoided_id: int,
+        games: int = 10,
+    ):
+        """Create a new soft avoid or extend existing one."""
+        ...
+
+    @abstractmethod
+    def get_active_avoids_for_players(
+        self,
+        guild_id: int | None,
+        player_ids: list[int],
+    ) -> list:
+        """Get all active avoids where BOTH avoider and avoided are in player_ids."""
+        ...
+
+    @abstractmethod
+    def get_user_avoids(
+        self,
+        guild_id: int | None,
+        discord_id: int,
+    ) -> list:
+        """Get all active avoids created by a user."""
+        ...
+
+    @abstractmethod
+    def decrement_avoids(
+        self,
+        guild_id: int | None,
+        avoid_ids: list[int],
+    ) -> int:
+        """Decrement games_remaining for the given avoid IDs."""
+        ...
+
+    @abstractmethod
+    def delete_expired_avoids(self, guild_id: int | None) -> int:
+        """Delete avoids with games_remaining = 0."""
+        ...
+
+
+class ITipRepository(ABC):
+    """Repository for tip transaction logging."""
+
+    @abstractmethod
+    def log_tip(
+        self,
+        sender_id: int,
+        recipient_id: int,
+        amount: int,
+        fee: int,
+        guild_id: int | None,
+    ) -> int:
+        """Log a tip transaction. Returns the transaction ID."""
+        ...
+
+    @abstractmethod
+    def get_tips_by_sender(
+        self, sender_id: int, guild_id: int | None = None, limit: int = 10
+    ) -> list[dict]:
+        """Get tips sent by a user."""
+        ...
+
+    @abstractmethod
+    def get_tips_by_recipient(
+        self, recipient_id: int, guild_id: int | None = None, limit: int = 10
+    ) -> list[dict]:
+        """Get tips received by a user."""
+        ...
+
+    @abstractmethod
+    def get_total_fees_collected(self, guild_id: int | None = None) -> int:
+        """Get total fees collected from tips."""
+        ...
+
+    @abstractmethod
+    def get_top_senders(self, guild_id: int | None, limit: int = 10) -> list[dict]:
+        """Get top tip senders ranked by total amount sent."""
+        ...
+
+    @abstractmethod
+    def get_top_receivers(self, guild_id: int | None, limit: int = 10) -> list[dict]:
+        """Get top tip receivers ranked by total amount received."""
+        ...
+
+    @abstractmethod
+    def get_user_tip_stats(self, discord_id: int, guild_id: int | None) -> dict:
+        """Get individual user's tip statistics."""
+        ...
+
+    @abstractmethod
+    def get_total_tip_volume(self, guild_id: int | None) -> dict:
+        """Get server-wide tip statistics."""
+        ...
+
+
+class IWrappedRepository(ABC):
+    """Repository for Cama Wrapped monthly summary data access."""
+
+    @abstractmethod
+    def get_wrapped(self, guild_id: int, year_month: str) -> dict | None:
+        """Get existing wrapped generation record for a guild/month."""
+        ...
+
+    @abstractmethod
+    def get_last_generation(self, guild_id: int) -> dict | None:
+        """Get the most recent wrapped generation for a guild."""
+        ...
+
+    @abstractmethod
+    def save_wrapped(
+        self,
+        guild_id: int,
+        year_month: str,
+        stats: dict,
+        channel_id: int | None = None,
+        message_id: int | None = None,
+        generated_by: int | None = None,
+        generation_type: str = "auto",
+    ) -> int:
+        """Save wrapped generation record."""
+        ...
+
+    @abstractmethod
+    def get_month_match_stats(
+        self, guild_id: int, start_ts: int, end_ts: int
+    ) -> list[dict]:
+        """Get match participation stats for a time period."""
+        ...
+
+    @abstractmethod
+    def get_month_hero_stats(
+        self, guild_id: int, start_ts: int, end_ts: int
+    ) -> list[dict]:
+        """Get hero pick stats for a time period."""
+        ...
+
+    @abstractmethod
+    def get_month_player_heroes(
+        self, guild_id: int, start_ts: int, end_ts: int
+    ) -> list[dict]:
+        """Get per-player hero stats for a time period."""
+        ...
+
+    @abstractmethod
+    def get_month_rating_changes(
+        self, guild_id: int, start_ts: int, end_ts: int
+    ) -> list[dict]:
+        """Get rating changes for players over a time period."""
+        ...
+
+    @abstractmethod
+    def get_month_betting_stats(
+        self, guild_id: int, start_ts: int, end_ts: int
+    ) -> list[dict]:
+        """Get betting stats for players over a time period."""
+        ...
+
+    @abstractmethod
+    def get_month_bankruptcy_count(
+        self, guild_id: int, start_ts: int, end_ts: int
+    ) -> list[dict]:
+        """Get bankruptcy counts for the period."""
+        ...
+
+    @abstractmethod
+    def get_month_bets_against_player(
+        self, guild_id: int, start_ts: int, end_ts: int
+    ) -> list[dict]:
+        """Get count of bets placed against each player's team."""
+        ...
+
+    @abstractmethod
+    def get_month_summary(self, guild_id: int, start_ts: int, end_ts: int) -> dict:
+        """Get high-level summary stats for the month."""
+        ...
+
+
+class IAIQueryRepository(ABC):
+    """Repository for executing AI-generated SQL queries safely."""
+
+    @abstractmethod
+    def execute_readonly(
+        self,
+        sql: str,
+        params: tuple = (),
+        max_rows: int = 25,
+    ) -> list[dict]:
+        """Execute a validated SQL query in read-only mode."""
+        ...
+
+    @abstractmethod
+    def get_table_schema(self, table_name: str) -> list[dict]:
+        """Get schema information for a table."""
+        ...
+
+    @abstractmethod
+    def get_all_tables(self) -> list[str]:
+        """Get list of all tables in the database."""
+        ...
+
+    @abstractmethod
+    def get_foreign_keys(self, table_name: str) -> list[dict]:
+        """Get foreign key relationships for a table."""
+        ...
+
+
+class IDisburseRepository(ABC):
+    """Repository for managing nonprofit fund disbursement proposals and votes."""
+
+    @abstractmethod
+    def get_active_proposal(self, guild_id: int | None) -> dict | None:
+        """Get the active proposal for a guild, if any."""
+        ...
+
+    @abstractmethod
+    def create_proposal(
+        self,
+        guild_id: int | None,
+        proposal_id: int,
+        fund_amount: int,
+        quorum_required: int,
+    ) -> None:
+        """Create a new disbursement proposal."""
+        ...
+
+    @abstractmethod
+    def set_proposal_message(
+        self, guild_id: int | None, message_id: int, channel_id: int
+    ) -> None:
+        """Set the Discord message ID for an active proposal."""
+        ...
+
+    @abstractmethod
+    def add_vote(
+        self,
+        guild_id: int | None,
+        proposal_id: int,
+        discord_id: int,
+        method: str,
+    ) -> None:
+        """Add or update a vote for a disbursement proposal."""
+        ...
+
+    @abstractmethod
+    def get_vote_counts(self, guild_id: int | None) -> dict[str, int]:
+        """Get vote counts for each method for the active proposal."""
+        ...
+
+    @abstractmethod
+    def get_total_votes(self, guild_id: int | None) -> int:
+        """Get total number of votes for the active proposal."""
+        ...
+
+    @abstractmethod
+    def get_voter_ids(self, guild_id: int | None) -> list[int]:
+        """Get list of discord_ids who have voted on the active proposal."""
+        ...
+
+    @abstractmethod
+    def get_individual_votes(self, guild_id: int | None) -> list[dict]:
+        """Get individual vote details for the active proposal."""
+        ...
+
+    @abstractmethod
+    def complete_proposal(self, guild_id: int | None) -> None:
+        """Mark the active proposal as completed."""
+        ...
+
+    @abstractmethod
+    def reset_proposal(self, guild_id: int | None) -> bool:
+        """Reset (cancel) the active proposal."""
+        ...
+
+    @abstractmethod
+    def record_disbursement(
+        self,
+        guild_id: int | None,
+        total_amount: int,
+        method: str,
+        distributions: list[tuple[int, int]],
+    ) -> int:
+        """Record a completed disbursement for history."""
+        ...
+
+    @abstractmethod
+    def get_last_disbursement(self, guild_id: int | None) -> dict | None:
+        """Get the most recent disbursement for a guild."""
+        ...

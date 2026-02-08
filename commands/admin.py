@@ -32,17 +32,19 @@ class AdminCommands(commands.Cog):
         self,
         bot: commands.Bot,
         lobby_service,
-        player_repo,
+        player_service,
         loan_service=None,
         bankruptcy_service=None,
         recalibration_service=None,
+        match_service=None,
     ):
         self.bot = bot
         self.lobby_service = lobby_service
-        self.player_repo = player_repo
+        self.player_service = player_service
         self.loan_service = loan_service
         self.bankruptcy_service = bankruptcy_service
         self.recalibration_service = recalibration_service
+        self.match_service = match_service
 
     @app_commands.command(
         name="addfake", description="Add fake users to lobby for testing (Admin only)"
@@ -148,7 +150,7 @@ class AdminCommands(commands.Cog):
                 fake_name = f"FakeUser{next_index}"
                 next_index += 1
 
-                existing = self.player_repo.get_by_id(fake_id, addfake_guild_id)
+                existing = self.player_service.get_player(fake_id, addfake_guild_id)
                 if not existing:
                     rating = random.randint(1000, 2000)
                     rd = random.uniform(50, 350)
@@ -156,11 +158,10 @@ class AdminCommands(commands.Cog):
                     num_roles = random.randint(1, min(5, len(role_choices)))
                     roles = random.sample(role_choices, k=num_roles)
                     try:
-                        self.player_repo.add(
+                        self.player_service.add_fake_player(
                             discord_id=fake_id,
                             discord_username=fake_name,
                             guild_id=addfake_guild_id,
-                            initial_mmr=None,
                             glicko_rating=rating,
                             glicko_rd=rd,
                             glicko_volatility=vol,
@@ -171,7 +172,7 @@ class AdminCommands(commands.Cog):
 
                 # Set captain eligibility if requested
                 if captain_eligible:
-                    self.player_repo.set_captain_eligible(fake_id, addfake_guild_id, True)
+                    self.player_service.set_captain_eligible(fake_id, addfake_guild_id, True)
 
                 success, _ = self.lobby_service.join_lobby(fake_id)
                 if success:
@@ -261,7 +262,7 @@ class AdminCommands(commands.Cog):
                 fake_name = f"FakeUser{next_index}"
                 next_index += 1
 
-                existing = self.player_repo.get_by_id(fake_id, fill_guild_id)
+                existing = self.player_service.get_player(fake_id, fill_guild_id)
                 if not existing:
                     rating = random.randint(1000, 2000)
                     rd = random.uniform(50, 350)
@@ -269,11 +270,10 @@ class AdminCommands(commands.Cog):
                     num_roles = random.randint(1, min(5, len(role_choices)))
                     roles = random.sample(role_choices, k=num_roles)
                     try:
-                        self.player_repo.add(
+                        self.player_service.add_fake_player(
                             discord_id=fake_id,
                             discord_username=fake_name,
                             guild_id=fill_guild_id,
-                            initial_mmr=None,
                             glicko_rating=rating,
                             glicko_rd=rd,
                             glicko_volatility=vol,
@@ -283,7 +283,7 @@ class AdminCommands(commands.Cog):
                         pass
 
                 if captain_eligible:
-                    self.player_repo.set_captain_eligible(fake_id, fill_guild_id, True)
+                    self.player_service.set_captain_eligible(fake_id, fill_guild_id, True)
 
                 success, _ = self.lobby_service.join_lobby(fake_id)
                 if success:
@@ -361,7 +361,7 @@ class AdminCommands(commands.Cog):
             return
 
         guild_id = interaction.guild.id if interaction.guild else None
-        player = await asyncio.to_thread(self.player_repo.get_by_id, user.id, guild_id)
+        player = await asyncio.to_thread(self.player_service.get_player, user.id, guild_id)
         if not player:
             await safe_followup(
                 interaction,
@@ -370,7 +370,7 @@ class AdminCommands(commands.Cog):
             )
             return
 
-        deleted = await asyncio.to_thread(self.player_repo.delete, user.id, guild_id)
+        deleted = await asyncio.to_thread(self.player_service.delete_player, user.id, guild_id)
         if deleted:
             await safe_followup(
                 interaction,
@@ -594,7 +594,7 @@ class AdminCommands(commands.Cog):
                     ephemeral=True,
                 )
             else:
-                # Taking from nonprofit - need to use the repo directly
+                # Taking from nonprofit
                 abs_amount = abs(amount)
                 if old_balance < abs_amount:
                     await interaction.response.send_message(
@@ -602,9 +602,8 @@ class AdminCommands(commands.Cog):
                         ephemeral=True,
                     )
                     return
-                # Negative add to subtract
                 await asyncio.to_thread(
-                    self.loan_service.loan_repo.add_to_nonprofit_fund, guild_id, amount
+                    self.loan_service.subtract_from_nonprofit_fund, guild_id, abs_amount
                 )
                 new_balance = await asyncio.to_thread(
                     self.loan_service.get_nonprofit_fund, guild_id
@@ -622,7 +621,7 @@ class AdminCommands(commands.Cog):
             return
 
         # Handle user target (original behavior)
-        player = await asyncio.to_thread(self.player_repo.get_by_id, user.id, guild_id)
+        player = await asyncio.to_thread(self.player_service.get_player, user.id, guild_id)
         if not player:
             await interaction.response.send_message(
                 f"⚠️ {user.mention} is not registered.",
@@ -631,11 +630,10 @@ class AdminCommands(commands.Cog):
             return
 
         old_balance = await asyncio.to_thread(
-            self.player_repo.get_balance, user.id, guild_id
+            self.player_service.get_balance, user.id, guild_id
         )
-        await asyncio.to_thread(self.player_repo.add_balance, user.id, guild_id, amount)
         new_balance = await asyncio.to_thread(
-            self.player_repo.get_balance, user.id, guild_id
+            self.player_service.adjust_balance, user.id, guild_id, amount
         )
 
         action = "gave" if amount >= 0 else "took"
@@ -672,7 +670,7 @@ class AdminCommands(commands.Cog):
             return
 
         guild_id = interaction.guild.id if interaction.guild else None
-        player = await asyncio.to_thread(self.player_repo.get_by_id, user.id, guild_id)
+        player = await asyncio.to_thread(self.player_service.get_player, user.id, guild_id)
         if not player:
             await interaction.response.send_message(
                 f"⚠️ {user.mention} is not registered.",
@@ -680,23 +678,9 @@ class AdminCommands(commands.Cog):
             )
             return
 
-        # Get current state
-        state = await asyncio.to_thread(self.loan_service.get_state, user.id, guild_id)
-
-        # Reset the cooldown by setting last_loan_at to 0 (epoch = no cooldown)
-        # Note: Can't use None because COALESCE in upsert keeps old value
+        # Reset the cooldown via service method
         await asyncio.to_thread(
-            functools.partial(
-                self.loan_service.loan_repo.upsert_state,
-                discord_id=user.id,
-                guild_id=guild_id,
-                last_loan_at=0,
-                total_loans_taken=state.total_loans_taken,
-                total_fees_paid=state.total_fees_paid,
-                negative_loans_taken=state.negative_loans_taken,
-                outstanding_principal=state.outstanding_principal,
-                outstanding_fee=state.outstanding_fee,
-            )
+            self.loan_service.reset_loan_cooldown, user.id, guild_id
         )
 
         await interaction.response.send_message(
@@ -730,7 +714,7 @@ class AdminCommands(commands.Cog):
             return
 
         guild_id = interaction.guild.id if interaction.guild else None
-        player = await asyncio.to_thread(self.player_repo.get_by_id, user.id, guild_id)
+        player = await asyncio.to_thread(self.player_service.get_player, user.id, guild_id)
         if not player:
             await interaction.response.send_message(
                 f"⚠️ {user.mention} is not registered.",
@@ -738,28 +722,17 @@ class AdminCommands(commands.Cog):
             )
             return
 
-        # Get current state
-        state = await asyncio.to_thread(
-            self.bankruptcy_service.bankruptcy_repo.get_state, user.id, guild_id
+        # Reset cooldown AND clear penalty games via service method
+        reset = await asyncio.to_thread(
+            self.bankruptcy_service.reset_cooldown, user.id, guild_id
         )
 
-        if not state:
+        if not reset:
             await interaction.response.send_message(
                 f"ℹ️ {user.mention} has no bankruptcy history to reset.",
                 ephemeral=True,
             )
             return
-
-        # Reset cooldown AND clear penalty games (without incrementing bankruptcy count)
-        await asyncio.to_thread(
-            functools.partial(
-                self.bankruptcy_service.bankruptcy_repo.reset_cooldown_only,
-                discord_id=user.id,
-                guild_id=guild_id,
-                last_bankruptcy_at=0,  # Far in the past = no cooldown
-                penalty_games_remaining=0,  # Clear penalty games
-            )
-        )
 
         await interaction.response.send_message(
             f"✅ Reset bankruptcy for {user.mention}. Cooldown and penalty games cleared.",
@@ -794,7 +767,7 @@ class AdminCommands(commands.Cog):
             return
 
         guild_id = interaction.guild.id if interaction.guild else None
-        player = await asyncio.to_thread(self.player_repo.get_by_id, user.id, guild_id)
+        player = await asyncio.to_thread(self.player_service.get_player, user.id, guild_id)
         if not player:
             await interaction.response.send_message(
                 f"⚠️ {user.mention} is not registered.",
@@ -802,11 +775,9 @@ class AdminCommands(commands.Cog):
             )
             return
 
-        games = 0
-        if hasattr(self.player_repo, "get_game_count"):
-            games = await asyncio.to_thread(
-                self.player_repo.get_game_count, user.id, guild_id
-            )
+        games = await asyncio.to_thread(
+            self.player_service.get_game_count, user.id, guild_id
+        )
         if games >= ADMIN_RATING_ADJUSTMENT_MAX_GAMES:
             await interaction.response.send_message(
                 "❌ Player has too many games for initial rating adjustment.",
@@ -818,7 +789,7 @@ class AdminCommands(commands.Cog):
         rd = 300.0
         vol = 0.06
         rating_data = await asyncio.to_thread(
-            self.player_repo.get_glicko_rating, user.id, guild_id
+            self.player_service.get_glicko_rating, user.id, guild_id
         )
         if rating_data:
             _current_rating, current_rd, current_vol = rating_data
@@ -828,7 +799,7 @@ class AdminCommands(commands.Cog):
                 vol = current_vol
 
         await asyncio.to_thread(
-            self.player_repo.update_glicko_rating, user.id, guild_id, rating, rd, vol
+            self.player_service.update_glicko_rating, user.id, guild_id, rating, rd, vol
         )
 
         await interaction.response.send_message(
@@ -953,7 +924,7 @@ class AdminCommands(commands.Cog):
             return
 
         guild_id = interaction.guild.id if interaction.guild else None
-        player = await asyncio.to_thread(self.player_repo.get_by_id, user.id, guild_id)
+        player = await asyncio.to_thread(self.player_service.get_player, user.id, guild_id)
         if not player:
             await interaction.response.send_message(
                 f"⚠️ {user.mention} is not registered.",
@@ -1271,7 +1242,7 @@ class AdminCommands(commands.Cog):
             return
 
         guild_id = interaction.guild.id if interaction.guild else None
-        player = await asyncio.to_thread(self.player_repo.get_by_id, user.id, guild_id)
+        player = await asyncio.to_thread(self.player_service.get_player, user.id, guild_id)
         if not player:
             await interaction.response.send_message(
                 f"⚠️ {user.mention} is not registered.",
@@ -1288,11 +1259,11 @@ class AdminCommands(commands.Cog):
             return
 
         try:
-            current_ids = await asyncio.to_thread(self.player_repo.get_steam_ids, user.id)
+            current_ids = await asyncio.to_thread(self.player_service.get_steam_ids, user.id)
             is_first = len(current_ids) == 0
             await asyncio.to_thread(
                 functools.partial(
-                    self.player_repo.add_steam_id,
+                    self.player_service.add_steam_id,
                     user.id,
                     steam_id,
                     is_primary=set_primary or is_first,
@@ -1337,7 +1308,7 @@ class AdminCommands(commands.Cog):
             return
 
         guild_id = interaction.guild.id if interaction.guild else None
-        player = await asyncio.to_thread(self.player_repo.get_by_id, user.id, guild_id)
+        player = await asyncio.to_thread(self.player_service.get_player, user.id, guild_id)
         if not player:
             await interaction.response.send_message(
                 f"⚠️ {user.mention} is not registered.",
@@ -1345,7 +1316,7 @@ class AdminCommands(commands.Cog):
             )
             return
 
-        current_ids = await asyncio.to_thread(self.player_repo.get_steam_ids, user.id)
+        current_ids = await asyncio.to_thread(self.player_service.get_steam_ids, user.id)
         if steam_id not in current_ids:
             await interaction.response.send_message(
                 f"❌ Steam ID `{steam_id}` is not linked to {user.mention}.",
@@ -1353,9 +1324,9 @@ class AdminCommands(commands.Cog):
             )
             return
 
-        removed = await asyncio.to_thread(self.player_repo.remove_steam_id, user.id, steam_id)
+        removed = await asyncio.to_thread(self.player_service.remove_steam_id, user.id, steam_id)
         if removed:
-            remaining = await asyncio.to_thread(self.player_repo.get_steam_ids, user.id)
+            remaining = await asyncio.to_thread(self.player_service.get_steam_ids, user.id)
             if remaining:
                 await interaction.response.send_message(
                     f"✅ Removed Steam ID `{steam_id}` from {user.mention}'s account.\n"
@@ -1401,7 +1372,7 @@ class AdminCommands(commands.Cog):
             return
 
         guild_id = interaction.guild.id if interaction.guild else None
-        player = await asyncio.to_thread(self.player_repo.get_by_id, user.id, guild_id)
+        player = await asyncio.to_thread(self.player_service.get_player, user.id, guild_id)
         if not player:
             await interaction.response.send_message(
                 f"⚠️ {user.mention} is not registered.",
@@ -1409,7 +1380,7 @@ class AdminCommands(commands.Cog):
             )
             return
 
-        current_ids = await asyncio.to_thread(self.player_repo.get_steam_ids, user.id)
+        current_ids = await asyncio.to_thread(self.player_service.get_steam_ids, user.id)
         if steam_id not in current_ids:
             await interaction.response.send_message(
                 f"❌ Steam ID `{steam_id}` is not linked to {user.mention}.\n"
@@ -1418,7 +1389,7 @@ class AdminCommands(commands.Cog):
             )
             return
 
-        if await asyncio.to_thread(self.player_repo.set_primary_steam_id, user.id, steam_id):
+        if await asyncio.to_thread(self.player_service.set_primary_steam_id, user.id, steam_id):
             await interaction.response.send_message(
                 f"✅ Set `{steam_id}` as {user.mention}'s primary Steam account.",
                 ephemeral=True,
@@ -1445,9 +1416,8 @@ class AdminCommands(commands.Cog):
 
         await interaction.response.defer(ephemeral=True)
 
-        match_repo = getattr(interaction.client, "match_repo", None)
-        if not match_repo:
-            await interaction.followup.send("❌ match_repo not available.", ephemeral=True)
+        if not self.match_service:
+            await interaction.followup.send("❌ match_service not available.", ephemeral=True)
             return
 
         # Hero pool: 20 popular heroes with IDs from heroes.json
@@ -1474,9 +1444,9 @@ class AdminCommands(commands.Cog):
             for i in range(NUM_PLAYERS):
                 pid = BASE_ID - i  # -1001, -1002, ...
                 player_ids.append(pid)
-                existing = self.player_repo.get_by_id(pid, seed_guild_id)
+                existing = self.player_service.get_player(pid, seed_guild_id)
                 if not existing:
-                    self.player_repo.add(
+                    self.player_service.add_fake_player(
                         discord_id=pid,
                         discord_username=f"GridTest{i + 1}",
                         guild_id=seed_guild_id,
@@ -1496,10 +1466,11 @@ class AdminCommands(commands.Cog):
                 team2 = shuffled[5:]
                 winning_team = random.choice([1, 2])
 
-                mid = match_repo.record_match(
+                mid = self.match_service.record_match_raw(
                     team1_ids=team1,
                     team2_ids=team2,
                     winning_team=winning_team,
+                    guild_id=seed_guild_id,
                     lobby_type="shuffle",
                 )
 
@@ -1514,7 +1485,7 @@ class AdminCommands(commands.Cog):
                         else:
                             hero_id = random.choice(HERO_POOL)
 
-                        match_repo.update_participant_stats(
+                        self.match_service.update_participant_stats(
                             match_id=mid,
                             discord_id=pid,
                             hero_id=hero_id,
@@ -1545,11 +1516,11 @@ class AdminCommands(commands.Cog):
 
 async def setup(bot: commands.Bot):
     lobby_service = getattr(bot, "lobby_service", None)
-    # Use player_repo directly from bot for admin operations
-    player_repo = getattr(bot, "player_repo", None)
+    player_service = getattr(bot, "player_service", None)
     loan_service = getattr(bot, "loan_service", None)
     bankruptcy_service = getattr(bot, "bankruptcy_service", None)
     recalibration_service = getattr(bot, "recalibration_service", None)
+    match_service = getattr(bot, "match_service", None)
 
     # Check if cog is already loaded
     if "AdminCommands" in [cog.__class__.__name__ for cog in bot.cogs.values()]:
@@ -1558,7 +1529,7 @@ async def setup(bot: commands.Bot):
 
     await bot.add_cog(
         AdminCommands(
-            bot, lobby_service, player_repo, loan_service, bankruptcy_service, recalibration_service
+            bot, lobby_service, player_service, loan_service, bankruptcy_service, recalibration_service, match_service
         )
     )
 

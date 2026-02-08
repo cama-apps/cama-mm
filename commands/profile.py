@@ -234,8 +234,8 @@ class ProfileCommands(commands.Cog):
     def _get_pairings_repo(self):
         return getattr(self.bot, "pairings_repo", None)
 
-    def _get_tip_repository(self):
-        return getattr(self.bot, "tip_repository", None)
+    def _get_tip_service(self):
+        return getattr(self.bot, "tip_service", None)
 
     def _get_rating_system(self):
         match_service = getattr(self.bot, "match_service", None)
@@ -719,9 +719,9 @@ class ProfileCommands(commands.Cog):
             )
 
         # Tipping statistics
-        tip_repo = self._get_tip_repository()
-        if tip_repo:
-            tip_stats = tip_repo.get_user_tip_stats(target_discord_id, guild_id)
+        tip_service = self._get_tip_service()
+        if tip_service:
+            tip_stats = tip_service.get_user_tip_stats(target_discord_id, guild_id)
 
             # Only show if user has tip history
             if tip_stats["tips_sent_count"] > 0 or tip_stats["tips_received_count"] > 0:
@@ -1026,7 +1026,7 @@ class ProfileCommands(commands.Cog):
             ), None
 
         # Get prediction stats
-        stats = prediction_service.prediction_repo.get_user_prediction_stats(target_discord_id, guild_id)
+        stats = prediction_service.get_user_prediction_stats(target_discord_id, guild_id)
 
         if not stats:
             return discord.Embed(

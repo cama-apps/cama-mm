@@ -18,6 +18,8 @@ from openskill_rating_system import CamaOpenSkillSystem
 from rating_system import CamaRatingSystem
 from repositories.interfaces import IMatchRepository, IPairingsRepository, IPlayerRepository
 from services.betting_service import BettingService
+from services.match_state_service import MatchStateService
+from services.match_voting_service import MatchVotingService
 from shuffler import BalancedShuffler
 
 logger = logging.getLogger("cama_bot.services.match")
@@ -38,6 +40,7 @@ class MatchService:
         pairings_repo: IPairingsRepository | None = None,
         loan_service=None,
         soft_avoid_repo=None,
+        state_service: MatchStateService | None = None,
     ):
         """
         Initialize MatchService with required repository dependencies.
@@ -50,6 +53,7 @@ class MatchService:
             pairings_repo: Optional repository for pairwise player statistics
             loan_service: Optional loan service for deferred repayment
             soft_avoid_repo: Optional repository for soft avoid feature
+            state_service: Optional state service (created if not provided)
         """
         self.player_repo = player_repo
         self.match_repo = match_repo
@@ -63,8 +67,10 @@ class MatchService:
             off_role_flat_penalty=self.shuffler.off_role_flat_penalty,
             role_matchup_delta_weight=self.shuffler.role_matchup_delta_weight,
         )
-        self._last_shuffle_by_guild: dict[int, dict] = {}
-        self._shuffle_state_lock = threading.RLock()  # Protects _last_shuffle_by_guild
+        # State management delegated to MatchStateService
+        self.state_service = state_service or MatchStateService(match_repo)
+        # Voting management delegated to MatchVotingService
+        self.voting_service = MatchVotingService(self.state_service)
         self.betting_service = betting_service
         self.pairings_repo = pairings_repo
         self.loan_service = loan_service
@@ -81,32 +87,23 @@ class MatchService:
         """Resolve Team players to Discord IDs using object identity."""
         return [player_id_map[id(p)] for p in team.players]
 
+    # ==================== State Management (delegated to MatchStateService) ====================
+
     def _normalize_guild_id(self, guild_id: int | None) -> int:
-        return guild_id if guild_id is not None else 0
+        """Normalize guild_id (delegates to state_service)."""
+        return self.state_service._normalize_guild_id(guild_id)
 
     def get_last_shuffle(self, guild_id: int | None = None) -> dict | None:
-        with self._shuffle_state_lock:
-            normalized = self._normalize_guild_id(guild_id)
-            state = self._last_shuffle_by_guild.get(normalized)
-            if state:
-                return state
-            persisted = self.match_repo.get_pending_match(guild_id)
-            if persisted:
-                self._last_shuffle_by_guild[normalized] = persisted
-                return persisted
-            return None
+        """Get the pending shuffle state (delegates to state_service)."""
+        return self.state_service.get_last_shuffle(guild_id)
 
     def set_last_shuffle(self, guild_id: int | None, payload: dict) -> None:
-        with self._shuffle_state_lock:
-            self._last_shuffle_by_guild[self._normalize_guild_id(guild_id)] = payload
+        """Set the pending shuffle state (delegates to state_service)."""
+        self.state_service.set_last_shuffle(guild_id, payload)
 
     def set_shuffle_message_url(self, guild_id: int | None, jump_url: str) -> None:
-        """
-        Store the message link for the current pending shuffle so other commands can link to it.
-
-        Legacy helper retained for backward compatibility; prefers set_shuffle_message_info.
-        """
-        self.set_shuffle_message_info(guild_id, message_id=None, channel_id=None, jump_url=jump_url)
+        """Store the message link for the current pending shuffle (delegates to state_service)."""
+        self.state_service.set_shuffle_message_url(guild_id, jump_url)
 
     def set_shuffle_message_info(
         self,
@@ -118,218 +115,81 @@ class MatchService:
         thread_id: int | None = None,
         origin_channel_id: int | None = None,
     ) -> None:
-        """
-        Store message metadata (id, channel, jump_url) for the pending shuffle.
-        Also stores thread message info for updating betting display in thread.
-        origin_channel_id is stored for betting reminders (since reset_lobby clears it).
-        """
-        with self._shuffle_state_lock:
-            state = self.get_last_shuffle(guild_id)
-            if not state:
-                return
-            if message_id is not None:
-                state["shuffle_message_id"] = message_id
-            if channel_id is not None:
-                state["shuffle_channel_id"] = channel_id
-            if jump_url is not None:
-                state["shuffle_message_jump_url"] = jump_url
-            if thread_message_id is not None:
-                state["thread_shuffle_message_id"] = thread_message_id
-            if thread_id is not None:
-                state["thread_shuffle_thread_id"] = thread_id
-            if origin_channel_id is not None:
-                state["origin_channel_id"] = origin_channel_id
-            self._persist_match_state(guild_id, state)
+        """Store message metadata for the pending shuffle (delegates to state_service)."""
+        self.state_service.set_shuffle_message_info(
+            guild_id, message_id, channel_id, jump_url,
+            thread_message_id, thread_id, origin_channel_id
+        )
 
     def get_shuffle_message_info(self, guild_id: int | None) -> dict[str, int | None]:
-        """
-        Return message metadata for the pending shuffle, if present.
-        """
-        with self._shuffle_state_lock:
-            state = self.get_last_shuffle(guild_id) or {}
-            return {
-                "message_id": state.get("shuffle_message_id"),
-                "channel_id": state.get("shuffle_channel_id"),
-                "jump_url": state.get("shuffle_message_jump_url"),
-                "thread_message_id": state.get("thread_shuffle_message_id"),
-                "thread_id": state.get("thread_shuffle_thread_id"),
-                "origin_channel_id": state.get("origin_channel_id"),
-            }
+        """Return message metadata for the pending shuffle (delegates to state_service)."""
+        return self.state_service.get_shuffle_message_info(guild_id)
 
     def clear_last_shuffle(self, guild_id: int | None) -> None:
-        with self._shuffle_state_lock:
-            self._last_shuffle_by_guild.pop(self._normalize_guild_id(guild_id), None)
-            self.match_repo.clear_pending_match(guild_id)
+        """Clear the pending shuffle state (delegates to state_service)."""
+        self.state_service.clear_last_shuffle(guild_id)
 
     def _ensure_pending_state(self, guild_id: int | None) -> dict:
-        state = self.get_last_shuffle(guild_id)
-        if not state:
-            raise ValueError("No recent shuffle found.")
-        return state
+        """Get the pending state, raising error if none exists (delegates to state_service)."""
+        return self.state_service.ensure_pending_state(guild_id)
 
     def _ensure_record_submissions(self, state: dict) -> dict[int, dict[str, Any]]:
-        if "record_submissions" not in state:
-            state["record_submissions"] = {}
-        return state["record_submissions"]
+        """Ensure record_submissions dict exists in state (delegates to state_service)."""
+        return self.state_service.ensure_record_submissions(state)
 
     def _build_pending_match_payload(self, state: dict) -> dict:
-        return {
-            "radiant_team_ids": state["radiant_team_ids"],
-            "dire_team_ids": state["dire_team_ids"],
-            "radiant_roles": state["radiant_roles"],
-            "dire_roles": state["dire_roles"],
-            "radiant_value": state["radiant_value"],
-            "dire_value": state["dire_value"],
-            "value_diff": state["value_diff"],
-            "first_pick_team": state["first_pick_team"],
-            "excluded_player_ids": state.get("excluded_player_ids", []),
-            "record_submissions": state.get("record_submissions", {}),
-            "shuffle_timestamp": state.get("shuffle_timestamp"),
-            "bet_lock_until": state.get("bet_lock_until"),
-            "shuffle_message_jump_url": state.get("shuffle_message_jump_url"),
-            "shuffle_message_id": state.get("shuffle_message_id"),
-            "shuffle_channel_id": state.get("shuffle_channel_id"),
-            "betting_mode": state.get("betting_mode", "pool"),
-            "is_draft": state.get("is_draft", False),
-            "effective_avoid_ids": state.get("effective_avoid_ids", []),
-            "is_bomb_pot": state.get("is_bomb_pot", False),
-        }
+        """Build payload for database persistence (delegates to state_service)."""
+        return self.state_service.build_pending_match_payload(state)
 
     def _persist_match_state(self, guild_id: int | None, state: dict) -> None:
-        payload = self._build_pending_match_payload(state)
-        self.match_repo.save_pending_match(guild_id, payload)
-        # Update in-memory cache to keep it in sync
-        self.set_last_shuffle(guild_id, state)
+        """Persist the pending match state (delegates to state_service)."""
+        self.state_service.persist_state(guild_id, state)
+
+    # ==================== Voting Management (delegated to MatchVotingService) ====================
 
     def has_admin_submission(self, guild_id: int | None) -> bool:
-        state = self.get_last_shuffle(guild_id)
-        if not state:
-            return False
-        submissions = state.get("record_submissions", {})
-        return any(
-            sub.get("is_admin") and sub.get("result") in ("radiant", "dire")
-            for sub in submissions.values()
-        )
+        """Check if an admin has submitted a result vote (delegates to voting_service)."""
+        return self.voting_service.has_admin_submission(guild_id)
 
     def has_admin_abort_submission(self, guild_id: int | None) -> bool:
-        state = self.get_last_shuffle(guild_id)
-        if not state:
-            return False
-        submissions = state.get("record_submissions", {})
-        return any(
-            sub.get("is_admin") and sub.get("result") == "abort" for sub in submissions.values()
-        )
+        """Check if an admin has submitted an abort vote (delegates to voting_service)."""
+        return self.voting_service.has_admin_abort_submission(guild_id)
 
     def add_record_submission(
         self, guild_id: int | None, user_id: int, result: str, is_admin: bool
     ) -> dict[str, Any]:
-        if result not in ("radiant", "dire"):
-            raise ValueError("Result must be 'radiant' or 'dire'.")
-        state = self._ensure_pending_state(guild_id)
-        submissions = self._ensure_record_submissions(state)
-        existing = submissions.get(user_id)
-        if existing and existing["result"] != result:
-            raise ValueError("You already submitted a different result.")
-        # Allow conflicting votes - requires MIN_NON_ADMIN_SUBMISSIONS matching submissions for non-admin results
-        submissions[user_id] = {"result": result, "is_admin": is_admin}
-        self._persist_match_state(guild_id, state)
-        vote_counts = self.get_vote_counts(guild_id)
-        return {
-            "non_admin_count": self.get_non_admin_submission_count(guild_id),
-            "total_count": len(submissions),
-            "result": self.get_pending_record_result(guild_id),
-            "is_ready": self.can_record_match(guild_id),
-            "vote_counts": vote_counts,
-        }
+        """Add a vote for the match result (delegates to voting_service)."""
+        return self.voting_service.add_record_submission(guild_id, user_id, result, is_admin)
 
     def get_non_admin_submission_count(self, guild_id: int | None) -> int:
-        state = self.get_last_shuffle(guild_id)
-        if not state:
-            return 0
-        submissions = state.get("record_submissions", {})
-        return sum(
-            1
-            for sub in submissions.values()
-            if not sub.get("is_admin") and sub.get("result") in ("radiant", "dire")
-        )
+        """Get count of non-admin result votes (delegates to voting_service)."""
+        return self.voting_service.get_non_admin_submission_count(guild_id)
 
     def get_abort_submission_count(self, guild_id: int | None) -> int:
-        state = self.get_last_shuffle(guild_id)
-        if not state:
-            return 0
-        submissions = state.get("record_submissions", {})
-        return sum(
-            1
-            for sub in submissions.values()
-            if not sub.get("is_admin") and sub.get("result") == "abort"
-        )
+        """Get count of non-admin abort votes (delegates to voting_service)."""
+        return self.voting_service.get_abort_submission_count(guild_id)
 
     def can_abort_match(self, guild_id: int | None) -> bool:
-        if self.has_admin_abort_submission(guild_id):
-            return True
-        return self.get_abort_submission_count(guild_id) >= self.MIN_NON_ADMIN_SUBMISSIONS
+        """Check if there are enough votes to abort (delegates to voting_service)."""
+        return self.voting_service.can_abort_match(guild_id)
 
     def add_abort_submission(
         self, guild_id: int | None, user_id: int, is_admin: bool
     ) -> dict[str, Any]:
-        state = self._ensure_pending_state(guild_id)
-        submissions = self._ensure_record_submissions(state)
-        existing = submissions.get(user_id)
-        if existing and existing["result"] != "abort":
-            raise ValueError("You already submitted a different result.")
-        submissions[user_id] = {"result": "abort", "is_admin": is_admin}
-        self._persist_match_state(guild_id, state)
-        return {
-            "non_admin_count": self.get_abort_submission_count(guild_id),
-            "total_count": len(submissions),
-            "is_ready": self.can_abort_match(guild_id),
-        }
+        """Add a vote to abort the match (delegates to voting_service)."""
+        return self.voting_service.add_abort_submission(guild_id, user_id, is_admin)
 
     def get_vote_counts(self, guild_id: int | None) -> dict[str, int]:
-        """Get vote counts for radiant and dire (non-admin only)."""
-        state = self.get_last_shuffle(guild_id)
-        if not state:
-            return {"radiant": 0, "dire": 0}
-        submissions = state.get("record_submissions", {})
-        counts = {"radiant": 0, "dire": 0}
-        for sub in submissions.values():
-            if not sub.get("is_admin"):
-                result = sub.get("result")
-                if result in counts:
-                    counts[result] += 1
-        return counts
+        """Get vote counts for radiant and dire (delegates to voting_service)."""
+        return self.voting_service.get_vote_counts(guild_id)
 
     def get_pending_record_result(self, guild_id: int | None) -> str | None:
-        """
-        Get the result to record.
-
-        For admin submissions: returns the admin's vote.
-        For non-admin: returns the first result to reach MIN_NON_ADMIN_SUBMISSIONS votes.
-        """
-        state = self.get_last_shuffle(guild_id)
-        if not state:
-            return None
-        submissions = state.get("record_submissions", {})
-
-        # If there's an admin submission (radiant/dire), use that result
-        for sub in submissions.values():
-            result = sub.get("result")
-            if sub.get("is_admin") and result in ("radiant", "dire"):
-                return result
-
-        # For non-admin: requires MIN_NON_ADMIN_SUBMISSIONS matching submissions to determine the result
-        vote_counts = self.get_vote_counts(guild_id)
-        if vote_counts["radiant"] >= self.MIN_NON_ADMIN_SUBMISSIONS:
-            return "radiant"
-        if vote_counts["dire"] >= self.MIN_NON_ADMIN_SUBMISSIONS:
-            return "dire"
-        return None
+        """Get the result to record if threshold met (delegates to voting_service)."""
+        return self.voting_service.get_pending_record_result(guild_id)
 
     def can_record_match(self, guild_id: int | None) -> bool:
-        if self.has_admin_submission(guild_id):
-            return True
-        # Requires MIN_NON_ADMIN_SUBMISSIONS matching submissions before a non-admin result can finalize
-        return self.get_pending_record_result(guild_id) is not None
+        """Check if there are enough votes to record (delegates to voting_service)."""
+        return self.voting_service.can_record_match(guild_id)
 
     def shuffle_players(
         self,
@@ -1757,3 +1617,342 @@ class MatchService:
             "new_winner_ids": new_winner_ids,
             "new_loser_ids": new_loser_ids,
         }
+
+    # ==================== Query Methods ====================
+    # These methods provide query access without exposing the repository directly
+
+    def get_match_by_id(self, match_id: int, guild_id: int | None = None) -> dict | None:
+        """
+        Get a match by its internal ID.
+
+        Args:
+            match_id: Internal match ID
+            guild_id: Guild ID (optional, for validation)
+
+        Returns:
+            Match dict or None if not found
+        """
+        return self.match_repo.get_match(match_id, guild_id)
+
+    def get_most_recent_match(self, guild_id: int | None = None) -> dict | None:
+        """
+        Get the most recently recorded match for a guild.
+
+        Args:
+            guild_id: Guild ID to filter by
+
+        Returns:
+            Match dict or None if no matches found
+        """
+        return self.match_repo.get_most_recent_match(guild_id)
+
+    def get_match_participants(self, match_id: int, guild_id: int | None = None) -> list[dict]:
+        """
+        Get all participants for a match with their stats.
+
+        Args:
+            match_id: Internal match ID
+            guild_id: Guild ID (optional)
+
+        Returns:
+            List of participant dicts with hero, KDA, etc.
+        """
+        return self.match_repo.get_match_participants(match_id)
+
+    def get_player_matches(
+        self, discord_id: int, guild_id: int | None, limit: int = 10
+    ) -> list[dict]:
+        """
+        Get a player's recent matches.
+
+        Args:
+            discord_id: Player's Discord ID
+            guild_id: Guild ID
+            limit: Maximum number of matches to return
+
+        Returns:
+            List of match dicts, most recent first
+        """
+        return self.match_repo.get_player_matches(discord_id, guild_id, limit=limit)
+
+    def get_rating_history_for_match(self, match_id: int) -> list[dict]:
+        """
+        Get rating history entries for a specific match.
+
+        Args:
+            match_id: Internal match ID
+
+        Returns:
+            List of rating history entries for participants
+        """
+        return self.match_repo.get_rating_history_for_match(match_id)
+
+    def get_matches_without_fantasy_data(self, limit: int = 100) -> list[dict]:
+        """
+        Get matches that have enrichment but no fantasy data.
+
+        Used for fantasy data backfill operations.
+
+        Args:
+            limit: Maximum number of matches to return
+
+        Returns:
+            List of match dicts needing fantasy data
+        """
+        return self.match_repo.get_matches_without_fantasy_data(limit=limit)
+
+    def get_enriched_count(self, guild_id: int | None = None) -> int:
+        """
+        Get count of enriched matches for a guild.
+
+        Args:
+            guild_id: Guild ID to filter by
+
+        Returns:
+            Number of enriched matches
+        """
+        return self.match_repo.get_enriched_count(guild_id)
+
+    def wipe_all_enrichments(self, guild_id: int | None = None) -> int:
+        """
+        Clear all match enrichments for a guild.
+
+        Args:
+            guild_id: Guild ID to filter by
+
+        Returns:
+            Number of matches wiped
+        """
+        return self.match_repo.wipe_all_enrichments(guild_id)
+
+    def wipe_match_enrichment(self, match_id: int, guild_id: int | None = None) -> bool:
+        """
+        Clear enrichment data for a specific match.
+
+        Args:
+            match_id: Internal match ID
+            guild_id: Guild ID (optional)
+
+        Returns:
+            True if match was found and wiped, False otherwise
+        """
+        return self.match_repo.wipe_match_enrichment(match_id)
+
+    def get_player_openskill_history(
+        self, discord_id: int, guild_id: int, limit: int = 10
+    ) -> list[dict]:
+        """
+        Get a player's OpenSkill rating history.
+
+        Args:
+            discord_id: Player's Discord ID
+            guild_id: Guild ID
+            limit: Maximum number of entries to return
+
+        Returns:
+            List of OpenSkill history entries, most recent first
+        """
+        return self.match_repo.get_player_openskill_history(discord_id, guild_id, limit=limit)
+
+    # --- Statistics and calibration facade methods ---
+
+    def get_match_count(self, guild_id: int | None = None) -> int:
+        """Get total number of matches recorded for a guild."""
+        return self.match_repo.get_match_count(guild_id)
+
+    def get_recent_match_predictions(self, guild_id: int | None, limit: int = 200) -> list[dict]:
+        """Get recent match predictions for calibration analysis."""
+        return self.match_repo.get_recent_match_predictions(guild_id, limit)
+
+    def get_recent_rating_history(self, guild_id: int | None, limit: int = 500) -> list[dict]:
+        """Get recent rating history entries for calibration analysis."""
+        return self.match_repo.get_recent_rating_history(guild_id, limit)
+
+    def get_biggest_upsets(self, guild_id: int | None, limit: int = 5) -> list[dict]:
+        """Get biggest upset matches (underdogs who won against the odds)."""
+        return self.match_repo.get_biggest_upsets(guild_id, limit)
+
+    def get_player_performance_stats(self, guild_id: int | None) -> list[dict]:
+        """Get player performance vs expected stats."""
+        return self.match_repo.get_player_performance_stats(guild_id)
+
+    def get_lobby_type_stats(self, guild_id: int | None) -> list[dict]:
+        """Get rating swing statistics by lobby type (shuffle vs draft)."""
+        return self.match_repo.get_lobby_type_stats(guild_id)
+
+    def get_player_rating_history_detailed(
+        self, discord_id: int, guild_id: int | None, limit: int = 50
+    ) -> list[dict]:
+        """Get detailed rating history for a player including predictions."""
+        return self.match_repo.get_player_rating_history_detailed(discord_id, guild_id, limit)
+
+    def get_os_ratings_for_match(self, match_id: int) -> dict:
+        """Get OpenSkill ratings for teams in a match."""
+        return self.match_repo.get_os_ratings_for_match(match_id)
+
+    def get_player_lobby_type_stats(self, discord_id: int, guild_id: int | None) -> list[dict]:
+        """Get lobby type statistics for a specific player."""
+        return self.match_repo.get_player_lobby_type_stats(discord_id, guild_id)
+
+    def get_player_hero_stats_detailed(
+        self, discord_id: int, guild_id: int | None, limit: int = 8
+    ) -> list[dict]:
+        """Get detailed hero performance stats for a player."""
+        return self.match_repo.get_player_hero_stats_detailed(discord_id, guild_id, limit)
+
+    def get_player_hero_role_breakdown(self, discord_id: int, guild_id: int | None) -> list[dict]:
+        """Get hero role breakdown (core vs support) for a player."""
+        return self.match_repo.get_player_hero_role_breakdown(discord_id, guild_id)
+
+    def get_player_fantasy_stats(self, discord_id: int, guild_id: int | None) -> dict | None:
+        """Get fantasy points statistics for a player."""
+        return self.match_repo.get_player_fantasy_stats(discord_id, guild_id)
+
+    def update_participant_stats(
+        self,
+        match_id: int,
+        discord_id: int,
+        hero_id: int,
+        kills: int,
+        deaths: int,
+        assists: int,
+        gpm: int,
+        xpm: int,
+        hero_damage: int,
+        tower_damage: int,
+        last_hits: int,
+        denies: int,
+        net_worth: int,
+        hero_healing: int = 0,
+        lane_role: int | None = None,
+        lane_efficiency: int | None = None,
+        towers_killed: int | None = None,
+        roshans_killed: int | None = None,
+        teamfight_participation: float | None = None,
+        obs_placed: int | None = None,
+        sen_placed: int | None = None,
+        camps_stacked: int | None = None,
+        rune_pickups: int | None = None,
+        firstblood_claimed: int | None = None,
+        stuns: float | None = None,
+        fantasy_points: float | None = None,
+    ) -> bool:
+        """
+        Update stats for a match participant.
+
+        Args:
+            match_id: Internal match ID
+            discord_id: Player's Discord ID
+            hero_id: Hero ID played
+            kills, deaths, assists: KDA stats
+            gpm, xpm: Gold/XP per minute
+            hero_damage, tower_damage: Damage dealt
+            last_hits, denies: Farming stats
+            net_worth: Final net worth
+            hero_healing: Healing done
+            lane_role, lane_efficiency: Laning phase stats
+            towers_killed, roshans_killed: Objectives
+            teamfight_participation: Teamfight participation rate
+            obs_placed, sen_placed: Vision stats
+            camps_stacked, rune_pickups: Utility stats
+            firstblood_claimed: First blood participation
+            stuns: Total stun time dealt
+            fantasy_points: Calculated fantasy points
+
+        Returns:
+            True if participant was updated, False otherwise
+        """
+        return self.match_repo.update_participant_stats(
+            match_id=match_id,
+            discord_id=discord_id,
+            hero_id=hero_id,
+            kills=kills,
+            deaths=deaths,
+            assists=assists,
+            gpm=gpm,
+            xpm=xpm,
+            hero_damage=hero_damage,
+            tower_damage=tower_damage,
+            last_hits=last_hits,
+            denies=denies,
+            net_worth=net_worth,
+            hero_healing=hero_healing,
+            lane_role=lane_role,
+            lane_efficiency=lane_efficiency,
+            towers_killed=towers_killed,
+            roshans_killed=roshans_killed,
+            teamfight_participation=teamfight_participation,
+            obs_placed=obs_placed,
+            sen_placed=sen_placed,
+            camps_stacked=camps_stacked,
+            rune_pickups=rune_pickups,
+            firstblood_claimed=firstblood_claimed,
+            stuns=stuns,
+            fantasy_points=fantasy_points,
+        )
+
+    def record_match_raw(
+        self,
+        team1_ids: list[int],
+        team2_ids: list[int],
+        winning_team: int,
+        guild_id: int | None = None,
+        lobby_type: str = "shuffle",
+    ) -> int:
+        """
+        Record a match directly without shuffle state or rating updates.
+
+        Used for test data seeding. For normal match recording with ratings,
+        use record_match() instead.
+
+        Args:
+            team1_ids: Discord IDs of Radiant players
+            team2_ids: Discord IDs of Dire players
+            winning_team: 1 (Radiant won) or 2 (Dire won)
+            guild_id: Guild ID for multi-server isolation
+            lobby_type: 'shuffle' or 'draft'
+
+        Returns:
+            Match ID
+        """
+        return self.match_repo.record_match(
+            team1_ids=team1_ids,
+            team2_ids=team2_ids,
+            winning_team=winning_team,
+            guild_id=guild_id or 0,
+            lobby_type=lobby_type,
+        )
+
+    def get_players_with_enriched_data(self, guild_id: int | None) -> list[dict]:
+        """
+        Get players who have enriched match data.
+
+        Args:
+            guild_id: Guild ID to filter by
+
+        Returns:
+            List of player dicts with discord_id and enriched match count
+        """
+        return self.match_repo.get_players_with_enriched_data(guild_id)
+
+    def get_last_match_participant_ids(self) -> list[int]:
+        """
+        Get participant IDs from the most recent recorded match.
+
+        Returns:
+            List of Discord IDs from the last match, or empty list
+        """
+        return self.match_repo.get_last_match_participant_ids()
+
+    def get_multi_player_hero_stats(self, player_ids: list[int], guild_id: int | None) -> list[dict]:
+        """
+        Get hero statistics for multiple players for hero grid.
+
+        Args:
+            player_ids: List of Discord IDs
+            guild_id: Guild ID for multi-server isolation
+
+        Returns:
+            List of dicts with player hero stats for grid visualization
+        """
+        return self.match_repo.get_multi_player_hero_stats(player_ids, guild_id)

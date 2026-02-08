@@ -126,22 +126,21 @@ class TestLeaderboardTypeRouting:
 
         # Mock prediction service
         mock_prediction_service = MagicMock()
-        mock_prediction_service.prediction_repo = MagicMock()
-        mock_prediction_service.prediction_repo.get_prediction_leaderboard = MagicMock(
+        mock_prediction_service.get_prediction_leaderboard = MagicMock(
             return_value={
                 "top_earners": [{"discord_id": 1, "net_pnl": 50, "win_rate": 0.7, "wins": 7, "losses": 3}],
                 "down_bad": [],
                 "most_accurate": [{"discord_id": 1, "win_rate": 0.7, "wins": 7, "losses": 3}],
             }
         )
-        mock_prediction_service.prediction_repo.get_server_prediction_stats = MagicMock(
+        mock_prediction_service.get_server_prediction_stats = MagicMock(
             return_value={"total_predictions": 10, "total_bets": 30, "total_wagered": 300}
         )
 
         return InfoCommands(
             bot=mock_bot,
-            player_repo=player_repo,
-            match_repo=mock_match_repo,
+            player_service=player_repo,
+            match_service=mock_match_repo,
             role_emojis={},
             role_names={},
             gambling_stats_service=mock_gambling_service,
@@ -218,8 +217,8 @@ class TestLeaderboardTypeRouting:
             info_cog, interaction, type=MockChoice("predictions"), limit=20
         )
 
-        # Verify prediction_service.prediction_repo.get_prediction_leaderboard was called
-        info_cog.prediction_service.prediction_repo.get_prediction_leaderboard.assert_called_once()
+        # Verify prediction_service.get_prediction_leaderboard was called
+        info_cog.prediction_service.get_prediction_leaderboard.assert_called_once()
 
         mock_followup = mock_discord_helpers["followup"]
         assert mock_followup.called
@@ -236,8 +235,8 @@ class TestLeaderboardTypeRouting:
 
         info_cog = InfoCommands(
             bot=MagicMock(),
-            player_repo=player_repo,
-            match_repo=MagicMock(),
+            player_service=player_repo,
+            match_service=MagicMock(),
             role_emojis={},
             role_names={},
             gambling_stats_service=None,
@@ -267,8 +266,8 @@ class TestLeaderboardTypeRouting:
 
         info_cog = InfoCommands(
             bot=MagicMock(),
-            player_repo=player_repo,
-            match_repo=MagicMock(),
+            player_service=player_repo,
+            match_service=MagicMock(),
             role_emojis={},
             role_names={},
             gambling_stats_service=None,
@@ -304,8 +303,8 @@ class TestLeaderboardLimitParameter:
 
         return InfoCommands(
             bot=MagicMock(),
-            player_repo=player_repo,
-            match_repo=MagicMock(),
+            player_service=player_repo,
+            match_service=MagicMock(),
             role_emojis={},
             role_names={},
         )
@@ -389,8 +388,8 @@ class TestLeaderboardGamblingContent:
 
         return InfoCommands(
             bot=MagicMock(),
-            player_repo=player_repo,
-            match_repo=MagicMock(),
+            player_service=player_repo,
+            match_service=MagicMock(),
             role_emojis={},
             role_names={},
             gambling_stats_service=mock_gambling_service,
@@ -617,8 +616,7 @@ class TestLeaderboardPredictionsContent:
         from commands.info import InfoCommands
 
         mock_prediction_service = MagicMock()
-        mock_prediction_service.prediction_repo = MagicMock()
-        mock_prediction_service.prediction_repo.get_prediction_leaderboard = MagicMock(
+        mock_prediction_service.get_prediction_leaderboard = MagicMock(
             return_value={
                 "top_earners": [
                     {"discord_id": 1001, "net_pnl": 200, "win_rate": 0.80, "wins": 8, "losses": 2},
@@ -631,14 +629,14 @@ class TestLeaderboardPredictionsContent:
                 ],
             }
         )
-        mock_prediction_service.prediction_repo.get_server_prediction_stats = MagicMock(
+        mock_prediction_service.get_server_prediction_stats = MagicMock(
             return_value={"total_predictions": 20, "total_bets": 50, "total_wagered": 500}
         )
 
         return InfoCommands(
             bot=MagicMock(),
-            player_repo=player_repo,
-            match_repo=MagicMock(),
+            player_service=player_repo,
+            match_service=MagicMock(),
             role_emojis={},
             role_names={},
             prediction_service=mock_prediction_service,

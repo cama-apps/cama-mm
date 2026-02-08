@@ -49,12 +49,12 @@ def mock_cog():
 
     # Mock prediction_service
     cog.prediction_service = MagicMock()
-    cog.prediction_service.prediction_repo.get_prediction_leaderboard.return_value = {
+    cog.prediction_service.get_prediction_leaderboard.return_value = {
         "top_earners": [],
         "down_bad": [],
         "most_accurate": [],
     }
-    cog.prediction_service.prediction_repo.get_server_prediction_stats.return_value = {
+    cog.prediction_service.get_server_prediction_stats.return_value = {
         "total_predictions": 0,
         "total_bets": 0,
         "total_wagered": 0,
@@ -480,17 +480,17 @@ class TestTipsTab:
 
     @pytest.fixture
     def mock_cog_with_tips(self, mock_cog):
-        """Create a mock cog with tip_repository."""
-        mock_tip_repo = MagicMock()
-        mock_tip_repo.get_top_senders.return_value = []
-        mock_tip_repo.get_top_receivers.return_value = []
-        mock_tip_repo.get_total_tip_volume.return_value = {
+        """Create a mock cog with tip_service."""
+        mock_tip_service = MagicMock()
+        mock_tip_service.get_top_senders.return_value = []
+        mock_tip_service.get_top_receivers.return_value = []
+        mock_tip_service.get_total_tip_volume.return_value = {
             "total_amount": 0,
             "total_fees": 0,
             "total_transactions": 0,
         }
         mock_cog.bot = MagicMock()
-        mock_cog.bot.tip_repository = mock_tip_repo
+        mock_cog.bot.tip_service = mock_tip_service
         return mock_cog
 
     @pytest.mark.asyncio
@@ -513,14 +513,14 @@ class TestTipsTab:
     async def test_build_tips_embed_with_data(self, mock_cog_with_tips, mock_interaction):
         """Test Tips embed with data."""
         # Set up mock data
-        mock_cog_with_tips.bot.tip_repository.get_top_senders.return_value = [
+        mock_cog_with_tips.bot.tip_service.get_top_senders.return_value = [
             {"discord_id": 123, "total_amount": 100, "tip_count": 5},
             {"discord_id": 456, "total_amount": 50, "tip_count": 3},
         ]
-        mock_cog_with_tips.bot.tip_repository.get_top_receivers.return_value = [
+        mock_cog_with_tips.bot.tip_service.get_top_receivers.return_value = [
             {"discord_id": 789, "total_amount": 80, "tip_count": 4},
         ]
-        mock_cog_with_tips.bot.tip_repository.get_total_tip_volume.return_value = {
+        mock_cog_with_tips.bot.tip_service.get_total_tip_volume.return_value = {
             "total_amount": 150,
             "total_fees": 15,
             "total_transactions": 8,
@@ -544,10 +544,10 @@ class TestTipsTab:
         assert "📊 Server Stats" in field_names
 
     @pytest.mark.asyncio
-    async def test_tips_tab_no_repository(self, mock_cog, mock_interaction):
-        """Test Tips tab when tip_repository is not available."""
+    async def test_tips_tab_no_service(self, mock_cog, mock_interaction):
+        """Test Tips tab when tip_service is not available."""
         mock_cog.bot = MagicMock()
-        mock_cog.bot.tip_repository = None
+        mock_cog.bot.tip_service = None
 
         view = UnifiedLeaderboardView(
             cog=mock_cog,

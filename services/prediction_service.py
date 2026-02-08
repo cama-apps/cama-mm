@@ -453,3 +453,78 @@ class PredictionService:
             "question": pred["question"],
             "status": "locked",
         }
+
+    def get_prediction_leaderboard(self, guild_id: int | None, limit: int = 10) -> dict:
+        """
+        Get prediction leaderboard data.
+
+        Args:
+            guild_id: Guild ID to filter by
+            limit: Maximum number of entries per category
+
+        Returns:
+            Dict with top_earners and down_bad lists
+        """
+        return self.prediction_repo.get_prediction_leaderboard(guild_id, limit)
+
+    def get_server_prediction_stats(self, guild_id: int | None) -> dict:
+        """
+        Get server-wide prediction stats.
+
+        Args:
+            guild_id: Guild ID to filter by
+
+        Returns:
+            Dict with total_predictions, total_pool, total_bets, etc.
+        """
+        return self.prediction_repo.get_server_prediction_stats(guild_id)
+
+    def get_user_prediction_stats(self, discord_id: int, guild_id: int | None = None) -> dict | None:
+        """
+        Get prediction statistics for a specific user.
+
+        Args:
+            discord_id: User's Discord ID
+            guild_id: Guild ID to filter by
+
+        Returns:
+            Dict with user's prediction stats or None if no stats found
+        """
+        return self.prediction_repo.get_user_prediction_stats(discord_id, guild_id)
+
+    def get_predictions_by_status(self, guild_id: int, status: str) -> list[dict]:
+        """
+        Get predictions filtered by status.
+
+        Args:
+            guild_id: Guild ID
+            status: Status to filter by (open, locked, resolved)
+
+        Returns:
+            List of prediction dicts
+        """
+        return self.prediction_repo.get_predictions_by_status(guild_id, status)
+
+    def get_prediction_totals(self, prediction_id: int) -> dict:
+        """
+        Get bet totals for a prediction.
+
+        Args:
+            prediction_id: Prediction ID
+
+        Returns:
+            Dict with yes_total, no_total, etc.
+        """
+        return self.prediction_repo.get_prediction_totals(prediction_id)
+
+    def get_resolution_summary(self, prediction_id: int) -> dict:
+        """
+        Get resolution vote summary for a prediction.
+
+        Args:
+            prediction_id: Prediction ID
+
+        Returns:
+            Dict with vote counts and voters
+        """
+        return self.prediction_repo.get_resolution_summary(prediction_id)

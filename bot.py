@@ -82,6 +82,12 @@ from services.prediction_service import PredictionService
 from services.permissions import has_admin_permission  # noqa: F401 - used by tests
 from services.player_service import PlayerService
 from services.opendota_player_service import OpenDotaPlayerService
+from services.rating_comparison_service import RatingComparisonService
+from services.match_enrichment_service import MatchEnrichmentService
+from services.match_discovery_service import MatchDiscoveryService
+from services.tip_service import TipService
+from services.soft_avoid_service import SoftAvoidService
+from services.pairings_service import PairingsService
 from utils.formatting import FROGLING_EMOJI_ID, FROGLING_EMOTE, JOPACOIN_EMOJI_ID, JOPACOIN_EMOTE, ROLE_EMOJIS, ROLE_NAMES, format_role_display
 
 # Bot setup
@@ -134,6 +140,7 @@ def _init_services():
     bet_repo = BetRepository(DB_PATH)
     match_repo = MatchRepository(DB_PATH)
     pairings_repo = PairingsRepository(DB_PATH)
+    pairings_service = PairingsService(pairings_repo)
     guild_config_repo = GuildConfigRepository(DB_PATH)
     guild_config_service = GuildConfigService(guild_config_repo)
 
@@ -156,8 +163,9 @@ def _init_services():
     disburse_repo = DisburseRepository(DB_PATH)
     disburse_service = DisburseService(disburse_repo, player_repo, loan_repo)
 
-    # Create soft avoid repository for soft avoid feature
+    # Create soft avoid repository and service
     soft_avoid_repo = SoftAvoidRepository(DB_PATH)
+    soft_avoid_service = SoftAvoidService(soft_avoid_repo)
 
     # Create betting service with garnishment and bankruptcy support
     betting_service = BettingService(
@@ -198,6 +206,7 @@ def _init_services():
     bot.player_repo = player_repo
     bot.match_repo = match_repo
     bot.pairings_repo = pairings_repo
+    bot.pairings_service = pairings_service
     bot.guild_config_repo = guild_config_repo
     bot.guild_config_service = guild_config_service
     bot.bankruptcy_repo = bankruptcy_repo
@@ -211,6 +220,7 @@ def _init_services():
     bot.disburse_service = disburse_service
     bot.recalibration_service = recalibration_service
     bot.soft_avoid_repo = soft_avoid_repo
+    bot.soft_avoid_service = soft_avoid_service
 
     # Create gambling stats service for degen score and leaderboards
     gambling_stats_service = GamblingStatsService(
@@ -232,13 +242,39 @@ def _init_services():
     bot.prediction_service = prediction_service
     bot.prediction_repo = prediction_repo
 
+    # Create rating comparison service for rating analysis
+    rating_comparison_service = RatingComparisonService(
+        match_repo=match_repo,
+        player_repo=player_repo,
+        match_service=match_service,
+    )
+    bot.rating_comparison_service = rating_comparison_service
+
     # Create OpenDota player service for profile stats
     opendota_player_service = OpenDotaPlayerService(player_repo)
     bot.opendota_player_service = opendota_player_service
 
-    # Create tip repository for transaction logging
+    # Create match enrichment service for enriching matches with OpenDota data
+    match_enrichment_service = MatchEnrichmentService(
+        match_repo=match_repo,
+        player_repo=player_repo,
+        match_service=match_service,
+    )
+    bot.match_enrichment_service = match_enrichment_service
+
+    # Create match discovery service for auto-discovering match IDs
+    match_discovery_service = MatchDiscoveryService(
+        match_repo=match_repo,
+        player_repo=player_repo,
+        match_service=match_service,
+    )
+    bot.match_discovery_service = match_discovery_service
+
+    # Create tip repository and service for transaction logging
     tip_repository = TipRepository(DB_PATH)
+    tip_service = TipService(tip_repository)
     bot.tip_repository = tip_repository
+    bot.tip_service = tip_service
 
     # Create AI services (optional - only if CEREBRAS_API_KEY is set)
     ai_service = None

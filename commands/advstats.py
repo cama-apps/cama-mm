@@ -9,7 +9,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from repositories.interfaces import IPairingsRepository
+from services.pairings_service import PairingsService
 from services.permissions import has_admin_permission
 from utils.interaction_safety import safe_defer, safe_followup
 
@@ -22,15 +22,15 @@ class AdvancedStatsCommands(commands.Cog):
     def __init__(
         self,
         bot: commands.Bot,
-        pairings_repo: IPairingsRepository,
-        player_repo,
+        pairings_service: PairingsService,
+        player_service,
         *,
         flavor_text_service=None,
         guild_config_service=None,
     ):
         self.bot = bot
-        self.pairings_repo = pairings_repo
-        self.player_repo = player_repo
+        self.pairings_service = pairings_service
+        self.player_service = player_service
         self.flavor_text_service = flavor_text_service
         self.guild_config_service = guild_config_service
 
@@ -65,8 +65,8 @@ class AdvancedStatsCommands(commands.Cog):
 
         # Verify both players are registered
         guild_id = interaction.guild.id if interaction.guild else None
-        p1 = await asyncio.to_thread(self.player_repo.get_by_id, player1.id, guild_id)
-        p2 = await asyncio.to_thread(self.player_repo.get_by_id, player2.id, guild_id)
+        p1 = await asyncio.to_thread(self.player_service.get_player, player1.id, guild_id)
+        p2 = await asyncio.to_thread(self.player_service.get_player, player2.id, guild_id)
 
         if not p1:
             await safe_followup(
@@ -83,7 +83,7 @@ class AdvancedStatsCommands(commands.Cog):
             )
             return
 
-        h2h = await asyncio.to_thread(self.pairings_repo.get_head_to_head, player1.id, player2.id)
+        h2h = await asyncio.to_thread(self.pairings_service.get_head_to_head, player1.id, player2.id)
 
         embed = discord.Embed(
             title=f"{player1.display_name} vs {player2.display_name}",
@@ -163,7 +163,7 @@ class AdvancedStatsCommands(commands.Cog):
             return
 
         try:
-            count = await asyncio.to_thread(self.pairings_repo.rebuild_all_pairings)
+            count = await asyncio.to_thread(self.pairings_service.rebuild_all_pairings)
             await safe_followup(
                 interaction,
                 content=f"Rebuilt pairwise statistics. {count} pairings calculated from match history.",
@@ -181,20 +181,20 @@ class AdvancedStatsCommands(commands.Cog):
 
 async def setup(bot: commands.Bot):
     """Setup function called when loading the cog."""
-    pairings_repo = getattr(bot, "pairings_repo", None)
-    player_repo = getattr(bot, "player_repo", None)
+    pairings_service = getattr(bot, "pairings_service", None)
+    player_service = getattr(bot, "player_service", None)
     flavor_text_service = getattr(bot, "flavor_text_service", None)
     guild_config_service = getattr(bot, "guild_config_service", None)
 
-    if pairings_repo is None or player_repo is None:
-        logger.warning("advstats cog: pairings_repo or player_repo not available, skipping")
+    if pairings_service is None or player_service is None:
+        logger.warning("advstats cog: pairings_service or player_service not available, skipping")
         return
 
     await bot.add_cog(
         AdvancedStatsCommands(
             bot,
-            pairings_repo,
-            player_repo,
+            pairings_service,
+            player_service,
             flavor_text_service=flavor_text_service,
             guild_config_service=guild_config_service,
         )

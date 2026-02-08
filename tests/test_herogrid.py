@@ -359,6 +359,10 @@ def _make_cog(
     # Match service
     match_service = MagicMock()
     match_service.get_last_shuffle.return_value = shuffle_state
+    match_service.get_last_match_participant_ids.return_value = set(last_match_ids or [])
+    match_service.get_players_with_enriched_data.return_value = [
+        {"discord_id": pid} for pid in (enriched_players or [])
+    ]
 
     # Draft state manager
     if draft_pool_ids is not None:
@@ -366,16 +370,10 @@ def _make_cog(
         dsm.get_state.return_value = SimpleNamespace(player_pool_ids=draft_pool_ids)
         bot.draft_state_manager = dsm
 
-    # Match repo
-    match_repo = MagicMock()
-    match_repo.get_last_match_participant_ids.return_value = set(last_match_ids or [])
-    match_repo.get_players_with_enriched_data.return_value = [
-        {"discord_id": pid} for pid in (enriched_players or [])
-    ]
+    # Player service
+    player_service = MagicMock()
 
-    player_repo = MagicMock()
-
-    return HeroGridCommands(bot, match_repo, player_repo, lobby_manager, match_service)
+    return HeroGridCommands(bot, match_service, player_service, lobby_manager)
 
 
 class TestResolvePlayerIds:
@@ -442,10 +440,9 @@ class TestResolvePlayerIds:
         assert set(ids) == {70, 71}
         assert label == "Last Match"
 
-    def test_match_service_none(self):
-        """match_service is None -> gracefully skips pending match check."""
-        cog = _make_cog(last_match_ids=[80, 81])
-        cog.match_service = None
+    def test_match_service_no_shuffle(self):
+        """match_service.get_last_shuffle returns None -> falls back to last match."""
+        cog = _make_cog(last_match_ids=[80, 81], shuffle_state=None)
         ids, label = cog._resolve_player_ids("auto", guild_id=99)
         assert set(ids) == {80, 81}
         assert label == "Last Match"

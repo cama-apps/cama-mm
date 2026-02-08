@@ -41,7 +41,7 @@ from services.loan_service import LoanService
 from services.match_service import MatchService
 from services.permissions import has_admin_permission
 from services.player_service import PlayerService
-from repositories.tip_repository import TipRepository
+from services.tip_service import TipService
 from utils.formatting import JOPACOIN_EMOTE, TOMBSTONE_EMOJI, format_betting_display
 from utils.interaction_safety import safe_defer
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
@@ -145,7 +145,7 @@ class BettingCommands(commands.Cog):
         loan_service: LoanService | None = None,
         disburse_service: DisburseService | None = None,
         flavor_text_service: FlavorTextService | None = None,
-        tip_repository: TipRepository | None = None,
+        tip_service: TipService | None = None,
     ):
         self.bot = bot
         self.betting_service = betting_service
@@ -156,7 +156,7 @@ class BettingCommands(commands.Cog):
         self.gambling_stats_service = gambling_stats_service
         self.loan_service = loan_service
         self.disburse_service = disburse_service
-        self.tip_repository = tip_repository
+        self.tip_service = tip_service
 
     def _get_neon_service(self):
         """Get the NeonDegenService from the bot, or None if unavailable."""
@@ -961,13 +961,13 @@ class BettingCommands(commands.Cog):
             # Atomic check-and-claim: prevents race condition where concurrent
             # requests could both pass the cooldown check
             claimed = await asyncio.to_thread(
-                self.player_service.player_repo.try_claim_wheel_spin,
+                self.player_service.try_claim_wheel_spin,
                 user_id, guild_id, int(now), WHEEL_COOLDOWN_SECONDS,
             )
             if not claimed:
                 # Spin was not claimed - still on cooldown. Get remaining time.
                 last_spin = await asyncio.to_thread(
-                    self.player_service.player_repo.get_last_wheel_spin, user_id, guild_id
+                    self.player_service.get_last_wheel_spin, user_id, guild_id
                 )
                 if last_spin:
                     remaining = WHEEL_COOLDOWN_SECONDS - (now - last_spin)
@@ -991,7 +991,7 @@ class BettingCommands(commands.Cog):
         else:
             # Admin bypass - still set the timestamp for consistency
             await asyncio.to_thread(
-                self.player_service.player_repo.set_last_wheel_spin, user_id, guild_id, int(now)
+                self.player_service.set_last_wheel_spin, user_id, guild_id, int(now)
             )
 
         # Check for 1% explosion chance (overrides normal result)
@@ -1022,7 +1022,7 @@ class BettingCommands(commands.Cog):
                 new_balance = result.get("new_balance", new_balance + WHEEL_EXPLOSION_REWARD)
             else:
                 await asyncio.to_thread(
-                    self.player_service.player_repo.add_balance, user_id, guild_id, WHEEL_EXPLOSION_REWARD
+                    self.player_service.adjust_balance, user_id, guild_id, WHEEL_EXPLOSION_REWARD
                 )
                 new_balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
 
@@ -1031,7 +1031,7 @@ class BettingCommands(commands.Cog):
             # Log the explosion as a special result
             await asyncio.to_thread(
                 functools.partial(
-                    self.player_service.player_repo.log_wheel_spin,
+                    self.player_service.log_wheel_spin,
                     discord_id=user_id,
                     guild_id=guild_id,
                     result=WHEEL_EXPLOSION_REWARD,
@@ -1082,14 +1082,14 @@ class BettingCommands(commands.Cog):
             # Mario Kart Red Shell: Steal 2-10 JC from player ranked above
             shell_amount = random.randint(2, 10)
             player_above = await asyncio.to_thread(
-                self.player_service.player_repo.get_player_above, user_id, guild_id
+                self.player_service.get_player_above, user_id, guild_id
             )
 
             if player_above:
                 # Atomic steal from player above (can push victim below MAX_DEBT - intentional)
                 steal_result = await asyncio.to_thread(
                     functools.partial(
-                        self.player_service.player_repo.steal_atomic,
+                        self.player_service.steal_atomic,
                         thief_discord_id=user_id,
                         victim_discord_id=player_above.discord_id,
                         guild_id=guild_id,
@@ -1110,14 +1110,14 @@ class BettingCommands(commands.Cog):
             # Mario Kart Blue Shell: Steal 4-20 JC from richest player
             shell_amount = random.randint(4, 20)
             leaderboard = await asyncio.to_thread(
-                functools.partial(self.player_service.player_repo.get_leaderboard, guild_id, limit=1)
+                functools.partial(self.player_service.get_leaderboard, guild_id, limit=1)
             )
 
             if leaderboard and leaderboard[0].discord_id == user_id:
                 # Self-hit! User is the richest - LOSE coins (can go below MAX_DEBT - intentional)
                 shell_self_hit = True
                 await asyncio.to_thread(
-                    self.player_service.player_repo.add_balance, user_id, guild_id, -shell_amount
+                    self.player_service.adjust_balance, user_id, guild_id, -shell_amount
                 )
                 new_balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
                 # Credit nonprofit fund with the self-hit loss
@@ -1131,7 +1131,7 @@ class BettingCommands(commands.Cog):
                 richest = leaderboard[0]
                 steal_result = await asyncio.to_thread(
                     functools.partial(
-                        self.player_service.player_repo.steal_atomic,
+                        self.player_service.steal_atomic,
                         thief_discord_id=user_id,
                         victim_discord_id=richest.discord_id,
                         guild_id=guild_id,
@@ -1161,13 +1161,13 @@ class BettingCommands(commands.Cog):
             else:
                 # Not in debt, add directly
                 await asyncio.to_thread(
-                    self.player_service.player_repo.add_balance, user_id, guild_id, result_value
+                    self.player_service.adjust_balance, user_id, guild_id, result_value
                 )
                 new_balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
         elif isinstance(result_value, int) and result_value < 0:
             # Bankrupt: subtract penalty (ignores MAX_DEBT floor - can go deeper into debt)
             await asyncio.to_thread(
-                self.player_service.player_repo.add_balance, user_id, guild_id, result_value
+                self.player_service.adjust_balance, user_id, guild_id, result_value
             )
             new_balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
             # Add losses to nonprofit fund
@@ -1184,7 +1184,7 @@ class BettingCommands(commands.Cog):
             # Set the spin time forward so the effective cooldown is the penalty duration
             penalty_spin_time = int(now) + (WHEEL_LOSE_PENALTY_COOLDOWN - WHEEL_COOLDOWN_SECONDS)
             await asyncio.to_thread(
-                self.player_service.player_repo.set_last_wheel_spin, user_id, guild_id, penalty_spin_time
+                self.player_service.set_last_wheel_spin, user_id, guild_id, penalty_spin_time
             )
             next_spin_time = int(now) + WHEEL_LOSE_PENALTY_COOLDOWN
         else:
@@ -1206,7 +1206,7 @@ class BettingCommands(commands.Cog):
 
         await asyncio.to_thread(
             functools.partial(
-                self.player_service.player_repo.log_wheel_spin,
+                self.player_service.log_wheel_spin,
                 discord_id=user_id,
                 guild_id=guild_id,
                 result=log_result,
@@ -1343,7 +1343,7 @@ class BettingCommands(commands.Cog):
         try:
             result = await asyncio.to_thread(
                 functools.partial(
-                    self.player_service.player_repo.tip_atomic,
+                    self.player_service.tip_atomic,
                     from_discord_id=interaction.user.id,
                     to_discord_id=player.id,
                     guild_id=guild_id,
@@ -1391,11 +1391,11 @@ class BettingCommands(commands.Cog):
             await self._send_neon_result(interaction, neon_result)
 
         # Log the transaction (non-critical - failure here doesn't affect the tip)
-        if self.tip_repository:
+        if self.tip_service:
             try:
                 await asyncio.to_thread(
                     functools.partial(
-                        self.tip_repository.log_tip,
+                        self.tip_service.log_tip,
                         sender_id=interaction.user.id,
                         recipient_id=player.id,
                         amount=amount,
@@ -1442,7 +1442,7 @@ class BettingCommands(commands.Cog):
         try:
             result = await asyncio.to_thread(
                 functools.partial(
-                    self.player_service.player_repo.pay_debt_atomic,
+                    self.player_service.pay_debt_atomic,
                     from_discord_id=interaction.user.id,
                     to_discord_id=player.id,
                     guild_id=guild_id,
@@ -1602,9 +1602,9 @@ class BettingCommands(commands.Cog):
         """Get the current bankruptcy filing number for a user."""
         try:
             gambling_stats = getattr(self.bot, "gambling_stats_service", None)
-            if gambling_stats and gambling_stats.bet_repo:
+            if gambling_stats:
                 return await asyncio.to_thread(
-                    gambling_stats.bet_repo.get_player_bankruptcy_count, discord_id, guild_id
+                    gambling_stats.get_player_bankruptcy_count, discord_id, guild_id
                 )
         except Exception:
             pass
@@ -2199,7 +2199,7 @@ class BettingCommands(commands.Cog):
         # Individual votes
         guild_id = proposal.guild_id if proposal.guild_id != 0 else None
         individual_votes = await asyncio.to_thread(
-            self.disburse_service.disburse_repo.get_individual_votes, guild_id
+            self.disburse_service.get_individual_votes, guild_id
         )
 
         if individual_votes:
@@ -2469,8 +2469,8 @@ async def setup(bot: commands.Bot):
     loan_service = getattr(bot, "loan_service", None)
     disburse_service = getattr(bot, "disburse_service", None)
     flavor_text_service = getattr(bot, "flavor_text_service", None)
-    tip_repository = getattr(bot, "tip_repository", None)
-    # bankruptcy_service, gambling_stats_service, loan_service, disburse_service, flavor_text_service, tip_repository are optional
+    tip_service = getattr(bot, "tip_service", None)
+    # bankruptcy_service, gambling_stats_service, loan_service, disburse_service, flavor_text_service, tip_service are optional
 
     cog = BettingCommands(
         bot,
@@ -2482,7 +2482,7 @@ async def setup(bot: commands.Bot):
         loan_service,
         disburse_service,
         flavor_text_service,
-        tip_repository,
+        tip_service,
     )
     await bot.add_cog(cog)
 
