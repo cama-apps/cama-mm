@@ -691,6 +691,29 @@ class PredictionCommands(commands.Cog):
                                     except Exception:
                                         pass
                                 asyncio.create_task(_del_neon(msg, 60))
+
+                        # Check for unanimous wrong (90%+ consensus loses)
+                        unanimous_data = settlement.get("unanimous_wrong")
+                        if unanimous_data:
+                            uw_result = await neon.on_unanimous_wrong(
+                                guild_id=interaction.guild.id if interaction.guild else None,
+                                consensus_percentage=unanimous_data["consensus_percentage"],
+                                winning_side=unanimous_data["winning_side"],
+                                loser_count=unanimous_data["loser_count"],
+                            )
+                            if uw_result:
+                                uw_msg = None
+                                if uw_result.gif_file:
+                                    import discord as _discord
+                                    gif_file = _discord.File(uw_result.gif_file, filename="jopat_market_crash.gif")
+                                    if uw_result.text_block:
+                                        uw_msg = await interaction.channel.send(uw_result.text_block, file=gif_file)
+                                    else:
+                                        uw_msg = await interaction.channel.send(file=gif_file)
+                                elif uw_result.text_block:
+                                    uw_msg = await interaction.channel.send(uw_result.text_block)
+                                if uw_msg:
+                                    asyncio.create_task(_del_neon(uw_msg, 120))
                 except Exception:
                     pass
 

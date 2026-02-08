@@ -342,6 +342,37 @@ class DraftCommands(commands.Cog):
         self.draft_service = draft_service
         self.match_service = match_service
 
+    async def _send_neon_result(self, interaction: discord.Interaction, neon_result) -> None:
+        """Send a NeonResult to the channel, auto-deleting after 60s."""
+        try:
+            if neon_result is None:
+                return
+            msg = None
+            if neon_result.gif_file:
+                gif_file = discord.File(neon_result.gif_file, filename="jopat_terminal.gif")
+                if neon_result.text_block:
+                    msg = await interaction.channel.send(neon_result.text_block, file=gif_file)
+                else:
+                    msg = await interaction.channel.send(file=gif_file)
+            elif neon_result.text_block:
+                msg = await interaction.channel.send(neon_result.text_block)
+            elif neon_result.footer_text:
+                msg = await interaction.channel.send(neon_result.footer_text)
+            # Auto-delete after 60 seconds
+            if msg:
+                asyncio.create_task(self._delete_neon_after(msg, 60))
+        except Exception as exc:
+            logger.debug(f"Failed to send neon result: {exc}")
+
+    @staticmethod
+    async def _delete_neon_after(msg, delay: float) -> None:
+        """Delete a message after a delay, ignoring errors."""
+        try:
+            await asyncio.sleep(delay)
+            await msg.delete()
+        except Exception:
+            pass
+
     # ========================================================================
     # /setcaptain command
     # ========================================================================
@@ -1398,6 +1429,30 @@ class DraftCommands(commands.Cog):
         state.radiant_player_ids.append(state.radiant_captain_id)
         state.dire_player_ids.append(state.dire_captain_id)
 
+        # Neon Degen Terminal hook for captain symmetry
+        try:
+            neon = getattr(self.bot, "neon_degen_service", None)
+            if neon:
+                # Get captain ratings
+                radiant_cap = await asyncio.to_thread(
+                    self.player_repo.get_by_id, state.radiant_captain_id, guild_id
+                )
+                dire_cap = await asyncio.to_thread(
+                    self.player_repo.get_by_id, state.dire_captain_id, guild_id
+                )
+                if radiant_cap and dire_cap:
+                    rad_rating = radiant_cap.glicko_rating or 1500.0
+                    dire_rating = dire_cap.glicko_rating or 1500.0
+                    rating_diff = int(abs(rad_rating - dire_rating))
+                    if rating_diff <= 50:
+                        neon_result = await neon.on_captain_symmetry(
+                            guild_id, state.radiant_captain_id, state.dire_captain_id, rating_diff
+                        )
+                        if neon_result and neon_result.text_block:
+                            await interaction.channel.send(neon_result.text_block)
+        except Exception as e:
+            logger.debug(f"Captain symmetry hook error: {e}")
+
         # Show draft UI
         await self._show_draft_ui(interaction, guild_id, state)
 
@@ -1737,6 +1792,19 @@ class DraftCommands(commands.Cog):
                             f"Created {blind_result['created']} blind bets for draft"
                             f"{' (BOMB POT)' if is_bomb_pot else ''}"
                         )
+                        # Neon Degen Terminal: Bomb pot easter egg
+                        if is_bomb_pot:
+                            try:
+                                neon = getattr(self.bot, "neon_degen_service", None)
+                                if neon:
+                                    pool_total = blind_result['total_radiant'] + blind_result['total_dire']
+                                    bomb_result = await neon.on_bomb_pot(
+                                        guild_id, pool_total, blind_result['created']
+                                    )
+                                    if bomb_result:
+                                        await self._send_neon_result(interaction, bomb_result)
+                            except Exception as e:
+                                logger.debug(f"neon on_bomb_pot error: {e}")
                 except Exception as exc:
                     logger.warning(f"Failed to create blind bets for draft: {exc}")
 

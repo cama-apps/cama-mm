@@ -59,6 +59,36 @@ class MatchCommands(commands.Cog):
         # Track scheduled betting reminder tasks per guild for cleanup
         self._betting_tasks_by_guild = {}
 
+    async def _send_neon_result(self, interaction: discord.Interaction, neon_result) -> None:
+        """Send a NeonResult to the channel, auto-deleting after 60s."""
+        try:
+            if neon_result is None:
+                return
+            msg = None
+            if neon_result.gif_file:
+                gif_file = discord.File(neon_result.gif_file, filename="jopat_terminal.gif")
+                if neon_result.text_block:
+                    msg = await interaction.channel.send(neon_result.text_block, file=gif_file)
+                else:
+                    msg = await interaction.channel.send(file=gif_file)
+            elif neon_result.text_block:
+                msg = await interaction.channel.send(neon_result.text_block)
+            elif neon_result.footer_text:
+                msg = await interaction.channel.send(neon_result.footer_text)
+            # Auto-delete after 60 seconds
+            if msg:
+                asyncio.create_task(self._delete_neon_after(msg, 60))
+        except Exception as exc:
+            logger.debug(f"Failed to send neon result: {exc}")
+
+    @staticmethod
+    async def _delete_neon_after(msg, delay: float) -> None:
+        """Delete a message after a delay, ignoring errors."""
+        try:
+            await asyncio.sleep(delay)
+            await msg.delete()
+        except Exception:
+            pass
 
     async def _update_channel_message_closed(self, reason: str = "Match Aborted") -> None:
         """Update the channel message embed to show lobby/match is closed."""
@@ -520,6 +550,19 @@ class MatchCommands(commands.Cog):
                             f"Dire={blind_bets_result['total_dire']}"
                             f"{' (BOMB POT)' if is_bomb_pot else ''}"
                         )
+                        # Neon Degen Terminal: Bomb pot easter egg
+                        if is_bomb_pot:
+                            try:
+                                neon = getattr(self.bot, "neon_degen_service", None)
+                                if neon:
+                                    pool_total = blind_bets_result['total_radiant'] + blind_bets_result['total_dire']
+                                    bomb_result = await neon.on_bomb_pot(
+                                        guild_id, pool_total, blind_bets_result['created']
+                                    )
+                                    if bomb_result:
+                                        await self._send_neon_result(interaction, bomb_result)
+                            except Exception as e:
+                                logger.debug(f"neon on_bomb_pot error: {e}")
                 except Exception as exc:
                     logger.warning(f"Failed to create blind bets: {exc}", exc_info=True)
 
@@ -1176,6 +1219,50 @@ class MatchCommands(commands.Cog):
                             if mr:
                                 await _send_neon_msg(mr)
                                 break
+
+                # Easter egg hooks: games milestones
+                easter_data = record_result.get("easter_egg_data", {})
+                events_fired = []  # Track events for simultaneous detection
+
+                for milestone in easter_data.get("games_milestones", []):
+                    gm_result = await neon.on_games_milestone(
+                        milestone["discord_id"],
+                        guild_id,
+                        milestone["total_games"],
+                    )
+                    if gm_result:
+                        events_fired.append("games_milestone")
+                    await _send_neon_msg(gm_result)
+
+                # Easter egg hooks: win streak records
+                for streak_rec in easter_data.get("win_streak_records", []):
+                    ws_result = await neon.on_win_streak_record(
+                        streak_rec["discord_id"],
+                        guild_id,
+                        streak_rec["current_streak"],
+                        streak_rec["previous_best"],
+                    )
+                    if ws_result:
+                        events_fired.append("win_streak_record")
+                    await _send_neon_msg(ws_result)
+
+                # Easter egg hooks: rivalries detected
+                for rivalry in easter_data.get("rivalries_detected", []):
+                    rv_result = await neon.on_rivalry_detected(
+                        guild_id,
+                        rivalry["player1_id"],
+                        rivalry["player2_id"],
+                        rivalry["games_together"],
+                        rivalry["winrate_vs"],
+                    )
+                    if rv_result:
+                        events_fired.append("rivalry_detected")
+                    await _send_neon_msg(rv_result)
+
+                # Check for simultaneous events
+                if len(events_fired) >= 2:
+                    sim_result = await neon.on_simultaneous_events(guild_id, events_fired)
+                    await _send_neon_msg(sim_result)
 
             except Exception as exc:
                 logger.debug(f"Neon match hook failed: {exc}")

@@ -347,6 +347,25 @@ class PredictionService:
             resolved_by=resolved_by,
         )
 
+        # Calculate consensus before settlement (for easter egg hooks)
+        totals = self.prediction_repo.get_prediction_totals(prediction_id)
+        yes_total = totals.get("yes_total", 0) or 0
+        no_total = totals.get("no_total", 0) or 0
+        total_pool = yes_total + no_total
+        consensus_data = None
+        if total_pool > 0:
+            winning_total = yes_total if outcome == "yes" else no_total
+            losing_total = no_total if outcome == "yes" else yes_total
+            losing_pct = (losing_total / total_pool) * 100
+            # If 90%+ bet on the losing side, flag as unanimous wrong
+            if losing_pct >= 90:
+                loser_count = totals.get("yes_bettors", 0) if outcome == "no" else totals.get("no_bettors", 0)
+                consensus_data = {
+                    "consensus_percentage": losing_pct,
+                    "winning_side": outcome,
+                    "loser_count": loser_count or 0,
+                }
+
         # Settle bets
         settlement = self.prediction_repo.settle_prediction_bets(
             prediction_id=prediction_id,
@@ -357,6 +376,7 @@ class PredictionService:
             "prediction_id": prediction_id,
             "outcome": outcome,
             "resolved_by": resolved_by,
+            "unanimous_wrong": consensus_data,
             **settlement,
         }
 

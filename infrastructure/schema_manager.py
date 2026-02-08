@@ -233,6 +233,8 @@ class SchemaManager:
             ("create_soft_avoids_table", self._migration_create_soft_avoids_table),
             # Ready check join times
             ("add_player_join_times_to_lobby", self._migration_add_player_join_times_to_lobby),
+            # Easter egg tracking columns
+            ("add_easter_egg_tracking_columns", self._migration_add_easter_egg_tracking_columns),
         ]
 
     # --- Migrations ---
@@ -1458,4 +1460,19 @@ class SchemaManager:
         """Add player_join_times column to lobby_state for ready check join timestamps."""
         self._add_column_if_not_exists(
             cursor, "lobby_state", "player_join_times", "TEXT DEFAULT '{}'"
+        )
+
+    def _migration_add_easter_egg_tracking_columns(self, cursor) -> None:
+        """Add columns for easter egg event tracking (JOPA-T expansion)."""
+        # Track personal best win streak for streak record events
+        self._add_column_if_not_exists(
+            cursor, "players", "personal_best_win_streak", "INTEGER DEFAULT 0"
+        )
+        # Track total bets placed for 100 bets milestone
+        self._add_column_if_not_exists(
+            cursor, "players", "total_bets_placed", "INTEGER DEFAULT 0"
+        )
+        # Track whether first leverage bet has been used (one-time trigger)
+        self._add_column_if_not_exists(
+            cursor, "players", "first_leverage_used", "INTEGER DEFAULT 0"
         )
