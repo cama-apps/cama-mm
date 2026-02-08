@@ -45,8 +45,6 @@ class MatchCommands(commands.Cog):
         player_service,
         *,
         guild_config_service=None,
-        player_repo=None,
-        match_repo=None,
         bankruptcy_repo=None,
         flavor_text_service=None,
     ):
@@ -55,8 +53,7 @@ class MatchCommands(commands.Cog):
         self.match_service = match_service
         self.player_service = player_service
         self.guild_config_service = guild_config_service
-        self.player_repo = player_repo
-        self.match_repo = match_repo
+        # bankruptcy_repo kept for embed builders that need bankruptcy status display
         self.bankruptcy_repo = bankruptcy_repo
         self.flavor_text_service = flavor_text_service
         # Track scheduled betting reminder tasks per guild for cleanup
@@ -249,7 +246,7 @@ class MatchCommands(commands.Cog):
         2. Biggest rating gainer
         3. Random winner (fallback)
         """
-        if not self.match_repo or not winning_ids:
+        if not winning_ids:
             return None, {}
 
         # Filter out excluded player if specified
@@ -260,7 +257,7 @@ class MatchCommands(commands.Cog):
             return None, {}  # All winners excluded
 
         # Get rating history for this match
-        rating_data = self.match_repo.get_rating_history_for_match(match_id)
+        rating_data = self.match_service.get_rating_history_for_match(match_id)
         winner_data = [r for r in rating_data if r["discord_id"] in available_winners]
 
         if not winner_data:
@@ -601,7 +598,7 @@ class MatchCommands(commands.Cog):
             # Give conditional players half the exclusion count bonus
             # (jopacoin bonus is awarded at record time in match_service)
             for pid in excluded_conditional_ids:
-                self.player_repo.increment_exclusion_count_half(pid, guild_id)
+                self.player_service.increment_exclusion_count_half(pid, guild_id)
 
             # Store excluded conditional IDs in shuffle state for jopacoin bonus at record time
             pending_state = self.match_service.get_last_shuffle(guild_id)
@@ -1144,7 +1141,7 @@ class MatchCommands(commands.Cog):
                         loser_id = entry["discord_id"]
                         leverage = entry.get("leverage", 1) or 1
                         amount = entry.get("effective_bet", entry["amount"])
-                        new_bal = self.player_repo.get_balance(loser_id, guild_id)
+                        new_bal = self.player_service.get_balance(loser_id, guild_id)
 
                         # on_leverage_loss: 5x leverage into debt
                         if leverage >= 5 and new_bal < 0:
@@ -1211,14 +1208,16 @@ class MatchCommands(commands.Cog):
                     logger.debug(f"Auto-enrich disabled for guild {guild_id}, skipping discovery")
                     return
 
-            # Need repos to create discovery service
-            if not self.match_repo or not self.player_repo:
+            # Get repos from bot for MatchDiscoveryService (which needs direct repo access)
+            match_repo = getattr(self.bot, "match_repo", None)
+            player_repo = getattr(self.bot, "player_repo", None)
+            if not match_repo or not player_repo:
                 logger.warning("Cannot auto-discover: missing match_repo or player_repo")
                 return
 
             # Create discovery service once
             discovery_service = MatchDiscoveryService(
-                self.match_repo, self.player_repo, match_service=self.match_service
+                match_repo, player_repo, match_service=self.match_service
             )
 
             # Exponential backoff retry loop
@@ -1291,8 +1290,8 @@ class MatchCommands(commands.Cog):
 
         try:
             # Fetch enriched match data for embed
-            match_data = self.match_repo.get_match(match_id)
-            participants = self.match_repo.get_match_participants(match_id)
+            match_data = self.match_service.get_match_by_id(match_id)
+            participants = self.match_service.get_match_participants(match_id)
 
             if match_data and participants:
                 radiant = [p for p in participants if p.get("side") == "radiant"]
@@ -1460,8 +1459,6 @@ async def setup(bot: commands.Bot):
     match_service = getattr(bot, "match_service", None)
     player_service = getattr(bot, "player_service", None)
     guild_config_service = getattr(bot, "guild_config_service", None)
-    player_repo = getattr(bot, "player_repo", None)
-    match_repo = getattr(bot, "match_repo", None)
     bankruptcy_repo = getattr(bot, "bankruptcy_repo", None)
     flavor_text_service = getattr(bot, "flavor_text_service", None)
     await bot.add_cog(
@@ -1471,8 +1468,6 @@ async def setup(bot: commands.Bot):
             match_service,
             player_service,
             guild_config_service=guild_config_service,
-            player_repo=player_repo,
-            match_repo=match_repo,
             bankruptcy_repo=bankruptcy_repo,
             flavor_text_service=flavor_text_service,
         )

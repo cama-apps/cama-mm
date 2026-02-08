@@ -556,3 +556,15 @@ class DisburseService:
                 remaining -= amount
 
         return distributions
+
+    def get_individual_votes(self, guild_id: int | None) -> dict[int, str]:
+        """
+        Get individual votes for the active proposal in a guild.
+
+        Args:
+            guild_id: Guild ID
+
+        Returns:
+            Dict mapping discord_id -> vote method
+        """
+        return self.disburse_repo.get_individual_votes(guild_id)

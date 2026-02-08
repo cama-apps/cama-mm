@@ -934,7 +934,7 @@ class PredictionCommands(commands.Cog):
             all_preds = []
             for s in ["open", "locked", "resolved", "cancelled"]:
                 status_preds = await asyncio.to_thread(
-                    self.prediction_service.prediction_repo.get_predictions_by_status,
+                    self.prediction_service.get_predictions_by_status,
                     guild_id, s,
                 )
                 all_preds.extend(status_preds)
@@ -948,7 +948,7 @@ class PredictionCommands(commands.Cog):
         # Enrich with odds info
         for pred in preds:
             totals = await asyncio.to_thread(
-                self.prediction_service.prediction_repo.get_prediction_totals,
+                self.prediction_service.get_prediction_totals,
                 pred["prediction_id"],
             )
             pred.update(totals)
@@ -980,7 +980,7 @@ class PredictionCommands(commands.Cog):
 
                 # Get resolution summary
                 summary = await asyncio.to_thread(
-                    self.prediction_service.prediction_repo.get_resolution_summary,
+                    self.prediction_service.get_resolution_summary,
                     pred["prediction_id"],
                 )
                 winners = summary["winners"]

@@ -622,6 +622,50 @@ class LoanService(ILoanService):
         """Add amount to the nonprofit fund. Returns the new total."""
         return self.loan_repo.add_to_nonprofit_fund(guild_id, amount)
 
+    def subtract_from_nonprofit_fund(self, guild_id: int | None, amount: int) -> int:
+        """
+        Subtract amount from the nonprofit fund (admin operation).
+
+        Args:
+            guild_id: Guild ID
+            amount: Positive amount to subtract
+
+        Returns:
+            New fund balance
+
+        Raises:
+            ValueError: If insufficient funds
+        """
+        if amount <= 0:
+            raise ValueError("Amount must be positive")
+        current = self.get_nonprofit_fund(guild_id)
+        if current < amount:
+            raise ValueError(f"Insufficient funds. Available: {current}, requested: {amount}")
+        # Use negative amount to subtract
+        return self.loan_repo.add_to_nonprofit_fund(guild_id, -amount)
+
+    def reset_loan_cooldown(self, discord_id: int, guild_id: int | None) -> None:
+        """
+        Reset a player's loan cooldown (admin operation).
+
+        Sets last_loan_at to 0 (epoch) so they can take a new loan immediately.
+
+        Args:
+            discord_id: Player's Discord ID
+            guild_id: Guild ID
+        """
+        state = self.get_state(discord_id, guild_id)
+        self.loan_repo.upsert_state(
+            discord_id=discord_id,
+            guild_id=guild_id,
+            last_loan_at=0,
+            total_loans_taken=state.total_loans_taken,
+            total_fees_paid=state.total_fees_paid,
+            negative_loans_taken=state.negative_loans_taken,
+            outstanding_principal=state.outstanding_principal,
+            outstanding_fee=state.outstanding_fee,
+        )
+
     # =========================================================================
     # Result-returning methods (new API)
     # These methods return Result types for cleaner error handling.

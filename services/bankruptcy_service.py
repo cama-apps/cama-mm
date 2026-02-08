@@ -488,3 +488,30 @@ class BankruptcyService(IBankruptcyService):
                 penalty_applied=penalty_applied,
             )
         )
+
+    # --- Admin operations ---
+
+    def reset_cooldown(self, discord_id: int, guild_id: int | None = None) -> bool:
+        """
+        Reset a player's bankruptcy cooldown and clear penalty games (admin operation).
+
+        Does NOT increment bankruptcy count.
+
+        Args:
+            discord_id: Player's Discord ID
+            guild_id: Guild ID
+
+        Returns:
+            True if reset was applied, False if no bankruptcy history exists
+        """
+        state = self.bankruptcy_repo.get_state(discord_id, guild_id)
+        if not state:
+            return False
+
+        self.bankruptcy_repo.reset_cooldown_only(
+            discord_id=discord_id,
+            guild_id=guild_id,
+            last_bankruptcy_at=0,  # Far in the past = no cooldown
+            penalty_games_remaining=0,  # Clear penalty games
+        )
+        return True

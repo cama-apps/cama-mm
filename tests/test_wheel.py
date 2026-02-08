@@ -50,13 +50,12 @@ async def test_wheel_cooldown_expired_allows_spin():
     player_service.get_player.return_value = MagicMock(name="TestPlayer")
     player_service.get_balance.return_value = 50
 
-    # Mock repository - cooldown expired
-    player_service.player_repo = MagicMock()
-    player_service.player_repo.get_last_wheel_spin.return_value = int(time.time()) - WHEEL_COOLDOWN_SECONDS - 1
-    player_service.player_repo.add_balance = MagicMock()
-    player_service.player_repo.set_last_wheel_spin = MagicMock()
-    player_service.player_repo.try_claim_wheel_spin = MagicMock(return_value=True)
-    player_service.player_repo.log_wheel_spin = MagicMock(return_value=1)
+    # Mock service methods - cooldown expired
+    player_service.get_last_wheel_spin = MagicMock(return_value=int(time.time()) - WHEEL_COOLDOWN_SECONDS - 1)
+    player_service.adjust_balance = MagicMock()
+    player_service.set_last_wheel_spin = MagicMock()
+    player_service.try_claim_wheel_spin = MagicMock(return_value=True)
+    player_service.log_wheel_spin = MagicMock(return_value=1)
 
     message = MagicMock()
     message.edit = AsyncMock()
@@ -97,12 +96,11 @@ async def test_wheel_positive_applies_garnishment():
     player_service.get_player.return_value = MagicMock(name="TestPlayer")
     player_service.get_balance.return_value = -100  # In debt
 
-    # Mock repository
-    player_service.player_repo = MagicMock()
-    player_service.player_repo.get_last_wheel_spin.return_value = None
-    player_service.player_repo.set_last_wheel_spin = MagicMock()
-    player_service.player_repo.try_claim_wheel_spin = MagicMock(return_value=True)
-    player_service.player_repo.log_wheel_spin = MagicMock(return_value=1)
+    # Mock service methods
+    player_service.get_last_wheel_spin = MagicMock(return_value=None)
+    player_service.set_last_wheel_spin = MagicMock()
+    player_service.try_claim_wheel_spin = MagicMock(return_value=True)
+    player_service.log_wheel_spin = MagicMock(return_value=1)
 
     # Set up garnishment service
     garnishment_service.add_income.return_value = {
@@ -149,13 +147,12 @@ async def test_wheel_positive_no_debt_adds_directly():
     player_service.get_player.return_value = MagicMock(name="TestPlayer")
     player_service.get_balance.return_value = 50  # Not in debt
 
-    # Mock repository
-    player_service.player_repo = MagicMock()
-    player_service.player_repo.get_last_wheel_spin.return_value = None
-    player_service.player_repo.set_last_wheel_spin = MagicMock()
-    player_service.player_repo.try_claim_wheel_spin = MagicMock(return_value=True)
-    player_service.player_repo.log_wheel_spin = MagicMock(return_value=1)
-    player_service.player_repo.add_balance = MagicMock()
+    # Mock service methods
+    player_service.get_last_wheel_spin = MagicMock(return_value=None)
+    player_service.set_last_wheel_spin = MagicMock()
+    player_service.try_claim_wheel_spin = MagicMock(return_value=True)
+    player_service.log_wheel_spin = MagicMock(return_value=1)
+    player_service.adjust_balance = MagicMock()
 
     # No garnishment service on bot
     bot.garnishment_service = None
@@ -179,7 +176,7 @@ async def test_wheel_positive_no_debt_adds_directly():
                 await commands.gamba.callback(commands, interaction)
 
     # Should add balance directly (user_id, guild_id, amount)
-    player_service.player_repo.add_balance.assert_called_once_with(1003, 123, 5)
+    player_service.adjust_balance.assert_called_once_with(1003, 123, 5)
 
 
 @pytest.mark.asyncio
@@ -195,12 +192,12 @@ async def test_wheel_bankrupt_subtracts_balance():
     player_service.get_balance.return_value = 50
 
     # Mock repository
-    player_service.player_repo = MagicMock()
-    player_service.player_repo.get_last_wheel_spin.return_value = None
-    player_service.player_repo.set_last_wheel_spin = MagicMock()
-    player_service.player_repo.try_claim_wheel_spin = MagicMock(return_value=True)
-    player_service.player_repo.log_wheel_spin = MagicMock(return_value=1)
-    player_service.player_repo.add_balance = MagicMock()
+    # Mock service methods
+    player_service.get_last_wheel_spin = MagicMock(return_value=None)
+    player_service.set_last_wheel_spin = MagicMock()
+    player_service.try_claim_wheel_spin = MagicMock(return_value=True)
+    player_service.log_wheel_spin = MagicMock(return_value=1)
+    player_service.adjust_balance = MagicMock()
 
     message = MagicMock()
     message.edit = AsyncMock()
@@ -223,7 +220,7 @@ async def test_wheel_bankrupt_subtracts_balance():
     # Should subtract the bankrupt value (negative)
     bankrupt_value = WHEEL_WEDGES[0][1]
     assert bankrupt_value < 0, "Bankrupt should have negative value"
-    player_service.player_repo.add_balance.assert_called_once_with(1004, 123, bankrupt_value)
+    player_service.adjust_balance.assert_called_once_with(1004, 123, bankrupt_value)
 
 
 @pytest.mark.asyncio
@@ -239,13 +236,12 @@ async def test_wheel_bankrupt_credits_nonprofit_fund():
     player_service.get_player.return_value = MagicMock(name="TestPlayer")
     player_service.get_balance.return_value = 50
 
-    # Mock repository
-    player_service.player_repo = MagicMock()
-    player_service.player_repo.get_last_wheel_spin.return_value = None
-    player_service.player_repo.set_last_wheel_spin = MagicMock()
-    player_service.player_repo.try_claim_wheel_spin = MagicMock(return_value=True)
-    player_service.player_repo.log_wheel_spin = MagicMock(return_value=1)
-    player_service.player_repo.add_balance = MagicMock()
+    # Mock service methods
+    player_service.get_last_wheel_spin = MagicMock(return_value=None)
+    player_service.set_last_wheel_spin = MagicMock()
+    player_service.try_claim_wheel_spin = MagicMock(return_value=True)
+    player_service.log_wheel_spin = MagicMock(return_value=1)
+    player_service.adjust_balance = MagicMock()
 
     message = MagicMock()
     message.edit = AsyncMock()
@@ -286,13 +282,12 @@ async def test_wheel_bankrupt_ignores_max_debt():
     # Balance will be -400, then more negative after bankrupt
     player_service.get_balance.side_effect = [-400, -400 + bankrupt_value]
 
-    # Mock repository
-    player_service.player_repo = MagicMock()
-    player_service.player_repo.get_last_wheel_spin.return_value = None
-    player_service.player_repo.set_last_wheel_spin = MagicMock()
-    player_service.player_repo.try_claim_wheel_spin = MagicMock(return_value=True)
-    player_service.player_repo.log_wheel_spin = MagicMock(return_value=1)
-    player_service.player_repo.add_balance = MagicMock()
+    # Mock service methods
+    player_service.get_last_wheel_spin = MagicMock(return_value=None)
+    player_service.set_last_wheel_spin = MagicMock()
+    player_service.try_claim_wheel_spin = MagicMock(return_value=True)
+    player_service.log_wheel_spin = MagicMock(return_value=1)
+    player_service.adjust_balance = MagicMock()
 
     message = MagicMock()
     message.edit = AsyncMock()
@@ -313,7 +308,7 @@ async def test_wheel_bankrupt_ignores_max_debt():
                 await commands.gamba.callback(commands, interaction)
 
     # Should subtract bankrupt value regardless of MAX_DEBT
-    player_service.player_repo.add_balance.assert_called_once_with(1005, 123, bankrupt_value)
+    player_service.adjust_balance.assert_called_once_with(1005, 123, bankrupt_value)
 
 
 @pytest.mark.asyncio
@@ -328,13 +323,12 @@ async def test_wheel_lose_turn_no_change():
     player_service.get_player.return_value = MagicMock(name="TestPlayer")
     player_service.get_balance.return_value = 75
 
-    # Mock repository
-    player_service.player_repo = MagicMock()
-    player_service.player_repo.get_last_wheel_spin.return_value = None
-    player_service.player_repo.set_last_wheel_spin = MagicMock()
-    player_service.player_repo.try_claim_wheel_spin = MagicMock(return_value=True)
-    player_service.player_repo.log_wheel_spin = MagicMock(return_value=1)
-    player_service.player_repo.add_balance = MagicMock()
+    # Mock service methods
+    player_service.get_last_wheel_spin = MagicMock(return_value=None)
+    player_service.set_last_wheel_spin = MagicMock()
+    player_service.try_claim_wheel_spin = MagicMock(return_value=True)
+    player_service.log_wheel_spin = MagicMock(return_value=1)
+    player_service.adjust_balance = MagicMock()
 
     message = MagicMock()
     message.edit = AsyncMock()
@@ -354,8 +348,8 @@ async def test_wheel_lose_turn_no_change():
             with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
                 await commands.gamba.callback(commands, interaction)
 
-    # Should NOT call add_balance at all
-    player_service.player_repo.add_balance.assert_not_called()
+    # Should NOT call adjust_balance at all
+    player_service.adjust_balance.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -370,13 +364,12 @@ async def test_wheel_jackpot_result():
     player_service.get_player.return_value = MagicMock(name="TestPlayer")
     player_service.get_balance.return_value = 50
 
-    # Mock repository
-    player_service.player_repo = MagicMock()
-    player_service.player_repo.get_last_wheel_spin.return_value = None
-    player_service.player_repo.set_last_wheel_spin = MagicMock()
-    player_service.player_repo.try_claim_wheel_spin = MagicMock(return_value=True)
-    player_service.player_repo.log_wheel_spin = MagicMock(return_value=1)
-    player_service.player_repo.add_balance = MagicMock()
+    # Mock service methods
+    player_service.get_last_wheel_spin = MagicMock(return_value=None)
+    player_service.set_last_wheel_spin = MagicMock()
+    player_service.try_claim_wheel_spin = MagicMock(return_value=True)
+    player_service.log_wheel_spin = MagicMock(return_value=1)
+    player_service.adjust_balance = MagicMock()
 
     message = MagicMock()
     message.edit = AsyncMock()
@@ -401,7 +394,7 @@ async def test_wheel_jackpot_result():
                     await commands.gamba.callback(commands, interaction)
 
     # Should add 100
-    player_service.player_repo.add_balance.assert_called_once_with(1007, 123, 100)
+    player_service.adjust_balance.assert_called_once_with(1007, 123, 100)
 
 
 def test_wheel_wedges_has_correct_count():
@@ -475,13 +468,12 @@ async def test_wheel_animation_uses_gif():
     player_service.get_player.return_value = MagicMock(name="TestPlayer")
     player_service.get_balance.return_value = 50
 
-    # Mock repository
-    player_service.player_repo = MagicMock()
-    player_service.player_repo.get_last_wheel_spin.return_value = None
-    player_service.player_repo.set_last_wheel_spin = MagicMock()
-    player_service.player_repo.try_claim_wheel_spin = MagicMock(return_value=True)
-    player_service.player_repo.log_wheel_spin = MagicMock(return_value=1)
-    player_service.player_repo.add_balance = MagicMock()
+    # Mock service methods
+    player_service.get_last_wheel_spin = MagicMock(return_value=None)
+    player_service.set_last_wheel_spin = MagicMock()
+    player_service.try_claim_wheel_spin = MagicMock(return_value=True)
+    player_service.log_wheel_spin = MagicMock(return_value=1)
+    player_service.adjust_balance = MagicMock()
 
     message = MagicMock()
     message.edit = AsyncMock()
@@ -519,13 +511,12 @@ async def test_wheel_updates_cooldown_in_database():
     player_service.get_player.return_value = MagicMock(name="TestPlayer")
     player_service.get_balance.return_value = 50
 
-    # Mock repository - no previous spin
-    player_service.player_repo = MagicMock()
-    player_service.player_repo.get_last_wheel_spin.return_value = None
-    player_service.player_repo.set_last_wheel_spin = MagicMock()
-    player_service.player_repo.try_claim_wheel_spin = MagicMock(return_value=True)
-    player_service.player_repo.log_wheel_spin = MagicMock(return_value=1)
-    player_service.player_repo.add_balance = MagicMock()
+    # Mock service methods - no previous spin
+    player_service.get_last_wheel_spin = MagicMock(return_value=None)
+    player_service.set_last_wheel_spin = MagicMock()
+    player_service.try_claim_wheel_spin = MagicMock(return_value=True)
+    player_service.log_wheel_spin = MagicMock(return_value=1)
+    player_service.adjust_balance = MagicMock()
 
     message = MagicMock()
     message.edit = AsyncMock()
@@ -549,8 +540,8 @@ async def test_wheel_updates_cooldown_in_database():
     after_time = int(time.time())
 
     # Should have called set_last_wheel_spin with (user_id, guild_id, timestamp)
-    player_service.player_repo.set_last_wheel_spin.assert_called_once()
-    call_args = player_service.player_repo.set_last_wheel_spin.call_args[0]
+    player_service.set_last_wheel_spin.assert_called_once()
+    call_args = player_service.set_last_wheel_spin.call_args[0]
     assert call_args[0] == 1009  # user_id
     assert call_args[1] == 123  # guild_id
     assert before_time <= call_args[2] <= after_time  # timestamp
@@ -568,13 +559,12 @@ async def test_wheel_admin_bypasses_cooldown():
     player_service.get_player.return_value = MagicMock(name="TestPlayer")
     player_service.get_balance.return_value = 50
 
-    # Mock repository - cooldown was just set
-    player_service.player_repo = MagicMock()
-    player_service.player_repo.get_last_wheel_spin.return_value = int(time.time())
-    player_service.player_repo.set_last_wheel_spin = MagicMock()
-    player_service.player_repo.try_claim_wheel_spin = MagicMock(return_value=True)
-    player_service.player_repo.log_wheel_spin = MagicMock(return_value=1)
-    player_service.player_repo.add_balance = MagicMock()
+    # Mock service methods - cooldown was just set
+    player_service.get_last_wheel_spin = MagicMock(return_value=int(time.time()))
+    player_service.set_last_wheel_spin = MagicMock()
+    player_service.try_claim_wheel_spin = MagicMock(return_value=True)
+    player_service.log_wheel_spin = MagicMock(return_value=1)
+    player_service.adjust_balance = MagicMock()
 
     message = MagicMock()
     message.edit = AsyncMock()
@@ -614,7 +604,7 @@ async def test_wheel_red_shell_steals_from_player_above():
     player_service.get_player.return_value = MagicMock(name="TestPlayer")
     player_service.get_balance.return_value = 50
 
-    # Mock repository - player above exists
+    # Mock service methods - player above exists
     player_above = Player(
         name="RicherPlayer",
         discord_id=2001,
@@ -629,13 +619,12 @@ async def test_wheel_red_shell_steals_from_player_above():
         glicko_volatility=None,
         jopacoin_balance=100,
     )
-    player_service.player_repo = MagicMock()
-    player_service.player_repo.get_last_wheel_spin.return_value = None
-    player_service.player_repo.set_last_wheel_spin = MagicMock()
-    player_service.player_repo.try_claim_wheel_spin = MagicMock(return_value=True)
-    player_service.player_repo.log_wheel_spin = MagicMock(return_value=1)
-    player_service.player_repo.get_player_above = MagicMock(return_value=player_above)
-    player_service.player_repo.steal_atomic = MagicMock(return_value={
+    player_service.get_last_wheel_spin = MagicMock(return_value=None)
+    player_service.set_last_wheel_spin = MagicMock()
+    player_service.try_claim_wheel_spin = MagicMock(return_value=True)
+    player_service.log_wheel_spin = MagicMock(return_value=1)
+    player_service.get_player_above = MagicMock(return_value=player_above)
+    player_service.steal_atomic = MagicMock(return_value={
         "amount": 3,
         "thief_new_balance": 53,
         "victim_new_balance": 97,
@@ -667,10 +656,10 @@ async def test_wheel_red_shell_steals_from_player_above():
                     await commands.gamba.callback(commands, interaction)
 
     # Should call get_player_above
-    player_service.player_repo.get_player_above.assert_called_once_with(1010, 123)
+    player_service.get_player_above.assert_called_once_with(1010, 123)
 
     # Should call steal_atomic for atomic transfer
-    player_service.player_repo.steal_atomic.assert_called_once_with(
+    player_service.steal_atomic.assert_called_once_with(
         thief_discord_id=1010,
         victim_discord_id=2001,
         guild_id=123,
@@ -690,14 +679,13 @@ async def test_wheel_red_shell_misses_when_first_place():
     player_service.get_player.return_value = MagicMock(name="TestPlayer")
     player_service.get_balance.return_value = 1000  # Highest balance
 
-    # Mock repository - no player above (user is #1)
-    player_service.player_repo = MagicMock()
-    player_service.player_repo.get_last_wheel_spin.return_value = None
-    player_service.player_repo.set_last_wheel_spin = MagicMock()
-    player_service.player_repo.try_claim_wheel_spin = MagicMock(return_value=True)
-    player_service.player_repo.log_wheel_spin = MagicMock(return_value=1)
-    player_service.player_repo.steal_atomic = MagicMock()
-    player_service.player_repo.get_player_above = MagicMock(return_value=None)
+    # Mock service methods - no player above (user is #1)
+    player_service.get_last_wheel_spin = MagicMock(return_value=None)
+    player_service.set_last_wheel_spin = MagicMock()
+    player_service.try_claim_wheel_spin = MagicMock(return_value=True)
+    player_service.log_wheel_spin = MagicMock(return_value=1)
+    player_service.steal_atomic = MagicMock()
+    player_service.get_player_above = MagicMock(return_value=None)
 
     message = MagicMock()
     message.edit = AsyncMock()
@@ -722,7 +710,7 @@ async def test_wheel_red_shell_misses_when_first_place():
                     await commands.gamba.callback(commands, interaction)
 
     # Should NOT call steal_atomic (shell missed)
-    player_service.player_repo.steal_atomic.assert_not_called()
+    player_service.steal_atomic.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -739,7 +727,7 @@ async def test_wheel_blue_shell_steals_from_richest():
     player_service.get_player.return_value = MagicMock(name="TestPlayer")
     player_service.get_balance.return_value = 50
 
-    # Mock repository - richest player is someone else
+    # Mock service methods - richest player is someone else
     richest = Player(
         name="RichestPlayer",
         discord_id=3001,
@@ -754,13 +742,12 @@ async def test_wheel_blue_shell_steals_from_richest():
         glicko_volatility=None,
         jopacoin_balance=500,
     )
-    player_service.player_repo = MagicMock()
-    player_service.player_repo.get_last_wheel_spin.return_value = None
-    player_service.player_repo.set_last_wheel_spin = MagicMock()
-    player_service.player_repo.try_claim_wheel_spin = MagicMock(return_value=True)
-    player_service.player_repo.log_wheel_spin = MagicMock(return_value=1)
-    player_service.player_repo.get_leaderboard = MagicMock(return_value=[richest])
-    player_service.player_repo.steal_atomic = MagicMock(return_value={
+    player_service.get_last_wheel_spin = MagicMock(return_value=None)
+    player_service.set_last_wheel_spin = MagicMock()
+    player_service.try_claim_wheel_spin = MagicMock(return_value=True)
+    player_service.log_wheel_spin = MagicMock(return_value=1)
+    player_service.get_leaderboard = MagicMock(return_value=[richest])
+    player_service.steal_atomic = MagicMock(return_value={
         "amount": 5,
         "thief_new_balance": 55,
         "victim_new_balance": 495,
@@ -792,10 +779,10 @@ async def test_wheel_blue_shell_steals_from_richest():
                     await commands.gamba.callback(commands, interaction)
 
     # Should call get_leaderboard
-    player_service.player_repo.get_leaderboard.assert_called_once_with(123, limit=1)
+    player_service.get_leaderboard.assert_called_once_with(123, limit=1)
 
     # Should call steal_atomic for atomic transfer
-    player_service.player_repo.steal_atomic.assert_called_once_with(
+    player_service.steal_atomic.assert_called_once_with(
         thief_discord_id=1012,
         victim_discord_id=3001,
         guild_id=123,
@@ -818,7 +805,7 @@ async def test_wheel_blue_shell_self_hit_when_richest():
     player_service.get_player.return_value = MagicMock(name="TestPlayer")
     player_service.get_balance.return_value = 500
 
-    # Mock repository - user is the richest
+    # Mock service methods - user is the richest
     user_as_richest = Player(
         name="TestPlayer",
         discord_id=1013,
@@ -833,13 +820,12 @@ async def test_wheel_blue_shell_self_hit_when_richest():
         glicko_volatility=None,
         jopacoin_balance=500,
     )
-    player_service.player_repo = MagicMock()
-    player_service.player_repo.get_last_wheel_spin.return_value = None
-    player_service.player_repo.set_last_wheel_spin = MagicMock()
-    player_service.player_repo.try_claim_wheel_spin = MagicMock(return_value=True)
-    player_service.player_repo.log_wheel_spin = MagicMock(return_value=1)
-    player_service.player_repo.add_balance = MagicMock()
-    player_service.player_repo.get_leaderboard = MagicMock(return_value=[user_as_richest])
+    player_service.get_last_wheel_spin = MagicMock(return_value=None)
+    player_service.set_last_wheel_spin = MagicMock()
+    player_service.try_claim_wheel_spin = MagicMock(return_value=True)
+    player_service.log_wheel_spin = MagicMock(return_value=1)
+    player_service.adjust_balance = MagicMock()
+    player_service.get_leaderboard = MagicMock(return_value=[user_as_richest])
 
     message = MagicMock()
     message.edit = AsyncMock()
@@ -867,8 +853,8 @@ async def test_wheel_blue_shell_self_hit_when_richest():
                 with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
                     await cmds.gamba.callback(cmds, interaction)
 
-    # Self-hit uses add_balance (not steal_atomic since no victim)
-    player_service.player_repo.add_balance.assert_called_once_with(1013, 123, -7)
+    # Self-hit uses adjust_balance (not steal_atomic since no victim)
+    player_service.adjust_balance.assert_called_once_with(1013, 123, -7)
 
     # Should credit nonprofit fund with the loss
     loan_service.add_to_nonprofit_fund.assert_called_once_with(123, 7)

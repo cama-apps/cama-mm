@@ -20,12 +20,11 @@ logger = logging.getLogger("cama_bot.commands.herogrid")
 class HeroGridCommands(commands.Cog):
     """Commands for hero grid visualization."""
 
-    def __init__(self, bot: commands.Bot, match_repo, player_repo, lobby_manager, match_service=None):
+    def __init__(self, bot: commands.Bot, match_service, player_service, lobby_manager):
         self.bot = bot
-        self.match_repo = match_repo
-        self.player_repo = player_repo
-        self.lobby_manager = lobby_manager
         self.match_service = match_service
+        self.player_service = player_service
+        self.lobby_manager = lobby_manager
 
     def _resolve_player_ids(self, source_value: str, guild_id: int | None) -> tuple[list[int], str | None]:
         """Resolve player IDs using a priority chain.
@@ -34,7 +33,7 @@ class HeroGridCommands(commands.Cog):
             (player_ids, source_label) where source_label is None for the all-players fallback.
         """
         if source_value == "all":
-            enriched_players = self.match_repo.get_players_with_enriched_data(guild_id)
+            enriched_players = self.match_service.get_players_with_enriched_data(guild_id)
             return [p["discord_id"] for p in enriched_players], None
 
         # Priority 1: Active lobby
@@ -69,7 +68,7 @@ class HeroGridCommands(commands.Cog):
 
         # Priority 4: Most recent recorded match
         try:
-            last_match_ids = self.match_repo.get_last_match_participant_ids()
+            last_match_ids = self.match_service.get_last_match_participant_ids()
             if last_match_ids:
                 return list(last_match_ids), "Last Match"
         except Exception:
@@ -77,7 +76,7 @@ class HeroGridCommands(commands.Cog):
 
         # Priority 5: All players (only for "auto", not "lobby")
         if source_value == "auto":
-            enriched_players = self.match_repo.get_players_with_enriched_data(guild_id)
+            enriched_players = self.match_service.get_players_with_enriched_data(guild_id)
             return [p["discord_id"] for p in enriched_players], None
 
         # source_value == "lobby" and nothing found
@@ -139,7 +138,7 @@ class HeroGridCommands(commands.Cog):
         min_games = max(1, min(min_games, 10))
 
         # Fetch grid data
-        grid_data = self.match_repo.get_multi_player_hero_stats(player_ids, guild_id)
+        grid_data = self.match_service.get_multi_player_hero_stats(player_ids, guild_id)
 
         if not grid_data:
             await safe_followup(
@@ -149,7 +148,7 @@ class HeroGridCommands(commands.Cog):
             return
 
         # Build player names dict (preserving order)
-        players = self.player_repo.get_by_ids(player_ids, guild_id)
+        players = self.player_service.get_by_ids(player_ids, guild_id)
         player_names = {}
         for p in players:
             player_names[p.discord_id] = p.name
@@ -192,19 +191,18 @@ class HeroGridCommands(commands.Cog):
 
 async def setup(bot: commands.Bot):
     """Setup function called when loading the cog."""
-    match_repo = getattr(bot, "match_repo", None)
-    player_repo = getattr(bot, "player_repo", None)
-    lobby_manager = getattr(bot, "lobby_manager", None)
     match_service = getattr(bot, "match_service", None)
+    player_service = getattr(bot, "player_service", None)
+    lobby_manager = getattr(bot, "lobby_manager", None)
 
-    if match_repo is None:
-        logger.warning("HeroGridCommands: match_repo not found on bot, skipping cog load")
+    if match_service is None:
+        logger.warning("HeroGridCommands: match_service not found on bot, skipping cog load")
         return
-    if player_repo is None:
-        logger.warning("HeroGridCommands: player_repo not found on bot, skipping cog load")
+    if player_service is None:
+        logger.warning("HeroGridCommands: player_service not found on bot, skipping cog load")
         return
     if lobby_manager is None:
         logger.warning("HeroGridCommands: lobby_manager not found on bot, skipping cog load")
         return
 
-    await bot.add_cog(HeroGridCommands(bot, match_repo, player_repo, lobby_manager, match_service))
+    await bot.add_cog(HeroGridCommands(bot, match_service, player_service, lobby_manager))

@@ -22,28 +22,38 @@ def clear_processed_interactions():
     admin_module._processed_interactions.clear()
 
 
-class FakePlayerRepo:
-    """Minimal player repo stub."""
+class FakePlayerService:
+    """Minimal player service stub for admin command tests."""
 
     def __init__(self):
         self.players = {}
 
-    def get_by_id(self, discord_id, guild_id=None):
+    def get_player(self, discord_id, guild_id=None):
         return self.players.get(discord_id)
 
     def get_by_ids(self, ids, guild_id=None):
         return [self.players[i] for i in ids if i in self.players]
 
-    def add(self, discord_id, discord_username, guild_id=None, initial_mmr=None, glicko_rating=None,
-            glicko_rd=None, glicko_volatility=None, preferred_roles=None):
+    def add_fake_player(
+        self,
+        discord_id,
+        discord_username,
+        guild_id=None,
+        glicko_rating=None,
+        glicko_rd=None,
+        glicko_volatility=None,
+        preferred_roles=None,
+    ):
         self.players[discord_id] = SimpleNamespace(
             discord_id=discord_id,
             name=discord_username,
             glicko_rating=glicko_rating,
             glicko_rd=glicko_rd,
             preferred_roles=preferred_roles or [],
-            mmr=initial_mmr,
         )
+
+    def set_captain_eligible(self, discord_id, guild_id, eligible):
+        pass  # No-op for tests
 
 
 class FakeFollowup:
@@ -71,9 +81,9 @@ class FakeInteraction:
 def make_services():
     db = Database(db_path=":memory:")
     lobby_manager = LobbyManager(db)
-    player_repo = FakePlayerRepo()
-    lobby_service = LobbyService(lobby_manager, player_repo, max_players=14)
-    return lobby_service, player_repo
+    player_service = FakePlayerService()
+    lobby_service = LobbyService(lobby_manager, player_service, max_players=14)
+    return lobby_service, player_service
 
 
 def make_bot():
@@ -90,7 +100,7 @@ async def invoke_addfake(cog, interaction, count):
 @pytest.mark.asyncio
 async def test_addfake_adds_users_to_lobby(monkeypatch):
     """Test that addfake actually adds fake users to the lobby."""
-    lobby_service, player_repo = make_services()
+    lobby_service, player_service = make_services()
     lobby = lobby_service.get_or_create_lobby(creator_id=99)
 
     interaction = FakeInteraction(user_id=1)
@@ -99,7 +109,7 @@ async def test_addfake_adds_users_to_lobby(monkeypatch):
     monkeypatch.setattr("commands.admin.GLOBAL_RATE_LIMITER.check",
                         lambda **kw: SimpleNamespace(allowed=True, retry_after_seconds=0))
 
-    cog = AdminCommands(make_bot(), lobby_service, player_repo)
+    cog = AdminCommands(make_bot(), lobby_service, player_service)
     await invoke_addfake(cog, interaction, 5)
 
     # Verify 5 fake users were added
@@ -111,7 +121,7 @@ async def test_addfake_adds_users_to_lobby(monkeypatch):
 @pytest.mark.asyncio
 async def test_addfake_works_when_defer_fails(monkeypatch):
     """Critical: addfake should still add users even when Discord interaction times out."""
-    lobby_service, player_repo = make_services()
+    lobby_service, player_service = make_services()
     lobby = lobby_service.get_or_create_lobby(creator_id=99)
 
     interaction = FakeInteraction(user_id=1)
@@ -121,7 +131,7 @@ async def test_addfake_works_when_defer_fails(monkeypatch):
     monkeypatch.setattr("commands.admin.GLOBAL_RATE_LIMITER.check",
                         lambda **kw: SimpleNamespace(allowed=True, retry_after_seconds=0))
 
-    cog = AdminCommands(make_bot(), lobby_service, player_repo)
+    cog = AdminCommands(make_bot(), lobby_service, player_service)
     await invoke_addfake(cog, interaction, 3)
 
     # Even though defer failed, users should be added
@@ -135,7 +145,7 @@ async def test_addfake_works_when_defer_fails(monkeypatch):
 @pytest.mark.asyncio
 async def test_addfake_continues_numbering(monkeypatch):
     """Test that subsequent addfake calls continue from the highest index."""
-    lobby_service, player_repo = make_services()
+    lobby_service, player_service = make_services()
     lobby = lobby_service.get_or_create_lobby(creator_id=99)
 
     interaction = FakeInteraction(user_id=1)
@@ -144,7 +154,7 @@ async def test_addfake_continues_numbering(monkeypatch):
     monkeypatch.setattr("commands.admin.GLOBAL_RATE_LIMITER.check",
                         lambda **kw: SimpleNamespace(allowed=True, retry_after_seconds=0))
 
-    cog = AdminCommands(make_bot(), lobby_service, player_repo)
+    cog = AdminCommands(make_bot(), lobby_service, player_service)
 
     # First call adds FakeUser1-3
     await invoke_addfake(cog, interaction, 3)

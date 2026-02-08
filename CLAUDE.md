@@ -636,7 +636,7 @@ See `config.py` for the full list (50+ options).
 - **Team Convention**: team1=Radiant, team2=Dire, winning_team: 1 or 2
 - **Match Types**: `lobby_type` = "shuffle" (random balanced) or "draft" (captain's pick)
 - **Betting Window**: 15 minutes (BET_LOCK_SECONDS=900) after shuffle; admins can extend via `/extendbetting`
-- **Voting Threshold**: 2 non-admin votes OR 1 admin vote to record match
+- **Voting Threshold**: 3 non-admin votes OR 1 admin vote to record match
 - **Leverage**: Multiplies effective bet; losses can cause debt up to MAX_DEBT
 - **Garnishment**: 100% of winnings go to debt repayment until balance >= 0
 - **Bankruptcy**: Players must WIN 5 games to clear penalty (like Dota 2 low prio), not just play games. 50% reduced rewards during penalty period.

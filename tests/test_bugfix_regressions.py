@@ -573,8 +573,8 @@ class TestCriticalCommandsAlwaysLoaded:
         # InfoCommands requires these constructor args
         cog = InfoCommands(
             bot=mock_bot,
-            player_repo=MagicMock(),
-            match_repo=MagicMock(),
+            player_service=MagicMock(),
+            match_service=MagicMock(),
             role_emojis={},
             role_names={},
         )
