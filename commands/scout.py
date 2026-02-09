@@ -25,6 +25,9 @@ logger = logging.getLogger("cama_bot.commands.scout")
 class ScoutCommands(commands.Cog):
     """Commands for player scouting."""
 
+    # Auto-delete timeout in seconds (14 minutes, matches ProfileView)
+    MESSAGE_TIMEOUT = 840
+
     def __init__(
         self,
         bot: commands.Bot,
@@ -36,6 +39,17 @@ class ScoutCommands(commands.Cog):
         self.match_service = match_service
         self.player_service = player_service
         self.lobby_manager = lobby_manager
+
+    async def _delete_after_timeout(self, message: discord.Message, timeout: int):
+        """Delete the scout message after timeout seconds."""
+        await asyncio.sleep(timeout)
+        try:
+            await message.delete()
+            logger.info(f"Scout message {message.id} deleted after {timeout // 60}min timeout")
+        except discord.NotFound:
+            logger.debug(f"Scout message {message.id} was already deleted")
+        except discord.HTTPException as e:
+            logger.warning(f"Failed to delete scout message {message.id}: {e}")
 
     def _resolve_player_context(
         self, guild_id: int | None, team_filter: str | None = None
@@ -209,7 +223,13 @@ class ScoutCommands(commands.Cog):
                 text="W-L = Wins-Losses | B:N = Times Banned | # = Position"
             )
 
-            await safe_followup(interaction, embed=embed, file=file)
+            message = await safe_followup(interaction, embed=embed, file=file)
+
+            # Schedule message deletion after timeout
+            if message:
+                asyncio.create_task(
+                    self._delete_after_timeout(message, self.MESSAGE_TIMEOUT)
+                )
         except Exception as e:
             logger.error(f"Error generating scout report: {e}", exc_info=True)
             await safe_followup(
