@@ -213,11 +213,11 @@ class NeonDegenService:
                 prompt=prompt,
                 system_prompt=JOPAT_SYSTEM_PROMPT,
                 temperature=0.9,
-                max_tokens=200,
+                max_tokens=2000,
             )
             return result
         except Exception as e:
-            logger.debug(f"LLM terminal commentary failed: {e}")
+            logger.info(f"LLM terminal commentary failed: {e}")
             return None
 
     async def _generate_text(
@@ -255,7 +255,7 @@ class NeonDegenService:
                 prompt=prompt,
                 system_prompt=JOPAT_SYSTEM_PROMPT,
                 temperature=0.9,
-                max_tokens=200,
+                max_tokens=2000,
             )
             if result:
                 from utils.neon_terminal import ansi_block
@@ -273,7 +273,7 @@ class NeonDegenService:
                     return ansi_block(stripped)
                 return ansi_block(result)
         except Exception as e:
-            logger.debug(f"LLM text generation failed, using template: {e}")
+            logger.info(f"LLM text generation failed, using template: {e}")
         return fallback_text
 
     def _build_player_context(self, discord_id: int, guild_id: int | None) -> dict[str, Any]:
