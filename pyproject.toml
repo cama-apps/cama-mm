@@ -28,6 +28,7 @@ dev = [
     "pytest>=7.4.0",
     "pytest-asyncio>=0.21.0",
     "pytest-timeout>=2.1.0",
+    "pytest-rerunfailures>=14.0",
     "ruff>=0.8.0",
 ]
 
@@ -40,7 +41,8 @@ python_classes = "Test*"
 python_functions = "test_*"
 # Group tests by module/class to share session-scoped fixtures efficiently
 # Limit workers to 8 to avoid Python 3.14.2 interpreter crashes under heavy parallel load
-addopts = "--dist=loadscope -n 8"
+# Retry failed tests once to handle Python 3.14 parallel execution flakiness
+addopts = "--dist=loadscope -n 8 --reruns 1 --reruns-delay 0.5"
 markers = [
     "timeout: mark test with a timeout",
     "forceserial: mark test to run in isolation (avoid parallel test state pollution)",

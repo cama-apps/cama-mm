@@ -376,6 +376,7 @@ EXTENSIONS = [
     "commands.draft",
     "commands.rating_analysis",
     "commands.herogrid",
+    "commands.scout",
     "commands.wrapped",
 ]
 

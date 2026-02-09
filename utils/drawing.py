@@ -1721,3 +1721,271 @@ def draw_hero_grid(
     img.save(fp, format="PNG")
     fp.seek(0)
     return fp
+
+
+# -------------------------------------------------------------------------
+# Hero Image Caching for Scout Report
+# -------------------------------------------------------------------------
+
+# Module-level cache for hero images
+_hero_image_cache: dict[int, Image.Image] = {}
+
+
+def _fetch_hero_image(hero_id: int, size: tuple[int, int] = (48, 27)) -> Image.Image | None:
+    """
+    Fetch hero image from Steam CDN with caching.
+
+    Args:
+        hero_id: Dota 2 hero ID
+        size: Target size (width, height) for the image
+
+    Returns:
+        PIL Image resized to specified dimensions, or None if fetch fails
+    """
+    import requests
+    from utils.hero_lookup import get_hero_image_url
+
+    # Check cache first
+    cache_key = hero_id
+    if cache_key in _hero_image_cache:
+        cached = _hero_image_cache[cache_key]
+        # Resize if needed
+        if cached.size != size:
+            return cached.resize(size, Image.Resampling.LANCZOS)
+        return cached
+
+    # Fetch from CDN
+    url = get_hero_image_url(hero_id)
+    if not url:
+        return None
+
+    try:
+        response = requests.get(url, timeout=5)
+        response.raise_for_status()
+        img = Image.open(BytesIO(response.content)).convert("RGBA")
+        # Cache the original
+        _hero_image_cache[cache_key] = img
+        # Return resized
+        return img.resize(size, Image.Resampling.LANCZOS)
+    except Exception:
+        return None
+
+
+def _get_hero_images_batch(hero_ids: list[int], size: tuple[int, int] = (48, 27)) -> dict[int, Image.Image]:
+    """
+    Fetch multiple hero images, using cache where available.
+
+    Args:
+        hero_ids: List of hero IDs to fetch
+        size: Target size for images
+
+    Returns:
+        Dict mapping hero_id -> PIL Image
+    """
+    result = {}
+    for hero_id in hero_ids:
+        img = _fetch_hero_image(hero_id, size)
+        if img:
+            result[hero_id] = img
+    return result
+
+
+# Role colors for scout report (Dota 2 positions 1-5)
+POSITION_COLORS = {
+    1: "#FF9800",  # Orange - Carry
+    2: "#9C27B0",  # Purple - Mid
+    3: "#4CAF50",  # Green - Offlane
+    4: "#00BCD4",  # Cyan - Soft Support
+    5: "#2196F3",  # Blue - Hard Support
+}
+
+
+def draw_scout_report(
+    scout_data: dict,
+    player_names: list[str],
+    title: str = "SCOUT REPORT",
+) -> BytesIO:
+    """
+    Generate a visual scouting report with hero portraits.
+
+    Shows aggregated hero stats for a team/group of players in a compact
+    table format with hero portrait images.
+
+    Layout (~300px width, mobile-friendly):
+    +------------------------------+
+    |       SCOUT REPORT           |
+    | Player1, Player2, ...        |
+    +------------------------------+
+    | [IMG]① 25  18-7  B:5        |
+    | [IMG]② 20  12-8  B:3        |
+    | ...                          |
+    +------------------------------+
+
+    Args:
+        scout_data: Dict from get_scout_data() with player_count and heroes list
+        player_names: List of player display names (for header)
+        title: Title text for the report
+
+    Returns:
+        BytesIO containing the PNG image
+    """
+    heroes = scout_data.get("heroes", [])
+
+    # Handle empty data
+    if not heroes:
+        img = Image.new("RGBA", (300, 100), DISCORD_BG)
+        draw = ImageDraw.Draw(img)
+        font = _get_font(16)
+        draw.text((20, 40), "No hero data available", fill=DISCORD_GREY, font=font)
+        fp = BytesIO()
+        img.save(fp, format="PNG")
+        fp.seek(0)
+        return fp
+
+    # Dimensions
+    WIDTH = 300
+    PADDING = 12
+    HEADER_HEIGHT = 50
+    ROW_HEIGHT = 32
+    HERO_IMG_WIDTH = 48
+    HERO_IMG_HEIGHT = 27
+
+    # Calculate height based on number of heroes
+    num_heroes = len(heroes)
+    height = PADDING + HEADER_HEIGHT + (num_heroes * ROW_HEIGHT) + PADDING
+
+    # Create image
+    img = Image.new("RGBA", (WIDTH, height), DISCORD_BG)
+    draw = ImageDraw.Draw(img)
+
+    # Fonts
+    title_font = _get_font(16)
+    player_font = _get_font(11)
+    stat_font = _get_font(13)
+    role_font = _get_font(11)
+    ban_font = _get_font(10)
+
+    # --- Draw header ---
+    # Title
+    title_w = _get_text_size(title_font, title)[0]
+    draw.text(((WIDTH - title_w) // 2, PADDING), title, fill=DISCORD_WHITE, font=title_font)
+
+    # Player names (truncated)
+    if player_names:
+        names_text = ", ".join(player_names[:5])
+        if len(player_names) > 5:
+            names_text += f" +{len(player_names) - 5}"
+        # Truncate if too long
+        max_name_len = 35
+        if len(names_text) > max_name_len:
+            names_text = names_text[:max_name_len - 2] + ".."
+        names_w = _get_text_size(player_font, names_text)[0]
+        draw.text(
+            ((WIDTH - names_w) // 2, PADDING + 22),
+            names_text,
+            fill=DISCORD_GREY,
+            font=player_font,
+        )
+
+    # Fixed column positions for alignment
+    COL_HERO_X = PADDING + 4
+    COL_ROLE_X = COL_HERO_X + HERO_IMG_WIDTH + 6
+    COL_GAMES_X = COL_ROLE_X + 18
+    COL_WL_X = COL_GAMES_X + 40
+    COL_BANS_X = COL_WL_X + 55
+
+    # Column headers
+    header_font = _get_font(11)
+    header_y = PADDING + HEADER_HEIGHT - 18
+    draw.text((COL_ROLE_X, header_y), "#", fill=DISCORD_GREY, font=header_font)
+    draw.text((COL_GAMES_X + 5, header_y), "Games", fill=DISCORD_GREY, font=header_font)
+    draw.text((COL_WL_X, header_y), "W-L", fill=DISCORD_GREY, font=header_font)
+    draw.text((COL_BANS_X, header_y), "Ban", fill=DISCORD_GREY, font=header_font)
+
+    # Header separator line
+    sep_y = PADDING + HEADER_HEIGHT - 5
+    draw.line([(PADDING, sep_y), (WIDTH - PADDING, sep_y)], fill=DISCORD_ACCENT, width=1)
+
+    # --- Fetch hero images ---
+    hero_ids = [h["hero_id"] for h in heroes]
+    hero_images = _get_hero_images_batch(hero_ids, (HERO_IMG_WIDTH, HERO_IMG_HEIGHT))
+
+    # --- Draw hero rows ---
+    y = PADDING + HEADER_HEIGHT
+
+    for i, hero in enumerate(heroes):
+        hero_id = hero["hero_id"]
+        games = hero["games"]
+        wins = hero["wins"]
+        losses = hero["losses"]
+        bans = hero.get("bans", 0)
+        primary_role = hero.get("primary_role", 1)
+
+        # Alternate row background
+        if i % 2 == 1:
+            draw.rectangle(
+                [(PADDING, y), (WIDTH - PADDING, y + ROW_HEIGHT)],
+                fill=DISCORD_DARKER,
+            )
+
+        stat_y = y + (ROW_HEIGHT - 15) // 2
+
+        # Hero portrait (fixed position)
+        hero_img = hero_images.get(hero_id)
+        if hero_img:
+            img_y = y + (ROW_HEIGHT - HERO_IMG_HEIGHT) // 2
+            img.paste(hero_img, (COL_HERO_X, img_y), hero_img)
+        else:
+            img_y = y + (ROW_HEIGHT - HERO_IMG_HEIGHT) // 2
+            draw.rectangle(
+                [(COL_HERO_X, img_y), (COL_HERO_X + HERO_IMG_WIDTH, img_y + HERO_IMG_HEIGHT)],
+                fill=DISCORD_DARKER,
+                outline=DISCORD_GREY,
+            )
+
+        # Role number (fixed position, colored)
+        role_text = str(primary_role)
+        role_color = POSITION_COLORS.get(primary_role, DISCORD_GREY)
+        draw.text((COL_ROLE_X, stat_y), role_text, fill=role_color, font=role_font)
+
+        # Games count (fixed position, right-aligned within column)
+        games_text = str(games)
+        games_w = _get_text_size(stat_font, games_text)[0]
+        draw.text((COL_GAMES_X + 30 - games_w, stat_y), games_text, fill=DISCORD_WHITE, font=stat_font)
+
+        # W-L (fixed position, color-coded by win rate)
+        win_rate = wins / games if games > 0 else 0
+        if win_rate >= 0.60:
+            wl_color = DISCORD_GREEN
+        elif win_rate >= 0.40:
+            wl_color = DISCORD_YELLOW
+        else:
+            wl_color = DISCORD_RED
+
+        wl_text = f"{wins}-{losses}"
+        draw.text((COL_WL_X, stat_y), wl_text, fill=wl_color, font=stat_font)
+
+        # Bans badge (fixed position, only if > 0)
+        if bans > 0:
+            ban_text = f"B:{bans}"
+            ban_w = _get_text_size(ban_font, ban_text)[0]
+            ban_y = y + (ROW_HEIGHT - 14) // 2
+
+            # Red badge background
+            badge_padding = 3
+            draw.rectangle(
+                [
+                    (COL_BANS_X - badge_padding, ban_y - 1),
+                    (COL_BANS_X + ban_w + badge_padding, ban_y + 13),
+                ],
+                fill=DISCORD_RED,
+            )
+            draw.text((COL_BANS_X, ban_y), ban_text, fill=DISCORD_WHITE, font=ban_font)
+
+        y += ROW_HEIGHT
+
+    # Save to BytesIO
+    fp = BytesIO()
+    img.save(fp, format="PNG")
+    fp.seek(0)
+    return fp
