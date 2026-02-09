@@ -649,16 +649,17 @@ async def test_wheel_red_shell_steals_from_player_above():
     # Mock _create_wheel_gif_file to avoid GIF generation calling random.randint
     with patch.object(commands, "_create_wheel_gif_file", return_value=MagicMock()):
         with patch("commands.betting.random.randint") as mock_randint:
-            # First call for wedge selection, second for steal amount
-            mock_randint.side_effect = [red_shell_idx, 3]  # RED_SHELL, steal 3 JC
-            with patch("commands.betting.random.random", return_value=1.0):  # No explosion
-                with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
-                    await commands.gamba.callback(commands, interaction)
+            # First call: wedge selection, second call: flat amount (2)
+            mock_randint.side_effect = [red_shell_idx, 2]
+            with patch("commands.betting.random.uniform", return_value=0.03):  # 3% of 100 = 3 JC
+                with patch("commands.betting.random.random", return_value=1.0):  # No explosion
+                    with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
+                        await commands.gamba.callback(commands, interaction)
 
     # Should call get_player_above
     player_service.get_player_above.assert_called_once_with(1010, 123)
 
-    # Should call steal_atomic for atomic transfer
+    # Should call steal_atomic: max(pct=3, flat=2) = 3 JC
     player_service.steal_atomic.assert_called_once_with(
         thief_discord_id=1010,
         victim_discord_id=2001,
@@ -772,16 +773,17 @@ async def test_wheel_blue_shell_steals_from_richest():
     # Mock _create_wheel_gif_file to avoid GIF generation calling random.randint
     with patch.object(commands, "_create_wheel_gif_file", return_value=MagicMock()):
         with patch("commands.betting.random.randint") as mock_randint:
-            # First call for wedge selection, second for steal amount
-            mock_randint.side_effect = [blue_shell_idx, 5]  # BLUE_SHELL, steal 5 JC
-            with patch("commands.betting.random.random", return_value=1.0):  # No explosion
-                with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
-                    await commands.gamba.callback(commands, interaction)
+            # First call: wedge selection, second call: flat amount (4)
+            mock_randint.side_effect = [blue_shell_idx, 4]
+            with patch("commands.betting.random.uniform", return_value=0.01):  # 1% of 500 = 5 JC
+                with patch("commands.betting.random.random", return_value=1.0):  # No explosion
+                    with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
+                        await commands.gamba.callback(commands, interaction)
 
     # Should call get_leaderboard
     player_service.get_leaderboard.assert_called_once_with(123, limit=1)
 
-    # Should call steal_atomic for atomic transfer
+    # Should call steal_atomic: max(pct=5, flat=4) = 5 JC
     player_service.steal_atomic.assert_called_once_with(
         thief_discord_id=1012,
         victim_discord_id=3001,
@@ -847,14 +849,16 @@ async def test_wheel_blue_shell_self_hit_when_richest():
     # Mock _create_wheel_gif_file to avoid GIF generation calling random.randint
     with patch.object(cmds, "_create_wheel_gif_file", return_value=MagicMock()):
         with patch("commands.betting.random.randint") as mock_randint:
-            # First call for wedge selection, second for self-hit amount
-            mock_randint.side_effect = [blue_shell_idx, 7]  # BLUE_SHELL, lose 7 JC
-            with patch("commands.betting.random.random", return_value=1.0):  # No explosion
-                with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
-                    await cmds.gamba.callback(cmds, interaction)
+            # First call: wedge selection, second call: flat amount (4)
+            mock_randint.side_effect = [blue_shell_idx, 4]
+            with patch("commands.betting.random.uniform", return_value=0.02):  # 2% of 500 = 10 JC
+                with patch("commands.betting.random.random", return_value=1.0):  # No explosion
+                    with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
+                        await cmds.gamba.callback(cmds, interaction)
 
     # Self-hit uses adjust_balance (not steal_atomic since no victim)
-    player_service.adjust_balance.assert_called_once_with(1013, 123, -7)
+    # max(pct=10, flat=4) = 10 JC loss
+    player_service.adjust_balance.assert_called_once_with(1013, 123, -10)
 
     # Should credit nonprofit fund with the loss
-    loan_service.add_to_nonprofit_fund.assert_called_once_with(123, 7)
+    loan_service.add_to_nonprofit_fund.assert_called_once_with(123, 10)
