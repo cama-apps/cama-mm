@@ -81,7 +81,7 @@ class ScoutView(discord.ui.View):
         )
         embed.set_image(url="attachment://scout_report.png")
         embed.set_footer(
-            text=f"Page {self.current_page + 1}/{self.total_pages} | Total = W+L+Bans"
+            text=f"Page {self.current_page + 1}/{self.total_pages} | Tot = W+L+Ban"
         )
 
         return embed, file
@@ -106,6 +106,9 @@ class ScoutView(discord.ui.View):
 
             embed, file = await self._generate_embed_and_file()
             await interaction.response.edit_message(embed=embed, attachments=[file], view=self)
+        else:
+            # Already at first page - acknowledge interaction to avoid Discord error
+            await interaction.response.defer()
 
     @discord.ui.button(label="Next ▶", style=discord.ButtonStyle.secondary)
     async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -116,6 +119,9 @@ class ScoutView(discord.ui.View):
 
             embed, file = await self._generate_embed_and_file()
             await interaction.response.edit_message(embed=embed, attachments=[file], view=self)
+        else:
+            # Already at last page - acknowledge interaction to avoid Discord error
+            await interaction.response.defer()
 
 
 class ScoutCommands(commands.Cog):
