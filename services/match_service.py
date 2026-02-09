@@ -2016,3 +2016,79 @@ class MatchService:
             List of dicts with player hero stats for grid visualization
         """
         return self.match_repo.get_multi_player_hero_stats(player_ids, guild_id)
+
+    def get_scout_data(
+        self, player_ids: list[int], guild_id: int | None, limit: int = 10
+    ) -> dict:
+        """
+        Get aggregated hero scouting data for multiple players.
+
+        Aggregates hero stats across all specified players, showing their combined
+        hero pool with games, wins, losses, bans, and primary role.
+
+        Args:
+            player_ids: List of Discord IDs to scout
+            guild_id: Guild ID for multi-server isolation
+            limit: Maximum number of heroes to return (default 10)
+
+        Returns:
+            Dict with:
+                - player_count: Number of players included
+                - heroes: List of top heroes by games, each containing:
+                    - hero_id, games, wins, losses, bans, primary_role
+        """
+        if not player_ids:
+            return {"player_count": 0, "heroes": []}
+
+        # Get per-player hero stats
+        player_stats = self.match_repo.get_player_hero_stats_for_scout(player_ids, guild_id)
+
+        # Get deduplicated ban counts
+        ban_data = self.match_repo.get_bans_for_players(player_ids, guild_id)
+
+        # Aggregate hero stats across all players
+        aggregated: dict[int, dict] = {}  # hero_id -> {games, wins, losses, roles}
+
+        for discord_id, heroes in player_stats.items():
+            for hero in heroes:
+                hero_id = hero["hero_id"]
+                if hero_id not in aggregated:
+                    aggregated[hero_id] = {
+                        "games": 0,
+                        "wins": 0,
+                        "losses": 0,
+                        "roles": [],
+                    }
+                aggregated[hero_id]["games"] += hero["games"]
+                aggregated[hero_id]["wins"] += hero["wins"]
+                aggregated[hero_id]["losses"] += hero["losses"]
+                if hero.get("primary_role"):
+                    aggregated[hero_id]["roles"].append(hero["primary_role"])
+
+        # Sort by games, take top N
+        sorted_heroes = sorted(aggregated.items(), key=lambda x: -x[1]["games"])[:limit]
+
+        # Build result with primary_role (mode) and ban counts
+        # Default to Carry (1) when no role data is available
+        DEFAULT_ROLE = 1
+        result_heroes = []
+        for hero_id, stats in sorted_heroes:
+            roles = stats["roles"]
+            if roles:
+                primary_role = max(set(roles), key=roles.count)
+            else:
+                primary_role = DEFAULT_ROLE
+
+            result_heroes.append({
+                "hero_id": hero_id,
+                "games": stats["games"],
+                "wins": stats["wins"],
+                "losses": stats["losses"],
+                "bans": ban_data.get(hero_id, 0),
+                "primary_role": primary_role,
+            })
+
+        return {
+            "player_count": len(player_ids),
+            "heroes": result_heroes,
+        }

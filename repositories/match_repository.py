@@ -2431,3 +2431,167 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 {"discord_id": row["discord_id"], "total_games": row["total_games"]}
                 for row in rows
             ]
+
+    # -------------------------------------------------------------------------
+    # Scout Command Methods
+    # -------------------------------------------------------------------------
+
+    def get_player_hero_stats_for_scout(
+        self, discord_ids: list[int], guild_id: int | None = None
+    ) -> dict[int, list[dict]]:
+        """
+        Get hero stats for multiple players, organized by player.
+
+        Returns per-player hero stats including games, wins, losses, and primary role.
+        Uses MODE() to find the most common lane_role for each hero.
+
+        Args:
+            discord_ids: List of Discord IDs to query
+            guild_id: Guild ID to filter by
+
+        Returns:
+            Dict mapping discord_id -> list of {hero_id, games, wins, losses, primary_role}
+            Each list is sorted by games descending.
+        """
+        if not discord_ids:
+            return {}
+
+        normalized_guild = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            placeholders = ",".join("?" * len(discord_ids))
+            # Get hero stats with lane_role for each match
+            cursor.execute(
+                f"""
+                SELECT mp.discord_id, mp.hero_id, mp.lane_role,
+                       mp.won
+                FROM match_participants mp
+                JOIN matches m ON mp.match_id = m.match_id
+                WHERE mp.discord_id IN ({placeholders})
+                  AND m.guild_id = ?
+                  AND mp.guild_id = ?
+                  AND mp.hero_id IS NOT NULL AND mp.hero_id > 0
+                """,
+                discord_ids + [normalized_guild, normalized_guild],
+            )
+            rows = cursor.fetchall()
+
+            # Aggregate in Python to compute mode of lane_role
+            # Structure: {discord_id: {hero_id: {"games": N, "wins": N, "roles": []}}}
+            player_hero_data: dict[int, dict[int, dict]] = {}
+
+            for row in rows:
+                discord_id = row["discord_id"]
+                hero_id = row["hero_id"]
+                lane_role = row["lane_role"]
+                won = row["won"]
+
+                if discord_id not in player_hero_data:
+                    player_hero_data[discord_id] = {}
+
+                if hero_id not in player_hero_data[discord_id]:
+                    player_hero_data[discord_id][hero_id] = {
+                        "games": 0,
+                        "wins": 0,
+                        "roles": [],
+                    }
+
+                player_hero_data[discord_id][hero_id]["games"] += 1
+                if won:
+                    player_hero_data[discord_id][hero_id]["wins"] += 1
+                if lane_role is not None:
+                    player_hero_data[discord_id][hero_id]["roles"].append(lane_role)
+
+            # Convert to output format
+            result: dict[int, list[dict]] = {}
+            for discord_id, hero_stats in player_hero_data.items():
+                heroes = []
+                for hero_id, stats in hero_stats.items():
+                    games = stats["games"]
+                    wins = stats["wins"]
+                    losses = games - wins
+                    roles = stats["roles"]
+
+                    # Compute mode of roles (most common lane_role)
+                    if roles:
+                        primary_role = max(set(roles), key=roles.count)
+                    else:
+                        primary_role = 1  # Default to carry if no data
+
+                    heroes.append({
+                        "hero_id": hero_id,
+                        "games": games,
+                        "wins": wins,
+                        "losses": losses,
+                        "primary_role": primary_role,
+                    })
+
+                # Sort by games descending
+                heroes.sort(key=lambda x: x["games"], reverse=True)
+                result[discord_id] = heroes
+
+            return result
+
+    def get_bans_for_players(
+        self, discord_ids: list[int], guild_id: int | None = None
+    ) -> dict[int, int]:
+        """
+        Extract ban data from enrichment_data JSON for matches where players participated.
+
+        Counts how many times each hero was banned in matches where ANY of the specified
+        players participated. Each match is only counted once even if multiple players
+        from the list were in the same match.
+
+        Args:
+            discord_ids: List of Discord IDs to check
+            guild_id: Guild ID to filter by
+
+        Returns:
+            Dict mapping hero_id -> ban_count (aggregated across all matches)
+        """
+        if not discord_ids:
+            return {}
+
+        normalized_guild = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            placeholders = ",".join("?" * len(discord_ids))
+
+            # Get unique match IDs where any of these players participated
+            # and that have enrichment_data
+            cursor.execute(
+                f"""
+                SELECT DISTINCT m.match_id, m.enrichment_data
+                FROM matches m
+                JOIN match_participants mp ON m.match_id = mp.match_id
+                WHERE mp.discord_id IN ({placeholders})
+                  AND m.guild_id = ?
+                  AND mp.guild_id = ?
+                  AND m.enrichment_data IS NOT NULL
+                """,
+                discord_ids + [normalized_guild, normalized_guild],
+            )
+            rows = cursor.fetchall()
+
+            # Parse enrichment_data and count bans
+            ban_counts: dict[int, int] = {}
+
+            for row in rows:
+                enrichment_data = row["enrichment_data"]
+                if not enrichment_data:
+                    continue
+
+                try:
+                    data = json.loads(enrichment_data)
+                    picks_bans = data.get("picks_bans", [])
+
+                    for entry in picks_bans:
+                        # Only count bans (is_pick = false)
+                        if entry.get("is_pick") is False:
+                            hero_id = entry.get("hero_id")
+                            if hero_id:
+                                ban_counts[hero_id] = ban_counts.get(hero_id, 0) + 1
+                except (json.JSONDecodeError, TypeError, KeyError):
+                    continue
+
+            return ban_counts

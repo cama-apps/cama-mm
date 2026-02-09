@@ -55,8 +55,9 @@ class Team:
         """
         if len(players) != self.TEAM_SIZE:
             raise ValueError(f"Team must have exactly {self.TEAM_SIZE} players")
-        self.players = players
-        self.role_assignments = role_assignments
+        # Defensive copies to prevent aliasing issues
+        self.players = list(players)
+        self.role_assignments = list(role_assignments) if role_assignments else None
 
     def get_team_value(
         self,
