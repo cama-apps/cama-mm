@@ -1889,17 +1889,20 @@ def draw_scout_report(
         )
 
     # Fixed column positions for alignment (no role column)
+    # Layout: Hero | Total | W | L | Bans
     COL_HERO_X = PADDING + 4
-    COL_TOTAL_X = COL_HERO_X + HERO_IMG_WIDTH + 10
-    COL_WL_X = COL_TOTAL_X + 40
-    COL_BANS_X = COL_WL_X + 70  # Wider W-L column
+    COL_TOTAL_X = COL_HERO_X + HERO_IMG_WIDTH + 8
+    COL_WINS_X = COL_TOTAL_X + 38
+    COL_LOSSES_X = COL_WINS_X + 32
+    COL_BANS_X = COL_LOSSES_X + 32
 
     # Column headers
     header_font = _get_font(11)
     header_y = PADDING + HEADER_HEIGHT - 18
-    draw.text((COL_TOTAL_X, header_y), "Total", fill=DISCORD_GREY, font=header_font)
-    draw.text((COL_WL_X, header_y), "W-L", fill=DISCORD_GREY, font=header_font)
-    draw.text((COL_BANS_X, header_y), "Bans", fill=DISCORD_GREY, font=header_font)
+    draw.text((COL_TOTAL_X, header_y), "Tot", fill=DISCORD_GREY, font=header_font)
+    draw.text((COL_WINS_X, header_y), "W", fill=DISCORD_GREY, font=header_font)
+    draw.text((COL_LOSSES_X, header_y), "L", fill=DISCORD_GREY, font=header_font)
+    draw.text((COL_BANS_X, header_y), "Ban", fill=DISCORD_GREY, font=header_font)
 
     # Header separator line
     sep_y = PADDING + HEADER_HEIGHT - 5
@@ -1945,27 +1948,25 @@ def draw_scout_report(
         # Total count (fixed position, right-aligned within column)
         total_text = str(total_games)
         total_w = _get_text_size(stat_font, total_text)[0]
-        draw.text((COL_TOTAL_X + 30 - total_w, stat_y), total_text, fill=DISCORD_WHITE, font=stat_font)
+        draw.text((COL_TOTAL_X + 25 - total_w, stat_y), total_text, fill=DISCORD_WHITE, font=stat_font)
 
-        # W-L (fixed position, color-coded by win rate)
-        played_games = wins + losses
-        win_rate = wins / played_games if played_games > 0 else 0
-        if win_rate >= 0.60:
-            wl_color = DISCORD_GREEN
-        elif win_rate >= 0.40:
-            wl_color = DISCORD_YELLOW
-        else:
-            wl_color = DISCORD_RED
+        # Wins (green)
+        wins_text = str(wins)
+        wins_w = _get_text_size(stat_font, wins_text)[0]
+        draw.text((COL_WINS_X + 20 - wins_w, stat_y), wins_text, fill=DISCORD_GREEN, font=stat_font)
 
-        wl_text = f"{wins}-{losses}"
-        draw.text((COL_WL_X, stat_y), wl_text, fill=wl_color, font=stat_font)
+        # Losses (red)
+        losses_text = str(losses)
+        losses_w = _get_text_size(stat_font, losses_text)[0]
+        draw.text((COL_LOSSES_X + 20 - losses_w, stat_y), losses_text, fill=DISCORD_RED, font=stat_font)
 
         # Bans count (fixed position, red text if > 0)
         ban_text = str(bans)
+        ban_w = _get_text_size(ban_font, ban_text)[0]
         if bans > 0:
-            draw.text((COL_BANS_X, stat_y), ban_text, fill=DISCORD_RED, font=ban_font)
+            draw.text((COL_BANS_X + 20 - ban_w, stat_y), ban_text, fill=DISCORD_RED, font=ban_font)
         else:
-            draw.text((COL_BANS_X, stat_y), ban_text, fill=DISCORD_GREY, font=ban_font)
+            draw.text((COL_BANS_X + 20 - ban_w, stat_y), ban_text, fill=DISCORD_GREY, font=ban_font)
 
         y += ROW_HEIGHT
 
