@@ -1137,13 +1137,15 @@ class BettingCommands(commands.Cog):
         shell_missed: bool = False
 
         if result_value == "RED_SHELL":
-            # Mario Kart Red Shell: Steal 2-10 JC from player ranked above
-            shell_amount = random.randint(2, 10)
+            # Mario Kart Red Shell: Steal 1-5% of balance from player ranked above
             player_above = await asyncio.to_thread(
                 self.player_service.get_player_above, user_id, guild_id
             )
 
             if player_above:
+                pct_amount = max(1, int(player_above.jopacoin_balance * random.uniform(0.01, 0.05)))
+                flat_amount = random.randint(2, 10)
+                shell_amount = max(pct_amount, flat_amount)
                 # Atomic steal from player above (can push victim below MAX_DEBT - intentional)
                 steal_result = await asyncio.to_thread(
                     functools.partial(
@@ -1165,8 +1167,7 @@ class BettingCommands(commands.Cog):
                 shell_amount = 0
 
         elif result_value == "BLUE_SHELL":
-            # Mario Kart Blue Shell: Steal 4-20 JC from richest player
-            shell_amount = random.randint(4, 20)
+            # Mario Kart Blue Shell: Steal 1-5% of balance from richest player
             leaderboard = await asyncio.to_thread(
                 functools.partial(self.player_service.get_leaderboard, guild_id, limit=1)
             )
@@ -1174,6 +1175,9 @@ class BettingCommands(commands.Cog):
             if leaderboard and leaderboard[0].discord_id == user_id:
                 # Self-hit! User is the richest - LOSE coins (can go below MAX_DEBT - intentional)
                 shell_self_hit = True
+                pct_amount = max(1, int(new_balance * random.uniform(0.01, 0.05)))
+                flat_amount = random.randint(4, 20)
+                shell_amount = max(pct_amount, flat_amount)
                 await asyncio.to_thread(
                     self.player_service.adjust_balance, user_id, guild_id, -shell_amount
                 )
@@ -1187,6 +1191,9 @@ class BettingCommands(commands.Cog):
             elif leaderboard:
                 # Atomic steal from richest (can push victim below MAX_DEBT - intentional)
                 richest = leaderboard[0]
+                pct_amount = max(1, int(richest.jopacoin_balance * random.uniform(0.01, 0.05)))
+                flat_amount = random.randint(4, 20)
+                shell_amount = max(pct_amount, flat_amount)
                 steal_result = await asyncio.to_thread(
                     functools.partial(
                         self.player_service.steal_atomic,
