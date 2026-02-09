@@ -398,8 +398,8 @@ async def test_wheel_jackpot_result():
 
 
 def test_wheel_wedges_has_correct_count():
-    """Verify WHEEL_WEDGES has exactly 26 wedges (24 base + 2 shells)."""
-    assert len(WHEEL_WEDGES) == 26
+    """Verify WHEEL_WEDGES has exactly 24 wedges (22 base + 2 shells)."""
+    assert len(WHEEL_WEDGES) == 24
 
 
 def test_wheel_wedges_distribution():
@@ -418,7 +418,7 @@ def test_wheel_wedges_distribution():
     assert lose_turn_count == 1, f"Expected 1 Lose a Turn wedge, got {lose_turn_count}"
     assert small_count == 4, f"Expected 4 small win wedges, got {small_count}"
     assert medium_count == 6, f"Expected 6 medium win wedges, got {medium_count}"
-    assert good_count == 6, f"Expected 6 good win wedges, got {good_count}"
+    assert good_count == 4, f"Expected 4 good win wedges, got {good_count}"
     assert great_count == 3, f"Expected 3 great win wedges, got {great_count}"
     assert jackpot_count == 2, f"Expected 2 Jackpot wedges, got {jackpot_count}"
     assert shell_count == 2, f"Expected 2 shell wedges, got {shell_count}"

@@ -4,7 +4,6 @@ import io
 import math
 import random
 from PIL import Image, ImageDraw, ImageFont
-from pilmoji import Pilmoji
 
 from config import WHEEL_TARGET_EV
 
@@ -28,32 +27,152 @@ def _get_cached_font(size: int, font_key: str, bold: bool = False) -> ImageFont.
 # Cached static overlay (pointer, center circle, center text) - drawn once per size
 _CACHED_STATIC_OVERLAY: dict[int, Image.Image] = {}
 
-# Cache for pre-rendered emoji text images (avoids pilmoji calls per GIF frame)
-_CACHED_EMOJI_TEXT: dict[tuple[str, int, str], Image.Image] = {}
+# Cached wheel face sprite (all wedges + text + glow ring) - drawn once per size
+_CACHED_WHEEL_FACE: dict[int, Image.Image] = {}
+
+# Matrix rain column data: pre-computed once per size
+_CACHED_RAIN_COLUMNS: dict[int, list[dict]] = {}
+
+# Jopacoin-themed glyphs for the matrix rain
+_RAIN_GLYPHS = list("JOPACOINDEGEN$01234567890+-=%<>")
+
+# Troll messages that occasionally spell out vertically in rain columns
+_RAIN_MESSAGES = [
+    "JOPA WAS HERE",
+    "322",
+    "JUMPMAN JUMPMAN JUMPMAN",
+    "GG EZ",
+    "DEGEN",
+    "ALL IN",
+    "GAMBA",
+    "RIGGED",
+    "EZ CLAP",
+    "COPIUM",
+    "JOPACOINS",
+    "RNG GOD",
+    "SEND IT",
+    "NO BALLS",
+]
 
 
-def _has_emoji(text: str) -> bool:
-    """Check if text contains emoji characters."""
-    # Check for characters in emoji ranges (beyond basic ASCII/Latin)
-    return any(ord(c) > 0x1F00 for c in text)
+def _get_rain_phase(frame_idx: int) -> dict:
+    """Map frame index to rain visibility and fade-out.
 
-
-def _get_emoji_text_image(
-    text: str, font: ImageFont.FreeTypeFont | ImageFont.ImageFont, size: int, fill: str = "#ffffff"
-) -> Image.Image:
+    Frames 0-37: normal rain.  38-44: fading out.  45+: invisible.
     """
-    Pre-render emoji text to a transparent image, cached for performance.
+    if frame_idx < 38:
+        return {"visible": True, "fade": 0.0}
+    elif frame_idx < 45:
+        progress = (frame_idx - 38) / 6  # 0.0 -> ~1.0 over 7 frames
+        return {"visible": True, "fade": progress}
+    else:
+        return {"visible": False, "fade": 1.0}
 
-    This avoids calling pilmoji for every GIF frame by caching the rendered result.
-    """
-    cache_key = (text, size, fill)
-    if cache_key not in _CACHED_EMOJI_TEXT:
-        # Create transparent image sized for the text
-        temp_img = Image.new("RGBA", (size * 4, size * 2), (0, 0, 0, 0))
-        with Pilmoji(temp_img) as pilmoji:
-            pilmoji.text((0, 0), text, font=font, fill=fill)
-        _CACHED_EMOJI_TEXT[cache_key] = temp_img
-    return _CACHED_EMOJI_TEXT[cache_key]
+
+def _get_rain_columns(size: int) -> list[dict]:
+    """Get pre-computed matrix rain column data for a given image size."""
+    if size not in _CACHED_RAIN_COLUMNS:
+        _CACHED_RAIN_COLUMNS[size] = _create_rain_columns(size)
+    return _CACHED_RAIN_COLUMNS[size]
+
+
+def _make_column_glyphs(count: int) -> list[str]:
+    """Generate glyphs for a rain column, occasionally spelling out a troll message."""
+    if random.random() < 0.35:
+        msg = random.choice(_RAIN_MESSAGES)
+        chars = list(msg)
+        # Tile the message characters to fill the column, with random padding between repeats
+        glyphs = []
+        while len(glyphs) < count:
+            glyphs.extend(chars)
+            # Add 2-5 random glyphs as spacing between repeats
+            glyphs.extend(random.choice(_RAIN_GLYPHS) for _ in range(random.randint(2, 5)))
+        return glyphs[:count]
+    return [random.choice(_RAIN_GLYPHS) for _ in range(count)]
+
+
+def _create_rain_columns(size: int) -> list[dict]:
+    """Create matrix rain columns positioned in the dark corner areas."""
+    center = size // 2
+    radius = size // 2 - 30
+    columns = []
+    char_h = max(8, size // 50)
+    glyph_count = size // char_h + 5
+
+    for _ in range(18):
+        x = random.randint(4, size - 8)
+        # Only keep columns that have at least some visible area outside the wheel
+        # Check if top or bottom of column is outside the circle
+        dist_from_center_x = abs(x - center)
+        if dist_from_center_x < radius - 10:
+            # Column is under the wheel horizontally - skip unless near edges
+            continue
+        columns.append({
+            "x": x,
+            "speed": random.uniform(1.5, 4.0),  # chars per frame
+            "offset": random.uniform(0, size),  # starting offset
+            "length": random.randint(4, 10),  # trail length in chars
+            "glyphs": _make_column_glyphs(glyph_count),
+        })
+
+    # Add a few columns in the very corners (always visible)
+    for x in [3, 10, 18, size - 20, size - 12, size - 5]:
+        columns.append({
+            "x": x,
+            "speed": random.uniform(1.5, 3.5),
+            "offset": random.uniform(0, size),
+            "length": random.randint(3, 8),
+            "glyphs": _make_column_glyphs(glyph_count),
+        })
+
+    return columns
+
+
+def _draw_matrix_rain(draw: ImageDraw.Draw, size: int, frame_idx: int, phase: dict) -> None:
+    """Draw matrix rain in the dark background areas, fading with phase."""
+    if not phase["visible"]:
+        return
+
+    center = size // 2
+    radius = size // 2 - 30
+    rain_font = _get_cached_font(max(7, size // 55), "rain")
+    char_h = max(8, size // 50)
+    columns = _get_rain_columns(size)
+    fade = phase["fade"]
+
+    for col in columns:
+        x = col["x"]
+        head_y = (col["offset"] + frame_idx * col["speed"] * char_h) % (size + col["length"] * char_h)
+
+        for j in range(col["length"]):
+            cy = int(head_y - j * char_h)
+            if cy < 0 or cy >= size:
+                continue
+
+            # Skip if inside the wheel circle
+            dx = x - center
+            dy = cy - center
+            dist = math.sqrt(dx * dx + dy * dy)
+            if dist < radius + 8:
+                continue
+
+            if j == 0:
+                alpha = 90
+                color = (50, 200, 50, alpha)
+            else:
+                alpha = max(15, 70 - j * 10)
+                color = (0, 100 + max(0, 40 - j * 8), 0, alpha)
+
+            # Apply fade
+            alpha = int(alpha * (1.0 - fade))
+            alpha = max(0, min(255, alpha))
+            if alpha == 0:
+                continue
+            color = (color[0], color[1], color[2], alpha)
+
+            glyph_idx = (int(head_y / char_h) + j) % len(col["glyphs"])
+            glyph = col["glyphs"][glyph_idx]
+            draw.text((x, cy), glyph, fill=color, font=rain_font)
 
 
 def _get_static_overlay(size: int) -> Image.Image:
@@ -69,10 +188,10 @@ def _create_static_overlay(size: int) -> Image.Image:
     draw = ImageDraw.Draw(img)
 
     center = size // 2
-    radius = size // 2 - 50
+    radius = size // 2 - 30
     inner_radius = radius // 3
 
-    title_font = _get_cached_font(max(9, size // 45), "title")
+    title_font = _get_cached_font(max(10, size // 40), "title")
 
     # Draw center circle
     draw.ellipse(
@@ -92,21 +211,27 @@ def _create_static_overlay(size: int) -> Image.Image:
         bbox = draw.textbbox((0, 0), text, font=title_font)
         text_w = bbox[2] - bbox[0]
         draw.text(
-            (center - text_w / 2, center - 12 + i * 16),
+            (center - text_w / 2, center - 14 + i * 18),
             text,
             fill="#f1c40f",
             font=title_font,
         )
 
-    # Draw pointer
+    # Draw pointer - proportional to radius/size
     pointer_y = center - radius - 5
+    pw = int(size * 0.036)  # pointer half-width (~18 at 500)
+    ph_tip = int(size * 0.07)  # pointer tip depth (~35 at 500)
+    ph_notch = int(size * 0.036)  # pointer notch depth (~18 at 500)
+    pw_inner = int(size * 0.012)  # inner notch width (~6 at 500)
+    ph_top = int(size * 0.016)  # top offset (~8 at 500)
+
     pointer_points = [
-        (center, pointer_y + 35),
-        (center - 18, pointer_y - 8),
-        (center - 6, pointer_y + 2),
-        (center, pointer_y + 18),
-        (center + 6, pointer_y + 2),
-        (center + 18, pointer_y - 8),
+        (center, pointer_y + ph_tip),
+        (center - pw, pointer_y - ph_top),
+        (center - pw_inner, pointer_y + 2),
+        (center, pointer_y + ph_notch),
+        (center + pw_inner, pointer_y + 2),
+        (center + pw, pointer_y - ph_top),
     ]
     draw.polygon(pointer_points, fill="#e74c3c", outline="#ffffff", width=2)
 
@@ -114,6 +239,7 @@ def _create_static_overlay(size: int) -> Image.Image:
 
 
 # Base wheel wedge configuration: (label, base_value, color)
+# 24 wedges at 15 degrees each (dropped 35 and 45 from original 26 for legibility)
 # BANKRUPT value will be adjusted based on WHEEL_TARGET_EV
 # Shell wedges are spread out for visual variety (BLUE with 25s, RED between 70-80)
 _BASE_WHEEL_WEDGES = [
@@ -130,16 +256,14 @@ _BASE_WHEEL_WEDGES = [
     ("20", 20, "#5dba57"),
     ("25", 25, "#3498db"),
     ("25", 25, "#3498db"),
-    ("🔵 BLUE", "BLUE_SHELL", "#3498db"),  # Mario Kart: Steal from richest (with 25s - same blue)
+    ("BLUE", "BLUE_SHELL", "#3498db"),
     ("30", 30, "#2980b9"),
-    ("35", 35, "#1f6dad"),
     ("40", 40, "#9b59b6"),
-    ("45", 45, "#8e44ad"),
     ("50", 50, "#7d3c98"),
     ("50", 50, "#7d3c98"),
     ("60", 60, "#e67e22"),
     ("70", 70, "#d35400"),
-    ("🔴 RED", "RED_SHELL", "#e74c3c"),   # Mario Kart: Steal from player above (between 70-80)
+    ("RED", "RED_SHELL", "#e74c3c"),
     ("80", 80, "#c0392b"),
     ("100", 100, "#f1c40f"),
     ("100", 100, "#f1c40f"),
@@ -208,316 +332,30 @@ def hex_to_rgb(hex_color: str) -> tuple[int, int, int]:
     return tuple(int(hex_color[i : i + 2], 16) for i in (0, 2, 4))
 
 
-def create_wheel_image(
-    size: int = 400,
-    rotation: float = 0,
-    spinning: bool = False,
-    selected_idx: int | None = None,
-) -> Image.Image:
-    """
-    Create a wheel of fortune image.
+def _get_wheel_face(size: int) -> Image.Image:
+    """Get cached wheel face sprite (pieslices + glow ring, no text)."""
+    if size not in _CACHED_WHEEL_FACE:
+        _CACHED_WHEEL_FACE[size] = _create_wheel_face(size)
+    return _CACHED_WHEEL_FACE[size]
 
-    Args:
-        size: Image size in pixels (square)
-        rotation: Wheel rotation in degrees (0 = first wedge at top)
-        spinning: Whether to show motion effects
-        selected_idx: Index of selected wedge to highlight (for result display)
 
-    Returns:
-        PIL Image object
+def _create_wheel_face(size: int) -> Image.Image:
     """
-    img = Image.new("RGBA", (size, size), (30, 30, 35, 255))
+    Create the wheel face sprite once: glow ring and colored wedge pieslices.
+
+    Text is NOT included here - it's drawn horizontally per-frame after rotation
+    so labels stay readable at every angle.
+    """
+    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
 
     center = size // 2
-    radius = size // 2 - 50
-    inner_radius = radius // 3
+    radius = size // 2 - 30
 
     num_wedges = len(WHEEL_WEDGES)
     angle_per_wedge = 360 / num_wedges
 
-    # Load fonts
-    try:
-        font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-        small_font = ImageFont.truetype(font_path, max(12, size // 35))
-        title_font = ImageFont.truetype(font_path, max(10, size // 40))
-    except OSError:
-        small_font = ImageFont.load_default()
-        title_font = small_font
-
-    # Draw motion trails if spinning
-    if spinning:
-        for trail in range(3, 0, -1):
-            trail_alpha = 60 - trail * 15
-            trail_rotation = rotation - trail * 8
-
-            for i, (label, value, color) in enumerate(WHEEL_WEDGES):
-                start_angle = i * angle_per_wedge + trail_rotation - 90
-                end_angle = start_angle + angle_per_wedge
-
-                rgb = hex_to_rgb(color)
-                faded_color = (*rgb, trail_alpha)
-
-                trail_img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-                trail_draw = ImageDraw.Draw(trail_img)
-                trail_draw.pieslice(
-                    [
-                        center - radius,
-                        center - radius,
-                        center + radius,
-                        center + radius,
-                    ],
-                    start_angle,
-                    end_angle,
-                    fill=faded_color,
-                )
-                img = Image.alpha_composite(img, trail_img)
-
-            draw = ImageDraw.Draw(img)
-
-    # Draw outer glow ring
-    for glow in range(5, 0, -1):
-        glow_radius = radius + glow * 3
-        glow_alpha = 30 - glow * 5
-        draw.ellipse(
-            [
-                center - glow_radius,
-                center - glow_radius,
-                center + glow_radius,
-                center + glow_radius,
-            ],
-            outline=(255, 215, 0, glow_alpha),
-            width=2,
-        )
-
-    # Draw wedges
-    for i, (label, value, color) in enumerate(WHEEL_WEDGES):
-        start_angle = i * angle_per_wedge + rotation - 90
-        end_angle = start_angle + angle_per_wedge
-
-        # Highlight selected wedge
-        wedge_color = color
-        outline_color = "#ffffff"
-        outline_width = 2
-
-        if selected_idx is not None and i == selected_idx:
-            # Brighten the selected wedge
-            rgb = hex_to_rgb(color)
-            wedge_color = tuple(min(255, c + 40) for c in rgb)
-            outline_color = "#f1c40f"
-            outline_width = 4
-
-        draw.pieslice(
-            [center - radius, center - radius, center + radius, center + radius],
-            start_angle,
-            end_angle,
-            fill=wedge_color,
-            outline=outline_color,
-            width=outline_width,
-        )
-
-        # Calculate text position
-        mid_angle = math.radians(start_angle + angle_per_wedge / 2)
-        text_radius = radius * 0.72
-        text_x = center + text_radius * math.cos(mid_angle)
-        text_y = center + text_radius * math.sin(mid_angle)
-
-        # For special wedges (string values like RED_SHELL), show the label
-        # For BANKRUPT/LOSE (value <= 0), show the label
-        # For positive values, show the numeric value
-        if isinstance(value, str) or value <= 0:
-            text = label
-        else:
-            text = str(value)
-
-        # Use pilmoji for emoji labels (shell wedges), standard draw for others
-        if _has_emoji(text):
-            # Get cached emoji text image
-            emoji_img = _get_emoji_text_image(text, small_font, max(12, size // 35))
-            # Composite the emoji text onto the main image
-            paste_x = int(text_x - emoji_img.width / 2)
-            paste_y = int(text_y - emoji_img.height / 2)
-            temp = Image.new("RGBA", img.size, (0, 0, 0, 0))
-            temp.paste(emoji_img, (paste_x, paste_y), emoji_img)
-            img = Image.alpha_composite(img, temp)
-            draw = ImageDraw.Draw(img)
-        else:
-            bbox = draw.textbbox((0, 0), text, font=small_font)
-            text_w = bbox[2] - bbox[0]
-            text_h = bbox[3] - bbox[1]
-
-            # Text shadow
-            draw.text(
-                (text_x - text_w / 2 + 1, text_y - text_h / 2 + 1),
-                text,
-                fill="#000000",
-                font=small_font,
-            )
-            draw.text(
-                (text_x - text_w / 2, text_y - text_h / 2),
-                text,
-                fill="#ffffff",
-                font=small_font,
-            )
-
-    # Draw center circle
-    draw.ellipse(
-        [
-            center - inner_radius,
-            center - inner_radius,
-            center + inner_radius,
-            center + inner_radius,
-        ],
-        fill="#2c3e50",
-        outline="#f1c40f",
-        width=4,
-    )
-
-    # Center text
-    center_text = "WHEEL OF"
-    bbox = draw.textbbox((0, 0), center_text, font=title_font)
-    text_w = bbox[2] - bbox[0]
-    draw.text(
-        (center - text_w / 2, center - 15), center_text, fill="#f1c40f", font=title_font
-    )
-
-    center_text2 = "FORTUNE"
-    bbox = draw.textbbox((0, 0), center_text2, font=title_font)
-    text_w = bbox[2] - bbox[0]
-    draw.text(
-        (center - text_w / 2, center + 3), center_text2, fill="#f1c40f", font=title_font
-    )
-
-    # Draw pointer
-    pointer_y = center - radius - 5
-
-    # Pointer glow
-    for glow in range(4, 0, -1):
-        glow_color = (231, 76, 60, 50 - glow * 10)
-        points = [
-            (center, pointer_y + 35 + glow),
-            (center - 20 - glow, pointer_y - 10 - glow),
-            (center - 8, pointer_y),
-            (center, pointer_y + 15),
-            (center + 8, pointer_y),
-            (center + 20 + glow, pointer_y - 10 - glow),
-        ]
-        draw.polygon(points, fill=glow_color)
-
-    # Main pointer
-    pointer_points = [
-        (center, pointer_y + 35),
-        (center - 18, pointer_y - 8),
-        (center - 6, pointer_y + 2),
-        (center, pointer_y + 18),
-        (center + 6, pointer_y + 2),
-        (center + 18, pointer_y - 8),
-    ]
-    draw.polygon(pointer_points, fill="#e74c3c", outline="#ffffff", width=2)
-
-    # Pointer highlight
-    highlight_points = [
-        (center, pointer_y + 20),
-        (center - 8, pointer_y),
-        (center, pointer_y + 10),
-    ]
-    draw.polygon(highlight_points, fill="#ec7063")
-
-    # Direction indicators if spinning
-    if spinning:
-        arrow_radius = radius + 25
-
-        for arrow_angle in [45, 135, 225, 315]:
-            angle_rad = math.radians(arrow_angle + rotation)
-            ax = center + arrow_radius * math.cos(angle_rad)
-            ay = center + arrow_radius * math.sin(angle_rad)
-
-            tangent_angle = angle_rad + math.pi / 2
-            arrow_len = 12
-
-            tip_x = ax + arrow_len * math.cos(tangent_angle)
-            tip_y = ay + arrow_len * math.sin(tangent_angle)
-
-            wing_angle1 = tangent_angle + math.pi * 0.8
-            wing_angle2 = tangent_angle - math.pi * 0.8
-            wing_len = 6
-
-            wing1_x = tip_x + wing_len * math.cos(wing_angle1)
-            wing1_y = tip_y + wing_len * math.sin(wing_angle1)
-            wing2_x = tip_x + wing_len * math.cos(wing_angle2)
-            wing2_y = tip_y + wing_len * math.sin(wing_angle2)
-
-            draw.polygon(
-                [(tip_x, tip_y), (wing1_x, wing1_y), (wing2_x, wing2_y)], fill="#f1c40f"
-            )
-
-            # Motion lines
-            for line in range(3):
-                line_start = tangent_angle + math.pi
-                line_len = 8 + line * 4
-                lx1 = ax + (line * 3) * math.cos(line_start)
-                ly1 = ay + (line * 3) * math.sin(line_start)
-                lx2 = lx1 + line_len * math.cos(line_start)
-                ly2 = ly1 + line_len * math.sin(line_start)
-
-                alpha = 150 - line * 40
-                draw.line(
-                    [(lx1, ly1), (lx2, ly2)], fill=(255, 255, 255, alpha), width=2
-                )
-
-    return img
-
-
-def wheel_image_to_bytes(img: Image.Image) -> io.BytesIO:
-    """Convert PIL Image to bytes buffer for Discord."""
-    buffer = io.BytesIO()
-    img.save(buffer, format="PNG")
-    buffer.seek(0)
-    return buffer
-
-
-def get_rotation_for_index(target_idx: int, num_wedges: int = 26) -> float:
-    """
-    Calculate rotation needed to position a wedge at the top (under pointer).
-
-    Args:
-        target_idx: Index of wedge to position at top
-        num_wedges: Total number of wedges
-
-    Returns:
-        Rotation in degrees
-    """
-    angle_per_wedge = 360 / num_wedges
-    # Rotation needed to put target wedge at top (0 degrees)
-    # Each wedge starts at idx * angle_per_wedge, we want center of wedge at top
-    return -(target_idx * angle_per_wedge + angle_per_wedge / 2)
-
-
-def get_wedge_at_index(idx: int) -> tuple[str, int, str]:
-    """Get wedge info (label, value, color) at given index."""
-    return WHEEL_WEDGES[idx % len(WHEEL_WEDGES)]
-
-
-def create_wheel_frame_for_gif(
-    size: int, rotation: float, selected_idx: int | None = None
-) -> Image.Image:
-    """
-    Create a single wheel frame optimized for GIF animation.
-    Uses cached static overlay for pointer/center to avoid redrawing each frame.
-    """
-    img = Image.new("RGBA", (size, size), (30, 30, 35, 255))
-    draw = ImageDraw.Draw(img)
-
-    center = size // 2
-    radius = size // 2 - 50
-
-    num_wedges = len(WHEEL_WEDGES)
-    angle_per_wedge = 360 / num_wedges
-
-    # Use cached regular font (not bold) at smaller size
-    small_font = _get_cached_font(max(12, size // 32), "small", bold=True)
-
-    # Draw outer glow ring
+    # Draw outer glow ring (part of face so it rotates with wheel)
     for glow in range(5, 0, -1):
         glow_radius = radius + glow * 3
         draw.ellipse(
@@ -533,77 +371,359 @@ def create_wheel_frame_for_gif(
 
     # Draw wedges
     for i, (label, value, color) in enumerate(WHEEL_WEDGES):
-        start_angle = i * angle_per_wedge + rotation - 90
+        start_angle = i * angle_per_wedge - 90
         end_angle = start_angle + angle_per_wedge
-
-        # Highlight selected wedge
-        wedge_color = color
-        outline_color = "#ffffff"
-        outline_width = 2
-
-        if selected_idx is not None and i == selected_idx:
-            rgb = hex_to_rgb(color)
-            wedge_color = tuple(min(255, c + 120) for c in rgb)
-            outline_color = "#ffff00"  # Bright yellow
-            outline_width = 12  # Thicc outline
 
         draw.pieslice(
             [center - radius, center - radius, center + radius, center + radius],
             start_angle,
             end_angle,
-            fill=wedge_color,
-            outline=outline_color,
-            width=outline_width,
+            fill=color,
+            outline="#ffffff",
+            width=2,
         )
 
-        # Calculate text position
-        mid_angle = math.radians(start_angle + angle_per_wedge / 2)
-        text_radius = radius * 0.72
-        text_x = center + text_radius * math.cos(mid_angle)
-        text_y = center + text_radius * math.sin(mid_angle)
+    return img
 
-        # For special wedges (string values like RED_SHELL), show the label
-        # For BANKRUPT/LOSE (value <= 0), show the label
-        # For positive values, show the numeric value
+
+_CACHED_SHELL_ICONS: dict[tuple[str, int], Image.Image] = {}
+
+
+def _get_shell_icon(shell_type: str, icon_size: int) -> Image.Image:
+    """Get a cached Mario Kart-style shell icon."""
+    key = (shell_type, icon_size)
+    if key not in _CACHED_SHELL_ICONS:
+        _CACHED_SHELL_ICONS[key] = _draw_shell_icon(shell_type, icon_size)
+    return _CACHED_SHELL_ICONS[key]
+
+
+def _draw_shell_icon(shell_type: str, s: int) -> Image.Image:
+    """Draw an 8-bit pixel-art style Mario Kart shell icon.
+
+    Red shell: blocky side-view koopa shell with bold stripes
+    Blue shell: blocky top-down spiny shell with rectangular wings
+    """
+    img = Image.new("RGBA", (s, s), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+
+    cx, cy = s // 2, s // 2
+    r = s // 2 - 2
+    outline_w = max(2, s // 10)
+
+    if shell_type == "BLUE_SHELL":
+        # Blue spiny shell - top-down view, blocky 8-bit style
+        body_color = (52, 152, 219)       # #3498db
+        dark_color = (41, 128, 185)        # #2980b9
+        spike_color = (255, 255, 255)
+        outline_color = (20, 60, 100)
+
+        # Blocky body (rounded rectangle instead of ellipse)
+        body_r = max(2, r // 4)
+        draw.rounded_rectangle(
+            [cx - r, cy - r, cx + r, cy + r],
+            radius=body_r, fill=body_color, outline=outline_color, width=outline_w,
+        )
+
+        # 4 blocky triangular spikes with black outlines
+        spike_len = int(r * 0.55)
+        spike_w = int(r * 0.35)
+        for angle_deg in [0, 90, 180, 270]:
+            a = math.radians(angle_deg)
+            perp = a + math.pi / 2
+            # Base points on the body edge
+            base_x = cx + int(r * 0.65 * math.cos(a))
+            base_y = cy + int(r * 0.65 * math.sin(a))
+            tip_x = cx + int((r + spike_len) * math.cos(a))
+            tip_y = cy + int((r + spike_len) * math.sin(a))
+            p1 = (base_x + int(spike_w * math.cos(perp)), base_y + int(spike_w * math.sin(perp)))
+            p2 = (base_x - int(spike_w * math.cos(perp)), base_y - int(spike_w * math.sin(perp)))
+            # Spike outline then fill
+            draw.polygon([(tip_x, tip_y), p1, p2], fill=spike_color, outline=outline_color, width=max(1, outline_w // 2))
+
+        # Rectangular wings with black outlines
+        wing_w = int(r * 0.8)
+        wing_h = int(r * 0.5)
+        # Left wing
+        draw.rectangle(
+            [cx - r - wing_w, cy - wing_h // 2, cx - r + 2, cy + wing_h // 4],
+            fill=(255, 255, 255, 220), outline=outline_color, width=max(1, outline_w // 2),
+        )
+        # Right wing
+        draw.rectangle(
+            [cx + r - 2, cy - wing_h // 2, cx + r + wing_w, cy + wing_h // 4],
+            fill=(255, 255, 255, 220), outline=outline_color, width=max(1, outline_w // 2),
+        )
+
+        # Inner darker rectangle for shell ridge
+        inner_r = int(r * 0.5)
+        draw.rounded_rectangle(
+            [cx - inner_r, cy - inner_r, cx + inner_r, cy + inner_r],
+            radius=max(1, body_r // 2), fill=dark_color,
+        )
+
+        # Central square dot instead of circle
+        dot_s = max(2, r // 3)
+        draw.rectangle(
+            [cx - dot_s, cy - dot_s, cx + dot_s, cy + dot_s],
+            fill=spike_color,
+        )
+
+    else:
+        # Red shell - side view, blocky 8-bit NES koopa shell
+        body_color = (231, 76, 60)         # #e74c3c
+        dark_color = (192, 57, 43)         # #c0392b
+        belly_color = (255, 235, 200)      # cream
+        outline_color = (80, 20, 15)
+
+        # Shell dome body (rounded rectangle for chunky pixel feel)
+        body_r = max(2, r // 3)
+        draw.rounded_rectangle(
+            [cx - r, cy - r, cx + r, cy + int(r * 0.3)],
+            radius=body_r, fill=body_color, outline=outline_color, width=outline_w,
+        )
+
+        # Flat cream belly at the bottom
+        belly_top = cy + int(r * 0.3)
+        draw.rectangle(
+            [cx - r + 1, belly_top, cx + r - 1, cy + r],
+            fill=belly_color, outline=outline_color, width=max(1, outline_w // 2),
+        )
+
+        # 3 bold vertical stripe rectangles on the dome
+        stripe_w = max(2, r // 4)
+        stripe_top = cy - r + outline_w + 1
+        stripe_bottom = belly_top - 1
+        if stripe_bottom > stripe_top:
+            for offset in [-1, 0, 1]:
+                stripe_x = cx + int(offset * r * 0.4) - stripe_w // 2
+                draw.rectangle(
+                    [stripe_x, stripe_top,
+                     stripe_x + stripe_w, stripe_bottom],
+                    fill=dark_color,
+                )
+
+        # Square specular highlight (not ellipse)
+        hl_s = max(2, r // 3)
+        draw.rectangle(
+            [cx - int(r * 0.45) - hl_s // 2, cy - int(r * 0.45) - hl_s // 2,
+             cx - int(r * 0.45) + hl_s // 2, cy - int(r * 0.45) + hl_s // 2],
+            fill=(255, 150, 140, 200),
+        )
+
+        # Small rectangular "feet" nubs at bottom corners
+        nub_w = max(2, r // 4)
+        nub_h = max(2, r // 5)
+        # Left nub
+        draw.rectangle(
+            [cx - r + 2, cy + r, cx - r + 2 + nub_w, cy + r + nub_h],
+            fill=body_color, outline=outline_color, width=max(1, outline_w // 3),
+        )
+        # Right nub
+        draw.rectangle(
+            [cx + r - 2 - nub_w, cy + r, cx + r - 2, cy + r + nub_h],
+            fill=body_color, outline=outline_color, width=max(1, outline_w // 3),
+        )
+
+    return img
+
+
+def _draw_wedge_labels(img: Image.Image, draw: ImageDraw.Draw, size: int, rotation: float) -> None:
+    """Draw horizontal text labels on each wedge after rotation.
+
+    For shell wedges, draws a Mario Kart shell icon next to the text.
+    Long labels auto-shrink to fit within their wedge arc width.
+    """
+    center = size // 2
+    radius = size // 2 - 30
+    num_wedges = len(WHEEL_WEDGES)
+    angle_per_wedge = 360 / num_wedges
+
+    # Base font size and max arc width available at the text radius
+    base_font_size = max(12, size // 30)
+    text_radius_frac = 0.68
+    arc_width = 2 * math.pi * (radius * text_radius_frac) * (angle_per_wedge / 360)
+    # Leave some padding inside the arc
+    max_label_width = arc_width * 0.85
+
+    for i, (label, value, _color) in enumerate(WHEEL_WEDGES):
+        # Determine display text
         if isinstance(value, str) or value <= 0:
             text = label
         else:
             text = str(value)
 
-        # Use pilmoji for emoji labels (shell wedges), standard draw for others
-        if _has_emoji(text):
-            # Get cached emoji text image (rendered once, reused across all frames)
-            emoji_img = _get_emoji_text_image(text, small_font, max(12, size // 32))
-            # Composite the emoji text onto the main image
-            paste_x = int(text_x - emoji_img.width / 2)
-            paste_y = int(text_y - emoji_img.height / 2)
-            temp = Image.new("RGBA", img.size, (0, 0, 0, 0))
-            temp.paste(emoji_img, (paste_x, paste_y), emoji_img)
-            img = Image.alpha_composite(img, temp)
-            draw = ImageDraw.Draw(img)
-        else:
-            bbox = draw.textbbox((0, 0), text, font=small_font)
+        is_shell = isinstance(value, str)
+
+        # Dynamic font sizing: shrink if text + icon would exceed wedge arc
+        font_size = base_font_size
+        font = _get_cached_font(font_size, "small", bold=True)
+        bbox = draw.textbbox((0, 0), text, font=font)
+        text_w = bbox[2] - bbox[0]
+        text_h = bbox[3] - bbox[1]
+        icon_size = int(text_h * 1.8) if is_shell else 0
+        icon_gap = icon_size + 3 if is_shell else 0
+        total_w = text_w + icon_gap
+
+        # Shrink font until it fits (minimum 8px)
+        while total_w > max_label_width and font_size > 8:
+            font_size -= 1
+            font = _get_cached_font(font_size, "small", bold=True)
+            bbox = draw.textbbox((0, 0), text, font=font)
             text_w = bbox[2] - bbox[0]
             text_h = bbox[3] - bbox[1]
+            icon_size = int(text_h * 1.8) if is_shell else 0
+            icon_gap = icon_size + 3 if is_shell else 0
+            total_w = text_w + icon_gap
 
-            # Text shadow
-            draw.text(
-                (text_x - text_w / 2 + 1, text_y - text_h / 2 + 1),
-                text,
-                fill="#000000",
-                font=small_font,
-            )
-            draw.text(
-                (text_x - text_w / 2, text_y - text_h / 2),
-                text,
-                fill="#ffffff",
-                font=small_font,
-            )
+        # Position along the rotated wedge radial
+        mid_angle_deg = i * angle_per_wedge + rotation - 90 + angle_per_wedge / 2
+        mid_angle_rad = math.radians(mid_angle_deg)
+        text_radius = radius * text_radius_frac
+        text_cx = center + text_radius * math.cos(mid_angle_rad)
+        text_cy = center + text_radius * math.sin(mid_angle_rad)
 
-    # Draw winner glow effect AFTER all wedges (so it's on top)
+        tx = text_cx - total_w / 2
+        ty = text_cy - text_h / 2
+
+        if is_shell:
+            shell_icon = _get_shell_icon(value, icon_size)
+            icon_x = int(tx)
+            icon_y = int(text_cy - icon_size / 2)
+            img.paste(shell_icon, (icon_x, icon_y), shell_icon)
+
+        # Text shadow + main text
+        text_x = tx + icon_gap
+        text_y = ty
+        draw.text((text_x + 1, text_y + 1), text, fill="#000000", font=font)
+        draw.text((text_x, text_y), text, fill="#ffffff", font=font)
+
+
+def wheel_image_to_bytes(img: Image.Image) -> io.BytesIO:
+    """Convert PIL Image to bytes buffer for Discord."""
+    buffer = io.BytesIO()
+    img.save(buffer, format="PNG")
+    buffer.seek(0)
+    return buffer
+
+
+def get_wedge_at_index(idx: int) -> tuple[str, int, str]:
+    """Get wedge info (label, value, color) at given index."""
+    return WHEEL_WEDGES[idx % len(WHEEL_WEDGES)]
+
+
+# Block characters for glitch transition
+_GLITCH_BLOCKS = list("\u2588\u2593\u2592\u2591")
+
+
+def _draw_terminal_shell(draw: ImageDraw.Draw, size: int, frame_idx: int, display_name: str) -> None:
+    """Draw the terminal shell prompt with glitch transition from status bar.
+
+    Frames 38-43: Glitch transition - old status bar text corrupts into terminal prompt.
+    Frames 44+: Steady-state terminal prompt with blinking cursor.
+    """
+    bar_font = _get_cached_font(max(7, size // 55), "statusbar")
+    y = size - 13
+
+    session_hex = format(hash(display_name) & 0xFFFF, "04x")
+    old_text = f"JOPA-T/v3.7 \u2502 {display_name} \u2502 #{session_hex}"
+    new_text = f"{display_name}@jopa-t:~$ "
+
+    if frame_idx < 44:
+        # Glitch transition (frames 38-43)
+        glitch_progress = (frame_idx - 38) / 5  # 0.0 -> 1.0 over 6 frames
+        rng = random.Random(frame_idx * 37 + 7)
+
+        # Determine max length to render
+        max_len = max(len(old_text), len(new_text))
+        result_chars = []
+        result_colors = []
+
+        for ci in range(max_len):
+            old_ch = old_text[ci] if ci < len(old_text) else " "
+            new_ch = new_text[ci] if ci < len(new_text) else " "
+
+            # Corruption spreads from edges inward
+            edge_dist = min(ci, max_len - 1 - ci) if max_len > 1 else 0
+            center_dist = edge_dist / (max_len / 2) if max_len > 0 else 0
+            # Earlier frames corrupt edges first, later frames corrupt center
+            corrupt_threshold = glitch_progress * 1.5 - center_dist * 0.5
+
+            if rng.random() < corrupt_threshold:
+                if glitch_progress > 0.6 and rng.random() < (glitch_progress - 0.4):
+                    # New text emerging
+                    result_chars.append(new_ch)
+                    result_colors.append((55, 190, 55, 180))
+                else:
+                    # Garbled block character
+                    result_chars.append(rng.choice(_GLITCH_BLOCKS))
+                    # Color shifts: dim green -> bright flash at midpoint -> terminal green
+                    if glitch_progress < 0.4:
+                        result_colors.append((55, 90 + int(rng.random() * 60), 55, 160))
+                    elif glitch_progress < 0.6:
+                        brightness = 150 + int(rng.random() * 105)
+                        result_colors.append((brightness, brightness, brightness, 200))
+                    else:
+                        result_colors.append((55, 140 + int(rng.random() * 50), 55, 170))
+            else:
+                # Original text still showing
+                result_chars.append(old_ch)
+                result_colors.append((55, 90, 55, 140))
+
+        # Draw character by character (each may have different color)
+        x_pos = 4
+        for ch, color in zip(result_chars, result_colors):
+            draw.text((x_pos, y), ch, fill=color, font=bar_font)
+            bbox = draw.textbbox((0, 0), ch, font=bar_font)
+            x_pos += bbox[2] - bbox[0]
+    else:
+        # Steady state (frames 44+) - solid cursor
+        prompt = new_text + "\u2588"
+        draw.text((4, y), prompt, fill=(55, 190, 55, 180), font=bar_font)
+
+
+def create_wheel_frame_for_gif(
+    size: int, rotation: float, selected_idx: int | None = None,
+    display_name: str | None = None, frame_idx: int = 0,
+) -> Image.Image:
+    """
+    Create a single wheel frame optimized for GIF animation.
+
+    Uses cached wheel face sprite rotated to the desired angle, then composites
+    the static overlay (pointer, center circle) on top.
+    """
+    img = Image.new("RGBA", (size, size), (30, 30, 35, 255))
+
+    center = size // 2
+    radius = size // 2 - 30
+
+    # Get cached wheel face (pieslices only) and rotate it
+    face = _get_wheel_face(size)
+    rotated_face = face.rotate(-rotation, center=(center, center), resample=Image.BICUBIC)
+
+    # Composite rotated face onto background
+    img = Image.alpha_composite(img, rotated_face)
+
+    # Draw winner highlight on top of rotated face (if selected)
+    draw = ImageDraw.Draw(img)
     if selected_idx is not None:
+        num_wedges = len(WHEEL_WEDGES)
+        angle_per_wedge = 360 / num_wedges
         win_angle = selected_idx * angle_per_wedge + rotation - 90
-        # Redraw winning wedge outline extra thick for emphasis
+
+        # Brighten the winning wedge by drawing a semi-transparent overlay
+        _, _, win_color = WHEEL_WEDGES[selected_idx]
+        rgb = hex_to_rgb(win_color)
+        bright = tuple(min(255, c + 120) for c in rgb)
+        draw.pieslice(
+            [center - radius, center - radius, center + radius, center + radius],
+            win_angle,
+            win_angle + angle_per_wedge,
+            fill=(*bright, 180),
+            outline="#ffff00",
+            width=12,
+        )
+
+        # Glow arcs
         for glow_offset in range(3, 0, -1):
             glow_width = 12 + glow_offset * 4
             glow_alpha = 200 - glow_offset * 50
@@ -615,14 +735,33 @@ def create_wheel_frame_for_gif(
                 width=glow_width,
             )
 
+    # Draw matrix rain in dark corners (behind wheel labels, above background)
+    if display_name:
+        phase = _get_rain_phase(frame_idx)
+        _draw_matrix_rain(draw, size, frame_idx, phase)
+
+    # Draw horizontal text labels on each wedge (after rotation so they stay readable)
+    _draw_wedge_labels(img, draw, size, rotation)
+
     # Composite cached static overlay (center circle, text, pointer)
     static_overlay = _get_static_overlay(size)
     img = Image.alpha_composite(img, static_overlay)
 
+    # Status bar / terminal shell at bottom
+    if display_name:
+        draw = ImageDraw.Draw(img)
+        if frame_idx >= 38:
+            _draw_terminal_shell(draw, size, frame_idx, display_name)
+        else:
+            bar_font = _get_cached_font(max(7, size // 55), "statusbar")
+            session_hex = format(hash(display_name) & 0xFFFF, "04x")
+            bar_text = f"JOPA-T/v3.7 \u2502 {display_name} \u2502 #{session_hex}"
+            draw.text((4, size - 13), bar_text, fill=(55, 90, 55, 140), font=bar_font)
+
     return img
 
 
-def create_wheel_gif(target_idx: int, size: int = 400) -> io.BytesIO:
+def create_wheel_gif(target_idx: int, size: int = 500, display_name: str | None = None) -> io.BytesIO:
     """
     Create an animated GIF of the wheel spinning and landing on target_idx.
 
@@ -632,8 +771,9 @@ def create_wheel_gif(target_idx: int, size: int = 400) -> io.BytesIO:
     against friction.
 
     Args:
-        target_idx: Index of wedge to land on (0-23)
+        target_idx: Index of wedge to land on
         size: Image size in pixels
+        display_name: User's Discord display name for JOPA-T terminal prompt
 
     Returns:
         BytesIO buffer containing the GIF data
@@ -654,14 +794,14 @@ def create_wheel_gif(target_idx: int, size: int = 400) -> io.BytesIO:
     # The wheel spins, slows down, almost stops some distance before target,
     # then creeps forward to land on the final position
 
-    num_frames = 150
+    num_frames = 100
 
-    # Phase boundaries (optimized for smooth 8-18 second animation)
-    fast_end = 60       # End of fast spin (frames 0-59)
-    medium_end = 90     # End of medium spin (frames 60-89)
-    slow_end = 125      # End of slow crawl (frames 90-124)
-    creep_end = 148     # End of creep to final (frames 125-147)
-    # Frame 148 is second-to-last, frame 149 is final
+    # Phase boundaries (scaled from 150 to 100 frames)
+    fast_end = 40       # End of fast spin (frames 0-39)
+    medium_end = 60     # End of medium spin (frames 40-59)
+    slow_end = 83       # End of slow crawl (frames 60-82)
+    creep_end = 98      # End of creep to final (frames 83-97)
+    # Frame 98 is second-to-last, frame 99 is final
 
     # Ending styles with varied physics (20 items for easy % math)
     ending_styles = [
@@ -741,6 +881,11 @@ def create_wheel_gif(target_idx: int, size: int = 400) -> io.BytesIO:
         # Final push to target
         chaos_keyframes.append(total_spin)
 
+    # Pre-render first frame to establish shared palette
+    first_frame_rgba = create_wheel_frame_for_gif(size, 0, selected_idx=None, display_name=display_name, frame_idx=0)
+    first_frame_rgb = first_frame_rgba.convert("RGB")
+    palette_image = first_frame_rgb.convert("P", palette=Image.ADAPTIVE, colors=256)
+
     for i in range(num_frames):
         # Calculate rotation based on frame
         if ending_style == "reverse":
@@ -786,14 +931,17 @@ def create_wheel_gif(target_idx: int, size: int = 400) -> io.BytesIO:
         is_final = i == num_frames - 1
 
         frame = create_wheel_frame_for_gif(
-            size, rotation, selected_idx=target_idx if is_final else None
+            size, rotation, selected_idx=target_idx if is_final else None,
+            display_name=display_name, frame_idx=i,
         )
 
-        frame_p = frame.convert("RGB").convert("P", palette=Image.ADAPTIVE, colors=256)
+        # Quantize against shared palette for consistent colors across frames
+        frame_rgb = frame.convert("RGB")
+        frame_p = frame_rgb.quantize(palette=palette_image, dither=Image.Dither.FLOYDSTEINBERG)
         frames.append(frame_p)
 
-        # Timing: variable 8-18 seconds of animation
-        if i < 30:
+        # Timing: variable animation duration
+        if i < 20:
             durations.append(30)       # Very fast: 30ms
         elif i < fast_end:
             durations.append(40)       # Fast: 40ms
@@ -834,7 +982,7 @@ def create_wheel_gif(target_idx: int, size: int = 400) -> io.BytesIO:
     return buffer
 
 
-def create_explosion_gif(size: int = 400) -> io.BytesIO:
+def create_explosion_gif(size: int = 500, display_name: str | None = None) -> io.BytesIO:
     """
     Create an animated GIF of the wheel exploding.
 
@@ -851,13 +999,14 @@ def create_explosion_gif(size: int = 400) -> io.BytesIO:
     durations = []
 
     center = size // 2
-    radius = size // 2 - 50
+    radius = size // 2 - 30
+    scale = size / 400.0  # Scale factor for pixel values calibrated at 400px
 
     # Phase 1: Normal spin for ~1 second (builds tension)
     spin_frames = 20
     for i in range(spin_frames):
         rotation = i * 25  # Fast spin
-        frame = create_wheel_frame_for_gif(size, rotation, selected_idx=None)
+        frame = create_wheel_frame_for_gif(size, rotation, selected_idx=None, display_name=display_name, frame_idx=i)
         frame_p = frame.convert("RGB").convert("P", palette=Image.ADAPTIVE, colors=256)
         frames.append(frame_p)
         durations.append(50)
@@ -867,11 +1016,11 @@ def create_explosion_gif(size: int = 400) -> io.BytesIO:
     base_rotation = spin_frames * 25
     for i in range(shake_frames):
         # Increasingly violent shaking
-        shake_intensity = (i + 1) * 3
+        shake_intensity = int((i + 1) * 3 * scale)
         shake_x = random.randint(-shake_intensity, shake_intensity)
         shake_y = random.randint(-shake_intensity, shake_intensity)
 
-        frame = create_wheel_frame_for_gif(size, base_rotation + random.randint(-5, 5))
+        frame = create_wheel_frame_for_gif(size, base_rotation + random.randint(-5, 5), display_name=display_name, frame_idx=spin_frames + i)
 
         # Apply shake by creating offset composite
         shaken = Image.new("RGBA", (size, size), (30, 30, 35, 255))
@@ -893,13 +1042,13 @@ def create_explosion_gif(size: int = 400) -> io.BytesIO:
     particles = []
     for _ in range(num_particles):
         angle = random.uniform(0, 2 * math.pi)
-        speed = random.uniform(3, 15)
+        speed = random.uniform(3, 15) * scale
         particle = {
-            "x": center,
-            "y": center,
+            "x": float(center),
+            "y": float(center),
             "vx": math.cos(angle) * speed,
             "vy": math.sin(angle) * speed,
-            "size": random.randint(4, 20),
+            "size": random.randint(int(4 * scale), int(20 * scale)),
             "color": random.choice([
                 (255, 100, 0),    # Orange fire
                 (255, 200, 0),    # Yellow fire
@@ -917,15 +1066,15 @@ def create_explosion_gif(size: int = 400) -> io.BytesIO:
     fragments = []
     for i in range(num_fragments):
         angle = (i / num_fragments) * 2 * math.pi + random.uniform(-0.2, 0.2)
-        speed = random.uniform(5, 12)
+        speed = random.uniform(5, 12) * scale
         fragments.append({
-            "x": center,
-            "y": center,
+            "x": float(center),
+            "y": float(center),
             "vx": math.cos(angle) * speed,
             "vy": math.sin(angle) * speed,
             "rotation": random.uniform(0, 360),
             "rot_speed": random.uniform(-20, 20),
-            "size": random.randint(20, 50),
+            "size": random.randint(int(20 * scale), int(50 * scale)),
             "color": random.choice(["#e74c3c", "#f1c40f", "#3498db", "#2ecc71", "#9b59b6"]),
         })
 
@@ -943,21 +1092,21 @@ def create_explosion_gif(size: int = 400) -> io.BytesIO:
         # Draw expanding shockwave rings
         if frame_idx < 15:
             for ring in range(3):
-                ring_radius = (frame_idx + 1) * 15 + ring * 30
+                ring_radius = int((frame_idx + 1) * 15 * scale + ring * 30 * scale)
                 ring_alpha = max(0, 200 - frame_idx * 15 - ring * 40)
                 if ring_alpha > 0 and ring_radius < size:
                     draw.ellipse(
                         [center - ring_radius, center - ring_radius,
                          center + ring_radius, center + ring_radius],
                         outline=(255, 200, 100, ring_alpha),
-                        width=4 - ring,
+                        width=max(1, 4 - ring),
                     )
 
         # Update and draw fragments
         for frag in fragments:
             frag["x"] += frag["vx"]
             frag["y"] += frag["vy"]
-            frag["vy"] += 0.3  # Gravity
+            frag["vy"] += 0.3 * scale  # Gravity
             frag["rotation"] += frag["rot_speed"]
             frag["vx"] *= 0.97  # Air resistance
 
@@ -984,7 +1133,7 @@ def create_explosion_gif(size: int = 400) -> io.BytesIO:
         for p in particles:
             p["x"] += p["vx"]
             p["y"] += p["vy"]
-            p["vy"] += 0.2  # Gravity
+            p["vy"] += 0.2 * scale  # Gravity
             p["vx"] *= p["decay"]
             p["vy"] *= p["decay"]
             p["size"] = max(1, p["size"] * 0.95)
@@ -1002,9 +1151,9 @@ def create_explosion_gif(size: int = 400) -> io.BytesIO:
         # Draw smoke clouds (appear after initial explosion)
         if frame_idx > 5:
             for smoke_idx in range(5):
-                smoke_x = center + random.randint(-80, 80)
-                smoke_y = center + random.randint(-80, 40) - frame_idx * 2
-                smoke_size = 30 + frame_idx * 2 + smoke_idx * 10
+                smoke_x = center + random.randint(int(-80 * scale), int(80 * scale))
+                smoke_y = center + random.randint(int(-80 * scale), int(40 * scale)) - int(frame_idx * 2 * scale)
+                smoke_size = int((30 + frame_idx * 2 + smoke_idx * 10) * scale)
                 smoke_alpha = max(0, 100 - frame_idx * 3)
                 if smoke_alpha > 0:
                     draw.ellipse(
@@ -1019,13 +1168,8 @@ def create_explosion_gif(size: int = 400) -> io.BytesIO:
 
     # Phase 4: Aftermath with "67 JC" and smoke clearing
     aftermath_frames = 20
-    try:
-        font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-        big_font = ImageFont.truetype(font_path, 48)
-        small_font = ImageFont.truetype(font_path, 20)
-    except OSError:
-        big_font = ImageFont.load_default()
-        small_font = big_font
+    big_font = _get_cached_font(int(48 * scale), "explosion_big", bold=True)
+    small_font = _get_cached_font(int(20 * scale), "explosion_small", bold=True)
 
     for frame_idx in range(aftermath_frames):
         img = Image.new("RGBA", (size, size), (30, 30, 35, 255))
@@ -1035,9 +1179,9 @@ def create_explosion_gif(size: int = 400) -> io.BytesIO:
         smoke_alpha = max(0, 60 - frame_idx * 3)
         if smoke_alpha > 0:
             for _ in range(8):
-                sx = center + random.randint(-100, 100)
-                sy = center + random.randint(-60, 60) - frame_idx * 3
-                ssize = random.randint(40, 80)
+                sx = center + random.randint(int(-100 * scale), int(100 * scale))
+                sy = center + random.randint(int(-60 * scale), int(60 * scale)) - int(frame_idx * 3 * scale)
+                ssize = random.randint(int(40 * scale), int(80 * scale))
                 draw.ellipse(
                     [sx - ssize, sy - ssize, sx + ssize, sy + ssize],
                     fill=(60, 60, 60, smoke_alpha),
@@ -1045,9 +1189,9 @@ def create_explosion_gif(size: int = 400) -> io.BytesIO:
 
         # Scattered debris on ground
         for _ in range(15):
-            dx = center + random.randint(-150, 150)
-            dy = center + random.randint(50, 120)
-            dsize = random.randint(3, 8)
+            dx = center + random.randint(int(-150 * scale), int(150 * scale))
+            dy = center + random.randint(int(50 * scale), int(120 * scale))
+            dsize = random.randint(int(3 * scale), int(8 * scale))
             draw.ellipse(
                 [dx - dsize, dy - dsize, dx + dsize, dy + dsize],
                 fill=(100, 100, 100, 150),
@@ -1061,7 +1205,7 @@ def create_explosion_gif(size: int = 400) -> io.BytesIO:
         bbox = draw.textbbox((0, 0), jc_text, font=big_font)
         text_w = bbox[2] - bbox[0]
         jc_x = center - text_w // 2
-        jc_y = center - 50
+        jc_y = center - int(50 * scale)
 
         # Glow effect
         for glow in range(3, 0, -1):
@@ -1084,7 +1228,7 @@ def create_explosion_gif(size: int = 400) -> io.BytesIO:
         bbox2 = draw.textbbox((0, 0), sorry_text, font=small_font)
         sorry_w = bbox2[2] - bbox2[0]
         sorry_x = center - sorry_w // 2
-        sorry_y = center + 20
+        sorry_y = center + int(20 * scale)
 
         draw.text((sorry_x + 1, sorry_y + 1), sorry_text, fill=(0, 0, 0, text_alpha), font=small_font)
         draw.text((sorry_x, sorry_y), sorry_text, fill=(255, 255, 255, text_alpha), font=small_font)
