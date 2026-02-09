@@ -27,6 +27,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("cama_bot.commands.lobby")
 
+# Players who joined within this window are considered active regardless of status
+RECENT_JOIN_THRESHOLD = 5 * 60  # 5 minutes
+
 
 class LobbyCommands(commands.Cog):
     """Slash commands for lobby management."""
@@ -827,6 +830,7 @@ class LobbyCommands(commands.Cog):
 
         # Classify every player — store structured data for later rebuilds
         player_data: dict[int, dict] = {}
+        now = time.time()
 
         for pid in all_player_ids:
             member = guild.get_member(pid)
@@ -834,6 +838,7 @@ class LobbyCommands(commands.Cog):
                 try:
                     member = await guild.fetch_member(pid)
                 except Exception:
+                    # Can't fetch member - treat as AFK
                     player = await asyncio.to_thread(self.player_service.get_player, pid, guild_id)
                     fallback_name = player.name if player else f"User {pid}"
                     player_data[pid] = {
@@ -846,39 +851,45 @@ class LobbyCommands(commands.Cog):
                     }
                     continue
 
+            # Get join time for classification
+            join_ts = lobby.player_join_times.get(pid)
+            time_in_lobby = (now - join_ts) if join_ts else float('inf')
+            is_recent = time_in_lobby < RECENT_JOIN_THRESHOLD
+
             signals = []
             is_afk = False
 
+            # Voice status (informational only - deafened doesn't mean AFK)
             if member.voice is not None:
                 is_deafened = bool(
                     getattr(member.voice, "self_deaf", False)
                     or getattr(member.voice, "deaf", False)
                 )
-                if is_deafened:
-                    signals.append("🔇")
-                    is_afk = True
-                else:
-                    signals.append("🔊")
+                signals.append("🔇" if is_deafened else "🔊")
 
+            # Dota status
             if _is_playing_dota(member):
                 signals.append("🎮")
 
+            # Presence status - this determines AFK classification
             status = member.status
             if status in (discord.Status.online, discord.Status.dnd):
                 signals.append("🟢")
             elif status == discord.Status.idle:
                 signals.append("🟡")
-                is_afk = True
-            else:
+                if not is_recent:
+                    is_afk = True
+            else:  # offline/invisible
                 signals.append("🔴")
-                is_afk = True
+                if not is_recent:
+                    is_afk = True
 
             player_data[pid] = {
                 "group": "afk" if is_afk else "active",
                 "signals": "".join(signals),
                 "name": member.display_name,
                 "is_conditional": pid in lobby.conditional_players,
-                "join_ts": lobby.player_join_times.get(pid),
+                "join_ts": join_ts,
                 "is_member": True,
             }
 
@@ -906,16 +917,23 @@ class LobbyCommands(commands.Cog):
         # Build embed from stored data (excludes reacted from Active/AFK)
         embed, mention_ids = build_readycheck_embed(player_data, reacted)
 
-        # Resolve target channel
+        # Resolve target channel - lobby thread only
         target_channel = None
-        lobby_channel_id = self.lobby_service.get_lobby_channel_id()
-        if lobby_channel_id:
+        lobby_thread_id = self.lobby_service.get_lobby_thread_id()
+        if lobby_thread_id:
             try:
-                target_channel = self.bot.get_channel(lobby_channel_id)
+                target_channel = self.bot.get_channel(lobby_thread_id)
                 if not target_channel:
-                    target_channel = await self.bot.fetch_channel(lobby_channel_id)
+                    target_channel = await self.bot.fetch_channel(lobby_thread_id)
             except Exception:
-                target_channel = None
+                pass
+
+        if not target_channel:
+            await interaction.followup.send(
+                "❌ No lobby thread found. Create a lobby with `/lobby` first.",
+                ephemeral=True,
+            )
+            return
 
         # Ping AFK players (exclude those who already reacted)
         allowed_mentions = discord.AllowedMentions(
@@ -935,25 +953,17 @@ class LobbyCommands(commands.Cog):
                 f"✅ Ready check refreshed! [View]({msg.jump_url})", ephemeral=True
             )
         else:
-            if target_channel and target_channel.id != interaction.channel.id:
-                msg = await target_channel.send(embed=embed)
-                try:
-                    await msg.add_reaction("✅")
-                except Exception:
-                    pass
-                if ping_content:
-                    await target_channel.send(ping_content, allowed_mentions=allowed_mentions)
-                await interaction.followup.send(
-                    f"✅ Ready check posted! [View]({msg.jump_url})", ephemeral=True
-                )
-            else:
-                msg = await interaction.followup.send(embed=embed)
-                try:
-                    await msg.add_reaction("✅")
-                except Exception:
-                    pass
-                if ping_content:
-                    await interaction.channel.send(ping_content, allowed_mentions=allowed_mentions)
+            # Post to lobby thread (target_channel is guaranteed to exist here)
+            msg = await target_channel.send(embed=embed)
+            try:
+                await msg.add_reaction("✅")
+            except Exception:
+                pass
+            if ping_content:
+                await target_channel.send(ping_content, allowed_mentions=allowed_mentions)
+            await interaction.followup.send(
+                f"✅ Ready check posted! [View]({msg.jump_url})", ephemeral=True
+            )
 
             self.lobby_service.set_readycheck_state(
                 msg.id, msg.channel.id, current_lobby_set, player_data
