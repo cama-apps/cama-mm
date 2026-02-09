@@ -1816,10 +1816,12 @@ def draw_scout_report(
     |       SCOUT REPORT           |
     | Player1, Player2, ...        |
     +------------------------------+
-    | [IMG]① 25  18-7  B:5        |
-    | [IMG]② 20  12-8  B:3        |
+    | [IMG] 25  18-7   5          |
+    | [IMG] 20  12-8   3          |
     | ...                          |
     +------------------------------+
+
+    Columns: Hero | Total (W+L+Bans) | W-L | Bans
 
     Args:
         scout_data: Dict from get_scout_data() with player_count and heroes list
@@ -1859,11 +1861,10 @@ def draw_scout_report(
     draw = ImageDraw.Draw(img)
 
     # Fonts
-    title_font = _get_font(16)
+    title_font = _get_font(14)
     player_font = _get_font(11)
     stat_font = _get_font(13)
-    role_font = _get_font(11)
-    ban_font = _get_font(10)
+    ban_font = _get_font(11)
 
     # --- Draw header ---
     # Title
@@ -1887,20 +1888,18 @@ def draw_scout_report(
             font=player_font,
         )
 
-    # Fixed column positions for alignment
+    # Fixed column positions for alignment (no role column)
     COL_HERO_X = PADDING + 4
-    COL_ROLE_X = COL_HERO_X + HERO_IMG_WIDTH + 6
-    COL_GAMES_X = COL_ROLE_X + 18
-    COL_WL_X = COL_GAMES_X + 40
-    COL_BANS_X = COL_WL_X + 55
+    COL_TOTAL_X = COL_HERO_X + HERO_IMG_WIDTH + 10
+    COL_WL_X = COL_TOTAL_X + 40
+    COL_BANS_X = COL_WL_X + 70  # Wider W-L column
 
     # Column headers
     header_font = _get_font(11)
     header_y = PADDING + HEADER_HEIGHT - 18
-    draw.text((COL_ROLE_X, header_y), "#", fill=DISCORD_GREY, font=header_font)
-    draw.text((COL_GAMES_X + 5, header_y), "Games", fill=DISCORD_GREY, font=header_font)
+    draw.text((COL_TOTAL_X, header_y), "Total", fill=DISCORD_GREY, font=header_font)
     draw.text((COL_WL_X, header_y), "W-L", fill=DISCORD_GREY, font=header_font)
-    draw.text((COL_BANS_X, header_y), "Ban", fill=DISCORD_GREY, font=header_font)
+    draw.text((COL_BANS_X, header_y), "Bans", fill=DISCORD_GREY, font=header_font)
 
     # Header separator line
     sep_y = PADDING + HEADER_HEIGHT - 5
@@ -1915,11 +1914,11 @@ def draw_scout_report(
 
     for i, hero in enumerate(heroes):
         hero_id = hero["hero_id"]
-        games = hero["games"]
         wins = hero["wins"]
         losses = hero["losses"]
         bans = hero.get("bans", 0)
-        primary_role = hero.get("primary_role", 1)
+        # Total = W + L + Bans (total hero relevance)
+        total_games = wins + losses + bans
 
         # Alternate row background
         if i % 2 == 1:
@@ -1943,18 +1942,14 @@ def draw_scout_report(
                 outline=DISCORD_GREY,
             )
 
-        # Role number (fixed position, colored)
-        role_text = str(primary_role)
-        role_color = POSITION_COLORS.get(primary_role, DISCORD_GREY)
-        draw.text((COL_ROLE_X, stat_y), role_text, fill=role_color, font=role_font)
-
-        # Games count (fixed position, right-aligned within column)
-        games_text = str(games)
-        games_w = _get_text_size(stat_font, games_text)[0]
-        draw.text((COL_GAMES_X + 30 - games_w, stat_y), games_text, fill=DISCORD_WHITE, font=stat_font)
+        # Total count (fixed position, right-aligned within column)
+        total_text = str(total_games)
+        total_w = _get_text_size(stat_font, total_text)[0]
+        draw.text((COL_TOTAL_X + 30 - total_w, stat_y), total_text, fill=DISCORD_WHITE, font=stat_font)
 
         # W-L (fixed position, color-coded by win rate)
-        win_rate = wins / games if games > 0 else 0
+        played_games = wins + losses
+        win_rate = wins / played_games if played_games > 0 else 0
         if win_rate >= 0.60:
             wl_color = DISCORD_GREEN
         elif win_rate >= 0.40:
@@ -1965,22 +1960,12 @@ def draw_scout_report(
         wl_text = f"{wins}-{losses}"
         draw.text((COL_WL_X, stat_y), wl_text, fill=wl_color, font=stat_font)
 
-        # Bans badge (fixed position, only if > 0)
+        # Bans count (fixed position, red text if > 0)
+        ban_text = str(bans)
         if bans > 0:
-            ban_text = f"B:{bans}"
-            ban_w = _get_text_size(ban_font, ban_text)[0]
-            ban_y = y + (ROW_HEIGHT - 14) // 2
-
-            # Red badge background
-            badge_padding = 3
-            draw.rectangle(
-                [
-                    (COL_BANS_X - badge_padding, ban_y - 1),
-                    (COL_BANS_X + ban_w + badge_padding, ban_y + 13),
-                ],
-                fill=DISCORD_RED,
-            )
-            draw.text((COL_BANS_X, ban_y), ban_text, fill=DISCORD_WHITE, font=ban_font)
+            draw.text((COL_BANS_X, stat_y), ban_text, fill=DISCORD_RED, font=ban_font)
+        else:
+            draw.text((COL_BANS_X, stat_y), ban_text, fill=DISCORD_GREY, font=ban_font)
 
         y += ROW_HEIGHT
 
