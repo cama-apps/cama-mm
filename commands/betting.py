@@ -355,14 +355,14 @@ class BettingCommands(commands.Cog):
             except Exception as exc:
                 logger.warning(f"Failed to send betting reminder to thread: {exc}", exc_info=True)
 
-    def _create_wheel_gif_file(self, target_idx: int) -> discord.File:
+    def _create_wheel_gif_file(self, target_idx: int, display_name: str | None = None) -> discord.File:
         """Create a wheel animation and return as discord.File."""
-        buffer = create_wheel_gif(target_idx=target_idx, size=400)
+        buffer = create_wheel_gif(target_idx=target_idx, size=500, display_name=display_name)
         return discord.File(buffer, filename="wheel.gif")
 
-    def _create_explosion_gif_file(self) -> discord.File:
+    def _create_explosion_gif_file(self, display_name: str | None = None) -> discord.File:
         """Create an explosion animation and return as discord.File."""
-        buffer = create_explosion_gif(size=400)
+        buffer = create_explosion_gif(size=500, display_name=display_name)
         return discord.File(buffer, filename="explosion.gif")
 
     def _wheel_result_embed(
@@ -1056,7 +1056,8 @@ class BettingCommands(commands.Cog):
             await interaction.response.defer()
 
             # Generate explosion animation
-            gif_file = await asyncio.to_thread(self._create_explosion_gif_file)
+            user_display = interaction.user.display_name
+            gif_file = await asyncio.to_thread(self._create_explosion_gif_file, user_display)
             message = await interaction.followup.send(file=gif_file, wait=True)
 
             # Wait for explosion animation (~8 seconds)
@@ -1106,7 +1107,8 @@ class BettingCommands(commands.Cog):
         await interaction.response.defer()
 
         # Generate the complete animation GIF (plays once, ~20 seconds)
-        gif_file = await asyncio.to_thread(self._create_wheel_gif_file, result_idx)
+        user_display = interaction.user.display_name
+        gif_file = await asyncio.to_thread(self._create_wheel_gif_file, result_idx, user_display)
 
         # Send via followup (since we deferred)
         message = await interaction.followup.send(file=gif_file, wait=True)
@@ -1115,10 +1117,12 @@ class BettingCommands(commands.Cog):
         # Animation timing:
         # - Fast spin: 45 frames * 50ms = 2.25s
         # - Medium: 15 frames * 100ms = 1.5s
-        # - Slow crawl: 20 frames * 250ms = 5s
-        # - Creep: 14 frames * ~1000ms avg = 14s
-        # Total spinning: ~23s (then 60s hold on result)
-        await asyncio.sleep(23.0)
+        # - Fast: 40 frames * ~35ms = 1.4s
+        # - Medium: 20 frames * 65ms = 1.3s
+        # - Slow: 23 frames * 100ms = 2.3s
+        # - Creep: 15 frames * ~150ms avg = 2.3s + pause
+        # Total spinning: ~8-15s depending on ending style
+        await asyncio.sleep(15.0)
 
         # Apply the result
         result_value = result_wedge[1]
