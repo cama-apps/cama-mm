@@ -220,7 +220,7 @@ class ScoutCommands(commands.Cog):
             )
             embed.set_image(url="attachment://scout_report.png")
             embed.set_footer(
-                text="W-L = Wins-Losses | B:N = Times Banned | # = Position"
+                text="Total = W+L+Bans | W-L color: green≥60%, yellow≥40%, red<40%"
             )
 
             message = await safe_followup(interaction, embed=embed, file=file)
