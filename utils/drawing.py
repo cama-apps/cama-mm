@@ -1946,27 +1946,32 @@ def draw_scout_report(
             )
 
         # Total count (fixed position, right-aligned within column)
+        # Use max() to prevent negative X when text is wider than column
         total_text = str(total_games)
         total_w = _get_text_size(stat_font, total_text)[0]
-        draw.text((COL_TOTAL_X + 25 - total_w, stat_y), total_text, fill=DISCORD_WHITE, font=stat_font)
+        total_x = max(COL_TOTAL_X, COL_TOTAL_X + 25 - total_w)
+        draw.text((total_x, stat_y), total_text, fill=DISCORD_WHITE, font=stat_font)
 
         # Wins (green)
         wins_text = str(wins)
         wins_w = _get_text_size(stat_font, wins_text)[0]
-        draw.text((COL_WINS_X + 20 - wins_w, stat_y), wins_text, fill=DISCORD_GREEN, font=stat_font)
+        wins_x = max(COL_WINS_X, COL_WINS_X + 20 - wins_w)
+        draw.text((wins_x, stat_y), wins_text, fill=DISCORD_GREEN, font=stat_font)
 
         # Losses (red)
         losses_text = str(losses)
         losses_w = _get_text_size(stat_font, losses_text)[0]
-        draw.text((COL_LOSSES_X + 20 - losses_w, stat_y), losses_text, fill=DISCORD_RED, font=stat_font)
+        losses_x = max(COL_LOSSES_X, COL_LOSSES_X + 20 - losses_w)
+        draw.text((losses_x, stat_y), losses_text, fill=DISCORD_RED, font=stat_font)
 
         # Bans count (fixed position, red text if > 0)
         ban_text = str(bans)
         ban_w = _get_text_size(ban_font, ban_text)[0]
+        ban_x = max(COL_BANS_X, COL_BANS_X + 20 - ban_w)
         if bans > 0:
-            draw.text((COL_BANS_X + 20 - ban_w, stat_y), ban_text, fill=DISCORD_RED, font=ban_font)
+            draw.text((ban_x, stat_y), ban_text, fill=DISCORD_RED, font=ban_font)
         else:
-            draw.text((COL_BANS_X + 20 - ban_w, stat_y), ban_text, fill=DISCORD_GREY, font=ban_font)
+            draw.text((ban_x, stat_y), ban_text, fill=DISCORD_GREY, font=ban_font)
 
         y += ROW_HEIGHT
 
