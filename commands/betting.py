@@ -1056,7 +1056,7 @@ class BettingCommands(commands.Cog):
             await interaction.response.defer()
 
             # Generate explosion animation
-            user_display = interaction.user.display_name
+            user_display = interaction.user.name
             gif_file = await asyncio.to_thread(self._create_explosion_gif_file, user_display)
             message = await interaction.followup.send(file=gif_file, wait=True)
 
@@ -1107,7 +1107,7 @@ class BettingCommands(commands.Cog):
         await interaction.response.defer()
 
         # Generate the complete animation GIF (plays once, ~20 seconds)
-        user_display = interaction.user.display_name
+        user_display = interaction.user.name
         gif_file = await asyncio.to_thread(self._create_wheel_gif_file, result_idx, user_display)
 
         # Send via followup (since we deferred)
@@ -1441,8 +1441,8 @@ class BettingCommands(commands.Cog):
         if neon:
             neon_result = await neon.on_tip(
                 interaction.user.id, guild_id,
-                sender_name=interaction.user.display_name,
-                recipient_name=player.display_name,
+                sender_name=interaction.user.name,
+                recipient_name=player.name,
                 amount=amount,
                 fee=fee,
             )

@@ -830,8 +830,8 @@ class NeonDegenService:
     async def on_draft_coinflip(
         self,
         guild_id: int | None,
-        winner_name: str,
-        loser_name: str,
+        winner_id: int,
+        loser_id: int,
     ) -> NeonResult | None:
         """Trigger on draft coinflip result. Layer 1 at 40% chance."""
         try:
@@ -840,6 +840,8 @@ class NeonDegenService:
             if not self._roll(0.40):
                 return None
 
+            winner_name = self._get_player_name(winner_id, guild_id)
+            loser_name = self._get_player_name(loser_id, guild_id)
             text = render_coinflip(winner_name, loser_name)
             text = await self._generate_text(
                 f"Draft coinflip: {winner_name} won, {loser_name} lost",

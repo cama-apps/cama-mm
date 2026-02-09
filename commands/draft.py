@@ -981,8 +981,8 @@ class DraftCommands(commands.Cog):
             _neon_svc = getattr(self.bot, "neon_degen_service", None)
             neon = _neon_svc if isinstance(_neon_svc, NeonDegenService) else None
             if neon:
-                loser_name = captain2_name if coinflip_winner_id == state.captain1_id else captain1_name
-                neon_result = await neon.on_draft_coinflip(guild_id, winner_name, loser_name)
+                loser_id = captain_pair.captain2_id if coinflip_winner_id == captain_pair.captain1_id else captain_pair.captain1_id
+                neon_result = await neon.on_draft_coinflip(guild_id, coinflip_winner_id, loser_id)
                 if neon_result and neon_result.text_block:
                     import asyncio
                     msg = await interaction.channel.send(neon_result.text_block)
@@ -2290,7 +2290,7 @@ class DraftCommands(commands.Cog):
                 logger.warning(f"Failed to update message after draft timeout: {exc}")
 
     async def _get_member_name(self, guild: discord.Guild | None, user_id: int) -> str:
-        """Get display name for a user ID."""
+        """Get display name for a user ID (used in Discord embeds)."""
         if guild:
             member = guild.get_member(user_id)
             if member:

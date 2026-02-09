@@ -413,7 +413,7 @@ class TestNeonDegenService:
         service = self._make_service()
         results = []
         for _ in range(100):
-            r = await service.on_draft_coinflip(456, "Winner", "Loser")
+            r = await service.on_draft_coinflip(456, 1001, 1002)
             results.append(r)
         # At least some should fire and some shouldn't
         assert any(r is not None for r in results)
@@ -424,7 +424,7 @@ class TestNeonDegenService:
         """When coinflip fires, should return layer 1."""
         service = self._make_service()
         for _ in range(100):
-            result = await service.on_draft_coinflip(456, "Captain1", "Captain2")
+            result = await service.on_draft_coinflip(456, 1001, 1002)
             if result:
                 assert result.layer == 1
                 assert result.text_block is not None
