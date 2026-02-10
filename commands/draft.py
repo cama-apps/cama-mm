@@ -984,7 +984,6 @@ class DraftCommands(commands.Cog):
                 loser_id = captain_pair.captain2_id if coinflip_winner_id == captain_pair.captain1_id else captain_pair.captain1_id
                 neon_result = await neon.on_draft_coinflip(guild_id, coinflip_winner_id, loser_id)
                 if neon_result and neon_result.text_block:
-                    import asyncio
                     msg = await interaction.channel.send(neon_result.text_block)
                     async def _del_neon(m, d):
                         try:
