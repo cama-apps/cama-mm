@@ -33,6 +33,7 @@ class ScoutView(discord.ui.View):
         all_heroes: list[dict],
         player_names: list[str],
         player_count: int,
+        total_matches: int,
         title: str,
         timeout: int = 840,
     ):
@@ -40,6 +41,7 @@ class ScoutView(discord.ui.View):
         self.all_heroes = all_heroes
         self.player_names = player_names
         self.player_count = player_count
+        self.total_matches = total_matches
         self.title = title
         self.current_page = 0
         self.total_pages = max(1, (len(all_heroes) + HEROES_PER_PAGE - 1) // HEROES_PER_PAGE)
@@ -60,7 +62,7 @@ class ScoutView(discord.ui.View):
     async def _generate_embed_and_file(self) -> tuple[discord.Embed, discord.File]:
         """Generate embed and image file for current page."""
         page_heroes = self._get_page_heroes()
-        scout_data = {"player_count": self.player_count, "heroes": page_heroes}
+        scout_data = {"player_count": self.player_count, "total_matches": self.total_matches, "heroes": page_heroes}
 
         image_bytes = await asyncio.to_thread(
             draw_scout_report,
@@ -296,6 +298,7 @@ class ScoutCommands(commands.Cog):
                 all_heroes=all_heroes,
                 player_names=player_names,
                 player_count=len(player_ids),
+                total_matches=scout_data.get("total_matches", 0),
                 title=title,
             )
 
