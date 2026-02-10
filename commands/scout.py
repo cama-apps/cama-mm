@@ -83,7 +83,7 @@ class ScoutView(discord.ui.View):
         )
         embed.set_image(url="attachment://scout_report.png")
         embed.set_footer(
-            text=f"Page {self.current_page + 1}/{self.total_pages} | Tot=W+L+Ban | CR=Tot/Games | WR=W/(W+L)"
+            text=f"Page {self.current_page + 1}/{self.total_pages} | Tot=W+L+B | CR=Tot/Games | WR=W/(W+L)"
         )
 
         return embed, file
