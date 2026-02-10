@@ -2043,8 +2043,11 @@ class MatchService:
         # Get per-player hero stats
         player_stats = self.match_repo.get_player_hero_stats_for_scout(player_ids, guild_id)
 
-        # Get deduplicated ban counts
+        # Get deduplicated ban counts (opposing team only)
         ban_data = self.match_repo.get_bans_for_players(player_ids, guild_id)
+
+        # Get total unique match count for contest rate calculation
+        total_matches = self.match_repo.get_match_count_for_players(player_ids, guild_id)
 
         # Aggregate hero stats across all players
         aggregated: dict[int, dict] = {}  # hero_id -> {games, wins, losses, roles}
@@ -2065,8 +2068,11 @@ class MatchService:
                 if hero.get("primary_role"):
                     aggregated[hero_id]["roles"].append(hero["primary_role"])
 
-        # Sort by games, take top N
-        sorted_heroes = sorted(aggregated.items(), key=lambda x: -x[1]["games"])[:limit]
+        # Sort by total relevance (games + bans), take top N
+        sorted_heroes = sorted(
+            aggregated.items(),
+            key=lambda x: -(x[1]["games"] + ban_data.get(x[0], 0)),
+        )[:limit]
 
         # Build result with primary_role (mode) and ban counts
         # Default to Carry (1) when no role data is available
@@ -2090,5 +2096,6 @@ class MatchService:
 
         return {
             "player_count": len(player_ids),
+            "total_matches": total_matches,
             "heroes": result_heroes,
         }
