@@ -1800,6 +1800,30 @@ POSITION_COLORS = {
 }
 
 
+def _lerp_color(c1: tuple, c2: tuple, t: float) -> tuple:
+    """Linearly interpolate between two RGB tuples."""
+    t = max(0.0, min(1.0, t))
+    return tuple(int(c1[i] + (c2[i] - c1[i]) * t) for i in range(3))
+
+
+def _heatmap_contest_rate(rate: float) -> tuple:
+    """Heatmap for contest rate: grey (0%) -> amber (50%) -> red (100%)."""
+    rate = max(0.0, min(1.0, rate))
+    if rate < 0.5:
+        return _lerp_color((150, 150, 150), (255, 180, 50), rate / 0.5)
+    else:
+        return _lerp_color((255, 180, 50), (255, 60, 60), (rate - 0.5) / 0.5)
+
+
+def _heatmap_winrate(rate: float) -> tuple:
+    """Heatmap for win rate: red (0%) -> yellow (50%) -> green (100%)."""
+    rate = max(0.0, min(1.0, rate))
+    if rate < 0.5:
+        return _lerp_color((255, 60, 60), (255, 220, 50), rate / 0.5)
+    else:
+        return _lerp_color((255, 220, 50), (80, 220, 80), (rate - 0.5) / 0.5)
+
+
 def draw_scout_report(
     scout_data: dict,
     player_names: list[str],
@@ -1811,20 +1835,23 @@ def draw_scout_report(
     Shows aggregated hero stats for a team/group of players in a compact
     table format with hero portrait images.
 
-    Layout (~300px width, mobile-friendly):
-    +------------------------------+
-    |       SCOUT REPORT           |
-    | Player1, Player2, ...        |
-    +------------------------------+
-    | [IMG] 25  18-7   5          |
-    | [IMG] 20  12-8   3          |
-    | ...                          |
-    +------------------------------+
+    Layout (~320px width, mobile-friendly):
+    +----------------------------------+
+    |        SCOUT REPORT              |
+    | Player1, Player2, ...            |
+    +----------------------------------+
+    | Hero  Tot  CR%  W-L  WR%         |
+    +----------------------------------+
+    | [IMG]  25  85%  18-7  72%        |
+    | [IMG]  20  68%  12-8  60%        |
+    | ...                              |
+    +----------------------------------+
 
-    Columns: Hero | Total (W+L+Bans) | W-L | Bans
+    Columns: Hero | Tot (W+L+Bans) | CR% (contest rate) | W-L | WR% (win rate)
+    CR% and WR% use heatmap coloring.
 
     Args:
-        scout_data: Dict from get_scout_data() with player_count and heroes list
+        scout_data: Dict from get_scout_data() with player_count, total_matches, and heroes list
         player_names: List of player display names (for header)
         title: Title text for the report
 
@@ -1832,10 +1859,11 @@ def draw_scout_report(
         BytesIO containing the PNG image
     """
     heroes = scout_data.get("heroes", [])
+    total_matches = scout_data.get("total_matches", 0)
 
     # Handle empty data
     if not heroes:
-        img = Image.new("RGBA", (300, 100), DISCORD_BG)
+        img = Image.new("RGBA", (320, 100), DISCORD_BG)
         draw = ImageDraw.Draw(img)
         font = _get_font(16)
         draw.text((20, 40), "No hero data available", fill=DISCORD_GREY, font=font)
@@ -1845,7 +1873,7 @@ def draw_scout_report(
         return fp
 
     # Dimensions
-    WIDTH = 300
+    WIDTH = 320
     PADDING = 12
     HEADER_HEIGHT = 50
     ROW_HEIGHT = 32
@@ -1864,7 +1892,6 @@ def draw_scout_report(
     title_font = _get_font(14)
     player_font = _get_font(11)
     stat_font = _get_font(13)
-    ban_font = _get_font(11)
 
     # --- Draw header ---
     # Title
@@ -1877,7 +1904,7 @@ def draw_scout_report(
         if len(player_names) > 5:
             names_text += f" +{len(player_names) - 5}"
         # Truncate if too long
-        max_name_len = 35
+        max_name_len = 38
         if len(names_text) > max_name_len:
             names_text = names_text[:max_name_len - 2] + ".."
         names_w = _get_text_size(player_font, names_text)[0]
@@ -1888,21 +1915,21 @@ def draw_scout_report(
             font=player_font,
         )
 
-    # Fixed column positions for alignment (no role column)
-    # Layout: Hero | Total | W | L | Bans
+    # Fixed column positions for alignment
+    # Layout: Hero | Tot | CR% | W-L | WR%
     COL_HERO_X = PADDING + 4
-    COL_TOTAL_X = COL_HERO_X + HERO_IMG_WIDTH + 8
-    COL_WINS_X = COL_TOTAL_X + 38
-    COL_LOSSES_X = COL_WINS_X + 32
-    COL_BANS_X = COL_LOSSES_X + 32
+    COL_TOTAL_X = COL_HERO_X + HERO_IMG_WIDTH + 8   # 72
+    COL_CR_X = COL_TOTAL_X + 34                      # 106
+    COL_WL_X = COL_CR_X + 40                         # 146
+    COL_WR_X = COL_WL_X + 50                         # 196
 
     # Column headers
     header_font = _get_font(11)
     header_y = PADDING + HEADER_HEIGHT - 18
     draw.text((COL_TOTAL_X, header_y), "Tot", fill=DISCORD_GREY, font=header_font)
-    draw.text((COL_WINS_X, header_y), "W", fill=DISCORD_GREY, font=header_font)
-    draw.text((COL_LOSSES_X, header_y), "L", fill=DISCORD_GREY, font=header_font)
-    draw.text((COL_BANS_X, header_y), "Ban", fill=DISCORD_GREY, font=header_font)
+    draw.text((COL_CR_X, header_y), "CR", fill=DISCORD_GREY, font=header_font)
+    draw.text((COL_WL_X, header_y), "W-L", fill=DISCORD_GREY, font=header_font)
+    draw.text((COL_WR_X, header_y), "WR", fill=DISCORD_GREY, font=header_font)
 
     # Header separator line
     sep_y = PADDING + HEADER_HEIGHT - 5
@@ -1920,8 +1947,12 @@ def draw_scout_report(
         wins = hero["wins"]
         losses = hero["losses"]
         bans = hero.get("bans", 0)
-        # Total = W + L + Bans (total hero relevance)
-        total_games = wins + losses + bans
+        games = wins + losses
+        total = games + bans
+
+        # Contest rate and win rate
+        contest_rate = total / total_matches if total_matches > 0 else 0.0
+        win_rate = wins / games if games > 0 else 0.0
 
         # Alternate row background
         if i % 2 == 1:
@@ -1945,33 +1976,56 @@ def draw_scout_report(
                 outline=DISCORD_GREY,
             )
 
-        # Total count (fixed position, right-aligned within column)
-        # Use max() to prevent negative X when text is wider than column
-        total_text = str(total_games)
-        total_w = _get_text_size(stat_font, total_text)[0]
-        total_x = max(COL_TOTAL_X, COL_TOTAL_X + 25 - total_w)
-        draw.text((total_x, stat_y), total_text, fill=DISCORD_WHITE, font=stat_font)
+        # Total count (right-aligned)
+        total_text = str(total)
+        tw = _get_text_size(stat_font, total_text)[0]
+        draw.text(
+            (max(COL_TOTAL_X, COL_TOTAL_X + 25 - tw), stat_y),
+            total_text,
+            fill=DISCORD_WHITE,
+            font=stat_font,
+        )
 
-        # Wins (green)
-        wins_text = str(wins)
-        wins_w = _get_text_size(stat_font, wins_text)[0]
-        wins_x = max(COL_WINS_X, COL_WINS_X + 20 - wins_w)
-        draw.text((wins_x, stat_y), wins_text, fill=DISCORD_GREEN, font=stat_font)
+        # Contest rate % (heatmap colored, right-aligned)
+        cr_text = f"{contest_rate * 100:.0f}%"
+        cr_w = _get_text_size(stat_font, cr_text)[0]
+        cr_color = _heatmap_contest_rate(contest_rate)
+        draw.text(
+            (max(COL_CR_X, COL_CR_X + 32 - cr_w), stat_y),
+            cr_text,
+            fill=cr_color,
+            font=stat_font,
+        )
 
-        # Losses (red)
-        losses_text = str(losses)
-        losses_w = _get_text_size(stat_font, losses_text)[0]
-        losses_x = max(COL_LOSSES_X, COL_LOSSES_X + 20 - losses_w)
-        draw.text((losses_x, stat_y), losses_text, fill=DISCORD_RED, font=stat_font)
+        # W-L (green wins, grey dash, red losses)
+        w_text = str(wins)
+        dash_text = "-"
+        l_text = str(losses)
+        wl_full = f"{wins}-{losses}"
+        wl_w = _get_text_size(stat_font, wl_full)[0]
+        wl_x = max(COL_WL_X, COL_WL_X + 40 - wl_w)
 
-        # Bans count (fixed position, red text if > 0)
-        ban_text = str(bans)
-        ban_w = _get_text_size(ban_font, ban_text)[0]
-        ban_x = max(COL_BANS_X, COL_BANS_X + 20 - ban_w)
-        if bans > 0:
-            draw.text((ban_x, stat_y), ban_text, fill=DISCORD_RED, font=ban_font)
+        w_width = _get_text_size(stat_font, w_text)[0]
+        dash_width = _get_text_size(stat_font, dash_text)[0]
+
+        draw.text((wl_x, stat_y), w_text, fill=DISCORD_GREEN, font=stat_font)
+        draw.text((wl_x + w_width, stat_y), dash_text, fill=DISCORD_GREY, font=stat_font)
+        draw.text((wl_x + w_width + dash_width, stat_y), l_text, fill=DISCORD_RED, font=stat_font)
+
+        # Win rate % (heatmap colored, right-aligned)
+        if games > 0:
+            wr_text = f"{win_rate * 100:.0f}%"
+            wr_color = _heatmap_winrate(win_rate)
         else:
-            draw.text((ban_x, stat_y), ban_text, fill=DISCORD_GREY, font=ban_font)
+            wr_text = "-"
+            wr_color = DISCORD_GREY
+        wr_w = _get_text_size(stat_font, wr_text)[0]
+        draw.text(
+            (max(COL_WR_X, COL_WR_X + 32 - wr_w), stat_y),
+            wr_text,
+            fill=wr_color,
+            font=stat_font,
+        )
 
         y += ROW_HEIGHT
 

@@ -2536,11 +2536,15 @@ class MatchRepository(BaseRepository, IMatchRepository):
         self, discord_ids: list[int], guild_id: int | None = None
     ) -> dict[int, int]:
         """
-        Extract ban data from enrichment_data JSON for matches where players participated.
+        Extract opposing-team ban data from enrichment_data for matches where players participated.
 
-        Counts how many times each hero was banned in matches where ANY of the specified
-        players participated. Each match is only counted once even if multiple players
-        from the list were in the same match.
+        Only counts bans made by the opposing team (i.e. bans targeted against the scouted
+        players). Each match is only counted once even if multiple players from the list
+        were in the same match.
+
+        Team mapping:
+        - Our team_number=1 (Radiant) → OpenDota team=0
+        - Our team_number=2 (Dire) → OpenDota team=1
 
         Args:
             discord_ids: List of Discord IDs to check
@@ -2557,11 +2561,10 @@ class MatchRepository(BaseRepository, IMatchRepository):
             cursor = conn.cursor()
             placeholders = ",".join("?" * len(discord_ids))
 
-            # Get unique match IDs where any of these players participated
-            # and that have enrichment_data
+            # Get matches with enrichment data and the team_number of each scouted player
             cursor.execute(
                 f"""
-                SELECT DISTINCT m.match_id, m.enrichment_data
+                SELECT m.match_id, m.enrichment_data, mp.team_number
                 FROM matches m
                 JOIN match_participants mp ON m.match_id = mp.match_id
                 WHERE mp.discord_id IN ({placeholders})
@@ -2573,25 +2576,82 @@ class MatchRepository(BaseRepository, IMatchRepository):
             )
             rows = cursor.fetchall()
 
-            # Parse enrichment_data and count bans
+            # Group by match_id: collect enrichment_data and team_numbers of scouted players
+            match_data: dict[int, dict] = {}
+            for row in rows:
+                match_id = row["match_id"]
+                if match_id not in match_data:
+                    match_data[match_id] = {
+                        "enrichment_data": row["enrichment_data"],
+                        "team_numbers": set(),
+                    }
+                match_data[match_id]["team_numbers"].add(row["team_number"])
+
+            # Parse enrichment_data and count only opposing-team bans
             ban_counts: dict[int, int] = {}
 
-            for row in rows:
-                enrichment_data = row["enrichment_data"]
+            for match_id, info in match_data.items():
+                enrichment_data = info["enrichment_data"]
+                team_numbers = info["team_numbers"]
                 if not enrichment_data:
                     continue
+
+                # Determine which OpenDota ban teams are "opposing"
+                # Our team_number 1 (Radiant) → opposing OpenDota team is 1 (Dire)
+                # Our team_number 2 (Dire) → opposing OpenDota team is 0 (Radiant)
+                opposing_ban_teams: set[int] = set()
+                for tn in team_numbers:
+                    if tn == 1:
+                        opposing_ban_teams.add(1)  # Dire bans
+                    elif tn == 2:
+                        opposing_ban_teams.add(0)  # Radiant bans
 
                 try:
                     data = json.loads(enrichment_data)
                     picks_bans = data.get("picks_bans", [])
 
                     for entry in picks_bans:
-                        # Only count bans (is_pick = false)
                         if entry.get("is_pick") is False:
-                            hero_id = entry.get("hero_id")
-                            if hero_id:
-                                ban_counts[hero_id] = ban_counts.get(hero_id, 0) + 1
+                            ban_team = entry.get("team")
+                            if ban_team in opposing_ban_teams:
+                                hero_id = entry.get("hero_id")
+                                if hero_id:
+                                    ban_counts[hero_id] = ban_counts.get(hero_id, 0) + 1
                 except (json.JSONDecodeError, TypeError, KeyError):
                     continue
 
             return ban_counts
+
+    def get_match_count_for_players(
+        self, discord_ids: list[int], guild_id: int | None = None
+    ) -> int:
+        """
+        Count unique matches where any of the specified players participated.
+
+        Args:
+            discord_ids: List of Discord IDs to check
+            guild_id: Guild ID to filter by
+
+        Returns:
+            Total number of unique matches
+        """
+        if not discord_ids:
+            return 0
+
+        normalized_guild = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            placeholders = ",".join("?" * len(discord_ids))
+            cursor.execute(
+                f"""
+                SELECT COUNT(DISTINCT mp.match_id) as match_count
+                FROM match_participants mp
+                JOIN matches m ON mp.match_id = m.match_id
+                WHERE mp.discord_id IN ({placeholders})
+                  AND m.guild_id = ?
+                  AND mp.guild_id = ?
+                """,
+                discord_ids + [normalized_guild, normalized_guild],
+            )
+            row = cursor.fetchone()
+            return row["match_count"] if row else 0
