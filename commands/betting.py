@@ -164,6 +164,32 @@ class BettingCommands(commands.Cog):
         svc = getattr(self.bot, "neon_degen_service", None)
         return svc if isinstance(svc, NeonDegenService) else None
 
+    async def match_autocomplete(
+        self, interaction: discord.Interaction, current: str
+    ) -> list[app_commands.Choice[int]]:
+        """Autocomplete for pending match IDs."""
+        guild_id = interaction.guild.id if interaction.guild else None
+        try:
+            pending = await asyncio.to_thread(
+                self.match_service.state_service.get_all_pending_matches, guild_id
+            )
+        except Exception:
+            return []
+
+        if not pending:
+            return []
+
+        choices = []
+        for match in pending:
+            pmid = match.get("pending_match_id")
+            if pmid is None:
+                continue
+            match_label = f"Match #{pmid}"
+            if current and current.lower() not in match_label.lower():
+                continue
+            choices.append(app_commands.Choice(name=match_label, value=pmid))
+        return choices[:25]  # Discord limit
+
     async def _send_neon_result(self, interaction: discord.Interaction, neon_result) -> None:
         """Send a NeonResult to the channel, auto-deleting after 60s."""
         try:
@@ -209,12 +235,20 @@ class BettingCommands(commands.Cog):
         except Exception:
             pass
 
-    async def _update_shuffle_message_wagers(self, guild_id: int | None) -> None:
+    async def _update_shuffle_message_wagers(
+        self, guild_id: int | None, pending_match_id: int | None = None
+    ) -> None:
         """
         Refresh the shuffle message's wager field with current totals.
         Updates both the main channel message and the thread copy.
+
+        Args:
+            guild_id: Guild ID
+            pending_match_id: Optional specific match ID for concurrent match support
         """
-        pending_state = await asyncio.to_thread(self.match_service.get_last_shuffle, guild_id)
+        pending_state = await asyncio.to_thread(
+            self.match_service.get_last_shuffle, guild_id, pending_match_id
+        )
         if not pending_state:
             return
 
@@ -229,7 +263,9 @@ class BettingCommands(commands.Cog):
         )
 
         # Update main channel message
-        message_info = await asyncio.to_thread(self.match_service.get_shuffle_message_info, guild_id)
+        message_info = await asyncio.to_thread(
+            self.match_service.state_service.get_shuffle_message_info, guild_id, pending_match_id
+        )
         message_id = message_info.get("message_id") if message_info else None
         channel_id = message_info.get("channel_id") if message_info else None
         if message_id and channel_id:
@@ -538,12 +574,13 @@ class BettingCommands(commands.Cog):
 
     @app_commands.command(
         name="bet",
-        description="Place a jopacoin bet on the current match (check balance with /balance)",
+        description="Place a jopacoin bet on a match (check balance with /balance)",
     )
     @app_commands.describe(
         team="Radiant or Dire",
         amount="Amount of jopacoin to wager (view balance with /balance)",
         leverage="Leverage multiplier (2x, 3x, 5x) - can cause debt!",
+        match="Match to bet on (optional - auto-selects if you're a participant or only one match exists)",
     )
     @app_commands.choices(
         team=[
@@ -557,12 +594,14 @@ class BettingCommands(commands.Cog):
             app_commands.Choice(name="5x", value=5),
         ],
     )
+    @app_commands.autocomplete(match=match_autocomplete)
     async def bet(
         self,
         interaction: discord.Interaction,
         team: app_commands.Choice[str],
         amount: int,
         leverage: app_commands.Choice[int] = None,
+        match: int = None,
     ):
         guild = interaction.guild if interaction.guild else None
         rl_gid = guild.id if guild else 0
@@ -591,10 +630,54 @@ class BettingCommands(commands.Cog):
             )
             return
 
-        pending_state = await asyncio.to_thread(self.match_service.get_last_shuffle, guild_id)
+        # Handle match selection for concurrent match support
+        pending_state = None
+        pending_match_id = match  # Optional match ID from parameter
+
+        if pending_match_id is not None:
+            # Explicit match ID provided - use that specific match
+            pending_state = await asyncio.to_thread(
+                self.match_service.state_service.get_last_shuffle, guild_id, pending_match_id
+            )
+            if not pending_state:
+                await interaction.followup.send(
+                    f"❌ Match #{pending_match_id} not found or already completed.", ephemeral=True
+                )
+                return
+        else:
+            # No match specified - try auto-detection
+            all_pending = await asyncio.to_thread(
+                self.match_service.state_service.get_all_pending_matches, guild_id
+            )
+            if not all_pending:
+                await interaction.followup.send("❌ No active match to bet on.", ephemeral=True)
+                return
+
+            if len(all_pending) == 1:
+                # Single match - use it (backward compatible)
+                pending_state = all_pending[0]
+            else:
+                # Multiple matches - try to find one the user is in
+                player_match = await asyncio.to_thread(
+                    self.match_service.state_service.get_pending_match_for_player, guild_id, user_id
+                )
+                if player_match:
+                    pending_state = player_match
+                else:
+                    # User is a spectator with multiple matches - require explicit selection
+                    match_list = ", ".join(f"Match #{m.get('pending_match_id')}" for m in all_pending if m.get('pending_match_id'))
+                    await interaction.followup.send(
+                        f"❌ Multiple matches in progress ({match_list}). "
+                        "Please specify which match to bet on using the `match` parameter.",
+                        ephemeral=True,
+                    )
+                    return
+
         if not pending_state:
             await interaction.followup.send("❌ No active match to bet on.", ephemeral=True)
             return
+
+        pending_match_id = pending_state.get("pending_match_id")
 
         # Unified betting through BettingService (works for both shuffle and draft modes)
         lev = leverage.value if leverage else 1
@@ -611,7 +694,7 @@ class BettingCommands(commands.Cog):
             await interaction.followup.send(f"❌ {exc}", ephemeral=True)
             return
 
-        await self._update_shuffle_message_wagers(guild_id)
+        await self._update_shuffle_message_wagers(guild_id, pending_match_id)
 
         # Build response message
         betting_mode = pending_state.get("betting_mode", "pool") if pending_state else "pool"
@@ -619,15 +702,18 @@ class BettingCommands(commands.Cog):
         if betting_mode == "pool":
             pool_warning = "\n⚠️ Pool mode: odds may shift as more bets come in. Use `/mybets` to check current EV."
 
+        # Include match ID note if there's a pending_match_id
+        match_note = f" (Match #{pending_match_id})" if pending_match_id else ""
+
         if lev > 1:
             await interaction.followup.send(
-                f"Bet placed: {amount} {JOPACOIN_EMOTE} on {team.name} at {lev}x leverage "
+                f"Bet placed{match_note}: {amount} {JOPACOIN_EMOTE} on {team.name} at {lev}x leverage "
                 f"(effective: {effective_bet} {JOPACOIN_EMOTE}).{pool_warning}",
                 ephemeral=True,
             )
         else:
             await interaction.followup.send(
-                f"Bet placed: {amount} {JOPACOIN_EMOTE} on {team.name}.{pool_warning}",
+                f"Bet placed{match_note}: {amount} {JOPACOIN_EMOTE} on {team.name}.{pool_warning}",
                 ephemeral=True,
             )
 
@@ -717,81 +803,108 @@ class BettingCommands(commands.Cog):
             return
 
         guild_id = interaction.guild.id if interaction.guild else None
-        pending_state = await asyncio.to_thread(self.match_service.get_last_shuffle, guild_id)
-        bets = await asyncio.to_thread(
-            functools.partial(
-                self.betting_service.get_pending_bets,
-                guild_id, interaction.user.id, pending_state=pending_state,
-            )
+
+        # Get all pending bets for the user (across all matches)
+        all_bets = await asyncio.to_thread(
+            self.betting_service.bet_repo.get_all_player_pending_bets,
+            guild_id, interaction.user.id
         )
-        if not bets:
+        if not all_bets:
             await interaction.followup.send("You have no active bets.", ephemeral=True)
             return
 
-        # Calculate totals across all bets
-        total_amount = sum(b["amount"] for b in bets)
-        total_effective = sum(b["amount"] * (b.get("leverage", 1) or 1) for b in bets)
-        team_name = bets[0]["team_bet_on"].title()  # All bets are on the same team
+        # Get all pending matches for context
+        all_pending = await asyncio.to_thread(
+            self.match_service.state_service.get_all_pending_matches, guild_id
+        )
+        pending_by_id = {m.get("pending_match_id"): m for m in all_pending if m.get("pending_match_id")}
 
-        # Build message with each bet enumerated
-        bet_lines = []
-        for i, bet in enumerate(bets, 1):
-            leverage = bet.get("leverage", 1) or 1
-            effective = bet["amount"] * leverage
-            time_str = f"<t:{int(bet['bet_time'])}:t>"
-            is_blind = bet.get("is_blind", 0)
-            auto_tag = " (auto)" if is_blind else ""
-            if leverage > 1:
-                bet_lines.append(
-                    f"{i}. {bet['amount']} {JOPACOIN_EMOTE} at {leverage}x "
-                    f"(effective: {effective} {JOPACOIN_EMOTE}){auto_tag} — {time_str}"
-                )
+        # Group bets by pending_match_id
+        bets_by_match: dict[int | None, list[dict]] = {}
+        for bet in all_bets:
+            pmid = bet.get("pending_match_id")
+            if pmid not in bets_by_match:
+                bets_by_match[pmid] = []
+            bets_by_match[pmid].append(bet)
+
+        # Build output for each match
+        output_sections = []
+        for pmid, bets in bets_by_match.items():
+            pending_state = pending_by_id.get(pmid) if pmid else None
+
+            # Calculate totals for this match
+            total_amount = sum(b["amount"] for b in bets)
+            total_effective = sum(b["amount"] * (b.get("leverage", 1) or 1) for b in bets)
+            team_name = bets[0]["team_bet_on"].title()
+
+            # Build bet lines
+            bet_lines = []
+            for i, bet in enumerate(bets, 1):
+                leverage = bet.get("leverage", 1) or 1
+                effective = bet["amount"] * leverage
+                time_str = f"<t:{int(bet['bet_time'])}:t>"
+                is_blind = bet.get("is_blind", 0)
+                auto_tag = " (auto)" if is_blind else ""
+                if leverage > 1:
+                    bet_lines.append(
+                        f"{i}. {bet['amount']} {JOPACOIN_EMOTE} at {leverage}x "
+                        f"(effective: {effective} {JOPACOIN_EMOTE}){auto_tag} — {time_str}"
+                    )
+                else:
+                    bet_lines.append(f"{i}. {bet['amount']} {JOPACOIN_EMOTE}{auto_tag} — {time_str}")
+
+            # Header with match ID if multiple matches
+            match_label = f" (Match #{pmid})" if pmid and len(bets_by_match) > 1 else ""
+            if len(bets) == 1:
+                header = f"**Active bet on {team_name}{match_label}:**"
             else:
-                bet_lines.append(f"{i}. {bet['amount']} {JOPACOIN_EMOTE}{auto_tag} — {time_str}")
+                header = f"**Active bets on {team_name}{match_label}** ({len(bets)} bets):"
 
-        # Header with totals
-        if len(bets) == 1:
-            header = f"**Active bet on {team_name}:**"
+            # Show total if multiple bets
+            if len(bets) > 1:
+                if total_amount != total_effective:
+                    bet_lines.append(
+                        f"\n**Total:** {total_amount} {JOPACOIN_EMOTE} "
+                        f"(effective: {total_effective} {JOPACOIN_EMOTE})"
+                    )
+                else:
+                    bet_lines.append(f"\n**Total:** {total_amount} {JOPACOIN_EMOTE}")
+
+            section_msg = header + "\n" + "\n".join(bet_lines)
+
+            # Add EV info for pool mode
+            betting_mode = pending_state.get("betting_mode", "pool") if pending_state else "pool"
+            if betting_mode == "pool" and pending_state:
+                totals = await asyncio.to_thread(
+                    functools.partial(self.betting_service.get_pot_odds, guild_id, pending_state=pending_state)
+                )
+                total_pool = totals["radiant"] + totals["dire"]
+                my_team_total = totals[bets[0]["team_bet_on"]]
+
+                if my_team_total > 0 and total_pool > 0:
+                    my_share = total_effective / my_team_total
+                    potential_payout = int(total_pool * my_share)
+                    other_team = "dire" if bets[0]["team_bet_on"] == "radiant" else "radiant"
+                    odds_ratio = totals[other_team] / my_team_total if my_team_total > 0 else 0
+
+                    section_msg += (
+                        f"\n\n📊 **Current Pool Odds** (may change):"
+                        f"\nTotal pool: {total_pool} {JOPACOIN_EMOTE}"
+                        f"\nYour team ({team_name}): {my_team_total} {JOPACOIN_EMOTE}"
+                        f"\nIf you win: ~{potential_payout} {JOPACOIN_EMOTE} ({odds_ratio:.2f}:1 odds)"
+                    )
+            elif betting_mode == "house":
+                # House mode: 1:1 payout
+                potential_payout = total_effective * 2
+                section_msg += f"\n\nIf you win: {potential_payout} {JOPACOIN_EMOTE} (1:1 odds)"
+
+            output_sections.append(section_msg)
+
+        # Join all sections with a separator if multiple matches
+        if len(output_sections) > 1:
+            base_msg = "\n\n---\n\n".join(output_sections)
         else:
-            header = f"**Active bets on {team_name}** ({len(bets)} bets):"
-
-        # Show total if multiple bets
-        if len(bets) > 1:
-            if total_amount != total_effective:
-                bet_lines.append(
-                    f"\n**Total:** {total_amount} {JOPACOIN_EMOTE} "
-                    f"(effective: {total_effective} {JOPACOIN_EMOTE})"
-                )
-            else:
-                bet_lines.append(f"\n**Total:** {total_amount} {JOPACOIN_EMOTE}")
-
-        base_msg = header + "\n" + "\n".join(bet_lines)
-
-        # Add EV info for pool mode
-        betting_mode = pending_state.get("betting_mode", "pool") if pending_state else "pool"
-        if betting_mode == "pool":
-            totals = await asyncio.to_thread(
-                functools.partial(self.betting_service.get_pot_odds, guild_id, pending_state=pending_state)
-            )
-            total_pool = totals["radiant"] + totals["dire"]
-            my_team_total = totals[bets[0]["team_bet_on"]]
-
-            if my_team_total > 0 and total_pool > 0:
-                my_share = total_effective / my_team_total
-                potential_payout = int(total_pool * my_share)
-                other_team = "dire" if bets[0]["team_bet_on"] == "radiant" else "radiant"
-                odds_ratio = totals[other_team] / my_team_total if my_team_total > 0 else 0
-
-                base_msg += (
-                    f"\n\n📊 **Current Pool Odds** (may change):"
-                    f"\nTotal pool: {total_pool} {JOPACOIN_EMOTE}"
-                    f"\nYour team ({team_name}): {my_team_total} {JOPACOIN_EMOTE}"
-                    f"\nIf you win: ~{potential_payout} {JOPACOIN_EMOTE} ({odds_ratio:.2f}:1 odds)"
-                )
-        elif betting_mode == "house":
-            # House mode: 1:1 payout
-            potential_payout = total_effective * 2
-            base_msg += f"\n\nIf you win: {potential_payout} {JOPACOIN_EMOTE} (1:1 odds)"
+            base_msg = output_sections[0]
 
         await interaction.followup.send(base_msg, ephemeral=True)
 

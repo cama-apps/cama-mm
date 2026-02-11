@@ -1781,6 +1781,7 @@ class DraftCommands(commands.Cog):
                             dire_ids=state.dire_player_ids,
                             shuffle_timestamp=pending_state.get("shuffle_timestamp"),
                             is_bomb_pot=is_bomb_pot,
+                            pending_match_id=pending_state.get("pending_match_id"),
                         )
                     )
                     if blind_result and blind_result.get("created", 0) > 0:
@@ -1835,6 +1836,7 @@ class DraftCommands(commands.Cog):
                             channel_id=original_message.channel.id,
                             jump_url=original_message.jump_url,
                             origin_channel_id=state.draft_channel_id,
+                            pending_match_id=pending_state.get("pending_match_id") if pending_state else None,
                         )
                     )
             except Exception as exc:

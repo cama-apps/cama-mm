@@ -50,6 +50,7 @@ class BetRepository(BaseRepository, IBetRepository):
         is_blind: bool = False,
         odds_at_placement: float | None = None,
         allow_negative: bool = False,
+        pending_match_id: int | None = None,
     ) -> int:
         """
         Atomically place a bet with optional leverage:
@@ -62,6 +63,7 @@ class BetRepository(BaseRepository, IBetRepository):
             is_blind: True if this is an auto-liquidity blind bet
             odds_at_placement: The odds multiplier at time of bet placement (for /bets display)
             allow_negative: If True, allows going into debt at 1x leverage (for bomb pot antes)
+            pending_match_id: Optional ID of the pending match this bet is for (for concurrent matches)
 
         This prevents race conditions where concurrent calls could double-spend.
         """
@@ -79,14 +81,25 @@ class BetRepository(BaseRepository, IBetRepository):
             cursor = conn.cursor()
 
             # Check for existing bets - allow additional bets only on the same team
-            cursor.execute(
-                """
-                SELECT team_bet_on
-                FROM bets
-                WHERE guild_id = ? AND discord_id = ? AND match_id IS NULL AND bet_time >= ?
-                """,
-                (normalized_guild, discord_id, int(since_ts)),
-            )
+            # When pending_match_id is provided, filter by it; otherwise use since_ts
+            if pending_match_id is not None:
+                cursor.execute(
+                    """
+                    SELECT team_bet_on
+                    FROM bets
+                    WHERE guild_id = ? AND discord_id = ? AND match_id IS NULL AND pending_match_id = ?
+                    """,
+                    (normalized_guild, discord_id, pending_match_id),
+                )
+            else:
+                cursor.execute(
+                    """
+                    SELECT team_bet_on
+                    FROM bets
+                    WHERE guild_id = ? AND discord_id = ? AND match_id IS NULL AND bet_time >= ?
+                    """,
+                    (normalized_guild, discord_id, int(since_ts)),
+                )
             existing_bets = cursor.fetchall()
             if existing_bets:
                 existing_team = existing_bets[0]["team_bet_on"]
@@ -139,10 +152,10 @@ class BetRepository(BaseRepository, IBetRepository):
 
             cursor.execute(
                 """
-                INSERT INTO bets (guild_id, match_id, discord_id, team_bet_on, amount, bet_time, leverage, is_blind, odds_at_placement)
-                VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO bets (guild_id, match_id, discord_id, team_bet_on, amount, bet_time, leverage, is_blind, odds_at_placement, pending_match_id)
+                VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (normalized_guild, discord_id, team, amount, bet_time, leverage, 1 if is_blind else 0, odds_at_placement),
+                (normalized_guild, discord_id, team, amount, bet_time, leverage, 1 if is_blind else 0, odds_at_placement, pending_match_id),
             )
             return cursor.lastrowid
 
@@ -158,6 +171,7 @@ class BetRepository(BaseRepository, IBetRepository):
         max_debt: int = 500,
         is_blind: bool = False,
         odds_at_placement: float | None = None,
+        pending_match_id: int | None = None,
     ) -> int:
         """
         Atomically place a bet with optional leverage using the DB as the source of truth.
@@ -166,8 +180,12 @@ class BetRepository(BaseRepository, IBetRepository):
         - there is an active pending match
         - betting is still open (bet_lock_until)
         - participants may only bet on their own team
-        - per-match-window duplicate-bet prevention (shuffle_timestamp)
+        - per-match-window duplicate-bet prevention (pending_match_id)
         - sufficient balance or debt limit, then debits + inserts bet in the same transaction
+
+        Args:
+            pending_match_id: Optional ID of specific pending match. If None, auto-detects
+                             (works for single pending match, or if player is in a match)
         """
         if amount <= 0:
             raise ValueError("Bet amount must be positive.")
@@ -182,14 +200,47 @@ class BetRepository(BaseRepository, IBetRepository):
         with self.atomic_transaction() as conn:
             cursor = conn.cursor()
 
-            cursor.execute(
-                "SELECT payload FROM pending_matches WHERE guild_id = ?",
-                (normalized_guild,),
-            )
-            row = cursor.fetchone()
+            # Get the pending match - either by ID or auto-detect
+            if pending_match_id is not None:
+                cursor.execute(
+                    "SELECT pending_match_id, payload FROM pending_matches WHERE pending_match_id = ? AND guild_id = ?",
+                    (pending_match_id, normalized_guild),
+                )
+                row = cursor.fetchone()
+            else:
+                # Auto-detect: if single match, use it; if multiple, check if player is in one
+                cursor.execute(
+                    "SELECT pending_match_id, payload FROM pending_matches WHERE guild_id = ?",
+                    (normalized_guild,),
+                )
+                rows = cursor.fetchall()
+                if not rows:
+                    raise ValueError("No pending match to bet on.")
+
+                if len(rows) == 1:
+                    row = rows[0]
+                else:
+                    # Multiple matches - find the one the player is in
+                    row = None
+                    for r in rows:
+                        try:
+                            p = json.loads(r["payload"])
+                            radiant = set(p.get("radiant_team_ids") or [])
+                            dire = set(p.get("dire_team_ids") or [])
+                            if discord_id in radiant or discord_id in dire:
+                                row = r
+                                break
+                        except Exception:
+                            continue
+                    if row is None:
+                        raise ValueError(
+                            "Multiple pending matches exist. Please specify which match to bet on."
+                        )
+
             if not row:
                 raise ValueError("No pending match to bet on.")
 
+            actual_pending_match_id = row["pending_match_id"]
             try:
                 payload = json.loads(row["payload"])
             except Exception:
@@ -199,10 +250,6 @@ class BetRepository(BaseRepository, IBetRepository):
             if lock_until is None or int(bet_time) >= int(lock_until):
                 raise ValueError("Betting is closed for the current match.")
 
-            since_ts = payload.get("shuffle_timestamp")
-            if since_ts is None:
-                raise ValueError("No pending match to bet on.")
-
             radiant_ids = set(payload.get("radiant_team_ids") or [])
             dire_ids = set(payload.get("dire_team_ids") or [])
             if discord_id in radiant_ids and team != "radiant":
@@ -211,13 +258,14 @@ class BetRepository(BaseRepository, IBetRepository):
                 raise ValueError("Participants on Dire can only bet on Dire.")
 
             # Check for existing bets - allow additional bets only on the same team
+            # Filter by pending_match_id to support concurrent matches
             cursor.execute(
                 """
                 SELECT team_bet_on
                 FROM bets
-                WHERE guild_id = ? AND discord_id = ? AND match_id IS NULL AND bet_time >= ?
+                WHERE guild_id = ? AND discord_id = ? AND match_id IS NULL AND pending_match_id = ?
                 """,
-                (normalized_guild, discord_id, int(since_ts)),
+                (normalized_guild, discord_id, actual_pending_match_id),
             )
             existing_bets = cursor.fetchall()
             if existing_bets:
@@ -265,99 +313,202 @@ class BetRepository(BaseRepository, IBetRepository):
             )
             cursor.execute(
                 """
-                INSERT INTO bets (guild_id, match_id, discord_id, team_bet_on, amount, bet_time, leverage, is_blind, odds_at_placement)
-                VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO bets (guild_id, match_id, discord_id, team_bet_on, amount, bet_time, leverage, is_blind, odds_at_placement, pending_match_id)
+                VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (normalized_guild, discord_id, team, amount, bet_time, leverage, 1 if is_blind else 0, odds_at_placement),
+                (normalized_guild, discord_id, team, amount, bet_time, leverage, 1 if is_blind else 0, odds_at_placement, actual_pending_match_id),
             )
             return cursor.lastrowid
 
     def get_player_pending_bet(
-        self, guild_id: int | None, discord_id: int, since_ts: int | None = None
+        self, guild_id: int | None, discord_id: int, since_ts: int | None = None,
+        pending_match_id: int | None = None,
     ) -> dict | None:
         """
         Return the bet placed by a player for the pending match in the guild.
+
+        Args:
+            pending_match_id: If provided, filter by this specific pending match
         """
         normalized_guild = self.normalize_guild_id(guild_id)
-        ts_filter = "AND bet_time >= ?" if since_ts is not None else ""
-        params = (
-            (normalized_guild, discord_id)
-            if since_ts is None
-            else (normalized_guild, discord_id, since_ts)
-        )
         with self.connection() as conn:
             cursor = conn.cursor()
-            cursor.execute(
-                f"""
-                SELECT bet_id, guild_id, match_id, discord_id, team_bet_on, amount, bet_time, created_at,
-                       COALESCE(leverage, 1) as leverage,
-                       COALESCE(is_blind, 0) as is_blind,
-                       odds_at_placement
-                FROM bets
-                WHERE guild_id = ? AND discord_id = ? AND match_id IS NULL
-                {ts_filter}
-                """,
-                params,
-            )
+
+            if pending_match_id is not None:
+                cursor.execute(
+                    """
+                    SELECT bet_id, guild_id, match_id, discord_id, team_bet_on, amount, bet_time, created_at,
+                           COALESCE(leverage, 1) as leverage,
+                           COALESCE(is_blind, 0) as is_blind,
+                           odds_at_placement, pending_match_id
+                    FROM bets
+                    WHERE guild_id = ? AND discord_id = ? AND match_id IS NULL AND pending_match_id = ?
+                    """,
+                    (normalized_guild, discord_id, pending_match_id),
+                )
+            elif since_ts is not None:
+                cursor.execute(
+                    """
+                    SELECT bet_id, guild_id, match_id, discord_id, team_bet_on, amount, bet_time, created_at,
+                           COALESCE(leverage, 1) as leverage,
+                           COALESCE(is_blind, 0) as is_blind,
+                           odds_at_placement, pending_match_id
+                    FROM bets
+                    WHERE guild_id = ? AND discord_id = ? AND match_id IS NULL AND bet_time >= ?
+                    """,
+                    (normalized_guild, discord_id, since_ts),
+                )
+            else:
+                cursor.execute(
+                    """
+                    SELECT bet_id, guild_id, match_id, discord_id, team_bet_on, amount, bet_time, created_at,
+                           COALESCE(leverage, 1) as leverage,
+                           COALESCE(is_blind, 0) as is_blind,
+                           odds_at_placement, pending_match_id
+                    FROM bets
+                    WHERE guild_id = ? AND discord_id = ? AND match_id IS NULL
+                    """,
+                    (normalized_guild, discord_id),
+                )
 
             row = cursor.fetchone()
             return dict(row) if row else None
 
     def get_player_pending_bets(
-        self, guild_id: int | None, discord_id: int, since_ts: int | None = None
+        self, guild_id: int | None, discord_id: int, since_ts: int | None = None,
+        pending_match_id: int | None = None,
     ) -> list[dict]:
         """
         Return all bets placed by a player for the pending match in the guild.
         Ordered by bet_time ascending.
+
+        Args:
+            pending_match_id: If provided, filter by this specific pending match
         """
         normalized_guild = self.normalize_guild_id(guild_id)
-        ts_filter = "AND bet_time >= ?" if since_ts is not None else ""
-        params = (
-            (normalized_guild, discord_id)
-            if since_ts is None
-            else (normalized_guild, discord_id, since_ts)
-        )
+        with self.connection() as conn:
+            cursor = conn.cursor()
+
+            if pending_match_id is not None:
+                cursor.execute(
+                    """
+                    SELECT bet_id, guild_id, match_id, discord_id, team_bet_on, amount, bet_time, created_at,
+                           COALESCE(leverage, 1) as leverage,
+                           COALESCE(is_blind, 0) as is_blind,
+                           odds_at_placement, pending_match_id
+                    FROM bets
+                    WHERE guild_id = ? AND discord_id = ? AND match_id IS NULL AND pending_match_id = ?
+                    ORDER BY bet_time ASC
+                    """,
+                    (normalized_guild, discord_id, pending_match_id),
+                )
+            elif since_ts is not None:
+                cursor.execute(
+                    """
+                    SELECT bet_id, guild_id, match_id, discord_id, team_bet_on, amount, bet_time, created_at,
+                           COALESCE(leverage, 1) as leverage,
+                           COALESCE(is_blind, 0) as is_blind,
+                           odds_at_placement, pending_match_id
+                    FROM bets
+                    WHERE guild_id = ? AND discord_id = ? AND match_id IS NULL AND bet_time >= ?
+                    ORDER BY bet_time ASC
+                    """,
+                    (normalized_guild, discord_id, since_ts),
+                )
+            else:
+                cursor.execute(
+                    """
+                    SELECT bet_id, guild_id, match_id, discord_id, team_bet_on, amount, bet_time, created_at,
+                           COALESCE(leverage, 1) as leverage,
+                           COALESCE(is_blind, 0) as is_blind,
+                           odds_at_placement, pending_match_id
+                    FROM bets
+                    WHERE guild_id = ? AND discord_id = ? AND match_id IS NULL
+                    ORDER BY bet_time ASC
+                    """,
+                    (normalized_guild, discord_id),
+                )
+            return [dict(row) for row in cursor.fetchall()]
+
+    def get_all_player_pending_bets(
+        self, guild_id: int | None, discord_id: int
+    ) -> list[dict]:
+        """
+        Return all pending bets for a player across ALL pending matches.
+        Useful for /mybets display when multiple matches are pending.
+
+        Returns bets grouped by pending_match_id.
+        """
+        normalized_guild = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                f"""
+                """
                 SELECT bet_id, guild_id, match_id, discord_id, team_bet_on, amount, bet_time, created_at,
                        COALESCE(leverage, 1) as leverage,
                        COALESCE(is_blind, 0) as is_blind,
-                       odds_at_placement
+                       odds_at_placement, pending_match_id
                 FROM bets
                 WHERE guild_id = ? AND discord_id = ? AND match_id IS NULL
-                {ts_filter}
-                ORDER BY bet_time ASC
+                ORDER BY pending_match_id, bet_time ASC
                 """,
-                params,
+                (normalized_guild, discord_id),
             )
             return [dict(row) for row in cursor.fetchall()]
 
     def get_bets_for_pending_match(
-        self, guild_id: int | None, since_ts: int | None = None
+        self, guild_id: int | None, since_ts: int | None = None,
+        pending_match_id: int | None = None,
     ) -> list[dict]:
         """
         Return bets associated with the pending match for a guild.
+
+        Args:
+            pending_match_id: If provided, filter by this specific pending match
         """
         normalized_guild = self.normalize_guild_id(guild_id)
-        ts_filter = "AND bet_time >= ?" if since_ts is not None else ""
-        params = (normalized_guild,) if since_ts is None else (normalized_guild, since_ts)
         with self.connection() as conn:
             cursor = conn.cursor()
-            cursor.execute(
-                f"""
-                SELECT bet_id, guild_id, match_id, discord_id, team_bet_on, amount, bet_time, created_at,
-                       COALESCE(leverage, 1) as leverage,
-                       COALESCE(is_blind, 0) as is_blind,
-                       odds_at_placement
-                FROM bets
-                WHERE guild_id = ? AND match_id IS NULL
-                {ts_filter}
-                ORDER BY bet_time ASC
-                """,
-                params,
-            )
+
+            if pending_match_id is not None:
+                cursor.execute(
+                    """
+                    SELECT bet_id, guild_id, match_id, discord_id, team_bet_on, amount, bet_time, created_at,
+                           COALESCE(leverage, 1) as leverage,
+                           COALESCE(is_blind, 0) as is_blind,
+                           odds_at_placement, pending_match_id
+                    FROM bets
+                    WHERE guild_id = ? AND match_id IS NULL AND pending_match_id = ?
+                    ORDER BY bet_time ASC
+                    """,
+                    (normalized_guild, pending_match_id),
+                )
+            elif since_ts is not None:
+                cursor.execute(
+                    """
+                    SELECT bet_id, guild_id, match_id, discord_id, team_bet_on, amount, bet_time, created_at,
+                           COALESCE(leverage, 1) as leverage,
+                           COALESCE(is_blind, 0) as is_blind,
+                           odds_at_placement, pending_match_id
+                    FROM bets
+                    WHERE guild_id = ? AND match_id IS NULL AND bet_time >= ?
+                    ORDER BY bet_time ASC
+                    """,
+                    (normalized_guild, since_ts),
+                )
+            else:
+                cursor.execute(
+                    """
+                    SELECT bet_id, guild_id, match_id, discord_id, team_bet_on, amount, bet_time, created_at,
+                           COALESCE(leverage, 1) as leverage,
+                           COALESCE(is_blind, 0) as is_blind,
+                           odds_at_placement, pending_match_id
+                    FROM bets
+                    WHERE guild_id = ? AND match_id IS NULL
+                    ORDER BY bet_time ASC
+                    """,
+                    (normalized_guild,),
+                )
             return [dict(row) for row in cursor.fetchall()]
 
     def delete_bets_for_guild(self, guild_id: int | None) -> int:
@@ -369,64 +520,122 @@ class BetRepository(BaseRepository, IBetRepository):
             return cursor.rowcount
 
     def get_total_bets_by_guild(
-        self, guild_id: int | None, since_ts: int | None = None
+        self, guild_id: int | None, since_ts: int | None = None,
+        pending_match_id: int | None = None,
     ) -> dict[str, int]:
         """Return total effective wager amounts grouped by team for a guild.
 
         Effective amount = amount * leverage, used for pool mode calculations.
+
+        Args:
+            pending_match_id: If provided, filter by this specific pending match
         """
         normalized_guild = self.normalize_guild_id(guild_id)
-        ts_filter = "AND bet_time >= ?" if since_ts is not None else ""
-        params = (normalized_guild,) if since_ts is None else (normalized_guild, since_ts)
         with self.connection() as conn:
             cursor = conn.cursor()
-            cursor.execute(
-                f"""
-                SELECT team_bet_on, SUM(amount * COALESCE(leverage, 1)) as total
-                FROM bets
-                WHERE guild_id = ? AND match_id IS NULL
-                {ts_filter}
-                GROUP BY team_bet_on
-                """,
-                params,
-            )
+
+            if pending_match_id is not None:
+                cursor.execute(
+                    """
+                    SELECT team_bet_on, SUM(amount * COALESCE(leverage, 1)) as total
+                    FROM bets
+                    WHERE guild_id = ? AND match_id IS NULL AND pending_match_id = ?
+                    GROUP BY team_bet_on
+                    """,
+                    (normalized_guild, pending_match_id),
+                )
+            elif since_ts is not None:
+                cursor.execute(
+                    """
+                    SELECT team_bet_on, SUM(amount * COALESCE(leverage, 1)) as total
+                    FROM bets
+                    WHERE guild_id = ? AND match_id IS NULL AND bet_time >= ?
+                    GROUP BY team_bet_on
+                    """,
+                    (normalized_guild, since_ts),
+                )
+            else:
+                cursor.execute(
+                    """
+                    SELECT team_bet_on, SUM(amount * COALESCE(leverage, 1)) as total
+                    FROM bets
+                    WHERE guild_id = ? AND match_id IS NULL
+                    GROUP BY team_bet_on
+                    """,
+                    (normalized_guild,),
+                )
             totals = {row["team_bet_on"]: row["total"] for row in cursor.fetchall()}
             return {team: totals.get(team, 0) for team in self.VALID_TEAMS}
 
     def assign_match_id(
-        self, guild_id: int | None, match_id: int, since_ts: int | None = None
+        self, guild_id: int | None, match_id: int, since_ts: int | None = None,
+        pending_match_id: int | None = None,
     ) -> None:
-        """Tie all pending bets for the current match window to a recorded match."""
-        normalized_guild = self.normalize_guild_id(guild_id)
-        ts_filter = "AND bet_time >= ?" if since_ts is not None else ""
-        params = (
-            (match_id, normalized_guild)
-            if since_ts is None
-            else (match_id, normalized_guild, since_ts)
-        )
-        with self.connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                f"""
-                UPDATE bets
-                SET match_id = ?
-                WHERE guild_id = ? AND match_id IS NULL
-                {ts_filter}
-                """,
-                params,
-            )
+        """Tie all pending bets for the current match window to a recorded match.
 
-    def delete_pending_bets(self, guild_id: int | None, since_ts: int | None = None) -> int:
-        """Delete pending bets (match_id IS NULL) for the current match window."""
+        Args:
+            pending_match_id: If provided, only update bets for this specific pending match
+        """
         normalized_guild = self.normalize_guild_id(guild_id)
-        ts_filter = "AND bet_time >= ?" if since_ts is not None else ""
-        params = (normalized_guild,) if since_ts is None else (normalized_guild, since_ts)
         with self.connection() as conn:
             cursor = conn.cursor()
-            cursor.execute(
-                f"DELETE FROM bets WHERE guild_id = ? AND match_id IS NULL {ts_filter}",
-                params,
-            )
+
+            if pending_match_id is not None:
+                cursor.execute(
+                    """
+                    UPDATE bets
+                    SET match_id = ?
+                    WHERE guild_id = ? AND match_id IS NULL AND pending_match_id = ?
+                    """,
+                    (match_id, normalized_guild, pending_match_id),
+                )
+            elif since_ts is not None:
+                cursor.execute(
+                    """
+                    UPDATE bets
+                    SET match_id = ?
+                    WHERE guild_id = ? AND match_id IS NULL AND bet_time >= ?
+                    """,
+                    (match_id, normalized_guild, since_ts),
+                )
+            else:
+                cursor.execute(
+                    """
+                    UPDATE bets
+                    SET match_id = ?
+                    WHERE guild_id = ? AND match_id IS NULL
+                    """,
+                    (match_id, normalized_guild),
+                )
+
+    def delete_pending_bets(
+        self, guild_id: int | None, since_ts: int | None = None,
+        pending_match_id: int | None = None,
+    ) -> int:
+        """Delete pending bets (match_id IS NULL) for the current match window.
+
+        Args:
+            pending_match_id: If provided, only delete bets for this specific pending match
+        """
+        normalized_guild = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            cursor = conn.cursor()
+
+            if pending_match_id is not None:
+                cursor.execute(
+                    "DELETE FROM bets WHERE guild_id = ? AND match_id IS NULL AND pending_match_id = ?",
+                    (normalized_guild, pending_match_id),
+                )
+            elif since_ts is not None:
+                cursor.execute(
+                    "DELETE FROM bets WHERE guild_id = ? AND match_id IS NULL AND bet_time >= ?",
+                    (normalized_guild, since_ts),
+                )
+            else:
+                cursor.execute(
+                    "DELETE FROM bets WHERE guild_id = ? AND match_id IS NULL",
+                    (normalized_guild,),
+                )
             return cursor.rowcount
 
     def settle_pending_bets_atomic(
@@ -438,6 +647,7 @@ class BetRepository(BaseRepository, IBetRepository):
         winning_team: str,
         house_payout_multiplier: float,
         betting_mode: str = "pool",
+        pending_match_id: int | None = None,
     ) -> dict[str, list[dict]]:
         """
         Atomically settle bets for the current match window:
@@ -446,20 +656,32 @@ class BetRepository(BaseRepository, IBetRepository):
 
         Args:
             betting_mode: "pool" for parimutuel betting, "house" for 1:1 payouts
+            pending_match_id: If provided, only settle bets for this specific pending match
         """
         normalized_guild = self.normalize_guild_id(guild_id)
         distributions: dict[str, list[dict]] = {"winners": [], "losers": []}
 
         with self.connection() as conn:
             cursor = conn.cursor()
-            cursor.execute(
-                """
-                SELECT bet_id, discord_id, team_bet_on, amount, COALESCE(leverage, 1) as leverage
-                FROM bets
-                WHERE guild_id = ? AND match_id IS NULL AND bet_time >= ?
-                """,
-                (normalized_guild, since_ts),
-            )
+
+            if pending_match_id is not None:
+                cursor.execute(
+                    """
+                    SELECT bet_id, discord_id, team_bet_on, amount, COALESCE(leverage, 1) as leverage
+                    FROM bets
+                    WHERE guild_id = ? AND match_id IS NULL AND pending_match_id = ?
+                    """,
+                    (normalized_guild, pending_match_id),
+                )
+            else:
+                cursor.execute(
+                    """
+                    SELECT bet_id, discord_id, team_bet_on, amount, COALESCE(leverage, 1) as leverage
+                    FROM bets
+                    WHERE guild_id = ? AND match_id IS NULL AND bet_time >= ?
+                    """,
+                    (normalized_guild, since_ts),
+                )
             rows = cursor.fetchall()
             if not rows:
                 return distributions
@@ -490,14 +712,25 @@ class BetRepository(BaseRepository, IBetRepository):
                     payout_updates,
                 )
 
-            cursor.execute(
-                """
-                UPDATE bets
-                SET match_id = ?
-                WHERE guild_id = ? AND match_id IS NULL AND bet_time >= ?
-                """,
-                (match_id, normalized_guild, since_ts),
-            )
+            # Tag settled bets with match_id
+            if pending_match_id is not None:
+                cursor.execute(
+                    """
+                    UPDATE bets
+                    SET match_id = ?
+                    WHERE guild_id = ? AND match_id IS NULL AND pending_match_id = ?
+                    """,
+                    (match_id, normalized_guild, pending_match_id),
+                )
+            else:
+                cursor.execute(
+                    """
+                    UPDATE bets
+                    SET match_id = ?
+                    WHERE guild_id = ? AND match_id IS NULL AND bet_time >= ?
+                    """,
+                    (match_id, normalized_guild, since_ts),
+                )
 
         return distributions
 
@@ -640,24 +873,40 @@ class BetRepository(BaseRepository, IBetRepository):
 
         return distributions, balance_deltas, payout_updates
 
-    def refund_pending_bets_atomic(self, *, guild_id: int | None, since_ts: int) -> int:
+    def refund_pending_bets_atomic(
+        self, *, guild_id: int | None, since_ts: int, pending_match_id: int | None = None
+    ) -> int:
         """
         Atomically refund + delete pending bets for the current match window.
         Returns number of bets refunded.
 
         Refunds the effective bet amount (amount * leverage).
+
+        Args:
+            pending_match_id: If provided, only refund bets for this specific pending match
         """
         normalized_guild = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
-            cursor.execute(
-                """
-                SELECT discord_id, amount, COALESCE(leverage, 1) as leverage
-                FROM bets
-                WHERE guild_id = ? AND match_id IS NULL AND bet_time >= ?
-                """,
-                (normalized_guild, since_ts),
-            )
+
+            if pending_match_id is not None:
+                cursor.execute(
+                    """
+                    SELECT discord_id, amount, COALESCE(leverage, 1) as leverage
+                    FROM bets
+                    WHERE guild_id = ? AND match_id IS NULL AND pending_match_id = ?
+                    """,
+                    (normalized_guild, pending_match_id),
+                )
+            else:
+                cursor.execute(
+                    """
+                    SELECT discord_id, amount, COALESCE(leverage, 1) as leverage
+                    FROM bets
+                    WHERE guild_id = ? AND match_id IS NULL AND bet_time >= ?
+                    """,
+                    (normalized_guild, since_ts),
+                )
             rows = cursor.fetchall()
             if not rows:
                 return 0
@@ -679,10 +928,16 @@ class BetRepository(BaseRepository, IBetRepository):
                 [(delta, discord_id, normalized_guild) for discord_id, delta in refund_deltas.items()],
             )
 
-            cursor.execute(
-                "DELETE FROM bets WHERE guild_id = ? AND match_id IS NULL AND bet_time >= ?",
-                (normalized_guild, since_ts),
-            )
+            if pending_match_id is not None:
+                cursor.execute(
+                    "DELETE FROM bets WHERE guild_id = ? AND match_id IS NULL AND pending_match_id = ?",
+                    (normalized_guild, pending_match_id),
+                )
+            else:
+                cursor.execute(
+                    "DELETE FROM bets WHERE guild_id = ? AND match_id IS NULL AND bet_time >= ?",
+                    (normalized_guild, since_ts),
+                )
             return cursor.rowcount
 
     def get_player_bet_history(self, discord_id: int, guild_id: int | None = None) -> list[dict]:
