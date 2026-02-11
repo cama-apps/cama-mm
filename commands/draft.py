@@ -690,6 +690,9 @@ class DraftCommands(commands.Cog):
         regular_players = list(lobby.players)
         conditional_players = list(lobby.conditional_players)
 
+        # Track which IDs are regular for pre-pruning priority (regular > conditional)
+        regular_player_ids_set = set(regular_players)
+
         if len(regular_players) >= DRAFT_POOL_SIZE:
             # Enough regular players - use them (conditional players excluded)
             lobby_player_ids = regular_players
@@ -836,14 +839,43 @@ class DraftCommands(commands.Cog):
                     except Exception:
                         pass  # Non-critical, proceed without
 
+                # Pre-prune candidates if too many (balanced selection is O(C(N,8)) - exponential)
+                # With 14 candidates: ~3k combos (~12s), with 18: ~44k combos (~3min timeout)
+                MAX_CANDIDATES_FOR_BALANCED = 14
+                pre_excluded_players = []
+
+                if len(non_captain_candidates) > MAX_CANDIDATES_FOR_BALANCED:
+                    # Pre-prune using priority: regular > conditional, higher exclusion, higher rating
+                    def prune_priority(p):
+                        is_regular = p.discord_id in regular_player_ids_set
+                        exc_count = exclusion_counts.get(p.discord_id, 0)
+                        rating = p.glicko_rating or 1500.0
+                        # Sort key: regular first (0 < 1), then higher exclusion, then higher rating
+                        return (0 if is_regular else 1, -exc_count, -rating)
+
+                    sorted_candidates = sorted(non_captain_candidates, key=prune_priority)
+                    candidates_for_pool = sorted_candidates[:MAX_CANDIDATES_FOR_BALANCED]
+                    pre_excluded_players = sorted_candidates[MAX_CANDIDATES_FOR_BALANCED:]
+                    logger.info(
+                        f"Pre-pruned {len(pre_excluded_players)} candidates "
+                        f"({len(non_captain_candidates)} -> {len(candidates_for_pool)}) "
+                        f"for balanced pool selection"
+                    )
+                else:
+                    candidates_for_pool = non_captain_candidates
+
                 shuffler = BalancedShuffler()
                 draft_pool_result = shuffler.select_draft_pool(
                     captain_a=captain_a,
                     captain_b=captain_b,
-                    candidates=non_captain_candidates,
+                    candidates=candidates_for_pool,
                     exclusion_counts=name_exclusion_counts,
                     recent_match_names=recent_match_names,
                 )
+
+                # Add pre-excluded players to the excluded list
+                if pre_excluded_players:
+                    draft_pool_result.excluded_players.extend(pre_excluded_players)
 
                 # Convert back to ID-based PoolSelectionResult format
                 selected_ids = (
