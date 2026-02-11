@@ -1129,7 +1129,7 @@ class InfoCommands(commands.Cog):
             )
             rating_history_entries = (
                 await asyncio.to_thread(
-                    functools.partial(self.match_service.get_recent_rating_history, guild_id, limit=500)
+                    functools.partial(self.match_service.get_recent_rating_history, guild_id, limit=2000)
                 )
                 if self.match_service
                 else []
@@ -1322,6 +1322,32 @@ class InfoCommands(commands.Cog):
             embed.add_field(name="📊 Rating Movement", value=movement_text, inline=False)
             embed.add_field(name="🔄 Rating Drift (Seed vs Current)", value=drift_text, inline=False)
             embed.add_field(name="⚖️ Rating Stability", value=stability_text, inline=False)
+
+            # Team composition analysis
+            team_comp = stats.get("team_composition", {})
+            comp_categories = team_comp.get("categories", [])
+            if comp_categories:
+                comp_lines = []
+                for cat in comp_categories[:6]:
+                    wr_pct = cat["winrate"] * 100
+                    exp_pct = cat["avg_expected"] * 100
+                    over = cat["overperformance"] * 100
+                    if over > 3:
+                        indicator = "+"
+                    elif over < -3:
+                        indicator = "-"
+                    else:
+                        indicator = "~"
+                    comp_lines.append(
+                        f"{indicator} **{cat['name']}**: {wr_pct:.0f}% WR vs {exp_pct:.0f}% exp "
+                        f"({over:+.0f}%, {cat['wins']}W/{cat['total']}G, "
+                        f"avg={cat['avg_rating']:.0f}, spread={cat['avg_sd']:.0f})"
+                    )
+                embed.add_field(
+                    name="\U0001f9ea Team Composition & Winrate",
+                    value="\n".join(comp_lines),
+                    inline=False,
+                )
 
             # Lobby type impact
             lobby_stats = await asyncio.to_thread(self.match_service.get_lobby_type_stats, guild_id) if self.match_service else []
