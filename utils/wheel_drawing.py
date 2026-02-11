@@ -255,7 +255,7 @@ _BASE_WHEEL_WEDGES = [
     ("20", 20, "#5dba57"),
     ("20", 20, "#5dba57"),
     ("25", 25, "#3498db"),
-    ("25", 25, "#3498db"),
+    ("BOLT", "LIGHTNING_BOLT", "#f39c12"),
     ("BLUE", "BLUE_SHELL", "#3498db"),
     ("30", 30, "#2980b9"),
     ("40", 40, "#9b59b6"),
@@ -270,6 +270,25 @@ _BASE_WHEEL_WEDGES = [
 ]
 
 
+_SPECIAL_WEDGE_EST_EVS: dict[str, float] = {}
+
+
+def _load_special_wedge_evs() -> None:
+    """Load estimated EVs for special wedges from config (deferred to avoid circular import)."""
+    if _SPECIAL_WEDGE_EST_EVS:
+        return
+    from config import (
+        WHEEL_BLUE_SHELL_EST_EV,
+        WHEEL_LIGHTNING_BOLT_EST_EV,
+        WHEEL_RED_SHELL_EST_EV,
+    )
+    _SPECIAL_WEDGE_EST_EVS.update({
+        "RED_SHELL": WHEEL_RED_SHELL_EST_EV,
+        "BLUE_SHELL": WHEEL_BLUE_SHELL_EST_EV,
+        "LIGHTNING_BOLT": WHEEL_LIGHTNING_BOLT_EST_EV,
+    })
+
+
 def _calculate_adjusted_wedges(target_ev: float) -> list[tuple[str, int | str, str]]:
     """
     Calculate wheel wedges with BANKRUPT value adjusted to hit target EV.
@@ -278,9 +297,10 @@ def _calculate_adjusted_wedges(target_ev: float) -> list[tuple[str, int | str, s
     sum(all_values) / num_wedges = target_ev
 
     BANKRUPT is capped at -1 minimum (can never be positive or zero).
-    Special shell wedges (RED_SHELL, BLUE_SHELL) are excluded from EV calculation
-    since their value depends on stealing from other players.
+    Special wedges (RED_SHELL, BLUE_SHELL, LIGHTNING_BOLT) use configurable
+    estimated EVs so the BANKRUPT value compensates for their impact.
     """
+    _load_special_wedge_evs()
     num_wedges = len(_BASE_WHEEL_WEDGES)
 
     # Calculate sum of non-bankrupt, non-special values (integers only)
@@ -289,19 +309,24 @@ def _calculate_adjusted_wedges(target_ev: float) -> list[tuple[str, int | str, s
         if isinstance(v, int) and v >= 0
     )
 
+    # Sum estimated EVs for special wedges
+    special_ev_sum = sum(
+        _SPECIAL_WEDGE_EST_EVS.get(v, 0.0)
+        for _, v, _ in _BASE_WHEEL_WEDGES
+        if isinstance(v, str)
+    )
+
     # Count bankrupt wedges (negative integers)
     num_bankrupt = sum(
         1 for _, v, _ in _BASE_WHEEL_WEDGES
         if isinstance(v, int) and v < 0
     )
 
-    # Target sum = target_ev * num_wedges
-    # Target sum = non_bankrupt_sum + (num_bankrupt * bankrupt_value) + shell_ev
-    # For shell wedges, assume average EV of 0 (steal/self-hit balance)
-    # bankrupt_value = (target_sum - non_bankrupt_sum) / num_bankrupt
+    # target_sum = non_bankrupt_sum + special_ev_sum + (num_bankrupt * bankrupt_value)
+    # bankrupt_value = (target_sum - non_bankrupt_sum - special_ev_sum) / num_bankrupt
     target_sum = target_ev * num_wedges
     if num_bankrupt > 0:
-        bankrupt_value = int((target_sum - non_bankrupt_sum) / num_bankrupt)
+        bankrupt_value = int((target_sum - non_bankrupt_sum - special_ev_sum) / num_bankrupt)
         # BANKRUPT must always be negative (minimum -1)
         bankrupt_value = min(bankrupt_value, -1)
     else:
@@ -311,7 +336,6 @@ def _calculate_adjusted_wedges(target_ev: float) -> list[tuple[str, int | str, s
     adjusted = []
     for label, value, color in _BASE_WHEEL_WEDGES:
         if isinstance(value, str):
-            # Special wedge (RED_SHELL, BLUE_SHELL) - keep as-is
             adjusted.append((label, value, color))
         elif value < 0:  # BANKRUPT
             # Update label to show actual value
@@ -467,6 +491,49 @@ def _draw_shell_icon(shell_type: str, s: int) -> Image.Image:
             [cx - dot_s, cy - dot_s, cx + dot_s, cy + dot_s],
             fill=spike_color,
         )
+
+    elif shell_type == "LIGHTNING_BOLT":
+        # Lightning bolt - 8-bit pixel art zigzag bolt
+        body_color = (243, 156, 18)       # #f39c12 orange-yellow
+        highlight_color = (241, 196, 15)  # #f1c40f bright yellow
+        outline_color = (125, 102, 8)     # #7d6608 dark outline
+
+        # Draw bolt as a polygon zigzag shape
+        # Scale points relative to icon size
+        bolt_points = [
+            (cx + int(r * 0.15), cy - r),
+            (cx + int(r * 0.55), cy - r),
+            (cx + int(r * 0.10), cy - int(r * 0.05)),
+            (cx + int(r * 0.50), cy - int(r * 0.05)),
+            (cx - int(r * 0.15), cy + r),
+            (cx - int(r * 0.15), cy + int(r * 0.10)),
+            (cx + int(r * 0.35), cy + int(r * 0.10)),
+            (cx - int(r * 0.10), cy + r),
+            (cx + int(r * 0.05), cy + int(r * 0.15)),
+            (cx - int(r * 0.35), cy + int(r * 0.15)),
+        ]
+        # Simplified bolt polygon (6 points for clean zigzag)
+        bolt_points = [
+            (cx + int(r * 0.1), cy - r),           # top-left
+            (cx + int(r * 0.6), cy - r),            # top-right
+            (cx + int(r * 0.05), cy - int(r * 0.1)), # mid-left notch
+            (cx + int(r * 0.55), cy - int(r * 0.1)), # mid-right
+            (cx - int(r * 0.2), cy + r),            # bottom-left tip
+            (cx + int(r * 0.1), cy + int(r * 0.05)), # bottom notch
+        ]
+        # Draw outline first (thicker), then fill
+        draw.polygon(bolt_points, fill=body_color, outline=outline_color, width=outline_w)
+
+        # Inner highlight stripe (smaller bolt shape offset slightly)
+        hl_points = [
+            (cx + int(r * 0.2), cy - int(r * 0.7)),
+            (cx + int(r * 0.45), cy - int(r * 0.7)),
+            (cx + int(r * 0.12), cy - int(r * 0.05)),
+            (cx + int(r * 0.4), cy - int(r * 0.05)),
+            (cx - int(r * 0.05), cy + int(r * 0.6)),
+            (cx + int(r * 0.15), cy + int(r * 0.1)),
+        ]
+        draw.polygon(hl_points, fill=highlight_color)
 
     else:
         # Red shell - side view, blocky 8-bit NES koopa shell

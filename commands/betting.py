@@ -25,6 +25,9 @@ from config import (
     BANKRUPTCY_PENALTY_RATE,
     GARNISHMENT_PERCENTAGE,
     JOPACOIN_MIN_BET,
+    LIGHTNING_BOLT_MIN_TAX,
+    LIGHTNING_BOLT_PCT_MAX,
+    LIGHTNING_BOLT_PCT_MIN,
     LOAN_FEE_RATE,
     MAX_DEBT,
     TIP_FEE_RATE,
@@ -423,6 +426,9 @@ class BettingCommands(commands.Cog):
         shell_amount: int = 0,
         shell_self_hit: bool = False,
         shell_missed: bool = False,
+        lightning_total: int = 0,
+        lightning_count: int = 0,
+        lightning_victims: list | None = None,
     ) -> discord.Embed:
         """Build the final result embed after the wheel stops."""
         label, value = result[0], result[1]  # (label, value, color)
@@ -478,6 +484,22 @@ class BettingCommands(commands.Cog):
                     f"You stole **{shell_amount}** {JOPACOIN_EMOTE}!\n\n"
                     f"*Victim's new balance: **{shell_victim_new_balance}** {JOPACOIN_EMOTE}*"
                 )
+
+        elif value == "LIGHTNING_BOLT":
+            title = "⚡ LIGHTNING BOLT! ⚡"
+            color = discord.Color.from_str("#f39c12")
+            victim_lines = ""
+            if lightning_victims:
+                for vname, vamt, _ in lightning_victims[:3]:
+                    victim_lines += f"⚡ **{vname}** lost **{vamt}** JC\n"
+            description = (
+                f"**{label}**\n\n"
+                f"Lightning strikes the entire server!\n\n"
+                f"**{lightning_count}** players hit for a total of **{lightning_total}** {JOPACOIN_EMOTE}\n"
+                f"All funds sent to the nonprofit fund.\n\n"
+                f"{victim_lines}\n"
+                f"*No one is safe.*"
+            )
 
         elif isinstance(value, int) and value > 0:
             # Win
@@ -1339,6 +1361,40 @@ class BettingCommands(commands.Cog):
                 shell_missed = True
                 shell_amount = 0
 
+        elif result_value == "LIGHTNING_BOLT":
+            # Lightning Bolt: tax ALL players in the guild, send to nonprofit
+            all_players = await asyncio.to_thread(
+                functools.partial(self.player_service.get_leaderboard, guild_id, limit=9999)
+            )
+            lightning_pct = random.uniform(LIGHTNING_BOLT_PCT_MIN, LIGHTNING_BOLT_PCT_MAX)
+            lightning_total = 0
+            lightning_count = 0
+            lightning_victims = []  # (name, amount, discord_id) for embed
+            for p in all_players:
+                if p.jopacoin_balance <= 0:
+                    continue
+                tax = max(LIGHTNING_BOLT_MIN_TAX, int(p.jopacoin_balance * lightning_pct))
+                await asyncio.to_thread(
+                    self.player_service.adjust_balance, p.discord_id, guild_id, -tax
+                )
+                lightning_total += tax
+                lightning_count += 1
+                lightning_victims.append((p.name, tax, p.discord_id))
+            # Send total to nonprofit
+            if self.loan_service and lightning_total > 0:
+                try:
+                    await asyncio.to_thread(
+                        self.loan_service.add_to_nonprofit_fund, guild_id, lightning_total
+                    )
+                except Exception:
+                    logger.warning("Failed to add lightning bolt tax to nonprofit fund")
+            # Sort victims by amount descending, keep top 3
+            lightning_victims.sort(key=lambda x: x[1], reverse=True)
+            # Re-fetch spinner balance (they got taxed too)
+            new_balance = await asyncio.to_thread(
+                self.player_service.get_balance, user_id, guild_id
+            )
+
         elif isinstance(result_value, int) and result_value > 0:
             # Positive result: use garnishment service if available
             garnishment_service = getattr(self.bot, "garnishment_service", None)
@@ -1392,6 +1448,8 @@ class BettingCommands(commands.Cog):
                 log_result = -shell_amount
             else:
                 log_result = shell_amount
+        elif result_value == "LIGHTNING_BOLT":
+            log_result = 0
         else:
             log_result = result_value
 
@@ -1414,6 +1472,9 @@ class BettingCommands(commands.Cog):
             shell_amount=shell_amount,
             shell_self_hit=shell_self_hit,
             shell_missed=shell_missed,
+            lightning_total=lightning_total if result_value == "LIGHTNING_BOLT" else 0,
+            lightning_count=lightning_count if result_value == "LIGHTNING_BOLT" else 0,
+            lightning_victims=lightning_victims if result_value == "LIGHTNING_BOLT" else None,
         )
         await message.edit(embed=result_embed)
 
@@ -1430,6 +1491,14 @@ class BettingCommands(commands.Cog):
                         result_value=result_wedge[1],
                         new_balance=new_balance,
                     )
+                )
+
+            # Lightning Bolt neon hook
+            if result_value == "LIGHTNING_BOLT" and lightning_total > 0:
+                _lt = lightning_total
+                _lc = lightning_count
+                candidates.append(
+                    lambda: neon.on_lightning_bolt(user_id, guild_id, _lt, _lc)
                 )
 
             # Degen milestone check after gamba
@@ -2043,6 +2112,13 @@ class BettingCommands(commands.Cog):
         guild_id = interaction.guild.id if interaction.guild else None
         total = await asyncio.to_thread(self.loan_service.get_nonprofit_fund, guild_id)
 
+        # Check for active proposal with reserved funds
+        reserved = 0
+        if self.disburse_service:
+            proposal = await asyncio.to_thread(self.disburse_service.get_proposal, guild_id)
+            if proposal:
+                reserved = proposal.fund_amount
+
         embed = discord.Embed(
             title="💝 Jopacoin Nonprofit for Gambling Addiction",
             description=(
@@ -2051,17 +2127,39 @@ class BettingCommands(commands.Cog):
             ),
             color=0xE91E63,  # Pink
         )
-        embed.add_field(
-            name="Available Funds",
-            value=f"**{total}** {JOPACOIN_EMOTE}",
-            inline=False,
-        )
 
-        # Show status based on fund level
-        if total >= DISBURSE_MIN_FUND:
-            status_value = f"Ready for disbursement! (min: {DISBURSE_MIN_FUND})"
+        if reserved > 0:
+            embed.add_field(
+                name="Available Funds",
+                value=f"**{total}** {JOPACOIN_EMOTE}",
+                inline=True,
+            )
+            embed.add_field(
+                name="Reserved for Proposal",
+                value=f"**{reserved}** {JOPACOIN_EMOTE}",
+                inline=True,
+            )
+            embed.add_field(
+                name="Total",
+                value=f"**{total + reserved}** {JOPACOIN_EMOTE}",
+                inline=True,
+            )
         else:
-            status_value = f"Collecting... ({total}/{DISBURSE_MIN_FUND} needed)"
+            embed.add_field(
+                name="Available Funds",
+                value=f"**{total}** {JOPACOIN_EMOTE}",
+                inline=False,
+            )
+
+        # Show status based on fund level (including reserved)
+        effective_total = total + reserved
+        if effective_total >= DISBURSE_MIN_FUND:
+            if reserved > 0:
+                status_value = f"Proposal active ({reserved} reserved)"
+            else:
+                status_value = f"Ready for disbursement! (min: {DISBURSE_MIN_FUND})"
+        else:
+            status_value = f"Collecting... ({effective_total}/{DISBURSE_MIN_FUND} needed)"
 
         embed.add_field(
             name="Status",

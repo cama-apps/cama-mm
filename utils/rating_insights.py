@@ -104,6 +104,7 @@ def compute_calibration_stats(
     rating_movement = _compute_rating_movement(rating_history_entries or [])
     side_balance = _compute_side_balance(match_predictions or [])
     rating_stability = _compute_rating_stability(rating_history_entries or [])
+    team_composition = _compute_team_composition_stats(rating_history_entries or [])
 
     # Calculate average certainty (inverse of uncertainty)
     avg_rd = _mean(rd_values)
@@ -132,6 +133,7 @@ def compute_calibration_stats(
         "rating_movement": rating_movement,
         "side_balance": side_balance,
         "rating_stability": rating_stability,
+        "team_composition": team_composition,
         "avg_certainty": avg_certainty,
         "avg_rd": avg_rd,
     }
@@ -226,6 +228,121 @@ def get_rd_tier_name(rd: float) -> str:
         return "Developing"
     else:
         return "Fresh"
+
+
+def _classify_team_archetype(ratings: list[float]) -> str:
+    """Classify a team's rating distribution shape using z-scores.
+
+    Uses population std dev (pstdev) since we have the full 5-player team.
+
+    Returns one of: balanced, star-carry, anchor-drag, polarized.
+    """
+    if len(ratings) < 2:
+        return "balanced"
+    sd = statistics.pstdev(ratings)
+    if sd < 1:
+        return "balanced"
+    mean = statistics.mean(ratings)
+    z_scores = [(r - mean) / sd for r in ratings]
+    has_high = any(z > 1.5 for z in z_scores)
+    has_low = any(z < -1.5 for z in z_scores)
+    if has_high and has_low:
+        return "polarized"
+    if has_high:
+        return "star-carry"
+    if has_low:
+        return "anchor-drag"
+    return "balanced"
+
+
+def _compute_team_composition_stats(rating_history_entries: list[dict]) -> dict:
+    """Analyze how team rating distribution correlates with winrate.
+
+    Groups entries by (match_id, team_number), classifies archetype,
+    then aggregates winrate and overperformance (actual - expected) per archetype.
+    """
+    if not rating_history_entries:
+        return {"categories": [], "total_teams": 0}
+
+    # Group by (match_id, team_number)
+    teams: dict[tuple, list[dict]] = {}
+    for entry in rating_history_entries:
+        match_id = entry.get("match_id")
+        team_num = entry.get("team_number")
+        if match_id is None or team_num is None:
+            continue
+        key = (match_id, team_num)
+        teams.setdefault(key, []).append(entry)
+
+    # Build team data — only include complete 5-player teams
+    team_data = []
+    for key, entries in teams.items():
+        if len(entries) != 5:
+            continue
+        ratings = [e["rating_before"] for e in entries if e.get("rating_before") is not None]
+        if len(ratings) != 5:
+            continue
+        sd = statistics.pstdev(ratings)
+        mean_rating = statistics.mean(ratings)
+        expected = entries[0].get("expected_team_win_prob")
+        won = entries[0].get("won")
+        if expected is None or won is None:
+            continue
+        archetype = _classify_team_archetype(ratings)
+        team_data.append({
+            "sd": sd,
+            "mean_rating": mean_rating,
+            "expected": expected,
+            "won": bool(won),
+            "archetype": archetype,
+        })
+
+    if not team_data:
+        return {"categories": [], "total_teams": 0}
+
+    # Group by archetype
+    archetype_display = {
+        "balanced": "Balanced",
+        "star-carry": "Star Carry",
+        "anchor-drag": "Anchor Drag",
+        "polarized": "Polarized",
+    }
+    category_data: dict[str, list[dict]] = {}
+    for t in team_data:
+        cat_name = archetype_display[t["archetype"]]
+        category_data.setdefault(cat_name, []).append(t)
+
+    # Aggregate per category
+    categories = []
+    for cat_name, items in category_data.items():
+        wins = sum(1 for t in items if t["won"])
+        total = len(items)
+        winrate = wins / total if total > 0 else 0.0
+        avg_expected = statistics.mean(t["expected"] for t in items)
+        overperformance = winrate - avg_expected
+        avg_rating = statistics.mean(t["mean_rating"] for t in items)
+        avg_sd = statistics.mean(t["sd"] for t in items)
+        categories.append({
+            "name": cat_name,
+            "wins": wins,
+            "total": total,
+            "winrate": winrate,
+            "avg_expected": avg_expected,
+            "overperformance": overperformance,
+            "avg_rating": avg_rating,
+            "avg_sd": avg_sd,
+        })
+
+    # Sort by overperformance descending
+    categories.sort(key=lambda c: c["overperformance"], reverse=True)
+
+    # Filter: only categories with >= 3 teams
+    display_categories = [c for c in categories if c["total"] >= 3]
+
+    return {
+        "categories": display_categories,
+        "total_teams": len(team_data),
+    }
 
 
 def _compute_rating_stability(rating_history_entries: list[dict]) -> dict:

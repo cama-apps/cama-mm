@@ -154,6 +154,21 @@ WHEEL_ANIMATION_FRAMES = _parse_int("WHEEL_ANIMATION_FRAMES", 5)  # Number of sp
 WHEEL_FRAME_DELAY_MS = _parse_int("WHEEL_FRAME_DELAY_MS", 1000)  # Delay between frames (ms)
 WHEEL_TARGET_EV = _parse_float("WHEEL_TARGET_EV", -10.0)  # Target expected value per spin
 
+# Estimated EV for special wedges — total economic impact, not just spinner's personal outcome.
+# Used to adjust BANKRUPT value so overall wheel drain stays at WHEEL_TARGET_EV.
+# RED_SHELL: zero-sum transfer between players, no JC created or destroyed
+WHEEL_RED_SHELL_EST_EV = _parse_float("WHEEL_RED_SHELL_EST_EV", 0.0)
+# BLUE_SHELL: mostly zero-sum transfer, self-hit (~1/N chance) sends to nonprofit
+WHEEL_BLUE_SHELL_EST_EV = _parse_float("WHEEL_BLUE_SHELL_EST_EV", -2.0)
+# LIGHTNING_BOLT: taxes ALL positive-balance players 1-3%, all to nonprofit sink
+# estimate ~15 active players * ~100 avg balance * ~2% avg tax = ~30 JC destroyed
+WHEEL_LIGHTNING_BOLT_EST_EV = _parse_float("WHEEL_LIGHTNING_BOLT_EST_EV", -30.0)
+
+# Lightning Bolt (wheel wedge: server-wide tax to nonprofit)
+LIGHTNING_BOLT_PCT_MIN = _parse_float("LIGHTNING_BOLT_PCT_MIN", 0.01)
+LIGHTNING_BOLT_PCT_MAX = _parse_float("LIGHTNING_BOLT_PCT_MAX", 0.03)
+LIGHTNING_BOLT_MIN_TAX = _parse_int("LIGHTNING_BOLT_MIN_TAX", 1)
+
 # Tip transaction fee (clamped to 0.0 - 0.5 to prevent economy-breaking values)
 _raw_tip_fee_rate = _parse_float("TIP_FEE_RATE", 0.01)
 TIP_FEE_RATE = max(0.0, min(0.5, _raw_tip_fee_rate))  # 1% default, max 50%

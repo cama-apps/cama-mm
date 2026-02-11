@@ -7,7 +7,13 @@ import pytest
 
 from commands.betting import BettingCommands
 from utils.wheel_drawing import WHEEL_WEDGES
-from config import WHEEL_COOLDOWN_SECONDS, WHEEL_TARGET_EV
+from config import (
+    WHEEL_BLUE_SHELL_EST_EV,
+    WHEEL_COOLDOWN_SECONDS,
+    WHEEL_LIGHTNING_BOLT_EST_EV,
+    WHEEL_RED_SHELL_EST_EV,
+    WHEEL_TARGET_EV,
+)
 
 
 @pytest.mark.asyncio
@@ -412,26 +418,38 @@ def test_wheel_wedges_distribution():
     good_count = sum(1 for w in WHEEL_WEDGES if isinstance(w[1], int) and 30 <= w[1] <= 50)
     great_count = sum(1 for w in WHEEL_WEDGES if isinstance(w[1], int) and 60 <= w[1] <= 80)
     jackpot_count = sum(1 for w in WHEEL_WEDGES if w[1] == 100)
-    shell_count = sum(1 for w in WHEEL_WEDGES if isinstance(w[1], str))
+    special_count = sum(1 for w in WHEEL_WEDGES if isinstance(w[1], str))
 
     assert bankrupt_count == 2, f"Expected 2 Bankrupt wedges, got {bankrupt_count}"
     assert lose_turn_count == 1, f"Expected 1 Lose a Turn wedge, got {lose_turn_count}"
     assert small_count == 4, f"Expected 4 small win wedges, got {small_count}"
-    assert medium_count == 6, f"Expected 6 medium win wedges, got {medium_count}"
+    assert medium_count == 5, f"Expected 5 medium win wedges, got {medium_count}"
     assert good_count == 4, f"Expected 4 good win wedges, got {good_count}"
     assert great_count == 3, f"Expected 3 great win wedges, got {great_count}"
     assert jackpot_count == 2, f"Expected 2 Jackpot wedges, got {jackpot_count}"
-    assert shell_count == 2, f"Expected 2 shell wedges, got {shell_count}"
+    assert special_count == 3, f"Expected 3 special wedges, got {special_count}"
 
 
 def test_wheel_expected_value_matches_config():
     """Verify the expected value of the wheel matches WHEEL_TARGET_EV config.
 
-    Shell wedges are excluded from EV calculation as their value depends on
-    stealing from other players (assumed average EV of 0 for shells).
+    Special wedges use configurable estimated EVs for total economic impact:
+    - RED_SHELL/BLUE_SHELL: transfers (net ~0) with small nonprofit drain on self-hit
+    - LIGHTNING_BOLT: server-wide tax, all to nonprofit sink (large negative)
+    BANKRUPT is adjusted so the overall wheel EV hits the target.
     """
-    # Only sum integer values (exclude shell wedges with string values)
-    total_value = sum(w[1] for w in WHEEL_WEDGES if isinstance(w[1], int))
+    est_evs = {
+        "RED_SHELL": WHEEL_RED_SHELL_EST_EV,
+        "BLUE_SHELL": WHEEL_BLUE_SHELL_EST_EV,
+        "LIGHTNING_BOLT": WHEEL_LIGHTNING_BOLT_EST_EV,
+    }
+    # Sum integer wedges + estimated EVs for special wedges
+    total_value = 0.0
+    for _, v, _ in WHEEL_WEDGES:
+        if isinstance(v, int):
+            total_value += v
+        elif isinstance(v, str):
+            total_value += est_evs.get(v, 0.0)
     expected_value = total_value / len(WHEEL_WEDGES)
 
     # EV should be close to the configured target (within 1 due to integer rounding)
@@ -446,14 +464,15 @@ def test_wheel_bankrupt_always_negative():
         assert w[1] <= -1, f"Bankrupt value {w[1]} should be <= -1"
 
 
-def test_wheel_shell_wedges_have_string_values():
-    """Verify shell wedges have string values for special handling."""
-    shell_wedges = [w for w in WHEEL_WEDGES if isinstance(w[1], str)]
-    assert len(shell_wedges) == 2, "Should have exactly 2 shell wedges"
+def test_wheel_special_wedges_have_string_values():
+    """Verify special wedges have string values for special handling."""
+    special_wedges = [w for w in WHEEL_WEDGES if isinstance(w[1], str)]
+    assert len(special_wedges) == 3, "Should have exactly 3 special wedges"
 
-    shell_values = {w[1] for w in shell_wedges}
-    assert "RED_SHELL" in shell_values, "Should have RED_SHELL wedge"
-    assert "BLUE_SHELL" in shell_values, "Should have BLUE_SHELL wedge"
+    special_values = {w[1] for w in special_wedges}
+    assert "RED_SHELL" in special_values, "Should have RED_SHELL wedge"
+    assert "BLUE_SHELL" in special_values, "Should have BLUE_SHELL wedge"
+    assert "LIGHTNING_BOLT" in special_values, "Should have LIGHTNING_BOLT wedge"
 
 
 @pytest.mark.asyncio
@@ -862,3 +881,218 @@ async def test_wheel_blue_shell_self_hit_when_richest():
 
     # Should credit nonprofit fund with the loss
     loan_service.add_to_nonprofit_fund.assert_called_once_with(123, 10)
+
+
+@pytest.mark.asyncio
+async def test_wheel_lightning_bolt_taxes_all_players():
+    """Verify Lightning Bolt taxes all players with positive balance and sends to nonprofit."""
+    from domain.models.player import Player
+
+    bot = MagicMock()
+    betting_service = MagicMock()
+    match_service = MagicMock()
+    player_service = MagicMock()
+    loan_service = MagicMock()
+
+    # User is registered
+    player_service.get_player.return_value = MagicMock(name="TestPlayer")
+    player_service.get_balance.return_value = 200
+
+    # Mock service methods
+    player_service.get_last_wheel_spin = MagicMock(return_value=None)
+    player_service.set_last_wheel_spin = MagicMock()
+    player_service.try_claim_wheel_spin = MagicMock(return_value=True)
+    player_service.log_wheel_spin = MagicMock(return_value=1)
+    player_service.adjust_balance = MagicMock()
+
+    # 3 players with positive balances
+    players = [
+        Player(name="Alice", discord_id=2001, mmr=None, initial_mmr=None,
+               wins=0, losses=0, preferred_roles=None, main_role=None,
+               glicko_rating=None, glicko_rd=None, glicko_volatility=None,
+               jopacoin_balance=1000),
+        Player(name="Bob", discord_id=2002, mmr=None, initial_mmr=None,
+               wins=0, losses=0, preferred_roles=None, main_role=None,
+               glicko_rating=None, glicko_rd=None, glicko_volatility=None,
+               jopacoin_balance=500),
+        Player(name="Carol", discord_id=2003, mmr=None, initial_mmr=None,
+               wins=0, losses=0, preferred_roles=None, main_role=None,
+               glicko_rating=None, glicko_rd=None, glicko_volatility=None,
+               jopacoin_balance=100),
+    ]
+    player_service.get_leaderboard = MagicMock(return_value=players)
+
+    message = MagicMock()
+    message.edit = AsyncMock()
+
+    interaction = MagicMock()
+    interaction.guild = MagicMock()
+    interaction.guild.id = 123
+    interaction.user.id = 2001
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock(return_value=message)
+
+    cmds = BettingCommands(
+        bot, betting_service, match_service, player_service, loan_service=loan_service
+    )
+
+    # Find LIGHTNING_BOLT index dynamically
+    bolt_idx = next(i for i, w in enumerate(WHEEL_WEDGES) if w[1] == "LIGHTNING_BOLT")
+
+    with patch.object(cmds, "_create_wheel_gif_file", return_value=MagicMock()):
+        with patch("commands.betting.random.randint", return_value=bolt_idx):
+            with patch("commands.betting.random.uniform", return_value=0.02):  # 2% tax
+                with patch("commands.betting.random.random", return_value=1.0):  # No explosion
+                    with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
+                        await cmds.gamba.callback(cmds, interaction)
+
+    # Should call adjust_balance for each positive-balance player
+    # Alice: 2% of 1000 = 20, Bob: 2% of 500 = 10, Carol: 2% of 100 = 2
+    adjust_calls = player_service.adjust_balance.call_args_list
+    assert len(adjust_calls) == 3
+    # Check each call is negative (tax)
+    for call in adjust_calls:
+        assert call[0][2] < 0, "Tax should be negative"
+
+    # Should credit nonprofit fund with total tax (20 + 10 + 2 = 32)
+    loan_service.add_to_nonprofit_fund.assert_called_once_with(123, 32)
+
+
+@pytest.mark.asyncio
+async def test_wheel_lightning_bolt_skips_zero_balance():
+    """Verify Lightning Bolt skips players with zero or negative balance."""
+    from domain.models.player import Player
+
+    bot = MagicMock()
+    betting_service = MagicMock()
+    match_service = MagicMock()
+    player_service = MagicMock()
+    loan_service = MagicMock()
+
+    # User is registered
+    player_service.get_player.return_value = MagicMock(name="TestPlayer")
+    player_service.get_balance.return_value = 100
+
+    # Mock service methods
+    player_service.get_last_wheel_spin = MagicMock(return_value=None)
+    player_service.set_last_wheel_spin = MagicMock()
+    player_service.try_claim_wheel_spin = MagicMock(return_value=True)
+    player_service.log_wheel_spin = MagicMock(return_value=1)
+    player_service.adjust_balance = MagicMock()
+
+    # Mix of positive, zero, and negative balance players
+    players = [
+        Player(name="Rich", discord_id=3001, mmr=None, initial_mmr=None,
+               wins=0, losses=0, preferred_roles=None, main_role=None,
+               glicko_rating=None, glicko_rd=None, glicko_volatility=None,
+               jopacoin_balance=500),
+        Player(name="Broke", discord_id=3002, mmr=None, initial_mmr=None,
+               wins=0, losses=0, preferred_roles=None, main_role=None,
+               glicko_rating=None, glicko_rd=None, glicko_volatility=None,
+               jopacoin_balance=0),
+        Player(name="InDebt", discord_id=3003, mmr=None, initial_mmr=None,
+               wins=0, losses=0, preferred_roles=None, main_role=None,
+               glicko_rating=None, glicko_rd=None, glicko_volatility=None,
+               jopacoin_balance=-100),
+    ]
+    player_service.get_leaderboard = MagicMock(return_value=players)
+
+    message = MagicMock()
+    message.edit = AsyncMock()
+
+    interaction = MagicMock()
+    interaction.guild = MagicMock()
+    interaction.guild.id = 123
+    interaction.user.id = 3001
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock(return_value=message)
+
+    cmds = BettingCommands(
+        bot, betting_service, match_service, player_service, loan_service=loan_service
+    )
+
+    bolt_idx = next(i for i, w in enumerate(WHEEL_WEDGES) if w[1] == "LIGHTNING_BOLT")
+
+    with patch.object(cmds, "_create_wheel_gif_file", return_value=MagicMock()):
+        with patch("commands.betting.random.randint", return_value=bolt_idx):
+            with patch("commands.betting.random.uniform", return_value=0.02):  # 2% tax
+                with patch("commands.betting.random.random", return_value=1.0):
+                    with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
+                        await cmds.gamba.callback(cmds, interaction)
+
+    # Only Rich (500 JC) should be taxed; Broke (0) and InDebt (-100) skipped
+    adjust_calls = player_service.adjust_balance.call_args_list
+    assert len(adjust_calls) == 1
+    assert adjust_calls[0][0] == (3001, 123, -10)  # 2% of 500 = 10
+
+    # Nonprofit receives only the one tax
+    loan_service.add_to_nonprofit_fund.assert_called_once_with(123, 10)
+
+
+@pytest.mark.asyncio
+async def test_wheel_lightning_bolt_spinner_also_taxed():
+    """Verify the spinner's discord_id appears in the taxed players."""
+    from domain.models.player import Player
+
+    bot = MagicMock()
+    betting_service = MagicMock()
+    match_service = MagicMock()
+    player_service = MagicMock()
+    loan_service = MagicMock()
+
+    spinner_id = 4001
+
+    # User is registered
+    player_service.get_player.return_value = MagicMock(name="Spinner")
+    player_service.get_balance.return_value = 300
+
+    # Mock service methods
+    player_service.get_last_wheel_spin = MagicMock(return_value=None)
+    player_service.set_last_wheel_spin = MagicMock()
+    player_service.try_claim_wheel_spin = MagicMock(return_value=True)
+    player_service.log_wheel_spin = MagicMock(return_value=1)
+    player_service.adjust_balance = MagicMock()
+
+    # Include the spinner in the leaderboard
+    players = [
+        Player(name="Spinner", discord_id=spinner_id, mmr=None, initial_mmr=None,
+               wins=0, losses=0, preferred_roles=None, main_role=None,
+               glicko_rating=None, glicko_rd=None, glicko_volatility=None,
+               jopacoin_balance=300),
+        Player(name="Other", discord_id=4002, mmr=None, initial_mmr=None,
+               wins=0, losses=0, preferred_roles=None, main_role=None,
+               glicko_rating=None, glicko_rd=None, glicko_volatility=None,
+               jopacoin_balance=200),
+    ]
+    player_service.get_leaderboard = MagicMock(return_value=players)
+
+    message = MagicMock()
+    message.edit = AsyncMock()
+
+    interaction = MagicMock()
+    interaction.guild = MagicMock()
+    interaction.guild.id = 123
+    interaction.user.id = spinner_id
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock(return_value=message)
+
+    cmds = BettingCommands(
+        bot, betting_service, match_service, player_service, loan_service=loan_service
+    )
+
+    bolt_idx = next(i for i, w in enumerate(WHEEL_WEDGES) if w[1] == "LIGHTNING_BOLT")
+
+    with patch.object(cmds, "_create_wheel_gif_file", return_value=MagicMock()):
+        with patch("commands.betting.random.randint", return_value=bolt_idx):
+            with patch("commands.betting.random.uniform", return_value=0.01):  # 1% tax
+                with patch("commands.betting.random.random", return_value=1.0):
+                    with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
+                        await cmds.gamba.callback(cmds, interaction)
+
+    # Both players should be taxed (including the spinner)
+    adjust_calls = player_service.adjust_balance.call_args_list
+    assert len(adjust_calls) == 2
+
+    # Verify the spinner was taxed
+    taxed_ids = {call[0][0] for call in adjust_calls}
+    assert spinner_id in taxed_ids, "Spinner should be taxed too"
