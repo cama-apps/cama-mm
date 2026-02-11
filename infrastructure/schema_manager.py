@@ -1513,10 +1513,20 @@ class SchemaManager:
         cursor.execute("PRAGMA table_info(pending_matches)")
         columns = {row[1] for row in cursor.fetchall()}
         if "pending_match_id" in columns:
+            # New schema exists - clean up any leftover temp table from partial migration
+            cursor.execute("DROP TABLE IF EXISTS pending_matches_old")
             return  # Already migrated
 
-        # Rename old table
-        cursor.execute("ALTER TABLE pending_matches RENAME TO pending_matches_old")
+        # Check if pending_matches_old exists from a previous failed migration
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='pending_matches_old'")
+        old_table_exists = cursor.fetchone() is not None
+        if old_table_exists:
+            # Previous migration failed - the old table still has the data
+            # Drop the incomplete new table if it exists and restore from old
+            cursor.execute("DROP TABLE IF EXISTS pending_matches")
+        else:
+            # Normal case - rename current table to old
+            cursor.execute("ALTER TABLE pending_matches RENAME TO pending_matches_old")
 
         # Create new table with auto-increment ID
         cursor.execute(

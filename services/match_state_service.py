@@ -97,11 +97,8 @@ class MatchStateService:
                     return persisted
                 return None
 
-            # Backward compat: return single match if only one exists in memory
-            if len(guild_states) == 1:
-                return next(iter(guild_states.values()))
-
-            # Check database for single match (legacy behavior)
+            # Always check database for authoritative count (fixes stale cache issue)
+            # get_pending_match returns single match only if exactly one exists in DB
             persisted = self.match_repo.get_pending_match(guild_id)
             if persisted:
                 pmid = persisted.get("pending_match_id")
@@ -317,14 +314,26 @@ class MatchStateService:
         """
         Ensure record_submissions dict exists in state.
 
+        JSON serialization converts integer keys to strings, so we need to
+        normalize the keys back to integers when loading from the database.
+
         Args:
             state: The pending match state dict
 
         Returns:
-            The record_submissions dict
+            The record_submissions dict with integer keys
         """
         if "record_submissions" not in state:
             state["record_submissions"] = {}
+        else:
+            # Normalize string keys to integers (JSON serialization converts int keys to str)
+            submissions = state["record_submissions"]
+            normalized = {}
+            for key, value in submissions.items():
+                # Convert string keys to integers
+                int_key = int(key) if isinstance(key, str) else key
+                normalized[int_key] = value
+            state["record_submissions"] = normalized
         return state["record_submissions"]
 
     def build_pending_match_payload(self, state: dict) -> dict:

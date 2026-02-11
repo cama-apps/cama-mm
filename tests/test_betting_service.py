@@ -237,6 +237,9 @@ def test_betting_totals_only_include_pending_bets(services):
     # Settle the first match (assigns match_id to bets)
     betting_service.settle_bets(100, TEST_GUILD_ID, "radiant", pending_state=pending1)
 
+    # Clear the pending match (simulates what record_match does)
+    match_service.clear_last_shuffle(TEST_GUILD_ID, pending1.get("pending_match_id"))
+
     # After settling, totals should be 0 (no pending bets)
     totals = betting_service.get_pot_odds(TEST_GUILD_ID, pending_state=pending1)
     assert totals["radiant"] == 0, "Should show 0 after settling (no pending bets)"
@@ -321,7 +324,12 @@ def test_stale_pending_bets_do_not_show_or_block_new_match(services):
     # Wait to ensure a newer shuffle timestamp
     time.sleep(1)
 
-    # New shuffle; old bet remains match_id NULL but should be ignored
+    # Abort the first match (refund bets but don't settle)
+    # This simulates the normal flow where a match must be completed or aborted before a new shuffle
+    betting_service.refund_pending_bets(TEST_GUILD_ID, pending_old, pending_old.get("pending_match_id"))
+    match_service.clear_last_shuffle(TEST_GUILD_ID, pending_old.get("pending_match_id"))
+
+    # Now shuffle again with the same players
     match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
     pending_new = match_service.get_last_shuffle(TEST_GUILD_ID)
     if pending_new.get("bet_lock_until") is None or pending_new["bet_lock_until"] <= int(

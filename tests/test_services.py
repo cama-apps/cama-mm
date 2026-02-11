@@ -29,6 +29,7 @@ class TestMatchStateManager:
             radiant_value=7500,
             dire_value=7500,
             first_pick_team="Radiant",
+            pending_match_id=1,  # Required for concurrent match support
         )
 
         manager.set_state(123, state)
@@ -56,6 +57,7 @@ class TestMatchStateManager:
             radiant_value=7500,
             dire_value=7500,
             first_pick_team="Radiant",
+            pending_match_id=1,  # Required for concurrent match support
         )
 
         manager.set_state(123, state)

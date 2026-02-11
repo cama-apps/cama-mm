@@ -698,9 +698,14 @@ class Database:
 
             return count
 
-    def save_pending_match(self, guild_id: int | None, payload: dict) -> None:
+    def save_pending_match(self, guild_id: int | None, payload: dict) -> int:
         """
         Save pending match state for a guild.
+
+        With concurrent match support, this always creates a new pending match.
+
+        Returns:
+            pending_match_id: The auto-generated ID for this pending match
         """
         normalized = self._normalize_guild_id(guild_id)
         serialized = json.dumps(payload)
@@ -710,30 +715,59 @@ class Database:
                 """
                 INSERT INTO pending_matches (guild_id, payload)
                 VALUES (?, ?)
-                ON CONFLICT(guild_id) DO UPDATE SET payload = excluded.payload, updated_at = CURRENT_TIMESTAMP
             """,
                 (normalized, serialized),
             )
+            return cursor.lastrowid
 
     def get_pending_match(self, guild_id: int | None) -> dict | None:
+        """
+        Get a pending match for a guild.
+
+        For backward compatibility, returns the single match if exactly one exists.
+        Returns None if no pending matches or multiple exist.
+        """
         normalized = self._normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT payload FROM pending_matches WHERE guild_id = ?", (normalized,))
-            row = cursor.fetchone()
-            if not row:
-                return None
-            return json.loads(row["payload"])
+            cursor.execute(
+                "SELECT pending_match_id, payload FROM pending_matches WHERE guild_id = ?",
+                (normalized,),
+            )
+            rows = cursor.fetchall()
+            if len(rows) == 1:
+                payload = json.loads(rows[0]["payload"])
+                payload["pending_match_id"] = rows[0]["pending_match_id"]
+                return payload
+            return None
 
-    def clear_pending_match(self, guild_id: int | None) -> None:
+    def clear_pending_match(self, guild_id: int | None, pending_match_id: int | None = None) -> None:
+        """
+        Clear pending match(es) for a guild.
+
+        If pending_match_id is provided, clears only that specific match.
+        Otherwise, clears all pending matches for the guild.
+        """
         normalized = self._normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("DELETE FROM pending_matches WHERE guild_id = ?", (normalized,))
+            if pending_match_id is not None:
+                cursor.execute(
+                    "DELETE FROM pending_matches WHERE pending_match_id = ?",
+                    (pending_match_id,),
+                )
+            else:
+                cursor.execute(
+                    "DELETE FROM pending_matches WHERE guild_id = ?",
+                    (normalized,),
+                )
 
-    def consume_pending_match(self, guild_id: int | None) -> dict | None:
+    def consume_pending_match(self, guild_id: int | None, pending_match_id: int | None = None) -> dict | None:
         """
         Atomically retrieve and delete the pending match for a guild.
+
+        If pending_match_id is provided, consumes that specific match.
+        Otherwise, returns the single match if exactly one exists.
 
         Returns the pending match payload if it exists, None otherwise.
         This ensures only one caller can successfully consume a given match.
@@ -741,12 +775,28 @@ class Database:
         normalized = self._normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT payload FROM pending_matches WHERE guild_id = ?", (normalized,))
-            row = cursor.fetchone()
-            if not row:
+            if pending_match_id is not None:
+                cursor.execute(
+                    "SELECT pending_match_id, payload FROM pending_matches WHERE pending_match_id = ?",
+                    (pending_match_id,),
+                )
+            else:
+                cursor.execute(
+                    "SELECT pending_match_id, payload FROM pending_matches WHERE guild_id = ?",
+                    (normalized,),
+                )
+            rows = cursor.fetchall()
+            # For backward compatibility, only consume if exactly one match exists
+            if len(rows) != 1:
                 return None
-            cursor.execute("DELETE FROM pending_matches WHERE guild_id = ?", (normalized,))
-            return json.loads(row["payload"])
+            row = rows[0]
+            cursor.execute(
+                "DELETE FROM pending_matches WHERE pending_match_id = ?",
+                (row["pending_match_id"],),
+            )
+            payload = json.loads(row["payload"])
+            payload["pending_match_id"] = row["pending_match_id"]
+            return payload
 
     def save_lobby_state(
         self,
