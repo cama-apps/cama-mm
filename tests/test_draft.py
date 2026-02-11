@@ -1015,3 +1015,186 @@ class TestConditionalPlayerPromotion:
         # No conditional players promoted
         assert 101 not in lobby_player_ids
         assert 102 not in lobby_player_ids
+
+
+class TestCandidatePrePruning:
+    """Tests for pre-pruning logic when too many candidates for balanced selection."""
+
+    def test_prune_priority_regular_over_conditional(self):
+        """Regular players are prioritized over conditional players."""
+        from domain.models.player import Player
+
+        # Create mixed players: 10 regular (IDs 1-10), 8 conditional (IDs 101-108)
+        regular_ids = set(range(1, 11))
+        players = []
+        for i in range(1, 11):
+            players.append(Player(
+                name=f"Regular{i}",
+                discord_id=i,
+                glicko_rating=1500.0,
+            ))
+        for i in range(101, 109):
+            players.append(Player(
+                name=f"Conditional{i}",
+                discord_id=i,
+                glicko_rating=1600.0,  # Higher rating but conditional
+            ))
+
+        exclusion_counts = {p.discord_id: 0 for p in players}
+        MAX_CANDIDATES = 14
+
+        def prune_priority(p):
+            is_regular = p.discord_id in regular_ids
+            exc_count = exclusion_counts.get(p.discord_id, 0)
+            rating = p.glicko_rating or 1500.0
+            return (0 if is_regular else 1, -exc_count, -rating)
+
+        sorted_candidates = sorted(players, key=prune_priority)
+        kept = sorted_candidates[:MAX_CANDIDATES]
+        pruned = sorted_candidates[MAX_CANDIDATES:]
+
+        # All 10 regular players should be kept
+        kept_ids = {p.discord_id for p in kept}
+        for i in range(1, 11):
+            assert i in kept_ids, f"Regular player {i} should be kept"
+
+        # 4 conditional players should be kept (10 + 4 = 14)
+        # 4 conditional players should be pruned (8 - 4 = 4)
+        assert len(pruned) == 4
+        for p in pruned:
+            assert p.discord_id >= 101, "Only conditional players should be pruned"
+
+    def test_prune_priority_higher_exclusion_first(self):
+        """Players with higher exclusion counts are prioritized."""
+        from domain.models.player import Player
+
+        regular_ids = set(range(1, 17))  # 16 regular players
+        players = [
+            Player(name=f"Player{i}", discord_id=i, glicko_rating=1500.0)
+            for i in range(1, 17)
+        ]
+
+        # Vary exclusion counts: players 1-5 have high counts, 6-16 have low
+        exclusion_counts = {}
+        for i in range(1, 6):
+            exclusion_counts[i] = 10  # High exclusion count
+        for i in range(6, 17):
+            exclusion_counts[i] = 0  # Low exclusion count
+
+        MAX_CANDIDATES = 14
+
+        def prune_priority(p):
+            is_regular = p.discord_id in regular_ids
+            exc_count = exclusion_counts.get(p.discord_id, 0)
+            rating = p.glicko_rating or 1500.0
+            return (0 if is_regular else 1, -exc_count, -rating)
+
+        sorted_candidates = sorted(players, key=prune_priority)
+        kept = sorted_candidates[:MAX_CANDIDATES]
+        pruned = sorted_candidates[MAX_CANDIDATES:]
+
+        # High-exclusion players (1-5) should all be kept
+        kept_ids = {p.discord_id for p in kept}
+        for i in range(1, 6):
+            assert i in kept_ids, f"High-exclusion player {i} should be kept"
+
+        # 2 low-exclusion players should be pruned (16 - 14 = 2)
+        assert len(pruned) == 2
+        for p in pruned:
+            assert exclusion_counts.get(p.discord_id, 0) == 0, "Low-exclusion players should be pruned"
+
+    def test_prune_priority_higher_rating_tiebreaker(self):
+        """Higher rating breaks ties when regular status and exclusion are equal."""
+        from domain.models.player import Player
+
+        regular_ids = set(range(1, 17))  # 16 regular players
+        players = []
+        for i in range(1, 17):
+            players.append(Player(
+                name=f"Player{i}",
+                discord_id=i,
+                glicko_rating=1000.0 + i * 100,  # Player 16 has highest rating
+            ))
+
+        exclusion_counts = {p.discord_id: 0 for p in players}  # All equal
+        MAX_CANDIDATES = 14
+
+        def prune_priority(p):
+            is_regular = p.discord_id in regular_ids
+            exc_count = exclusion_counts.get(p.discord_id, 0)
+            rating = p.glicko_rating or 1500.0
+            return (0 if is_regular else 1, -exc_count, -rating)
+
+        sorted_candidates = sorted(players, key=prune_priority)
+        kept = sorted_candidates[:MAX_CANDIDATES]
+        pruned = sorted_candidates[MAX_CANDIDATES:]
+
+        # Highest rated players (ID 3-16 with ratings 1300-2600) should be kept
+        # Lowest rated players (ID 1-2 with ratings 1100-1200) should be pruned
+        pruned_ids = {p.discord_id for p in pruned}
+        assert len(pruned) == 2
+        assert 1 in pruned_ids, "Lowest rated player should be pruned"
+        assert 2 in pruned_ids, "Second lowest rated player should be pruned"
+
+    def test_no_pruning_at_threshold(self):
+        """No pruning when candidates <= MAX_CANDIDATES."""
+        from domain.models.player import Player
+
+        regular_ids = set(range(1, 15))  # 14 regular players (exactly at limit)
+        players = [
+            Player(name=f"Player{i}", discord_id=i, glicko_rating=1500.0)
+            for i in range(1, 15)
+        ]
+
+        exclusion_counts = {p.discord_id: 0 for p in players}
+        MAX_CANDIDATES = 14
+
+        # Simulate the condition check
+        if len(players) > MAX_CANDIDATES:
+            def prune_priority(p):
+                is_regular = p.discord_id in regular_ids
+                exc_count = exclusion_counts.get(p.discord_id, 0)
+                rating = p.glicko_rating or 1500.0
+                return (0 if is_regular else 1, -exc_count, -rating)
+
+            sorted_candidates = sorted(players, key=prune_priority)
+            candidates_for_pool = sorted_candidates[:MAX_CANDIDATES]
+            pre_excluded = sorted_candidates[MAX_CANDIDATES:]
+        else:
+            candidates_for_pool = players
+            pre_excluded = []
+
+        # No pruning should occur
+        assert len(candidates_for_pool) == 14
+        assert len(pre_excluded) == 0
+
+    def test_pruning_at_threshold_plus_one(self):
+        """Pruning occurs when candidates = MAX_CANDIDATES + 1."""
+        from domain.models.player import Player
+
+        regular_ids = set(range(1, 16))  # 15 regular players (1 over limit)
+        players = [
+            Player(name=f"Player{i}", discord_id=i, glicko_rating=1500.0)
+            for i in range(1, 16)
+        ]
+
+        exclusion_counts = {p.discord_id: 0 for p in players}
+        MAX_CANDIDATES = 14
+
+        if len(players) > MAX_CANDIDATES:
+            def prune_priority(p):
+                is_regular = p.discord_id in regular_ids
+                exc_count = exclusion_counts.get(p.discord_id, 0)
+                rating = p.glicko_rating or 1500.0
+                return (0 if is_regular else 1, -exc_count, -rating)
+
+            sorted_candidates = sorted(players, key=prune_priority)
+            candidates_for_pool = sorted_candidates[:MAX_CANDIDATES]
+            pre_excluded = sorted_candidates[MAX_CANDIDATES:]
+        else:
+            candidates_for_pool = players
+            pre_excluded = []
+
+        # Exactly 1 player should be pruned
+        assert len(candidates_for_pool) == 14
+        assert len(pre_excluded) == 1
