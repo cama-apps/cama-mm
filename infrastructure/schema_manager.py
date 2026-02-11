@@ -235,6 +235,7 @@ class SchemaManager:
             ("add_player_join_times_to_lobby", self._migration_add_player_join_times_to_lobby),
             # Easter egg tracking columns
             ("add_easter_egg_tracking_columns", self._migration_add_easter_egg_tracking_columns),
+            ("create_neon_events_table", self._migration_create_neon_events_table),
         ]
 
     # --- Migrations ---
@@ -1475,4 +1476,25 @@ class SchemaManager:
         # Track whether first leverage bet has been used (one-time trigger)
         self._add_column_if_not_exists(
             cursor, "players", "first_leverage_used", "INTEGER DEFAULT 0"
+        )
+
+    def _migration_create_neon_events_table(self, cursor) -> None:
+        """Create neon_events table for persisting one-time neon triggers and event history."""
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS neon_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                discord_id INTEGER NOT NULL,
+                guild_id INTEGER NOT NULL DEFAULT 0,
+                event_type TEXT NOT NULL,
+                layer INTEGER NOT NULL DEFAULT 1,
+                one_time INTEGER NOT NULL DEFAULT 0,
+                fired_at INTEGER NOT NULL,
+                metadata TEXT
+            )
+            """
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_neon_events_user_event "
+            "ON neon_events(discord_id, guild_id, event_type)"
         )

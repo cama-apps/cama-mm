@@ -606,3 +606,86 @@ class TestNeonDrawing:
         buf = create_market_crash_gif(1000, "no", 5, 10)
         size_mb = len(buf.getvalue()) / (1024 * 1024)
         assert size_mb < 4, f"Market crash GIF is {size_mb:.2f} MB, exceeds 4MB limit"
+
+
+# ---------------------------------------------------------------------------
+# Persistence tests (neon_events table)
+# ---------------------------------------------------------------------------
+
+
+class TestNeonDegenPersistence:
+    """Tests for DB persistence of one-time neon triggers."""
+
+    @pytest.mark.asyncio
+    async def test_degen_milestone_persists_across_instances(self, repo_db_path):
+        """One-time trigger should persist in DB and block re-fire on new instance."""
+        from repositories.player_repository import PlayerRepository
+
+        player_repo = PlayerRepository(repo_db_path)
+
+        # First instance: fire degen_90
+        svc1 = NeonDegenService(player_repo=player_repo)
+        result1 = await svc1.on_degen_milestone(123, 456, 95)
+        # Should fire (first time)
+        assert result1 is not None
+
+        # Second instance (simulates bot restart) with same DB
+        svc2 = NeonDegenService(player_repo=player_repo)
+        result2 = await svc2.on_degen_milestone(123, 456, 95)
+        # Should NOT fire (already persisted in DB)
+        assert result2 is None
+
+    @pytest.mark.asyncio
+    async def test_one_time_db_fallback_without_repo(self):
+        """Without player_repo, one-time triggers should still work in-memory only."""
+        svc = NeonDegenService()  # No player_repo
+
+        # First fire should work (in-memory)
+        result1 = await svc.on_degen_milestone(999, 456, 95)
+        assert result1 is not None
+
+        # Second fire should be blocked (in-memory)
+        result2 = await svc.on_degen_milestone(999, 456, 95)
+        assert result2 is None
+
+        # New instance without repo - no DB to check, so it fires again
+        svc2 = NeonDegenService()
+        result3 = await svc2.on_degen_milestone(999, 456, 95)
+        assert result3 is not None
+
+    @pytest.mark.asyncio
+    async def test_different_triggers_independent(self, repo_db_path):
+        """Different trigger types should not interfere with each other."""
+        from repositories.player_repository import PlayerRepository
+
+        player_repo = PlayerRepository(repo_db_path)
+        svc = NeonDegenService(player_repo=player_repo)
+
+        # Fire degen_90
+        result1 = await svc.on_degen_milestone(123, 456, 95)
+        assert result1 is not None
+
+        # Registration should still be available (different trigger type)
+        assert svc._check_one_time(123, 456, "registration") is True
+        # degen_90 should be blocked
+        assert svc._check_one_time(123, 456, "degen_90") is False
+
+    @pytest.mark.asyncio
+    async def test_different_guilds_independent(self, repo_db_path):
+        """Same user in different guilds should have independent triggers."""
+        from repositories.player_repository import PlayerRepository
+
+        player_repo = PlayerRepository(repo_db_path)
+        svc = NeonDegenService(player_repo=player_repo)
+
+        # Fire degen_90 for guild 456
+        result1 = await svc.on_degen_milestone(123, 456, 95)
+        assert result1 is not None
+
+        # Same user, different guild - should still fire
+        result2 = await svc.on_degen_milestone(123, 789, 95)
+        assert result2 is not None
+
+        # Original guild should still be blocked
+        result3 = await svc.on_degen_milestone(123, 456, 95)
+        assert result3 is None

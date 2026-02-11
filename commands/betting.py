@@ -188,6 +188,17 @@ class BettingCommands(commands.Cog):
         except Exception as exc:
             logger.debug(f"Failed to send neon result: {exc}")
 
+    async def _send_first_neon_result(self, interaction, *event_fns):
+        """Evaluate neon event callables in order, send only the FIRST non-None result."""
+        for fn in event_fns:
+            try:
+                result = await fn()
+                if result is not None:
+                    await self._send_neon_result(interaction, result)
+                    return
+            except Exception:
+                pass
+
     @staticmethod
     async def _delete_after(msg, delay: float) -> None:
         """Delete a message after a delay, ignoring errors."""
@@ -620,65 +631,67 @@ class BettingCommands(commands.Cog):
                 ephemeral=True,
             )
 
-        # Neon Degen Terminal hooks
+        # Neon Degen Terminal hooks - at most ONE neon event per /bet action
         neon = self._get_neon_service()
         if neon:
             try:
-                # Standard bet placed event
-                neon_result = await neon.on_bet_placed(
-                    interaction.user.id, guild_id, amount, lev, team.value
-                )
-                await self._send_neon_result(interaction, neon_result)
-            except Exception as e:
-                logger.debug(f"neon on_bet_placed error: {e}")
-
-            # Additional easter egg events
-            try:
-                # Get balance for all-in check (use betting_service's player_repo)
+                # Pre-fetch data needed by multiple event checks
                 player_repo = self.betting_service.player_repo
                 player = await asyncio.to_thread(
                     player_repo.get_by_id, user_id, guild_id
                 )
-                if player:
-                    # Check for all-in bet (90%+ of balance)
-                    balance_before = player.jopacoin_balance + amount  # Bet was already deducted
-                    if balance_before > 0:
-                        all_in_result = await neon.on_all_in_bet(
-                            user_id, guild_id, amount, balance_before
-                        )
-                        await self._send_neon_result(interaction, all_in_result)
+                balance_before = (player.jopacoin_balance + amount) if player else 0
 
-                    # Check for first leverage bet
-                    if lev > 1 and not player.first_leverage_used:
-                        first_lev_result = await neon.on_first_leverage_bet(
-                            user_id, guild_id, lev
-                        )
-                        await self._send_neon_result(interaction, first_lev_result)
-                        # Mark as used in database
-                        await asyncio.to_thread(
-                            player_repo.mark_first_leverage_used, user_id, guild_id
-                        )
+                # Increment total bets (side-effect needed regardless of which event fires)
+                total_bets = await asyncio.to_thread(
+                    player_repo.increment_total_bets_placed, user_id, guild_id
+                ) if player else 0
 
-                    # Check for 100 bets milestone
-                    total_bets = await asyncio.to_thread(
-                        player_repo.increment_total_bets_placed, user_id, guild_id
-                    )
-                    if total_bets == 100:
-                        bets_milestone_result = await neon.on_100_bets_milestone(
-                            user_id, guild_id, total_bets
-                        )
-                        await self._send_neon_result(interaction, bets_milestone_result)
-
-                # Check for last-second bet
+                # Compute seconds remaining for last-second check
+                seconds_remaining = 0
                 if pending_state:
                     lock_time = pending_state.get("lock_time", 0)
                     import time as _time
                     seconds_remaining = max(0, int(lock_time - _time.time()))
-                    if 0 < seconds_remaining <= 60:
-                        last_second_result = await neon.on_last_second_bet(
-                            user_id, guild_id, seconds_remaining
-                        )
-                        await self._send_neon_result(interaction, last_second_result)
+
+                # Build candidate event lambdas, rarest/one-time first
+                candidates = []
+
+                # First leverage bet (one-time)
+                if player and lev > 1 and not player.first_leverage_used:
+                    async def _first_leverage():
+                        result = await neon.on_first_leverage_bet(user_id, guild_id, lev)
+                        if result is not None:
+                            await asyncio.to_thread(
+                                player_repo.mark_first_leverage_used, user_id, guild_id
+                            )
+                        return result
+                    candidates.append(_first_leverage)
+
+                # 100 bets milestone (one-time)
+                if total_bets == 100:
+                    candidates.append(
+                        lambda: neon.on_100_bets_milestone(user_id, guild_id, total_bets)
+                    )
+
+                # All-in bet
+                if player and balance_before > 0:
+                    candidates.append(
+                        lambda: neon.on_all_in_bet(user_id, guild_id, amount, balance_before)
+                    )
+
+                # Last-second bet
+                if 0 < seconds_remaining <= 60:
+                    candidates.append(
+                        lambda: neon.on_last_second_bet(user_id, guild_id, seconds_remaining)
+                    )
+
+                # Standard bet placed (most common, lowest priority)
+                candidates.append(
+                    lambda: neon.on_bet_placed(user_id, guild_id, amount, lev, team.value)
+                )
+
+                await self._send_first_neon_result(interaction, *candidates)
             except Exception as e:
                 logger.debug(f"Easter egg event hooks error: {e}")
 
@@ -1291,25 +1304,30 @@ class BettingCommands(commands.Cog):
         )
         await message.edit(embed=result_embed)
 
-        # Neon Degen Terminal hook (for BANKRUPT results)
+        # Neon Degen Terminal hook - at most ONE neon event per /gamba action
         neon = self._get_neon_service()
-        if neon and isinstance(result_wedge[1], int) and result_wedge[1] < 0:
-            neon_result = await neon.on_wheel_result(
-                user_id, guild_id,
-                result_value=result_wedge[1],
-                new_balance=new_balance,
-            )
-            await self._send_neon_result(interaction, neon_result)
-
-        # Neon Degen Terminal hook (degen milestone check after gamba)
         if neon:
-            try:
-                degen_score = neon._get_degen_score(user_id, guild_id)
-                if degen_score is not None and degen_score >= 90:
-                    milestone = await neon.on_degen_milestone(user_id, guild_id, degen_score)
-                    await self._send_neon_result(interaction, milestone)
-            except Exception:
-                pass
+            candidates = []
+
+            # Wheel result (for BANKRUPT results)
+            if isinstance(result_wedge[1], int) and result_wedge[1] < 0:
+                candidates.append(
+                    lambda: neon.on_wheel_result(
+                        user_id, guild_id,
+                        result_value=result_wedge[1],
+                        new_balance=new_balance,
+                    )
+                )
+
+            # Degen milestone check after gamba
+            degen_score = neon._get_degen_score(user_id, guild_id)
+            if degen_score is not None and degen_score >= 90:
+                candidates.append(
+                    lambda: neon.on_degen_milestone(user_id, guild_id, degen_score)
+                )
+
+            if candidates:
+                await self._send_first_neon_result(interaction, *candidates)
 
     @app_commands.command(name="tip", description="Give jopacoin to another player")
     @app_commands.describe(
@@ -1643,25 +1661,25 @@ class BettingCommands(commands.Cog):
             ephemeral=False,
         )
 
-        # Neon Degen Terminal hook
+        # Neon Degen Terminal hook - at most ONE neon event per /bankruptcy action
         neon = self._get_neon_service()
         if neon:
             filing_number = await self._get_bankruptcy_filing_number(user_id, guild_id)
-            neon_result = await neon.on_bankruptcy(
-                user_id, guild_id,
-                debt_cleared=result["debt_cleared"],
-                filing_number=filing_number,
-            )
-            await self._send_neon_result(interaction, neon_result)
+            degen_score = neon._get_degen_score(user_id, guild_id)
 
-            # Degen milestone check after bankruptcy
-            try:
-                degen_score = neon._get_degen_score(user_id, guild_id)
-                if degen_score is not None and degen_score >= 90:
-                    milestone = await neon.on_degen_milestone(user_id, guild_id, degen_score)
-                    await self._send_neon_result(interaction, milestone)
-            except Exception:
-                pass
+            candidates = [
+                lambda: neon.on_bankruptcy(
+                    user_id, guild_id,
+                    debt_cleared=result["debt_cleared"],
+                    filing_number=filing_number,
+                ),
+            ]
+            if degen_score is not None and degen_score >= 90:
+                candidates.append(
+                    lambda: neon.on_degen_milestone(user_id, guild_id, degen_score)
+                )
+
+            await self._send_first_neon_result(interaction, *candidates)
 
     async def _get_bankruptcy_filing_number(self, discord_id: int, guild_id: int | None) -> int:
         """Get the current bankruptcy filing number for a user."""

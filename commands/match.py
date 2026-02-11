@@ -1218,51 +1218,51 @@ class MatchCommands(commands.Cog):
                             mr = await neon.on_degen_milestone(loser_id, guild_id, degen_score)
                             if mr:
                                 await _send_neon_msg(mr)
+                                neon_sent = True
                                 break
 
-                # Easter egg hooks: games milestones
-                easter_data = record_result.get("easter_egg_data", {})
-                events_fired = []  # Track events for simultaneous detection
+                # Easter egg hooks: at most ONE additional neon event
+                if not neon_sent:
+                    easter_data = record_result.get("easter_egg_data", {})
 
-                for milestone in easter_data.get("games_milestones", []):
-                    gm_result = await neon.on_games_milestone(
-                        milestone["discord_id"],
-                        guild_id,
-                        milestone["total_games"],
-                    )
-                    if gm_result:
-                        events_fired.append("games_milestone")
-                    await _send_neon_msg(gm_result)
+                    for milestone in easter_data.get("games_milestones", []):
+                        if neon_sent:
+                            break
+                        gm_result = await neon.on_games_milestone(
+                            milestone["discord_id"],
+                            guild_id,
+                            milestone["total_games"],
+                        )
+                        if gm_result:
+                            await _send_neon_msg(gm_result)
+                            neon_sent = True
 
-                # Easter egg hooks: win streak records
-                for streak_rec in easter_data.get("win_streak_records", []):
-                    ws_result = await neon.on_win_streak_record(
-                        streak_rec["discord_id"],
-                        guild_id,
-                        streak_rec["current_streak"],
-                        streak_rec["previous_best"],
-                    )
-                    if ws_result:
-                        events_fired.append("win_streak_record")
-                    await _send_neon_msg(ws_result)
+                    for streak_rec in easter_data.get("win_streak_records", []):
+                        if neon_sent:
+                            break
+                        ws_result = await neon.on_win_streak_record(
+                            streak_rec["discord_id"],
+                            guild_id,
+                            streak_rec["current_streak"],
+                            streak_rec["previous_best"],
+                        )
+                        if ws_result:
+                            await _send_neon_msg(ws_result)
+                            neon_sent = True
 
-                # Easter egg hooks: rivalries detected
-                for rivalry in easter_data.get("rivalries_detected", []):
-                    rv_result = await neon.on_rivalry_detected(
-                        guild_id,
-                        rivalry["player1_id"],
-                        rivalry["player2_id"],
-                        rivalry["games_together"],
-                        rivalry["winrate_vs"],
-                    )
-                    if rv_result:
-                        events_fired.append("rivalry_detected")
-                    await _send_neon_msg(rv_result)
-
-                # Check for simultaneous events
-                if len(events_fired) >= 2:
-                    sim_result = await neon.on_simultaneous_events(guild_id, events_fired)
-                    await _send_neon_msg(sim_result)
+                    for rivalry in easter_data.get("rivalries_detected", []):
+                        if neon_sent:
+                            break
+                        rv_result = await neon.on_rivalry_detected(
+                            guild_id,
+                            rivalry["player1_id"],
+                            rivalry["player2_id"],
+                            rivalry["games_together"],
+                            rivalry["winrate_vs"],
+                        )
+                        if rv_result:
+                            await _send_neon_msg(rv_result)
+                            neon_sent = True
 
             except Exception as exc:
                 logger.debug(f"Neon match hook failed: {exc}")
