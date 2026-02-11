@@ -914,6 +914,48 @@ def render_wheel_bankrupt(name: str, loss: int) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Lightning Bolt templates (server-wide tax)
+# ---------------------------------------------------------------------------
+
+LIGHTNING_BOLT_TEMPLATES = [
+    lambda total, count: f"{DIM}[JOPA-T] LIGHTNING_EVENT processed. {count} accounts taxed. {total} JC redistributed to nonprofit. The system provides.{RESET}",
+    lambda total, count: f"{DIM}[{_ts()}] {count} clients affected. {total} JC seized. Redistribution is {corrupt_text('mandatory')}.{RESET}",
+    lambda total, count: f"{DIM}[SYS] Server-wide levy complete. {total} JC extracted from {count} subjects. No appeals.{RESET}",
+    lambda total, count: f"{DIM}[{_ts()}] The people suffer. The nonprofit {corrupt_text('thrives')}. {total} JC collected.{RESET}",
+    lambda total, count: f"{DIM}[JOPA-T] {count} balances struck. {total} JC for the common good. The good is {corrupt_text('uncommon')}.{RESET}",
+    lambda total, count: f"{DIM}[SYS] Lightning revenue: {total} JC from {count} clients. The house always takes its {corrupt_text('share')}.{RESET}",
+]
+
+
+def lightning_bolt_overlay(total: int, count: int) -> str:
+    """Layer 2 ASCII art for lightning bolt server-wide tax."""
+    lines = [
+        f"{YELLOW}{'=' * 36}{RESET}",
+        f"{YELLOW}  LIGHTNING TAX ASSESSMENT{RESET}",
+        f"{YELLOW}{'=' * 36}{RESET}",
+        f"",
+        f"{DIM}[{_ts()}] Accounts levied:{RESET} {count}",
+        f"{DIM}[{_ts()}] Total extracted:{RESET} {YELLOW}{total}{RESET}{DIM} JC{RESET}",
+        f"{DIM}[{_ts()}] Destination:{RESET} NONPROFIT_FUND",
+        f"",
+        f"{DIM}The {RESET}{corrupt_text('people')}{DIM} suffer quietly.{RESET}",
+        f"{DIM}The fund {RESET}{corrupt_text('grows')}{DIM}.{RESET}",
+    ]
+    return "\n".join(lines)
+
+
+def render_lightning_bolt(total: int, count: int) -> str:
+    """Render a Layer 1 lightning bolt one-liner."""
+    template = random.choice(LIGHTNING_BOLT_TEMPLATES)
+    return ansi_block(template(total, count))
+
+
+def render_lightning_bolt_overlay(total: int, count: int) -> str:
+    """Render a Layer 2 lightning bolt ASCII art."""
+    return ansi_block(lightning_bolt_overlay(total, count))
+
+
+# ---------------------------------------------------------------------------
 # Soft Avoid templates
 # ---------------------------------------------------------------------------
 
