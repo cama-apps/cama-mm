@@ -195,6 +195,57 @@ class LoanRepository(BaseRepository):
             row = cursor.fetchone()
             return row["total_collected"] if row else amount
 
+    def deduct_from_nonprofit_fund(self, guild_id: int | None, amount: int) -> int:
+        """
+        Atomically deduct amount from the nonprofit fund.
+
+        Validates sufficient funds inside a BEGIN IMMEDIATE transaction.
+
+        Args:
+            guild_id: Guild ID
+            amount: Positive amount to deduct
+
+        Returns:
+            New fund balance after deduction
+
+        Raises:
+            ValueError: If amount <= 0 or insufficient funds
+        """
+        if amount <= 0:
+            raise ValueError("Amount must be positive")
+
+        normalized_id = normalize_guild_id(guild_id)
+
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT total_collected FROM nonprofit_fund WHERE guild_id = ?",
+                (normalized_id,),
+            )
+            row = cursor.fetchone()
+            current = row["total_collected"] if row else 0
+
+            if current < amount:
+                raise ValueError(
+                    f"Insufficient nonprofit funds. Available: {current}, requested: {amount}"
+                )
+
+            cursor.execute(
+                """
+                UPDATE nonprofit_fund
+                SET total_collected = total_collected - ?, updated_at = CURRENT_TIMESTAMP
+                WHERE guild_id = ?
+                """,
+                (amount, normalized_id),
+            )
+
+            cursor.execute(
+                "SELECT total_collected FROM nonprofit_fund WHERE guild_id = ?",
+                (normalized_id,),
+            )
+            row = cursor.fetchone()
+            return row["total_collected"]
+
     def execute_loan_atomic(
         self,
         discord_id: int,

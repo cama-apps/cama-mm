@@ -2112,6 +2112,13 @@ class BettingCommands(commands.Cog):
         guild_id = interaction.guild.id if interaction.guild else None
         total = await asyncio.to_thread(self.loan_service.get_nonprofit_fund, guild_id)
 
+        # Check for active proposal with reserved funds
+        reserved = 0
+        if self.disburse_service:
+            proposal = await asyncio.to_thread(self.disburse_service.get_proposal, guild_id)
+            if proposal:
+                reserved = proposal.fund_amount
+
         embed = discord.Embed(
             title="💝 Jopacoin Nonprofit for Gambling Addiction",
             description=(
@@ -2120,17 +2127,39 @@ class BettingCommands(commands.Cog):
             ),
             color=0xE91E63,  # Pink
         )
-        embed.add_field(
-            name="Available Funds",
-            value=f"**{total}** {JOPACOIN_EMOTE}",
-            inline=False,
-        )
 
-        # Show status based on fund level
-        if total >= DISBURSE_MIN_FUND:
-            status_value = f"Ready for disbursement! (min: {DISBURSE_MIN_FUND})"
+        if reserved > 0:
+            embed.add_field(
+                name="Available Funds",
+                value=f"**{total}** {JOPACOIN_EMOTE}",
+                inline=True,
+            )
+            embed.add_field(
+                name="Reserved for Proposal",
+                value=f"**{reserved}** {JOPACOIN_EMOTE}",
+                inline=True,
+            )
+            embed.add_field(
+                name="Total",
+                value=f"**{total + reserved}** {JOPACOIN_EMOTE}",
+                inline=True,
+            )
         else:
-            status_value = f"Collecting... ({total}/{DISBURSE_MIN_FUND} needed)"
+            embed.add_field(
+                name="Available Funds",
+                value=f"**{total}** {JOPACOIN_EMOTE}",
+                inline=False,
+            )
+
+        # Show status based on fund level (including reserved)
+        effective_total = total + reserved
+        if effective_total >= DISBURSE_MIN_FUND:
+            if reserved > 0:
+                status_value = f"Proposal active ({reserved} reserved)"
+            else:
+                status_value = f"Ready for disbursement! (min: {DISBURSE_MIN_FUND})"
+        else:
+            status_value = f"Collecting... ({effective_total}/{DISBURSE_MIN_FUND} needed)"
 
         embed.add_field(
             name="Status",

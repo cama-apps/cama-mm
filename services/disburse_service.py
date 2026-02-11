@@ -133,6 +133,9 @@ class DisburseService:
             quorum_required=quorum_required,
         )
 
+        # Reserve funds by deducting from nonprofit
+        self.loan_repo.deduct_from_nonprofit_fund(guild_id, fund_amount)
+
         return DisburseProposal(
             guild_id=guild_id if guild_id is not None else 0,
             proposal_id=proposal_id,
@@ -261,6 +264,7 @@ class DisburseService:
 
         # Handle cancel specially - reset proposal instead of distributing
         if method == "cancel":
+            self.loan_repo.add_to_nonprofit_fund(guild_id, fund_amount)
             self.disburse_repo.reset_proposal(guild_id)
             return {
                 "success": True,
@@ -269,13 +273,14 @@ class DisburseService:
                 "total_disbursed": 0,
                 "distributions": [],
                 "cancelled": True,
-                "message": "Proposal cancelled by vote. Funds remain in nonprofit.",
+                "message": "Proposal cancelled by vote. Funds returned to nonprofit.",
             }
 
         # Handle stimulus separately - different eligibility criteria
         if method == "stimulus":
             eligible = self.player_repo.get_stimulus_eligible_players(guild_id)
             if not eligible:
+                self.loan_repo.add_to_nonprofit_fund(guild_id, fund_amount)
                 self.disburse_repo.complete_proposal(guild_id)
                 return {
                     "success": True,
@@ -290,6 +295,7 @@ class DisburseService:
             # Lottery: pick one random registered player, winner takes all
             eligible = self.player_repo.get_all_registered_players_for_lottery(guild_id)
             if not eligible:
+                self.loan_repo.add_to_nonprofit_fund(guild_id, fund_amount)
                 self.disburse_repo.complete_proposal(guild_id)
                 return {
                     "success": True,
@@ -304,6 +310,7 @@ class DisburseService:
             # Social security: distribute proportional to games played
             eligible = self.player_repo.get_players_by_games_played(guild_id)
             if not eligible:
+                self.loan_repo.add_to_nonprofit_fund(guild_id, fund_amount)
                 self.disburse_repo.complete_proposal(guild_id)
                 return {
                     "success": True,
@@ -318,6 +325,7 @@ class DisburseService:
             # Debtor-based methods: even, proportional, neediest
             debtors = self.player_repo.get_players_with_negative_balance(guild_id)
             if not debtors:
+                self.loan_repo.add_to_nonprofit_fund(guild_id, fund_amount)
                 self.disburse_repo.complete_proposal(guild_id)
                 return {
                     "success": True,
@@ -335,7 +343,9 @@ class DisburseService:
             else:  # neediest
                 distributions = self._calculate_neediest_distribution(fund_amount, debtors)
 
-        # Execute atomic disbursement
+        # Return reserved funds, then atomically deduct the actual distribution amount.
+        # Net effect: fund decreases by total_disbursed; any leftover stays in fund.
+        self.loan_repo.add_to_nonprofit_fund(guild_id, fund_amount)
         total_disbursed = self.loan_repo.disburse_fund_atomic(guild_id, distributions)
 
         # Record history
@@ -362,10 +372,19 @@ class DisburseService:
         """
         Reset (cancel) the active proposal. Admin only.
 
+        Returns reserved funds to the nonprofit fund.
+
         Returns:
             True if a proposal was reset, False if none active
         """
-        return self.disburse_repo.reset_proposal(guild_id)
+        proposal_data = self.disburse_repo.get_active_proposal(guild_id)
+        if not proposal_data:
+            return False
+        fund_amount = proposal_data["fund_amount"]
+        result = self.disburse_repo.reset_proposal(guild_id)
+        if result:
+            self.loan_repo.add_to_nonprofit_fund(guild_id, fund_amount)
+        return result
 
     def get_last_disbursement(self, guild_id: int | None) -> dict | None:
         """Get the most recent disbursement for display in /nonprofit."""

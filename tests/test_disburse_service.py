@@ -880,6 +880,111 @@ class TestSocialSecurityExecution:
         assert bal4 == 50  # Unchanged (not eligible)
 
 
+class TestFundReservation:
+    """Test that funds are reserved on proposal creation and returned on cancel/reset."""
+
+    def test_fund_decreases_on_proposal_creation(
+        self, disburse_service, loan_repo, setup_players, setup_nonprofit_fund
+    ):
+        """Fund should decrease when a proposal is created (funds are reserved)."""
+        initial_fund = loan_repo.get_nonprofit_fund(guild_id=TEST_GUILD_ID)
+        assert initial_fund == 300
+
+        disburse_service.create_proposal(guild_id=TEST_GUILD_ID)
+
+        fund_after = loan_repo.get_nonprofit_fund(guild_id=TEST_GUILD_ID)
+        assert fund_after == 0  # 300 reserved
+
+    def test_fund_returns_on_admin_reset(
+        self, disburse_service, loan_repo, setup_players, setup_nonprofit_fund
+    ):
+        """Fund should return to original level after admin reset."""
+        initial_fund = loan_repo.get_nonprofit_fund(guild_id=TEST_GUILD_ID)
+
+        disburse_service.create_proposal(guild_id=TEST_GUILD_ID)
+        assert loan_repo.get_nonprofit_fund(guild_id=TEST_GUILD_ID) == 0
+
+        disburse_service.reset_proposal(guild_id=TEST_GUILD_ID)
+
+        final_fund = loan_repo.get_nonprofit_fund(guild_id=TEST_GUILD_ID)
+        assert final_fund == initial_fund
+
+    def test_fund_returns_on_vote_cancel(
+        self, disburse_service, loan_repo, setup_players, setup_nonprofit_fund
+    ):
+        """Fund should return to original level after cancel vote wins."""
+        initial_fund = loan_repo.get_nonprofit_fund(guild_id=TEST_GUILD_ID)
+
+        disburse_service.create_proposal(guild_id=TEST_GUILD_ID)
+        disburse_service.add_vote(guild_id=TEST_GUILD_ID, discord_id=1003, method="cancel")
+        disburse_service.add_vote(guild_id=TEST_GUILD_ID, discord_id=1004, method="cancel")
+
+        disburse_service.execute_disbursement(guild_id=TEST_GUILD_ID)
+
+        final_fund = loan_repo.get_nonprofit_fund(guild_id=TEST_GUILD_ID)
+        assert final_fund == initial_fund
+
+    def test_fund_correct_after_execution(
+        self, disburse_service, loan_repo, player_repo, setup_players, setup_nonprofit_fund
+    ):
+        """Fund should equal initial - total_disbursed after successful execution."""
+        initial_fund = loan_repo.get_nonprofit_fund(guild_id=TEST_GUILD_ID)
+
+        disburse_service.create_proposal(guild_id=TEST_GUILD_ID)
+        disburse_service.add_vote(guild_id=TEST_GUILD_ID, discord_id=1003, method="even")
+        disburse_service.add_vote(guild_id=TEST_GUILD_ID, discord_id=1004, method="even")
+
+        result = disburse_service.execute_disbursement(guild_id=TEST_GUILD_ID)
+        total_disbursed = result["total_disbursed"]
+
+        final_fund = loan_repo.get_nonprofit_fund(guild_id=TEST_GUILD_ID)
+        assert final_fund == initial_fund - total_disbursed
+
+    def test_fund_returns_when_no_eligible(
+        self, disburse_service, loan_repo, player_repo
+    ):
+        """Fund should return fully when there are no eligible recipients at execution time."""
+        # Create players with positive balances (for stimulus eligibility at proposal time)
+        for i in range(1, 7):
+            player_repo.add(discord_id=i, discord_username=f"Player{i}", guild_id=TEST_GUILD_ID, initial_mmr=3000)
+            player_repo.update_balance(i, TEST_GUILD_ID, 100 - i * 10)
+
+        loan_repo.add_to_nonprofit_fund(guild_id=TEST_GUILD_ID, amount=300)
+        initial_fund = loan_repo.get_nonprofit_fund(guild_id=TEST_GUILD_ID)
+
+        disburse_service.create_proposal(guild_id=TEST_GUILD_ID)
+
+        # Vote for "neediest" but there are no debtors
+        disburse_service.add_vote(guild_id=TEST_GUILD_ID, discord_id=1, method="neediest")
+        disburse_service.add_vote(guild_id=TEST_GUILD_ID, discord_id=2, method="neediest")
+        disburse_service.add_vote(guild_id=TEST_GUILD_ID, discord_id=3, method="neediest")
+
+        result = disburse_service.execute_disbursement(guild_id=TEST_GUILD_ID)
+        assert result["total_disbursed"] == 0
+
+        final_fund = loan_repo.get_nonprofit_fund(guild_id=TEST_GUILD_ID)
+        assert final_fund == initial_fund
+
+    def test_fund_accrued_during_proposal_preserved(
+        self, disburse_service, loan_repo, setup_players, setup_nonprofit_fund
+    ):
+        """New income added during active proposal should survive cancel/reset."""
+        initial_fund = loan_repo.get_nonprofit_fund(guild_id=TEST_GUILD_ID)
+
+        disburse_service.create_proposal(guild_id=TEST_GUILD_ID)
+        assert loan_repo.get_nonprofit_fund(guild_id=TEST_GUILD_ID) == 0
+
+        # Simulate new loan fees arriving while proposal is active
+        loan_repo.add_to_nonprofit_fund(guild_id=TEST_GUILD_ID, amount=50)
+        assert loan_repo.get_nonprofit_fund(guild_id=TEST_GUILD_ID) == 50
+
+        disburse_service.reset_proposal(guild_id=TEST_GUILD_ID)
+
+        # Should be initial (returned) + 50 (accrued)
+        final_fund = loan_repo.get_nonprofit_fund(guild_id=TEST_GUILD_ID)
+        assert final_fund == initial_fund + 50
+
+
 class TestGetIndividualVotes:
     """Test get_individual_votes repository method."""
 
