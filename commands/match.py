@@ -117,6 +117,7 @@ class MatchCommands(commands.Cog):
         guild_id: int | None,
         shuffle_embed: discord.Embed = None,
         included_player_ids: list[int] | None = None,
+        pending_match_id: int | None = None,
     ) -> None:
         """Lock the lobby thread when shuffle occurs and post shuffle results."""
         thread_id = self.lobby_service.get_lobby_thread_id()
@@ -167,6 +168,7 @@ class MatchCommands(commands.Cog):
                 channel_id=None,
                 thread_message_id=thread_shuffle_msg.id,
                 thread_id=thread_id,
+                pending_match_id=pending_match_id,
             )
 
     async def _finalize_lobby_thread(
@@ -358,14 +360,18 @@ class MatchCommands(commands.Cog):
 
         guild_id = guild.id if guild else None
 
-        pending_match = self.match_service.get_last_shuffle(guild_id)
-        if pending_match:
-            jump_url = pending_match.get("shuffle_message_jump_url")
-            message_text = "❌ There's an active match that needs to be recorded!"
+        # Check if the user calling shuffle is already in a pending match
+        player_match = self.match_service.state_service.get_pending_match_for_player(
+            guild_id, interaction.user.id
+        )
+        if player_match:
+            pending_match_id = player_match.get("pending_match_id")
+            jump_url = player_match.get("shuffle_message_jump_url")
+            message_text = f"❌ You're already in a pending match (Match #{pending_match_id})!"
             if jump_url:
-                message_text += f" [View match]({jump_url}) then use `/record` first."
+                message_text += f" [View your match]({jump_url}) and use `/record` to complete it first."
             else:
-                message_text += " Use `/record` first."
+                message_text += " Use `/record` to complete it first."
             await interaction.followup.send(message_text, ephemeral=True)
             return
 
@@ -474,6 +480,28 @@ class MatchCommands(commands.Cog):
         else:
             # 10+ regular players means all conditional players are excluded
             excluded_conditional_ids = list(all_conditional_ids)
+
+        # Check if any of the players to be shuffled are already in a pending match
+        pending_player_ids = self.match_service.state_service.get_all_pending_player_ids(guild_id)
+        players_in_pending = set(player_ids) & pending_player_ids
+        if players_in_pending:
+            # Get player names for the error message
+            blocked_names = []
+            for pid in players_in_pending:
+                player_obj = self.player_service.get_player(pid, guild_id)
+                if player_obj:
+                    display_name = get_player_display_name(player_obj, discord_id=pid, guild=guild)
+                    blocked_names.append(display_name)
+            blocked_list = ", ".join(blocked_names[:5])  # Show max 5 names
+            if len(players_in_pending) > 5:
+                blocked_list += f" and {len(players_in_pending) - 5} more"
+            await interaction.followup.send(
+                f"❌ Cannot shuffle: {len(players_in_pending)} players are already in a pending match: {blocked_list}\n"
+                f"They must complete their current match with `/record` first.",
+                ephemeral=True,
+            )
+            return
+
         # `guild` and `guild_id` already computed before the match check
         mode = "pool"  # betting_mode.value if betting_mode else "pool"
         rs = rating_system.value if rating_system else "glicko"
@@ -541,6 +569,7 @@ class MatchCommands(commands.Cog):
                             dire_ids=pending_state["dire_team_ids"],
                             shuffle_timestamp=pending_state["shuffle_timestamp"],
                             is_bomb_pot=is_bomb_pot,
+                            pending_match_id=pending_state.get("pending_match_id"),
                         )
                     )
                     if blind_bets_result["created"] > 0:
@@ -711,9 +740,15 @@ class MatchCommands(commands.Cog):
         embed.add_field(name=wager_field_name, value=wager_field_value, inline=False)
 
         # Add match quality indicators to footer (subtle display)
+        # Include pending_match_id for concurrent match identification
         glicko_prob = result.get("glicko_radiant_win_prob", 0.5)
         os_prob = result.get("openskill_radiant_win_prob", 0.5)
-        embed.set_footer(text=f"{glicko_prob:.2f} {os_prob:.2f}")
+        pending_state = self.match_service.get_last_shuffle(guild_id)
+        pending_match_id = pending_state.get("pending_match_id") if pending_state else None
+        if pending_match_id:
+            embed.set_footer(text=f"Match #{pending_match_id} | {glicko_prob:.2f} {os_prob:.2f}")
+        else:
+            embed.set_footer(text=f"{glicko_prob:.2f} {os_prob:.2f}")
 
         # Post shuffle embed to the lobby channel (dedicated channel where embed lives)
         lobby_channel_id = self.lobby_service.get_lobby_channel_id()
@@ -750,6 +785,7 @@ class MatchCommands(commands.Cog):
                     channel_id=message.channel.id if message.channel else None,
                     jump_url=jump_url,
                     origin_channel_id=origin_channel_id,
+                    pending_match_id=pending_match_id,
                 )
         except Exception as exc:
             logger.warning(f"Failed to store shuffle message URL: {exc}", exc_info=True)
@@ -769,6 +805,7 @@ class MatchCommands(commands.Cog):
             guild_id,
             shuffle_embed=embed,
             included_player_ids=included_ids,
+            pending_match_id=pending_match_id,
         )
         # Unpin from the lobby channel (may be dedicated channel, not interaction channel)
         lobby_channel_id = self.lobby_service.get_lobby_channel_id()
@@ -837,33 +874,66 @@ class MatchCommands(commands.Cog):
         guild_id = (
             interaction.guild.id if hasattr(interaction, "guild") and interaction.guild else None
         )
+
+        # Auto-detect which pending match the voter is in (for concurrent match support)
+        # This determines which match's votes to update
+        pending_state = None
+        all_pending = self.match_service.state_service.get_all_pending_matches(guild_id)
+
+        if len(all_pending) == 0:
+            await interaction.followup.send("❌ No pending match to record.", ephemeral=True)
+            return
+        elif len(all_pending) == 1:
+            # Single match - use it (backward compatible)
+            pending_state = all_pending[0]
+        else:
+            # Multiple matches - find the one the voter is in
+            player_match = self.match_service.state_service.get_pending_match_for_player(
+                guild_id, interaction.user.id
+            )
+            if player_match:
+                pending_state = player_match
+            else:
+                # Voter not in any match - they can't vote
+                match_ids = ", ".join(f"#{m.get('pending_match_id')}" for m in all_pending)
+                await interaction.followup.send(
+                    f"❌ Multiple pending matches exist ({match_ids}) but you're not a participant in any of them. "
+                    "Only match participants can vote on the result.",
+                    ephemeral=True,
+                )
+                return
+
+        pending_match_id = pending_state.get("pending_match_id")
+        logger.info(f"Recording for pending_match_id={pending_match_id}")
+
         is_admin = has_admin_permission(interaction)
         if result.value == "abort":
             if is_admin:
-                await self._finalize_abort(interaction, guild_id, admin_override=True)
+                await self._finalize_abort(interaction, guild_id, admin_override=True, pending_match_id=pending_match_id)
                 return
             try:
                 submission = await asyncio.to_thread(
                     functools.partial(self.match_service.add_abort_submission,
-                        guild_id, interaction.user.id, is_admin=False)
+                        guild_id, interaction.user.id, is_admin=False, pending_match_id=pending_match_id)
                 )
             except ValueError as exc:
                 await interaction.followup.send(f"❌ {exc}", ephemeral=True)
                 return
             if not submission["is_ready"]:
                 min_subs = self.match_service.MIN_NON_ADMIN_SUBMISSIONS
+                match_id_note = f" (Match #{pending_match_id})" if pending_match_id else ""
                 await interaction.followup.send(
-                    f"✅ Abort request recorded. Non-admin submissions: {submission['non_admin_count']}/{min_subs} "
+                    f"✅ Abort request recorded{match_id_note}. Non-admin submissions: {submission['non_admin_count']}/{min_subs} "
                     f"(admins do not count toward the minimum).\nRequires {min_subs} abort confirmations.",
                     ephemeral=True,
                 )
                 return
-            await self._finalize_abort(interaction, guild_id, admin_override=False)
+            await self._finalize_abort(interaction, guild_id, admin_override=False, pending_match_id=pending_match_id)
             return
         try:
             submission = await asyncio.to_thread(
-                self.match_service.add_record_submission,
-                guild_id, interaction.user.id, result.value, is_admin
+                functools.partial(self.match_service.add_record_submission,
+                    guild_id, interaction.user.id, result.value, is_admin, pending_match_id=pending_match_id)
             )
         except ValueError as exc:
             await interaction.followup.send(f"❌ {exc}", ephemeral=True)
@@ -873,9 +943,10 @@ class MatchCommands(commands.Cog):
             vote_counts = submission.get("vote_counts", {"radiant": 0, "dire": 0})
             min_subs = self.match_service.MIN_NON_ADMIN_SUBMISSIONS
             admin_note = " (admins do not count toward the minimum)" if is_admin else ""
+            match_id_note = f" (Match #{pending_match_id})" if pending_match_id else ""
             confirmations_text = f"🟢 Radiant: {vote_counts['radiant']}/{min_subs} | 🔴 Dire: {vote_counts['dire']}/{min_subs}"
             await interaction.followup.send(
-                f"✅ Result recorded for {result.name}.{admin_note}\n{confirmations_text}\nRequires {min_subs} confirmations.",
+                f"✅ Result recorded for {result.name}{match_id_note}.{admin_note}\n{confirmations_text}\nRequires {min_subs} confirmations.",
                 ephemeral=True,
             )
             return
@@ -883,7 +954,7 @@ class MatchCommands(commands.Cog):
         winning_result = submission["result"]
 
         # Save thread_id before record_match clears the pending state
-        pending_state = self.match_service.get_last_shuffle(guild_id)
+        # Use the specific pending_match_id we've been working with
         thread_id_for_finalize = (
             pending_state.get("thread_shuffle_thread_id") if pending_state else None
         )
@@ -891,7 +962,8 @@ class MatchCommands(commands.Cog):
         try:
             record_result = await asyncio.to_thread(
                 functools.partial(self.match_service.record_match,
-                    winning_result, guild_id=guild_id, dotabuff_match_id=dotabuff_match_id)
+                    winning_result, guild_id=guild_id, dotabuff_match_id=dotabuff_match_id,
+                    pending_match_id=pending_match_id)
             )
         except ValueError as exc:
             await interaction.followup.send(f"❌ {exc}", ephemeral=True)
@@ -1411,13 +1483,14 @@ class MatchCommands(commands.Cog):
             logger.warning(f"Failed to send enrichment result: {exc}")
 
     async def _finalize_abort(
-        self, interaction: discord.Interaction, guild_id: int | None, admin_override: bool
+        self, interaction: discord.Interaction, guild_id: int | None, admin_override: bool,
+        pending_match_id: int | None = None
     ):
         betting_service = getattr(self.bot, "betting_service", None)
-        pending_state = self.match_service.get_last_shuffle(guild_id)
+        pending_state = self.match_service.state_service.get_last_shuffle(guild_id, pending_match_id)
         if betting_service and pending_state:
             try:
-                betting_service.refund_pending_bets(guild_id, pending_state)
+                betting_service.refund_pending_bets(guild_id, pending_state, pending_match_id=pending_match_id)
             except Exception as exc:
                 logger.error(f"Error refunding pending bets on abort: {exc}", exc_info=True)
         # Cancel any pending betting reminders
@@ -1427,16 +1500,20 @@ class MatchCommands(commands.Cog):
         await self._update_channel_message_closed("Match Aborted")
         await self._abort_lobby_thread(guild_id)
 
-        self.match_service.clear_last_shuffle(guild_id)
+        # Clear only the specific pending match (not all of them)
+        self.match_service.state_service.clear_last_shuffle(guild_id, pending_match_id)
         await safe_unpin_all_bot_messages(interaction.channel, self.bot.user)
-        await asyncio.to_thread(self.lobby_service.reset_lobby)
+
+        # Don't reset lobby on abort - players can still queue for next game
+        # Only reset lobby after successful shuffle to clear the player list
 
         # Clear lobby rally cooldowns
         from bot import clear_lobby_rally_cooldowns
         clear_lobby_rally_cooldowns(guild_id or 0)
 
+        match_id_note = f" (Match #{pending_match_id})" if pending_match_id else ""
         await interaction.followup.send(
-            "✅ Match aborted. You can create a new lobby.", ephemeral=False
+            f"✅ Match aborted{match_id_note}. Bets have been refunded.", ephemeral=False
         )
 
     async def _schedule_betting_reminders(

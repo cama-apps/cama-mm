@@ -77,7 +77,9 @@ class MatchService:
         self.soft_avoid_repo = soft_avoid_repo
         # Guard against concurrent finalizations per guild
         self._recording_lock = threading.Lock()
-        self._recording_in_progress: set[int] = set()
+        # Track matches being recorded as (guild_id, pending_match_id) tuples
+        # to allow concurrent recording of different matches in the same guild
+        self._recording_in_progress: set[tuple[int, int | None]] = set()
 
     def _map_player_ids(self, player_ids: list[int], players: list[Player]) -> dict[int, int]:
         """Map Player object identity (id()) to Discord ID for stable lookups."""
@@ -93,9 +95,9 @@ class MatchService:
         """Normalize guild_id (delegates to state_service)."""
         return self.state_service._normalize_guild_id(guild_id)
 
-    def get_last_shuffle(self, guild_id: int | None = None) -> dict | None:
+    def get_last_shuffle(self, guild_id: int | None = None, pending_match_id: int | None = None) -> dict | None:
         """Get the pending shuffle state (delegates to state_service)."""
-        return self.state_service.get_last_shuffle(guild_id)
+        return self.state_service.get_last_shuffle(guild_id, pending_match_id)
 
     def set_last_shuffle(self, guild_id: int | None, payload: dict) -> None:
         """Set the pending shuffle state (delegates to state_service)."""
@@ -114,20 +116,21 @@ class MatchService:
         thread_message_id: int | None = None,
         thread_id: int | None = None,
         origin_channel_id: int | None = None,
+        pending_match_id: int | None = None,
     ) -> None:
         """Store message metadata for the pending shuffle (delegates to state_service)."""
         self.state_service.set_shuffle_message_info(
             guild_id, message_id, channel_id, jump_url,
-            thread_message_id, thread_id, origin_channel_id
+            thread_message_id, thread_id, origin_channel_id, pending_match_id
         )
 
-    def get_shuffle_message_info(self, guild_id: int | None) -> dict[str, int | None]:
+    def get_shuffle_message_info(self, guild_id: int | None, pending_match_id: int | None = None) -> dict[str, int | None]:
         """Return message metadata for the pending shuffle (delegates to state_service)."""
-        return self.state_service.get_shuffle_message_info(guild_id)
+        return self.state_service.get_shuffle_message_info(guild_id, pending_match_id)
 
-    def clear_last_shuffle(self, guild_id: int | None) -> None:
+    def clear_last_shuffle(self, guild_id: int | None, pending_match_id: int | None = None) -> None:
         """Clear the pending shuffle state (delegates to state_service)."""
-        self.state_service.clear_last_shuffle(guild_id)
+        self.state_service.clear_last_shuffle(guild_id, pending_match_id)
 
     def _ensure_pending_state(self, guild_id: int | None) -> dict:
         """Get the pending state, raising error if none exists (delegates to state_service)."""
@@ -147,49 +150,51 @@ class MatchService:
 
     # ==================== Voting Management (delegated to MatchVotingService) ====================
 
-    def has_admin_submission(self, guild_id: int | None) -> bool:
+    def has_admin_submission(self, guild_id: int | None, pending_match_id: int | None = None) -> bool:
         """Check if an admin has submitted a result vote (delegates to voting_service)."""
-        return self.voting_service.has_admin_submission(guild_id)
+        return self.voting_service.has_admin_submission(guild_id, pending_match_id)
 
-    def has_admin_abort_submission(self, guild_id: int | None) -> bool:
+    def has_admin_abort_submission(self, guild_id: int | None, pending_match_id: int | None = None) -> bool:
         """Check if an admin has submitted an abort vote (delegates to voting_service)."""
-        return self.voting_service.has_admin_abort_submission(guild_id)
+        return self.voting_service.has_admin_abort_submission(guild_id, pending_match_id)
 
     def add_record_submission(
-        self, guild_id: int | None, user_id: int, result: str, is_admin: bool
+        self, guild_id: int | None, user_id: int, result: str, is_admin: bool,
+        pending_match_id: int | None = None
     ) -> dict[str, Any]:
         """Add a vote for the match result (delegates to voting_service)."""
-        return self.voting_service.add_record_submission(guild_id, user_id, result, is_admin)
+        return self.voting_service.add_record_submission(guild_id, user_id, result, is_admin, pending_match_id)
 
-    def get_non_admin_submission_count(self, guild_id: int | None) -> int:
+    def get_non_admin_submission_count(self, guild_id: int | None, pending_match_id: int | None = None) -> int:
         """Get count of non-admin result votes (delegates to voting_service)."""
-        return self.voting_service.get_non_admin_submission_count(guild_id)
+        return self.voting_service.get_non_admin_submission_count(guild_id, pending_match_id)
 
-    def get_abort_submission_count(self, guild_id: int | None) -> int:
+    def get_abort_submission_count(self, guild_id: int | None, pending_match_id: int | None = None) -> int:
         """Get count of non-admin abort votes (delegates to voting_service)."""
-        return self.voting_service.get_abort_submission_count(guild_id)
+        return self.voting_service.get_abort_submission_count(guild_id, pending_match_id)
 
-    def can_abort_match(self, guild_id: int | None) -> bool:
+    def can_abort_match(self, guild_id: int | None, pending_match_id: int | None = None) -> bool:
         """Check if there are enough votes to abort (delegates to voting_service)."""
-        return self.voting_service.can_abort_match(guild_id)
+        return self.voting_service.can_abort_match(guild_id, pending_match_id)
 
     def add_abort_submission(
-        self, guild_id: int | None, user_id: int, is_admin: bool
+        self, guild_id: int | None, user_id: int, is_admin: bool,
+        pending_match_id: int | None = None
     ) -> dict[str, Any]:
         """Add a vote to abort the match (delegates to voting_service)."""
-        return self.voting_service.add_abort_submission(guild_id, user_id, is_admin)
+        return self.voting_service.add_abort_submission(guild_id, user_id, is_admin, pending_match_id)
 
-    def get_vote_counts(self, guild_id: int | None) -> dict[str, int]:
+    def get_vote_counts(self, guild_id: int | None, pending_match_id: int | None = None) -> dict[str, int]:
         """Get vote counts for radiant and dire (delegates to voting_service)."""
-        return self.voting_service.get_vote_counts(guild_id)
+        return self.voting_service.get_vote_counts(guild_id, pending_match_id)
 
-    def get_pending_record_result(self, guild_id: int | None) -> str | None:
+    def get_pending_record_result(self, guild_id: int | None, pending_match_id: int | None = None) -> str | None:
         """Get the result to record if threshold met (delegates to voting_service)."""
-        return self.voting_service.get_pending_record_result(guild_id)
+        return self.voting_service.get_pending_record_result(guild_id, pending_match_id)
 
-    def can_record_match(self, guild_id: int | None) -> bool:
+    def can_record_match(self, guild_id: int | None, pending_match_id: int | None = None) -> bool:
         """Check if there are enough votes to record (delegates to voting_service)."""
-        return self.voting_service.can_record_match(guild_id)
+        return self.voting_service.can_record_match(guild_id, pending_match_id)
 
     def shuffle_players(
         self,
@@ -514,26 +519,38 @@ class MatchService:
         winning_team: str,
         guild_id: int | None = None,
         dotabuff_match_id: str | None = None,
+        pending_match_id: int | None = None,
     ) -> dict:
         """
         Record a match result and update ratings.
 
         winning_team: 'radiant' or 'dire'
+        pending_match_id: Optional specific match ID for concurrent match support.
+                         If None and only one pending match exists, uses that one.
 
-        Thread-safe: prevents concurrent finalization for the same guild.
+        Thread-safe: prevents concurrent finalization for the same match.
         """
         normalized_gid = self._normalize_guild_id(guild_id)
 
-        # Acquire exclusive recording right for this guild
+        # Get state first to determine the actual pending_match_id
+        last_shuffle = self.get_last_shuffle(guild_id, pending_match_id)
+        if not last_shuffle:
+            raise ValueError("No recent shuffle found.")
+        # Get the actual pending_match_id from the state (in case it wasn't provided)
+        pending_match_id = last_shuffle.get("pending_match_id")
+
+        # Create lock key as (guild_id, pending_match_id) tuple
+        # This allows concurrent recording of different matches in the same guild
+        lock_key = (normalized_gid, pending_match_id)
+
+        # Acquire exclusive recording right for this specific match
         with self._recording_lock:
-            if normalized_gid in self._recording_in_progress:
-                raise ValueError("Match recording already in progress for this guild.")
-            self._recording_in_progress.add(normalized_gid)
+            if lock_key in self._recording_in_progress:
+                match_note = f" (Match #{pending_match_id})" if pending_match_id else ""
+                raise ValueError(f"Match recording already in progress{match_note}.")
+            self._recording_in_progress.add(lock_key)
 
         try:
-            last_shuffle = self.get_last_shuffle(guild_id)
-            if not last_shuffle:
-                raise ValueError("No recent shuffle found.")
 
             if winning_team not in ("radiant", "dire"):
                 raise ValueError("winning_team must be 'radiant' or 'dire'.")
@@ -868,8 +885,8 @@ class MatchService:
                                 "previous_best": prev_best,
                             })
 
-            # Clear state after successful record
-            self.clear_last_shuffle(guild_id)
+            # Clear state after successful record (only this specific match)
+            self.clear_last_shuffle(guild_id, pending_match_id)
 
             return {
                 "match_id": match_id,
@@ -884,7 +901,7 @@ class MatchService:
             }
         finally:
             with self._recording_lock:
-                self._recording_in_progress.discard(normalized_gid)
+                self._recording_in_progress.discard(lock_key)
 
     def update_openskill_ratings_for_match(self, match_id: int, guild_id: int | None = None) -> dict:
         """

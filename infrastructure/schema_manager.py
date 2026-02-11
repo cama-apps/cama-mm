@@ -236,6 +236,9 @@ class SchemaManager:
             # Easter egg tracking columns
             ("add_easter_egg_tracking_columns", self._migration_add_easter_egg_tracking_columns),
             ("create_neon_events_table", self._migration_create_neon_events_table),
+            # Concurrent match support migrations
+            ("restructure_pending_matches_for_concurrent", self._migration_restructure_pending_matches_for_concurrent),
+            ("add_pending_match_id_to_bets", self._migration_add_pending_match_id_to_bets),
         ]
 
     # --- Migrations ---
@@ -1497,4 +1500,59 @@ class SchemaManager:
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_neon_events_user_event "
             "ON neon_events(discord_id, guild_id, event_type)"
+        )
+
+    def _migration_restructure_pending_matches_for_concurrent(self, cursor) -> None:
+        """
+        Restructure pending_matches table to support concurrent matches per guild.
+
+        Changes PRIMARY KEY from guild_id to auto-increment pending_match_id,
+        allowing multiple pending matches per guild simultaneously.
+        """
+        # Check if we already have the new schema (pending_match_id column exists)
+        cursor.execute("PRAGMA table_info(pending_matches)")
+        columns = {row[1] for row in cursor.fetchall()}
+        if "pending_match_id" in columns:
+            return  # Already migrated
+
+        # Rename old table
+        cursor.execute("ALTER TABLE pending_matches RENAME TO pending_matches_old")
+
+        # Create new table with auto-increment ID
+        cursor.execute(
+            """
+            CREATE TABLE pending_matches (
+                pending_match_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                payload TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_pending_matches_guild ON pending_matches(guild_id)"
+        )
+
+        # Migrate existing data (preserve guild_id and payload)
+        cursor.execute(
+            """
+            INSERT INTO pending_matches (guild_id, payload, updated_at)
+            SELECT guild_id, payload, updated_at FROM pending_matches_old
+            """
+        )
+
+        # Drop old table
+        cursor.execute("DROP TABLE pending_matches_old")
+
+    def _migration_add_pending_match_id_to_bets(self, cursor) -> None:
+        """
+        Add pending_match_id column to bets table for concurrent match support.
+
+        This allows bets to be associated with a specific pending match when
+        multiple matches are pending simultaneously.
+        """
+        self._add_column_if_not_exists(cursor, "bets", "pending_match_id", "INTEGER")
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_bets_pending_match ON bets(pending_match_id)"
         )

@@ -282,12 +282,14 @@ class LobbyCommands(commands.Cog):
         if not player or not player.preferred_roles:
             return False, "⚠️ Set your preferred roles with `/setroles` to auto-join."
 
-        # Check for pending match
+        # Check if this player is already in a pending match
         match_service = getattr(self.bot, "match_service", None)
         if match_service:
-            pending_match = await asyncio.to_thread(match_service.get_last_shuffle, guild_id)
-            if pending_match:
-                return False, None  # Don't show warning, the main command handles this
+            player_match = await asyncio.to_thread(
+                match_service.state_service.get_pending_match_for_player, guild_id, user_id
+            )
+            if player_match:
+                return False, None  # Player is in a pending match, can't auto-join
 
         # Attempt to join
         success, reason = await asyncio.to_thread(self.lobby_service.join_lobby, user_id)
@@ -341,20 +343,6 @@ class LobbyCommands(commands.Cog):
                 "❌ You're not registered! Use `/register` first.", ephemeral=True
             )
             return
-
-        # Block if a match is pending recording
-        match_service = getattr(self.bot, "match_service", None)
-        if match_service:
-            pending_match = await asyncio.to_thread(match_service.get_last_shuffle, guild_id)
-            if pending_match:
-                jump_url = pending_match.get("shuffle_message_jump_url")
-                message_text = "❌ There's a pending match that needs to be recorded!"
-                if jump_url:
-                    message_text += f" [View pending match]({jump_url}) then use `/record` first."
-                else:
-                    message_text += " Use `/record` first."
-                await interaction.followup.send(message_text, ephemeral=True)
-                return
 
         # Acquire lock to prevent race condition when multiple users call /lobby simultaneously
         async with self.lobby_service.creation_lock:
@@ -589,17 +577,20 @@ class LobbyCommands(commands.Cog):
             )
             return
 
-        # Block if a match is pending recording
+        # Block if THIS player is already in a pending match
         match_service = getattr(self.bot, "match_service", None)
         if match_service:
-            pending_match = await asyncio.to_thread(match_service.get_last_shuffle, guild_id)
-            if pending_match:
-                jump_url = pending_match.get("shuffle_message_jump_url")
-                message_text = "❌ There's a pending match that needs to be recorded!"
+            player_match = await asyncio.to_thread(
+                match_service.state_service.get_pending_match_for_player, guild_id, interaction.user.id
+            )
+            if player_match:
+                pending_match_id = player_match.get("pending_match_id")
+                jump_url = player_match.get("shuffle_message_jump_url")
+                message_text = f"❌ You're already in a pending match (Match #{pending_match_id})!"
                 if jump_url:
-                    message_text += f" [View pending match]({jump_url}) then use `/record` first."
+                    message_text += f" [View your match]({jump_url}) and use `/record` to complete it first."
                 else:
-                    message_text += " Use `/record` first."
+                    message_text += " Use `/record` to complete it first."
                 await interaction.followup.send(message_text, ephemeral=True)
                 return
 

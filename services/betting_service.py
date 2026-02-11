@@ -86,8 +86,13 @@ class BettingService:
             valid_tiers = ", ".join(str(t) for t in self.leverage_tiers)
             raise ValueError(f"Invalid leverage. Valid tiers: 1 (none), {valid_tiers}")
 
+        # Get pending_match_id for concurrent match support
+        pending_match_id = pending_state.get("pending_match_id")
+
         # Calculate odds at placement
-        current_totals = self.bet_repo.get_total_bets_by_guild(guild_id, since_ts=int(since_ts))
+        current_totals = self.bet_repo.get_total_bets_by_guild(
+            guild_id, since_ts=int(since_ts), pending_match_id=pending_match_id
+        )
         total_pool = current_totals["radiant"] + current_totals["dire"]
         team_total = current_totals[team]
         odds_at_placement = total_pool / team_total if team_total > 0 and total_pool > 0 else None
@@ -103,6 +108,7 @@ class BettingService:
                 leverage=leverage,
                 max_debt=self.max_debt,
                 odds_at_placement=odds_at_placement,
+                pending_match_id=pending_match_id,
             )
             return
 
@@ -121,6 +127,7 @@ class BettingService:
                 leverage=leverage,
                 max_debt=self.max_debt,
                 odds_at_placement=odds_at_placement,
+                pending_match_id=pending_match_id,
             )
             return
 
@@ -224,6 +231,7 @@ class BettingService:
             return {"winners": [], "losers": []}
 
         betting_mode = pending_state.get("betting_mode", "pool")
+        pending_match_id = pending_state.get("pending_match_id")
 
         # Prefer atomic settlement (payouts + bet tagging in one DB transaction)
         if hasattr(self.bet_repo, "settle_pending_bets_atomic"):
@@ -234,15 +242,16 @@ class BettingService:
                 winning_team=winning_team,
                 house_payout_multiplier=HOUSE_PAYOUT_MULTIPLIER,
                 betting_mode=betting_mode,
+                pending_match_id=pending_match_id,
             )
 
         # Fallback (older behavior) - only supports house mode
-        bets = self.bet_repo.get_bets_for_pending_match(guild_id, since_ts=since_ts)
+        bets = self.bet_repo.get_bets_for_pending_match(guild_id, since_ts=since_ts, pending_match_id=pending_match_id)
         distributions: dict[str, list[dict]] = {"winners": [], "losers": []}
         if not bets:
             return distributions
 
-        self.bet_repo.assign_match_id(guild_id, match_id, since_ts=since_ts)
+        self.bet_repo.assign_match_id(guild_id, match_id, since_ts=since_ts, pending_match_id=pending_match_id)
 
         if betting_mode == "pool":
             return self._settle_pool_bets_fallback(bets, winning_team, guild_id)
@@ -474,29 +483,39 @@ class BettingService:
         return self.bet_repo.get_player_pending_bets(guild_id, discord_id, since_ts=since_ts)
 
     def refund_pending_bets(
-        self, guild_id: int | None, pending_state: dict[str, Any] | None
+        self, guild_id: int | None, pending_state: dict[str, Any] | None,
+        pending_match_id: int | None = None
     ) -> int:
         """
         Refund all pending bets for the current match window.
+
+        Args:
+            guild_id: Guild ID
+            pending_state: The pending match state dict
+            pending_match_id: Optional specific match ID for concurrent match support
 
         Returns the number of bets refunded.
         """
         since_ts = self._since_ts(pending_state)
         if pending_state is None or since_ts is None:
             return 0
+        # Get pending_match_id from state if not provided
+        if pending_match_id is None:
+            pending_match_id = pending_state.get("pending_match_id")
+
         if hasattr(self.bet_repo, "refund_pending_bets_atomic"):
             return self.bet_repo.refund_pending_bets_atomic(
-                guild_id=guild_id, since_ts=int(since_ts)
+                guild_id=guild_id, since_ts=int(since_ts), pending_match_id=pending_match_id
             )
 
-        bets = self.bet_repo.get_bets_for_pending_match(guild_id, since_ts=since_ts)
+        bets = self.bet_repo.get_bets_for_pending_match(guild_id, since_ts=since_ts, pending_match_id=pending_match_id)
         if not bets:
             return 0
 
         for bet in bets:
             self.player_repo.add_balance(bet["discord_id"], guild_id, bet["amount"])
 
-        return self.bet_repo.delete_pending_bets(guild_id, since_ts=since_ts)
+        return self.bet_repo.delete_pending_bets(guild_id, since_ts=since_ts, pending_match_id=pending_match_id)
 
     def _enforce_team_restriction(self, discord_id: int, team: str, state: dict[str, Any]) -> None:
         radiant = set(state.get("radiant_team_ids", []))
@@ -513,6 +532,7 @@ class BettingService:
         dire_ids: list[int],
         shuffle_timestamp: int,
         is_bomb_pot: bool = False,
+        pending_match_id: int | None = None,
     ) -> dict[str, Any]:
         """
         Create auto-liquidity blind bets for all eligible players after shuffle.
@@ -532,6 +552,7 @@ class BettingService:
             dire_ids: List of Discord IDs on Dire team
             shuffle_timestamp: The shuffle timestamp for bet timing
             is_bomb_pot: Whether this is a bomb pot match (higher stakes, mandatory)
+            pending_match_id: Optional specific match ID for concurrent match support
 
         Returns:
             {
@@ -602,7 +623,7 @@ class BettingService:
 
                     # Calculate current odds for this team before placing bet
                     current_totals = self.bet_repo.get_total_bets_by_guild(
-                        guild_id, since_ts=shuffle_timestamp
+                        guild_id, since_ts=shuffle_timestamp, pending_match_id=pending_match_id
                     )
                     total_pool = current_totals["radiant"] + current_totals["dire"]
                     team_total = current_totals[team]
@@ -630,6 +651,7 @@ class BettingService:
                         is_blind=True,
                         odds_at_placement=odds_at_placement,
                         allow_negative=is_bomb_pot,  # Bomb pot antes can go into debt
+                        pending_match_id=pending_match_id,
                     )
 
                     result["created"] += 1
