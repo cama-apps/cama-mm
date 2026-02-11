@@ -74,6 +74,26 @@ class LobbyService:
     def reset_lobby(self):
         self.lobby_manager.reset_lobby()
 
+    # --- Next-match queue ---
+
+    def get_next_lobby(self) -> Lobby | None:
+        return self.lobby_manager.get_next_lobby()
+
+    def join_next_lobby(self, discord_id: int) -> tuple[bool, str]:
+        """Join the next-match queue. Returns (success, message)."""
+        lobby = self.lobby_manager.get_or_create_next_lobby()
+        if lobby.get_total_count() >= self.max_players:
+            return False, f"Next match queue is full ({self.max_players}/{self.max_players})."
+        if not self.lobby_manager.join_next_lobby(discord_id, self.max_players):
+            return False, "Already in the next match queue."
+        return True, ""
+
+    def leave_next_lobby(self, discord_id: int) -> bool:
+        return self.lobby_manager.leave_next_lobby(discord_id)
+
+    def promote_next_lobby(self) -> bool:
+        return self.lobby_manager.promote_next_lobby()
+
     def set_lobby_message_id(
         self,
         message_id: int | None,

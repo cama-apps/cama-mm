@@ -978,6 +978,9 @@ class MatchCommands(commands.Cog):
             # Cancel any pending betting reminders when recording completes (success or failure)
             self._cancel_betting_tasks(guild_id)
 
+        # Promote next-match queue to main lobby now that game is over
+        await asyncio.to_thread(self.lobby_service.promote_next_lobby)
+
         distributions = record_result.get("bet_distributions", {})
         winners = distributions.get("winners", [])
         losers = distributions.get("losers", [])

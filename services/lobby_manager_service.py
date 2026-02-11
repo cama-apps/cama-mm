@@ -13,6 +13,8 @@ from datetime import datetime
 from domain.models.lobby import Lobby
 from repositories.interfaces import ILobbyRepository
 
+logger = logging.getLogger("cama_bot.services.lobby_manager")
+
 
 class LobbyManagerService:
     """
@@ -20,11 +22,13 @@ class LobbyManagerService:
 
     This service layer class handles:
     - Lobby lifecycle (create, join, leave, reset)
+    - Next-match queue (separate lobby for queuing during active games/drafts)
     - State persistence via ILobbyRepository
     - Message metadata tracking for Discord UI updates
     """
 
     DEFAULT_LOBBY_ID = 1
+    NEXT_LOBBY_ID = 2
 
     def __init__(self, lobby_repo: ILobbyRepository):
         self.lobby_repo = lobby_repo
@@ -34,6 +38,7 @@ class LobbyManagerService:
         self.lobby_embed_message_id: int | None = None
         self.origin_channel_id: int | None = None  # Channel where /lobby was originally run
         self.lobby: Lobby | None = None
+        self.next_lobby: Lobby | None = None  # Separate queue for next match
         self._creation_lock = asyncio.Lock()
         self._state_lock = threading.RLock()  # Protects all in-memory state mutations
         # Readycheck state (in-memory only, cleared on lobby reset)
@@ -49,8 +54,14 @@ class LobbyManagerService:
         """Lock for protecting the full lobby creation flow."""
         return self._creation_lock
 
+    # --- Main lobby ---
+
     def get_or_create_lobby(self, creator_id: int | None = None) -> Lobby:
         with self._state_lock:
+            # Promote next_lobby if main is empty (defensive fallback)
+            if (self.lobby is None or self.lobby.status != "open") and self.next_lobby and self.next_lobby.get_total_count() > 0:
+                self.promote_next_lobby()
+
             if self.lobby is None or self.lobby.status != "open":
                 self.lobby = Lobby(
                     lobby_id=self.DEFAULT_LOBBY_ID,
@@ -128,7 +139,6 @@ class LobbyManagerService:
 
     def reset_lobby(self) -> None:
         with self._state_lock:
-            logger = logging.getLogger("cama_bot.services.lobby_manager")
             logger.info(f"reset_lobby called. Current lobby: {self.lobby}")
             if self.lobby:
                 self.lobby.status = "closed"
@@ -145,6 +155,72 @@ class LobbyManagerService:
             self.readycheck_player_data = {}
             self._clear_persistent_lobby()
             logger.info("reset_lobby completed - cleared persistent lobby")
+
+            # Auto-promote next_lobby if it has players
+            self.promote_next_lobby()
+
+    # --- Next-match queue ---
+
+    def get_or_create_next_lobby(self, creator_id: int | None = None) -> Lobby:
+        with self._state_lock:
+            if self.next_lobby is None or self.next_lobby.status != "open":
+                self.next_lobby = Lobby(
+                    lobby_id=self.NEXT_LOBBY_ID,
+                    created_by=creator_id or 0,
+                    created_at=datetime.now(),
+                )
+                self._persist_next_lobby()
+            return self.next_lobby
+
+    def get_next_lobby(self) -> Lobby | None:
+        return self.next_lobby if self.next_lobby and self.next_lobby.status == "open" else None
+
+    def join_next_lobby(self, discord_id: int, max_players: int = 12) -> bool:
+        with self._state_lock:
+            lobby = self.get_or_create_next_lobby()
+            if lobby.get_total_count() >= max_players:
+                return False
+            success = lobby.add_player(discord_id)
+            if success:
+                self._persist_next_lobby()
+            return success
+
+    def leave_next_lobby(self, discord_id: int) -> bool:
+        """Remove player from next-match queue (checks both regular and conditional)."""
+        with self._state_lock:
+            if not self.next_lobby:
+                return False
+            success = self.next_lobby.remove_player(discord_id)
+            if not success:
+                success = self.next_lobby.remove_conditional_player(discord_id)
+            if success:
+                self._persist_next_lobby()
+            return success
+
+    def promote_next_lobby(self) -> bool:
+        """Promote next_lobby to become the main lobby.
+
+        Only promotes if main lobby is None and next_lobby has players.
+        Returns True if promotion occurred.
+        """
+        with self._state_lock:
+            if self.lobby is not None:
+                return False
+            if not self.next_lobby or self.next_lobby.get_total_count() == 0:
+                return False
+
+            # Re-stamp as lobby_id=1 and move to main slot
+            self.next_lobby.lobby_id = self.DEFAULT_LOBBY_ID
+            self.lobby = self.next_lobby
+            self.next_lobby = None
+            self._persist_lobby()
+            self._clear_next_lobby()
+            logger.info(
+                f"promote_next_lobby: promoted {self.lobby.get_total_count()} players to main lobby"
+            )
+            return True
+
+    # --- Persistence ---
 
     def _persist_lobby(self) -> None:
         if not self.lobby:
@@ -167,16 +243,42 @@ class LobbyManagerService:
     def _clear_persistent_lobby(self) -> None:
         self.lobby_repo.clear_lobby_state(self.DEFAULT_LOBBY_ID)
 
-    def _load_state(self) -> None:
-        data = self.lobby_repo.load_lobby_state(self.DEFAULT_LOBBY_ID)
-        if not data:
+    def _persist_next_lobby(self) -> None:
+        if not self.next_lobby:
             return
-        self.lobby = Lobby.from_dict(data)
-        self.lobby_message_id = data.get("message_id")
-        self.lobby_channel_id = data.get("channel_id")
-        self.lobby_thread_id = data.get("thread_id")
-        self.lobby_embed_message_id = data.get("embed_message_id")
-        self.origin_channel_id = data.get("origin_channel_id")
+        self.lobby_repo.save_lobby_state(
+            lobby_id=self.NEXT_LOBBY_ID,
+            players=list(self.next_lobby.players),
+            conditional_players=list(self.next_lobby.conditional_players),
+            status=self.next_lobby.status,
+            created_by=self.next_lobby.created_by,
+            created_at=self.next_lobby.created_at.isoformat(),
+            message_id=None,
+            channel_id=None,
+            thread_id=None,
+            embed_message_id=None,
+            origin_channel_id=None,
+            player_join_times=self.next_lobby.player_join_times,
+        )
+
+    def _clear_next_lobby(self) -> None:
+        self.lobby_repo.clear_lobby_state(self.NEXT_LOBBY_ID)
+
+    def _load_state(self) -> None:
+        # Load main lobby
+        data = self.lobby_repo.load_lobby_state(self.DEFAULT_LOBBY_ID)
+        if data:
+            self.lobby = Lobby.from_dict(data)
+            self.lobby_message_id = data.get("message_id")
+            self.lobby_channel_id = data.get("channel_id")
+            self.lobby_thread_id = data.get("thread_id")
+            self.lobby_embed_message_id = data.get("embed_message_id")
+            self.origin_channel_id = data.get("origin_channel_id")
+
+        # Load next-match queue
+        next_data = self.lobby_repo.load_lobby_state(self.NEXT_LOBBY_ID)
+        if next_data:
+            self.next_lobby = Lobby.from_dict(next_data)
 
 
 # Backward compatibility alias - allows gradual migration

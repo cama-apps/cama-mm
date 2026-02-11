@@ -689,6 +689,143 @@ class LobbyCommands(commands.Cog):
         await interaction.followup.send("✅ Left the lobby.", ephemeral=True)
 
     @app_commands.command(
+        name="joinnext",
+        description="Queue for the next match while a game is in progress",
+    )
+    async def joinnext(self, interaction: discord.Interaction):
+        """Join the next match queue while a current game is pending."""
+        logger.info(f"Joinnext command: User {interaction.user.id} ({interaction.user})")
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+
+        guild_id = interaction.guild.id if interaction.guild else None
+
+        # Require a pending match or active draft
+        match_service = getattr(self.bot, "match_service", None)
+        draft_state_manager = getattr(self.bot, "draft_state_manager", None)
+        pending_match = None
+        if match_service:
+            pending_match = await asyncio.to_thread(match_service.get_last_shuffle, guild_id)
+        active_draft = draft_state_manager and draft_state_manager.has_active_draft(guild_id)
+
+        if not pending_match and not active_draft:
+            await interaction.followup.send(
+                "⚠️ No active game in progress. Use `/join` instead.", ephemeral=True
+            )
+            return
+
+        # Check registration
+        player = await asyncio.to_thread(
+            self.player_service.get_player, interaction.user.id, guild_id
+        )
+        if not player:
+            await interaction.followup.send(
+                "❌ You're not registered! Use `/register` first.", ephemeral=True
+            )
+            return
+
+        # Check roles set
+        if not player.preferred_roles:
+            await interaction.followup.send(
+                "❌ Set your preferred roles first! Use `/setroles`.", ephemeral=True
+            )
+            return
+
+        # Attempt to join the next-match queue (separate from main lobby)
+        success, reason = await asyncio.to_thread(
+            self.lobby_service.join_next_lobby, interaction.user.id
+        )
+        if not success:
+            await interaction.followup.send(f"❌ {reason}", ephemeral=True)
+            return
+
+        # Get updated next_lobby for count
+        next_lobby = self.lobby_service.get_next_lobby()
+        count = next_lobby.get_total_count() if next_lobby else 1
+        await interaction.followup.send(
+            f"✅ Joined the next match queue! ({count} queued)", ephemeral=True
+        )
+
+    @app_commands.command(
+        name="leavenext",
+        description="Leave the next match queue",
+    )
+    async def leavenext(self, interaction: discord.Interaction):
+        """Leave the next match queue while a current game is pending."""
+        logger.info(f"Leavenext command: User {interaction.user.id} ({interaction.user})")
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+
+        guild_id = interaction.guild.id if interaction.guild else None
+
+        # Require a pending match or active draft
+        match_service = getattr(self.bot, "match_service", None)
+        draft_state_manager = getattr(self.bot, "draft_state_manager", None)
+        pending_match = None
+        if match_service:
+            pending_match = await asyncio.to_thread(match_service.get_last_shuffle, guild_id)
+        active_draft = draft_state_manager and draft_state_manager.has_active_draft(guild_id)
+
+        if not pending_match and not active_draft:
+            await interaction.followup.send(
+                "⚠️ No active game in progress. Use `/leave` instead.", ephemeral=True
+            )
+            return
+
+        # Check next_lobby exists and user is in it
+        next_lobby = self.lobby_service.get_next_lobby()
+        if not next_lobby:
+            await interaction.followup.send(
+                "⚠️ You're not in the next match queue.", ephemeral=True
+            )
+            return
+
+        in_queue = (
+            interaction.user.id in next_lobby.players
+            or interaction.user.id in next_lobby.conditional_players
+        )
+        if not in_queue:
+            await interaction.followup.send(
+                "⚠️ You're not in the next match queue.", ephemeral=True
+            )
+            return
+
+        await asyncio.to_thread(self.lobby_service.leave_next_lobby, interaction.user.id)
+        await interaction.followup.send("✅ Left the next match queue.", ephemeral=True)
+
+    @app_commands.command(
+        name="viewnext",
+        description="View players queued for the next match",
+    )
+    async def viewnext(self, interaction: discord.Interaction):
+        """View the next-match queue."""
+        logger.info(f"Viewnext command: User {interaction.user.id} ({interaction.user})")
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+
+        next_lobby = self.lobby_service.get_next_lobby()
+        if not next_lobby or next_lobby.get_total_count() == 0:
+            await interaction.followup.send(
+                "⚠️ No players queued for the next match.", ephemeral=True
+            )
+            return
+
+        lines = []
+        for i, pid in enumerate(next_lobby.players, 1):
+            lines.append(f"{i}. <@{pid}>")
+        if next_lobby.conditional_players:
+            for pid in next_lobby.conditional_players:
+                lines.append(f"- <@{pid}> *(conditional)*")
+
+        count = next_lobby.get_total_count()
+        message_text = f"**Next Match Queue** ({count} player{'s' if count != 1 else ''}):\n" + "\n".join(lines)
+
+        await interaction.followup.send(
+            message_text, ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    @app_commands.command(
         name="resetlobby",
         description="Reset the current lobby (Admin or lobby creator only)",
     )
