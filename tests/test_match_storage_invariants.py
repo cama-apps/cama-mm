@@ -224,11 +224,13 @@ class TestConcurrencyGuard:
     def test_consume_pending_match_atomic(self, test_db):
         """Test that consume_pending_match is atomic."""
         # Save a pending match
-        test_db.save_pending_match(123, {"test": "data"})
+        pending_match_id = test_db.save_pending_match(123, {"test": "data"})
 
-        # First consume should return the data
+        # First consume should return the data (with pending_match_id added)
         result1 = test_db.consume_pending_match(123)
-        assert result1 == {"test": "data"}
+        assert result1 is not None
+        assert result1["test"] == "data"
+        assert result1["pending_match_id"] == pending_match_id
 
         # Second consume should return None
         result2 = test_db.consume_pending_match(123)

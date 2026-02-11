@@ -52,6 +52,7 @@ def sample_match_state(sample_team):
         radiant_value=7500.0,
         dire_value=7450.0,
         first_pick_team="radiant",
+        pending_match_id=1,  # Required for concurrent match support
     )
 
 
@@ -201,6 +202,7 @@ class TestMatchStateManagerGuildIsolation:
             radiant_value=8000.0,
             dire_value=8000.0,
             first_pick_team="dire",
+            pending_match_id=2,  # Required for concurrent match support
         )
 
         state_manager.set_state(TEST_GUILD_ID, state1)

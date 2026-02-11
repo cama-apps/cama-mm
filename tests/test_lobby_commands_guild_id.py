@@ -55,7 +55,10 @@ class FakeMessage:
     async def remove_reaction(self, emoji, user):
         pass
 
-    async def pin(self):
+    async def pin(self, reason=None):
+        pass
+
+    async def delete(self):
         pass
 
     async def create_thread(self, name=None, auto_archive_duration=None):
@@ -158,8 +161,21 @@ class FakePlayerService:
         return self.player_repo.players.get((discord_id, guild_id))
 
 
+class FakeStateService:
+    """Fake state service for concurrent match support."""
+
+    def get_pending_match_for_player(self, guild_id, discord_id):
+        return None  # Player not in any pending match
+
+    def get_all_pending_matches(self, guild_id):
+        return []
+
+
 class FakeMatchService:
     """Fake match service for pending match checks."""
+
+    def __init__(self):
+        self.state_service = FakeStateService()
 
     def get_last_shuffle(self, guild_id):
         return None  # No pending match

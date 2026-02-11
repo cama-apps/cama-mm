@@ -199,16 +199,22 @@ async def test_mybets_uses_discord_timestamp_format():
     player_service = MagicMock()
 
     bet_time = int(time.time()) - 300  # 5 minutes ago
-    pending_state = {"bet_lock_until": int(time.time()) + 600, "betting_mode": "house"}
-    match_service.get_last_shuffle.return_value = pending_state
+    pending_match_id = 1
+    pending_state = {
+        "bet_lock_until": int(time.time()) + 600,
+        "betting_mode": "house",
+        "pending_match_id": pending_match_id,
+    }
 
-    # Now uses get_pending_bets (plural) instead of get_pending_bet
-    betting_service.get_pending_bets.return_value = [
+    # Mock the methods the command actually uses
+    match_service.state_service.get_all_pending_matches.return_value = [pending_state]
+    betting_service.bet_repo.get_all_player_pending_bets.return_value = [
         {
             "amount": 100,
             "team_bet_on": "radiant",
             "bet_time": bet_time,
             "leverage": 1,
+            "pending_match_id": pending_match_id,
         }
     ]
 
@@ -242,16 +248,22 @@ async def test_mybets_leverage_uses_discord_timestamp_format():
     player_service = MagicMock()
 
     bet_time = int(time.time()) - 120  # 2 minutes ago
-    pending_state = {"bet_lock_until": int(time.time()) + 600, "betting_mode": "house"}
-    match_service.get_last_shuffle.return_value = pending_state
+    pending_match_id = 1
+    pending_state = {
+        "bet_lock_until": int(time.time()) + 600,
+        "betting_mode": "house",
+        "pending_match_id": pending_match_id,
+    }
 
-    # Now uses get_pending_bets (plural) instead of get_pending_bet
-    betting_service.get_pending_bets.return_value = [
+    # Mock the methods the command actually uses
+    match_service.state_service.get_all_pending_matches.return_value = [pending_state]
+    betting_service.bet_repo.get_all_player_pending_bets.return_value = [
         {
             "amount": 50,
             "team_bet_on": "dire",
             "bet_time": bet_time,
             "leverage": 3,
+            "pending_match_id": pending_match_id,
         }
     ]
 

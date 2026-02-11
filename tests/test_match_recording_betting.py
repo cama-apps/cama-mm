@@ -433,6 +433,8 @@ class TestLoanRepaymentOnMatchRecord:
                 pending["dire_team_ids"],
                 pending["radiant_team_ids"],
             )
+            # Persist the swapped state
+            match_service._persist_match_state(TEST_GUILD_ID, pending)
 
         # Record radiant win
         result = match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
@@ -470,6 +472,8 @@ class TestLoanRepaymentOnMatchRecord:
                 pending["dire_team_ids"],
                 pending["radiant_team_ids"],
             )
+            # Persist the swapped state
+            match_service._persist_match_state(TEST_GUILD_ID, pending)
 
         # Radiant wins (borrower loses)
         match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
