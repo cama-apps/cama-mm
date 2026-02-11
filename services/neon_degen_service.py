@@ -44,6 +44,8 @@ from utils.neon_terminal import (
     render_streak,
     render_system_breach,
     render_wheel_bankrupt,
+    render_lightning_bolt,
+    render_lightning_bolt_overlay,
     # New event templates (Easter Egg Expansion)
     render_all_in_bet,
     render_last_second_bet,
@@ -626,6 +628,45 @@ class NeonDegenService:
             return None
         except Exception as e:
             logger.debug(f"neon on_wheel_result error: {e}")
+            return None
+
+    async def on_lightning_bolt(
+        self,
+        discord_id: int,
+        guild_id: int | None,
+        total_taxed: int,
+        players_hit: int,
+    ) -> NeonResult | None:
+        """Trigger on Lightning Bolt wheel result. 20% chance, Layer 1 or 2."""
+        try:
+            if not self._is_enabled():
+                return None
+            if not self._check_cooldown(discord_id, guild_id):
+                return None
+            if not self._roll(0.20):
+                return None
+
+            # Layer 2 for big hits (500+ total), Layer 1 otherwise
+            if total_taxed >= 500:
+                text = render_lightning_bolt_overlay(total_taxed, players_hit)
+                text = await self._generate_text(
+                    f"Lightning Bolt struck {players_hit} players for {total_taxed} JC total. All went to nonprofit.",
+                    self._build_player_context(discord_id, guild_id),
+                    text,
+                )
+                self._set_cooldown(discord_id, guild_id)
+                return NeonResult(layer=2, text_block=text)
+            else:
+                text = render_lightning_bolt(total_taxed, players_hit)
+                text = await self._generate_text(
+                    f"Lightning Bolt struck {players_hit} players for {total_taxed} JC total. Wry commentary on suffering.",
+                    self._build_player_context(discord_id, guild_id),
+                    text,
+                )
+                self._set_cooldown(discord_id, guild_id)
+                return NeonResult(layer=1, text_block=text)
+        except Exception as e:
+            logger.debug(f"neon on_lightning_bolt error: {e}")
             return None
 
     async def on_match_recorded(
