@@ -40,6 +40,7 @@ class MatchService:
         pairings_repo: IPairingsRepository | None = None,
         loan_service=None,
         soft_avoid_repo=None,
+        package_deal_repo=None,
         state_service: MatchStateService | None = None,
     ):
         """
@@ -53,6 +54,7 @@ class MatchService:
             pairings_repo: Optional repository for pairwise player statistics
             loan_service: Optional loan service for deferred repayment
             soft_avoid_repo: Optional repository for soft avoid feature
+            package_deal_repo: Optional repository for package deal feature
             state_service: Optional state service (created if not provided)
         """
         self.player_repo = player_repo
@@ -75,6 +77,7 @@ class MatchService:
         self.pairings_repo = pairings_repo
         self.loan_service = loan_service
         self.soft_avoid_repo = soft_avoid_repo
+        self.package_deal_repo = package_deal_repo
         # Guard against concurrent finalizations per guild
         self._recording_lock = threading.Lock()
         # Track matches being recorded as (guild_id, pending_match_id) tuples
@@ -275,12 +278,17 @@ class MatchService:
         if self.soft_avoid_repo:
             avoids = self.soft_avoid_repo.get_active_avoids_for_players(guild_id, player_ids)
 
+        # Load active package deals for these players
+        deals = []
+        if self.package_deal_repo:
+            deals = self.package_deal_repo.get_active_deals_for_players(guild_id, player_ids)
+
         if len(players) > 10:
             team1, team2, excluded_players = shuffler.shuffle_from_pool(
-                players, exclusion_counts, recent_match_names, avoids=avoids
+                players, exclusion_counts, recent_match_names, avoids=avoids, deals=deals
             )
         else:
-            team1, team2 = shuffler.shuffle(players, avoids=avoids)
+            team1, team2 = shuffler.shuffle(players, avoids=avoids, deals=deals)
             excluded_players = []
 
         off_role_mult = shuffler.off_role_multiplier
@@ -350,9 +358,9 @@ class MatchService:
 
         # Calculate soft avoid penalty (for display only - already factored into shuffler)
         soft_avoid_penalty = 0.0
+        radiant_ids_set = {p.discord_id for p in radiant_team.players if p.discord_id}
+        dire_ids_set = {p.discord_id for p in dire_team.players if p.discord_id}
         if avoids:
-            radiant_ids_set = {p.discord_id for p in radiant_team.players if p.discord_id}
-            dire_ids_set = {p.discord_id for p in dire_team.players if p.discord_id}
             for avoid in avoids:
                 avoider = avoid.avoider_discord_id
                 avoided = avoid.avoided_discord_id
@@ -362,8 +370,22 @@ class MatchService:
                 if both_radiant or both_dire:
                     soft_avoid_penalty += shuffler.soft_avoid_penalty
 
+        # Calculate package deal penalty (for display only - already factored into shuffler)
+        package_deal_penalty = 0.0
+        if deals:
+            for deal in deals:
+                buyer = deal.buyer_discord_id
+                partner = deal.partner_discord_id
+                # Check if on OPPOSITE teams (penalty was applied)
+                on_opposite = (
+                    (buyer in radiant_ids_set and partner in dire_ids_set) or
+                    (buyer in dire_ids_set and partner in radiant_ids_set)
+                )
+                if on_opposite:
+                    package_deal_penalty += shuffler.package_deal_penalty
+
         goodness_score = (
-            value_diff + off_role_penalty + weighted_role_matchup_delta + excluded_penalty + recent_match_penalty + soft_avoid_penalty
+            value_diff + off_role_penalty + weighted_role_matchup_delta + excluded_penalty + recent_match_penalty + soft_avoid_penalty + package_deal_penalty
         )
 
         # Calculate Glicko-2 win probability for Radiant
@@ -430,6 +452,23 @@ class MatchService:
                 if on_opposite:
                     effective_avoid_ids.append(avoid.id)
 
+        # Calculate effective package deals (same team) - will be decremented on record_match
+        effective_deal_ids = []
+        if self.package_deal_repo and deals:
+            radiant_set = set(radiant_team_ids)
+            dire_set = set(dire_team_ids)
+            for deal in deals:
+                buyer = deal.buyer_discord_id
+                partner = deal.partner_discord_id
+                # Both must be in the match (not excluded)
+                if buyer not in included_player_ids or partner not in included_player_ids:
+                    continue
+                # They must be on the SAME team (deal "worked")
+                both_radiant = buyer in radiant_set and partner in radiant_set
+                both_dire = buyer in dire_set and partner in dire_set
+                if both_radiant or both_dire:
+                    effective_deal_ids.append(deal.id)
+
         # Persist last shuffle for recording
         now_ts = int(time.time())
         shuffle_state = {
@@ -454,6 +493,7 @@ class MatchService:
             "is_draft": False,
             "balancing_rating_system": rating_system,
             "effective_avoid_ids": effective_avoid_ids,  # Avoids to decrement on record
+            "effective_deal_ids": effective_deal_ids,  # Package deals to decrement on record
         }
         self.set_last_shuffle(guild_id, shuffle_state)
         self._persist_match_state(guild_id, shuffle_state)
@@ -813,6 +853,11 @@ class MatchService:
             effective_avoid_ids = last_shuffle.get("effective_avoid_ids", [])
             if self.soft_avoid_repo and effective_avoid_ids:
                 self.soft_avoid_repo.decrement_avoids(guild_id, effective_avoid_ids)
+
+            # Decrement package deals that were effective (same team)
+            effective_deal_ids = last_shuffle.get("effective_deal_ids", [])
+            if self.package_deal_repo and effective_deal_ids:
+                self.package_deal_repo.decrement_deals(guild_id, effective_deal_ids)
 
             # Find the most notable streak (longest, >=5 games) for neon hooks
             notable_streak = None

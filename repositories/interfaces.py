@@ -629,6 +629,54 @@ class ISoftAvoidRepository(ABC):
         ...
 
 
+class IPackageDealRepository(ABC):
+    """Repository for package deal feature data access."""
+
+    @abstractmethod
+    def create_or_extend_deal(
+        self,
+        guild_id: int | None,
+        buyer_id: int,
+        partner_id: int,
+        games: int = 10,
+        cost: int = 0,
+    ):
+        """Create a new package deal or extend existing one."""
+        ...
+
+    @abstractmethod
+    def get_active_deals_for_players(
+        self,
+        guild_id: int | None,
+        player_ids: list[int],
+    ) -> list:
+        """Get all active deals where BOTH buyer and partner are in player_ids."""
+        ...
+
+    @abstractmethod
+    def get_user_deals(
+        self,
+        guild_id: int | None,
+        discord_id: int,
+    ) -> list:
+        """Get all active deals created by a user."""
+        ...
+
+    @abstractmethod
+    def decrement_deals(
+        self,
+        guild_id: int | None,
+        deal_ids: list[int],
+    ) -> int:
+        """Decrement games_remaining for the given deal IDs."""
+        ...
+
+    @abstractmethod
+    def delete_expired_deals(self, guild_id: int | None) -> int:
+        """Delete deals with games_remaining = 0."""
+        ...
+
+
 class ITipRepository(ABC):
     """Repository for tip transaction logging."""
 

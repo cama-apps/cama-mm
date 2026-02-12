@@ -239,6 +239,8 @@ class SchemaManager:
             # Concurrent match support migrations
             ("restructure_pending_matches_for_concurrent", self._migration_restructure_pending_matches_for_concurrent),
             ("add_pending_match_id_to_bets", self._migration_add_pending_match_id_to_bets),
+            # Package deal feature
+            ("create_package_deals_table", self._migration_create_package_deals_table),
         ]
 
     # --- Migrations ---
@@ -1565,4 +1567,37 @@ class SchemaManager:
         self._add_column_if_not_exists(cursor, "bets", "pending_match_id", "INTEGER")
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_bets_pending_match ON bets(pending_match_id)"
+        )
+
+    def _migration_create_package_deals_table(self, cursor) -> None:
+        """Create table for package deal feature (same-team preference)."""
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS package_deals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL DEFAULT 0,
+                buyer_discord_id INTEGER NOT NULL,
+                partner_discord_id INTEGER NOT NULL,
+                games_remaining INTEGER NOT NULL DEFAULT 10,
+                cost_paid INTEGER NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                UNIQUE (guild_id, buyer_discord_id, partner_discord_id)
+            )
+            """
+        )
+        # Index for looking up deals by buyer
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_package_deals_buyer "
+            "ON package_deals(guild_id, buyer_discord_id)"
+        )
+        # Index for looking up deals targeting a player
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_package_deals_partner "
+            "ON package_deals(guild_id, partner_discord_id)"
+        )
+        # Index for efficient active deal lookup
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_package_deals_guild_active "
+            "ON package_deals(guild_id, games_remaining)"
         )
