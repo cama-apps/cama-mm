@@ -230,39 +230,48 @@ def get_rd_tier_name(rd: float) -> str:
         return "Fresh"
 
 
-def _classify_team_archetype(ratings: list[float]) -> str:
-    """Classify a team's rating distribution shape using z-scores.
+def _gini_coefficient(values: list[float]) -> float:
+    """Compute the Gini coefficient for a list of values.
 
-    Uses population std dev (pstdev) since we have the full 5-player team.
-
-    Returns one of: balanced, star-carry, anchor-drag, polarized.
+    Returns 0.0 for equal distributions, approaching 1.0 for maximum inequality.
     """
-    if len(ratings) < 2:
-        return "balanced"
-    sd = statistics.pstdev(ratings)
-    if sd < 1:
-        return "balanced"
-    mean = statistics.mean(ratings)
-    z_scores = [(r - mean) / sd for r in ratings]
-    has_high = any(z > 1.5 for z in z_scores)
-    has_low = any(z < -1.5 for z in z_scores)
-    if has_high and has_low:
-        return "polarized"
-    if has_high:
-        return "star-carry"
-    if has_low:
-        return "anchor-drag"
-    return "balanced"
+    n = len(values)
+    if n < 2:
+        return 0.0
+    mean_val = statistics.mean(values)
+    if mean_val <= 0:
+        return 0.0
+    abs_diffs = sum(abs(a - b) for a in values for b in values)
+    return abs_diffs / (2 * n * n * mean_val)
+
+
+def _pearson_r(xs: list[float], ys: list[float]) -> float | None:
+    """Compute the Pearson correlation coefficient between two sequences.
+
+    Returns None if fewer than 3 data points or if either sequence is constant.
+    """
+    n = len(xs)
+    if n < 3:
+        return None
+    mean_x = statistics.mean(xs)
+    mean_y = statistics.mean(ys)
+    num = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys))
+    den_x = sum((x - mean_x) ** 2 for x in xs) ** 0.5
+    den_y = sum((y - mean_y) ** 2 for y in ys) ** 0.5
+    if den_x == 0 or den_y == 0:
+        return None
+    return num / (den_x * den_y)
 
 
 def _compute_team_composition_stats(rating_history_entries: list[dict]) -> dict:
-    """Analyze how team rating distribution correlates with winrate.
+    """Analyze how team rating spread (Gini) correlates with winrate.
 
-    Groups entries by (match_id, team_number), classifies archetype,
-    then aggregates winrate and overperformance (actual - expected) per archetype.
+    Groups entries by (match_id, team_number), computes Gini coefficient for
+    each team's ratings, splits into two halves by index-based median, and
+    computes Pearson correlation between Gini and overperformance.
     """
     if not rating_history_entries:
-        return {"categories": [], "total_teams": 0}
+        return {"halves": [], "total_teams": 0, "gini_correlation": None}
 
     # Group by (match_id, team_number)
     teams: dict[tuple, list[dict]] = {}
@@ -282,66 +291,62 @@ def _compute_team_composition_stats(rating_history_entries: list[dict]) -> dict:
         ratings = [e["rating_before"] for e in entries if e.get("rating_before") is not None]
         if len(ratings) != 5:
             continue
-        sd = statistics.pstdev(ratings)
-        mean_rating = statistics.mean(ratings)
         expected = entries[0].get("expected_team_win_prob")
         won = entries[0].get("won")
         if expected is None or won is None:
             continue
-        archetype = _classify_team_archetype(ratings)
+        gini = _gini_coefficient(ratings)
+        overperf = int(bool(won)) - expected
         team_data.append({
-            "sd": sd,
-            "mean_rating": mean_rating,
+            "gini": gini,
             "expected": expected,
             "won": bool(won),
-            "archetype": archetype,
+            "overperf": overperf,
         })
 
-    if not team_data:
-        return {"categories": [], "total_teams": 0}
+    total_teams = len(team_data)
+    if total_teams == 0:
+        return {"halves": [], "total_teams": 0, "gini_correlation": None}
 
-    # Group by archetype
-    archetype_display = {
-        "balanced": "Balanced",
-        "star-carry": "Star Carry",
-        "anchor-drag": "Anchor Drag",
-        "polarized": "Polarized",
-    }
-    category_data: dict[str, list[dict]] = {}
-    for t in team_data:
-        cat_name = archetype_display[t["archetype"]]
-        category_data.setdefault(cat_name, []).append(t)
+    # Pearson correlation between Gini and overperformance
+    gini_values = [t["gini"] for t in team_data]
+    overperf_values = [t["overperf"] for t in team_data]
+    r = _pearson_r(gini_values, overperf_values)
 
-    # Aggregate per category
-    categories = []
-    for cat_name, items in category_data.items():
+    # Index-based median split: sort by Gini, first n//2 are "Similar ratings"
+    if total_teams < 6:
+        return {"halves": [], "total_teams": total_teams, "gini_correlation": r}
+
+    sorted_teams = sorted(team_data, key=lambda t: t["gini"])
+    mid = total_teams // 2
+    lower_half = sorted_teams[:mid]
+    upper_half = sorted_teams[mid:]
+
+    def _aggregate(items: list[dict], name: str) -> dict:
         wins = sum(1 for t in items if t["won"])
         total = len(items)
         winrate = wins / total if total > 0 else 0.0
         avg_expected = statistics.mean(t["expected"] for t in items)
-        overperformance = winrate - avg_expected
-        avg_rating = statistics.mean(t["mean_rating"] for t in items)
-        avg_sd = statistics.mean(t["sd"] for t in items)
-        categories.append({
-            "name": cat_name,
+        avg_gini = statistics.mean(t["gini"] for t in items)
+        return {
+            "name": name,
             "wins": wins,
             "total": total,
             "winrate": winrate,
             "avg_expected": avg_expected,
-            "overperformance": overperformance,
-            "avg_rating": avg_rating,
-            "avg_sd": avg_sd,
-        })
+            "overperformance": winrate - avg_expected,
+            "avg_gini": avg_gini,
+        }
 
-    # Sort by overperformance descending
-    categories.sort(key=lambda c: c["overperformance"], reverse=True)
-
-    # Filter: only categories with >= 3 teams
-    display_categories = [c for c in categories if c["total"] >= 3]
+    halves = [
+        _aggregate(lower_half, "Similar ratings"),
+        _aggregate(upper_half, "Mixed ratings"),
+    ]
 
     return {
-        "categories": display_categories,
-        "total_teams": len(team_data),
+        "halves": halves,
+        "total_teams": total_teams,
+        "gini_correlation": r,
     }
 
 

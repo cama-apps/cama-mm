@@ -3,40 +3,71 @@
 import pytest
 
 from utils.rating_insights import (
-    _classify_team_archetype,
+    _gini_coefficient,
+    _pearson_r,
     _compute_team_composition_stats,
     compute_calibration_stats,
 )
 from domain.models.player import Player
 
 
-class TestClassifyTeamArchetype:
-    """Tests for _classify_team_archetype using population std dev."""
+class TestGiniCoefficient:
+    """Tests for _gini_coefficient."""
 
-    def test_balanced_similar_ratings(self):
-        assert _classify_team_archetype([1200, 1210, 1190, 1205, 1195]) == "balanced"
+    def test_equal_values_returns_zero(self):
+        assert _gini_coefficient([1200] * 5) == 0.0
 
-    def test_star_carry_one_high_outlier(self):
-        assert _classify_team_archetype([1500, 1100, 1120, 1080, 1110]) == "star-carry"
+    def test_single_value_returns_zero(self):
+        assert _gini_coefficient([1200]) == 0.0
 
-    def test_anchor_drag_one_low_outlier(self):
-        assert _classify_team_archetype([1400, 1380, 1420, 1390, 1050]) == "anchor-drag"
+    def test_empty_returns_zero(self):
+        assert _gini_coefficient([]) == 0.0
 
-    def test_polarized_both_outliers(self):
-        assert _classify_team_archetype([1600, 1200, 1210, 1190, 800]) == "polarized"
+    def test_unequal_values_positive(self):
+        result = _gini_coefficient([800, 1000, 1200, 1400, 1600])
+        assert result > 0
 
-    def test_zero_spread_returns_balanced(self):
-        assert _classify_team_archetype([1200, 1200, 1200, 1200, 1200]) == "balanced"
+    def test_max_inequality(self):
+        result = _gini_coefficient([0, 0, 0, 0, 1000])
+        assert abs(result - 0.8) < 0.001
 
-    def test_near_zero_spread_guard(self):
-        # pstdev < 1 should return balanced
-        assert _classify_team_archetype([1200, 1200, 1200, 1200, 1201]) == "balanced"
+    def test_symmetric(self):
+        """Order of values shouldn't affect the result."""
+        a = _gini_coefficient([800, 1000, 1200, 1400, 1600])
+        b = _gini_coefficient([1600, 800, 1400, 1000, 1200])
+        assert abs(a - b) < 1e-10
 
-    def test_single_player_returns_balanced(self):
-        assert _classify_team_archetype([1200]) == "balanced"
+    def test_zero_mean_returns_zero(self):
+        assert _gini_coefficient([0, 0, 0]) == 0.0
 
-    def test_empty_returns_balanced(self):
-        assert _classify_team_archetype([]) == "balanced"
+    def test_negative_mean_returns_zero(self):
+        assert _gini_coefficient([-10, -20, -30]) == 0.0
+
+
+class TestPearsonR:
+    """Tests for _pearson_r."""
+
+    def test_perfect_positive(self):
+        r = _pearson_r([1, 2, 3], [1, 2, 3])
+        assert r is not None
+        assert abs(r - 1.0) < 1e-10
+
+    def test_perfect_negative(self):
+        r = _pearson_r([1, 2, 3], [3, 2, 1])
+        assert r is not None
+        assert abs(r - (-1.0)) < 1e-10
+
+    def test_too_few_points(self):
+        assert _pearson_r([1, 2], [1, 2]) is None
+
+    def test_constant_x_returns_none(self):
+        assert _pearson_r([1, 1, 1], [1, 2, 3]) is None
+
+    def test_constant_y_returns_none(self):
+        assert _pearson_r([1, 2, 3], [5, 5, 5]) is None
+
+    def test_empty_returns_none(self):
+        assert _pearson_r([], []) is None
 
 
 def _make_rating_history_entry(match_id, team_number, rating_before, expected_win_prob, won):
@@ -61,12 +92,13 @@ def _make_team_entries(match_id, team_number, ratings, expected_win_prob, won):
 
 
 class TestComputeTeamCompositionStats:
-    """Tests for _compute_team_composition_stats."""
+    """Tests for _compute_team_composition_stats with Gini-based analysis."""
 
     def test_empty_input(self):
         result = _compute_team_composition_stats([])
-        assert result["categories"] == []
+        assert result["halves"] == []
         assert result["total_teams"] == 0
+        assert result["gini_correlation"] is None
 
     def test_teams_with_fewer_than_5_players_excluded(self):
         entries = [
@@ -77,103 +109,97 @@ class TestComputeTeamCompositionStats:
         result = _compute_team_composition_stats(entries)
         assert result["total_teams"] == 0
 
-    def test_single_balanced_team(self):
-        entries = _make_team_entries(1, 1, [1200, 1210, 1190, 1205, 1195], 0.5, True)
-        result = _compute_team_composition_stats(entries)
-        # Single team won't meet >= 3 threshold for display
-        assert result["total_teams"] == 1
-        assert result["categories"] == []  # filtered out (< 3 teams)
-
-    def test_categories_filtered_below_3_teams(self):
-        """Categories with < 3 teams should not appear in display results."""
-        # Create 2 balanced teams (not enough) and 3 star-carry teams
+    def test_below_display_threshold(self):
+        """Fewer than 6 teams should produce empty halves."""
         entries = []
-        for i in range(2):
-            entries.extend(_make_team_entries(i, 1, [1200, 1210, 1190, 1205, 1195], 0.5, True))
-        for i in range(2, 5):
-            entries.extend(_make_team_entries(i, 1, [1500, 1100, 1120, 1080, 1110], 0.5, True))
-        result = _compute_team_composition_stats(entries)
-        assert result["total_teams"] == 5
-        cat_names = [c["name"] for c in result["categories"]]
-        # Star Carry with 3 teams should appear, Balanced with 2 should not
-        assert "Star Carry" in cat_names
-        assert "Balanced" not in cat_names
-
-    def test_overperformance_calculation(self):
-        """Overperformance = actual_winrate - avg_expected_win_prob."""
-        entries = []
-        # 3 teams with same archetype: 2 wins, 1 loss, all expected at 0.4
-        for i in range(3):
-            won = i < 2  # 2 wins, 1 loss
-            entries.extend(
-                _make_team_entries(i, 1, [1200, 1210, 1190, 1205, 1195], 0.4, won)
-            )
-        result = _compute_team_composition_stats(entries)
-        assert result["total_teams"] == 3
-        cats = result["categories"]
-        assert len(cats) == 1
-        cat = cats[0]
-        assert cat["name"] == "Balanced"
-        assert cat["wins"] == 2
-        assert cat["total"] == 3
-        assert abs(cat["winrate"] - 2 / 3) < 0.001
-        assert abs(cat["avg_expected"] - 0.4) < 0.001
-        # overperformance = 2/3 - 0.4 = 0.2667
-        assert abs(cat["overperformance"] - (2 / 3 - 0.4)) < 0.001
-
-    def test_sorted_by_overperformance_descending(self):
-        """Categories should be sorted by overperformance, highest first."""
-        entries = []
-        # Category A: balanced - wins all, expected 0.3
-        for i in range(3):
-            entries.extend(
-                _make_team_entries(i, 1, [1200, 1210, 1190, 1205, 1195], 0.3, True)
-            )
-        # Category B: star-carry - loses all, expected 0.7
-        for i in range(3, 6):
-            entries.extend(
-                _make_team_entries(i, 1, [1500, 1100, 1120, 1080, 1110], 0.7, False)
-            )
-        result = _compute_team_composition_stats(entries)
-        cats = result["categories"]
-        assert len(cats) == 2
-        assert cats[0]["name"] == "Balanced"
-        assert cats[1]["name"] == "Star Carry"
-        assert cats[0]["overperformance"] > cats[1]["overperformance"]
-
-    def test_expected_win_prob_extracted(self):
-        """expected_team_win_prob should be correctly used from entries."""
-        entries = []
-        for i in range(3):
-            entries.extend(
-                _make_team_entries(i, 1, [1200, 1200, 1200, 1200, 1200], 0.65, i % 2 == 0)
-            )
-        result = _compute_team_composition_stats(entries)
-        assert len(result["categories"]) == 1
-        cat = result["categories"][0]
-        assert cat["name"] == "Balanced"
-        assert abs(cat["avg_expected"] - 0.65) < 0.001
-
-    def test_no_spread_thresholds_in_result(self):
-        """Result should not contain spread_thresholds (archetype-only grouping)."""
-        entries = []
-        for i in range(3):
+        for i in range(4):
             entries.extend(
                 _make_team_entries(i, 1, [1200, 1210, 1190, 1205, 1195], 0.5, True)
             )
         result = _compute_team_composition_stats(entries)
-        assert "spread_thresholds" not in result
+        assert result["total_teams"] == 4
+        assert result["halves"] == []
 
-    def test_mixed_teams_both_sides_of_match(self):
+    def test_index_split_with_ties(self):
+        """Teams with identical Gini still split deterministically into n//2 halves."""
+        entries = []
+        # 6 teams all with identical ratings -> identical Gini
+        for i in range(6):
+            won = i < 3
+            entries.extend(
+                _make_team_entries(i, 1, [1200, 1200, 1200, 1200, 1200], 0.5, won)
+            )
+        result = _compute_team_composition_stats(entries)
+        assert result["total_teams"] == 6
+        halves = result["halves"]
+        assert len(halves) == 2
+        assert halves[0]["total"] == 3  # first n//2
+        assert halves[1]["total"] == 3
+        assert halves[0]["name"] == "Similar ratings"
+        assert halves[1]["name"] == "Mixed ratings"
+
+    def test_overperformance_calculation(self):
+        """Verify winrate - avg_expected for each half."""
+        entries = []
+        # 3 low-spread teams: all win, expected 0.4
+        for i in range(3):
+            entries.extend(
+                _make_team_entries(i, 1, [1200, 1200, 1200, 1200, 1200], 0.4, True)
+            )
+        # 3 high-spread teams: all lose, expected 0.6
+        for i in range(3, 6):
+            entries.extend(
+                _make_team_entries(i, 1, [800, 1000, 1200, 1400, 1600], 0.6, False)
+            )
+        result = _compute_team_composition_stats(entries)
+        halves = result["halves"]
+        assert len(halves) == 2
+        # Lower Gini half (similar ratings): winrate=1.0, expected=0.4
+        similar = halves[0]
+        assert similar["name"] == "Similar ratings"
+        assert abs(similar["overperformance"] - (1.0 - 0.4)) < 0.001
+        # Upper Gini half (mixed ratings): winrate=0.0, expected=0.6
+        mixed = halves[1]
+        assert mixed["name"] == "Mixed ratings"
+        assert abs(mixed["overperformance"] - (0.0 - 0.6)) < 0.001
+
+    def test_gini_correlation_computed(self):
+        """Verify r is a float when enough teams with varying Gini."""
+        entries = []
+        # 3 low-spread teams
+        for i in range(3):
+            entries.extend(
+                _make_team_entries(i, 1, [1200, 1200, 1200, 1200, 1200], 0.5, True)
+            )
+        # 3 high-spread teams
+        for i in range(3, 6):
+            entries.extend(
+                _make_team_entries(i, 1, [800, 1000, 1200, 1400, 1600], 0.5, False)
+            )
+        result = _compute_team_composition_stats(entries)
+        r = result["gini_correlation"]
+        assert r is not None
+        assert isinstance(r, float)
+
+    def test_gini_correlation_none_when_constant_gini(self):
+        """All teams with the same Gini -> r is None."""
+        entries = []
+        for i in range(6):
+            entries.extend(
+                _make_team_entries(i, 1, [1200, 1200, 1200, 1200, 1200], 0.5, i < 3)
+            )
+        result = _compute_team_composition_stats(entries)
+        assert result["gini_correlation"] is None
+
+    def test_mixed_teams_both_sides(self):
         """Both teams in a match should be analyzed independently."""
         entries = []
-        # Match 1: team 1 (balanced) wins, team 2 (star-carry) loses
         for i in range(5):
             entries.extend(
                 _make_team_entries(i, 1, [1200, 1210, 1190, 1205, 1195], 0.5, True)
             )
             entries.extend(
-                _make_team_entries(i, 2, [1500, 1100, 1120, 1080, 1110], 0.5, False)
+                _make_team_entries(i, 2, [800, 1000, 1200, 1400, 1600], 0.5, False)
             )
         result = _compute_team_composition_stats(entries)
         assert result["total_teams"] == 10
@@ -218,9 +244,10 @@ class TestComputeCalibrationStatsIntegration:
         ]
         result = compute_calibration_stats(players, match_count=0)
         tc = result["team_composition"]
-        assert "categories" in tc
+        assert "halves" in tc
         assert "total_teams" in tc
-        assert isinstance(tc["categories"], list)
+        assert "gini_correlation" in tc
+        assert isinstance(tc["halves"], list)
 
     def test_with_rating_history(self):
         players = [
