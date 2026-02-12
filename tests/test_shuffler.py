@@ -479,7 +479,7 @@ class TestRoleMatchupDelta:
     """Tests for the role matchup delta scoring additions."""
 
     def test_role_matchup_delta_calculation(self):
-        """Role matchup delta should return the max of the critical matchups."""
+        """Role matchup delta should return the sum of the critical matchups."""
         team1_players = [
             Player(name="Carry1", mmr=2000, preferred_roles=["1"]),
             Player(name="Mid1", mmr=1500, preferred_roles=["2"]),
@@ -504,13 +504,14 @@ class TestRoleMatchupDelta:
         # carry1 vs offlane2 = |2000 - 1900| = 100
         # carry2 vs offlane1 = |1000 - 1200| = 200
         # mid vs mid = |1500 - 1500| = 0
-        assert delta == 200
+        # sum = 100 + 200 + 0 = 300
+        assert delta == 300
 
         score = service.calculate_matchup_score(team1, team2)
         # value difference = |6800 - 6400| = 400
         # off-role penalty = 0
-        # total should therefore be 600
-        assert score == pytest.approx(600)
+        # total should therefore be 400 + 300 = 700
+        assert score == pytest.approx(700)
 
     def test_role_matchup_delta_weight_applied_in_service(self):
         """Weight should scale the matchup delta when computing scores."""
@@ -537,13 +538,13 @@ class TestRoleMatchupDelta:
         )
 
         delta = service.calculate_role_matchup_delta(team1, team2)
-        assert delta == 200  # max of the three matchups
+        assert delta == 300  # sum of the three matchups (100 + 200 + 0)
 
         score = service.calculate_matchup_score(team1, team2)
         # value difference = |6800 - 6400| = 400
-        # weighted role delta = 200 * 0.5 = 100
+        # weighted role delta = 300 * 0.5 = 150
         # off-role penalty = 0
-        assert score == pytest.approx(500)
+        assert score == pytest.approx(550)
 
     def test_role_matchup_delta_weight_applied_in_shuffler_scoring(self):
         """BalancedShuffler should apply the weight when scoring matchups."""
@@ -587,9 +588,9 @@ class TestRoleMatchupDelta:
         )
 
         # value diff = |6500 - 6800| = 300
-        # role delta = max(|2000-1900|, |1400-1000|, |1500-1500|) = 400
-        assert score_full == pytest.approx(700)  # 300 + 400
-        assert score_half == pytest.approx(500)  # 300 + (400 * 0.5)
+        # role delta = sum(|2000-1900|, |1400-1000|, |1500-1500|) = 100 + 400 + 0 = 500
+        assert score_full == pytest.approx(800)  # 300 + 500
+        assert score_half == pytest.approx(550)  # 300 + (500 * 0.5)
 
 
 def _create_players_with_roles(count: int, base_mmr: int = 1500, spread: int = 50) -> list[Player]:

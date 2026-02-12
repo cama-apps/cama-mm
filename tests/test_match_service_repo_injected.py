@@ -51,7 +51,7 @@ def test_match_service_repo_injected_shuffle_and_record(repo_db_path):
 
 
 def test_goodness_score_respects_role_matchup_weight(repo_db_path, monkeypatch):
-    """Ensure goodness_score uses the weighted role delta (0.18 default)."""
+    """Ensure goodness_score uses the weighted role delta (0.19 default)."""
     player_repo = PlayerRepository(repo_db_path)
     match_repo = MatchRepository(repo_db_path)
     service = MatchService(
@@ -106,6 +106,6 @@ def test_goodness_score_respects_role_matchup_weight(repo_db_path, monkeypatch):
     result = service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
 
     # value diff = |6500 - 6800| = 300
-    # role delta = 400; weighted by 0.18 -> 72
+    # role delta = sum(100, 400, 0) = 500; weighted by 0.19 -> 95
     # off-role penalty and exclusion penalty = 0
-    assert result["goodness_score"] == pytest.approx(372)
+    assert result["goodness_score"] == pytest.approx(395)

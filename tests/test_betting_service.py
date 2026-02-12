@@ -2163,3 +2163,74 @@ class TestBombPot:
         del pending_state["is_bomb_pot"]
         payload = match_service._build_pending_match_payload(pending_state)
         assert payload["is_bomb_pot"] is False
+
+    def test_openskill_shuffle_flag_persisted_in_pending_match(self, services):
+        """Verify is_openskill_shuffle flag is included in persisted pending match payload."""
+        match_service = services["match_service"]
+
+        pending_state = {
+            "radiant_team_ids": [1, 2, 3, 4, 5],
+            "dire_team_ids": [6, 7, 8, 9, 10],
+            "radiant_roles": ["1", "2", "3", "4", "5"],
+            "dire_roles": ["1", "2", "3", "4", "5"],
+            "radiant_value": 7500.0,
+            "dire_value": 7500.0,
+            "value_diff": 0.0,
+            "first_pick_team": "radiant",
+            "shuffle_timestamp": int(time.time()),
+            "bet_lock_until": int(time.time()) + 900,
+            "betting_mode": "pool",
+            "is_openskill_shuffle": True,
+        }
+
+        payload = match_service._build_pending_match_payload(pending_state)
+        assert "is_openskill_shuffle" in payload
+        assert payload["is_openskill_shuffle"] is True
+
+        # Non-openskill shuffle
+        pending_state["is_openskill_shuffle"] = False
+        payload = match_service._build_pending_match_payload(pending_state)
+        assert payload["is_openskill_shuffle"] is False
+
+        # Default case (missing key)
+        del pending_state["is_openskill_shuffle"]
+        payload = match_service._build_pending_match_payload(pending_state)
+        assert payload["is_openskill_shuffle"] is False
+
+    def test_balancing_rating_system_persisted_in_pending_match(self, services):
+        """Verify balancing_rating_system is included in persisted pending match payload."""
+        match_service = services["match_service"]
+
+        pending_state = {
+            "radiant_team_ids": [1, 2, 3, 4, 5],
+            "dire_team_ids": [6, 7, 8, 9, 10],
+            "radiant_roles": ["1", "2", "3", "4", "5"],
+            "dire_roles": ["1", "2", "3", "4", "5"],
+            "radiant_value": 7500.0,
+            "dire_value": 7500.0,
+            "value_diff": 0.0,
+            "first_pick_team": "radiant",
+            "shuffle_timestamp": int(time.time()),
+            "bet_lock_until": int(time.time()) + 900,
+            "betting_mode": "pool",
+            "balancing_rating_system": "openskill",
+        }
+
+        payload = match_service._build_pending_match_payload(pending_state)
+        assert "balancing_rating_system" in payload
+        assert payload["balancing_rating_system"] == "openskill"
+
+        # Glicko system
+        pending_state["balancing_rating_system"] = "glicko"
+        payload = match_service._build_pending_match_payload(pending_state)
+        assert payload["balancing_rating_system"] == "glicko"
+
+        # Jopacoin system
+        pending_state["balancing_rating_system"] = "jopacoin"
+        payload = match_service._build_pending_match_payload(pending_state)
+        assert payload["balancing_rating_system"] == "jopacoin"
+
+        # Default case (missing key)
+        del pending_state["balancing_rating_system"]
+        payload = match_service._build_pending_match_payload(pending_state)
+        assert payload["balancing_rating_system"] == "glicko"

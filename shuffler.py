@@ -113,7 +113,7 @@ class BalancedShuffler:
 
     def _calculate_role_matchup_delta(self, team1: Team, team2: Team) -> float:
         """
-        Calculate the maximum role matchup delta between two teams.
+        Calculate the sum of role matchup deltas between two teams.
 
         Compares:
         - Team1 carry (1) vs Team2 offlane (3)
@@ -125,7 +125,7 @@ class BalancedShuffler:
             team2: Second team
 
         Returns:
-            Maximum delta among the three critical matchups
+            Sum of deltas across the three critical matchups
         """
         # Get players and their effective values for each role
         team1_carry_player, team1_carry_value = team1.get_player_by_role(
@@ -153,8 +153,8 @@ class BalancedShuffler:
         carry_vs_offlane_2 = abs(team2_carry_value - team1_offlane_value)
         mid_vs_mid = abs(team1_mid_value - team2_mid_value)
 
-        # Return the maximum delta
-        return max(carry_vs_offlane_1, carry_vs_offlane_2, mid_vs_mid)
+        # Return the sum of all three deltas
+        return carry_vs_offlane_1 + carry_vs_offlane_2 + mid_vs_mid
 
     def _calculate_rd_priority(self, players: Iterable[Player]) -> float:
         """Compute the RD-based bonus for a group of players."""

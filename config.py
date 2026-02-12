@@ -77,11 +77,12 @@ WIN_LOSS_MULTIPLIER = _parse_int("WIN_LOSS_MULTIPLIER", 200)
 # Legacy: Not used in current balancing algorithm
 MMR_WEIGHT = _parse_float("MMR_WEIGHT", 1.0)
 USE_GLICKO = _parse_bool("USE_GLICKO", True)
+OPENSKILL_SHUFFLE_CHANCE = _parse_float("OPENSKILL_SHUFFLE_CHANCE", 0.10)  # 10% chance per shuffle
 
 SHUFFLER_SETTINGS: dict[str, Any] = {
     "off_role_multiplier": _parse_float("OFF_ROLE_MULTIPLIER", 0.95),
     "off_role_flat_penalty": _parse_float("OFF_ROLE_FLAT_PENALTY", 350.0),
-    "role_matchup_delta_weight": _parse_float("ROLE_MATCHUP_DELTA_WEIGHT", 0.18),
+    "role_matchup_delta_weight": _parse_float("ROLE_MATCHUP_DELTA_WEIGHT", 0.19),
     "exclusion_penalty_weight": _parse_float("EXCLUSION_PENALTY_WEIGHT", 45.0),
     # Recent match penalty: players who participated in the most recent match
     # get this penalty added to goodness score (making them more likely to sit out)
@@ -104,8 +105,8 @@ AUTO_BLIND_ENABLED = _parse_bool("AUTO_BLIND_ENABLED", True)  # Enable auto-blin
 AUTO_BLIND_THRESHOLD = _parse_int("AUTO_BLIND_THRESHOLD", 50)  # Min balance to trigger blind (inclusive)
 AUTO_BLIND_PERCENTAGE = _parse_float("AUTO_BLIND_PERCENTAGE", 0.05)  # 5% of balance
 
-# Bomb Pot configuration (randomly triggered ~10% of matches)
-BOMB_POT_CHANCE = _parse_float("BOMB_POT_CHANCE", 0.10)  # 10% chance per match
+# Bomb Pot configuration (randomly triggered ~20% of matches)
+BOMB_POT_CHANCE = _parse_float("BOMB_POT_CHANCE", 0.20)  # 20% chance per match
 BOMB_POT_BLIND_PERCENTAGE = _parse_float("BOMB_POT_BLIND_PERCENTAGE", 0.10)  # 10% vs normal 5%
 BOMB_POT_ANTE = _parse_int("BOMB_POT_ANTE", 10)  # Flat 10 JC ante (mandatory, can go negative)
 BOMB_POT_PARTICIPATION_BONUS = _parse_int("BOMB_POT_PARTICIPATION_BONUS", 1)  # Extra +1 JC for all players
