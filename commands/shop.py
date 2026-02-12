@@ -17,10 +17,13 @@ from discord.ext import commands
 
 from config import (
     DOUBLE_OR_NOTHING_COOLDOWN_SECONDS,
+    PACKAGE_DEAL_GAMES_DURATION,
     SHOP_ANNOUNCE_COST,
     SHOP_ANNOUNCE_TARGET_COST,
     SHOP_DOUBLE_OR_NOTHING_COST,
     SHOP_MYSTERY_GIFT_COST,
+    SHOP_PACKAGE_DEAL_BASE_COST,
+    SHOP_PACKAGE_DEAL_RATING_DIVISOR,
     SHOP_PROTECT_HERO_COST,
     SHOP_SOFT_AVOID_COST,
     SOFT_AVOID_GAMES_DURATION,
@@ -105,7 +108,7 @@ class ShopCommands(commands.Cog):
     @app_commands.command(name="shop", description="Spend jopacoin in the shop")
     @app_commands.describe(
         item="What to buy",
-        target="User to tag/avoid (required for 'Announce + Tag' and 'Soft Avoid' options)",
+        target="User to interact with (required for 'Announce + Tag', 'Soft Avoid', and 'Package Deal' options)",
         hero="Hero to protect from bans (required for 'Protect Hero' option)",
     )
     @app_commands.choices(
@@ -133,6 +136,10 @@ class ShopCommands(commands.Cog):
             app_commands.Choice(
                 name=f"Soft Avoid ({SHOP_SOFT_AVOID_COST} jopacoin for {SOFT_AVOID_GAMES_DURATION} games)",
                 value="soft_avoid",
+            ),
+            app_commands.Choice(
+                name=f"Package Deal ({SHOP_PACKAGE_DEAL_BASE_COST}+ jopacoin for {PACKAGE_DEAL_GAMES_DURATION} games)",
+                value="package_deal",
             ),
         ]
     )
@@ -197,6 +204,15 @@ class ShopCommands(commands.Cog):
                 )
                 return
             await self._handle_soft_avoid(interaction, target=target)
+        elif item.value == "package_deal":
+            if not target:
+                await interaction.response.send_message(
+                    "You selected 'Package Deal' but didn't specify a target. "
+                    "Please provide a user you want to be teamed with!",
+                    ephemeral=True,
+                )
+                return
+            await self._handle_package_deal(interaction, target=target)
 
     async def _handle_announce(
         self,
@@ -978,6 +994,102 @@ class ShopCommands(commands.Cog):
         except Exception:
             pass
 
+    async def _handle_package_deal(
+        self,
+        interaction: discord.Interaction,
+        target: discord.Member,
+    ):
+        """Handle the package deal purchase."""
+        user_id = interaction.user.id
+        guild_id = interaction.guild.id if interaction.guild else None
+
+        # Can't package deal with yourself
+        if target.id == user_id:
+            await interaction.response.send_message(
+                "You can't package deal with yourself.",
+                ephemeral=True,
+            )
+            return
+
+        # Check if registered
+        player = await asyncio.to_thread(self.player_service.get_player, user_id, guild_id)
+        if not player:
+            await interaction.response.send_message(
+                "You need to `/register` before you can shop.",
+                ephemeral=True,
+            )
+            return
+
+        # Check if target is registered (required for package deal)
+        target_player = await asyncio.to_thread(self.player_service.get_player, target.id, guild_id)
+        if not target_player:
+            await interaction.response.send_message(
+                "The target player is not registered.",
+                ephemeral=True,
+            )
+            return
+
+        # Check if package_deal_service is available
+        package_deal_service = getattr(self.bot, "package_deal_service", None)
+        if not package_deal_service:
+            await interaction.response.send_message(
+                "Package deal feature is currently unavailable.",
+                ephemeral=True,
+            )
+            return
+
+        # Calculate dynamic cost: base + (sum of ratings / divisor)
+        buyer_rating = player.glicko_rating or 1500
+        partner_rating = target_player.glicko_rating or 1500
+        cost = SHOP_PACKAGE_DEAL_BASE_COST + int(
+            (buyer_rating + partner_rating) / SHOP_PACKAGE_DEAL_RATING_DIVISOR
+        )
+
+        # Check balance
+        balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
+        if balance < cost:
+            await interaction.response.send_message(
+                f"You need {cost} {JOPACOIN_EMOTE} for this, but you only have {balance}.\n"
+                f"*(Base: {SHOP_PACKAGE_DEAL_BASE_COST} + Rating bonus: {cost - SHOP_PACKAGE_DEAL_BASE_COST})*",
+                ephemeral=True,
+            )
+            return
+
+        # Deduct cost
+        await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, -cost)
+
+        # Create or extend deal
+        deal = await asyncio.to_thread(
+            functools.partial(
+                package_deal_service.create_or_extend_deal,
+                guild_id=guild_id,
+                buyer_id=user_id,
+                partner_id=target.id,
+                games=PACKAGE_DEAL_GAMES_DURATION,
+                cost=cost,
+            )
+        )
+
+        # Build confirmation embed (ephemeral)
+        embed = discord.Embed(
+            title="Package Deal Active",
+            description=(
+                f"You have a Package Deal with **{target.display_name}**.\n\n"
+                f"**Games remaining:** {deal.games_remaining}\n"
+                f"**Cost:** {cost} {JOPACOIN_EMOTE}\n\n"
+                f"When shuffling, the system will try to place you on the **same team**. "
+                f"The deal count decreases each game where you're both playing "
+                f"and successfully placed on the same team."
+            ),
+            color=0x2ECC71,  # Green for partnership
+        )
+        embed.set_footer(
+            text=f"Base cost: {SHOP_PACKAGE_DEAL_BASE_COST} + Rating bonus: {cost - SHOP_PACKAGE_DEAL_BASE_COST}"
+        )
+
+        # Ephemeral response (private - target not notified)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
     @app_commands.command(name="myavoids", description="View your active soft avoids")
     async def myavoids(self, interaction: discord.Interaction):
         """View your active soft avoids."""
@@ -1012,6 +1124,45 @@ class ShopCommands(commands.Cog):
             title="Your Active Soft Avoids",
             description="\n".join(lines),
             color=0x7289DA,
+        )
+
+        # Ephemeral response (private)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="mydeals", description="View your active package deals")
+    async def mydeals(self, interaction: discord.Interaction):
+        """View your active package deals."""
+        user_id = interaction.user.id
+        guild_id = interaction.guild.id if interaction.guild else None
+
+        # Check if package_deal_service is available
+        package_deal_service = getattr(self.bot, "package_deal_service", None)
+        if not package_deal_service:
+            await interaction.response.send_message(
+                "Package deal feature is currently unavailable.",
+                ephemeral=True,
+            )
+            return
+
+        # Get user's deals
+        deals = await asyncio.to_thread(package_deal_service.get_user_deals, guild_id, user_id)
+
+        if not deals:
+            await interaction.response.send_message(
+                "You have no active package deals.",
+                ephemeral=True,
+            )
+            return
+
+        # Build the list
+        lines = []
+        for deal in deals:
+            lines.append(f"<@{deal.partner_discord_id}> - **{deal.games_remaining}** games")
+
+        embed = discord.Embed(
+            title="Your Active Package Deals",
+            description="\n".join(lines),
+            color=0x2ECC71,  # Green for partnership
         )
 
         # Ephemeral response (private)

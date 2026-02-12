@@ -10,7 +10,7 @@ import random
 from collections.abc import Iterable
 from dataclasses import dataclass
 
-from config import RD_PRIORITY_WEIGHT, SHUFFLER_SETTINGS, SOFT_AVOID_PENALTY
+from config import PACKAGE_DEAL_PENALTY, RD_PRIORITY_WEIGHT, SHUFFLER_SETTINGS, SOFT_AVOID_PENALTY
 from domain.models.player import Player
 from domain.models.team import Team
 from utils.role_assignment_cache import get_cached_role_assignments
@@ -47,6 +47,7 @@ class BalancedShuffler:
         use_jopacoin: bool = False,
         recent_match_penalty_weight: float | None = None,
         soft_avoid_penalty: float | None = None,
+        package_deal_penalty: float | None = None,
     ):
         """
         Initialize the shuffler.
@@ -62,6 +63,7 @@ class BalancedShuffler:
             use_jopacoin: Whether to use jopacoin balance instead of ratings (default False)
             recent_match_penalty_weight: Penalty per recent match participant selected (default 25.0)
             soft_avoid_penalty: Penalty added when avoider/avoided pair are on same team (default 500.0)
+            package_deal_penalty: Penalty added when buyer/partner pair are on DIFFERENT teams (default 200.0)
         """
         self.use_glicko = use_glicko
         self.consider_roles = consider_roles
@@ -102,6 +104,11 @@ class BalancedShuffler:
             soft_avoid_penalty
             if soft_avoid_penalty is not None
             else SOFT_AVOID_PENALTY
+        )
+        self.package_deal_penalty = (
+            package_deal_penalty
+            if package_deal_penalty is not None
+            else PACKAGE_DEAL_PENALTY
         )
 
     def _calculate_role_matchup_delta(self, team1: Team, team2: Team) -> float:
@@ -192,12 +199,52 @@ class BalancedShuffler:
 
         return penalty
 
+    def _calculate_package_deal_penalty(
+        self,
+        team1_ids: set[int],
+        team2_ids: set[int],
+        deals: list | None,
+    ) -> float:
+        """
+        Calculate penalty for package deals where buyer/partner are on DIFFERENT teams.
+
+        This is the inverse of soft avoid - we want the pair on the SAME team.
+        Deals are ADDITIVE: if A deals with B AND B deals with A, the penalty is doubled.
+
+        Args:
+            team1_ids: Set of discord IDs on team 1
+            team2_ids: Set of discord IDs on team 2
+            deals: List of PackageDeal objects (or any object with buyer_discord_id and partner_discord_id)
+
+        Returns:
+            Total penalty for different-team deal pairs
+        """
+        if not deals:
+            return 0.0
+
+        penalty = 0.0
+        for deal in deals:
+            buyer = deal.buyer_discord_id
+            partner = deal.partner_discord_id
+
+            # Check if on OPPOSITE teams (penalty applies)
+            on_opposite = (
+                (buyer in team1_ids and partner in team2_ids) or
+                (buyer in team2_ids and partner in team1_ids)
+            )
+
+            if on_opposite:
+                penalty += self.package_deal_penalty
+
+        return penalty
+
     def _greedy_shuffle(
         self,
         players: list[Player],
         exclusion_counts: dict[str, int] | None = None,
         recent_match_names: set[str] | None = None,
         avoids: list | None = None,
+        deals: list | None = None,
     ) -> tuple[Team, Team, list[Player], float]:
         """
         Greedy snake-draft shuffle for initial upper bound in branch and bound.
@@ -209,6 +256,7 @@ class BalancedShuffler:
             exclusion_counts: Optional dict mapping player names to exclusion counts
             recent_match_names: Optional set of player names who participated in the most recent match
             avoids: Optional list of SoftAvoid objects to apply same-team penalties
+            deals: Optional list of PackageDeal objects to apply different-team penalties
 
         Returns:
             Tuple of (team1, team2, excluded_players, score)
@@ -272,7 +320,7 @@ class BalancedShuffler:
 
         # Optimize role assignments for the greedy teams
         team1, team2, base_score = self._optimize_role_assignments_for_matchup(
-            team1_players, team2_players, max_assignments_per_team=3, avoids=avoids
+            team1_players, team2_players, max_assignments_per_team=3, avoids=avoids, deals=deals
         )
 
         # Add exclusion penalty
@@ -364,6 +412,7 @@ class BalancedShuffler:
         team2_players: list[Player],
         max_assignments_per_team: int = 20,
         avoids: list | None = None,
+        deals: list | None = None,
     ) -> tuple[Team, Team, float]:
         """
         Find optimal role assignments for two teams that minimize total score.
@@ -376,6 +425,7 @@ class BalancedShuffler:
             team2_players: Players for team 2
             max_assignments_per_team: Maximum number of role assignments to try per team
             avoids: Optional list of SoftAvoid objects to apply same-team penalties
+            deals: Optional list of PackageDeal objects to apply different-team penalties
 
         Returns:
             Tuple of (best_team1, best_team2, best_score)
@@ -388,10 +438,11 @@ class BalancedShuffler:
         best_team2 = None
         best_score = float("inf")
 
-        # Pre-compute team IDs for soft avoid penalty (only once per call)
+        # Pre-compute team IDs for penalty calculations (only once per call)
         team1_ids = {p.discord_id for p in team1_players if p.discord_id is not None}
         team2_ids = {p.discord_id for p in team2_players if p.discord_id is not None}
         avoid_penalty = self._calculate_soft_avoid_penalty(team1_ids, team2_ids, avoids)
+        deal_penalty = self._calculate_package_deal_penalty(team1_ids, team2_ids, deals)
 
         # Try all combinations of valid role assignments
         for t1_roles in team1_assignments:
@@ -415,7 +466,7 @@ class BalancedShuffler:
 
                 weighted_role_delta = role_matchup_delta * self.role_matchup_delta_weight
                 rd_priority = self._calculate_rd_priority(team1_players + team2_players)
-                total_score = value_diff + off_role_penalty + weighted_role_delta - rd_priority + avoid_penalty
+                total_score = value_diff + off_role_penalty + weighted_role_delta - rd_priority + avoid_penalty + deal_penalty
 
                 if total_score < best_score:
                     best_score = total_score
@@ -430,13 +481,14 @@ class BalancedShuffler:
 
         return best_team1, best_team2, best_score
 
-    def shuffle(self, players: list[Player], avoids: list | None = None) -> tuple[Team, Team]:
+    def shuffle(self, players: list[Player], avoids: list | None = None, deals: list | None = None) -> tuple[Team, Team]:
         """
         Shuffle players into two balanced teams.
 
         Args:
             players: List of exactly 10 players
             avoids: Optional list of SoftAvoid objects to apply same-team penalties
+            deals: Optional list of PackageDeal objects to apply different-team penalties
 
         Returns:
             Tuple of (Team1, Team2)
@@ -472,7 +524,7 @@ class BalancedShuffler:
 
             # Optimize role assignments for this matchup
             team1, team2, total_score = self._optimize_role_assignments_for_matchup(
-                team1_players, team2_players, avoids=avoids
+                team1_players, team2_players, avoids=avoids, deals=deals
             )
 
             team1_value = team1.get_team_value(
@@ -564,6 +616,7 @@ class BalancedShuffler:
         exclusion_counts: dict[str, int] | None = None,
         recent_match_names: set[str] | None = None,
         avoids: list | None = None,
+        deals: list | None = None,
     ) -> tuple[Team, Team, list[Player]]:
         """
         Shuffle players into two balanced teams when there are more than 10 players.
@@ -579,6 +632,7 @@ class BalancedShuffler:
                                These players receive a penalty when selected, making them more likely
                                to sit out.
             avoids: Optional list of SoftAvoid objects to apply same-team penalties
+            deals: Optional list of PackageDeal objects to apply different-team penalties
 
         Returns:
             Tuple of (Team1, Team2, excluded_players)
@@ -597,12 +651,12 @@ class BalancedShuffler:
 
         if len(players) == 10:
             # Just use the regular shuffle
-            team1, team2 = self.shuffle(players, avoids=avoids)
+            team1, team2 = self.shuffle(players, avoids=avoids, deals=deals)
             return team1, team2, []
 
         if len(players) == 14:
             # Use branch and bound for 14 players (optimized pruning)
-            return self.shuffle_branch_bound(players, exclusion_counts, recent_match_names, avoids=avoids)
+            return self.shuffle_branch_bound(players, exclusion_counts, recent_match_names, avoids=avoids, deals=deals)
 
         # ---- Performance knobs (kept internal to preserve current public API) ----
         # Pool shuffles are far more expensive than 10-player shuffles. We therefore
@@ -711,6 +765,7 @@ class BalancedShuffler:
                     team2_players,
                     max_assignments_per_team=pool_max_assignments_per_team,
                     avoids=avoids,
+                    deals=deals,
                 )
 
                 # base_score includes: value_diff + off_role_penalty + role_matchup_delta - rd_priority + avoid_penalty
@@ -863,6 +918,7 @@ class BalancedShuffler:
         exclusion_counts: dict[str, int] | None = None,
         recent_match_names: set[str] | None = None,
         avoids: list | None = None,
+        deals: list | None = None,
     ) -> tuple[Team, Team, list[Player]]:
         """
         Branch and bound shuffle optimized for 14 players.
@@ -875,6 +931,7 @@ class BalancedShuffler:
             exclusion_counts: Optional dict mapping player names to exclusion counts
             recent_match_names: Optional set of player names who participated in the most recent match
             avoids: Optional list of SoftAvoid objects to apply same-team penalties
+            deals: Optional list of PackageDeal objects to apply different-team penalties
 
         Returns:
             Tuple of (Team1, Team2, excluded_players)
@@ -887,7 +944,7 @@ class BalancedShuffler:
 
         # Step 1: Get greedy initial upper bound
         greedy_t1, greedy_t2, greedy_excluded, best_score = self._greedy_shuffle(
-            players, exclusion_counts, recent_match_names, avoids=avoids
+            players, exclusion_counts, recent_match_names, avoids=avoids, deals=deals
         )
         best_result: tuple[Team, Team, list[Player]] = (greedy_t1, greedy_t2, greedy_excluded)
 
@@ -966,7 +1023,7 @@ class BalancedShuffler:
                 # Step 4: Full role optimization (only for promising splits)
                 evaluated_matchups += 1
                 team1, team2, base_score = self._optimize_role_assignments_for_matchup(
-                    team1_players, team2_players, max_assignments_per_team=3, avoids=avoids
+                    team1_players, team2_players, max_assignments_per_team=3, avoids=avoids, deals=deals
                 )
 
                 total_score = base_score + exclusion_penalty + recent_penalty
