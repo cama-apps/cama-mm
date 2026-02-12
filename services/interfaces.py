@@ -494,6 +494,26 @@ class ILobbyService(ABC):
         ...
 
     @abstractmethod
+    def get_next_lobby(self) -> "Lobby | None":
+        """Get the next-match queue lobby."""
+        ...
+
+    @abstractmethod
+    def join_next_lobby(self, discord_id: int) -> tuple[bool, str]:
+        """Join the next-match queue. Returns (success, message)."""
+        ...
+
+    @abstractmethod
+    def leave_next_lobby(self, discord_id: int) -> bool:
+        """Leave the next-match queue."""
+        ...
+
+    @abstractmethod
+    def promote_next_lobby(self) -> bool:
+        """Promote next-match queue to main lobby. Returns True if promoted."""
+        ...
+
+    @abstractmethod
     def set_lobby_message_id(
         self,
         message_id: int | None,
