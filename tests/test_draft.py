@@ -39,6 +39,22 @@ class TestDraftState:
         assert 4 in available
         assert len(available) == 7
 
+    def test_available_player_ids_excludes_captains(self):
+        """Captains are excluded from available players even if not yet in team lists."""
+        state = DraftState(guild_id=123)
+        state.player_pool_ids = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        # Set captains but don't add them to team lists yet
+        state.radiant_captain_id = 1
+        state.dire_captain_id = 2
+        state.radiant_player_ids = []
+        state.dire_player_ids = []
+
+        available = state.available_player_ids
+        assert 1 not in available  # Radiant captain excluded
+        assert 2 not in available  # Dire captain excluded
+        assert 3 in available
+        assert len(available) == 8  # 10 pool - 2 captains = 8 draftable
+
     def test_current_captain_id_during_drafting(self):
         """Current captain ID is correct during drafting phase."""
         state = DraftState(guild_id=123)
@@ -462,10 +478,14 @@ class TestSnakeDraftOrder:
 
 
 class TestForceRandomCaptains:
-    """Tests for force_random_captains functionality used in shuffle auto-redirect."""
+    """Tests for force_random_captains functionality used in shuffle auto-redirect.
+
+    Note: force_random_captains skips the 60s wait but still respects captain eligibility.
+    Only players who did /setcaptain yes can be selected as captain.
+    """
 
     def test_select_captains_force_random_all_eligible(self):
-        """When force_random_captains=True, any player can be captain."""
+        """DraftService.select_captains picks from the eligible_ids list provided."""
         service = DraftService()
         # All players have the same rating - simulates random selection
         ratings = {1: 1500.0, 2: 1500.0, 3: 1500.0, 4: 1500.0, 5: 1500.0}

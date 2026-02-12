@@ -94,12 +94,15 @@ class DraftState:
     # UI state
     draft_message_id: int | None = None
     draft_channel_id: int | None = None
+    captain_ping_message_id: int | None = None  # Ping message to delete after first choice
 
     @property
     def available_player_ids(self) -> list[int]:
         """Get list of players not yet picked (excluding captains who are auto-assigned)."""
         picked = set(self.radiant_player_ids) | set(self.dire_player_ids)
-        return [pid for pid in self.player_pool_ids if pid not in picked]
+        # Explicitly exclude captains as defensive measure
+        captain_ids = {self.radiant_captain_id, self.dire_captain_id} - {None}
+        return [pid for pid in self.player_pool_ids if pid not in picked and pid not in captain_ids]
 
     @property
     def current_captain_id(self) -> int | None:
@@ -252,6 +255,7 @@ class DraftState:
             "phase": self.phase.value,
             "draft_message_id": self.draft_message_id,
             "draft_channel_id": self.draft_channel_id,
+            "captain_ping_message_id": self.captain_ping_message_id,
         }
 
     @classmethod
@@ -281,4 +285,5 @@ class DraftState:
         state.phase = DraftPhase(data.get("phase", "coinflip"))
         state.draft_message_id = data.get("draft_message_id")
         state.draft_channel_id = data.get("draft_channel_id")
+        state.captain_ping_message_id = data.get("captain_ping_message_id")
         return state
