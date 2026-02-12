@@ -793,6 +793,28 @@ async def on_raw_reaction_add(payload):
                 pass
             return
 
+        # Check if player is in a pending match
+        player_match = await asyncio.to_thread(
+            match_service.state_service.get_pending_match_for_player, guild_id, payload.user_id
+        )
+        if player_match:
+            try:
+                await message.remove_reaction(payload.emoji, user)
+            except Exception:
+                pass
+            try:
+                pending_match_id = player_match.get("pending_match_id")
+                jump_url = player_match.get("shuffle_message_jump_url")
+                msg = f"{user.mention} ❌ You're in a pending match (Match #{pending_match_id})!"
+                if jump_url:
+                    msg += f" [View your match]({jump_url}) and use `/record` to complete it first."
+                else:
+                    msg += " Use `/record` to complete it first."
+                await channel.send(msg, delete_after=15)
+            except Exception:
+                pass
+            return
+
         # Handle mutual exclusivity: remove the other reaction if present
         if is_sword:
             # Joining as regular player - remove frogling if present
