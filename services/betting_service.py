@@ -462,7 +462,10 @@ class BettingService:
         since_ts = self._since_ts(pending_state)
         if pending_state is None or since_ts is None:
             return dict.fromkeys(self.bet_repo.VALID_TEAMS, 0)
-        return self.bet_repo.get_total_bets_by_guild(guild_id, since_ts=since_ts)
+        pending_match_id = pending_state.get("pending_match_id")
+        return self.bet_repo.get_total_bets_by_guild(
+            guild_id, since_ts=since_ts, pending_match_id=pending_match_id
+        )
 
     def get_pending_bet(
         self, guild_id: int | None, discord_id: int, pending_state: dict[str, Any] | None = None
@@ -686,4 +689,7 @@ class BettingService:
         since_ts = self._since_ts(pending_state)
         if pending_state is None or since_ts is None:
             return []
-        return self.bet_repo.get_bets_for_pending_match(guild_id, since_ts=since_ts)
+        pending_match_id = pending_state.get("pending_match_id")
+        return self.bet_repo.get_bets_for_pending_match(
+            guild_id, since_ts=since_ts, pending_match_id=pending_match_id
+        )
