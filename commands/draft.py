@@ -373,6 +373,22 @@ class DraftCommands(commands.Cog):
         except Exception:
             pass
 
+    async def _delete_captain_ping_message(
+        self, interaction: discord.Interaction, state: DraftState
+    ) -> None:
+        """Delete the captain ping message if it exists."""
+        if not state.captain_ping_message_id:
+            return
+        try:
+            channel = interaction.channel
+            if channel:
+                msg = await channel.fetch_message(state.captain_ping_message_id)
+                await msg.delete()
+        except Exception:
+            pass  # Message already deleted or not found
+        finally:
+            state.captain_ping_message_id = None
+
     # ========================================================================
     # /setcaptain command
     # ========================================================================
@@ -710,80 +726,46 @@ class DraftCommands(commands.Cog):
         player_ratings = {p.discord_id: p.glicko_rating or 1500.0 for p in players}
 
         if force_random_captains:
-            # All players are eligible when force_random_captains is True
-            # Captain selection (random first, weighted random second) is handled
-            # by select_captains() below — no need to pre-pick here
-            if len(lobby_player_ids) < 2:
+            # Skip the 60s wait, but still respect captain eligibility (explicit opt-ins only)
+            # Players who did /setcaptain no should NEVER be selected as captain
+            eligible_captain_ids = await asyncio.to_thread(
+                self.player_repo.get_captain_eligible_players, lobby_player_ids, guild_id
+            )
+            if len(eligible_captain_ids) < 2:
                 await interaction.followup.send(
-                    "❌ Not enough players to select captains.",
+                    "❌ Not enough captain-eligible players. "
+                    "At least 2 players must use `/setcaptain yes`.",
                     ephemeral=True,
                 )
                 return False
-            eligible_captain_ids = lobby_player_ids.copy()
         else:
-            # Normal captain eligibility check
+            # Check captain eligibility (no wait - require pre-existing opt-ins)
             eligible_captain_ids = await asyncio.to_thread(self.player_repo.get_captain_eligible_players, lobby_player_ids, guild_id)
 
-            # If captains are specified, add them to eligible list if not already there
+            # Specified captains must also be eligible (no bypass)
             if specified_captain1_id and specified_captain1_id not in eligible_captain_ids:
-                eligible_captain_ids.append(specified_captain1_id)
-            if specified_captain2_id and specified_captain2_id not in eligible_captain_ids:
-                eligible_captain_ids.append(specified_captain2_id)
-
-            # Check we have enough captains
-            needed_captains = 2
-            if specified_captain1_id:
-                needed_captains -= 1
-            if specified_captain2_id:
-                needed_captains -= 1
-
-            total_needed = needed_captains + (1 if specified_captain1_id else 0) + (
-                1 if specified_captain2_id else 0
-            )
-
-            # Always ping all lobby players and give 60s to change eligibility
-            current_eligible = len(eligible_captain_ids)
-            mentions = " ".join(f"<@{pid}>" for pid in lobby_player_ids)
-            if current_eligible < total_needed:
-                still_needed = total_needed - current_eligible
-                waiting_msg = await interaction.followup.send(
-                    f"⏳ **Waiting for captains!**\n"
-                    f"Need **{still_needed}** more captain-eligible player(s) to start the draft.\n"
-                    f"Use `/setcaptain` to opt in or out: {mentions}",
+                cap1_name = await self._get_member_name(interaction.guild, specified_captain1_id)
+                await interaction.followup.send(
+                    f"❌ **{cap1_name}** has not opted in as captain. "
+                    f"They must use `/setcaptain yes` first.",
+                    ephemeral=True,
                 )
-            else:
-                waiting_msg = await interaction.followup.send(
-                    f"⏳ **Captain check — 60 seconds to update eligibility!**\n"
-                    f"Currently **{current_eligible}** captain-eligible player(s).\n"
-                    f"Use `/setcaptain` to opt in or out: {mentions}",
-                )
-
-            # Always wait the full 60s so players can opt in or change their mind
-            for _ in range(12):
-                await asyncio.sleep(5)
-
-            # Re-query eligibility after the wait
-            eligible_captain_ids = await asyncio.to_thread(self.player_repo.get_captain_eligible_players, lobby_player_ids, guild_id)
-            if specified_captain1_id and specified_captain1_id not in eligible_captain_ids:
-                eligible_captain_ids.append(specified_captain1_id)
+                return False
             if specified_captain2_id and specified_captain2_id not in eligible_captain_ids:
-                eligible_captain_ids.append(specified_captain2_id)
+                cap2_name = await self._get_member_name(interaction.guild, specified_captain2_id)
+                await interaction.followup.send(
+                    f"❌ **{cap2_name}** has not opted in as captain. "
+                    f"They must use `/setcaptain yes` first.",
+                    ephemeral=True,
+                )
+                return False
 
-            if len(eligible_captain_ids) >= total_needed:
-                try:
-                    await waiting_msg.edit(
-                        content=f"✅ **{len(eligible_captain_ids)} captain(s) eligible!** Starting the draft..."
-                    )
-                except Exception:
-                    pass
-            else:
-                try:
-                    await waiting_msg.edit(
-                        content="❌ Draft cancelled — not enough captains opted in within 60 seconds.\n"
-                        "Use `/startdraft` to try again."
-                    )
-                except Exception:
-                    pass
+            if len(eligible_captain_ids) < 2:
+                await interaction.followup.send(
+                    f"❌ Not enough captain-eligible players. "
+                    f"At least 2 players must use `/setcaptain yes`.",
+                    ephemeral=True,
+                )
                 return False
 
         # Select captains
@@ -1007,6 +989,15 @@ class DraftCommands(commands.Cog):
         # Store message ID for later updates
         state.draft_message_id = message.id
 
+        # Ping both captains once (will be deleted when first choice is made)
+        try:
+            ping_msg = await interaction.channel.send(
+                f"<@{captain_pair.captain1_id}> <@{captain_pair.captain2_id}> Draft starting!"
+            )
+            state.captain_ping_message_id = ping_msg.id
+        except Exception:
+            pass  # Don't fail draft if ping fails
+
         # Neon Degen Terminal hook (draft coinflip)
         try:
             from services.neon_degen_service import NeonDegenService
@@ -1150,6 +1141,9 @@ class DraftCommands(commands.Cog):
             await interaction.response.send_message("❌ Draft not found.", ephemeral=True)
             return
 
+        # Delete captain ping message (first choice made)
+        await self._delete_captain_ping_message(interaction, state)
+
         state.winner_choice_type = "side"
         state.phase = DraftPhase.WINNER_SIDE_CHOICE
 
@@ -1183,6 +1177,9 @@ class DraftCommands(commands.Cog):
         if not state:
             await interaction.response.send_message("❌ Draft not found.", ephemeral=True)
             return
+
+        # Delete captain ping message (first choice made)
+        await self._delete_captain_ping_message(interaction, state)
 
         state.winner_choice_type = "hero_pick"
         state.phase = DraftPhase.WINNER_HERO_CHOICE
