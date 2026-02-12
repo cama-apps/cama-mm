@@ -73,7 +73,7 @@ class TeamBalancingService:
 
     def calculate_role_matchup_delta(self, team1: Team, team2: Team) -> float:
         """
-        Calculate the maximum role matchup delta between two teams.
+        Calculate the sum of role matchup deltas between two teams.
 
         Compares:
         - Team1 carry (1) vs Team2 offlane (3)
@@ -85,7 +85,7 @@ class TeamBalancingService:
             team2: Second team
 
         Returns:
-            Maximum delta among the three critical matchups
+            Sum of deltas across the three critical matchups
         """
         # Get players and their effective values for each role
         team1_carry_player, team1_carry_value = team1.get_player_by_role(
@@ -113,8 +113,8 @@ class TeamBalancingService:
         carry_vs_offlane_2 = abs(team2_carry_value - team1_offlane_value)
         mid_vs_mid = abs(team1_mid_value - team2_mid_value)
 
-        # Return the maximum delta
-        return max(carry_vs_offlane_1, carry_vs_offlane_2, mid_vs_mid)
+        # Return the sum of all three deltas
+        return carry_vs_offlane_1 + carry_vs_offlane_2 + mid_vs_mid
 
     def calculate_matchup_score(self, team1: Team, team2: Team) -> float:
         """
@@ -137,7 +137,7 @@ class TeamBalancingService:
             team1.get_off_role_count() + team2.get_off_role_count()
         ) * self.off_role_flat_penalty
 
-        # Calculate role matchup delta (max delta among critical matchups)
+        # Calculate role matchup delta (sum of deltas across critical matchups)
         role_matchup_delta = self.calculate_role_matchup_delta(team1, team2)
 
         return value_diff + off_role_penalty + (role_matchup_delta * self.role_matchup_delta_weight)

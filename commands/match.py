@@ -12,7 +12,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from config import BOMB_POT_CHANCE, ENRICHMENT_RETRY_DELAYS, JOPACOIN_MIN_BET
+from config import BOMB_POT_CHANCE, ENRICHMENT_RETRY_DELAYS, JOPACOIN_MIN_BET, OPENSKILL_SHUFFLE_CHANCE
 from services.flavor_text_service import FlavorEvent
 from services.lobby_service import LobbyService
 from services.match_discovery_service import MatchDiscoveryService
@@ -505,6 +505,13 @@ class MatchCommands(commands.Cog):
         # `guild` and `guild_id` already computed before the match check
         mode = "pool"  # betting_mode.value if betting_mode else "pool"
         rs = rating_system.value if rating_system else "glicko"
+
+        # Random chance to use OpenSkill (only if user didn't explicitly pick)
+        is_openskill_shuffle = False
+        if not rating_system and random.random() < OPENSKILL_SHUFFLE_CHANCE:
+            rs = "openskill"
+            is_openskill_shuffle = True
+
         try:
             result = await asyncio.to_thread(
                 functools.partial(self.match_service.shuffle_players,
@@ -548,11 +555,14 @@ class MatchCommands(commands.Cog):
         pending_state = self.match_service.get_last_shuffle(guild_id)
         if pending_state:
             pending_state["is_bomb_pot"] = is_bomb_pot
-            # Persist to DB so bomb pot survives bot restart
+            pending_state["is_openskill_shuffle"] = is_openskill_shuffle
+            # Persist to DB so bomb pot and openskill shuffle survive bot restart
             self.match_service._persist_match_state(guild_id, pending_state)
 
         if is_bomb_pot:
             logger.info(f"💣 BOMB POT triggered for guild {guild_id}")
+        if is_openskill_shuffle:
+            logger.info(f"⚗️ OPENSKILL SHUFFLE triggered for guild {guild_id}")
 
         # Create auto-liquidity blind bets for pool mode
         blind_bets_result = None
