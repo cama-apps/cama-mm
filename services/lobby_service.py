@@ -20,12 +20,14 @@ class LobbyService:
         ready_threshold: int = 10,
         max_players: int = 12,
         bankruptcy_repo=None,
+        match_state_service=None,
     ):
         self.player_repo = player_repo
         self.lobby_manager = lobby_manager
         self.ready_threshold = ready_threshold
         self.max_players = max_players
         self.bankruptcy_repo = bankruptcy_repo
+        self.match_state_service = match_state_service
 
     @property
     def creation_lock(self) -> asyncio.Lock:
@@ -38,30 +40,77 @@ class LobbyService:
     def get_lobby(self) -> Lobby | None:
         return self.lobby_manager.get_lobby()
 
-    def join_lobby(self, discord_id: int) -> tuple[bool, str]:
+    def join_lobby(
+        self, discord_id: int, guild_id: int = 0
+    ) -> tuple[bool, str, dict | None]:
+        """
+        Join a player to the lobby.
+
+        Args:
+            discord_id: Player's Discord ID
+            guild_id: Guild ID for pending match lookup
+
+        Returns:
+            Tuple of (success, reason, pending_info):
+            - success: True if joined, False otherwise
+            - reason: "" on success, or one of: "in_pending_match", "lobby_full", "already_joined"
+            - pending_info: Dict with pending_match_id and shuffle_message_jump_url if blocked,
+                           None otherwise
+        """
+        # Check if player is in a pending match FIRST
+        if self.match_state_service:
+            pending_match = self.match_state_service.get_pending_match_for_player(
+                guild_id, discord_id
+            )
+            if pending_match:
+                return False, "in_pending_match", pending_match
+
         lobby = self.get_or_create_lobby()
 
         if lobby.get_total_count() >= self.max_players:
-            return False, f"Lobby is full ({self.max_players}/{self.max_players})."
+            return False, "lobby_full", None
 
         # Use manager's join_lobby which persists to database
         if not self.lobby_manager.join_lobby(discord_id, self.max_players):
-            return False, "Already in lobby or lobby is closed."
+            return False, "already_joined", None
 
-        return True, ""
+        return True, "", None
 
-    def join_lobby_conditional(self, discord_id: int) -> tuple[bool, str]:
-        """Add a player to the conditional (frogling) queue."""
+    def join_lobby_conditional(
+        self, discord_id: int, guild_id: int = 0
+    ) -> tuple[bool, str, dict | None]:
+        """
+        Add a player to the conditional (frogling) queue.
+
+        Args:
+            discord_id: Player's Discord ID
+            guild_id: Guild ID for pending match lookup
+
+        Returns:
+            Tuple of (success, reason, pending_info):
+            - success: True if joined, False otherwise
+            - reason: "" on success, or one of: "in_pending_match", "lobby_full", "already_joined"
+            - pending_info: Dict with pending_match_id and shuffle_message_jump_url if blocked,
+                           None otherwise
+        """
+        # Check if player is in a pending match FIRST
+        if self.match_state_service:
+            pending_match = self.match_state_service.get_pending_match_for_player(
+                guild_id, discord_id
+            )
+            if pending_match:
+                return False, "in_pending_match", pending_match
+
         lobby = self.get_or_create_lobby()
 
         if lobby.get_total_count() >= self.max_players:
-            return False, f"Lobby is full ({self.max_players}/{self.max_players})."
+            return False, "lobby_full", None
 
         # Use manager's join_lobby_conditional which persists to database
         if not self.lobby_manager.join_lobby_conditional(discord_id, self.max_players):
-            return False, "Already in lobby or lobby is closed."
+            return False, "already_joined", None
 
-        return True, ""
+        return True, "", None
 
     def leave_lobby(self, discord_id: int) -> bool:
         # Use manager's leave_lobby which persists to database
