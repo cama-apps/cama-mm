@@ -1323,28 +1323,31 @@ class InfoCommands(commands.Cog):
             embed.add_field(name="🔄 Rating Drift (Seed vs Current)", value=drift_text, inline=False)
             embed.add_field(name="⚖️ Rating Stability", value=stability_text, inline=False)
 
-            # Team composition analysis
+            # Team composition analysis (Gini spread)
             team_comp = stats.get("team_composition", {})
-            comp_categories = team_comp.get("categories", [])
-            if comp_categories:
+            halves = team_comp.get("halves", [])
+            if halves:
                 comp_lines = []
-                for cat in comp_categories[:6]:
-                    wr_pct = cat["winrate"] * 100
-                    exp_pct = cat["avg_expected"] * 100
-                    over = cat["overperformance"] * 100
-                    if over > 3:
-                        indicator = "+"
-                    elif over < -3:
-                        indicator = "-"
+                r = team_comp.get("gini_correlation")
+                if r is not None:
+                    if abs(r) < 0.1:
+                        verdict = "Rating spread has no meaningful effect on match outcomes"
+                    elif r > 0:
+                        verdict = "Teams with mixed ratings slightly overperform"
                     else:
-                        indicator = "~"
+                        verdict = "Teams with similar ratings slightly overperform"
+                    comp_lines.append(f"*{verdict}*")
+                for half in halves:
+                    wr_pct = half["winrate"] * 100
+                    exp_pct = half["avg_expected"] * 100
+                    over = half["overperformance"] * 100
+                    indicator = "+" if over > 3 else "-" if over < -3 else "~"
                     comp_lines.append(
-                        f"{indicator} **{cat['name']}**: {wr_pct:.0f}% WR vs {exp_pct:.0f}% exp "
-                        f"({over:+.0f}%, {cat['wins']}W/{cat['total']}G, "
-                        f"avg={cat['avg_rating']:.0f}, spread={cat['avg_sd']:.0f})"
+                        f"{indicator} **{half['name']}**: {wr_pct:.0f}% WR vs {exp_pct:.0f}% exp "
+                        f"({over:+.0f}%, {half['wins']}W/{half['total']}G)"
                     )
                 embed.add_field(
-                    name="\U0001f9ea Team Composition & Winrate",
+                    name="\U0001f9ea Rating Spread & Winrate",
                     value="\n".join(comp_lines),
                     inline=False,
                 )
