@@ -840,8 +840,13 @@ async def on_raw_reaction_add(payload):
                 except Exception:
                     pass
             else:
+                reason_messages = {
+                    "lobby_full": "Lobby is full.",
+                    "already_joined": "Already in lobby.",
+                }
+                msg = reason_messages.get(reason, "Could not join lobby.")
                 try:
-                    await channel.send(f"{user.mention} ❌ {reason}", delete_after=10)
+                    await channel.send(f"{user.mention} ❌ {msg}", delete_after=10)
                 except Exception:
                     pass
             return

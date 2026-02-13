@@ -75,9 +75,9 @@ def test_lobby_service_leave_persists(repo_db_path):
 
     # Add players
     service1.get_or_create_lobby(creator_id=100)
-    service1.join_lobby(111)
-    service1.join_lobby(222)
-    service1.join_lobby(333)
+    service1.join_lobby(111, 0)
+    service1.join_lobby(222, 0)
+    service1.join_lobby(333, 0)
 
     # One player leaves
     left = service1.leave_lobby(222)
