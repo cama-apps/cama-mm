@@ -33,9 +33,9 @@ def test_lobby_service_join_persists_players(repo_db_path):
 
     # Join players via service (this is what reaction handler does)
     service1.get_or_create_lobby(creator_id=100)
-    success1, _ = service1.join_lobby(111)
-    success2, _ = service1.join_lobby(222)
-    success3, _ = service1.join_lobby(333)
+    success1, _, _ = service1.join_lobby(111)
+    success2, _, _ = service1.join_lobby(222)
+    success3, _, _ = service1.join_lobby(333)
 
     assert success1, "Player 111 should join successfully"
     assert success2, "Player 222 should join successfully"
@@ -55,7 +55,7 @@ def test_lobby_service_join_persists_players(repo_db_path):
     assert lobby2.players == {111, 222, 333}, "Player IDs should match"
 
     # Join another player after restart
-    success4, _ = service2.join_lobby(444)
+    success4, _, _ = service2.join_lobby(444)
     assert success4, "Player 444 should join successfully after restart"
     assert lobby2.get_player_count() == 4
 

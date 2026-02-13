@@ -169,6 +169,10 @@ def _init_services():
     soft_avoid_repo = SoftAvoidRepository(DB_PATH)
     soft_avoid_service = SoftAvoidService(soft_avoid_repo)
 
+    # Create match state service early (needed by lobby_service and match_service)
+    from services.match_state_service import MatchStateService
+    match_state_service = MatchStateService(match_repo)
+
     # Create package deal repository and service
     package_deal_repo = PackageDealRepository(DB_PATH)
     package_deal_service = PackageDealService(package_deal_repo)
@@ -190,6 +194,7 @@ def _init_services():
         ready_threshold=LOBBY_READY_THRESHOLD,
         max_players=LOBBY_MAX_PLAYERS,
         bankruptcy_repo=bankruptcy_repo,
+        match_state_service=match_state_service,
     )
 
     # Create match service
@@ -202,6 +207,7 @@ def _init_services():
         loan_service=loan_service,
         soft_avoid_repo=soft_avoid_repo,
         package_deal_repo=package_deal_repo,
+        state_service=match_state_service,
     )
 
     # Expose on bot for cogs
@@ -793,28 +799,6 @@ async def on_raw_reaction_add(payload):
                 pass
             return
 
-        # Check if player is in a pending match
-        player_match = await asyncio.to_thread(
-            match_service.state_service.get_pending_match_for_player, guild_id, payload.user_id
-        )
-        if player_match:
-            try:
-                await message.remove_reaction(payload.emoji, user)
-            except Exception:
-                pass
-            try:
-                pending_match_id = player_match.get("pending_match_id")
-                jump_url = player_match.get("shuffle_message_jump_url")
-                msg = f"{user.mention} ❌ You're in a pending match (Match #{pending_match_id})!"
-                if jump_url:
-                    msg += f" [View your match]({jump_url}) and use `/record` to complete it first."
-                else:
-                    msg += " Use `/record` to complete it first."
-                await channel.send(msg, delete_after=15)
-            except Exception:
-                pass
-            return
-
         # Handle mutual exclusivity: remove the other reaction if present
         if is_sword:
             # Joining as regular player - remove frogling if present
@@ -823,7 +807,9 @@ async def on_raw_reaction_add(payload):
                 await message.remove_reaction(frogling_emoji, user)
             except Exception:
                 pass
-            success, reason = await asyncio.to_thread(lobby_service.join_lobby, payload.user_id)
+            success, reason, pending_info = await asyncio.to_thread(
+                lobby_service.join_lobby, payload.user_id, guild_id
+            )
             join_type = "regular"
         else:
             # Joining as conditional (frogling) - remove sword if present
@@ -831,7 +817,9 @@ async def on_raw_reaction_add(payload):
                 await message.remove_reaction("⚔️", user)
             except Exception:
                 pass
-            success, reason = await asyncio.to_thread(lobby_service.join_lobby_conditional, payload.user_id)
+            success, reason, pending_info = await asyncio.to_thread(
+                lobby_service.join_lobby_conditional, payload.user_id, guild_id
+            )
             join_type = "conditional"
 
         if not success:
@@ -839,10 +827,23 @@ async def on_raw_reaction_add(payload):
                 await message.remove_reaction(payload.emoji, user)
             except Exception:
                 pass
-            try:
-                await channel.send(f"{user.mention} ❌ {reason}", delete_after=10)
-            except Exception:
-                pass
+            if reason == "in_pending_match" and pending_info:
+                try:
+                    pending_match_id = pending_info.get("pending_match_id")
+                    jump_url = pending_info.get("shuffle_message_jump_url")
+                    msg = f"{user.mention} ❌ You're in a pending match (Match #{pending_match_id})!"
+                    if jump_url:
+                        msg += f" [View your match]({jump_url}) and use `/record` to complete it first."
+                    else:
+                        msg += " Use `/record` to complete it first."
+                    await channel.send(msg, delete_after=15)
+                except Exception:
+                    pass
+            else:
+                try:
+                    await channel.send(f"{user.mention} ❌ {reason}", delete_after=10)
+                except Exception:
+                    pass
             return
 
         await update_lobby_message(message, lobby, payload.guild_id)

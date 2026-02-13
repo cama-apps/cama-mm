@@ -162,9 +162,9 @@ async def test_resetlobby_new_lobby_is_empty(monkeypatch):
 
     # Create lobby and add players
     lobby = lobby_service.get_or_create_lobby(creator_id=99)
-    lobby_service.join_lobby(1)
-    lobby_service.join_lobby(2)
-    lobby_service.join_lobby(3)
+    lobby_service.join_lobby(1, 0)
+    lobby_service.join_lobby(2, 0)
+    lobby_service.join_lobby(3, 0)
     assert lobby.get_player_count() == 3
 
     interaction = FakeInteraction(user_id=99)

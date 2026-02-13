@@ -282,18 +282,12 @@ class LobbyCommands(commands.Cog):
         if not player or not player.preferred_roles:
             return False, "⚠️ Set your preferred roles with `/setroles` to auto-join."
 
-        # Check if this player is already in a pending match
-        match_service = getattr(self.bot, "match_service", None)
-        if match_service:
-            player_match = await asyncio.to_thread(
-                match_service.state_service.get_pending_match_for_player, guild_id, user_id
-            )
-            if player_match:
-                return False, None  # Player is in a pending match, can't auto-join
-
-        # Attempt to join
-        success, reason = await asyncio.to_thread(self.lobby_service.join_lobby, user_id)
+        # Attempt to join (pending match check now inside LobbyService)
+        success, reason, pending_info = await asyncio.to_thread(
+            self.lobby_service.join_lobby, user_id, guild_id
+        )
         if not success:
+            # Auto-join failures are silent (including pending match)
             logger.info(f"Auto-join failed for {user_id}: {reason}")
             return False, None
 
@@ -577,27 +571,24 @@ class LobbyCommands(commands.Cog):
             )
             return
 
-        # Block if THIS player is already in a pending match
-        match_service = getattr(self.bot, "match_service", None)
-        if match_service:
-            player_match = await asyncio.to_thread(
-                match_service.state_service.get_pending_match_for_player, guild_id, interaction.user.id
-            )
-            if player_match:
-                pending_match_id = player_match.get("pending_match_id")
-                jump_url = player_match.get("shuffle_message_jump_url")
+        # Attempt to join (pending match check now inside LobbyService)
+        success, reason, pending_info = await asyncio.to_thread(
+            self.lobby_service.join_lobby, interaction.user.id, guild_id
+        )
+        if not success:
+            if reason == "in_pending_match" and pending_info:
+                pending_match_id = pending_info.get("pending_match_id")
+                jump_url = pending_info.get("shuffle_message_jump_url")
                 message_text = f"❌ You're already in a pending match (Match #{pending_match_id})!"
                 if jump_url:
                     message_text += f" [View your match]({jump_url}) and use `/record` to complete it first."
                 else:
                     message_text += " Use `/record` to complete it first."
                 await interaction.followup.send(message_text, ephemeral=True)
-                return
-
-        # Attempt to join
-        success, reason = await asyncio.to_thread(self.lobby_service.join_lobby, interaction.user.id)
-        if not success:
-            await interaction.followup.send(f"❌ {reason}", ephemeral=True)
+            elif reason == "lobby_full":
+                await interaction.followup.send("❌ Lobby is full.", ephemeral=True)
+            else:
+                await interaction.followup.send("❌ Already in lobby or lobby is closed.", ephemeral=True)
             return
 
         # Refresh lobby state after join
