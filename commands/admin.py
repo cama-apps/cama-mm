@@ -174,7 +174,7 @@ class AdminCommands(commands.Cog):
                 if captain_eligible:
                     self.player_service.set_captain_eligible(fake_id, addfake_guild_id, True)
 
-                success, _ = self.lobby_service.join_lobby(fake_id)
+                success, _, _ = self.lobby_service.join_lobby(fake_id, addfake_guild_id)
                 if success:
                     fake_users_added.append(fake_name)
 
@@ -285,7 +285,7 @@ class AdminCommands(commands.Cog):
                 if captain_eligible:
                     self.player_service.set_captain_eligible(fake_id, fill_guild_id, True)
 
-                success, _ = self.lobby_service.join_lobby(fake_id)
+                success, _, _ = self.lobby_service.join_lobby(fake_id, fill_guild_id)
                 if success:
                     fake_users_added.append((fake_name, fake_id))
                     # Backdate join time for readycheck testing variety

@@ -306,7 +306,7 @@ class TestAbortLobbyReset:
 
         # Step 2: Add players to lobby and shuffle (simulating /shuffle command)
         for pid in test_players:
-            lobby_service.join_lobby(pid)
+            lobby_service.join_lobby(pid, 0)
 
         assert lobby_service.get_lobby() is not None
         assert lobby_service.get_lobby().get_player_count() == 10

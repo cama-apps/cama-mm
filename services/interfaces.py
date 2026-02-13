@@ -474,13 +474,13 @@ class ILobbyService(ABC):
         ...
 
     @abstractmethod
-    def join_lobby(self, discord_id: int) -> tuple[bool, str]:
-        """Join the lobby. Returns (success, message)."""
+    def join_lobby(self, discord_id: int, guild_id: int = 0) -> tuple[bool, str, dict | None]:
+        """Join the lobby. Returns (success, reason, pending_info)."""
         ...
 
     @abstractmethod
-    def join_lobby_conditional(self, discord_id: int) -> tuple[bool, str]:
-        """Join conditional queue. Returns (success, message)."""
+    def join_lobby_conditional(self, discord_id: int, guild_id: int = 0) -> tuple[bool, str, dict | None]:
+        """Join conditional queue. Returns (success, reason, pending_info)."""
         ...
 
     @abstractmethod
