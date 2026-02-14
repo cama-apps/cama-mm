@@ -32,6 +32,7 @@ logging.getLogger("discord.client").addFilter(_PyNaClFilter())
 
 # Now import discord after logging is configured
 import discord
+from discord.app_commands.errors import TransformerError
 from discord.ext import commands
 
 # Remove any handlers discord.py added to prevent duplicate output
@@ -650,8 +651,16 @@ async def on_app_command_error(interaction: discord.Interaction, error: discord.
     """Global error handler for app commands - prevents infinite 'thinking...' state."""
     logger.error(f"App command error in '{interaction.command.name if interaction.command else 'unknown'}': {error}", exc_info=error)
 
-    # Try to send error message to user
-    error_msg = "An error occurred while processing your command. Please try again."
+    # Handle TransformerError (e.g., typing a username instead of selecting from Discord's picker)
+    if isinstance(error, TransformerError):
+        value = getattr(error, 'value', None)
+        error_msg = (
+            f"Could not find user `{value}`. "
+            "Please use @mention or select from Discord's user picker when typing."
+        )
+    else:
+        # Generic error message
+        error_msg = "An error occurred while processing your command. Please try again."
 
     try:
         if interaction.response.is_done():

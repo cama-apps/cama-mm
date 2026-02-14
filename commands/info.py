@@ -110,6 +110,27 @@ class UnifiedLeaderboardView(discord.ui.View):
         self.prev_button.disabled = state.current_page == 0
         self.next_button.disabled = state.current_page >= state.max_page
 
+    def _get_guild_members(self) -> dict[int, discord.Member]:
+        """Get dict of guild member ID -> Member for filtering and name lookups.
+
+        Cached on first call since guild membership doesn't change during view lifetime.
+        Dict membership check is O(1), so this works for both filtering and name lookups.
+
+        Returns empty dict if in DM context (no guild). Use _should_filter_by_guild()
+        to check if filtering should be applied.
+        """
+        if not hasattr(self, "_guild_members_cache"):
+            guild = self.interaction.guild
+            self._guild_members_cache: dict[int, discord.Member] = {m.id: m for m in guild.members} if guild else {}
+        return self._guild_members_cache
+
+    def _should_filter_by_guild(self) -> bool:
+        """Check if we should filter entries by guild membership.
+
+        Only filter in guild context, not in DMs where we can't verify membership.
+        """
+        return self.interaction.guild is not None
+
     async def _load_tab_data(self, tab: LeaderboardTab) -> None:
         """Load data for a tab if not already loaded."""
         state = self._tab_states[tab]
@@ -140,9 +161,14 @@ class UnifiedLeaderboardView(discord.ui.View):
         total_count = await asyncio.to_thread(self.cog.player_service.get_player_count, self.guild_id)
         debtors = await asyncio.to_thread(self.cog.player_service.get_players_with_negative_balance, self.guild_id)
 
+        guild_members = self._get_guild_members()
+        should_filter = self._should_filter_by_guild()
+
         players_with_stats = []
         for player in players:
             if player.discord_id is None:
+                continue
+            if should_filter and player.discord_id not in guild_members:
                 continue
             wins = player.wins or 0
             losses = player.losses or 0
@@ -164,6 +190,10 @@ class UnifiedLeaderboardView(discord.ui.View):
                 "jopacoin_balance": player.jopacoin_balance or 0,
             })
 
+        # Filter debtors too (only in guild context)
+        if should_filter:
+            debtors = [d for d in debtors if d["discord_id"] in guild_members]
+
         state.data = {
             "players": players_with_stats,
             "total_count": total_count,
@@ -181,11 +211,16 @@ class UnifiedLeaderboardView(discord.ui.View):
             functools.partial(self.cog.gambling_stats_service.get_leaderboard, self.guild_id, limit=self.limit)
         )
 
-        # Pre-fetch guild members
-        guild = self.interaction.guild
-        guild_members = {m.id: m for m in guild.members} if guild else {}
+        guild_members = self._get_guild_members()
 
-        # Collect all unique discord_ids
+        # Filter out users who have left the server (only in guild context)
+        if self._should_filter_by_guild():
+            leaderboard.top_earners = [e for e in leaderboard.top_earners if e.discord_id in guild_members]
+            leaderboard.down_bad = [e for e in leaderboard.down_bad if e.discord_id in guild_members]
+            leaderboard.hall_of_degen = [e for e in leaderboard.hall_of_degen if e.discord_id in guild_members]
+            leaderboard.biggest_gamblers = [e for e in leaderboard.biggest_gamblers if e.discord_id in guild_members]
+
+        # Collect all unique discord_ids (after filtering)
         all_discord_ids = set()
         for entry in leaderboard.top_earners:
             all_discord_ids.add(entry.discord_id)
@@ -202,10 +237,7 @@ class UnifiedLeaderboardView(discord.ui.View):
             bankruptcy_states = await asyncio.to_thread(self.cog.bankruptcy_service.get_bulk_states, list(all_discord_ids))
 
         state.data = leaderboard
-        state.extra = {
-            "guild_members": guild_members,
-            "bankruptcy_states": bankruptcy_states,
-        }
+        state.extra = {"bankruptcy_states": bankruptcy_states}
 
         # Calculate max pages based on longest section
         max_entries = max(
@@ -232,15 +264,21 @@ class UnifiedLeaderboardView(discord.ui.View):
             self.guild_id
         )
 
-        # Pre-fetch guild members
-        guild = self.interaction.guild
-        guild_members = {m.id: m for m in guild.members} if guild else {}
+        guild_members = self._get_guild_members()
+
+        # Filter out users who have left the server (only in guild context)
+        if self._should_filter_by_guild():
+            if "top_earners" in leaderboard:
+                leaderboard["top_earners"] = [e for e in leaderboard["top_earners"] if e["discord_id"] in guild_members]
+            if "down_bad" in leaderboard:
+                leaderboard["down_bad"] = [e for e in leaderboard["down_bad"] if e["discord_id"] in guild_members]
+            if "most_accurate" in leaderboard:
+                leaderboard["most_accurate"] = [e for e in leaderboard["most_accurate"] if e["discord_id"] in guild_members]
 
         state.data = {
             "leaderboard": leaderboard,
             "server_stats": server_stats,
         }
-        state.extra = {"guild_members": guild_members}
 
         # Calculate max pages based on longest section
         max_entries = max(
@@ -261,9 +299,14 @@ class UnifiedLeaderboardView(discord.ui.View):
             functools.partial(self.cog.player_service.get_rated_player_count, self.guild_id, rating_type="glicko")
         )
 
+        guild_members = self._get_guild_members()
+        should_filter = self._should_filter_by_guild()
+
         players_with_stats = []
         for player in players:
             if player.glicko_rating is None:
+                continue
+            if should_filter and player.discord_id not in guild_members:
                 continue
             rating_display = rating_system.rating_to_display(player.glicko_rating)
             rd = player.glicko_rd or 350.0
@@ -293,9 +336,14 @@ class UnifiedLeaderboardView(discord.ui.View):
             functools.partial(self.cog.player_service.get_rated_player_count, self.guild_id, rating_type="openskill")
         )
 
+        guild_members = self._get_guild_members()
+        should_filter = self._should_filter_by_guild()
+
         players_with_stats = []
         for player in players:
             if player.os_mu is None:
+                continue
+            if should_filter and player.discord_id not in guild_members:
                 continue
             rating_display = os_system.mu_to_display(player.os_mu)
             sigma = player.os_sigma or os_system.DEFAULT_SIGMA
@@ -330,16 +378,18 @@ class UnifiedLeaderboardView(discord.ui.View):
         )
         total_volume = await asyncio.to_thread(tip_service.get_total_tip_volume, self.guild_id)
 
-        # Pre-fetch guild members
-        guild = self.interaction.guild
-        guild_members = {m.id: m for m in guild.members} if guild else {}
+        guild_members = self._get_guild_members()
+
+        # Filter out users who have left the server (only in guild context)
+        if self._should_filter_by_guild():
+            top_senders = [e for e in top_senders if e["discord_id"] in guild_members]
+            top_receivers = [e for e in top_receivers if e["discord_id"] in guild_members]
 
         state.data = {
             "top_senders": top_senders,
             "top_receivers": top_receivers,
             "total_volume": total_volume,
         }
-        state.extra = {"guild_members": guild_members}
 
         # Calculate max pages based on longest section
         max_entries = max(
@@ -349,38 +399,23 @@ class UnifiedLeaderboardView(discord.ui.View):
         )
         state.max_page = max(0, (max_entries - 1) // MULTI_SECTION_PAGE_SIZE)
 
-    def _get_name_for_gambling(self, discord_id: int) -> str:
-        """Get display name for gambling leaderboard entries."""
-        state = self._tab_states[LeaderboardTab.GAMBLING]
-        guild_members = state.extra.get("guild_members", {})
-        bankruptcy_states = state.extra.get("bankruptcy_states", {})
+    def _get_display_name(self, discord_id: int) -> str:
+        """Get display name for a user, with fallback if not in guild."""
+        member = self._get_guild_members().get(discord_id)
+        return member.display_name if member else f"User {discord_id}"
 
-        member = guild_members.get(discord_id)
-        if member:
-            name = member.display_name
-        else:
-            name = f"User {discord_id}"
+    def _get_name_for_gambling(self, discord_id: int) -> str:
+        """Get display name for gambling leaderboard entries (with bankruptcy indicator)."""
+        name = self._get_display_name(discord_id)
 
         # Add tombstone if in bankruptcy penalty
+        state = self._tab_states[LeaderboardTab.GAMBLING]
+        bankruptcy_states = state.extra.get("bankruptcy_states", {})
         bankruptcy_state = bankruptcy_states.get(discord_id)
         if bankruptcy_state and bankruptcy_state.penalty_games_remaining > 0:
             name = f"{TOMBSTONE_EMOJI} {name}"
 
         return name
-
-    def _get_name_for_predictions(self, discord_id: int) -> str:
-        """Get display name for predictions leaderboard entries."""
-        state = self._tab_states[LeaderboardTab.PREDICTIONS]
-        guild_members = state.extra.get("guild_members", {})
-        member = guild_members.get(discord_id)
-        return member.display_name if member else f"User {discord_id}"
-
-    def _get_name_for_tips(self, discord_id: int) -> str:
-        """Get display name for tips leaderboard entries."""
-        state = self._tab_states[LeaderboardTab.TIPS]
-        guild_members = state.extra.get("guild_members", {})
-        member = guild_members.get(discord_id)
-        return member.display_name if member else f"User {discord_id}"
 
     def build_embed(self) -> discord.Embed:
         """Build embed for current tab and page."""
@@ -556,7 +591,7 @@ class UnifiedLeaderboardView(discord.ui.View):
             if page_entries:
                 lines = []
                 for i, entry in enumerate(page_entries, start + 1):
-                    name = self._get_name_for_predictions(entry["discord_id"])
+                    name = self._get_display_name(entry["discord_id"])
                     pnl = entry["net_pnl"]
                     pnl_str = f"+{pnl}" if pnl >= 0 else str(pnl)
                     lines.append(f"{i}. **{name}** {pnl_str} {JOPACOIN_EMOTE} ({entry['win_rate']:.0%})")
@@ -569,7 +604,7 @@ class UnifiedLeaderboardView(discord.ui.View):
             if page_entries:
                 lines = []
                 for i, entry in enumerate(page_entries, start + 1):
-                    name = self._get_name_for_predictions(entry["discord_id"])
+                    name = self._get_display_name(entry["discord_id"])
                     lines.append(f"{i}. **{name}** {entry['net_pnl']} {JOPACOIN_EMOTE} ({entry['win_rate']:.0%})")
                 embed.add_field(name=" Down Bad", value="\n".join(lines), inline=False)
 
@@ -579,7 +614,7 @@ class UnifiedLeaderboardView(discord.ui.View):
             if page_entries:
                 lines = []
                 for i, entry in enumerate(page_entries, start + 1):
-                    name = self._get_name_for_predictions(entry["discord_id"])
+                    name = self._get_display_name(entry["discord_id"])
                     lines.append(f"{i}. **{name}** {entry['win_rate']:.0%} ({entry['wins']}W-{entry['losses']}L)")
                 embed.add_field(name=" Most Accurate", value="\n".join(lines), inline=False)
 
@@ -705,7 +740,7 @@ class UnifiedLeaderboardView(discord.ui.View):
             if page_entries:
                 lines = []
                 for i, entry in enumerate(page_entries, start + 1):
-                    name = self._get_name_for_tips(entry["discord_id"])
+                    name = self._get_display_name(entry["discord_id"])
                     lines.append(
                         f"{i}. **{name}** {entry['total_amount']} {JOPACOIN_EMOTE} ({entry['tip_count']} tips)"
                     )
@@ -717,7 +752,7 @@ class UnifiedLeaderboardView(discord.ui.View):
             if page_entries:
                 lines = []
                 for i, entry in enumerate(page_entries, start + 1):
-                    name = self._get_name_for_tips(entry["discord_id"])
+                    name = self._get_display_name(entry["discord_id"])
                     lines.append(
                         f"{i}. **{name}** {entry['total_amount']} {JOPACOIN_EMOTE} ({entry['tip_count']} tips)"
                     )
@@ -1084,7 +1119,7 @@ class InfoCommands(commands.Cog):
     )
     @app_commands.describe(user="Optional: View detailed stats for a specific player")
     async def calibration(
-        self, interaction: discord.Interaction, user: discord.Member | None = None
+        self, interaction: discord.Interaction, user: discord.User | None = None
     ):
         """Show rating system health and calibration stats."""
         target_user = user or interaction.user
@@ -1533,7 +1568,7 @@ class InfoCommands(commands.Cog):
     async def _show_individual_calibration(
         self,
         interaction: discord.Interaction,
-        user: discord.Member,
+        user: discord.User,
         rating_system: CamaRatingSystem,
     ):
         """Show detailed calibration stats for an individual player."""

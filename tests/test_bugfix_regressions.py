@@ -227,11 +227,10 @@ class TestGamblingLeaderboardNoFetchUser:
         # Load gambling data
         await view._load_tab_data(LeaderboardTab.GAMBLING)
 
-        # Verify guild_members are cached in state.extra
-        state = view._tab_states[LeaderboardTab.GAMBLING]
-        assert "guild_members" in state.extra
-        assert 1001 in state.extra["guild_members"]
-        assert 1002 in state.extra["guild_members"]
+        # Verify guild_members are cached at view level
+        assert hasattr(view, "_guild_members_cache")
+        assert 1001 in view._guild_members_cache
+        assert 1002 in view._guild_members_cache
 
         # Build embed and verify cached names are used
         embed = view.build_embed()
@@ -295,11 +294,12 @@ class TestGamblingLeaderboardNoFetchUser:
         # Load gambling data - should not raise
         await view._load_tab_data(LeaderboardTab.GAMBLING)
 
-        # Should have empty guild_members dict
-        state = view._tab_states[LeaderboardTab.GAMBLING]
-        assert state.extra.get("guild_members") == {}
+        # Should have empty guild_members cache (DM context)
+        assert hasattr(view, "_guild_members_cache")
+        assert view._guild_members_cache == {}
 
-        # Build embed should work and fall back to "User {id}"
+        # Build embed should work and fall back to "User {id}" for names
+        # In DM context, entries are NOT filtered, just displayed with fallback names
         embed = view.build_embed()
         assert embed is not None
         assert len(embed.fields) > 0 or embed.description is not None
@@ -442,9 +442,9 @@ class TestGetNameFunctionSync:
             "_get_name_for_gambling should not use await - it should be synchronous"
         )
 
-        # Verify it uses guild_members from state.extra
-        assert "guild_members" in source, (
-            "Should use guild_members from state.extra for O(1) lookup"
+        # Verify it uses the centralized _get_display_name helper
+        assert "_get_display_name" in source, (
+            "Should use _get_display_name for O(1) cached lookup"
         )
 
 
