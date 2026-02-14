@@ -97,11 +97,10 @@ class TestGamblingTabPagination:
         from commands.info import MULTI_SECTION_PAGE_SIZE
         state = view._tab_states[LeaderboardTab.GAMBLING]
         state.data = leaderboard
-        state.extra = {
-            "guild_members": {},
-            "bankruptcy_states": {},
-        }
+        state.extra = {"bankruptcy_states": {}}
         state.loaded = True
+        # Set view-level guild members cache (empty = DM context, no filtering)
+        view._guild_members_cache = {}
 
         # Calculate max pages
         max_entries = max(
@@ -221,8 +220,8 @@ class TestGamblingTabPagination:
         view = self._create_view_with_gambling_data(mock_cog, mock_interaction, leaderboard)
         state = view._tab_states[LeaderboardTab.GAMBLING]
 
-        # Add mock guild members for name lookup
-        state.extra["guild_members"] = {i: MagicMock(display_name=f"User{i}") for i in range(20)}
+        # Add mock guild members for name lookup (view-level cache)
+        view._guild_members_cache = {i: MagicMock(display_name=f"User{i}") for i in range(20)}
 
         # Page 0 should show entries 0-7
         embed = view.build_embed()
@@ -257,7 +256,7 @@ class TestGamblingTabPagination:
         state = view._tab_states[LeaderboardTab.GAMBLING]
 
         # Add mock guild members
-        state.extra["guild_members"] = {i: MagicMock(display_name=f"User{i}") for i in range(1, 5)}
+        view._guild_members_cache = {i: MagicMock(display_name=f"User{i}") for i in range(1, 5)}
 
         embed = view.build_embed()
 
@@ -298,7 +297,7 @@ class TestGamblingTabPagination:
         state = view._tab_states[LeaderboardTab.GAMBLING]
 
         # Add mock guild members
-        state.extra["guild_members"] = {i: MagicMock(display_name=f"User{i}") for i in range(20)}
+        view._guild_members_cache = {i: MagicMock(display_name=f"User{i}") for i in range(20)}
 
         # First page starts at 1
         embed = view.build_embed()

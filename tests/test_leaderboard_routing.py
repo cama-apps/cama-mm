@@ -50,6 +50,17 @@ def mock_discord_helpers():
 TEST_GUILD_ID = 12345
 
 
+def create_mock_members(player_ids):
+    """Create mock guild members for the given player IDs."""
+    members = []
+    for pid in player_ids:
+        member = MagicMock()
+        member.id = pid
+        member.display_name = f"Player{pid}"
+        members.append(member)
+    return members
+
+
 def register_players(player_repo, player_ids, guild_id=TEST_GUILD_ID):
     """Helper to register test players with varied balances."""
     for i, pid in enumerate(player_ids):
@@ -72,7 +83,8 @@ class MockInteraction:
         self.guild = MagicMock()
         self.guild.id = guild_id
         self.guild.get_member = MagicMock(return_value=None)
-        self.guild.members = []  # Required for UnifiedLeaderboardView
+        # Include mock members for common test IDs used in fixtures
+        self.guild.members = create_mock_members([1001, 1002, 1003, 1004, 1005])
         self.response = MagicMock()
         self.response.is_done = MagicMock(return_value=False)
         self.response.send_message = AsyncMock()
@@ -153,9 +165,10 @@ class TestLeaderboardTypeRouting:
         self, info_cog, player_repo, mock_rate_limiter, mock_discord_helpers
     ):
         """Test that leaderboard with no type defaults to balance."""
-        register_players(player_repo, [1, 2, 3, 4, 5])
+        player_ids = [1, 2, 3, 4, 5]
+        register_players(player_repo, player_ids)
         interaction = MockInteraction()
-        interaction.guild.members = []  # Add members list for unified view
+        interaction.guild.members = create_mock_members(player_ids)
 
         await info_cog.leaderboard.callback(info_cog, interaction, type=None, limit=20)
 
@@ -171,9 +184,10 @@ class TestLeaderboardTypeRouting:
         self, info_cog, player_repo, mock_rate_limiter, mock_discord_helpers
     ):
         """Test that type=balance routes to balance leaderboard."""
-        register_players(player_repo, [1, 2, 3, 4, 5])
+        player_ids = [1, 2, 3, 4, 5]
+        register_players(player_repo, player_ids)
         interaction = MockInteraction()
-        interaction.guild.members = []  # Add members list for unified view
+        interaction.guild.members = create_mock_members(player_ids)
 
         await info_cog.leaderboard.callback(
             info_cog, interaction, type=MockChoice("balance"), limit=20
@@ -244,7 +258,7 @@ class TestLeaderboardTypeRouting:
         )
 
         interaction = MockInteraction()
-        interaction.guild.members = []  # Add members list for unified view
+        interaction.guild.members = []  # Will be populated with matching players
 
         await info_cog.leaderboard.callback(
             info_cog, interaction, type=MockChoice("gambling"), limit=20
@@ -275,7 +289,7 @@ class TestLeaderboardTypeRouting:
         )
 
         interaction = MockInteraction()
-        interaction.guild.members = []  # Add members list for unified view
+        interaction.guild.members = []  # Will be populated with matching players
 
         await info_cog.leaderboard.callback(
             info_cog, interaction, type=MockChoice("predictions"), limit=20
@@ -315,7 +329,7 @@ class TestLeaderboardLimitParameter:
     ):
         """Test that invalid limits are clamped to valid range."""
         interaction = MockInteraction()
-        interaction.guild.members = []  # Add members list for unified view
+        interaction.guild.members = []  # Will be populated with matching players
 
         await info_cog.leaderboard.callback(info_cog, interaction, type=None, limit=150)
 
@@ -332,7 +346,7 @@ class TestLeaderboardLimitParameter:
     ):
         """Test that limit=0 is clamped to 1."""
         interaction = MockInteraction()
-        interaction.guild.members = []  # Add members list for unified view
+        interaction.guild.members = []  # Will be populated with matching players
 
         await info_cog.leaderboard.callback(info_cog, interaction, type=None, limit=0)
 

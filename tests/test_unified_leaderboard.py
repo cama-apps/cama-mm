@@ -67,13 +67,27 @@ def mock_cog():
     return cog
 
 
+def create_mock_member(discord_id: int, name: str = None) -> MagicMock:
+    """Create a mock guild member."""
+    member = MagicMock()
+    member.id = discord_id
+    member.display_name = name or f"User{discord_id}"
+    return member
+
+
 @pytest.fixture
 def mock_interaction():
     """Create a mock Discord interaction."""
     interaction = MagicMock()
     interaction.guild = MagicMock()
     interaction.guild.id = 12345
-    interaction.guild.members = []
+    # Include mock members for common test IDs (123, 456, 789, 67890)
+    interaction.guild.members = [
+        create_mock_member(123, "User123"),
+        create_mock_member(456, "User456"),
+        create_mock_member(789, "User789"),
+        create_mock_member(67890, "TestUser"),
+    ]
     interaction.user = MagicMock()
     interaction.user.id = 67890
     interaction.response = MagicMock()

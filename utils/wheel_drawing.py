@@ -241,7 +241,7 @@ def _create_static_overlay(size: int) -> Image.Image:
 # Base wheel wedge configuration: (label, base_value, color)
 # 24 wedges at 15 degrees each (dropped 35 and 45 from original 26 for legibility)
 # BANKRUPT value will be adjusted based on WHEEL_TARGET_EV
-# Shell wedges are spread out for visual variety (BLUE with 25s, RED between 70-80)
+# Wedges ordered by color: black/gray, green, blue, purple, orange (BOLT here), red, gold
 _BASE_WHEEL_WEDGES = [
     ("BANKRUPT", -100, "#1a1a1a"),
     ("BANKRUPT", -100, "#1a1a1a"),
@@ -255,13 +255,13 @@ _BASE_WHEEL_WEDGES = [
     ("20", 20, "#5dba57"),
     ("20", 20, "#5dba57"),
     ("25", 25, "#3498db"),
-    ("BOLT", "LIGHTNING_BOLT", "#f39c12"),
     ("BLUE", "BLUE_SHELL", "#3498db"),
     ("30", 30, "#2980b9"),
     ("40", 40, "#9b59b6"),
     ("50", 50, "#7d3c98"),
     ("50", 50, "#7d3c98"),
     ("60", 60, "#e67e22"),
+    ("BOLT", "LIGHTNING_BOLT", "#f39c12"),
     ("70", 70, "#d35400"),
     ("RED", "RED_SHELL", "#e74c3c"),
     ("80", 80, "#c0392b"),
