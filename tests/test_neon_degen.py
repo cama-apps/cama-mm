@@ -689,3 +689,124 @@ class TestNeonDegenPersistence:
         # Original guild should still be blocked
         result3 = await svc.on_degen_milestone(123, 456, 95)
         assert result3 is None
+
+
+# ---------------------------------------------------------------------------
+# Privacy / anonymous mode tests
+# ---------------------------------------------------------------------------
+
+
+class TestNeonDegenPrivacy:
+    """Tests that sensitive events don't leak PII in public neon messages."""
+
+    @pytest.mark.asyncio
+    async def test_on_soft_avoid_does_not_call_build_player_context(self):
+        """on_soft_avoid must NOT call _build_player_context at all."""
+        from unittest.mock import AsyncMock, patch, MagicMock
+
+        service = NeonDegenService()
+        service._build_player_context = MagicMock(
+            side_effect=AssertionError("_build_player_context should not be called")
+        )
+        # Run many times to ensure it's never called regardless of roll outcome
+        for _ in range(50):
+            svc = NeonDegenService()
+            svc._build_player_context = MagicMock(
+                side_effect=AssertionError("_build_player_context should not be called")
+            )
+            await svc.on_soft_avoid(888, 456, cost=50, games=3)
+
+    @pytest.mark.asyncio
+    async def test_on_soft_avoid_neon_output_never_contains_buyer_name(self):
+        """Public neon text from soft avoid must never include the buyer's name or balance."""
+        buyer_name = "SecretBuyer123"
+        buyer_balance = 99999
+
+        from unittest.mock import MagicMock
+        from domain.models.player import Player
+
+        fake_player = Player(
+            name=buyer_name,
+            mmr=3000,
+            initial_mmr=3000,
+            preferred_roles=["1"],
+            main_role="1",
+            glicko_rating=1500.0,
+            glicko_rd=200.0,
+            glicko_volatility=0.06,
+            os_mu=25.0,
+            os_sigma=8.0,
+            discord_id=888,
+            jopacoin_balance=buyer_balance,
+        )
+        player_repo = MagicMock()
+        player_repo.get_by_id = MagicMock(return_value=fake_player)
+
+        for _ in range(200):
+            svc = NeonDegenService(player_repo=player_repo)
+            result = await svc.on_soft_avoid(888, 456, cost=50, games=3)
+            if result and result.text_block:
+                assert buyer_name not in result.text_block, (
+                    f"Buyer name '{buyer_name}' leaked in soft avoid neon output"
+                )
+                assert str(buyer_balance) not in result.text_block, (
+                    f"Buyer balance '{buyer_balance}' leaked in soft avoid neon output"
+                )
+
+    @pytest.mark.asyncio
+    async def test_generate_text_anonymous_sends_empty_context_to_llm(self):
+        """_generate_text with anonymous=True should pass empty context and anonymity instructions."""
+        from unittest.mock import AsyncMock
+
+        ai_service = AsyncMock()
+        ai_service.complete = AsyncMock(return_value=None)  # LLM returns nothing -> fallback
+
+        svc = NeonDegenService(ai_service=ai_service)
+
+        fallback = "```ansi\nfallback text\n```"
+        player_ctx = {"name": "LeakyName", "balance": 42}
+
+        result = await svc._generate_text(
+            "some event", player_ctx, fallback, anonymous=True
+        )
+        # Should fall back since LLM returned None
+        assert result == fallback
+
+        # Verify the LLM was called with the anonymity instruction
+        call_kwargs = ai_service.complete.call_args
+        prompt_sent = call_kwargs.kwargs.get("prompt") or call_kwargs.args[0]
+        system_sent = call_kwargs.kwargs.get("system_prompt", "")
+
+        # Player context values must NOT appear in the prompt
+        assert "LeakyName" not in prompt_sent
+        assert "42" not in prompt_sent.split("Player context:")[1].split("Example output")[0]
+
+        # Anonymity instruction must appear in system prompt
+        assert "ANONYMOUS" in system_sent
+        assert "DO NOT include any player names" in system_sent
+
+    @pytest.mark.asyncio
+    async def test_generate_text_non_anonymous_includes_context(self):
+        """_generate_text without anonymous should include player context normally."""
+        from unittest.mock import AsyncMock
+
+        ai_service = AsyncMock()
+        ai_service.complete = AsyncMock(return_value=None)
+
+        svc = NeonDegenService(ai_service=ai_service)
+
+        fallback = "```ansi\nfallback text\n```"
+        player_ctx = {"name": "VisiblePlayer", "balance": 100}
+
+        await svc._generate_text("some event", player_ctx, fallback)
+
+        call_kwargs = ai_service.complete.call_args
+        prompt_sent = call_kwargs.kwargs.get("prompt") or call_kwargs.args[0]
+        system_sent = call_kwargs.kwargs.get("system_prompt", "")
+
+        # Player context SHOULD appear in the prompt
+        assert "VisiblePlayer" in prompt_sent
+        assert "100" in prompt_sent
+
+        # No anonymity instruction
+        assert "ANONYMOUS" not in system_sent
