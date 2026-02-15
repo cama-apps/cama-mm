@@ -308,8 +308,14 @@ class NeonDegenService:
         event_description: str,
         player_context: dict[str, Any],
         fallback_text: str,
+        *,
+        anonymous: bool = False,
     ) -> str:
-        """Try LLM-generated terminal text; fall back to static template instantly."""
+        """Try LLM-generated terminal text; fall back to static template instantly.
+
+        When anonymous=True, no player context is sent to the LLM and an extra
+        instruction tells it to avoid any identifying information.
+        """
         if not self.ai_service:
             return fallback_text
         try:
@@ -322,9 +328,19 @@ class NeonDegenService:
             # Strip ANSI escape codes for the LLM
             clean_fallback = re.sub(r"\u001b\[[0-9;]*m", "", raw_fallback)
 
+            effective_context = {} if anonymous else player_context
             context_str = "\n".join(
-                f"  {k}: {v}" for k, v in player_context.items() if v is not None
+                f"  {k}: {v}" for k, v in effective_context.items() if v is not None
             )
+
+            if anonymous:
+                stats_instruction = (
+                    "Do NOT reference any player-specific stats. "
+                    "Use only generic terms like 'a client' or 'a subject'."
+                )
+            else:
+                stats_instruction = "Reference the player's specific stats."
+
             prompt = (
                 f"Event: {event_description}\n"
                 f"Player context:\n{context_str}\n\n"
@@ -332,11 +348,22 @@ class NeonDegenService:
                 f"Generate a 2-4 line terminal log response as JOPA-T/v3.7. "
                 f"Match the tone and format of the example but vary the content. "
                 f"Use timestamps like [HH:MM:SS.mmm] and status codes. "
+                f"{stats_instruction} "
                 f"Be darkly funny and terse. Do NOT use emojis or exclamation marks."
             )
+
+            system_prompt = JOPAT_SYSTEM_PROMPT
+            if anonymous:
+                system_prompt += (
+                    "\n\nCRITICAL: This is an ANONYMOUS event. DO NOT include any "
+                    "player names, usernames, balances, statistics, or any identifying "
+                    "information whatsoever. Use only generic terms like 'a client' or "
+                    "'a subject'."
+                )
+
             result = await self.ai_service.complete(
                 prompt=prompt,
-                system_prompt=JOPAT_SYSTEM_PROMPT,
+                system_prompt=system_prompt,
                 temperature=0.9,
                 max_tokens=2000,
             )
@@ -1061,27 +1088,30 @@ class NeonDegenService:
         cost: int,
         games: int,
     ) -> NeonResult | None:
-        """Trigger on soft avoid purchase. 10% Layer 2, 25% Layer 1."""
+        """Trigger on soft avoid purchase. 10% Layer 2, 25% Layer 1.
+
+        Uses anonymous mode to prevent leaking the buyer's identity in the
+        public neon message (the purchase itself is ephemeral).
+        """
         try:
             if not self._is_enabled():
                 return None
             if not self._check_cooldown(discord_id, guild_id):
                 return None
 
-            ctx = self._build_player_context(discord_id, guild_id)
-            event_desc = f"Client purchased a soft avoid for {cost} JC. Duration: {games} games"
+            event_desc = f"A soft avoid was purchased. Cost: {cost} JC. Duration: {games} games"
 
             # Layer 2: Surveillance report (10%)
             if self._roll(0.10):
                 text = render_soft_avoid_surveillance(cost, games)
-                text = await self._generate_text(event_desc, ctx, text)
+                text = await self._generate_text(event_desc, {}, text, anonymous=True)
                 self._set_cooldown(discord_id, guild_id)
                 return NeonResult(layer=2, text_block=text)
 
             # Layer 1: One-liner (25%)
             if self._roll(0.25):
                 text = render_soft_avoid(cost, games)
-                text = await self._generate_text(event_desc, ctx, text)
+                text = await self._generate_text(event_desc, {}, text, anonymous=True)
                 self._set_cooldown(discord_id, guild_id)
                 return NeonResult(layer=1, text_block=text)
 
