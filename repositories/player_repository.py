@@ -996,7 +996,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 """
                 SELECT discord_id, jopacoin_balance
                 FROM players
-                WHERE guild_id = ? AND jopacoin_balance >= 0
+                WHERE guild_id = ? AND jopacoin_balance >= 0 AND (wins + losses) > 0
                 ORDER BY jopacoin_balance DESC
                 LIMIT -1 OFFSET 3
                 """,
@@ -1023,7 +1023,8 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         """
         Get players sorted by total games played (wins + losses).
 
-        Only includes players with at least 1 game played.
+        Only includes players with at least 1 game played, excluding the top 3
+        by balance (same exclusion as stimulus).
         Used for social security distribution.
 
         Returns:
@@ -1035,10 +1036,17 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 """
                 SELECT discord_id, COALESCE(wins, 0) + COALESCE(losses, 0) as games_played
                 FROM players
-                WHERE guild_id = ? AND COALESCE(wins, 0) + COALESCE(losses, 0) > 0
+                WHERE guild_id = ?
+                  AND COALESCE(wins, 0) + COALESCE(losses, 0) > 0
+                  AND discord_id NOT IN (
+                      SELECT discord_id FROM players
+                      WHERE guild_id = ? AND jopacoin_balance >= 0
+                      ORDER BY jopacoin_balance DESC
+                      LIMIT 3
+                  )
                 ORDER BY games_played DESC
                 """,
-                (guild_id,),
+                (guild_id, guild_id),
             )
             return [
                 {"discord_id": row["discord_id"], "games_played": row["games_played"]}
