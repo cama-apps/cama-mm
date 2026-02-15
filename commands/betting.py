@@ -2413,7 +2413,7 @@ class BettingCommands(commands.Cog):
         )
         embed.add_field(
             name="💸 Stimulus",
-            value=f"Even split to non-top-3\n**{votes['stimulus']}** votes",
+            value=f"Even split to active non-top-3\n**{votes['stimulus']}** votes",
             inline=True,
         )
         embed.add_field(
@@ -2423,7 +2423,7 @@ class BettingCommands(commands.Cog):
         )
         embed.add_field(
             name="👴 Social Security",
-            value=f"By games played\n**{votes.get('social_security', 0)}** votes",
+            value=f"By games played (excl. top 3)\n**{votes.get('social_security', 0)}** votes",
             inline=True,
         )
         embed.add_field(
