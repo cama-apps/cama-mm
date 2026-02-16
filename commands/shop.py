@@ -560,11 +560,11 @@ class ShopCommands(commands.Cog):
 
         # Build the embed
         embed = discord.Embed(
-            title=f"Hero Protected: {hero_name}",
+            title=f"First Pick Reserved: {hero_name}",
             description=(
-                f"{interaction.user.mention} ({team_name}) has protected "
-                f"**{hero_name}** from being banned!\n\n"
-                f"*This hero cannot be banned during the draft (honor system).*"
+                f"{interaction.user.mention} has protected **{hero_name}** for **{team_name}**!\n\n"
+                f"**{team_name}** should first-pick this hero as early as possible "
+                f"to avoid draft complications."
             ),
             color=hero_color,
         )
