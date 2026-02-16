@@ -479,7 +479,12 @@ class TestSocialSecurityEligibility:
     """Test social security eligibility in repository."""
 
     def test_get_players_by_games_played_basic(self, player_repo):
-        """Test that players are sorted by games played."""
+        """Test that players are sorted by games played, excluding top 3 by balance."""
+        # Create 3 rich players to fill the top-3 exclusion
+        for i in range(101, 104):
+            player_repo.add(discord_id=i, discord_username=f"Rich{i}", guild_id=TEST_GUILD_ID, initial_mmr=3000)
+            player_repo.update_balance(i, TEST_GUILD_ID, 1000)
+
         for i in range(1, 4):
             player_repo.add(discord_id=i, discord_username=f"Player{i}", guild_id=TEST_GUILD_ID, initial_mmr=3000)
 
@@ -501,6 +506,11 @@ class TestSocialSecurityEligibility:
 
     def test_get_players_by_games_played_excludes_zero_games(self, player_repo):
         """Test that players with 0 games are excluded."""
+        # Create 3 rich players to fill the top-3 exclusion
+        for i in range(101, 104):
+            player_repo.add(discord_id=i, discord_username=f"Rich{i}", guild_id=TEST_GUILD_ID, initial_mmr=3000)
+            player_repo.update_balance(i, TEST_GUILD_ID, 1000)
+
         player_repo.add(discord_id=1, discord_username="Veteran", guild_id=TEST_GUILD_ID, initial_mmr=3000)
         player_repo.add(discord_id=2, discord_username="Newbie", guild_id=TEST_GUILD_ID, initial_mmr=3000)
 
@@ -528,6 +538,10 @@ class TestStimulusEligibility:
         player_repo.add(discord_id=5, discord_username="Mid2", guild_id=TEST_GUILD_ID, initial_mmr=3000)
         player_repo.add(discord_id=6, discord_username="Poor1", guild_id=TEST_GUILD_ID, initial_mmr=3000)
 
+        # All players need at least 1 game to be eligible
+        for i in range(1, 7):
+            player_repo.increment_wins(i, TEST_GUILD_ID)
+
         player_repo.update_balance(1, TEST_GUILD_ID, 1000)  # Top 1
         player_repo.update_balance(2, TEST_GUILD_ID, 500)   # Top 2
         player_repo.update_balance(3, TEST_GUILD_ID, 200)   # Top 3
@@ -548,6 +562,10 @@ class TestStimulusEligibility:
         player_repo.add(discord_id=3, discord_username="Zero", guild_id=TEST_GUILD_ID, initial_mmr=3000)
         player_repo.add(discord_id=4, discord_username="Debtor", guild_id=TEST_GUILD_ID, initial_mmr=3000)
 
+        # All players need at least 1 game to be eligible
+        for i in range(1, 5):
+            player_repo.increment_wins(i, TEST_GUILD_ID)
+
         player_repo.update_balance(1, TEST_GUILD_ID, 100)
         player_repo.update_balance(2, TEST_GUILD_ID, 50)
         player_repo.update_balance(3, TEST_GUILD_ID, 0)
@@ -565,6 +583,10 @@ class TestStimulusEligibility:
         player_repo.add(discord_id=1, discord_username="Player1", guild_id=TEST_GUILD_ID, initial_mmr=3000)
         player_repo.add(discord_id=2, discord_username="Player2", guild_id=TEST_GUILD_ID, initial_mmr=3000)
         player_repo.add(discord_id=3, discord_username="Player3", guild_id=TEST_GUILD_ID, initial_mmr=3000)
+
+        # All players need at least 1 game to be eligible
+        for i in range(1, 4):
+            player_repo.increment_wins(i, TEST_GUILD_ID)
 
         player_repo.update_balance(1, TEST_GUILD_ID, 100)
         player_repo.update_balance(2, TEST_GUILD_ID, 50)
@@ -585,6 +607,7 @@ class TestCanProposeWithStimulus:
         # Create 5 players, all with non-negative balance
         for i in range(1, 6):
             player_repo.add(discord_id=i, discord_username=f"Player{i}", guild_id=TEST_GUILD_ID, initial_mmr=3000)
+            player_repo.increment_wins(i, TEST_GUILD_ID)
             player_repo.update_balance(i, TEST_GUILD_ID, 100 - i * 10)  # 90, 80, 70, 60, 50
 
         # Add nonprofit fund
@@ -602,6 +625,7 @@ class TestCanProposeWithStimulus:
         # Create only 3 players, all non-debtors (all in top 3)
         for i in range(1, 4):
             player_repo.add(discord_id=i, discord_username=f"Player{i}", guild_id=TEST_GUILD_ID, initial_mmr=3000)
+            player_repo.increment_wins(i, TEST_GUILD_ID)
             player_repo.update_balance(i, TEST_GUILD_ID, 100)
 
         # Add nonprofit fund
@@ -623,6 +647,7 @@ class TestStimulusExecution:
         # Create 6 players - varied balances
         for i in range(1, 7):
             player_repo.add(discord_id=i, discord_username=f"Player{i}", guild_id=TEST_GUILD_ID, initial_mmr=3000)
+            player_repo.increment_wins(i, TEST_GUILD_ID)
 
         player_repo.update_balance(1, TEST_GUILD_ID, 500)   # Top 1
         player_repo.update_balance(2, TEST_GUILD_ID, 300)   # Top 2
@@ -804,6 +829,7 @@ class TestLotteryExecution:
         # Create 5 players
         for i in range(1, 6):
             player_repo.add(discord_id=i, discord_username=f"Player{i}", guild_id=TEST_GUILD_ID, initial_mmr=3000)
+            player_repo.increment_wins(i, TEST_GUILD_ID)
             player_repo.update_balance(i, TEST_GUILD_ID, 50)
 
         # Add nonprofit fund
@@ -836,13 +862,18 @@ class TestSocialSecurityExecution:
         self, disburse_service, player_repo, loan_repo
     ):
         """Test full social security disbursement execution."""
-        # Create 4 players with varying game counts
+        # Create 3 rich players to fill the top-3 exclusion
+        for i in range(101, 104):
+            player_repo.add(discord_id=i, discord_username=f"Rich{i}", guild_id=TEST_GUILD_ID, initial_mmr=3000)
+            player_repo.increment_wins(i, TEST_GUILD_ID)
+            player_repo.update_balance(i, TEST_GUILD_ID, 1000)
+
+        # Create 4 players with varying game counts (all outside top 3)
         for i in range(1, 5):
             player_repo.add(discord_id=i, discord_username=f"Player{i}", guild_id=TEST_GUILD_ID, initial_mmr=3000)
             player_repo.update_balance(i, TEST_GUILD_ID, 50)
 
         # Set wins/losses for game counts
-        # Use repository directly to set wins/losses
         with player_repo.connection() as conn:
             cursor = conn.cursor()
             cursor.execute("UPDATE players SET wins = 20, losses = 10 WHERE discord_id = 1 AND guild_id = ?", (TEST_GUILD_ID,))
@@ -856,15 +887,16 @@ class TestSocialSecurityExecution:
         # Create proposal
         disburse_service.create_proposal(guild_id=TEST_GUILD_ID)
 
-        # Vote for social security (quorum = 2 for 4 players at 40%)
+        # Vote for social security (quorum = 3 for 7 players at 40%)
         disburse_service.add_vote(guild_id=TEST_GUILD_ID, discord_id=1, method="social_security")
         disburse_service.add_vote(guild_id=TEST_GUILD_ID, discord_id=2, method="social_security")
+        disburse_service.add_vote(guild_id=TEST_GUILD_ID, discord_id=3, method="social_security")
 
         result = disburse_service.execute_disbursement(guild_id=TEST_GUILD_ID)
 
         assert result["success"]
         assert result["method"] == "social_security"
-        assert result["recipient_count"] == 3  # Player 4 excluded (0 games)
+        assert result["recipient_count"] == 3  # Players 1-3 (player 4 has 0 games)
         assert result["total_disbursed"] == 300  # All funds distributed
 
         # Player 1 (30 games, 50%) should get most
@@ -877,7 +909,7 @@ class TestSocialSecurityExecution:
         bal4 = player_repo.get_balance(4, TEST_GUILD_ID)
 
         assert bal1 > bal2 > bal3
-        assert bal4 == 50  # Unchanged (not eligible)
+        assert bal4 == 50  # Unchanged (not eligible, 0 games)
 
 
 class TestFundReservation:
@@ -947,6 +979,7 @@ class TestFundReservation:
         # Create players with positive balances (for stimulus eligibility at proposal time)
         for i in range(1, 7):
             player_repo.add(discord_id=i, discord_username=f"Player{i}", guild_id=TEST_GUILD_ID, initial_mmr=3000)
+            player_repo.increment_wins(i, TEST_GUILD_ID)
             player_repo.update_balance(i, TEST_GUILD_ID, 100 - i * 10)
 
         loan_repo.add_to_nonprofit_fund(guild_id=TEST_GUILD_ID, amount=300)
