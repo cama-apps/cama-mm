@@ -450,12 +450,15 @@ class AdminCommands(commands.Cog):
             )
             return
 
+        guild_id = interaction.guild.id if interaction.guild else None
+
         try:
             result = await asyncio.to_thread(
                 functools.partial(
                     player_service.register_player,
                     discord_id=user.id,
                     discord_username=str(user),
+                    guild_id=guild_id,
                     steam_id=steam_id,
                     mmr_override=mmr,
                 )
