@@ -150,7 +150,8 @@ SOFT_AVOID_PENALTY = _parse_float("SOFT_AVOID_PENALTY", 250.0)  # Penalty added 
 SHOP_PACKAGE_DEAL_BASE_COST = _parse_int("SHOP_PACKAGE_DEAL_BASE_COST", 500)  # Base cost for package deal
 SHOP_PACKAGE_DEAL_RATING_DIVISOR = _parse_float("SHOP_PACKAGE_DEAL_RATING_DIVISOR", 10.0)  # Divide sum of ratings by this
 PACKAGE_DEAL_GAMES_DURATION = _parse_int("PACKAGE_DEAL_GAMES_DURATION", 10)  # Number of games deal lasts
-PACKAGE_DEAL_PENALTY = _parse_float("PACKAGE_DEAL_PENALTY", 200.0)  # Penalty when pair on DIFFERENT teams (lower than soft avoid)
+PACKAGE_DEAL_PENALTY = _parse_float("PACKAGE_DEAL_PENALTY", 100.0)  # Penalty when pair on DIFFERENT teams
+PACKAGE_DEAL_SPLIT_PENALTY = _parse_float("PACKAGE_DEAL_SPLIT_PENALTY", 100.0)  # Penalty when one selected, one excluded
 
 # Wheel of Fortune configuration
 WHEEL_COOLDOWN_SECONDS = _parse_int("WHEEL_COOLDOWN_SECONDS", 86400)  # 24 hours
