@@ -8,6 +8,7 @@ domain models should not depend on infrastructure (repositories).
 import asyncio
 import logging
 import threading
+import time
 from datetime import datetime
 
 from domain.models.lobby import Lobby
@@ -25,6 +26,7 @@ class LobbyManagerService:
     """
 
     DEFAULT_LOBBY_ID = 1
+    SHUFFLE_LOCK_TIMEOUT = 60.0  # Auto-release shuffle lock after 60 seconds
 
     def __init__(self, lobby_repo: ILobbyRepository):
         self.lobby_repo = lobby_repo
@@ -42,12 +44,43 @@ class LobbyManagerService:
         self.readycheck_lobby_ids: set[int] = set()
         self.readycheck_reacted: dict[int, str] = {}  # {discord_id: "<@discord_id>"}
         self.readycheck_player_data: dict[int, dict] = {}  # {discord_id: {group, signals, name, ...}}
+        # Per-guild shuffle/draft locks to prevent race conditions
+        self._shuffle_locks: dict[int, asyncio.Lock] = {}
+        self._shuffle_lock_times: dict[int, float] = {}  # Track when lock acquired
         self._load_state()
 
     @property
     def creation_lock(self) -> asyncio.Lock:
         """Lock for protecting the full lobby creation flow."""
         return self._creation_lock
+
+    def get_shuffle_lock(self, guild_id: int | None) -> asyncio.Lock:
+        """Get or create the shuffle lock for a guild."""
+        normalized = guild_id if guild_id is not None else 0
+        if normalized not in self._shuffle_locks:
+            self._shuffle_locks[normalized] = asyncio.Lock()
+        return self._shuffle_locks[normalized]
+
+    def _check_stale_lock(self, guild_id: int | None) -> bool:
+        """Check if lock is stale and release if so. Returns True if was stale."""
+        normalized = guild_id if guild_id is not None else 0
+        lock = self._shuffle_locks.get(normalized)
+        if lock and lock.locked():
+            acquired_at = self._shuffle_lock_times.get(normalized, 0)
+            if time.time() - acquired_at > self.SHUFFLE_LOCK_TIMEOUT:
+                lock.release()
+                return True
+        return False
+
+    def record_lock_acquired(self, guild_id: int | None) -> None:
+        """Record when lock was acquired for timeout tracking."""
+        normalized = guild_id if guild_id is not None else 0
+        self._shuffle_lock_times[normalized] = time.time()
+
+    def clear_lock_time(self, guild_id: int | None) -> None:
+        """Clear lock acquisition time on release."""
+        normalized = guild_id if guild_id is not None else 0
+        self._shuffle_lock_times.pop(normalized, None)
 
     def get_or_create_lobby(self, creator_id: int | None = None) -> Lobby:
         with self._state_lock:

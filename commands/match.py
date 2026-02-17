@@ -360,6 +360,44 @@ class MatchCommands(commands.Cog):
 
         guild_id = guild.id if guild else None
 
+        # Acquire shuffle lock to prevent race conditions
+        lobby_manager = self.lobby_service.lobby_manager
+
+        # Check for stale lock (>60s) and release if needed
+        lobby_manager._check_stale_lock(guild_id)
+
+        shuffle_lock = lobby_manager.get_shuffle_lock(guild_id)
+        if shuffle_lock.locked():
+            await interaction.followup.send(
+                "A shuffle is already in progress. Please wait for it to complete.",
+                ephemeral=True,
+            )
+            return
+
+        try:
+            await asyncio.wait_for(shuffle_lock.acquire(), timeout=0.5)
+        except asyncio.TimeoutError:
+            await interaction.followup.send(
+                "A shuffle is already in progress. Please wait for it to complete.",
+                ephemeral=True,
+            )
+            return
+
+        lobby_manager.record_lock_acquired(guild_id)
+        try:
+            await self._execute_shuffle(interaction, guild, guild_id, rating_system)
+        finally:
+            lobby_manager.clear_lock_time(guild_id)
+            shuffle_lock.release()
+
+    async def _execute_shuffle(
+        self,
+        interaction: discord.Interaction,
+        guild: discord.Guild | None,
+        guild_id: int | None,
+        rating_system: app_commands.Choice[str] | None,
+    ):
+        """Execute the shuffle logic. Called within the shuffle lock."""
         # Check if the user calling shuffle is already in a pending match
         player_match = self.match_service.state_service.get_pending_match_for_player(
             guild_id, interaction.user.id
