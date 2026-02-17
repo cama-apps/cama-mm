@@ -378,7 +378,14 @@ class BalancedShuffler:
             recent_in_match = len(selected_names & recent_match_names)
             recent_penalty = recent_in_match * self.recent_match_penalty_weight
 
-        total_score = base_score + exclusion_penalty + recent_penalty
+        # Add split penalty for package deals (one selected, one excluded)
+        selected_discord_ids = {p.discord_id for p in team1.players + team2.players if p.discord_id}
+        excluded_discord_ids = {p.discord_id for p in excluded if p.discord_id}
+        deal_split_penalty = self._calculate_package_deal_split_penalty(
+            selected_discord_ids, excluded_discord_ids, deals
+        )
+
+        total_score = base_score + exclusion_penalty + recent_penalty + deal_split_penalty
 
         return team1, team2, excluded, total_score
 

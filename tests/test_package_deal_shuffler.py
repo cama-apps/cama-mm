@@ -191,6 +191,68 @@ class TestPackageDealWithPoolShuffle:
 
             assert both_team1 or both_team2, "Package deal pair should be on same team when both included"
 
+    def test_branch_bound_respects_split_penalty(self):
+        """Test that 14-player branch-and-bound shuffle respects split penalty."""
+        # Create 14 players with equal ratings so split penalty is the deciding factor
+        players = [
+            Player(f"Player{i}", 2000, preferred_roles=["3"], discord_id=100 + i, glicko_rating=2000)
+            for i in range(14)
+        ]
+
+        shuffler = BalancedShuffler(
+            use_glicko=True,
+            consider_roles=True,
+            package_deal_split_penalty=5000.0,  # Very high penalty to force keeping together
+        )
+
+        # Deal between player 0 (id=100) and player 1 (id=101)
+        deals = [MockPackageDeal(id=1, buyer_discord_id=100, partner_discord_id=101)]
+
+        team1, team2, excluded = shuffler.shuffle_branch_bound(
+            players,
+            deals=deals,
+        )
+
+        # With high split penalty, both should be either included or excluded together
+        included_ids = {p.discord_id for p in team1.players} | {p.discord_id for p in team2.players}
+        excluded_ids = {p.discord_id for p in excluded}
+
+        both_included = 100 in included_ids and 101 in included_ids
+        both_excluded = 100 in excluded_ids and 101 in excluded_ids
+
+        assert both_included or both_excluded, "Package deal pair should not be split in branch-and-bound"
+
+    def test_greedy_shuffle_includes_split_penalty(self):
+        """Test that greedy shuffle (used as upper bound) includes split penalty."""
+        players = [
+            Player(f"Player{i}", 2000, preferred_roles=["3"], discord_id=100 + i, glicko_rating=2000)
+            for i in range(14)
+        ]
+
+        shuffler = BalancedShuffler(
+            use_glicko=True,
+            consider_roles=True,
+            package_deal_split_penalty=1000.0,
+        )
+
+        # Deal between player 0 (selected) and player 13 (likely excluded in greedy)
+        deals = [MockPackageDeal(id=1, buyer_discord_id=100, partner_discord_id=113)]
+
+        # Call greedy shuffle directly and verify split penalty is included in score
+        team1, team2, excluded, score = shuffler._greedy_shuffle(
+            players,
+            deals=deals,
+        )
+
+        excluded_ids = {p.discord_id for p in excluded}
+
+        # If player 113 is excluded and 100 is included, score should include split penalty
+        if 113 in excluded_ids:
+            included_ids = {p.discord_id for p in team1.players} | {p.discord_id for p in team2.players}
+            if 100 in included_ids:
+                # Score should be at least the split penalty (1000)
+                assert score >= 1000.0, "Greedy shuffle should include split penalty in score"
+
 
 class TestPackageDealSplitPenalty:
     """Tests for package deal split penalty calculations in shuffler."""
