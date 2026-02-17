@@ -190,3 +190,129 @@ class TestPackageDealWithPoolShuffle:
             both_team2 = 100 in team2_ids and 105 in team2_ids
 
             assert both_team1 or both_team2, "Package deal pair should be on same team when both included"
+
+
+class TestPackageDealSplitPenalty:
+    """Tests for package deal split penalty calculations in shuffler."""
+
+    @pytest.fixture
+    def shuffler(self):
+        """Create a shuffler with default settings."""
+        return BalancedShuffler(use_glicko=True, consider_roles=True)
+
+    def test_split_penalty_when_one_excluded(self, shuffler):
+        """Test that penalty is applied when one of the pair is excluded."""
+        selected_ids = {100, 101, 102, 103, 104, 105, 106, 107, 108, 109}
+        excluded_ids = {110, 111, 112, 113}
+
+        # Deal between 100 (selected) and 110 (excluded)
+        deals = [MockPackageDeal(id=1, buyer_discord_id=100, partner_discord_id=110)]
+
+        penalty = shuffler._calculate_package_deal_split_penalty(selected_ids, excluded_ids, deals)
+        assert penalty == shuffler.package_deal_split_penalty
+
+    def test_no_split_penalty_when_both_selected(self, shuffler):
+        """Test that no penalty is applied when both are selected."""
+        selected_ids = {100, 101, 102, 103, 104, 105, 106, 107, 108, 109}
+        excluded_ids = {110, 111, 112, 113}
+
+        # Deal between 100 and 101 (both selected)
+        deals = [MockPackageDeal(id=1, buyer_discord_id=100, partner_discord_id=101)]
+
+        penalty = shuffler._calculate_package_deal_split_penalty(selected_ids, excluded_ids, deals)
+        assert penalty == 0.0
+
+    def test_no_split_penalty_when_both_excluded(self, shuffler):
+        """Test that no penalty is applied when both are excluded."""
+        selected_ids = {100, 101, 102, 103, 104, 105, 106, 107, 108, 109}
+        excluded_ids = {110, 111, 112, 113}
+
+        # Deal between 110 and 111 (both excluded)
+        deals = [MockPackageDeal(id=1, buyer_discord_id=110, partner_discord_id=111)]
+
+        penalty = shuffler._calculate_package_deal_split_penalty(selected_ids, excluded_ids, deals)
+        assert penalty == 0.0
+
+    def test_multiple_splits_stack(self, shuffler):
+        """Test that multiple split deals stack penalties."""
+        selected_ids = {100, 101, 102, 103, 104, 105, 106, 107, 108, 109}
+        excluded_ids = {110, 111, 112, 113}
+
+        # Two deals where pairs are split
+        deals = [
+            MockPackageDeal(id=1, buyer_discord_id=100, partner_discord_id=110),
+            MockPackageDeal(id=2, buyer_discord_id=101, partner_discord_id=111),
+        ]
+
+        penalty = shuffler._calculate_package_deal_split_penalty(selected_ids, excluded_ids, deals)
+        assert penalty == 2 * shuffler.package_deal_split_penalty
+
+    def test_reverse_split_direction(self, shuffler):
+        """Test that split is detected regardless of buyer/partner direction."""
+        selected_ids = {100, 101, 102, 103, 104, 105, 106, 107, 108, 109}
+        excluded_ids = {110, 111, 112, 113}
+
+        # Deal where buyer is excluded, partner is selected
+        deals = [MockPackageDeal(id=1, buyer_discord_id=110, partner_discord_id=100)]
+
+        penalty = shuffler._calculate_package_deal_split_penalty(selected_ids, excluded_ids, deals)
+        assert penalty == shuffler.package_deal_split_penalty
+
+    def test_no_deals_no_split_penalty(self, shuffler):
+        """Test that empty deals list results in no penalty."""
+        selected_ids = {100, 101, 102, 103, 104, 105, 106, 107, 108, 109}
+        excluded_ids = {110, 111, 112, 113}
+
+        penalty = shuffler._calculate_package_deal_split_penalty(selected_ids, excluded_ids, [])
+        assert penalty == 0.0
+
+        penalty = shuffler._calculate_package_deal_split_penalty(selected_ids, excluded_ids, None)
+        assert penalty == 0.0
+
+    def test_split_penalty_customizable(self):
+        """Test that split penalty is configurable."""
+        shuffler = BalancedShuffler(package_deal_split_penalty=888.0)
+        assert shuffler.package_deal_split_penalty == 888.0
+
+    def test_pool_shuffle_prefers_keeping_deals_together(self):
+        """Integration test: pool shuffle should prefer including both deal members."""
+        # Create 12 players with widely varying ratings
+        # Make the deal pair have middling ratings so they could be excluded
+        players = []
+        for i in range(12):
+            if i < 5:
+                # High rated players
+                rating = 2500
+            elif i < 7:
+                # Deal pair - middling ratings
+                rating = 2000
+            else:
+                # Lower rated players
+                rating = 1500
+            players.append(
+                Player(f"Player{i}", rating, preferred_roles=["3"], discord_id=100 + i, glicko_rating=rating)
+            )
+
+        # High split penalty - should strongly prefer keeping deal together
+        shuffler = BalancedShuffler(
+            use_glicko=True,
+            consider_roles=True,
+            package_deal_split_penalty=5000.0,  # Very high penalty
+        )
+
+        # Deal between player 5 (id=105) and player 6 (id=106) - the middling pair
+        deals = [MockPackageDeal(id=1, buyer_discord_id=105, partner_discord_id=106)]
+
+        team1, team2, excluded = shuffler.shuffle_from_pool(
+            players,
+            deals=deals,
+        )
+
+        included_ids = {p.discord_id for p in team1.players} | {p.discord_id for p in team2.players}
+        excluded_ids = {p.discord_id for p in excluded}
+
+        # With high split penalty, both should be either included or excluded together
+        both_included = 105 in included_ids and 106 in included_ids
+        both_excluded = 105 in excluded_ids and 106 in excluded_ids
+
+        assert both_included or both_excluded, "Package deal pair should not be split"

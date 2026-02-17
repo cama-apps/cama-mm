@@ -10,7 +10,7 @@ import random
 from collections.abc import Iterable
 from dataclasses import dataclass
 
-from config import PACKAGE_DEAL_PENALTY, RD_PRIORITY_WEIGHT, SHUFFLER_SETTINGS, SOFT_AVOID_PENALTY
+from config import PACKAGE_DEAL_PENALTY, PACKAGE_DEAL_SPLIT_PENALTY, RD_PRIORITY_WEIGHT, SHUFFLER_SETTINGS, SOFT_AVOID_PENALTY
 from domain.models.player import Player
 from domain.models.team import Team
 from utils.role_assignment_cache import get_cached_role_assignments
@@ -48,6 +48,7 @@ class BalancedShuffler:
         recent_match_penalty_weight: float | None = None,
         soft_avoid_penalty: float | None = None,
         package_deal_penalty: float | None = None,
+        package_deal_split_penalty: float | None = None,
     ):
         """
         Initialize the shuffler.
@@ -63,7 +64,8 @@ class BalancedShuffler:
             use_jopacoin: Whether to use jopacoin balance instead of ratings (default False)
             recent_match_penalty_weight: Penalty per recent match participant selected (default 25.0)
             soft_avoid_penalty: Penalty added when avoider/avoided pair are on same team (default 500.0)
-            package_deal_penalty: Penalty added when buyer/partner pair are on DIFFERENT teams (default 200.0)
+            package_deal_penalty: Penalty added when buyer/partner pair are on DIFFERENT teams (default 100.0)
+            package_deal_split_penalty: Penalty added when one of the pair is excluded from the match (default 100.0)
         """
         self.use_glicko = use_glicko
         self.consider_roles = consider_roles
@@ -109,6 +111,11 @@ class BalancedShuffler:
             package_deal_penalty
             if package_deal_penalty is not None
             else PACKAGE_DEAL_PENALTY
+        )
+        self.package_deal_split_penalty = (
+            package_deal_split_penalty
+            if package_deal_split_penalty is not None
+            else PACKAGE_DEAL_SPLIT_PENALTY
         )
 
     def _calculate_role_matchup_delta(self, team1: Team, team2: Team) -> float:
@@ -235,6 +242,41 @@ class BalancedShuffler:
 
             if on_opposite:
                 penalty += self.package_deal_penalty
+
+        return penalty
+
+    def _calculate_package_deal_split_penalty(
+        self,
+        selected_ids: set[int],
+        excluded_ids: set[int],
+        deals: list | None,
+    ) -> float:
+        """
+        Calculate penalty for package deals where one player is selected and one is excluded.
+
+        Args:
+            selected_ids: Set of discord IDs for players selected to play
+            excluded_ids: Set of discord IDs for players excluded from the match
+            deals: List of PackageDeal objects (or any object with buyer_discord_id and partner_discord_id)
+
+        Returns:
+            Total penalty for split deal pairs
+        """
+        if not deals:
+            return 0.0
+
+        penalty = 0.0
+        for deal in deals:
+            buyer = deal.buyer_discord_id
+            partner = deal.partner_discord_id
+
+            # Split: one selected, one excluded
+            is_split = (
+                (buyer in selected_ids and partner in excluded_ids) or
+                (buyer in excluded_ids and partner in selected_ids)
+            )
+            if is_split:
+                penalty += self.package_deal_split_penalty
 
         return penalty
 
@@ -744,6 +786,13 @@ class BalancedShuffler:
                 * self.exclusion_penalty_weight
             )
 
+            # Calculate split penalty for package deals (one selected, one excluded)
+            selected_discord_ids = {p.discord_id for p in selected_players if p.discord_id}
+            excluded_discord_ids = {p.discord_id for p in excluded_players if p.discord_id}
+            deal_split_penalty = self._calculate_package_deal_split_penalty(
+                selected_discord_ids, excluded_discord_ids, deals
+            )
+
             # For this combination of 10, try all ways to split into teams
             for team1_indices in itertools.combinations(range(10), 5):
                 team1_players = [selected_players[i] for i in team1_indices]
@@ -768,15 +817,15 @@ class BalancedShuffler:
                     deals=deals,
                 )
 
-                # base_score includes: value_diff + off_role_penalty + role_matchup_delta - rd_priority + avoid_penalty
-                # We need to add exclusion_penalty and recent_match_penalty, then extract components for logging
+                # base_score includes: value_diff + off_role_penalty + role_matchup_delta - rd_priority + avoid_penalty + deal_penalty
+                # We need to add exclusion_penalty, recent_match_penalty, and deal_split_penalty
 
                 # Add recent match penalty for selected players
                 selected_player_names = {p.name for p in team1_players + team2_players}
                 recent_in_match = len(selected_player_names & recent_match_names)
                 recent_penalty = recent_in_match * self.recent_match_penalty_weight
 
-                total_score = base_score + exclusion_penalty + recent_penalty
+                total_score = base_score + exclusion_penalty + recent_penalty + deal_split_penalty
 
                 # Extract components for logging
                 team1_value = team1.get_team_value(
@@ -974,8 +1023,15 @@ class BalancedShuffler:
                 * self.exclusion_penalty_weight
             )
 
-            # Quick pruning: if exclusion penalty alone exceeds best score, skip
-            if exclusion_penalty >= best_score:
+            # Calculate split penalty for package deals (one selected, one excluded)
+            selected_discord_ids = {p.discord_id for p in selected_players if p.discord_id}
+            excluded_discord_ids = {p.discord_id for p in excluded_players if p.discord_id}
+            deal_split_penalty = self._calculate_package_deal_split_penalty(
+                selected_discord_ids, excluded_discord_ids, deals
+            )
+
+            # Quick pruning: if exclusion + split penalty exceeds best score, skip
+            if exclusion_penalty + deal_split_penalty >= best_score:
                 pruned_player_selections += 1
                 continue
 
@@ -1012,8 +1068,8 @@ class BalancedShuffler:
                 recent_in_match = len(selected_player_names & recent_match_names)
                 recent_penalty = recent_in_match * self.recent_match_penalty_weight
 
-                # Quick lower bound: value_diff + exclusion_penalty + recent_penalty (ignore role penalties)
-                lower_bound = value_diff_lb + exclusion_penalty + recent_penalty
+                # Quick lower bound: value_diff + exclusion_penalty + recent_penalty + deal_split_penalty
+                lower_bound = value_diff_lb + exclusion_penalty + recent_penalty + deal_split_penalty
 
                 # Prune if lower bound >= best score
                 if lower_bound >= best_score:
@@ -1026,7 +1082,7 @@ class BalancedShuffler:
                     team1_players, team2_players, max_assignments_per_team=3, avoids=avoids, deals=deals
                 )
 
-                total_score = base_score + exclusion_penalty + recent_penalty
+                total_score = base_score + exclusion_penalty + recent_penalty + deal_split_penalty
 
                 if total_score < best_score:
                     best_score = total_score
