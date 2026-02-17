@@ -1047,6 +1047,41 @@ class DraftCommands(commands.Cog):
 
         await safe_defer(interaction)
 
+        # Acquire shuffle lock to prevent race conditions with /shuffle or concurrent /startdraft
+        self.lobby_manager._check_stale_lock(guild_id)
+
+        shuffle_lock = self.lobby_manager.get_shuffle_lock(guild_id)
+        if shuffle_lock.locked():
+            await interaction.followup.send(
+                "A shuffle or draft is already being processed. Please wait.",
+                ephemeral=True,
+            )
+            return
+
+        try:
+            await asyncio.wait_for(shuffle_lock.acquire(), timeout=0.5)
+        except asyncio.TimeoutError:
+            await interaction.followup.send(
+                "A shuffle or draft is already being processed. Please wait.",
+                ephemeral=True,
+            )
+            return
+
+        self.lobby_manager.record_lock_acquired(guild_id)
+        try:
+            await self._execute_startdraft(interaction, guild_id, captain1, captain2)
+        finally:
+            self.lobby_manager.clear_lock_time(guild_id)
+            shuffle_lock.release()
+
+    async def _execute_startdraft(
+        self,
+        interaction: discord.Interaction,
+        guild_id: int | None,
+        captain1: discord.Member | None,
+        captain2: discord.Member | None,
+    ):
+        """Execute the startdraft logic. Called within the shuffle lock."""
         # Check for existing draft
         if self.draft_state_manager.has_active_draft(guild_id):
             await interaction.followup.send(
