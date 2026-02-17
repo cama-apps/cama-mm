@@ -461,10 +461,10 @@ class MatchCommands(commands.Cog):
             )
             return
 
-        # 15 or more players → force Immortal Draft with auto-selected captains
-        if total_count >= 15:
+        # 15 or more regular (non-conditional) players → force Immortal Draft
+        if regular_count >= 15:
             await interaction.followup.send(
-                f"⚔️ **{total_count} players signed up** — starting Immortal Draft!\n"
+                f"⚔️ **{regular_count} regular players signed up** — starting Immortal Draft!\n"
                 f"_(Shuffle limited to 14 players)_"
             )
             draft_cog = self.bot.get_cog("DraftCommands")

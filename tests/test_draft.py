@@ -527,7 +527,11 @@ class TestForceRandomCaptains:
         assert DRAFT_REDIRECT_MIN > SHUFFLE_MAX_FOR_NORMAL
 
     def test_lobby_player_count_includes_conditional(self):
-        """Verify total count includes both regular and conditional players."""
+        """Verify total count includes both regular and conditional players.
+
+        Note: Immortal Draft triggers on regular_count >= 15, not total_count.
+        This test verifies the count methods work correctly.
+        """
         from datetime import datetime
         from domain.models.lobby import Lobby
 
@@ -540,8 +544,11 @@ class TestForceRandomCaptains:
             lobby.add_conditional_player(i)
 
         total = lobby.get_total_count()
+        regular = lobby.get_player_count()
         assert total == 16
-        assert total >= 15  # Would trigger draft redirect
+        assert regular == 10
+        # Immortal Draft requires 15+ regular players, so this would NOT trigger it
+        assert regular < 15
 
 
 class TestCaptainEligibility:
