@@ -38,6 +38,9 @@ BLOCKED_TABLES: set[str] = {
     "nonprofit_fund",
     "disburse_proposals",
     "disburse_votes",
+    # Sensitive social information
+    "soft_avoids",
+    "package_deals",
 }
 
 # Columns that should never appear in SELECT results (PII/internal)
