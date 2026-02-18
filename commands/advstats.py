@@ -83,7 +83,7 @@ class AdvancedStatsCommands(commands.Cog):
             )
             return
 
-        h2h = await asyncio.to_thread(self.pairings_service.get_head_to_head, player1.id, player2.id)
+        h2h = await asyncio.to_thread(self.pairings_service.get_head_to_head, player1.id, player2.id, guild_id)
 
         embed = discord.Embed(
             title=f"{player1.display_name} vs {player2.display_name}",

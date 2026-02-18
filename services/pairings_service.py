@@ -15,19 +15,21 @@ class PairingsService:
     def __init__(self, pairings_repo: IPairingsRepository):
         self.pairings_repo = pairings_repo
 
-    def get_head_to_head(self, player1_id: int, player2_id: int) -> dict | None:
+    def get_head_to_head(self, player1_id: int, player2_id: int, guild_id: int | None = None) -> dict | None:
         """
         Get head-to-head statistics between two players.
 
         Args:
             player1_id: First player's Discord ID
             player2_id: Second player's Discord ID
+            guild_id: Guild ID
 
         Returns:
             Dict with games_together, wins_together, games_against, player1_wins_against,
             or None if no history exists
         """
-        return self.pairings_repo.get_head_to_head(player1_id, player2_id)
+        normalized_guild = guild_id if guild_id is not None else 0
+        return self.pairings_repo.get_head_to_head(player1_id, player2_id, normalized_guild)
 
     def rebuild_all_pairings(self) -> int:
         """

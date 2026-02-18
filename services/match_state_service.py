@@ -365,6 +365,7 @@ class MatchStateService:
             "betting_mode": state.get("betting_mode", "pool"),
             "is_draft": state.get("is_draft", False),
             "effective_avoid_ids": state.get("effective_avoid_ids", []),
+            "effective_deal_ids": state.get("effective_deal_ids", []),
             "is_bomb_pot": state.get("is_bomb_pot", False),
             "is_openskill_shuffle": state.get("is_openskill_shuffle", False),
             "balancing_rating_system": state.get("balancing_rating_system", "glicko"),
