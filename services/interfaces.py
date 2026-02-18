@@ -574,6 +574,7 @@ class IMatchEnrichmentService(ABC):
         self,
         match_id: int,
         valve_match_id: int,
+        guild_id: int | None = None,
     ) -> dict:
         """Enrich a match with Valve API data."""
         ...

@@ -1437,7 +1437,7 @@ class MatchCommands(commands.Cog):
                 # Run discovery in executor to avoid blocking
                 loop = asyncio.get_event_loop()
                 result = await loop.run_in_executor(
-                    None, discovery_service.discover_match, match_id
+                    None, discovery_service.discover_match, match_id, guild_id
                 )
 
                 status = result.get("status")

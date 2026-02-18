@@ -75,7 +75,7 @@ class MatchDiscoveryService:
         for match in unenriched:
             match_id = match["match_id"]
             try:
-                result = self._discover_single_match(match_id, dry_run)
+                result = self._discover_single_match(match_id, normalized_guild, dry_run)
                 results["details"].append(result)
 
                 if result["status"] == "discovered":
@@ -111,13 +111,15 @@ class MatchDiscoveryService:
 
         return results
 
-    def _discover_single_match(self, match_id: int, dry_run: bool) -> dict:
+    def _discover_single_match(
+        self, match_id: int, guild_id: int | None, dry_run: bool
+    ) -> dict:
         """
         Attempt to discover the Dota 2 match ID for a single internal match.
 
         Returns dict with match_id, status, and optionally valve_match_id/confidence.
         """
-        match = self.match_repo.get_match(match_id)
+        match = self.match_repo.get_match(match_id, guild_id)
         if not match:
             return {"match_id": match_id, "status": "not_found"}
 
@@ -263,18 +265,19 @@ class MatchDiscoveryService:
                 "total_players": players_with_steam_id,
             }
 
-    def discover_match(self, match_id: int) -> dict:
+    def discover_match(self, match_id: int, guild_id: int | None = None) -> dict:
         """
         Public method to discover and enrich a single match.
 
         Args:
             match_id: Internal match ID to discover
+            guild_id: Guild ID for multi-guild isolation
 
         Returns:
             Dict with status and details (same as _discover_single_match)
         """
         logger.info(f"Auto-discovery triggered for match {match_id}")
-        return self._discover_single_match(match_id, dry_run=False)
+        return self._discover_single_match(match_id, guild_id, dry_run=False)
 
     def _parse_match_time(self, match_date) -> int | None:
         """Parse match_date to Unix timestamp."""
