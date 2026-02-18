@@ -385,11 +385,17 @@ class MatchRepository(BaseRepository, IMatchRepository):
             payload["pending_match_id"] = match_id
             return payload
 
-    def get_match(self, match_id: int) -> dict | None:
-        """Get match by ID."""
+    def get_match(self, match_id: int, guild_id: int | None = None) -> dict | None:
+        """Get match by ID, optionally filtered by guild."""
         with self.connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT * FROM matches WHERE match_id = ?", (match_id,))
+            if guild_id is not None:
+                cursor.execute(
+                    "SELECT * FROM matches WHERE match_id = ? AND guild_id = ?",
+                    (match_id, guild_id),
+                )
+            else:
+                cursor.execute("SELECT * FROM matches WHERE match_id = ?", (match_id,))
             row = cursor.fetchone()
 
             if not row:
