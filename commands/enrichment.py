@@ -160,7 +160,7 @@ class EnrichmentCommands(commands.Cog):
         # Perform enrichment (skip_validation=True for manual admin enrichment)
         result = await asyncio.to_thread(
             functools.partial(self.enrichment_service.enrich_match,
-                internal_match_id, valve_match_id, skip_validation=True)
+                internal_match_id, valve_match_id, skip_validation=True, guild_id=guild_id)
         )
 
         if not result["success"]:
@@ -629,7 +629,8 @@ class EnrichmentCommands(commands.Cog):
 
         # Handle refill_fantasy mode - re-enrich matches that have valve_match_id but no fantasy data
         if refill_fantasy:
-            await self._refill_fantasy_data(interaction, dry_run)
+            guild_id = interaction.guild_id
+            await self._refill_fantasy_data(interaction, dry_run, guild_id)
             return
 
         if not self.discovery_service:
@@ -710,7 +711,9 @@ class EnrichmentCommands(commands.Cog):
 
         await interaction.edit_original_response(content="\n".join(lines))
 
-    async def _refill_fantasy_data(self, interaction: discord.Interaction, dry_run: bool):
+    async def _refill_fantasy_data(
+        self, interaction: discord.Interaction, dry_run: bool, guild_id: int | None = None
+    ):
         """Re-enrich matches that have enrichment but no fantasy data."""
         matches = self.match_service.get_matches_without_fantasy_data(limit=100)
 
@@ -742,7 +745,8 @@ class EnrichmentCommands(commands.Cog):
                     # Re-enrich with skip_validation since we already have the correct valve_match_id
                     result = await asyncio.to_thread(
                         functools.partial(self.enrichment_service.enrich_match,
-                            match_id, valve_match_id, source="manual", skip_validation=True)
+                            match_id, valve_match_id, source="manual", skip_validation=True,
+                            guild_id=guild_id)
                     )
                     if result["success"]:
                         refilled.append({

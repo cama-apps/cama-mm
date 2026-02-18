@@ -967,7 +967,7 @@ class MatchService:
             - error: str (if failed)
         """
         # Get match data
-        match = self.match_repo.get_match(match_id)
+        match = self.match_repo.get_match(match_id, guild_id)
         if not match:
             return {
                 "success": False,
@@ -1464,7 +1464,7 @@ class MatchService:
             raise ValueError("new_winning_team must be 'radiant' or 'dire'")
 
         # 1. Load match data
-        match = self.match_repo.get_match(match_id)
+        match = self.match_repo.get_match(match_id, guild_id)
         if not match:
             raise ValueError(f"Match {match_id} not found")
 

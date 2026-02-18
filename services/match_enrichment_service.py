@@ -198,6 +198,7 @@ class MatchEnrichmentService:
         source: str = "manual",
         confidence: float | None = None,
         skip_validation: bool = False,
+        guild_id: int | None = None,
     ) -> dict:
         """
         Enrich an internal match with OpenDota API data including fantasy points.
@@ -208,6 +209,7 @@ class MatchEnrichmentService:
             source: 'manual' or 'auto' to indicate enrichment source
             confidence: Optional confidence score for auto-discovered matches
             skip_validation: If True, skip strict validation (for manual overrides)
+            guild_id: Guild ID for multi-guild isolation
 
         Returns:
             Dict with enrichment results:
@@ -222,7 +224,7 @@ class MatchEnrichmentService:
         logger.info(f"Enriching match {internal_match_id} with Dota match {dota_match_id}")
 
         # Get internal match data
-        internal_match = self.match_repo.get_match(internal_match_id)
+        internal_match = self.match_repo.get_match(internal_match_id, guild_id)
         if not internal_match:
             return {
                 "success": False,
@@ -449,17 +451,20 @@ class MatchEnrichmentService:
 
         return {"players_updated": updated, "players_failed": failed}
 
-    def format_match_summary(self, internal_match_id: int) -> str | None:
+    def format_match_summary(
+        self, internal_match_id: int, guild_id: int | None = None
+    ) -> str | None:
         """
         Format a human-readable summary of an enriched match.
 
         Args:
             internal_match_id: Our database match_id
+            guild_id: Guild ID for multi-guild isolation
 
         Returns:
             Formatted string or None if match not found/not enriched
         """
-        match = self.match_repo.get_match(internal_match_id)
+        match = self.match_repo.get_match(internal_match_id, guild_id)
         if not match:
             return None
 
