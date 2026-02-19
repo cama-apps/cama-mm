@@ -986,7 +986,7 @@ class MatchService:
             }
 
         # Get participants with fantasy points
-        participants = self.match_repo.get_match_participants(match_id)
+        participants = self.match_repo.get_match_participants(match_id, guild_id)
         if not participants:
             return {
                 "success": False,
@@ -1212,7 +1212,7 @@ class MatchService:
 
             try:
                 # Get participants to check for fantasy data
-                participants = self.match_repo.get_match_participants(match_id)
+                participants = self.match_repo.get_match_participants(match_id, normalized_guild)
 
                 if not participants:
                     # No participants recorded - use team lists from match
@@ -1479,7 +1479,7 @@ class MatchService:
         old_winning_team = "radiant" if old_winning_team_num == 1 else "dire"
 
         # 2. Get participant data
-        participants = self.match_repo.get_match_participants(match_id)
+        participants = self.match_repo.get_match_participants(match_id, guild_id)
         if not participants:
             raise ValueError(f"No participants found for match {match_id}")
 

@@ -373,7 +373,7 @@ class EnrichmentCommands(commands.Cog):
             side = match.get("side", "?").capitalize()
 
             # Get participants for this match
-            participants = self.match_service.get_match_participants(match_id)
+            participants = self.match_service.get_match_participants(match_id, guild_id)
 
             # Find this player's stats
             player_stats = None
@@ -530,7 +530,7 @@ class EnrichmentCommands(commands.Cog):
             match_id = match_data["match_id"]
 
         # Get participants
-        participants = self.match_service.get_match_participants(match_id)
+        participants = self.match_service.get_match_participants(match_id, guild_id)
 
         if not participants:
             await safe_followup(
