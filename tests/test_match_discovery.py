@@ -55,7 +55,7 @@ class TestMatchDiscoveryService:
         ]
 
         service = MatchDiscoveryService(match_repo, player_repo, mock_opendota_api)
-        result = service._discover_single_match(1, dry_run=True)
+        result = service._discover_single_match(1, TEST_GUILD_ID, dry_run=True)
 
         assert result["status"] == "discovered"
         assert result["valve_match_id"] == 99999
@@ -88,7 +88,7 @@ class TestMatchDiscoveryService:
         mock_opendota_api.get_player_matches.side_effect = mock_get_matches
 
         service = MatchDiscoveryService(match_repo, player_repo, mock_opendota_api)
-        result = service._discover_single_match(1, dry_run=True)
+        result = service._discover_single_match(1, TEST_GUILD_ID, dry_run=True)
 
         assert result["status"] == "low_confidence"
         assert result["confidence"] == 0.5
@@ -112,7 +112,7 @@ class TestMatchDiscoveryService:
         }
 
         service = MatchDiscoveryService(match_repo, player_repo, mock_opendota_api)
-        result = service._discover_single_match(1, dry_run=True)
+        result = service._discover_single_match(1, TEST_GUILD_ID, dry_run=True)
 
         assert result["status"] == "no_steam_ids"
         assert result["players_with_steam_id"] == 3
@@ -140,7 +140,7 @@ class TestMatchDiscoveryService:
         ]
 
         service = MatchDiscoveryService(match_repo, player_repo, mock_opendota_api)
-        result = service._discover_single_match(1, dry_run=True)
+        result = service._discover_single_match(1, TEST_GUILD_ID, dry_run=True)
 
         assert result["status"] == "no_candidates"
 
@@ -165,7 +165,7 @@ class TestMatchDiscoveryService:
         ]
 
         service = MatchDiscoveryService(match_repo, player_repo, mock_opendota_api)
-        result = service._discover_single_match(1, dry_run=True)
+        result = service._discover_single_match(1, TEST_GUILD_ID, dry_run=True)
 
         # In dry run, match_repo.update_match_enrichment should NOT be called
         match_repo.update_match_enrichment.assert_not_called()
