@@ -123,7 +123,7 @@ class MatchDiscoveryService:
         if not match:
             return {"match_id": match_id, "status": "not_found"}
 
-        participants = self.match_repo.get_match_participants(match_id)
+        participants = self.match_repo.get_match_participants(match_id, guild_id)
 
         # Get all steam_ids for participants (supports multiple per player)
         discord_ids = [p["discord_id"] for p in participants]

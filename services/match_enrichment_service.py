@@ -245,7 +245,7 @@ class MatchEnrichmentService:
 
         # Get our match participants and their steam_ids (bulk lookup)
         # Now supports multiple steam_ids per player
-        participants = self.match_repo.get_match_participants(internal_match_id)
+        participants = self.match_repo.get_match_participants(internal_match_id, guild_id)
         discord_ids = [p["discord_id"] for p in participants]
         discord_to_steam_ids = self.player_repo.get_steam_ids_bulk(discord_ids)
 
@@ -468,7 +468,7 @@ class MatchEnrichmentService:
         if not match:
             return None
 
-        participants = self.match_repo.get_match_participants(internal_match_id)
+        participants = self.match_repo.get_match_participants(internal_match_id, guild_id)
         if not participants or not any(p.get("hero_id") for p in participants):
             return None  # Not enriched
 
