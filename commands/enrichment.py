@@ -120,7 +120,7 @@ class EnrichmentCommands(commands.Cog):
 
         # Determine which internal match to enrich
         if internal_match_id:
-            match = self.match_service.get_match_by_id(internal_match_id)
+            match = self.match_service.get_match_by_id(internal_match_id, guild_id)
             if not match:
                 await safe_followup(
                     interaction,
@@ -172,8 +172,8 @@ class EnrichmentCommands(commands.Cog):
             return
 
         # Fetch enriched data for embed
-        match_data = self.match_service.get_match_by_id(internal_match_id)
-        participants = self.match_service.get_match_participants(internal_match_id)
+        match_data = self.match_service.get_match_by_id(internal_match_id, guild_id)
+        participants = self.match_service.get_match_participants(internal_match_id, guild_id)
 
         if match_data and participants:
             radiant = [p for p in participants if p.get("side") == "radiant"]
@@ -504,7 +504,7 @@ class EnrichmentCommands(commands.Cog):
 
         # Get match - default to target's most recent match
         if match_id:
-            match_data = self.match_service.get_match_by_id(match_id)
+            match_data = self.match_service.get_match_by_id(match_id, guild_id)
             if not match_data:
                 await safe_followup(
                     interaction,
@@ -516,7 +516,7 @@ class EnrichmentCommands(commands.Cog):
             user_matches = self.match_service.get_player_matches(target_id, guild_id, limit=1)
             if user_matches:
                 match_id = user_matches[0]["match_id"]
-                match_data = self.match_service.get_match_by_id(match_id)
+                match_data = self.match_service.get_match_by_id(match_id, guild_id)
             else:
                 # Fall back to globally most recent
                 match_data = self.match_service.get_most_recent_match(guild_id)

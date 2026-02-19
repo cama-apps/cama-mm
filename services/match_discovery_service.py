@@ -226,6 +226,7 @@ class MatchDiscoveryService:
                     best_match_id,
                     source="auto",
                     confidence=confidence,
+                    guild_id=guild_id,
                 )
 
                 # If validation failed in enrichment service, report as low_confidence

@@ -1444,7 +1444,7 @@ class MatchCommands(commands.Cog):
 
                 if status == "discovered":
                     # Success - send enriched embed
-                    await self._send_enrichment_result(channel, match_id, result)
+                    await self._send_enrichment_result(channel, match_id, result, guild_id)
                     return
 
                 if status in ("low_confidence", "no_candidates"):
@@ -1482,6 +1482,7 @@ class MatchCommands(commands.Cog):
         channel: discord.abc.Messageable | None,
         match_id: int,
         result: dict,
+        guild_id: int | None = None,
     ) -> None:
         """Send enriched match embed to channel after successful discovery."""
         valve_match_id = result.get("valve_match_id")
@@ -1497,8 +1498,8 @@ class MatchCommands(commands.Cog):
 
         try:
             # Fetch enriched match data for embed
-            match_data = self.match_service.get_match_by_id(match_id)
-            participants = self.match_service.get_match_participants(match_id)
+            match_data = self.match_service.get_match_by_id(match_id, guild_id)
+            participants = self.match_service.get_match_participants(match_id, guild_id)
 
             if match_data and participants:
                 radiant = [p for p in participants if p.get("side") == "radiant"]

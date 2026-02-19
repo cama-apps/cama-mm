@@ -1774,12 +1774,12 @@ class MatchService:
 
         Args:
             match_id: Internal match ID
-            guild_id: Guild ID (optional)
+            guild_id: Guild ID for multi-guild isolation (optional)
 
         Returns:
             List of participant dicts with hero, KDA, etc.
         """
-        return self.match_repo.get_match_participants(match_id)
+        return self.match_repo.get_match_participants(match_id, guild_id)
 
     def get_player_matches(
         self, discord_id: int, guild_id: int | None, limit: int = 10
