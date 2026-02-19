@@ -1042,17 +1042,28 @@ class MatchRepository(BaseRepository, IMatchRepository):
             )
             return cursor.rowcount
 
-    def get_match_participants(self, match_id: int) -> list[dict]:
+    def get_match_participants(
+        self, match_id: int, guild_id: int | None = None
+    ) -> list[dict]:
         """Get all participants for a match with their stats."""
         with self.connection() as conn:
             cursor = conn.cursor()
-            cursor.execute(
-                """
-                SELECT * FROM match_participants
-                WHERE match_id = ?
-                """,
-                (match_id,),
-            )
+            if guild_id is not None:
+                cursor.execute(
+                    """
+                    SELECT * FROM match_participants
+                    WHERE match_id = ? AND guild_id = ?
+                    """,
+                    (match_id, guild_id),
+                )
+            else:
+                cursor.execute(
+                    """
+                    SELECT * FROM match_participants
+                    WHERE match_id = ?
+                    """,
+                    (match_id,),
+                )
             rows = cursor.fetchall()
             return [dict(row) for row in rows]
 
