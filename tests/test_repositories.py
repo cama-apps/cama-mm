@@ -336,7 +336,7 @@ class TestMatchRepository:
 
         assert match_id > 0
 
-        match = match_repository.get_match(match_id)
+        match = match_repository.get_match(match_id, TEST_GUILD_ID)
         assert match is not None
         assert match["team1_players"] == [1, 2, 3, 4, 5]
         assert match["team2_players"] == [6, 7, 8, 9, 10]

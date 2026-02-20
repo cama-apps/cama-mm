@@ -239,7 +239,7 @@ class EnrichmentCommands(commands.Cog):
             )
             return
 
-        result = self.enrichment_service.backfill_steam_ids()
+        result = await asyncio.to_thread(self.enrichment_service.backfill_steam_ids)
 
         response = (
             f"Steam ID backfill complete!\n\n**Players updated:** {result['players_updated']}"
@@ -650,7 +650,13 @@ class EnrichmentCommands(commands.Cog):
         )
 
         guild_id = interaction.guild_id
-        results = discovery_service.discover_all_matches(guild_id=guild_id, dry_run=dry_run)
+        results = await asyncio.to_thread(
+            functools.partial(
+                discovery_service.discover_all_matches,
+                guild_id=guild_id,
+                dry_run=dry_run,
+            )
+        )
 
         # Build summary
         lines = [

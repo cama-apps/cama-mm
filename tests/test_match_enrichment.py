@@ -284,7 +284,7 @@ class TestMatchRepositoryEnrichment:
             net_worth=20000,
         )
 
-        participants = repo.get_match_participants(match_id)
+        participants = repo.get_match_participants(match_id, TEST_GUILD_ID)
         p = next((p for p in participants if p["discord_id"] == 100), None)
 
         assert p is not None

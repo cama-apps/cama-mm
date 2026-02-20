@@ -20,10 +20,13 @@ async def test_update_shuffle_message_wagers_updates_field():
     # Pending state and message info (house mode is default)
     pending_state = {"bet_lock_until": 1700000000, "betting_mode": "house"}
     match_service.get_last_shuffle.return_value = pending_state
-    match_service.get_shuffle_message_info.return_value = {
+    # Mock state_service.get_shuffle_message_info (used by _update_shuffle_message_wagers)
+    match_service.state_service.get_shuffle_message_info.return_value = {
         "message_id": 42,
         "channel_id": 55,
         "jump_url": "https://example.com",
+        "cmd_message_id": None,
+        "cmd_channel_id": None,
     }
 
     # Pot totals to display
@@ -70,10 +73,12 @@ async def test_update_shuffle_message_wagers_handles_missing_message():
 
     pending_state = {"bet_lock_until": 1700000000, "betting_mode": "house"}
     match_service.get_last_shuffle.return_value = pending_state
-    match_service.get_shuffle_message_info.return_value = {
+    match_service.state_service.get_shuffle_message_info.return_value = {
         "message_id": 42,
         "channel_id": 55,
         "jump_url": "https://example.com",
+        "cmd_message_id": None,
+        "cmd_channel_id": None,
     }
 
     # Channel fetch raises to simulate deleted/missing message

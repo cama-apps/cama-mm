@@ -265,7 +265,7 @@ class BettingCommands(commands.Cog):
             totals["radiant"], totals["dire"], betting_mode, lock_until
         )
 
-        # Update main channel message
+        # Update main channel message (lobby channel)
         message_info = await asyncio.to_thread(
             self.match_service.state_service.get_shuffle_message_info, guild_id, pending_match_id
         )
@@ -273,6 +273,12 @@ class BettingCommands(commands.Cog):
         channel_id = message_info.get("channel_id") if message_info else None
         if message_id and channel_id:
             await self._update_embed_betting_field(channel_id, message_id, field_name, field_value)
+
+        # Update command channel message if it exists (different from lobby channel)
+        cmd_message_id = message_info.get("cmd_message_id") if message_info else None
+        cmd_channel_id = message_info.get("cmd_channel_id") if message_info else None
+        if cmd_message_id and cmd_channel_id:
+            await self._update_embed_betting_field(cmd_channel_id, cmd_message_id, field_name, field_value)
 
         # Update thread message if it exists
         thread_message_id = pending_state.get("thread_shuffle_message_id")

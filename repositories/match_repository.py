@@ -386,16 +386,14 @@ class MatchRepository(BaseRepository, IMatchRepository):
             return payload
 
     def get_match(self, match_id: int, guild_id: int | None = None) -> dict | None:
-        """Get match by ID, optionally filtered by guild."""
+        """Get match by ID, filtered by guild (guild_id=None normalizes to 0)."""
+        normalized_guild = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
-            if guild_id is not None:
-                cursor.execute(
-                    "SELECT * FROM matches WHERE match_id = ? AND guild_id = ?",
-                    (match_id, guild_id),
-                )
-            else:
-                cursor.execute("SELECT * FROM matches WHERE match_id = ?", (match_id,))
+            cursor.execute(
+                "SELECT * FROM matches WHERE match_id = ? AND guild_id = ?",
+                (match_id, normalized_guild),
+            )
             row = cursor.fetchone()
 
             if not row:
@@ -1045,25 +1043,17 @@ class MatchRepository(BaseRepository, IMatchRepository):
     def get_match_participants(
         self, match_id: int, guild_id: int | None = None
     ) -> list[dict]:
-        """Get all participants for a match with their stats."""
+        """Get all participants for a match with their stats (guild_id=None normalizes to 0)."""
+        normalized_guild = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
-            if guild_id is not None:
-                cursor.execute(
-                    """
-                    SELECT * FROM match_participants
-                    WHERE match_id = ? AND guild_id = ?
-                    """,
-                    (match_id, guild_id),
-                )
-            else:
-                cursor.execute(
-                    """
-                    SELECT * FROM match_participants
-                    WHERE match_id = ?
-                    """,
-                    (match_id,),
-                )
+            cursor.execute(
+                """
+                SELECT * FROM match_participants
+                WHERE match_id = ? AND guild_id = ?
+                """,
+                (match_id, normalized_guild),
+            )
             rows = cursor.fetchall()
             return [dict(row) for row in rows]
 

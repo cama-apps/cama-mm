@@ -810,11 +810,12 @@ class MatchCommands(commands.Cog):
             except Exception as exc:
                 logger.warning(f"Failed to post shuffle to lobby channel: {exc}")
 
-        # Also post to command channel if different from lobby channel (dedicated channel setup)
+        # Also post to command channel if different from lobby channel
         command_channel_id = interaction.channel.id if interaction.channel else None
+        cmd_message = None
         if command_channel_id and command_channel_id != lobby_channel_id:
             try:
-                await interaction.channel.send(embed=embed)
+                cmd_message = await interaction.channel.send(embed=embed)
             except Exception as exc:
                 logger.warning(f"Failed to post shuffle to command channel: {exc}")
 
@@ -825,15 +826,17 @@ class MatchCommands(commands.Cog):
         # Capture origin_channel_id before reset_lobby clears it (needed for betting reminders)
         try:
             origin_channel_id = self.lobby_service.get_origin_channel_id()
-            if message:
-                jump_url = message.jump_url if hasattr(message, "jump_url") else None
+            if message or cmd_message:
+                jump_url = message.jump_url if message and hasattr(message, "jump_url") else None
                 self.match_service.set_shuffle_message_info(
                     guild_id,
-                    message_id=message.id,
-                    channel_id=message.channel.id if message.channel else None,
+                    message_id=message.id if message else None,
+                    channel_id=message.channel.id if message and message.channel else None,
                     jump_url=jump_url,
                     origin_channel_id=origin_channel_id,
                     pending_match_id=pending_match_id,
+                    cmd_message_id=cmd_message.id if cmd_message else None,
+                    cmd_channel_id=cmd_message.channel.id if cmd_message and cmd_message.channel else None,
                 )
         except Exception as exc:
             logger.warning(f"Failed to store shuffle message URL: {exc}", exc_info=True)
