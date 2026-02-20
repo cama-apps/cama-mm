@@ -208,6 +208,8 @@ class MatchStateService:
         thread_id: int | None = None,
         origin_channel_id: int | None = None,
         pending_match_id: int | None = None,
+        cmd_message_id: int | None = None,
+        cmd_channel_id: int | None = None,
     ) -> None:
         """
         Store message metadata for the pending shuffle.
@@ -216,13 +218,15 @@ class MatchStateService:
 
         Args:
             guild_id: Guild ID
-            message_id: Discord message ID
-            channel_id: Discord channel ID
+            message_id: Discord message ID (lobby channel)
+            channel_id: Discord channel ID (lobby channel)
             jump_url: Discord message jump URL
             thread_message_id: Thread message ID for updates
             thread_id: Thread ID
             origin_channel_id: Original channel for betting reminders
             pending_match_id: Optional specific match ID
+            cmd_message_id: Command channel message ID (if different from lobby)
+            cmd_channel_id: Command channel ID (if different from lobby)
         """
         with self._shuffle_state_lock:
             state = self.get_last_shuffle(guild_id, pending_match_id)
@@ -240,6 +244,10 @@ class MatchStateService:
                 state["thread_shuffle_thread_id"] = thread_id
             if origin_channel_id is not None:
                 state["origin_channel_id"] = origin_channel_id
+            if cmd_message_id is not None:
+                state["cmd_shuffle_message_id"] = cmd_message_id
+            if cmd_channel_id is not None:
+                state["cmd_shuffle_channel_id"] = cmd_channel_id
             self.persist_state(guild_id, state)
 
     def get_shuffle_message_info(self, guild_id: int | None, pending_match_id: int | None = None) -> dict[str, int | None]:
@@ -251,7 +259,8 @@ class MatchStateService:
             pending_match_id: Optional specific match ID
 
         Returns:
-            Dict with message_id, channel_id, jump_url, thread_message_id, thread_id, origin_channel_id
+            Dict with message_id, channel_id, jump_url, thread_message_id, thread_id,
+            origin_channel_id, cmd_message_id, cmd_channel_id
         """
         with self._shuffle_state_lock:
             state = self.get_last_shuffle(guild_id, pending_match_id) or {}
@@ -263,6 +272,8 @@ class MatchStateService:
                 "thread_id": state.get("thread_shuffle_thread_id"),
                 "origin_channel_id": state.get("origin_channel_id"),
                 "pending_match_id": state.get("pending_match_id"),
+                "cmd_message_id": state.get("cmd_shuffle_message_id"),
+                "cmd_channel_id": state.get("cmd_shuffle_channel_id"),
             }
 
     def clear_last_shuffle(self, guild_id: int | None, pending_match_id: int | None = None) -> None:
@@ -362,6 +373,8 @@ class MatchStateService:
             "shuffle_message_jump_url": state.get("shuffle_message_jump_url"),
             "shuffle_message_id": state.get("shuffle_message_id"),
             "shuffle_channel_id": state.get("shuffle_channel_id"),
+            "cmd_shuffle_message_id": state.get("cmd_shuffle_message_id"),
+            "cmd_shuffle_channel_id": state.get("cmd_shuffle_channel_id"),
             "betting_mode": state.get("betting_mode", "pool"),
             "is_draft": state.get("is_draft", False),
             "effective_avoid_ids": state.get("effective_avoid_ids", []),

@@ -491,7 +491,8 @@ class TestMatchParticipants:
         )
 
         # Use repository method to get participants
-        participants = match_repository.get_match_participants(match_id)
+        # Legacy Database.record_match() uses guild_id=0 (default), so query with None
+        participants = match_repository.get_match_participants(match_id, guild_id=None)
 
         assert len(participants) == 10
 

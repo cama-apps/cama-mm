@@ -45,7 +45,7 @@ def test_match_service_repo_injected_shuffle_and_record(repo_db_path):
     assert result["match_id"] > 0
     assert match_repo.get_pending_match(TEST_GUILD_ID) is None
 
-    recorded = match_repo.get_match(result["match_id"])
+    recorded = match_repo.get_match(result["match_id"], TEST_GUILD_ID)
     assert recorded is not None
     assert recorded["winning_team"] in (1, 2)
 

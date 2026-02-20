@@ -841,8 +841,9 @@ class LobbyCommands(commands.Cog):
             signals = []
             is_afk = False
 
-            # Voice status (informational only - deafened doesn't mean AFK)
-            if member.voice is not None:
+            # Voice status - if in voice, they're definitely not AFK
+            in_voice = member.voice is not None
+            if in_voice:
                 is_deafened = bool(
                     getattr(member.voice, "self_deaf", False)
                     or getattr(member.voice, "deaf", False)
@@ -853,17 +854,17 @@ class LobbyCommands(commands.Cog):
             if _is_playing_dota(member):
                 signals.append("🎮")
 
-            # Presence status - this determines AFK classification
+            # Presence status - determines AFK classification (unless in voice)
             status = member.status
             if status in (discord.Status.online, discord.Status.dnd):
                 signals.append("🟢")
             elif status == discord.Status.idle:
                 signals.append("🟡")
-                if not is_recent:
+                if not is_recent and not in_voice:
                     is_afk = True
             else:  # offline/invisible
                 signals.append("🔴")
-                if not is_recent:
+                if not is_recent and not in_voice:
                     is_afk = True
 
             player_data[pid] = {

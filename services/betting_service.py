@@ -131,23 +131,11 @@ class BettingService:
             )
             return
 
-        # Fallback (older behavior) - doesn't support leverage
-        effective_bet = amount * leverage
-        balance = self.player_repo.get_balance(discord_id, guild_id)
-        if balance - effective_bet < -self.max_debt:
-            raise ValueError(f"Bet would exceed maximum debt limit of {self.max_debt} jopacoin.")
-
-        # Check for existing bets - allow additional bets only on the same team
-        existing_bet = self.bet_repo.get_player_pending_bet(guild_id, discord_id, since_ts=since_ts)
-        if existing_bet and existing_bet["team_bet_on"] != team:
-            existing_team = existing_bet["team_bet_on"].title()
-            raise ValueError(
-                f"You already have bets on {existing_team}. "
-                "You can only add more bets on the same team."
-            )
-
-        self.player_repo.add_balance(discord_id, guild_id, -effective_bet)
-        self.bet_repo.create_bet(guild_id, discord_id, team, amount, now_ts)
+        # No atomic method available - this should not happen in production
+        raise NotImplementedError(
+            "BetRepository must implement place_bet_atomic or "
+            "place_bet_against_pending_match_atomic for safe bet placement."
+        )
 
     def award_participation(
         self,
