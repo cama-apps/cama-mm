@@ -821,9 +821,10 @@ class DraftCommands(commands.Cog):
                     except Exception:
                         pass  # Non-critical, proceed without
 
-                # Pre-prune candidates if too many (balanced selection is O(C(N,8)) - exponential)
-                # With 14 candidates: ~3k combos (~12s), with 18: ~44k combos (~3min timeout)
-                MAX_CANDIDATES_FOR_BALANCED = 14
+                # Pre-prune candidates if too many
+                # Beam search algorithm handles up to 24 candidates efficiently
+                # Above that, we pre-prune to avoid excessive search space
+                MAX_CANDIDATES_FOR_BALANCED = 24
                 pre_excluded_players = []
 
                 if len(non_captain_candidates) > MAX_CANDIDATES_FOR_BALANCED:
