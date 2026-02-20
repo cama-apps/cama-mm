@@ -58,12 +58,13 @@ _RAIN_MESSAGES = [
 def _get_rain_phase(frame_idx: int) -> dict:
     """Map frame index to rain visibility and fade-out.
 
-    Frames 0-37: normal rain.  38-44: fading out.  45+: invisible.
+    Frames 0-26: normal rain.  27-31: fading out.  32+: invisible.
+    (Optimized for 70-frame animation)
     """
-    if frame_idx < 38:
+    if frame_idx < 27:
         return {"visible": True, "fade": 0.0}
-    elif frame_idx < 45:
-        progress = (frame_idx - 38) / 6  # 0.0 -> ~1.0 over 7 frames
+    elif frame_idx < 32:
+        progress = (frame_idx - 27) / 4  # 0.0 -> ~1.0 over 5 frames
         return {"visible": True, "fade": progress}
     else:
         return {"visible": False, "fade": 1.0}
@@ -685,8 +686,9 @@ _GLITCH_BLOCKS = list("\u2588\u2593\u2592\u2591")
 def _draw_terminal_shell(draw: ImageDraw.Draw, size: int, frame_idx: int, display_name: str) -> None:
     """Draw the terminal shell prompt with glitch transition from status bar.
 
-    Frames 38-43: Glitch transition - old status bar text corrupts into terminal prompt.
-    Frames 44+: Steady-state terminal prompt with blinking cursor.
+    Frames 27-30: Glitch transition - old status bar text corrupts into terminal prompt.
+    Frames 31+: Steady-state terminal prompt with blinking cursor.
+    (Optimized for 70-frame animation)
     """
     bar_font = _get_cached_font(max(7, size // 55), "statusbar")
     y = size - 13
@@ -695,9 +697,9 @@ def _draw_terminal_shell(draw: ImageDraw.Draw, size: int, frame_idx: int, displa
     old_text = f"JOPA-T/v3.7 \u2502 {display_name} \u2502 #{session_hex}"
     new_text = f"{display_name}@jopa-t:~$ "
 
-    if frame_idx < 44:
-        # Glitch transition (frames 38-43)
-        glitch_progress = (frame_idx - 38) / 5  # 0.0 -> 1.0 over 6 frames
+    if frame_idx < 31:
+        # Glitch transition (frames 27-30)
+        glitch_progress = (frame_idx - 27) / 3  # 0.0 -> 1.0 over 4 frames
         rng = random.Random(frame_idx * 37 + 7)
 
         # Determine max length to render
@@ -764,8 +766,9 @@ def create_wheel_frame_for_gif(
     radius = size // 2 - 30
 
     # Get cached wheel face (pieslices only) and rotate it
+    # Use BILINEAR for faster rotation with minimal quality loss
     face = _get_wheel_face(size)
-    rotated_face = face.rotate(-rotation, center=(center, center), resample=Image.BICUBIC)
+    rotated_face = face.rotate(-rotation, center=(center, center), resample=Image.BILINEAR)
 
     # Composite rotated face onto background
     img = Image.alpha_composite(img, rotated_face)
@@ -817,7 +820,7 @@ def create_wheel_frame_for_gif(
     # Status bar / terminal shell at bottom
     if display_name:
         draw = ImageDraw.Draw(img)
-        if frame_idx >= 38:
+        if frame_idx >= 27:
             _draw_terminal_shell(draw, size, frame_idx, display_name)
         else:
             bar_font = _get_cached_font(max(7, size // 55), "statusbar")
@@ -861,14 +864,14 @@ def create_wheel_gif(target_idx: int, size: int = 500, display_name: str | None 
     # The wheel spins, slows down, almost stops some distance before target,
     # then creeps forward to land on the final position
 
-    num_frames = 100
+    num_frames = 70
 
-    # Phase boundaries (scaled from 150 to 100 frames)
-    fast_end = 40       # End of fast spin (frames 0-39)
-    medium_end = 60     # End of medium spin (frames 40-59)
-    slow_end = 83       # End of slow crawl (frames 60-82)
-    creep_end = 98      # End of creep to final (frames 83-97)
-    # Frame 98 is second-to-last, frame 99 is final
+    # Phase boundaries (optimized for 70 frames - ~40% faster than 100)
+    fast_end = 28       # End of fast spin (frames 0-27)
+    medium_end = 42     # End of medium spin (frames 28-41)
+    slow_end = 58       # End of slow crawl (frames 42-57)
+    creep_end = 68      # End of creep to final (frames 58-67)
+    # Frame 68 is second-to-last, frame 69 is final
 
     # Ending styles with varied physics (20 items for easy % math)
     ending_styles = [
@@ -1007,15 +1010,15 @@ def create_wheel_gif(target_idx: int, size: int = 500, display_name: str | None 
         frame_p = frame_rgb.quantize(palette=palette_image, dither=Image.Dither.FLOYDSTEINBERG)
         frames.append(frame_p)
 
-        # Timing: variable animation duration
-        if i < 20:
+        # Timing: variable animation duration (adjusted for 70 frames)
+        if i < 14:
             durations.append(30)       # Very fast: 30ms
         elif i < fast_end:
-            durations.append(40)       # Fast: 40ms
+            durations.append(45)       # Fast: 45ms (slightly longer to maintain pacing)
         elif i < medium_end:
-            durations.append(65)       # Medium: 65ms
+            durations.append(70)       # Medium: 70ms
         elif i < slow_end:
-            durations.append(100)      # Slow: 100ms
+            durations.append(110)      # Slow: 110ms
         elif i == slow_end:
             # Near-miss moment with dramatic pause
             base = int(creep_base_duration * creep_speed_factor)
@@ -1069,17 +1072,17 @@ def create_explosion_gif(size: int = 500, display_name: str | None = None) -> io
     radius = size // 2 - 30
     scale = size / 400.0  # Scale factor for pixel values calibrated at 400px
 
-    # Phase 1: Normal spin for ~1 second (builds tension)
-    spin_frames = 20
+    # Phase 1: Normal spin for ~0.7 second (builds tension)
+    spin_frames = 14
     for i in range(spin_frames):
-        rotation = i * 25  # Fast spin
+        rotation = i * 35  # Fast spin (faster rotation per frame to maintain visual speed)
         frame = create_wheel_frame_for_gif(size, rotation, selected_idx=None, display_name=display_name, frame_idx=i)
         frame_p = frame.convert("RGB").convert("P", palette=Image.ADAPTIVE, colors=256)
         frames.append(frame_p)
         durations.append(50)
 
     # Phase 2: Wheel starts shaking/glitching (something's wrong...)
-    shake_frames = 15
+    shake_frames = 10
     base_rotation = spin_frames * 25
     for i in range(shake_frames):
         # Increasingly violent shaking
@@ -1102,7 +1105,7 @@ def create_explosion_gif(size: int = 500, display_name: str | None = None) -> io
         durations.append(60 + i * 10)  # Slowing down before explosion
 
     # Phase 3: THE EXPLOSION
-    explosion_frames = 25
+    explosion_frames = 18
 
     # Pre-generate explosion particles
     num_particles = 80
@@ -1150,14 +1153,14 @@ def create_explosion_gif(size: int = 500, display_name: str | None = None) -> io
         draw = ImageDraw.Draw(img)
 
         # Initial flash (first few frames)
-        if frame_idx < 3:
-            flash_alpha = 255 - frame_idx * 80
+        if frame_idx < 2:
+            flash_alpha = 255 - frame_idx * 120
             flash = Image.new("RGBA", (size, size), (255, 255, 200, flash_alpha))
             img = Image.alpha_composite(img, flash)
             draw = ImageDraw.Draw(img)
 
         # Draw expanding shockwave rings
-        if frame_idx < 15:
+        if frame_idx < 11:
             for ring in range(3):
                 ring_radius = int((frame_idx + 1) * 15 * scale + ring * 30 * scale)
                 ring_alpha = max(0, 200 - frame_idx * 15 - ring * 40)
@@ -1191,7 +1194,7 @@ def create_explosion_gif(size: int = 500, display_name: str | None = None) -> io
                     points.append((px, py))
                 try:
                     rgb = hex_to_rgb(frag["color"])
-                    alpha = max(0, 255 - frame_idx * 10)
+                    alpha = max(0, 255 - frame_idx * 14)
                     draw.polygon(points, fill=(*rgb, alpha))
                 except Exception:
                     pass
@@ -1208,7 +1211,7 @@ def create_explosion_gif(size: int = 500, display_name: str | None = None) -> io
             px, py = int(p["x"]), int(p["y"])
             psize = int(p["size"])
             if 0 <= px < size and 0 <= py < size and psize > 0:
-                alpha = max(0, 255 - frame_idx * 8)
+                alpha = max(0, 255 - frame_idx * 11)
                 color = (*p["color"], alpha)
                 draw.ellipse(
                     [px - psize, py - psize, px + psize, py + psize],
@@ -1216,12 +1219,12 @@ def create_explosion_gif(size: int = 500, display_name: str | None = None) -> io
                 )
 
         # Draw smoke clouds (appear after initial explosion)
-        if frame_idx > 5:
+        if frame_idx > 4:
             for smoke_idx in range(5):
                 smoke_x = center + random.randint(int(-80 * scale), int(80 * scale))
                 smoke_y = center + random.randint(int(-80 * scale), int(40 * scale)) - int(frame_idx * 2 * scale)
                 smoke_size = int((30 + frame_idx * 2 + smoke_idx * 10) * scale)
-                smoke_alpha = max(0, 100 - frame_idx * 3)
+                smoke_alpha = max(0, 100 - frame_idx * 4)
                 if smoke_alpha > 0:
                     draw.ellipse(
                         [smoke_x - smoke_size, smoke_y - smoke_size,
@@ -1231,10 +1234,10 @@ def create_explosion_gif(size: int = 500, display_name: str | None = None) -> io
 
         frame_p = img.convert("RGB").convert("P", palette=Image.ADAPTIVE, colors=256)
         frames.append(frame_p)
-        durations.append(60 if frame_idx < 5 else 80)
+        durations.append(60 if frame_idx < 4 else 80)
 
     # Phase 4: Aftermath with "67 JC" and smoke clearing
-    aftermath_frames = 20
+    aftermath_frames = 14
     big_font = _get_cached_font(int(48 * scale), "explosion_big", bold=True)
     small_font = _get_cached_font(int(20 * scale), "explosion_small", bold=True)
 

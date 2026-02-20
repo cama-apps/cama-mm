@@ -76,10 +76,12 @@ async def test_wheel_cooldown_expired_allows_spin():
     commands = BettingCommands(bot, betting_service, match_service, player_service)
 
     # Mock random to get a predictable result (index 3 = "5") and disable explosion
+    # Mock GIF generation to avoid memory-intensive PIL operations in parallel tests
     with patch("commands.betting.random.randint", return_value=3):
         with patch("commands.betting.random.random", return_value=1.0):  # No explosion
             with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
-                await commands.gamba.callback(commands, interaction)
+                with patch.object(commands, "_create_wheel_gif_file", return_value=MagicMock()):
+                    await commands.gamba.callback(commands, interaction)
 
     # Should defer then send via followup
     interaction.response.defer.assert_awaited_once()
@@ -176,10 +178,12 @@ async def test_wheel_positive_no_debt_adds_directly():
     commands = BettingCommands(bot, betting_service, match_service, player_service)
 
     # Mock random to get a positive result (index 3 = "5") and disable explosion
+    # Mock GIF generation to avoid memory-intensive PIL operations in parallel tests
     with patch("commands.betting.random.randint", return_value=3):
         with patch("commands.betting.random.random", return_value=1.0):  # No explosion
             with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
-                await commands.gamba.callback(commands, interaction)
+                with patch.object(commands, "_create_wheel_gif_file", return_value=MagicMock()):
+                    await commands.gamba.callback(commands, interaction)
 
     # Should add balance directly (user_id, guild_id, amount)
     player_service.adjust_balance.assert_called_once_with(1003, 123, 5)
@@ -218,10 +222,12 @@ async def test_wheel_bankrupt_subtracts_balance():
     commands = BettingCommands(bot, betting_service, match_service, player_service)
 
     # Mock random to get Bankrupt (index 0) and disable explosion
+    # Mock GIF generation to avoid memory-intensive PIL operations in parallel tests
     with patch("commands.betting.random.randint", return_value=0):
         with patch("commands.betting.random.random", return_value=1.0):  # No explosion
             with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
-                await commands.gamba.callback(commands, interaction)
+                with patch.object(commands, "_create_wheel_gif_file", return_value=MagicMock()):
+                    await commands.gamba.callback(commands, interaction)
 
     # Should subtract the bankrupt value (negative)
     bankrupt_value = WHEEL_WEDGES[0][1]
@@ -264,10 +270,12 @@ async def test_wheel_bankrupt_credits_nonprofit_fund():
     )
 
     # Mock random to get Bankrupt (index 0) and disable explosion
+    # Mock GIF generation to avoid memory-intensive PIL operations in parallel tests
     with patch("commands.betting.random.randint", return_value=0):
         with patch("commands.betting.random.random", return_value=1.0):  # No explosion
             with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
-                await cmds.gamba.callback(cmds, interaction)
+                with patch.object(cmds, "_create_wheel_gif_file", return_value=MagicMock()):
+                    await cmds.gamba.callback(cmds, interaction)
 
     # Should credit the nonprofit fund with the absolute loss value
     bankrupt_value = WHEEL_WEDGES[0][1]
@@ -308,10 +316,12 @@ async def test_wheel_bankrupt_ignores_max_debt():
     commands = BettingCommands(bot, betting_service, match_service, player_service)
 
     # Mock random to get Bankrupt (index 0) and disable explosion
+    # Mock GIF generation to avoid memory-intensive PIL operations in parallel tests
     with patch("commands.betting.random.randint", return_value=0):
         with patch("commands.betting.random.random", return_value=1.0):  # No explosion
             with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
-                await commands.gamba.callback(commands, interaction)
+                with patch.object(commands, "_create_wheel_gif_file", return_value=MagicMock()):
+                    await commands.gamba.callback(commands, interaction)
 
     # Should subtract bankrupt value regardless of MAX_DEBT
     player_service.adjust_balance.assert_called_once_with(1005, 123, bankrupt_value)
@@ -349,10 +359,12 @@ async def test_wheel_lose_turn_no_change():
     commands = BettingCommands(bot, betting_service, match_service, player_service)
 
     # Mock random to get "Lose a Turn" (index 2) and disable explosion
+    # Mock GIF generation to avoid memory-intensive PIL operations in parallel tests
     with patch("commands.betting.random.randint", return_value=2):
         with patch("commands.betting.random.random", return_value=1.0):  # No explosion
             with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
-                await commands.gamba.callback(commands, interaction)
+                with patch.object(commands, "_create_wheel_gif_file", return_value=MagicMock()):
+                    await commands.gamba.callback(commands, interaction)
 
     # Should NOT call adjust_balance at all
     player_service.adjust_balance.assert_not_called()
@@ -506,10 +518,12 @@ async def test_wheel_animation_uses_gif():
 
     commands = BettingCommands(bot, betting_service, match_service, player_service)
 
+    # Mock GIF generation to avoid memory-intensive PIL operations in parallel tests
     with patch("commands.betting.random.randint", return_value=5):
         with patch("commands.betting.random.random", return_value=1.0):  # No explosion
             with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
-                await commands.gamba.callback(commands, interaction)
+                with patch.object(commands, "_create_wheel_gif_file", return_value=MagicMock()):
+                    await commands.gamba.callback(commands, interaction)
 
     # GIF animation: 1 sleep for animation + 1 sleep before result
     assert mock_sleep.await_count == 2
@@ -551,10 +565,12 @@ async def test_wheel_updates_cooldown_in_database():
 
     before_time = int(time.time())
 
+    # Mock GIF generation to avoid memory-intensive PIL operations in parallel tests
     with patch("commands.betting.random.randint", return_value=5):
         with patch("commands.betting.random.random", return_value=1.0):  # No explosion
             with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
-                await commands.gamba.callback(commands, interaction)
+                with patch.object(commands, "_create_wheel_gif_file", return_value=MagicMock()):
+                    await commands.gamba.callback(commands, interaction)
 
     after_time = int(time.time())
 
@@ -602,7 +618,8 @@ async def test_wheel_admin_bypasses_cooldown():
         with patch("commands.betting.random.randint", return_value=5):
             with patch("commands.betting.random.random", return_value=1.0):  # No explosion
                 with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
-                    await commands.gamba.callback(commands, interaction)
+                    with patch.object(commands, "_create_wheel_gif_file", return_value=MagicMock()):
+                        await commands.gamba.callback(commands, interaction)
 
     # Admin should be able to spin despite cooldown - file attachment means spin happened
     call_kwargs = interaction.followup.send.call_args.kwargs
