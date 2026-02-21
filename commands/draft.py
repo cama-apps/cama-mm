@@ -473,15 +473,7 @@ class DraftCommands(commands.Cog):
 
         # Check if user is a captain or admin
         is_captain = user_id in (state.captain1_id, state.captain2_id)
-        is_admin = False
-
-        # Check admin permissions
-        if hasattr(self.bot, "admin_user_ids"):
-            is_admin = user_id in self.bot.admin_user_ids
-        if not is_admin and interaction.guild:
-            member = interaction.guild.get_member(user_id)
-            if member and member.guild_permissions.administrator:
-                is_admin = True
+        is_admin = has_admin_permission(interaction)
 
         if not is_captain and not is_admin:
             await interaction.response.send_message(
@@ -1091,16 +1083,9 @@ class DraftCommands(commands.Cog):
             )
             return
 
-        # Check for pending match from shuffle
-        if self.match_service:
-            pending_match = await asyncio.to_thread(self.match_service.get_last_shuffle, guild_id)
-            if pending_match:
-                await interaction.followup.send(
-                    "❌ There's an active shuffled match that needs to be recorded! "
-                    "Use `/record` first before starting a draft.",
-                    ephemeral=True,
-                )
-                return
+        # Note: We don't block on existing pending matches here.
+        # The lobby service already prevents players from joining if they're in a pending match,
+        # so by the time /startdraft is called, all lobby players are guaranteed to be available.
 
         # Check lobby
         lobby = self.lobby_manager.get_lobby()
@@ -1813,9 +1798,9 @@ class DraftCommands(commands.Cog):
         # Check if draft is complete
         if state.phase == DraftPhase.COMPLETE:
             # Create pending match for betting and recording
-            match_created = await self._create_pending_match(guild_id, state)
+            pending_match_id = await self._create_pending_match(guild_id, state)
 
-            if not match_created:
+            if pending_match_id is None:
                 # Failed to create pending match - don't reset lobby, show error
                 embed = discord.Embed(
                     title="⚠️ Draft Complete - Match Creation Failed",
@@ -1830,8 +1815,10 @@ class DraftCommands(commands.Cog):
                 self.draft_state_manager.clear_state(guild_id)
                 return
 
-            # Get pending state for betting display
-            pending_state = await asyncio.to_thread(self.match_service.get_last_shuffle, guild_id)
+            # Get pending state for betting display (use specific pending_match_id for concurrent match support)
+            pending_state = await asyncio.to_thread(
+                self.match_service.get_last_shuffle, guild_id, pending_match_id=pending_match_id
+            )
 
             # === NEW: Create auto-blind bets (same as shuffle mode) ===
             betting_service = getattr(self.bot, "betting_service", None)
@@ -1912,7 +1899,9 @@ class DraftCommands(commands.Cog):
             if match_cog and hasattr(match_cog, "_schedule_betting_reminders"):
                 try:
                     await match_cog._schedule_betting_reminders(
-                        guild_id, pending_state.get("bet_lock_until")
+                        guild_id,
+                        pending_state.get("bet_lock_until"),
+                        pending_match_id=pending_state.get("pending_match_id"),
                     )
                 except Exception as exc:
                     logger.warning(f"Failed to schedule betting reminders for draft: {exc}")
@@ -1989,16 +1978,16 @@ class DraftCommands(commands.Cog):
         self,
         guild_id: int,
         state: DraftState,
-    ) -> bool:
+    ) -> int | None:
         """
         Create a pending match from draft result for betting and recording.
 
         Returns:
-            True if pending match was created successfully, False otherwise.
+            The pending_match_id if created successfully, None otherwise.
         """
         if not self.match_service:
             logger.warning("No match_service available, skipping pending match creation")
-            return False
+            return None
 
         now_ts = int(time.time())
 
@@ -2058,14 +2047,16 @@ class DraftCommands(commands.Cog):
             "is_bomb_pot": is_bomb_pot,  # Bomb pot mode for higher stakes
         }
 
-        self.match_service.set_last_shuffle(guild_id, shuffle_state)
+        # persist_state handles both DB persistence and in-memory cache update
         await asyncio.to_thread(self.match_service._persist_match_state, guild_id, shuffle_state)
 
+        # After persist_state, shuffle_state["pending_match_id"] is set via mutation
+        pending_match_id = shuffle_state.get("pending_match_id")
         logger.info(
-            f"Created pending match from draft for guild {guild_id}: "
+            f"Created pending match #{pending_match_id} from draft for guild {guild_id}: "
             f"Radiant={state.radiant_player_ids}, Dire={state.dire_player_ids}"
         )
-        return True
+        return pending_match_id
 
     async def _build_draft_complete_embed(
         self,

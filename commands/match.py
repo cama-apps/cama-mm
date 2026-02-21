@@ -172,13 +172,15 @@ class MatchCommands(commands.Cog):
             )
 
     async def _finalize_lobby_thread(
-        self, guild_id: int | None, winning_result: str, *, thread_id: int | None = None
+        self, guild_id: int | None, winning_result: str, *,
+        thread_id: int | None = None,
+        pending_match_id: int | None = None,
     ) -> None:
         """Post results to lobby thread and archive it."""
         # Use provided thread_id only - do NOT fallback to lobby_service
         # as that could return a different match's thread in concurrent match scenarios
         if not thread_id:
-            pending_state = self.match_service.get_last_shuffle(guild_id)
+            pending_state = self.match_service.get_last_shuffle(guild_id, pending_match_id=pending_match_id)
             thread_id = pending_state.get("thread_shuffle_thread_id") if pending_state else None
         if not thread_id:
             # No thread_id means we can't safely update any thread
@@ -611,7 +613,10 @@ class MatchCommands(commands.Cog):
             if betting_service:
                 try:
                     # Get IDs and timestamp from the saved pending state
+                    logger.debug(f"Creating blind bets for pending_match_id={pending_match_id}")
                     pending_state = self.match_service.get_last_shuffle(guild_id, pending_match_id=pending_match_id)
+                    state_pmid = pending_state.get("pending_match_id") if pending_state else None
+                    logger.debug(f"Blind bets: state={pending_state is not None}, state_pmid={state_pmid}")
                     blind_bets_result = await asyncio.to_thread(
                         functools.partial(betting_service.create_auto_blind_bets,
                             guild_id=guild_id,
@@ -842,9 +847,9 @@ class MatchCommands(commands.Cog):
             logger.warning(f"Failed to store shuffle message URL: {exc}", exc_info=True)
 
         # Schedule betting reminders (5-minute warning and close) if applicable
-        pending_state = self.match_service.get_last_shuffle(guild_id)
+        pending_state = self.match_service.get_last_shuffle(guild_id, pending_match_id=pending_match_id)
         bet_lock_until = pending_state.get("bet_lock_until") if pending_state else None
-        await self._schedule_betting_reminders(guild_id, bet_lock_until)
+        await self._schedule_betting_reminders(guild_id, bet_lock_until, pending_match_id=pending_match_id)
 
         # Lock lobby thread and post shuffle results there too
         included_ids = []
@@ -1569,7 +1574,8 @@ class MatchCommands(commands.Cog):
         )
 
     async def _schedule_betting_reminders(
-        self, guild_id: int | None, bet_lock_until: int | None
+        self, guild_id: int | None, bet_lock_until: int | None,
+        pending_match_id: int | None = None,
     ) -> None:
         """
         Schedule betting reminder tasks (5-minute warning and close) for the current shuffle.
@@ -1599,6 +1605,7 @@ class MatchCommands(commands.Cog):
                         guild_id=guild_id,
                         reminder_type="warning",
                         lock_until=bet_lock_until,
+                        pending_match_id=pending_match_id,
                     )
                 )
             )
@@ -1611,6 +1618,7 @@ class MatchCommands(commands.Cog):
                     guild_id=guild_id,
                     reminder_type="closed",
                     lock_until=bet_lock_until,
+                    pending_match_id=pending_match_id,
                 )
             )
         )
@@ -1624,12 +1632,13 @@ class MatchCommands(commands.Cog):
         guild_id: int | None,
         reminder_type: str,
         lock_until: int | None,
+        pending_match_id: int | None = None,
     ) -> None:
         """Sleep for delay_seconds then send the requested reminder, if still relevant."""
         try:
             await asyncio.sleep(delay_seconds)
             # Ensure pending state still matches the expected lock time
-            state = self.match_service.get_last_shuffle(guild_id)
+            state = self.match_service.get_last_shuffle(guild_id, pending_match_id=pending_match_id)
             if not state:
                 return
             current_lock = state.get("bet_lock_until")
@@ -1644,6 +1653,7 @@ class MatchCommands(commands.Cog):
                 guild_id,
                 reminder_type=reminder_type,
                 lock_until=lock_until,
+                pending_match_id=pending_match_id,
             )
         except asyncio.CancelledError:
             # Task was cancelled because match ended/aborted
