@@ -512,6 +512,7 @@ class MatchService:
             "glicko_radiant_win_prob": glicko_radiant_win_prob,
             "openskill_radiant_win_prob": openskill_radiant_win_prob,
             "balancing_rating_system": rating_system,
+            "pending_match_id": shuffle_state.get("pending_match_id"),
         }
 
     def _load_glicko_player(self, player_id: int, guild_id: int | None = None) -> tuple[Player, int]:

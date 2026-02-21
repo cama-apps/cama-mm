@@ -586,12 +586,13 @@ class MatchCommands(commands.Cog):
         )
         first_pick_team = result["first_pick_team"]
         excluded_ids = result["excluded_ids"]
+        pending_match_id = result.get("pending_match_id")
 
         # Determine if this is a bomb pot match (~10% chance)
         is_bomb_pot = random.random() < BOMB_POT_CHANCE
 
         # Store bomb pot status in pending state and persist to DB
-        pending_state = self.match_service.get_last_shuffle(guild_id)
+        pending_state = self.match_service.get_last_shuffle(guild_id, pending_match_id=pending_match_id)
         if pending_state:
             pending_state["is_bomb_pot"] = is_bomb_pot
             pending_state["is_openskill_shuffle"] = is_openskill_shuffle
@@ -610,7 +611,7 @@ class MatchCommands(commands.Cog):
             if betting_service:
                 try:
                     # Get IDs and timestamp from the saved pending state
-                    pending_state = self.match_service.get_last_shuffle(guild_id)
+                    pending_state = self.match_service.get_last_shuffle(guild_id, pending_match_id=pending_match_id)
                     blind_bets_result = await asyncio.to_thread(
                         functools.partial(betting_service.create_auto_blind_bets,
                             guild_id=guild_id,
@@ -659,12 +660,13 @@ class MatchCommands(commands.Cog):
         for (_r_role, r_line), (_d_role, d_line) in zip(radiant_sorted, dire_sorted):
             head_to_head.append(f"{r_line}  |  {d_line}")
 
-        # Build embed title with bomb pot banner if applicable
+        # Build embed title with match ID and bomb pot banner if applicable
+        match_label = f"Match #{pending_match_id} — " if pending_match_id else ""
         if is_bomb_pot:
-            embed_title = "💣 BOMB POT 💣 Balanced Team Shuffle"
+            embed_title = f"💣 BOMB POT 💣 {match_label}Balanced Team Shuffle"
             embed_color = discord.Color.orange()
         else:
-            embed_title = "Balanced Team Shuffle"
+            embed_title = f"{match_label}Balanced Team Shuffle"
             embed_color = discord.Color.blue()
 
         embed = discord.Embed(title=embed_title, color=embed_color)
@@ -722,7 +724,7 @@ class MatchCommands(commands.Cog):
                 self.player_service.increment_exclusion_count_half(pid, guild_id)
 
             # Store excluded conditional IDs in shuffle state for jopacoin bonus at record time
-            pending_state = self.match_service.get_last_shuffle(guild_id)
+            pending_state = self.match_service.get_last_shuffle(guild_id, pending_match_id=pending_match_id)
             if pending_state:
                 pending_state["excluded_conditional_player_ids"] = excluded_conditional_ids
                 self.match_service.set_last_shuffle(guild_id, pending_state)
@@ -779,7 +781,7 @@ class MatchCommands(commands.Cog):
         totals = {"radiant": 0, "dire": 0}
         lock_until = None
         if betting_service:
-            pending_state = self.match_service.get_last_shuffle(guild_id)
+            pending_state = self.match_service.get_last_shuffle(guild_id, pending_match_id=pending_match_id)
             totals = betting_service.get_pot_odds(guild_id, pending_state=pending_state)
             lock_until = pending_state.get("bet_lock_until") if pending_state else None
 
@@ -789,11 +791,8 @@ class MatchCommands(commands.Cog):
         embed.add_field(name=wager_field_name, value=wager_field_value, inline=False)
 
         # Add match quality indicators to footer (subtle display)
-        # Include pending_match_id for concurrent match identification
         glicko_prob = result.get("glicko_radiant_win_prob", 0.5)
         os_prob = result.get("openskill_radiant_win_prob", 0.5)
-        pending_state = self.match_service.get_last_shuffle(guild_id)
-        pending_match_id = pending_state.get("pending_match_id") if pending_state else None
         if pending_match_id:
             embed.set_footer(text=f"Match #{pending_match_id} | {glicko_prob:.2f} {os_prob:.2f}")
         else:

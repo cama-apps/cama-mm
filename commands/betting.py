@@ -937,7 +937,11 @@ class BettingCommands(commands.Cog):
         await interaction.followup.send(base_msg, ephemeral=True)
 
     @app_commands.command(name="bets", description="Show all bets in the current pool")
-    async def bets(self, interaction: discord.Interaction):
+    @app_commands.describe(
+        match="Match to view bets for (auto-selects if only one match exists)",
+    )
+    @app_commands.autocomplete(match=match_autocomplete)
+    async def bets(self, interaction: discord.Interaction, match: int = None):
         """View all bets in the current pool."""
         if not has_admin_permission(interaction):
             guild = interaction.guild if interaction.guild else None
@@ -960,10 +964,56 @@ class BettingCommands(commands.Cog):
             return
 
         guild_id = interaction.guild.id if interaction.guild else None
-        pending_state = await asyncio.to_thread(self.match_service.get_last_shuffle, guild_id)
+        user_id = interaction.user.id
+
+        # Handle match selection for concurrent match support
+        pending_state = None
+        pending_match_id = match  # Optional match ID from parameter
+
+        if pending_match_id is not None:
+            # Explicit match ID provided - use that specific match
+            pending_state = await asyncio.to_thread(
+                self.match_service.state_service.get_last_shuffle, guild_id, pending_match_id
+            )
+            if not pending_state:
+                await interaction.followup.send(
+                    f"❌ Match #{pending_match_id} not found or already completed.", ephemeral=True
+                )
+                return
+        else:
+            # No match specified - try auto-detection
+            all_pending = await asyncio.to_thread(
+                self.match_service.state_service.get_all_pending_matches, guild_id
+            )
+            if not all_pending:
+                await interaction.followup.send("No active match to show bets for.", ephemeral=True)
+                return
+
+            if len(all_pending) == 1:
+                # Single match - use it (backward compatible)
+                pending_state = all_pending[0]
+            else:
+                # Multiple matches - try to find one the user is in
+                player_match = await asyncio.to_thread(
+                    self.match_service.state_service.get_pending_match_for_player, guild_id, user_id
+                )
+                if player_match:
+                    pending_state = player_match
+                else:
+                    # User is a spectator with multiple matches - require explicit selection
+                    match_list = ", ".join(f"Match #{m.get('pending_match_id')}" for m in all_pending if m.get('pending_match_id'))
+                    await interaction.followup.send(
+                        f"❌ Multiple matches in progress ({match_list}). "
+                        "Please specify which match to view using the `match` parameter.",
+                        ephemeral=True,
+                    )
+                    return
+
         if not pending_state:
             await interaction.followup.send("No active match to show bets for.", ephemeral=True)
             return
+
+        pending_match_id = pending_state.get("pending_match_id")
 
         all_bets = await asyncio.to_thread(
             functools.partial(self.betting_service.get_all_pending_bets, guild_id, pending_state=pending_state)
@@ -981,8 +1031,9 @@ class BettingCommands(commands.Cog):
         dire_mult = total_pool / totals["dire"] if totals["dire"] > 0 else None
 
         # Build embed
+        match_label = f"Match #{pending_match_id} — " if pending_match_id else ""
         embed = discord.Embed(
-            title=f"📊 Pool Bets ({len(all_bets)} bets)",
+            title=f"📊 {match_label}Pool Bets ({len(all_bets)} bets)",
             color=discord.Color.gold(),
         )
 
