@@ -8,9 +8,10 @@ import json
 import time
 
 from repositories.base_repository import BaseRepository
+from repositories.interfaces import IDisburseRepository
 
 
-class DisburseRepository(BaseRepository):
+class DisburseRepository(BaseRepository, IDisburseRepository):
     """
     Handles CRUD operations for disburse_proposals and disburse_votes tables.
     """

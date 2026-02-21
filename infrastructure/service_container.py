@@ -266,6 +266,7 @@ class ServiceContainer:
             match_repo=self._repos.match,
             bankruptcy_service=self._services["bankruptcy"],
             loan_service=self._services["loan"],
+            loan_repo=self._services["loan_repo"],
         )
 
         # Predictions

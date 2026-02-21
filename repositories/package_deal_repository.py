@@ -7,6 +7,7 @@ import time
 from dataclasses import dataclass
 
 from repositories.base_repository import BaseRepository
+from repositories.interfaces import IPackageDealRepository
 
 logger = logging.getLogger("cama_bot.repositories.package_deal")
 
@@ -24,7 +25,7 @@ class PackageDeal:
     updated_at: int
 
 
-class PackageDealRepository(BaseRepository):
+class PackageDealRepository(BaseRepository, IPackageDealRepository):
     """Repository for package deal feature."""
 
     def create_or_extend_deal(

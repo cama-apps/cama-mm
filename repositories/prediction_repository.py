@@ -115,6 +115,17 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                 (status, prediction_id),
             )
 
+    def close_prediction_betting(self, prediction_id: int, closes_at: int) -> None:
+        """Lock a prediction and set closes_at to the given timestamp.
+
+        Used to close betting early so resolution voting can proceed.
+        """
+        with self.connection() as conn:
+            conn.execute(
+                "UPDATE predictions SET status = 'locked', closes_at = ? WHERE prediction_id = ?",
+                (closes_at, prediction_id),
+            )
+
     def update_prediction_discord_ids(
         self,
         prediction_id: int,

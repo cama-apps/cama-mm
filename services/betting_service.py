@@ -3,7 +3,6 @@ Handles betting-related business logic.
 """
 
 import logging
-import math
 import time
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -100,44 +99,17 @@ class BettingService:
         team_total = current_totals[team]
         odds_at_placement = total_pool / team_total if team_total > 0 and total_pool > 0 else None
 
-        # Prefer atomic placement using DB pending match payload (also enforces lock + team restriction).
-        if hasattr(self.bet_repo, "place_bet_against_pending_match_atomic"):
-            self.bet_repo.place_bet_against_pending_match_atomic(
-                guild_id=guild_id,
-                discord_id=discord_id,
-                team=team,
-                amount=amount,
-                bet_time=now_ts,
-                leverage=leverage,
-                max_debt=self.max_debt,
-                odds_at_placement=odds_at_placement,
-                pending_match_id=pending_match_id,
-            )
-            return
-
-        # Fallback: enforce timing and team restriction using in-memory pending_state.
-        self._enforce_team_restriction(discord_id, team, pending_state)
-
-        # Prefer atomic placement (balance debit + bet insert in one transaction).
-        if hasattr(self.bet_repo, "place_bet_atomic"):
-            self.bet_repo.place_bet_atomic(
-                guild_id=guild_id,
-                discord_id=discord_id,
-                team=team,
-                amount=amount,
-                bet_time=now_ts,
-                since_ts=int(since_ts),
-                leverage=leverage,
-                max_debt=self.max_debt,
-                odds_at_placement=odds_at_placement,
-                pending_match_id=pending_match_id,
-            )
-            return
-
-        # No atomic method available - this should not happen in production
-        raise NotImplementedError(
-            "BetRepository must implement place_bet_atomic or "
-            "place_bet_against_pending_match_atomic for safe bet placement."
+        # Atomic placement using DB pending match payload (enforces lock + team restriction).
+        self.bet_repo.place_bet_against_pending_match_atomic(
+            guild_id=guild_id,
+            discord_id=discord_id,
+            team=team,
+            amount=amount,
+            bet_time=now_ts,
+            leverage=leverage,
+            max_debt=self.max_debt,
+            odds_at_placement=odds_at_placement,
+            pending_match_id=pending_match_id,
         )
 
     def award_participation(
@@ -197,11 +169,7 @@ class BettingService:
 
         # Otherwise, bulk add without garnishment tracking
         deltas = dict.fromkeys(player_ids, total_reward)
-        if hasattr(self.player_repo, "add_balance_many"):
-            self.player_repo.add_balance_many(deltas, guild_id=guild_id)  # type: ignore[attr-defined]
-        else:
-            for pid in player_ids:
-                self.player_repo.add_balance(pid, guild_id, total_reward)
+        self.player_repo.add_balance_many(deltas, guild_id=guild_id)
 
         for pid in player_ids:
             results[pid] = {"gross": total_reward, "garnished": 0, "net": total_reward, "bomb_pot_bonus": bomb_pot_bonus}
@@ -224,98 +192,16 @@ class BettingService:
         betting_mode = pending_state.get("betting_mode", "pool")
         pending_match_id = pending_state.get("pending_match_id")
 
-        # Prefer atomic settlement (payouts + bet tagging in one DB transaction)
-        if hasattr(self.bet_repo, "settle_pending_bets_atomic"):
-            return self.bet_repo.settle_pending_bets_atomic(
-                match_id=match_id,
-                guild_id=guild_id,
-                since_ts=int(since_ts),
-                winning_team=winning_team,
-                house_payout_multiplier=HOUSE_PAYOUT_MULTIPLIER,
-                betting_mode=betting_mode,
-                pending_match_id=pending_match_id,
-            )
-
-        # Fallback (older behavior) - only supports house mode
-        bets = self.bet_repo.get_bets_for_pending_match(guild_id, since_ts=since_ts, pending_match_id=pending_match_id)
-        distributions: dict[str, list[dict]] = {"winners": [], "losers": []}
-        if not bets:
-            return distributions
-
-        self.bet_repo.assign_match_id(guild_id, match_id, since_ts=since_ts, pending_match_id=pending_match_id)
-
-        if betting_mode == "pool":
-            return self._settle_pool_bets_fallback(bets, winning_team, guild_id)
-        else:
-            return self._settle_house_bets_fallback(bets, winning_team, guild_id)
-
-    def _settle_house_bets_fallback(
-        self, bets: list[dict], winning_team: str, guild_id: int | None = None
-    ) -> dict[str, list[dict]]:
-        """House mode fallback: 1:1 payouts."""
-        distributions: dict[str, list[dict]] = {"winners": [], "losers": []}
-
-        for bet in bets:
-            outcome_entry = {
-                "discord_id": bet["discord_id"],
-                "amount": bet["amount"],
-                "team": bet["team_bet_on"],
-            }
-            if bet["team_bet_on"] != winning_team:
-                distributions["losers"].append(outcome_entry)
-                continue
-
-            payout = int(bet["amount"] * (1 + HOUSE_PAYOUT_MULTIPLIER))
-            self.player_repo.add_balance(bet["discord_id"], guild_id, payout)
-            outcome_entry["payout"] = payout
-            distributions["winners"].append(outcome_entry)
-
-        return distributions
-
-    def _settle_pool_bets_fallback(
-        self, bets: list[dict], winning_team: str, guild_id: int | None = None
-    ) -> dict[str, list[dict]]:
-        """Pool mode fallback: proportional payouts from total pool."""
-        distributions: dict[str, list[dict]] = {"winners": [], "losers": []}
-
-        # Calculate totals
-        total_pool = sum(bet["amount"] for bet in bets)
-        winner_pool = sum(bet["amount"] for bet in bets if bet["team_bet_on"] == winning_team)
-
-        # Edge case: no bets on winning side - refund all bets
-        if winner_pool == 0:
-            for bet in bets:
-                self.player_repo.add_balance(bet["discord_id"], guild_id, bet["amount"])
-                distributions["losers"].append(
-                    {
-                        "discord_id": bet["discord_id"],
-                        "amount": bet["amount"],
-                        "team": bet["team_bet_on"],
-                        "refunded": True,
-                    }
-                )
-            return distributions
-
-        for bet in bets:
-            outcome_entry = {
-                "discord_id": bet["discord_id"],
-                "amount": bet["amount"],
-                "team": bet["team_bet_on"],
-            }
-            if bet["team_bet_on"] != winning_team:
-                distributions["losers"].append(outcome_entry)
-                continue
-
-            # Proportional payout: (bet_amount / winner_pool) * total_pool
-            # Round up to ensure winners never lose fractional coins
-            payout = math.ceil((bet["amount"] / winner_pool) * total_pool)
-            multiplier = total_pool / winner_pool
-            self.player_repo.add_balance(bet["discord_id"], guild_id, payout)
-            outcome_entry["payout"] = payout
-            outcome_entry["multiplier"] = multiplier
-            distributions["winners"].append(outcome_entry)
-
-        return distributions
+        # Atomic settlement (payouts + bet tagging in one DB transaction)
+        return self.bet_repo.settle_pending_bets_atomic(
+            match_id=match_id,
+            guild_id=guild_id,
+            since_ts=int(since_ts),
+            winning_team=winning_team,
+            house_payout_multiplier=HOUSE_PAYOUT_MULTIPLIER,
+            betting_mode=betting_mode,
+            pending_match_id=pending_match_id,
+        )
 
     def award_win_bonus(
         self, winning_ids: list[int], guild_id: int | None = None
@@ -503,27 +389,9 @@ class BettingService:
         if pending_match_id is None:
             pending_match_id = pending_state.get("pending_match_id")
 
-        if hasattr(self.bet_repo, "refund_pending_bets_atomic"):
-            return self.bet_repo.refund_pending_bets_atomic(
-                guild_id=guild_id, since_ts=int(since_ts), pending_match_id=pending_match_id
-            )
-
-        bets = self.bet_repo.get_bets_for_pending_match(guild_id, since_ts=since_ts, pending_match_id=pending_match_id)
-        if not bets:
-            return 0
-
-        for bet in bets:
-            self.player_repo.add_balance(bet["discord_id"], guild_id, bet["amount"])
-
-        return self.bet_repo.delete_pending_bets(guild_id, since_ts=since_ts, pending_match_id=pending_match_id)
-
-    def _enforce_team_restriction(self, discord_id: int, team: str, state: dict[str, Any]) -> None:
-        radiant = set(state.get("radiant_team_ids", []))
-        dire = set(state.get("dire_team_ids", []))
-        if discord_id in radiant and team != "radiant":
-            raise ValueError("Participants on Radiant can only bet on Radiant.")
-        if discord_id in dire and team != "dire":
-            raise ValueError("Participants on Dire can only bet on Dire.")
+        return self.bet_repo.refund_pending_bets_atomic(
+            guild_id=guild_id, since_ts=int(since_ts), pending_match_id=pending_match_id
+        )
 
     def create_auto_blind_bets(
         self,

@@ -321,29 +321,15 @@ class WrappedService:
             return None
 
         # Query player's match stats for the period
-        with self.wrapped_repo.cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT
-                    COUNT(DISTINCT m.match_id) as games_played,
-                    SUM(CASE WHEN mp.won = 1 THEN 1 ELSE 0 END) as wins,
-                    SUM(CASE WHEN mp.won = 0 THEN 1 ELSE 0 END) as losses
-                FROM match_participants mp
-                JOIN matches m ON mp.match_id = m.match_id
-                WHERE mp.discord_id = ?
-                  AND m.winning_team IS NOT NULL
-                  AND m.match_date >= datetime(?, 'unixepoch')
-                  AND m.match_date < datetime(?, 'unixepoch')
-                """,
-                (discord_id, start_ts, end_ts),
-            )
-            row = cursor.fetchone()
-            if not row or row["games_played"] == 0:
-                return None
+        match_details = self.wrapped_repo.get_month_player_match_details(
+            discord_id, guild_id, start_ts, end_ts
+        )
+        if not match_details:
+            return None
 
-            games_played = row["games_played"]
-            wins = row["wins"] or 0
-            losses = row["losses"] or 0
+        games_played = match_details["games_played"]
+        wins = match_details["wins"]
+        losses = match_details["losses"]
 
         # Get rating change
         rating_changes = self.wrapped_repo.get_month_rating_changes(0, start_ts, end_ts)

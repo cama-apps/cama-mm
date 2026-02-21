@@ -15,12 +15,15 @@ class IPlayerRepository(ABC):
         discord_username: str,
         guild_id: int,
         dotabuff_url: str | None = None,
+        steam_id: int | None = None,
         initial_mmr: int | None = None,
         preferred_roles: list[str] | None = None,
         main_role: str | None = None,
         glicko_rating: float | None = None,
         glicko_rd: float | None = None,
         glicko_volatility: float | None = None,
+        os_mu: float | None = None,
+        os_sigma: float | None = None,
     ) -> None: ...
 
     @abstractmethod
@@ -89,8 +92,8 @@ class IPlayerRepository(ABC):
     def delete_fake_users(self, guild_id: int) -> int: ...
 
     @abstractmethod
-    def get_by_steam_id(self, steam_id: int):
-        """Get player by Steam ID (32-bit account_id)."""
+    def get_by_steam_id(self, steam_id: int, guild_id: int):
+        """Get player by Steam ID (32-bit account_id) within a guild."""
         ...
 
     @abstractmethod
@@ -136,8 +139,8 @@ class IPlayerRepository(ABC):
         ...
 
     @abstractmethod
-    def get_player_by_any_steam_id(self, steam_id: int):
-        """Get player by any of their Steam IDs."""
+    def get_player_by_any_steam_id(self, steam_id: int, guild_id: int):
+        """Get player by any of their Steam IDs within a guild."""
         ...
 
     @abstractmethod
@@ -166,6 +169,31 @@ class IPlayerRepository(ABC):
         Returns:
             Dict with 'amount', 'thief_new_balance', 'victim_new_balance'
         """
+        ...
+
+    @abstractmethod
+    def add_balance_many(self, deltas_by_discord_id: dict[int, int], guild_id: int) -> None:
+        """Apply multiple balance deltas in a single transaction."""
+        ...
+
+    @abstractmethod
+    def get_leaderboard(self, guild_id: int, limit: int = 20, offset: int = 0) -> list:
+        """Get players for leaderboard, sorted by jopacoin balance descending."""
+        ...
+
+    @abstractmethod
+    def get_lowest_balance(self, discord_id: int, guild_id: int) -> int | None:
+        """Get a player's lowest balance ever recorded."""
+        ...
+
+    @abstractmethod
+    def update_lowest_balance_if_lower(self, discord_id: int, guild_id: int, new_balance: int) -> bool:
+        """Update lowest_balance_ever if new_balance is lower than current record."""
+        ...
+
+    @abstractmethod
+    def get_all_registered_players_for_lottery(self, guild_id: int, activity_days: int = 14) -> list[dict]:
+        """Get recently active players for lottery selection."""
         ...
 
 
@@ -204,6 +232,90 @@ class IBetRepository(ABC):
     @abstractmethod
     def get_bets_on_player_matches(self, target_discord_id: int) -> list[dict]:
         """Get all bets by OTHER players on matches where target participated."""
+        ...
+
+    @abstractmethod
+    def place_bet_atomic(
+        self,
+        *,
+        guild_id: int | None,
+        discord_id: int,
+        team: str,
+        amount: int,
+        bet_time: int,
+        since_ts: int,
+        leverage: int = 1,
+        max_debt: int = 500,
+        is_blind: bool = False,
+        odds_at_placement: float | None = None,
+        allow_negative: bool = False,
+        pending_match_id: int | None = None,
+    ) -> int:
+        """Atomically place a bet (balance debit + bet insert in one transaction)."""
+        ...
+
+    @abstractmethod
+    def place_bet_against_pending_match_atomic(
+        self,
+        *,
+        guild_id: int | None,
+        discord_id: int,
+        team: str,
+        amount: int,
+        bet_time: int,
+        leverage: int = 1,
+        max_debt: int = 500,
+        is_blind: bool = False,
+        odds_at_placement: float | None = None,
+        pending_match_id: int | None = None,
+    ) -> int:
+        """Atomically place a bet using the DB pending match as source of truth."""
+        ...
+
+    @abstractmethod
+    def settle_pending_bets_atomic(
+        self,
+        *,
+        match_id: int,
+        guild_id: int | None,
+        since_ts: int,
+        winning_team: str,
+        house_payout_multiplier: float,
+        betting_mode: str = "pool",
+        pending_match_id: int | None = None,
+    ) -> dict:
+        """Atomically settle bets for the current match window."""
+        ...
+
+    @abstractmethod
+    def refund_pending_bets_atomic(
+        self,
+        *,
+        guild_id: int | None,
+        since_ts: int,
+        pending_match_id: int | None = None,
+    ) -> int:
+        """Atomically refund + delete pending bets. Returns number of bets refunded."""
+        ...
+
+    @abstractmethod
+    def get_player_pending_bets(
+        self,
+        guild_id: int | None,
+        discord_id: int,
+        since_ts: int | None = None,
+        pending_match_id: int | None = None,
+    ) -> list[dict]:
+        """Return all bets placed by a player for the pending match in the guild."""
+        ...
+
+    @abstractmethod
+    def get_all_player_pending_bets(
+        self,
+        guild_id: int | None,
+        discord_id: int,
+    ) -> list[dict]:
+        """Return all pending bets for a player across ALL pending matches."""
         ...
 
 
@@ -264,7 +376,6 @@ class IMatchRepository(ABC):
     def add_match_prediction(
         self,
         match_id: int,
-        guild_id: int,
         radiant_rating: float,
         dire_rating: float,
         radiant_rd: float,
@@ -285,16 +396,16 @@ class IMatchRepository(ABC):
     def delete_all_matches(self, guild_id: int) -> int: ...
 
     @abstractmethod
-    def save_pending_match(self, guild_id: int | None, payload: dict) -> None: ...
+    def save_pending_match(self, guild_id: int | None, payload: dict) -> int: ...
 
     @abstractmethod
     def get_pending_match(self, guild_id: int | None) -> dict | None: ...
 
     @abstractmethod
-    def clear_pending_match(self, guild_id: int | None) -> None: ...
+    def clear_pending_match(self, guild_id: int | None, pending_match_id: int | None = None) -> None: ...
 
     @abstractmethod
-    def consume_pending_match(self, guild_id: int | None) -> dict | None: ...
+    def consume_pending_match(self, guild_id: int | None, pending_match_id: int | None = None) -> dict | None: ...
 
     @abstractmethod
     def get_player_hero_stats(self, discord_id: int, guild_id: int) -> dict:
@@ -304,6 +415,26 @@ class IMatchRepository(ABC):
     @abstractmethod
     def get_last_match_participant_ids(self, guild_id: int) -> set[int]:
         """Get Discord IDs of participants from the most recently recorded match."""
+        ...
+
+    @abstractmethod
+    def get_pending_match_by_id(self, pending_match_id: int) -> dict | None:
+        """Get a specific pending match by its ID."""
+        ...
+
+    @abstractmethod
+    def get_pending_matches(self, guild_id: int | None) -> list[dict]:
+        """Get all pending matches for a guild."""
+        ...
+
+    @abstractmethod
+    def update_pending_match(self, pending_match_id: int, payload: dict) -> None:
+        """Update an existing pending match's payload."""
+        ...
+
+    @abstractmethod
+    def update_match_result(self, match_id: int, new_winning_team: int) -> None:
+        """Update the winning_team for a match."""
         ...
 
 

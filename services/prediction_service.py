@@ -462,11 +462,7 @@ class PredictionService:
 
         # Lock and set closes_at to now so resolution voting can proceed
         now = int(time.time())
-        with self.prediction_repo.connection() as conn:
-            conn.execute(
-                "UPDATE predictions SET status = 'locked', closes_at = ? WHERE prediction_id = ?",
-                (now, prediction_id),
-            )
+        self.prediction_repo.close_prediction_betting(prediction_id, now)
 
         return {
             "prediction_id": prediction_id,

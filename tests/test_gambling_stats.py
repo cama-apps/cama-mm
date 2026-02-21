@@ -53,6 +53,7 @@ def gambling_stats_service(repositories):
         player_repo=repositories["player_repo"],
         match_repo=repositories["match_repo"],
         bankruptcy_service=bankruptcy_service,
+        loan_repo=repositories["loan_repo"],
     )
 
 

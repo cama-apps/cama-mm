@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, TypedDict
 
 if TYPE_CHECKING:
     from repositories.bet_repository import BetRepository
+    from repositories.loan_repository import LoanRepository
     from repositories.match_repository import MatchRepository
     from repositories.player_repository import PlayerRepository
     from services.bankruptcy_service import BankruptcyService
@@ -197,12 +198,14 @@ class GamblingStatsService:
         match_repo: "MatchRepository",
         bankruptcy_service: "BankruptcyService | None" = None,
         loan_service: "LoanService | None" = None,
+        loan_repo: "LoanRepository | None" = None,
     ):
         self.bet_repo = bet_repo
         self.player_repo = player_repo
         self.match_repo = match_repo
         self.bankruptcy_service = bankruptcy_service
         self.loan_service = loan_service
+        self.loan_repo = loan_repo
 
     def get_player_stats(self, discord_id: int, guild_id: int | None = None) -> GambaStats | None:
         """Get complete gambling statistics for a player."""
@@ -421,37 +424,12 @@ class GamblingStatsService:
         total_matches = self.bet_repo.get_total_settled_matches(guild_id)
 
         # Batch fetch lowest balances for all players
-        lowest_balances = {}
-        if discord_ids:
-            placeholders = ",".join("?" * len(discord_ids))
-            with self.player_repo.connection() as conn:
-                cursor = conn.cursor()
-                normalized_guild = guild_id if guild_id is not None else 0
-                cursor.execute(
-                    f"SELECT discord_id, lowest_balance_ever FROM players WHERE guild_id = ? AND discord_id IN ({placeholders})",
-                    [normalized_guild] + discord_ids,
-                )
-                for row in cursor.fetchall():
-                    lowest_balances[row["discord_id"]] = row["lowest_balance_ever"]
+        lowest_balances = self.player_repo.get_lowest_balances_bulk(discord_ids, guild_id) if discord_ids else {}
 
-        # Batch fetch negative loans if loan_service available
+        # Batch fetch negative loans if loan_repo available
         negative_loans_by_id: dict[int, int] = {}
-        if self.loan_service and discord_ids:
-            # Get negative loans in bulk from loan_state table
-            placeholders = ",".join("?" * len(discord_ids))
-            with self.bet_repo.connection() as conn:
-                cursor = conn.cursor()
-                normalized_guild = guild_id if guild_id is not None else 0
-                cursor.execute(
-                    f"""
-                    SELECT discord_id, COALESCE(negative_loans_taken, 0) as negative_loans
-                    FROM loan_state
-                    WHERE guild_id = ? AND discord_id IN ({placeholders})
-                    """,
-                    [normalized_guild] + discord_ids,
-                )
-                for row in cursor.fetchall():
-                    negative_loans_by_id[row["discord_id"]] = row["negative_loans"]
+        if self.loan_repo and discord_ids:
+            negative_loans_by_id = self.loan_repo.get_negative_loans_bulk(discord_ids, guild_id)
 
         # Build entries with batch-computed degen scores
         entries: list[LeaderboardEntry] = []
@@ -514,21 +492,7 @@ class GamblingStatsService:
         total_bankruptcies = sum(bulk_bankruptcy.values())
 
         # Count total loans taken (server-wide aggregate stat)
-        total_loans = 0
-        normalized_guild = guild_id if guild_id is not None else 0
-        with self.bet_repo.connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                SELECT COALESCE(SUM(total_loans_taken), 0) as total
-                FROM loan_state
-                WHERE guild_id = ?
-                """,
-                (normalized_guild,),
-            )
-            row = cursor.fetchone()
-            if row:
-                total_loans = row["total"]
+        total_loans = self.loan_repo.get_total_loans_taken(guild_id) if self.loan_repo else 0
 
         # Build server stats
         unique_gamblers = len(summaries)
