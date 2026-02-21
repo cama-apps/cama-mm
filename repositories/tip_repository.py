@@ -5,9 +5,10 @@ Repository for tip transaction logging.
 import time
 
 from repositories.base_repository import BaseRepository
+from repositories.interfaces import ITipRepository
 
 
-class TipRepository(BaseRepository):
+class TipRepository(BaseRepository, ITipRepository):
     """
     Repository for logging tip transactions.
     """

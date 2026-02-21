@@ -7,6 +7,7 @@ import time
 from dataclasses import dataclass
 
 from repositories.base_repository import BaseRepository
+from repositories.interfaces import ISoftAvoidRepository
 
 logger = logging.getLogger("cama_bot.repositories.soft_avoid")
 
@@ -23,7 +24,7 @@ class SoftAvoid:
     updated_at: int
 
 
-class SoftAvoidRepository(BaseRepository):
+class SoftAvoidRepository(BaseRepository, ISoftAvoidRepository):
     """Repository for soft avoid feature."""
 
     def create_or_extend_avoid(

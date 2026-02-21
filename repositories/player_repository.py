@@ -1118,6 +1118,30 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 (discord_id, guild_id),
             )
 
+    def correct_win_loss_counts(
+        self,
+        old_winner_ids: list[int],
+        old_loser_ids: list[int],
+        guild_id: int,
+    ) -> None:
+        """Swap win/loss counts for match correction.
+
+        Old winners get wins--, losses++. Old losers get losses--, wins++.
+        """
+        normalized_guild = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            for pid in old_winner_ids:
+                cursor.execute(
+                    "UPDATE players SET wins = wins - 1, losses = losses + 1 WHERE discord_id = ? AND guild_id = ?",
+                    (pid, normalized_guild),
+                )
+            for pid in old_loser_ids:
+                cursor.execute(
+                    "UPDATE players SET losses = losses - 1, wins = wins + 1 WHERE discord_id = ? AND guild_id = ?",
+                    (pid, normalized_guild),
+                )
+
     def apply_match_outcome(self, winning_ids: list[int], losing_ids: list[int], guild_id: int) -> None:
         """
         Apply win/loss increments for a match in a single transaction.
@@ -1496,6 +1520,23 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             )
             row = cursor.fetchone()
             return row["lowest_balance_ever"] if row and row["lowest_balance_ever"] is not None else None
+
+    def get_lowest_balances_bulk(self, discord_ids: list[int], guild_id: int) -> dict[int, int | None]:
+        """Get lowest_balance_ever for multiple players in a single query.
+
+        Returns dict of {discord_id: lowest_balance_ever}.
+        """
+        if not discord_ids:
+            return {}
+        normalized_guild = self.normalize_guild_id(guild_id)
+        placeholders = ",".join("?" * len(discord_ids))
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"SELECT discord_id, lowest_balance_ever FROM players WHERE guild_id = ? AND discord_id IN ({placeholders})",
+                [normalized_guild] + list(discord_ids),
+            )
+            return {row["discord_id"]: row["lowest_balance_ever"] for row in cursor.fetchall()}
 
     def update_lowest_balance_if_lower(self, discord_id: int, guild_id: int, new_balance: int) -> bool:
         """

@@ -13,11 +13,12 @@ import sqlite3
 from contextlib import contextmanager
 
 from repositories.base_repository import BaseRepository
+from repositories.interfaces import IAIQueryRepository
 
 logger = logging.getLogger("cama_bot.repositories.ai_query")
 
 
-class AIQueryRepository(BaseRepository):
+class AIQueryRepository(BaseRepository, IAIQueryRepository):
     """
     Repository for executing AI-generated SQL queries safely.
 

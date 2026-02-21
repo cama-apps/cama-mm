@@ -175,6 +175,36 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 ),
             )
 
+    def update_rating_history_openskill(
+        self,
+        match_id: int,
+        discord_id: int,
+        os_mu_before: float,
+        os_mu_after: float,
+        os_sigma_before: float,
+        os_sigma_after: float,
+        fantasy_weight: float | None,
+    ) -> bool:
+        """Update an existing rating_history entry with OpenSkill data.
+
+        Returns True if a row was updated, False if no entry found.
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE rating_history
+                SET os_mu_before = ?,
+                    os_mu_after = ?,
+                    os_sigma_before = ?,
+                    os_sigma_after = ?,
+                    fantasy_weight = ?
+                WHERE match_id = ? AND discord_id = ?
+                """,
+                (os_mu_before, os_mu_after, os_sigma_before, os_sigma_after, fantasy_weight, match_id, discord_id),
+            )
+            return cursor.rowcount > 0
+
     def save_pending_match(self, guild_id: int | None, payload: dict) -> int:
         """
         Save a pending match and return its ID.

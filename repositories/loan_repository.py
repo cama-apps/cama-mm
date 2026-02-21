@@ -377,3 +377,43 @@ class LoanRepository(BaseRepository):
             )
 
             return total
+
+    def get_negative_loans_bulk(self, discord_ids: list[int], guild_id: int) -> dict[int, int]:
+        """Get negative_loans_taken for multiple players in a single query.
+
+        Returns dict of {discord_id: negative_loans_taken}.
+        """
+        if not discord_ids:
+            return {}
+        normalized_guild = self.normalize_guild_id(guild_id)
+        placeholders = ",".join("?" * len(discord_ids))
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"""
+                SELECT discord_id, COALESCE(negative_loans_taken, 0) as negative_loans
+                FROM loan_state
+                WHERE guild_id = ? AND discord_id IN ({placeholders})
+                """,
+                [normalized_guild] + list(discord_ids),
+            )
+            return {row["discord_id"]: row["negative_loans"] for row in cursor.fetchall()}
+
+    def get_total_loans_taken(self, guild_id: int) -> int:
+        """Get total number of loans taken server-wide.
+
+        Returns the sum of total_loans_taken across all players in the guild.
+        """
+        normalized_guild = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT COALESCE(SUM(total_loans_taken), 0) as total
+                FROM loan_state
+                WHERE guild_id = ?
+                """,
+                (normalized_guild,),
+            )
+            row = cursor.fetchone()
+            return row["total"] if row else 0

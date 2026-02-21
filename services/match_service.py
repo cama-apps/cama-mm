@@ -1116,33 +1116,19 @@ class MatchService:
         If no existing entry exists, this is a no-op (OpenSkill updates happen
         after enrichment, so rating_history should already exist from record_match).
         """
-        # Try to update existing entry
-        with self.match_repo.connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                UPDATE rating_history
-                SET os_mu_before = ?,
-                    os_mu_after = ?,
-                    os_sigma_before = ?,
-                    os_sigma_after = ?,
-                    fantasy_weight = ?
-                WHERE match_id = ? AND discord_id = ?
-                """,
-                (
-                    os_mu_before,
-                    os_mu_after,
-                    os_sigma_before,
-                    os_sigma_after,
-                    fantasy_weight,
-                    match_id,
-                    discord_id,
-                ),
+        updated = self.match_repo.update_rating_history_openskill(
+            match_id=match_id,
+            discord_id=discord_id,
+            os_mu_before=os_mu_before,
+            os_mu_after=os_mu_after,
+            os_sigma_before=os_sigma_before,
+            os_sigma_after=os_sigma_after,
+            fantasy_weight=fantasy_weight,
+        )
+        if not updated:
+            logger.warning(
+                f"No rating_history entry found for match {match_id}, player {discord_id}"
             )
-            if cursor.rowcount == 0:
-                logger.warning(
-                    f"No rating_history entry found for match {match_id}, player {discord_id}"
-                )
 
     def backfill_openskill_ratings(self, guild_id: int | None = None, reset_first: bool = True) -> dict:
         """
@@ -1510,21 +1496,7 @@ class MatchService:
         # Old winners: wins-- | Old losers: losses--
         # New winners: wins++ | New losers: losses++
         # Since old winners become new losers and vice versa, we can just swap
-        normalized_guild_id = guild_id if guild_id is not None else 0
-        with self.player_repo.connection() as conn:
-            cursor = conn.cursor()
-            # Decrement wins for old winners (they become losers)
-            for pid in old_winner_ids:
-                cursor.execute(
-                    "UPDATE players SET wins = wins - 1, losses = losses + 1 WHERE discord_id = ? AND guild_id = ?",
-                    (pid, normalized_guild_id),
-                )
-            # Decrement losses for old losers (they become winners)
-            for pid in old_loser_ids:
-                cursor.execute(
-                    "UPDATE players SET losses = losses - 1, wins = wins + 1 WHERE discord_id = ? AND guild_id = ?",
-                    (pid, normalized_guild_id),
-                )
+        self.player_repo.correct_win_loss_counts(old_winner_ids, old_loser_ids, guild_id)
 
         # 5. Restore pre-match ratings from rating_history
         glicko_updates = []

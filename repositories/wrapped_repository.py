@@ -8,11 +8,12 @@ import time
 from typing import Any
 
 from repositories.base_repository import BaseRepository
+from repositories.interfaces import IWrappedRepository
 
 logger = logging.getLogger("cama_bot.repositories.wrapped")
 
 
-class WrappedRepository(BaseRepository):
+class WrappedRepository(BaseRepository, IWrappedRepository):
     """
     Data access layer for wrapped generation tracking and stats queries.
     """
@@ -419,3 +420,37 @@ class WrappedRepository(BaseRepository):
             result["total_wagered"] = wager_row["total_wagered"] if wager_row else 0
 
             return result
+
+    def get_month_player_match_details(
+        self, discord_id: int, guild_id: int, start_ts: int, end_ts: int
+    ) -> dict | None:
+        """Get a player's match stats (games, wins, losses) for a time period.
+
+        Returns dict with 'games_played', 'wins', 'losses' or None if no games.
+        """
+        guild_id = self.normalize_guild_id(guild_id)
+        with self.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT
+                    COUNT(DISTINCT m.match_id) as games_played,
+                    SUM(CASE WHEN mp.won = 1 THEN 1 ELSE 0 END) as wins,
+                    SUM(CASE WHEN mp.won = 0 THEN 1 ELSE 0 END) as losses
+                FROM match_participants mp
+                JOIN matches m ON mp.match_id = m.match_id
+                WHERE mp.discord_id = ?
+                  AND m.guild_id = ?
+                  AND m.winning_team IS NOT NULL
+                  AND m.match_date >= datetime(?, 'unixepoch')
+                  AND m.match_date < datetime(?, 'unixepoch')
+                """,
+                (discord_id, guild_id, start_ts, end_ts),
+            )
+            row = cursor.fetchone()
+            if not row or row["games_played"] == 0:
+                return None
+            return {
+                "games_played": row["games_played"],
+                "wins": row["wins"] or 0,
+                "losses": row["losses"] or 0,
+            }
