@@ -72,10 +72,6 @@ if _lobby_channel_raw:
         LOBBY_CHANNEL_ID = int(_lobby_channel_raw.strip())
     except ValueError:
         LOBBY_CHANNEL_ID = None
-# Legacy: Not used in current balancing algorithm (replaced by Glicko-2 ratings)
-WIN_LOSS_MULTIPLIER = _parse_int("WIN_LOSS_MULTIPLIER", 200)
-# Legacy: Not used in current balancing algorithm
-MMR_WEIGHT = _parse_float("MMR_WEIGHT", 1.0)
 USE_GLICKO = _parse_bool("USE_GLICKO", True)
 OPENSKILL_SHUFFLE_CHANCE = _parse_float("OPENSKILL_SHUFFLE_CHANCE", 0.10)  # 10% chance per shuffle
 

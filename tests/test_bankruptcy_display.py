@@ -98,8 +98,8 @@ def test_tombstone_shown_for_bankrupted_player(test_services):
     player_repo.add_balance(1002, TEST_GUILD_ID, -200)
 
     # Declare bankruptcy
-    result = bankruptcy_service.declare_bankruptcy(1002, TEST_GUILD_ID)
-    assert result["success"] is True
+    result = bankruptcy_service.execute_bankruptcy(1002, TEST_GUILD_ID)
+    assert result.success
 
     # Check display name includes tombstone
     player = player_repo.get_by_id(1002, TEST_GUILD_ID)
@@ -129,7 +129,7 @@ def test_tombstone_disappears_after_penalty_games(test_services):
         glicko_volatility=0.06,
     )
     player_repo.add_balance(1003, TEST_GUILD_ID, -100)
-    bankruptcy_service.declare_bankruptcy(1003, TEST_GUILD_ID)
+    bankruptcy_service.execute_bankruptcy(1003, TEST_GUILD_ID)
 
     # Initially has tombstone
     player = player_repo.get_by_id(1003, TEST_GUILD_ID)
@@ -171,7 +171,7 @@ def test_tombstone_in_lobby_player_list(test_services):
 
     # Make one bankrupt
     player_repo.add_balance(1005, TEST_GUILD_ID, -100)
-    bankruptcy_service.declare_bankruptcy(1005, TEST_GUILD_ID)
+    bankruptcy_service.execute_bankruptcy(1005, TEST_GUILD_ID)
 
     # Get players and format list
     players = player_repo.get_by_ids([1004, 1005], TEST_GUILD_ID)
@@ -216,7 +216,7 @@ def test_tombstone_in_lobby_embed(test_services):
 
     # Make one bankrupt
     player_repo.add_balance(1011, TEST_GUILD_ID, -100)
-    bankruptcy_service.declare_bankruptcy(1011, TEST_GUILD_ID)
+    bankruptcy_service.execute_bankruptcy(1011, TEST_GUILD_ID)
 
     # Create lobby and add players
     lobby = lobby_manager.get_or_create_lobby(creator_id=1010)
@@ -298,7 +298,7 @@ def test_bankruptcy_state_persistence(test_services):
     # Use first bankruptcy repo instance
     bankruptcy_repo1 = BankruptcyRepository(db_path)
     bankruptcy_service1 = BankruptcyService(bankruptcy_repo1, player_repo)
-    bankruptcy_service1.declare_bankruptcy(1020, TEST_GUILD_ID)
+    bankruptcy_service1.execute_bankruptcy(1020, TEST_GUILD_ID)
 
     # Create new bankruptcy repo instance
     bankruptcy_repo2 = BankruptcyRepository(db_path)
@@ -330,7 +330,7 @@ def test_multiple_bankrupted_players_in_lobby(test_services):
     # Bankrupt players 2001 and 2003
     for player_id in [2001, 2003]:
         player_repo.add_balance(player_id, TEST_GUILD_ID, -100)
-        bankruptcy_service.declare_bankruptcy(player_id, TEST_GUILD_ID)
+        bankruptcy_service.execute_bankruptcy(player_id, TEST_GUILD_ID)
 
     # Format player list
     players = player_repo.get_by_ids(list(range(2000, 2005)), TEST_GUILD_ID)

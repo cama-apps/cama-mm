@@ -147,66 +147,6 @@ class BankruptcyService(IBankruptcyService):
                 )
         return result
 
-    def can_declare_bankruptcy(self, discord_id: int, guild_id: int | None = None) -> dict:
-        """
-        Check if a player can declare bankruptcy.
-
-        Returns:
-            Dict with 'allowed' (bool) and 'reason' (str if not allowed)
-        """
-        balance = self.player_repo.get_balance(discord_id, guild_id)
-        state = self.get_state(discord_id, guild_id)
-
-        if balance >= 0:
-            return {
-                "allowed": False,
-                "reason": "not_in_debt",
-                "balance": balance,
-            }
-
-        if state.is_on_cooldown:
-            return {
-                "allowed": False,
-                "reason": "on_cooldown",
-                "cooldown_ends_at": state.cooldown_ends_at,
-            }
-
-        return {"allowed": True, "debt": abs(balance)}
-
-    def declare_bankruptcy(self, discord_id: int, guild_id: int | None = None) -> dict:
-        """
-        Declare bankruptcy for a player.
-
-        Clears their debt and applies the penalty.
-
-        Returns:
-            Dict with 'success', 'debt_cleared', 'penalty_games'
-        """
-        check = self.can_declare_bankruptcy(discord_id, guild_id)
-        if not check["allowed"]:
-            return {"success": False, **check}
-
-        debt_cleared = check["debt"]
-        now = int(time.time())
-
-        # Clear debt and give fresh start balance
-        self.player_repo.update_balance(discord_id, guild_id, BANKRUPTCY_FRESH_START_BALANCE)
-
-        # Record bankruptcy and set penalty
-        self.bankruptcy_repo.upsert_state(
-            discord_id=discord_id,
-            guild_id=guild_id,
-            last_bankruptcy_at=now,
-            penalty_games_remaining=self.penalty_games,
-        )
-
-        return {
-            "success": True,
-            "debt_cleared": debt_cleared,
-            "penalty_games": self.penalty_games,
-            "penalty_rate": self.penalty_rate,
-        }
-
     def apply_penalty_to_winnings(self, discord_id: int, amount: int, guild_id: int | None = None) -> dict[str, int]:
         """
         Apply bankruptcy penalty to winnings if applicable.

@@ -663,11 +663,18 @@ class MatchService:
                 for player_id in all_participant_ids:
                     state = self.loan_service.get_state(player_id, guild_id)
                     if state.has_outstanding_loan:
-                        result = self.loan_service.repay_loan(player_id, guild_id)
-                        if result.get("success"):
+                        repay_result = self.loan_service.execute_repayment(player_id, guild_id)
+                        if repay_result.success:
+                            r = repay_result.value
                             loan_repayments.append({
                                 "player_id": player_id,
-                                **result,
+                                "success": True,
+                                "principal": r.principal,
+                                "fee": r.fee,
+                                "total_repaid": r.total_repaid,
+                                "balance_before": r.balance_before,
+                                "new_balance": r.new_balance,
+                                "nonprofit_total": r.nonprofit_total,
                             })
 
             # Build Glicko players

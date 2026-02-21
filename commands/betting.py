@@ -1794,21 +1794,23 @@ class BettingCommands(commands.Cog):
             return
 
         # Check if bankruptcy is allowed
-        check = await asyncio.to_thread(self.bankruptcy_service.can_declare_bankruptcy, user_id, guild_id)
+        check = await asyncio.to_thread(self.bankruptcy_service.validate_bankruptcy, user_id, guild_id)
 
-        if not check["allowed"]:
-            if check["reason"] == "not_in_debt":
+        if not check.success:
+            from services import error_codes
+            if check.error_code == error_codes.NOT_IN_DEBT:
                 message = random.choice(BANKRUPTCY_DENIED_MESSAGES)
-                balance = check.get("balance", 0)
+                balance = await asyncio.to_thread(self.player_repo.get_balance, user_id, guild_id)
                 await interaction.followup.send(
                     f"{interaction.user.mention} tried to declare bankruptcy...\n\n"
                     f"{message}\n\nTheir balance: {balance} {JOPACOIN_EMOTE}",
                     ephemeral=False,
                 )
                 return
-            elif check["reason"] == "on_cooldown":
+            elif check.error_code == error_codes.BANKRUPTCY_COOLDOWN:
                 message = random.choice(BANKRUPTCY_COOLDOWN_MESSAGES)
-                cooldown_ends = check.get("cooldown_ends_at")
+                state = await asyncio.to_thread(self.bankruptcy_service.get_state, user_id, guild_id)
+                cooldown_ends = state.cooldown_ends_at
                 cooldown_str = f"<t:{cooldown_ends}:R>" if cooldown_ends else "soon"
                 await interaction.followup.send(
                     f"{interaction.user.mention} tried to declare bankruptcy again...\n\n"
@@ -1826,20 +1828,21 @@ class BettingCommands(commands.Cog):
                 return
 
         # Declare bankruptcy
-        result = await asyncio.to_thread(self.bankruptcy_service.declare_bankruptcy, user_id, guild_id)
+        result = await asyncio.to_thread(self.bankruptcy_service.execute_bankruptcy, user_id, guild_id)
 
-        if not result["success"]:
+        if not result.success:
             await interaction.followup.send(
                 "Something went wrong with your bankruptcy filing. The universe is cruel.",
                 ephemeral=True,
             )
             return
 
+        decl = result.value
         # Format success message
         message = random.choice(BANKRUPTCY_SUCCESS_MESSAGES).format(
-            debt=result["debt_cleared"],
-            games=result["penalty_games"],
-            rate=int(result["penalty_rate"] * 100),
+            debt=decl.debt_cleared,
+            games=decl.penalty_games,
+            rate=int(decl.penalty_rate * 100),
         )
 
         # Try to get AI-generated flavor text
@@ -1851,22 +1854,22 @@ class BettingCommands(commands.Cog):
                     event=FlavorEvent.BANKRUPTCY_DECLARED,
                     discord_id=user_id,
                     event_details={
-                        "debt_cleared": result["debt_cleared"],
-                        "penalty_games": result["penalty_games"],
-                        "penalty_rate": result["penalty_rate"],
+                        "debt_cleared": decl.debt_cleared,
+                        "penalty_games": decl.penalty_games,
+                        "penalty_rate": decl.penalty_rate,
                     },
                 )
             except Exception as e:
                 logger.warning(f"Failed to generate AI flavor for bankruptcy: {e}")
 
-        penalty_rate_pct = int(result["penalty_rate"] * 100)
+        penalty_rate_pct = int(decl.penalty_rate * 100)
         flavor_line = f"\n\n*{ai_flavor}*" if ai_flavor else ""
         await interaction.followup.send(
             f"**{interaction.user.mention} HAS DECLARED BANKRUPTCY**\n\n"
             f"{message}{flavor_line}\n\n"
             f"**Details:**\n"
-            f"Debt cleared: {result['debt_cleared']} {JOPACOIN_EMOTE}\n"
-            f"Penalty: {penalty_rate_pct}% win bonus until you **WIN** {result['penalty_games']} games\n"
+            f"Debt cleared: {decl.debt_cleared} {JOPACOIN_EMOTE}\n"
+            f"Penalty: {penalty_rate_pct}% win bonus until you **WIN** {decl.penalty_games} games\n"
             f"New balance: 0 {JOPACOIN_EMOTE}",
             ephemeral=False,
         )
@@ -1880,7 +1883,7 @@ class BettingCommands(commands.Cog):
             candidates = [
                 lambda: neon.on_bankruptcy(
                     user_id, guild_id,
-                    debt_cleared=result["debt_cleared"],
+                    debt_cleared=decl.debt_cleared,
                     filing_number=filing_number,
                 ),
             ]
@@ -1931,18 +1934,21 @@ class BettingCommands(commands.Cog):
         await interaction.response.defer()
 
         # Check eligibility
-        check = await asyncio.to_thread(self.loan_service.can_take_loan, user_id, amount, guild_id)
+        from services import error_codes as _ec
+        check = await asyncio.to_thread(self.loan_service.validate_loan, user_id, amount, guild_id)
 
-        if not check["allowed"]:
-            if check["reason"] == "has_outstanding_loan":
+        if not check.success:
+            if check.error_code == _ec.LOAN_ALREADY_EXISTS:
+                state = await asyncio.to_thread(self.loan_service.get_state, user_id, guild_id)
                 await interaction.followup.send(
-                    f"You already have an outstanding loan of **{check['outstanding_total']}** {JOPACOIN_EMOTE} "
-                    f"(principal: {check['outstanding_principal']}, fee: {check['outstanding_fee']}).\n\n"
+                    f"You already have an outstanding loan of **{state.outstanding_total}** {JOPACOIN_EMOTE} "
+                    f"(principal: {state.outstanding_principal}, fee: {state.outstanding_fee}).\n\n"
                     "Repay it by playing in a match first!",
                 )
                 return
-            elif check["reason"] == "on_cooldown":
-                remaining = check["cooldown_ends_at"] - int(__import__("time").time())
+            elif check.error_code == _ec.COOLDOWN_ACTIVE:
+                state = await asyncio.to_thread(self.loan_service.get_state, user_id, guild_id)
+                remaining = state.cooldown_ends_at - int(__import__("time").time())
                 hours = remaining // 3600
                 minutes = (remaining % 3600) // 60
                 # Try AI flavor, fallback to static message
@@ -1975,48 +1981,23 @@ class BettingCommands(commands.Cog):
                     except Exception:
                         pass
                 return
-            elif check["reason"] == "exceeds_debt_limit":
-                # Try AI flavor, fallback to static message
-                msg = None
-                if self.flavor_text_service:
-                    try:
-                        msg = await self.flavor_text_service.generate_event_flavor(
-                            guild_id=guild_id,
-                            event=FlavorEvent.LOAN_DENIED_DEBT,
-                            discord_id=user_id,
-                            event_details={
-                                "current_balance": check["current_balance"],
-                                "requested_amount": amount,
-                                "max_debt": MAX_DEBT,
-                            },
-                        )
-                    except Exception as e:
-                        logger.warning(f"Failed to generate AI flavor for loan denied: {e}")
-                if not msg:
-                    msg = random.choice(LOAN_DENIED_DEBT_MESSAGES)
-                await interaction.followup.send(
-                    f"{msg}\n\nCurrent balance: **{check['current_balance']}** {JOPACOIN_EMOTE}",
-                )
+            elif check.error_code == _ec.LOAN_AMOUNT_EXCEEDED:
+                await interaction.followup.send(check.error)
                 return
-            elif check["reason"] == "exceeds_max":
-                await interaction.followup.send(
-                    f"Maximum loan amount is **{check['max_amount']}** {JOPACOIN_EMOTE}.",
-                )
-                return
-            elif check["reason"] == "invalid_amount":
-                await interaction.followup.send(
-                    "Loan amount must be positive.",
-                )
+            else:
+                await interaction.followup.send(check.error)
                 return
 
         # Take the loan
-        result = await asyncio.to_thread(self.loan_service.take_loan, user_id, amount, guild_id)
+        loan_result = await asyncio.to_thread(self.loan_service.execute_loan, user_id, amount, guild_id)
 
-        if not result["success"]:
+        if not loan_result.success:
             await interaction.followup.send(
                 "Failed to process loan. Please try again.", ephemeral=True
             )
             return
+
+        result = loan_result.value
 
         fee_pct = int(LOAN_FEE_RATE * 100)
 
@@ -2025,7 +2006,7 @@ class BettingCommands(commands.Cog):
         if self.flavor_text_service:
             event_type = (
                 FlavorEvent.NEGATIVE_LOAN
-                if result.get("was_negative_loan")
+                if result.was_negative_loan
                 else FlavorEvent.LOAN_TAKEN
             )
             try:
@@ -2034,25 +2015,25 @@ class BettingCommands(commands.Cog):
                     event=event_type,
                     discord_id=user_id,
                     event_details={
-                        "amount": result["amount"],
-                        "fee": result["fee"],
-                        "total_owed": result["total_owed"],
-                        "new_balance": result["new_balance"],
-                        "total_loans_taken": result["total_loans_taken"],
-                        "was_negative_loan": result.get("was_negative_loan", False),
+                        "amount": result.amount,
+                        "fee": result.fee,
+                        "total_owed": result.total_owed,
+                        "new_balance": result.new_balance,
+                        "total_loans_taken": result.total_loans_taken,
+                        "was_negative_loan": result.was_negative_loan,
                     },
                 )
             except Exception as e:
                 logger.warning(f"Failed to generate AI flavor for loan: {e}")
 
         # Check if this was a negative loan (peak degen behavior)
-        if result.get("was_negative_loan"):
+        if result.was_negative_loan:
             # Use AI flavor as main message if available, otherwise fallback to static
             if ai_flavor:
                 msg = ai_flavor
             else:
                 msg = random.choice(NEGATIVE_LOAN_MESSAGES).format(
-                    amount=result["amount"],
+                    amount=result.amount,
                     emote=JOPACOIN_EMOTE,
                 )
             embed = discord.Embed(
@@ -2063,10 +2044,10 @@ class BettingCommands(commands.Cog):
             embed.add_field(
                 name="The Damage",
                 value=(
-                    f"Borrowed: **{result['amount']}** {JOPACOIN_EMOTE}\n"
-                    f"Fee ({fee_pct}%): **{result['fee']}** {JOPACOIN_EMOTE}\n"
-                    f"Total Owed: **{result['total_owed']}** {JOPACOIN_EMOTE}\n"
-                    f"New Balance: **{result['new_balance']}** {JOPACOIN_EMOTE}"
+                    f"Borrowed: **{result.amount}** {JOPACOIN_EMOTE}\n"
+                    f"Fee ({fee_pct}%): **{result.fee}** {JOPACOIN_EMOTE}\n"
+                    f"Total Owed: **{result.total_owed}** {JOPACOIN_EMOTE}\n"
+                    f"New Balance: **{result.new_balance}** {JOPACOIN_EMOTE}"
                 ),
                 inline=False,
             )
@@ -2077,7 +2058,7 @@ class BettingCommands(commands.Cog):
             )
             embed.set_footer(
                 text="Loan #{} | Go bet it all, you beautiful degen".format(
-                    result["total_loans_taken"]
+                    result.total_loans_taken
                 )
             )
         else:
@@ -2086,9 +2067,9 @@ class BettingCommands(commands.Cog):
                 msg = ai_flavor
             else:
                 msg = random.choice(LOAN_SUCCESS_MESSAGES).format(
-                    amount=result["amount"],
-                    owed=result["total_owed"],
-                    fee=result["fee"],
+                    amount=result.amount,
+                    owed=result.total_owed,
+                    fee=result.fee,
                     emote=JOPACOIN_EMOTE,
                 )
             embed = discord.Embed(
@@ -2099,10 +2080,10 @@ class BettingCommands(commands.Cog):
             embed.add_field(
                 name="Details",
                 value=(
-                    f"Borrowed: **{result['amount']}** {JOPACOIN_EMOTE}\n"
-                    f"Fee ({fee_pct}%): **{result['fee']}** {JOPACOIN_EMOTE}\n"
-                    f"Total Owed: **{result['total_owed']}** {JOPACOIN_EMOTE}\n"
-                    f"New Balance: **{result['new_balance']}** {JOPACOIN_EMOTE}"
+                    f"Borrowed: **{result.amount}** {JOPACOIN_EMOTE}\n"
+                    f"Fee ({fee_pct}%): **{result.fee}** {JOPACOIN_EMOTE}\n"
+                    f"Total Owed: **{result.total_owed}** {JOPACOIN_EMOTE}\n"
+                    f"New Balance: **{result.new_balance}** {JOPACOIN_EMOTE}"
                 ),
                 inline=False,
             )
@@ -2112,7 +2093,7 @@ class BettingCommands(commands.Cog):
                 inline=False,
             )
             embed.set_footer(
-                text=f"Loan #{result['total_loans_taken']} | Fee donated to Gambling Addiction Nonprofit"
+                text=f"Loan #{result.total_loans_taken} | Fee donated to Gambling Addiction Nonprofit"
             )
 
         await interaction.followup.send(embed=embed)
@@ -2122,9 +2103,9 @@ class BettingCommands(commands.Cog):
         if neon:
             neon_result = await neon.on_loan(
                 user_id, guild_id,
-                amount=result["amount"],
-                total_owed=result["total_owed"],
-                is_negative=result.get("was_negative_loan", False),
+                amount=result.amount,
+                total_owed=result.total_owed,
+                is_negative=result.was_negative_loan,
             )
             await send_neon_result(interaction, neon_result)
 

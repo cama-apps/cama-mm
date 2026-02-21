@@ -70,23 +70,22 @@ class TestLoanEligibility:
         player_repo = db_and_repos["player_repo"]
         pid = create_test_player(player_repo, 1001, balance=50)
 
-        result = loan_service.can_take_loan(pid, 50, TEST_GUILD_ID)
-        assert result["allowed"] is True
-        assert result["amount"] == 50
-        assert result["fee"] == 10  # 20% of 50
-        assert result["total_owed"] == 60
+        result = loan_service.validate_loan(pid, 50, TEST_GUILD_ID)
+        assert result.success
+        assert result.value.amount == 50
+        assert result.value.fee == 10  # 20% of 50
+        assert result.value.total_owed == 60
         # With deferred repayment, new_balance is current + amount (not minus fee)
-        assert result["new_balance"] == 100  # 50 + 50
+        assert result.value.new_balance == 100  # 50 + 50
 
     def test_cannot_take_loan_exceeding_max(self, db_and_repos, loan_service):
         """Cannot borrow more than max loan amount."""
         player_repo = db_and_repos["player_repo"]
         pid = create_test_player(player_repo, 1002, balance=100)
 
-        result = loan_service.can_take_loan(pid, 150, TEST_GUILD_ID)
-        assert result["allowed"] is False
-        assert result["reason"] == "exceeds_max"
-        assert result["max_amount"] == 100
+        result = loan_service.validate_loan(pid, 150, TEST_GUILD_ID)
+        assert result.error
+        assert result.error_code == "loan_amount_exceeded"
 
     def test_cannot_take_loan_with_outstanding_loan(self, db_and_repos, loan_service):
         """Cannot take another loan while one is outstanding."""
@@ -94,29 +93,26 @@ class TestLoanEligibility:
         pid = create_test_player(player_repo, 1003, balance=100)
 
         # Take first loan
-        result = loan_service.take_loan(pid, 50, TEST_GUILD_ID)
-        assert result["success"] is True
+        result = loan_service.execute_loan(pid, 50, TEST_GUILD_ID)
+        assert result.success
 
         # Try to take another - should fail because outstanding loan exists
-        result = loan_service.can_take_loan(pid, 50, TEST_GUILD_ID)
-        assert result["allowed"] is False
-        assert result["reason"] == "has_outstanding_loan"
-        assert result["outstanding_principal"] == 50
-        assert result["outstanding_fee"] == 10
-        assert result["outstanding_total"] == 60
+        result = loan_service.validate_loan(pid, 50, TEST_GUILD_ID)
+        assert result.error
+        assert result.error_code == "loan_already_exists"
 
     def test_cannot_take_invalid_amount(self, db_and_repos, loan_service):
         """Cannot take loan with zero or negative amount."""
         player_repo = db_and_repos["player_repo"]
         pid = create_test_player(player_repo, 1004, balance=50)
 
-        result = loan_service.can_take_loan(pid, 0, TEST_GUILD_ID)
-        assert result["allowed"] is False
-        assert result["reason"] == "invalid_amount"
+        result = loan_service.validate_loan(pid, 0, TEST_GUILD_ID)
+        assert result.error
+        assert result.error_code == "validation_error"
 
-        result = loan_service.can_take_loan(pid, -10, TEST_GUILD_ID)
-        assert result["allowed"] is False
-        assert result["reason"] == "invalid_amount"
+        result = loan_service.validate_loan(pid, -10, TEST_GUILD_ID)
+        assert result.error
+        assert result.error_code == "validation_error"
 
 
 class TestLoanCooldown:
@@ -139,18 +135,17 @@ class TestLoanCooldown:
         pid = create_test_player(player_repo, 2001, balance=200)
 
         # Take first loan
-        result = loan_service.take_loan(pid, 50, TEST_GUILD_ID)
-        assert result["success"] is True
+        result = loan_service.execute_loan(pid, 50, TEST_GUILD_ID)
+        assert result.success
 
         # Repay the loan
-        repay_result = loan_service.repay_loan(pid, guild_id=TEST_GUILD_ID)
-        assert repay_result["success"] is True
+        repay_result = loan_service.execute_repayment(pid, guild_id=TEST_GUILD_ID)
+        assert repay_result.success
 
         # Now try to take another - should be on cooldown
-        result = loan_service.can_take_loan(pid, 50, TEST_GUILD_ID)
-        assert result["allowed"] is False
-        assert result["reason"] == "on_cooldown"
-        assert result["cooldown_ends_at"] is not None
+        result = loan_service.validate_loan(pid, 50, TEST_GUILD_ID)
+        assert result.error
+        assert result.error_code == "cooldown_active"
 
     def test_cooldown_expires(self, db_and_repos):
         """Cooldown expires after configured time."""
@@ -170,15 +165,15 @@ class TestLoanCooldown:
         pid = create_test_player(player_repo, 2002, balance=200)
 
         # Take first loan and repay
-        loan_service.take_loan(pid, 20, TEST_GUILD_ID)
-        loan_service.repay_loan(pid, TEST_GUILD_ID)
+        loan_service.execute_loan(pid, 20, TEST_GUILD_ID)
+        loan_service.execute_repayment(pid, TEST_GUILD_ID)
 
         # Wait for cooldown to expire
         time.sleep(1.1)
 
         # Should be able to take another loan
-        result = loan_service.can_take_loan(pid, 20, TEST_GUILD_ID)
-        assert result["allowed"] is True
+        result = loan_service.validate_loan(pid, 20, TEST_GUILD_ID)
+        assert result.success
 
 
 class TestLoanExecution:
@@ -189,12 +184,12 @@ class TestLoanExecution:
         player_repo = db_and_repos["player_repo"]
         pid = create_test_player(player_repo, 3001, balance=50)
 
-        result = loan_service.take_loan(pid, 100, guild_id=12345)
+        result = loan_service.execute_loan(pid, 100, guild_id=12345)
 
-        assert result["success"] is True
-        assert result["amount"] == 100
-        assert result["fee"] == 20  # 20% of 100
-        assert result["total_owed"] == 120
+        assert result.success
+        assert result.value.amount == 100
+        assert result.value.fee == 20  # 20% of 100
+        assert result.value.total_owed == 120
 
         # Balance should be: 50 + 100 = 150 (NO deduction yet)
         new_balance = player_repo.get_balance(pid, TEST_GUILD_ID)
@@ -205,7 +200,7 @@ class TestLoanExecution:
         player_repo = db_and_repos["player_repo"]
         pid = create_test_player(player_repo, 3002, balance=50)
 
-        loan_service.take_loan(pid, 100, TEST_GUILD_ID)
+        loan_service.execute_loan(pid, 100, TEST_GUILD_ID)
 
         state = loan_service.get_state(pid, TEST_GUILD_ID)
         assert state.outstanding_principal == 100
@@ -218,9 +213,9 @@ class TestLoanExecution:
         player_repo = db_and_repos["player_repo"]
         pid = create_test_player(player_repo, 3003, balance=100)
 
-        result = loan_service.take_loan(pid, 50, TEST_GUILD_ID)
-        assert result["success"] is True
-        assert result["total_loans_taken"] == 1
+        result = loan_service.execute_loan(pid, 50, TEST_GUILD_ID)
+        assert result.success
+        assert result.value.total_loans_taken == 1
 
         state = loan_service.get_state(pid, TEST_GUILD_ID)
         assert state.total_loans_taken == 1
@@ -238,18 +233,18 @@ class TestLoanRepayment:
         pid = create_test_player(player_repo, 4001, balance=50)
 
         # Take loan: balance becomes 150
-        loan_service.take_loan(pid, 100, TEST_GUILD_ID)
+        loan_service.execute_loan(pid, 100, TEST_GUILD_ID)
         assert player_repo.get_balance(pid, TEST_GUILD_ID) == 150
 
         # Repay loan: balance -= 120 (100 + 20 fee)
-        result = loan_service.repay_loan(pid, guild_id=TEST_GUILD_ID)
+        result = loan_service.execute_repayment(pid, guild_id=TEST_GUILD_ID)
 
-        assert result["success"] is True
-        assert result["principal"] == 100
-        assert result["fee"] == 20
-        assert result["total_repaid"] == 120
-        assert result["balance_before"] == 150
-        assert result["new_balance"] == 30
+        assert result.success
+        assert result.value.principal == 100
+        assert result.value.fee == 20
+        assert result.value.total_repaid == 120
+        assert result.value.balance_before == 150
+        assert result.value.new_balance == 30
 
         # Verify balance
         assert player_repo.get_balance(pid, TEST_GUILD_ID) == 30
@@ -259,10 +254,10 @@ class TestLoanRepayment:
         player_repo = db_and_repos["player_repo"]
         pid = create_test_player(player_repo, 4002, balance=200)
 
-        loan_service.take_loan(pid, 50, TEST_GUILD_ID)
+        loan_service.execute_loan(pid, 50, TEST_GUILD_ID)
         assert loan_service.get_state(pid, TEST_GUILD_ID).has_outstanding_loan is True
 
-        loan_service.repay_loan(pid, TEST_GUILD_ID)
+        loan_service.execute_repayment(pid, TEST_GUILD_ID)
 
         state = loan_service.get_state(pid, TEST_GUILD_ID)
         assert state.outstanding_principal == 0
@@ -275,27 +270,27 @@ class TestLoanRepayment:
         pid = create_test_player(player_repo, 4003, balance=200)
 
         # Initially empty
-        assert loan_service.get_nonprofit_fund(guild_id=99) == 0
+        assert loan_service.get_nonprofit_fund(guild_id=TEST_GUILD_ID) == 0
 
         # Take and repay loan
-        loan_service.take_loan(pid, 100, guild_id=99)
+        loan_service.execute_loan(pid, 100, guild_id=TEST_GUILD_ID)
         # Fee not in nonprofit yet
-        assert loan_service.get_nonprofit_fund(guild_id=99) == 0
+        assert loan_service.get_nonprofit_fund(guild_id=TEST_GUILD_ID) == 0
 
-        loan_service.repay_loan(pid, guild_id=99)
+        loan_service.execute_repayment(pid, guild_id=TEST_GUILD_ID)
         # Now fee is in nonprofit
-        assert loan_service.get_nonprofit_fund(guild_id=99) == 20
+        assert loan_service.get_nonprofit_fund(guild_id=TEST_GUILD_ID) == 20
 
     def test_repay_loan_updates_fees_paid(self, db_and_repos, loan_service):
         """Repaying a loan updates total_fees_paid in state."""
         player_repo = db_and_repos["player_repo"]
         pid = create_test_player(player_repo, 4004, balance=200)
 
-        loan_service.take_loan(pid, 50, TEST_GUILD_ID)
+        loan_service.execute_loan(pid, 50, TEST_GUILD_ID)
         # Fee not counted yet
         assert loan_service.get_state(pid, TEST_GUILD_ID).total_fees_paid == 0
 
-        loan_service.repay_loan(pid, TEST_GUILD_ID)
+        loan_service.execute_repayment(pid, TEST_GUILD_ID)
         # Now fee is counted
         assert loan_service.get_state(pid, TEST_GUILD_ID).total_fees_paid == 10
 
@@ -305,25 +300,25 @@ class TestLoanRepayment:
         pid = create_test_player(player_repo, 4005, balance=0)
 
         # Take loan: balance becomes 100
-        loan_service.take_loan(pid, 100, TEST_GUILD_ID)
+        loan_service.execute_loan(pid, 100, TEST_GUILD_ID)
         assert player_repo.get_balance(pid, TEST_GUILD_ID) == 100
 
         # Spend all the money (simulate betting loss)
         player_repo.update_balance(pid, TEST_GUILD_ID, 0)
 
         # Repay loan: 0 - 120 = -120
-        result = loan_service.repay_loan(pid, TEST_GUILD_ID)
-        assert result["success"] is True
-        assert result["new_balance"] == -120
+        result = loan_service.execute_repayment(pid, TEST_GUILD_ID)
+        assert result.success
+        assert result.value.new_balance == -120
 
     def test_repay_no_outstanding_loan(self, db_and_repos, loan_service):
         """Repaying with no outstanding loan returns failure."""
         player_repo = db_and_repos["player_repo"]
         pid = create_test_player(player_repo, 4006, balance=100)
 
-        result = loan_service.repay_loan(pid, TEST_GUILD_ID)
-        assert result["success"] is False
-        assert result["reason"] == "no_outstanding_loan"
+        result = loan_service.execute_repayment(pid, TEST_GUILD_ID)
+        assert result.error
+        assert result.error_code == "no_outstanding_loan"
 
 
 class TestLoanState:
@@ -349,7 +344,7 @@ class TestLoanState:
         player_repo = db_and_repos["player_repo"]
         pid = create_test_player(player_repo, 6002, balance=100)
 
-        loan_service.take_loan(pid, 50, TEST_GUILD_ID)
+        loan_service.execute_loan(pid, 50, TEST_GUILD_ID)
 
         state = loan_service.get_state(pid, TEST_GUILD_ID)
         assert state.total_loans_taken == 1
@@ -364,8 +359,8 @@ class TestLoanState:
         player_repo = db_and_repos["player_repo"]
         pid = create_test_player(player_repo, 6003, balance=200)
 
-        loan_service.take_loan(pid, 50, TEST_GUILD_ID)
-        loan_service.repay_loan(pid, TEST_GUILD_ID)
+        loan_service.execute_loan(pid, 50, TEST_GUILD_ID)
+        loan_service.execute_repayment(pid, TEST_GUILD_ID)
 
         state = loan_service.get_state(pid, TEST_GUILD_ID)
         assert state.total_loans_taken == 1
@@ -396,18 +391,18 @@ class TestNegativeLoans:
         # Start with negative balance
         pid = create_test_player(player_repo, 7001, balance=-100)
 
-        result = loan_service.take_loan(pid, 50, TEST_GUILD_ID)
-        assert result["success"] is True
-        assert result["was_negative_loan"] is True
+        result = loan_service.execute_loan(pid, 50, TEST_GUILD_ID)
+        assert result.success
+        assert result.value.was_negative_loan is True
 
     def test_loan_while_positive_not_flagged(self, db_and_repos, loan_service):
         """Taking a loan with positive balance is not flagged as negative loan."""
         player_repo = db_and_repos["player_repo"]
         pid = create_test_player(player_repo, 7002, balance=100)
 
-        result = loan_service.take_loan(pid, 50, TEST_GUILD_ID)
-        assert result["success"] is True
-        assert result["was_negative_loan"] is False
+        result = loan_service.execute_loan(pid, 50, TEST_GUILD_ID)
+        assert result.success
+        assert result.value.was_negative_loan is False
 
     def test_negative_loans_counted(self, db_and_repos):
         """Negative loans are counted in state."""
@@ -426,12 +421,12 @@ class TestNegativeLoans:
         pid = create_test_player(player_repo, 7003, balance=-50)
 
         # Take loan while negative, then repay to allow second loan
-        loan_service.take_loan(pid, 20, TEST_GUILD_ID)
-        loan_service.repay_loan(pid, TEST_GUILD_ID)
+        loan_service.execute_loan(pid, 20, TEST_GUILD_ID)
+        loan_service.execute_repayment(pid, TEST_GUILD_ID)
 
         # Still negative, take another
         player_repo.update_balance(pid, TEST_GUILD_ID, -50)
-        loan_service.take_loan(pid, 20, TEST_GUILD_ID)
+        loan_service.execute_loan(pid, 20, TEST_GUILD_ID)
 
         state = loan_service.get_state(pid, TEST_GUILD_ID)
         assert state.negative_loans_taken == 2
@@ -458,8 +453,8 @@ class TestFullLoanCycle:
         pid = create_test_player(player_repo, 8001, balance=0)
 
         # 1. Take loan of 100
-        result = loan_service.take_loan(pid, 100, guild_id=TEST_GUILD_ID)
-        assert result["success"] is True
+        result = loan_service.execute_loan(pid, 100, guild_id=TEST_GUILD_ID)
+        assert result.success
         assert player_repo.get_balance(pid, TEST_GUILD_ID) == 100  # Got the money
 
         # 2. Simulate betting and winning
@@ -467,9 +462,9 @@ class TestFullLoanCycle:
         assert player_repo.get_balance(pid, TEST_GUILD_ID) == 150
 
         # 3. Match ends, loan repaid
-        repay = loan_service.repay_loan(pid, guild_id=TEST_GUILD_ID)
-        assert repay["success"] is True
-        assert repay["total_repaid"] == 120  # 100 + 20 fee
+        repay = loan_service.execute_repayment(pid, guild_id=TEST_GUILD_ID)
+        assert repay.success
+        assert repay.value.total_repaid == 120  # 100 + 20 fee
 
         # 4. Final balance: 150 - 120 = 30
         assert player_repo.get_balance(pid, TEST_GUILD_ID) == 30
@@ -494,15 +489,15 @@ class TestFullLoanCycle:
         pid = create_test_player(player_repo, 8002, balance=0)
 
         # Take loan
-        loan_service.take_loan(pid, 100, TEST_GUILD_ID)
+        loan_service.execute_loan(pid, 100, TEST_GUILD_ID)
         assert player_repo.get_balance(pid, TEST_GUILD_ID) == 100
 
         # Lose everything (bad bet)
         player_repo.update_balance(pid, TEST_GUILD_ID, 0)
 
         # Match ends, must repay
-        repay = loan_service.repay_loan(pid, TEST_GUILD_ID)
-        assert repay["success"] is True
+        repay = loan_service.execute_repayment(pid, TEST_GUILD_ID)
+        assert repay.success
 
         # Now in debt: 0 - 120 = -120
         assert player_repo.get_balance(pid, TEST_GUILD_ID) == -120
