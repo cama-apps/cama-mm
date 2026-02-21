@@ -175,14 +175,14 @@ class MatchCommands(commands.Cog):
         self, guild_id: int | None, winning_result: str, *, thread_id: int | None = None
     ) -> None:
         """Post results to lobby thread and archive it."""
-        # Use provided thread_id, or try to get from pending state / lobby_service
+        # Use provided thread_id only - do NOT fallback to lobby_service
+        # as that could return a different match's thread in concurrent match scenarios
         if not thread_id:
             pending_state = self.match_service.get_last_shuffle(guild_id)
             thread_id = pending_state.get("thread_shuffle_thread_id") if pending_state else None
         if not thread_id:
-            # Fallback to lobby_service in case it's still available
-            thread_id = self.lobby_service.get_lobby_thread_id()
-        if not thread_id:
+            # No thread_id means we can't safely update any thread
+            logger.debug("No thread_id available for finalize_lobby_thread")
             return
 
         try:
@@ -205,14 +205,15 @@ class MatchCommands(commands.Cog):
         except Exception as exc:
             logger.warning(f"Failed to finalize lobby thread: {exc}")
 
-    async def _abort_lobby_thread(self, guild_id: int | None) -> None:
+    async def _abort_lobby_thread(self, guild_id: int | None, pending_match_id: int | None = None) -> None:
         """Archive the lobby thread when match is aborted."""
         # Get thread_id from pending state (must be called before clear_last_shuffle)
-        pending_state = self.match_service.get_last_shuffle(guild_id)
+        # Do NOT fallback to lobby_service as that could return a different match's thread
+        pending_state = self.match_service.get_last_shuffle(guild_id, pending_match_id)
         thread_id = pending_state.get("thread_shuffle_thread_id") if pending_state else None
         if not thread_id:
-            thread_id = self.lobby_service.get_lobby_thread_id()
-        if not thread_id:
+            # No thread_id means we can't safely update any thread
+            logger.debug("No thread_id available for abort_lobby_thread")
             return
 
         try:
@@ -1550,7 +1551,7 @@ class MatchCommands(commands.Cog):
 
         # Update channel message to show closed and archive thread
         await self._update_channel_message_closed("Match Aborted")
-        await self._abort_lobby_thread(guild_id)
+        await self._abort_lobby_thread(guild_id, pending_match_id)
 
         # Clear only the specific pending match (not all of them)
         self.match_service.state_service.clear_last_shuffle(guild_id, pending_match_id)
