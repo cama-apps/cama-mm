@@ -215,17 +215,49 @@ class BettingService:
 
         Returns dict of {discord_id: {gross, garnished, net, bankruptcy_penalty}} for each player.
         """
-        results: dict[int, dict[str, int]] = {}
-        if not winning_ids:
-            return results
-
         # Decrement bankruptcy penalty games for winners only (wins clear bankruptcy)
-        if self.bankruptcy_service:
+        if self.bankruptcy_service and winning_ids:
             for pid in winning_ids:
                 self.bankruptcy_service.on_game_won(pid, guild_id)
 
-        for pid in winning_ids:
-            reward = JOPACOIN_WIN_REWARD
+        return self._award_with_penalties(winning_ids, JOPACOIN_WIN_REWARD, guild_id)
+
+    def award_exclusion_bonus(
+        self, excluded_ids: list[int], guild_id: int | None = None
+    ) -> dict[int, dict[str, int]]:
+        """
+        Reward excluded players with a small consolation bonus.
+
+        Mirrors win bonus processing so bankruptcy and garnishment rules still apply.
+        """
+        return self._award_with_penalties(excluded_ids, JOPACOIN_EXCLUSION_REWARD, guild_id)
+
+    def award_exclusion_bonus_half(
+        self, excluded_ids: list[int], guild_id: int | None = None
+    ) -> dict[int, dict[str, int]]:
+        """
+        Reward conditional players excluded from shuffle with half the normal bonus.
+
+        Same processing as award_exclusion_bonus but with JOPACOIN_EXCLUSION_REWARD // 2.
+        """
+        return self._award_with_penalties(excluded_ids, JOPACOIN_EXCLUSION_REWARD // 2, guild_id)
+
+    def _award_with_penalties(
+        self, player_ids: list[int], reward_amount: int, guild_id: int | None = None
+    ) -> dict[int, dict[str, int]]:
+        """
+        Award jopacoins to players, applying bankruptcy penalty and garnishment.
+
+        Shared logic for win bonus, exclusion bonus, and half-exclusion bonus.
+
+        Returns dict of {discord_id: {gross, garnished, net, bankruptcy_penalty}}.
+        """
+        results: dict[int, dict[str, int]] = {}
+        if not player_ids:
+            return results
+
+        for pid in player_ids:
+            reward = reward_amount
             bankruptcy_penalty = 0
 
             # Apply bankruptcy penalty if applicable
@@ -240,91 +272,12 @@ class BettingService:
             if self.garnishment_service:
                 result = self.garnishment_service.add_income(pid, reward, guild_id=guild_id)
                 result["bankruptcy_penalty"] = bankruptcy_penalty
-                result["gross"] = JOPACOIN_WIN_REWARD  # Original before penalty
+                result["gross"] = reward_amount
                 results[pid] = result
             else:
                 self.player_repo.add_balance(pid, guild_id, reward)
                 results[pid] = {
-                    "gross": JOPACOIN_WIN_REWARD,
-                    "garnished": 0,
-                    "net": reward,
-                    "bankruptcy_penalty": bankruptcy_penalty,
-                }
-
-        return results
-
-    def award_exclusion_bonus(
-        self, excluded_ids: list[int], guild_id: int | None = None
-    ) -> dict[int, dict[str, int]]:
-        """
-        Reward excluded players with a small consolation bonus.
-
-        Mirrors win bonus processing so bankruptcy and garnishment rules still apply.
-        """
-        results: dict[int, dict[str, int]] = {}
-        if not excluded_ids:
-            return results
-
-        for pid in excluded_ids:
-            reward = JOPACOIN_EXCLUSION_REWARD
-            bankruptcy_penalty = 0
-
-            if self.bankruptcy_service:
-                penalty_result = self.bankruptcy_service.apply_penalty_to_winnings(
-                    pid, reward, guild_id
-                )
-                reward = penalty_result["penalized"]
-                bankruptcy_penalty = penalty_result["penalty_applied"]
-
-            if self.garnishment_service:
-                result = self.garnishment_service.add_income(pid, reward, guild_id=guild_id)
-                result["bankruptcy_penalty"] = bankruptcy_penalty
-                result["gross"] = JOPACOIN_EXCLUSION_REWARD
-                results[pid] = result
-            else:
-                self.player_repo.add_balance(pid, guild_id, reward)
-                results[pid] = {
-                    "gross": JOPACOIN_EXCLUSION_REWARD,
-                    "garnished": 0,
-                    "net": reward,
-                    "bankruptcy_penalty": bankruptcy_penalty,
-                }
-
-        return results
-
-    def award_exclusion_bonus_half(
-        self, excluded_ids: list[int], guild_id: int | None = None
-    ) -> dict[int, dict[str, int]]:
-        """
-        Reward conditional players excluded from shuffle with half the normal bonus.
-
-        Same processing as award_exclusion_bonus but with JOPACOIN_EXCLUSION_REWARD // 2.
-        """
-        results: dict[int, dict[str, int]] = {}
-        if not excluded_ids:
-            return results
-
-        half_reward = JOPACOIN_EXCLUSION_REWARD // 2
-        for pid in excluded_ids:
-            reward = half_reward
-            bankruptcy_penalty = 0
-
-            if self.bankruptcy_service:
-                penalty_result = self.bankruptcy_service.apply_penalty_to_winnings(
-                    pid, reward, guild_id
-                )
-                reward = penalty_result["penalized"]
-                bankruptcy_penalty = penalty_result["penalty_applied"]
-
-            if self.garnishment_service:
-                result = self.garnishment_service.add_income(pid, reward, guild_id=guild_id)
-                result["bankruptcy_penalty"] = bankruptcy_penalty
-                result["gross"] = half_reward
-                results[pid] = result
-            else:
-                self.player_repo.add_balance(pid, guild_id, reward)
-                results[pid] = {
-                    "gross": half_reward,
+                    "gross": reward_amount,
                     "garnished": 0,
                     "net": reward,
                     "bankruptcy_penalty": bankruptcy_penalty,

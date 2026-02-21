@@ -16,6 +16,7 @@ from services.permissions import has_admin_permission
 from services.prediction_service import PredictionService
 from utils.formatting import JOPACOIN_EMOTE
 from utils.interaction_safety import safe_defer, safe_followup
+from utils.neon_helpers import get_neon_service
 
 logger = logging.getLogger("cama_bot.commands.predictions")
 
@@ -657,9 +658,7 @@ class PredictionCommands(commands.Cog):
 
                 # Neon Degen Terminal hook (prediction resolved)
                 try:
-                    from services.neon_degen_service import NeonDegenService
-                    _neon_svc = getattr(self.bot, "neon_degen_service", None)
-                    neon = _neon_svc if isinstance(_neon_svc, NeonDegenService) else None
+                    neon = get_neon_service(self.bot)
                     if neon:
                         neon_result = await neon.on_prediction_resolved(
                             guild_id=interaction.guild.id if interaction.guild else None,

@@ -16,6 +16,7 @@ from config import (
 )
 from utils.formatting import format_role_display
 from utils.interaction_safety import safe_defer, safe_followup
+from utils.neon_helpers import get_neon_service
 
 logger = logging.getLogger("cama_bot.commands.registration")
 
@@ -70,9 +71,7 @@ class RegistrationCommands(commands.Cog):
 
             # Neon Degen Terminal hook (registration)
             try:
-                from services.neon_degen_service import NeonDegenService
-                _neon_svc = getattr(self.bot, "neon_degen_service", None)
-                neon = _neon_svc if isinstance(_neon_svc, NeonDegenService) else None
+                neon = get_neon_service(self.bot)
                 if neon:
                     neon_result = await neon.on_registration(
                         interaction.user.id, guild_id, str(interaction.user)

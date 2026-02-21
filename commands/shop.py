@@ -15,6 +15,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from utils.neon_helpers import get_neon_service
 from config import (
     DOUBLE_OR_NOTHING_COOLDOWN_SECONDS,
     PACKAGE_DEAL_GAMES_DURATION,
@@ -691,9 +692,7 @@ class ShopCommands(commands.Cog):
                 )
                 # Neon Degen Terminal hook (cooldown hit)
                 try:
-                    from services.neon_degen_service import NeonDegenService
-                    _neon_svc = getattr(self.bot, "neon_degen_service", None)
-                    neon = _neon_svc if isinstance(_neon_svc, NeonDegenService) else None
+                    neon = get_neon_service(self.bot)
                     if neon:
                         neon_result = await neon.on_cooldown_hit(user_id, guild_id, "double_or_nothing")
                         if neon_result:
@@ -848,9 +847,7 @@ class ShopCommands(commands.Cog):
 
         # Neon Degen Terminal hook (double or nothing result)
         try:
-            from services.neon_degen_service import NeonDegenService
-            _neon_svc = getattr(self.bot, "neon_degen_service", None)
-            neon = _neon_svc if isinstance(_neon_svc, NeonDegenService) else None
+            neon = get_neon_service(self.bot)
             if neon:
                 neon_result = await neon.on_double_or_nothing(
                     user_id, guild_id,
@@ -968,9 +965,7 @@ class ShopCommands(commands.Cog):
 
         # Neon Degen Terminal hook (soft avoid purchase)
         try:
-            from services.neon_degen_service import NeonDegenService
-            _neon_svc = getattr(self.bot, "neon_degen_service", None)
-            neon = _neon_svc if isinstance(_neon_svc, NeonDegenService) else None
+            neon = get_neon_service(self.bot)
             if neon:
                 neon_result = await neon.on_soft_avoid(
                     user_id, guild_id,

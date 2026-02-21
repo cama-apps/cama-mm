@@ -24,6 +24,7 @@ from shuffler import BalancedShuffler
 from services.permissions import has_admin_permission
 from utils.draft_embeds import MAX_NAME_LEN, format_player_row, format_roles
 from utils.formatting import JOPACOIN_EMOTE, format_betting_display, get_player_display_name
+from utils.neon_helpers import get_neon_service, send_neon_result
 from utils.interaction_safety import safe_defer
 
 if TYPE_CHECKING:
@@ -341,37 +342,6 @@ class DraftCommands(commands.Cog):
         self.draft_state_manager = draft_state_manager
         self.draft_service = draft_service
         self.match_service = match_service
-
-    async def _send_neon_result(self, interaction: discord.Interaction, neon_result) -> None:
-        """Send a NeonResult to the channel, auto-deleting after 60s."""
-        try:
-            if neon_result is None:
-                return
-            msg = None
-            if neon_result.gif_file:
-                gif_file = discord.File(neon_result.gif_file, filename="jopat_terminal.gif")
-                if neon_result.text_block:
-                    msg = await interaction.channel.send(neon_result.text_block, file=gif_file)
-                else:
-                    msg = await interaction.channel.send(file=gif_file)
-            elif neon_result.text_block:
-                msg = await interaction.channel.send(neon_result.text_block)
-            elif neon_result.footer_text:
-                msg = await interaction.channel.send(neon_result.footer_text)
-            # Auto-delete after 60 seconds
-            if msg:
-                asyncio.create_task(self._delete_neon_after(msg, 60))
-        except Exception as exc:
-            logger.debug(f"Failed to send neon result: {exc}")
-
-    @staticmethod
-    async def _delete_neon_after(msg, delay: float) -> None:
-        """Delete a message after a delay, ignoring errors."""
-        try:
-            await asyncio.sleep(delay)
-            await msg.delete()
-        except Exception:
-            pass
 
     async def _delete_captain_ping_message(
         self, interaction: discord.Interaction, state: DraftState
@@ -993,21 +963,11 @@ class DraftCommands(commands.Cog):
 
         # Neon Degen Terminal hook (draft coinflip)
         try:
-            from services.neon_degen_service import NeonDegenService
-            _neon_svc = getattr(self.bot, "neon_degen_service", None)
-            neon = _neon_svc if isinstance(_neon_svc, NeonDegenService) else None
+            neon = get_neon_service(self.bot)
             if neon:
                 loser_id = captain_pair.captain2_id if coinflip_winner_id == captain_pair.captain1_id else captain_pair.captain1_id
                 neon_result = await neon.on_draft_coinflip(guild_id, coinflip_winner_id, loser_id)
-                if neon_result and neon_result.text_block:
-                    msg = await interaction.channel.send(neon_result.text_block)
-                    async def _del_neon(m, d):
-                        try:
-                            await asyncio.sleep(d)
-                            await m.delete()
-                        except Exception:
-                            pass
-                    asyncio.create_task(_del_neon(msg, 60))
+                await send_neon_result(interaction, neon_result)
         except Exception:
             pass
 
@@ -1480,7 +1440,7 @@ class DraftCommands(commands.Cog):
 
         # Neon Degen Terminal hook for captain symmetry
         try:
-            neon = getattr(self.bot, "neon_degen_service", None)
+            neon = get_neon_service(self.bot)
             if neon:
                 # Get captain ratings
                 radiant_cap = await asyncio.to_thread(
@@ -1847,14 +1807,14 @@ class DraftCommands(commands.Cog):
                         # Neon Degen Terminal: Bomb pot easter egg
                         if is_bomb_pot:
                             try:
-                                neon = getattr(self.bot, "neon_degen_service", None)
+                                neon = get_neon_service(self.bot)
                                 if neon:
                                     pool_total = blind_result['total_radiant'] + blind_result['total_dire']
                                     bomb_result = await neon.on_bomb_pot(
                                         guild_id, pool_total, blind_result['created']
                                     )
                                     if bomb_result:
-                                        await self._send_neon_result(interaction, bomb_result)
+                                        await send_neon_result(interaction, bomb_result)
                             except Exception as e:
                                 logger.debug(f"neon on_bomb_pot error: {e}")
                 except Exception as exc:

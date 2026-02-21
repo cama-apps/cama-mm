@@ -47,6 +47,7 @@ from services.player_service import PlayerService
 from services.tip_service import TipService
 from utils.formatting import JOPACOIN_EMOTE, TOMBSTONE_EMOJI, format_betting_display
 from utils.interaction_safety import safe_defer
+from utils.neon_helpers import get_neon_service, send_neon_result
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
 from utils.wheel_drawing import (
     WHEEL_WEDGES,
@@ -163,9 +164,7 @@ class BettingCommands(commands.Cog):
 
     def _get_neon_service(self):
         """Get the NeonDegenService from the bot, or None if unavailable."""
-        from services.neon_degen_service import NeonDegenService
-        svc = getattr(self.bot, "neon_degen_service", None)
-        return svc if isinstance(svc, NeonDegenService) else None
+        return get_neon_service(self.bot)
 
     async def match_autocomplete(
         self, interaction: discord.Interaction, current: str
@@ -193,50 +192,16 @@ class BettingCommands(commands.Cog):
             choices.append(app_commands.Choice(name=match_label, value=pmid))
         return choices[:25]  # Discord limit
 
-    async def _send_neon_result(self, interaction: discord.Interaction, neon_result) -> None:
-        """Send a NeonResult to the channel, auto-deleting after 60s."""
-        try:
-            if neon_result is None:
-                return
-            msg = None
-            if neon_result.gif_file:
-                import discord as _discord
-                gif_file = _discord.File(neon_result.gif_file, filename="jopat_terminal.gif")
-                if neon_result.text_block:
-                    msg = await interaction.channel.send(neon_result.text_block, file=gif_file)
-                else:
-                    msg = await interaction.channel.send(file=gif_file)
-            elif neon_result.text_block:
-                msg = await interaction.channel.send(neon_result.text_block)
-            elif neon_result.footer_text:
-                msg = await interaction.channel.send(neon_result.footer_text)
-            # Auto-delete after 60 seconds
-            if msg:
-                import asyncio
-                asyncio.create_task(self._delete_after(msg, 60))
-        except Exception as exc:
-            logger.debug(f"Failed to send neon result: {exc}")
-
     async def _send_first_neon_result(self, interaction, *event_fns):
         """Evaluate neon event callables in order, send only the FIRST non-None result."""
         for fn in event_fns:
             try:
                 result = await fn()
                 if result is not None:
-                    await self._send_neon_result(interaction, result)
+                    await send_neon_result(interaction, result)
                     return
             except Exception:
                 pass
-
-    @staticmethod
-    async def _delete_after(msg, delay: float) -> None:
-        """Delete a message after a delay, ignoring errors."""
-        try:
-            import asyncio
-            await asyncio.sleep(delay)
-            await msg.delete()
-        except Exception:
-            pass
 
     async def _update_shuffle_message_wagers(
         self, guild_id: int | None, pending_match_id: int | None = None
@@ -1203,7 +1168,7 @@ class BettingCommands(commands.Cog):
         neon = self._get_neon_service()
         if neon:
             neon_result = await neon.on_balance_check(user_id, guild_id, balance)
-            await self._send_neon_result(interaction, neon_result)
+            await send_neon_result(interaction, neon_result)
 
     @app_commands.command(name="gamba", description="Spin the Wheel of Fortune! (once per day)")
     async def gamba(self, interaction: discord.Interaction):
@@ -1249,7 +1214,7 @@ class BettingCommands(commands.Cog):
                 if neon:
                     try:
                         neon_result = await neon.on_cooldown_hit(user_id, guild_id, "gamba")
-                        await self._send_neon_result(interaction, neon_result)
+                        await send_neon_result(interaction, neon_result)
                     except Exception:
                         pass
                 return
@@ -1716,7 +1681,7 @@ class BettingCommands(commands.Cog):
                 amount=amount,
                 fee=fee,
             )
-            await self._send_neon_result(interaction, neon_result)
+            await send_neon_result(interaction, neon_result)
 
         # Log the transaction (non-critical - failure here doesn't affect the tip)
         if self.tip_service:
@@ -1855,7 +1820,7 @@ class BettingCommands(commands.Cog):
                 if neon:
                     try:
                         neon_result = await neon.on_cooldown_hit(user_id, guild_id, "bankruptcy")
-                        await self._send_neon_result(interaction, neon_result)
+                        await send_neon_result(interaction, neon_result)
                     except Exception:
                         pass
                 return
@@ -2006,7 +1971,7 @@ class BettingCommands(commands.Cog):
                 if neon:
                     try:
                         neon_result = await neon.on_cooldown_hit(user_id, guild_id, "loan")
-                        await self._send_neon_result(interaction, neon_result)
+                        await send_neon_result(interaction, neon_result)
                     except Exception:
                         pass
                 return
@@ -2161,7 +2126,7 @@ class BettingCommands(commands.Cog):
                 total_owed=result["total_owed"],
                 is_negative=result.get("was_negative_loan", False),
             )
-            await self._send_neon_result(interaction, neon_result)
+            await send_neon_result(interaction, neon_result)
 
     @app_commands.command(name="nonprofit", description="View the Gambling Addiction Nonprofit fund")
     async def nonprofit(self, interaction: discord.Interaction):
