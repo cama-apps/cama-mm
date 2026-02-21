@@ -339,17 +339,23 @@ class BettingCommands(commands.Cog):
         *,
         reminder_type: str,
         lock_until: int | None,
+        pending_match_id: int | None = None,
     ) -> None:
         """
         Send a reminder message replying to the shuffle embed with current bet totals.
 
         reminder_type: "warning" (5 minutes left) or "closed" (betting closed).
+        pending_match_id: Specific match ID for concurrent match support.
         """
-        pending_state = await asyncio.to_thread(self.match_service.get_last_shuffle, guild_id)
+        pending_state = await asyncio.to_thread(
+            self.match_service.get_last_shuffle, guild_id, pending_match_id=pending_match_id
+        )
         if not pending_state:
             return
 
-        message_info = await asyncio.to_thread(self.match_service.get_shuffle_message_info, guild_id)
+        message_info = await asyncio.to_thread(
+            self.match_service.get_shuffle_message_info, guild_id, pending_match_id=pending_match_id
+        )
         message_id = message_info.get("message_id") if message_info else None
         channel_id = message_info.get("channel_id") if message_info else None
         thread_message_id = message_info.get("thread_message_id") if message_info else None

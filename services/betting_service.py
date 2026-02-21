@@ -2,9 +2,12 @@
 Handles betting-related business logic.
 """
 
+import logging
 import math
 import time
 from typing import TYPE_CHECKING, Any, Optional
+
+logger = logging.getLogger("cama_bot.services.betting")
 
 from config import (
     AUTO_BLIND_ENABLED,
@@ -561,6 +564,10 @@ class BettingService:
                 "is_bomb_pot": bool
             }
         """
+        logger.debug(
+            f"create_auto_blind_bets called: guild={guild_id}, "
+            f"pending_match_id={pending_match_id}, radiant={len(radiant_ids)}, dire={len(dire_ids)}"
+        )
         if not AUTO_BLIND_ENABLED:
             return {
                 "created": 0,
