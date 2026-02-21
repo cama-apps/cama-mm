@@ -14,11 +14,10 @@ from discord.ext import commands
 
 from services.permissions import has_admin_permission
 from services.prediction_service import PredictionService
+from utils.formatting import JOPACOIN_EMOTE
 from utils.interaction_safety import safe_defer, safe_followup
 
 logger = logging.getLogger("cama_bot.commands.predictions")
-
-JOPACOIN_EMOTE = "<:jopacoin:1375713705702318192>"
 
 
 def parse_duration(duration_str: str) -> int:

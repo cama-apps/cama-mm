@@ -15,7 +15,8 @@ from repositories.bet_repository import BetRepository
 from repositories.match_repository import MatchRepository
 from repositories.player_repository import PlayerRepository
 from repositories.pairings_repository import PairingsRepository
-from services.bankruptcy_service import BankruptcyRepository, BankruptcyService
+from repositories.bankruptcy_repository import BankruptcyRepository
+from services.bankruptcy_service import BankruptcyService
 from services.gambling_stats_service import GamblingStatsService, Leaderboard, LeaderboardEntry
 
 TEST_GUILD_ID = 12345

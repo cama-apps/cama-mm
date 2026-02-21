@@ -64,6 +64,7 @@ from utils.neon_terminal import (
 if TYPE_CHECKING:
     from repositories.interfaces import IPlayerRepository
     from repositories.bet_repository import BetRepository
+    from repositories.neon_event_repository import NeonEventRepository
     from services.ai_service import AIService
     from services.bankruptcy_service import BankruptcyService
     from services.flavor_text_service import FlavorTextService
@@ -113,6 +114,7 @@ class NeonDegenService:
         gambling_stats_service: GamblingStatsService | None = None,
         ai_service: AIService | None = None,
         flavor_text_service: FlavorTextService | None = None,
+        neon_event_repo: NeonEventRepository | None = None,
     ):
         self.player_repo = player_repo
         self.bet_repo = bet_repo
@@ -120,6 +122,7 @@ class NeonDegenService:
         self.gambling_stats_service = gambling_stats_service
         self.ai_service = ai_service
         self.flavor_text_service = flavor_text_service
+        self.neon_event_repo = neon_event_repo
 
         # Per-user cooldown: {(discord_id, guild_id): last_trigger_time}
         self._cooldowns: dict[tuple[int, int], float] = {}
@@ -167,75 +170,28 @@ class NeonDegenService:
         self._one_time_seen[key] = True
         self._persist_one_time_db(discord_id, guild_id or 0, trigger, layer)
 
-    def _get_db_path(self) -> str | None:
-        """Get database path from player_repo, or None."""
-        if self.player_repo:
-            return getattr(self.player_repo, "db_path", None)
-        return None
-
     def _load_one_time_from_db(self) -> None:
         """Preload all one-time triggers from the DB into the in-memory cache."""
-        import sqlite3
-
-        db_path = self._get_db_path()
-        if not db_path:
+        if not self.neon_event_repo:
             return
         try:
-            conn = sqlite3.connect(db_path)
-            try:
-                rows = conn.execute(
-                    "SELECT discord_id, guild_id, event_type FROM neon_events WHERE one_time = 1"
-                ).fetchall()
-                for row in rows:
-                    self._one_time_seen[(row[0], row[1], row[2])] = True
-            finally:
-                conn.close()
+            events = self.neon_event_repo.load_one_time_events()
+            for discord_id, guild_id, event_type in events:
+                self._one_time_seen[(discord_id, guild_id, event_type)] = True
         except Exception as e:
             logger.debug(f"Failed to preload one-time triggers from DB: {e}")
 
     def _check_one_time_db(self, discord_id: int, guild_id: int, trigger: str) -> bool:
         """Check if a one-time trigger exists in the DB. Returns True if found."""
-        import sqlite3
-
-        db_path = self._get_db_path()
-        if not db_path:
+        if not self.neon_event_repo:
             return False
-        try:
-            conn = sqlite3.connect(db_path)
-            try:
-                row = conn.execute(
-                    "SELECT 1 FROM neon_events WHERE discord_id = ? AND guild_id = ? "
-                    "AND event_type = ? AND one_time = 1 LIMIT 1",
-                    (discord_id, guild_id, trigger),
-                ).fetchone()
-                return row is not None
-            finally:
-                conn.close()
-        except Exception as e:
-            logger.debug(f"Failed to check one-time trigger in DB: {e}")
-            return False
+        return self.neon_event_repo.check_one_time_event(discord_id, guild_id, trigger)
 
     def _persist_one_time_db(self, discord_id: int, guild_id: int, trigger: str, layer: int) -> None:
         """Write a one-time trigger to the DB."""
-        import sqlite3
-
-        db_path = self._get_db_path()
-        if not db_path:
+        if not self.neon_event_repo:
             return
-        try:
-            conn = sqlite3.connect(db_path)
-            try:
-                conn.execute(
-                    "INSERT OR IGNORE INTO neon_events "
-                    "(discord_id, guild_id, event_type, layer, one_time, fired_at) "
-                    "VALUES (?, ?, ?, ?, 1, ?)",
-                    (discord_id, guild_id, trigger, layer, int(time.time())),
-                )
-                conn.commit()
-            finally:
-                conn.close()
-        except Exception as e:
-            logger.debug(f"Failed to persist one-time trigger to DB: {e}")
+        self.neon_event_repo.persist_one_time_event(discord_id, guild_id, trigger, layer)
 
     def _roll(self, chance: float) -> bool:
         """Roll a random check against a probability."""

@@ -4,9 +4,9 @@ import time
 
 import pytest
 
+from repositories.loan_repository import LoanRepository
 from services.loan_service import (
     LoanService,
-    LoanRepository,
     LoanApproval,
     LoanResult,
     RepaymentResult,

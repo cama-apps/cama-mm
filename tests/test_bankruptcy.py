@@ -9,7 +9,8 @@ import pytest
 from database import Database
 from repositories.bet_repository import BetRepository
 from repositories.player_repository import PlayerRepository
-from services.bankruptcy_service import BankruptcyRepository, BankruptcyService
+from repositories.bankruptcy_repository import BankruptcyRepository
+from services.bankruptcy_service import BankruptcyService
 from services.betting_service import BettingService
 
 

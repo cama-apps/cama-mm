@@ -195,8 +195,10 @@ class ServiceContainer:
 
         from services.guild_config_service import GuildConfigService
         from services.garnishment_service import GarnishmentService
-        from services.bankruptcy_service import BankruptcyService, BankruptcyRepository
-        from services.loan_service import LoanService, LoanRepository
+        from repositories.bankruptcy_repository import BankruptcyRepository
+        from repositories.loan_repository import LoanRepository
+        from services.bankruptcy_service import BankruptcyService
+        from services.loan_service import LoanService
 
         # Guild config
         self._services["guild_config"] = GuildConfigService(self._repos.guild_config)

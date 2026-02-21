@@ -620,17 +620,20 @@ class TestNeonDegenPersistence:
     async def test_degen_milestone_persists_across_instances(self, repo_db_path):
         """One-time trigger should persist in DB and block re-fire on new instance."""
         from repositories.player_repository import PlayerRepository
+        from repositories.neon_event_repository import NeonEventRepository
 
         player_repo = PlayerRepository(repo_db_path)
+        neon_event_repo = NeonEventRepository(repo_db_path)
 
         # First instance: fire degen_90
-        svc1 = NeonDegenService(player_repo=player_repo)
+        svc1 = NeonDegenService(player_repo=player_repo, neon_event_repo=neon_event_repo)
         result1 = await svc1.on_degen_milestone(123, 456, 95)
         # Should fire (first time)
         assert result1 is not None
 
         # Second instance (simulates bot restart) with same DB
-        svc2 = NeonDegenService(player_repo=player_repo)
+        neon_event_repo2 = NeonEventRepository(repo_db_path)
+        svc2 = NeonDegenService(player_repo=player_repo, neon_event_repo=neon_event_repo2)
         result2 = await svc2.on_degen_milestone(123, 456, 95)
         # Should NOT fire (already persisted in DB)
         assert result2 is None

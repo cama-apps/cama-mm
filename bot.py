@@ -65,12 +65,14 @@ from repositories.lobby_repository import LobbyRepository
 from repositories.match_repository import MatchRepository
 from repositories.pairings_repository import PairingsRepository
 from repositories.player_repository import PlayerRepository
-from services.bankruptcy_service import BankruptcyRepository, BankruptcyService
+from repositories.bankruptcy_repository import BankruptcyRepository
+from repositories.loan_repository import LoanRepository
+from services.bankruptcy_service import BankruptcyService
 from services.betting_service import BettingService
 from services.gambling_stats_service import GamblingStatsService
 from services.garnishment_service import GarnishmentService
 from services.disburse_service import DisburseService
-from services.loan_service import LoanRepository, LoanService
+from services.loan_service import LoanService
 from services.lobby_service import LobbyService
 from services.recalibration_service import RecalibrationService
 from repositories.recalibration_repository import RecalibrationRepository
@@ -341,7 +343,9 @@ def _init_services():
     bot.flavor_text_service = flavor_text_service
 
     # Create Neon Degen Terminal service (JOPA-T/v3.7 easter egg system)
+    from repositories.neon_event_repository import NeonEventRepository
     from services.neon_degen_service import NeonDegenService
+    neon_event_repo = NeonEventRepository(DB_PATH)
     neon_degen_service = NeonDegenService(
         player_repo=player_repo,
         bet_repo=bet_repo,
@@ -349,6 +353,7 @@ def _init_services():
         gambling_stats_service=gambling_stats_service,
         ai_service=ai_service,
         flavor_text_service=flavor_text_service,
+        neon_event_repo=neon_event_repo,
     )
     bot.neon_degen_service = neon_degen_service
 

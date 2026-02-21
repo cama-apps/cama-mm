@@ -154,14 +154,15 @@ class WrappedRepository(BaseRepository):
                     p.glicko_rd
                 FROM match_participants mp
                 JOIN matches m ON mp.match_id = m.match_id
-                JOIN players p ON mp.discord_id = p.discord_id
+                JOIN players p ON mp.discord_id = p.discord_id AND p.guild_id = ?
                 WHERE m.winning_team IS NOT NULL
                   AND m.match_date >= datetime(?, 'unixepoch')
                   AND m.match_date < datetime(?, 'unixepoch')
+                  AND m.guild_id = ?
                 GROUP BY mp.discord_id
                 ORDER BY games_played DESC
                 """,
-                (start_ts, end_ts),
+                (guild_id, start_ts, end_ts, guild_id),
             )
             return [dict(row) for row in cursor.fetchall()]
 
@@ -189,10 +190,11 @@ class WrappedRepository(BaseRepository):
                   AND mp.hero_id IS NOT NULL
                   AND m.match_date >= datetime(?, 'unixepoch')
                   AND m.match_date < datetime(?, 'unixepoch')
+                  AND m.guild_id = ?
                 GROUP BY mp.hero_id
                 ORDER BY picks DESC
                 """,
-                (start_ts, end_ts),
+                (start_ts, end_ts, guild_id),
             )
             return [dict(row) for row in cursor.fetchall()]
 
@@ -217,10 +219,11 @@ class WrappedRepository(BaseRepository):
                   AND mp.hero_id IS NOT NULL
                   AND m.match_date >= datetime(?, 'unixepoch')
                   AND m.match_date < datetime(?, 'unixepoch')
+                  AND m.guild_id = ?
                 GROUP BY mp.discord_id, mp.hero_id
                 ORDER BY mp.discord_id, picks DESC
                 """,
-                (start_ts, end_ts),
+                (start_ts, end_ts, guild_id),
             )
             return [dict(row) for row in cursor.fetchall()]
 
@@ -238,17 +241,19 @@ class WrappedRepository(BaseRepository):
                 WITH first_rating AS (
                     SELECT discord_id, rating_before as first_rating,
                            ROW_NUMBER() OVER (PARTITION BY discord_id ORDER BY timestamp ASC) as rn
-                    FROM rating_history
-                    WHERE timestamp >= datetime(?, 'unixepoch')
-                      AND timestamp < datetime(?, 'unixepoch')
+                    FROM rating_history rh
+                    WHERE rh.timestamp >= datetime(?, 'unixepoch')
+                      AND rh.timestamp < datetime(?, 'unixepoch')
+                      AND rh.guild_id = ?
                       AND rating_before IS NOT NULL
                 ),
                 last_rating AS (
                     SELECT discord_id, rating as last_rating,
                            ROW_NUMBER() OVER (PARTITION BY discord_id ORDER BY timestamp DESC) as rn
-                    FROM rating_history
-                    WHERE timestamp >= datetime(?, 'unixepoch')
-                      AND timestamp < datetime(?, 'unixepoch')
+                    FROM rating_history rh
+                    WHERE rh.timestamp >= datetime(?, 'unixepoch')
+                      AND rh.timestamp < datetime(?, 'unixepoch')
+                      AND rh.guild_id = ?
                       AND rating IS NOT NULL
                 ),
                 rating_variance AS (
@@ -256,9 +261,10 @@ class WrappedRepository(BaseRepository):
                            AVG(rating) as avg_rating,
                            -- Calculate variance manually
                            AVG(rating * rating) - AVG(rating) * AVG(rating) as rating_variance
-                    FROM rating_history
-                    WHERE timestamp >= datetime(?, 'unixepoch')
-                      AND timestamp < datetime(?, 'unixepoch')
+                    FROM rating_history rh
+                    WHERE rh.timestamp >= datetime(?, 'unixepoch')
+                      AND rh.timestamp < datetime(?, 'unixepoch')
+                      AND rh.guild_id = ?
                       AND rating IS NOT NULL
                     GROUP BY discord_id
                 )
@@ -271,12 +277,12 @@ class WrappedRepository(BaseRepository):
                     rv.rating_variance
                 FROM first_rating f
                 JOIN last_rating l ON f.discord_id = l.discord_id AND l.rn = 1
-                JOIN players p ON f.discord_id = p.discord_id
+                JOIN players p ON f.discord_id = p.discord_id AND p.guild_id = ?
                 LEFT JOIN rating_variance rv ON f.discord_id = rv.discord_id
                 WHERE f.rn = 1
                 ORDER BY rating_change DESC
                 """,
-                (start_ts, end_ts, start_ts, end_ts, start_ts, end_ts),
+                (start_ts, end_ts, guild_id, start_ts, end_ts, guild_id, start_ts, end_ts, guild_id, guild_id),
             )
             return [dict(row) for row in cursor.fetchall()]
 
@@ -300,7 +306,7 @@ class WrappedRepository(BaseRepository):
                     SUM(CASE WHEN b.payout IS NULL OR b.payout = 0 THEN 1 ELSE 0 END) as losses
                 FROM bets b
                 JOIN matches m ON b.match_id = m.match_id
-                JOIN players p ON b.discord_id = p.discord_id
+                JOIN players p ON b.discord_id = p.discord_id AND p.guild_id = ?
                 WHERE m.winning_team IS NOT NULL
                   AND b.guild_id = ?
                   AND b.bet_time >= ?
@@ -308,7 +314,7 @@ class WrappedRepository(BaseRepository):
                 GROUP BY b.discord_id
                 ORDER BY total_wagered DESC
                 """,
-                (guild_id, start_ts, end_ts),
+                (guild_id, guild_id, start_ts, end_ts),
             )
             return [dict(row) for row in cursor.fetchall()]
 
@@ -320,6 +326,7 @@ class WrappedRepository(BaseRepository):
         Note: bankruptcy_state doesn't have per-event timestamps, so this
         counts players who declared bankruptcy and have last_bankruptcy_at in range.
         """
+        guild_id = self.normalize_guild_id(guild_id)
         with self.cursor() as cursor:
             cursor.execute(
                 """
@@ -328,12 +335,13 @@ class WrappedRepository(BaseRepository):
                     p.discord_username,
                     bs.bankruptcy_count
                 FROM bankruptcy_state bs
-                JOIN players p ON bs.discord_id = p.discord_id
+                JOIN players p ON bs.discord_id = p.discord_id AND p.guild_id = ?
                 WHERE bs.last_bankruptcy_at >= ?
                   AND bs.last_bankruptcy_at < ?
+                  AND bs.guild_id = ?
                 ORDER BY bs.bankruptcy_count DESC
                 """,
-                (start_ts, end_ts),
+                (guild_id, start_ts, end_ts, guild_id),
             )
             return [dict(row) for row in cursor.fetchall()]
 
@@ -357,7 +365,7 @@ class WrappedRepository(BaseRepository):
                     AND b.discord_id != mp.discord_id
                     AND ((mp.side = 'radiant' AND b.team_bet_on = 'dire')
                          OR (mp.side = 'dire' AND b.team_bet_on = 'radiant'))
-                JOIN players p ON mp.discord_id = p.discord_id
+                JOIN players p ON mp.discord_id = p.discord_id AND p.guild_id = ?
                 WHERE m.winning_team IS NOT NULL
                   AND b.guild_id = ?
                   AND b.bet_time >= ?
@@ -365,7 +373,7 @@ class WrappedRepository(BaseRepository):
                 GROUP BY mp.discord_id
                 ORDER BY bets_against DESC
                 """,
-                (guild_id, start_ts, end_ts),
+                (guild_id, guild_id, start_ts, end_ts),
             )
             return [dict(row) for row in cursor.fetchall()]
 
@@ -387,8 +395,9 @@ class WrappedRepository(BaseRepository):
                 WHERE m.winning_team IS NOT NULL
                   AND m.match_date >= datetime(?, 'unixepoch')
                   AND m.match_date < datetime(?, 'unixepoch')
+                  AND m.guild_id = ?
                 """,
-                (start_ts, end_ts),
+                (start_ts, end_ts, guild_id),
             )
             row = cursor.fetchone()
             result = dict(row) if row else {}
@@ -402,8 +411,9 @@ class WrappedRepository(BaseRepository):
                 WHERE m.winning_team IS NOT NULL
                   AND b.bet_time >= ?
                   AND b.bet_time < ?
+                  AND b.guild_id = ?
                 """,
-                (start_ts, end_ts),
+                (start_ts, end_ts, guild_id),
             )
             wager_row = cursor.fetchone()
             result["total_wagered"] = wager_row["total_wagered"] if wager_row else 0

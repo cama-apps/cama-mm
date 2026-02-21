@@ -8,6 +8,7 @@ for AI-generated queries.
 from __future__ import annotations
 
 import logging
+import re
 import sqlite3
 from contextlib import contextmanager
 
@@ -80,6 +81,8 @@ class AIQueryRepository(BaseRepository):
         Returns:
             List of column info dicts with cid, name, type, notnull, dflt_value, pk
         """
+        if not re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', table_name):
+            raise ValueError(f"Invalid table name: {table_name}")
         with self.readonly_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(f"PRAGMA table_info({table_name})")
@@ -109,6 +112,8 @@ class AIQueryRepository(BaseRepository):
         Returns:
             List of FK info dicts with id, seq, table, from, to, on_update, on_delete, match
         """
+        if not re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', table_name):
+            raise ValueError(f"Invalid table name: {table_name}")
         with self.readonly_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(f"PRAGMA foreign_key_list({table_name})")

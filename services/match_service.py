@@ -735,7 +735,6 @@ class MatchService:
                     dire_glicko, radiant_glicko, 1, streak_multipliers=streak_multipliers
                 )
 
-            {pid for _, _, _, pid in team1_updated + team2_updated}
             expected_ids = set(radiant_team_ids + dire_team_ids)
             # Even if mismatch, continue but skip unknown IDs when writing
 
