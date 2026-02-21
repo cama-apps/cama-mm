@@ -10,13 +10,14 @@ from infrastructure.schema_manager import SchemaManager
 from repositories.bet_repository import BetRepository
 from repositories.match_repository import MatchRepository
 from repositories.player_repository import PlayerRepository
-from services.bankruptcy_service import BankruptcyRepository, BankruptcyService
+from repositories.bankruptcy_repository import BankruptcyRepository
+from services.bankruptcy_service import BankruptcyService
 from services.gambling_stats_service import (
     DegenScoreBreakdown,
     GamblingStatsService,
     Leaderboard,
 )
-from services.loan_service import LoanRepository
+from repositories.loan_repository import LoanRepository
 
 
 @pytest.fixture

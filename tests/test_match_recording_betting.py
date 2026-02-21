@@ -353,7 +353,8 @@ class TestLoanRepaymentOnMatchRecord:
     @pytest.fixture
     def services(self, test_db):
         """Create all required services with loan integration."""
-        from services.loan_service import LoanRepository, LoanService
+        from repositories.loan_repository import LoanRepository
+        from services.loan_service import LoanService
 
         player_repo = PlayerRepository(test_db.db_path)
         bet_repo = BetRepository(test_db.db_path)

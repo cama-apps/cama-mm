@@ -6,7 +6,7 @@ import pytest
 import time
 
 from services.disburse_service import DisburseService
-from services.loan_service import LoanRepository
+from repositories.loan_repository import LoanRepository
 from repositories.disburse_repository import DisburseRepository
 from repositories.player_repository import PlayerRepository
 

@@ -13,7 +13,8 @@ import pytest
 
 from database import Database
 from repositories.player_repository import PlayerRepository
-from services.loan_service import LoanRepository, LoanService
+from repositories.loan_repository import LoanRepository
+from services.loan_service import LoanService
 
 TEST_GUILD_ID = 12345
 

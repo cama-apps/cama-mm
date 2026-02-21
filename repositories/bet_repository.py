@@ -709,7 +709,7 @@ class BetRepository(BaseRepository, IBetRepository):
         normalized_guild = self.normalize_guild_id(guild_id)
         distributions: dict[str, list[dict]] = {"winners": [], "losers": []}
 
-        with self.connection() as conn:
+        with self.atomic_transaction() as conn:
             cursor = conn.cursor()
 
             if pending_match_id is not None:
@@ -937,7 +937,7 @@ class BetRepository(BaseRepository, IBetRepository):
                              Also includes legacy bets (pending_match_id IS NULL) with matching since_ts.
         """
         normalized_guild = self.normalize_guild_id(guild_id)
-        with self.connection() as conn:
+        with self.atomic_transaction() as conn:
             cursor = conn.cursor()
 
             if pending_match_id is not None:
@@ -1502,18 +1502,16 @@ class BetRepository(BaseRepository, IBetRepository):
                 balance_deltas[discord_id] = balance_deltas.get(discord_id, 0) + payout
                 payout_updates.append((payout, bet["bet_id"]))
 
-        # Update payout column for new winners
-        if payout_updates:
-            with self.connection() as conn:
-                cursor = conn.cursor()
+        # Update payout column for new winners and clear payout for new losers atomically
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            if payout_updates:
                 cursor.executemany(
                     "UPDATE bets SET payout = ? WHERE bet_id = ?",
                     payout_updates,
                 )
 
-        # Clear payout for new losers (old winners)
-        with self.connection() as conn:
-            cursor = conn.cursor()
+            # Clear payout for new losers (old winners)
             cursor.execute(
                 """
                 UPDATE bets

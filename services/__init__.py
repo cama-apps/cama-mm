@@ -4,7 +4,8 @@ Application services layer.
 Services orchestrate business operations using repositories and domain services.
 """
 
-from services.bankruptcy_service import BankruptcyRepository, BankruptcyService
+from repositories.bankruptcy_repository import BankruptcyRepository
+from services.bankruptcy_service import BankruptcyService
 from services.betting_service import BettingService
 from services.lobby_service import LobbyService
 from services.match_service import MatchService

@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from config import DISBURSE_MIN_FUND, DISBURSE_QUORUM_PERCENTAGE, LOTTERY_ACTIVITY_DAYS
 from repositories.disburse_repository import DisburseRepository
 from repositories.player_repository import PlayerRepository
-from services.loan_service import LoanRepository
+from repositories.loan_repository import LoanRepository
 
 
 @dataclass
