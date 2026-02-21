@@ -413,8 +413,8 @@ class TestLoanRepaymentOnMatchRecord:
         player_repo.update_balance(borrower_id, TEST_GUILD_ID, 0)
 
         # Take a loan of 50 (fee = 10, total owed = 60)
-        result = loan_service.take_loan(borrower_id, 50, guild_id=TEST_GUILD_ID)
-        assert result["success"]
+        result = loan_service.execute_loan(borrower_id, 50, guild_id=TEST_GUILD_ID)
+        assert result.success
         assert player_repo.get_balance(borrower_id, TEST_GUILD_ID) == 50  # Got full loan amount
 
         # Verify outstanding loan exists
@@ -460,7 +460,7 @@ class TestLoanRepaymentOnMatchRecord:
         player_repo.update_balance(borrower_id, TEST_GUILD_ID, 0)
 
         # Take loan of 50
-        loan_service.take_loan(borrower_id, 50, guild_id=TEST_GUILD_ID)
+        loan_service.execute_loan(borrower_id, 50, guild_id=TEST_GUILD_ID)
         assert player_repo.get_balance(borrower_id, TEST_GUILD_ID) == 50
 
         # Shuffle match
@@ -506,7 +506,7 @@ class TestLoanRepaymentOnMatchRecord:
         player_repo.update_balance(spectator_id, TEST_GUILD_ID, 0)
 
         # Spectator takes loan
-        loan_service.take_loan(spectator_id, 50, guild_id=TEST_GUILD_ID)
+        loan_service.execute_loan(spectator_id, 50, guild_id=TEST_GUILD_ID)
         assert player_repo.get_balance(spectator_id, TEST_GUILD_ID) == 50
 
         # Match is played by different players
@@ -540,7 +540,7 @@ class TestLoanRepaymentOnMatchRecord:
         player_repo.update_balance(spectator_id, TEST_GUILD_ID, 0)
 
         # Spectator takes loan of 100 (fee = 20)
-        loan_service.take_loan(spectator_id, 100, guild_id=TEST_GUILD_ID)
+        loan_service.execute_loan(spectator_id, 100, guild_id=TEST_GUILD_ID)
         assert player_repo.get_balance(spectator_id, TEST_GUILD_ID) == 100
 
         # Match 1: spectator bets but doesn't play (house mode for 1:1 payout)
@@ -584,7 +584,7 @@ class TestLoanRepaymentOnMatchRecord:
         player_repo.update_balance(borrower_id, TEST_GUILD_ID, 0)
 
         # Take max loan of 100 (fee = 20, total owed = 120)
-        loan_service.take_loan(borrower_id, 100, guild_id=TEST_GUILD_ID)
+        loan_service.execute_loan(borrower_id, 100, guild_id=TEST_GUILD_ID)
         assert player_repo.get_balance(borrower_id, TEST_GUILD_ID) == 100
 
         # "Spend" the loan money (set balance to 0)
@@ -615,8 +615,8 @@ class TestLoanRepaymentOnMatchRecord:
         player_repo.update_balance(borrower1, TEST_GUILD_ID, 0)
         player_repo.update_balance(borrower2, TEST_GUILD_ID, 0)
 
-        loan_service.take_loan(borrower1, 50, guild_id=TEST_GUILD_ID)  # owes 60
-        loan_service.take_loan(borrower2, 100, guild_id=TEST_GUILD_ID)  # owes 120
+        loan_service.execute_loan(borrower1, 50, guild_id=TEST_GUILD_ID)  # owes 60
+        loan_service.execute_loan(borrower2, 100, guild_id=TEST_GUILD_ID)  # owes 120
 
         # Shuffle and record
         match_service.shuffle_players(test_players, guild_id=TEST_GUILD_ID)
@@ -652,7 +652,7 @@ class TestLoanRepaymentOnMatchRecord:
         nonprofit_before = loan_repo.get_nonprofit_fund(TEST_GUILD_ID)
 
         # Take loan of 100 (fee = 20)
-        loan_service.take_loan(borrower_id, 100, guild_id=TEST_GUILD_ID)
+        loan_service.execute_loan(borrower_id, 100, guild_id=TEST_GUILD_ID)
 
         # Fee not added yet (deferred)
         assert loan_repo.get_nonprofit_fund(TEST_GUILD_ID) == nonprofit_before
@@ -673,7 +673,7 @@ class TestLoanRepaymentOnMatchRecord:
 
         borrower_id = test_players[0]
         player_repo.update_balance(borrower_id, TEST_GUILD_ID, 0)
-        loan_service.take_loan(borrower_id, 75, guild_id=TEST_GUILD_ID)  # owes 90
+        loan_service.execute_loan(borrower_id, 75, guild_id=TEST_GUILD_ID)  # owes 90
 
         match_service.shuffle_players(test_players, guild_id=TEST_GUILD_ID)
         result = match_service.record_match("radiant", guild_id=TEST_GUILD_ID)

@@ -53,9 +53,9 @@ class TestServiceInterfacesExist:
 
         assert issubclass(ILoanService, ABC)
         assert hasattr(ILoanService, "get_state")
-        assert hasattr(ILoanService, "can_take_loan")
-        assert hasattr(ILoanService, "take_loan")
-        assert hasattr(ILoanService, "repay_loan")
+        assert hasattr(ILoanService, "validate_loan")
+        assert hasattr(ILoanService, "execute_loan")
+        assert hasattr(ILoanService, "execute_repayment")
 
     def test_bankruptcy_service_interface(self):
         """IBankruptcyService interface exists with expected methods."""
@@ -63,8 +63,8 @@ class TestServiceInterfacesExist:
 
         assert issubclass(IBankruptcyService, ABC)
         assert hasattr(IBankruptcyService, "get_state")
-        assert hasattr(IBankruptcyService, "can_declare_bankruptcy")
-        assert hasattr(IBankruptcyService, "declare_bankruptcy")
+        assert hasattr(IBankruptcyService, "validate_bankruptcy")
+        assert hasattr(IBankruptcyService, "execute_bankruptcy")
         assert hasattr(IBankruptcyService, "apply_penalty_to_winnings")
 
     def test_prediction_service_interface(self):

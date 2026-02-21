@@ -506,37 +506,6 @@ class Database:
 
             return match_id
 
-    def update_player_mmr(self, discord_id: int, new_mmr: float, match_id: int | None = None):
-        """
-        Update player's current MMR and record in history.
-
-        Args:
-            discord_id: Discord user ID
-            new_mmr: New MMR value
-            match_id: Optional match ID that triggered this update
-        """
-        with self.connection() as conn:
-            cursor = conn.cursor()
-
-            # Update current MMR
-            cursor.execute(
-                """
-                UPDATE players
-                SET current_mmr = ?, updated_at = CURRENT_TIMESTAMP
-                WHERE discord_id = ?
-            """,
-                (new_mmr, discord_id),
-            )
-
-            # Record in history
-            cursor.execute(
-                """
-                INSERT INTO rating_history (discord_id, rating, match_id)
-                VALUES (?, ?, ?)
-            """,
-                (discord_id, new_mmr, match_id),
-            )
-
     def get_exclusion_counts(self, discord_ids: list[int]) -> dict[int, int]:
         """
         Get exclusion counts for multiple players.

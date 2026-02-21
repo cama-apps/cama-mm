@@ -71,29 +71,27 @@ class TestBankruptcyEligibility:
         player_repo = db_and_repos["player_repo"]
         pid = create_test_player(player_repo, 1001, balance=100)
 
-        result = bankruptcy_service.can_declare_bankruptcy(pid, TEST_GUILD_ID)
-        assert result["allowed"] is False
-        assert result["reason"] == "not_in_debt"
-        assert result["balance"] == 100
+        result = bankruptcy_service.validate_bankruptcy(pid, TEST_GUILD_ID)
+        assert not result.success
+        assert result.error_code == "not_in_debt"
 
     def test_cannot_declare_bankruptcy_with_zero_balance(self, db_and_repos, bankruptcy_service):
         """Players with zero balance cannot declare bankruptcy."""
         player_repo = db_and_repos["player_repo"]
         pid = create_test_player(player_repo, 1001, balance=0)
 
-        result = bankruptcy_service.can_declare_bankruptcy(pid, TEST_GUILD_ID)
-        assert result["allowed"] is False
-        assert result["reason"] == "not_in_debt"
-        assert result["balance"] == 0
+        result = bankruptcy_service.validate_bankruptcy(pid, TEST_GUILD_ID)
+        assert not result.success
+        assert result.error_code == "not_in_debt"
 
     def test_can_declare_bankruptcy_with_negative_balance(self, db_and_repos, bankruptcy_service):
         """Players with negative balance can declare bankruptcy."""
         player_repo = db_and_repos["player_repo"]
         pid = create_test_player(player_repo, 1001, balance=-100)
 
-        result = bankruptcy_service.can_declare_bankruptcy(pid, TEST_GUILD_ID)
-        assert result["allowed"] is True
-        assert result["debt"] == 100
+        result = bankruptcy_service.validate_bankruptcy(pid, TEST_GUILD_ID)
+        assert result.success
+        assert result.value == 100
 
 
 class TestBankruptcyCooldown:
@@ -105,16 +103,16 @@ class TestBankruptcyCooldown:
         pid = create_test_player(player_repo, 1001, balance=-200)
 
         # First bankruptcy should succeed
-        result1 = bankruptcy_service.declare_bankruptcy(pid, TEST_GUILD_ID)
-        assert result1["success"] is True
+        result1 = bankruptcy_service.execute_bankruptcy(pid, TEST_GUILD_ID)
+        assert result1.success
 
         # Put player back in debt
         player_repo.update_balance(pid, TEST_GUILD_ID, -100)
 
         # Second bankruptcy should fail due to cooldown
-        result2 = bankruptcy_service.can_declare_bankruptcy(pid, TEST_GUILD_ID)
-        assert result2["allowed"] is False
-        assert result2["reason"] == "on_cooldown"
+        result2 = bankruptcy_service.validate_bankruptcy(pid, TEST_GUILD_ID)
+        assert not result2.success
+        assert result2.error_code == "bankruptcy_cooldown"
 
     def test_cooldown_expires_after_duration(self, db_and_repos):
         """Players can declare bankruptcy after cooldown expires."""
@@ -133,8 +131,8 @@ class TestBankruptcyCooldown:
         pid = create_test_player(player_repo, 1001, balance=-200)
 
         # First bankruptcy
-        result1 = service.declare_bankruptcy(pid, TEST_GUILD_ID)
-        assert result1["success"] is True
+        result1 = service.execute_bankruptcy(pid, TEST_GUILD_ID)
+        assert result1.success
 
         # Wait for cooldown to expire
         time.sleep(1.1)
@@ -143,8 +141,8 @@ class TestBankruptcyCooldown:
         player_repo.update_balance(pid, TEST_GUILD_ID, -100)
 
         # Should be able to declare again
-        result2 = service.can_declare_bankruptcy(pid, TEST_GUILD_ID)
-        assert result2["allowed"] is True
+        result2 = service.validate_bankruptcy(pid, TEST_GUILD_ID)
+        assert result2.success
 
 
 class TestBankruptcyDeclaration:
@@ -155,10 +153,10 @@ class TestBankruptcyDeclaration:
         player_repo = db_and_repos["player_repo"]
         pid = create_test_player(player_repo, 1001, balance=-300)
 
-        result = bankruptcy_service.declare_bankruptcy(pid, TEST_GUILD_ID)
+        result = bankruptcy_service.execute_bankruptcy(pid, TEST_GUILD_ID)
 
-        assert result["success"] is True
-        assert result["debt_cleared"] == 300
+        assert result.success
+        assert result.value.debt_cleared == 300
         assert player_repo.get_balance(pid, TEST_GUILD_ID) == 3
 
     def test_bankruptcy_sets_penalty_games(self, db_and_repos, bankruptcy_service):
@@ -166,9 +164,9 @@ class TestBankruptcyDeclaration:
         player_repo = db_and_repos["player_repo"]
         pid = create_test_player(player_repo, 1001, balance=-300)
 
-        result = bankruptcy_service.declare_bankruptcy(pid, TEST_GUILD_ID)
+        result = bankruptcy_service.execute_bankruptcy(pid, TEST_GUILD_ID)
 
-        assert result["penalty_games"] == 5
+        assert result.value.penalty_games == 5
         state = bankruptcy_service.get_state(pid, TEST_GUILD_ID)
         assert state.penalty_games_remaining == 5
 
@@ -182,7 +180,7 @@ class TestBankruptcyPenalty:
         pid = create_test_player(player_repo, 1001, balance=-300)
 
         # Declare bankruptcy
-        bankruptcy_service.declare_bankruptcy(pid, TEST_GUILD_ID)
+        bankruptcy_service.execute_bankruptcy(pid, TEST_GUILD_ID)
 
         # Apply penalty to winnings
         result = bankruptcy_service.apply_penalty_to_winnings(pid, 10, TEST_GUILD_ID)
@@ -207,7 +205,7 @@ class TestBankruptcyPenalty:
         player_repo = db_and_repos["player_repo"]
         pid = create_test_player(player_repo, 1001, balance=-300)
 
-        bankruptcy_service.declare_bankruptcy(pid, TEST_GUILD_ID)
+        bankruptcy_service.execute_bankruptcy(pid, TEST_GUILD_ID)
         assert bankruptcy_service.get_state(pid, TEST_GUILD_ID).penalty_games_remaining == 5
 
         # Win 3 games
@@ -221,7 +219,7 @@ class TestBankruptcyPenalty:
         player_repo = db_and_repos["player_repo"]
         pid = create_test_player(player_repo, 1001, balance=-300)
 
-        bankruptcy_service.declare_bankruptcy(pid, TEST_GUILD_ID)
+        bankruptcy_service.execute_bankruptcy(pid, TEST_GUILD_ID)
 
         # Win all 5 required games
         for _ in range(5):
@@ -258,7 +256,7 @@ class TestBettingServiceIntegration:
 
         # Create player with debt and declare bankruptcy
         pid = create_test_player(player_repo, 1001, balance=-200)
-        bankruptcy_service.declare_bankruptcy(pid, TEST_GUILD_ID)
+        bankruptcy_service.execute_bankruptcy(pid, TEST_GUILD_ID)
 
         # Award win bonus (default 2 jopacoin)
         results = betting_service.award_win_bonus([pid], TEST_GUILD_ID)
@@ -289,7 +287,7 @@ class TestBettingServiceIntegration:
 
         # Create player with debt and declare bankruptcy
         pid = create_test_player(player_repo, 1001, balance=-200)
-        bankruptcy_service.declare_bankruptcy(pid, TEST_GUILD_ID)
+        bankruptcy_service.execute_bankruptcy(pid, TEST_GUILD_ID)
 
         assert bankruptcy_service.get_state(pid, TEST_GUILD_ID).penalty_games_remaining == 5
 
@@ -321,7 +319,7 @@ class TestBettingServiceIntegration:
 
         # Create player with debt and declare bankruptcy
         pid = create_test_player(player_repo, 1001, balance=-200)
-        bankruptcy_service.declare_bankruptcy(pid, TEST_GUILD_ID)
+        bankruptcy_service.execute_bankruptcy(pid, TEST_GUILD_ID)
 
         assert bankruptcy_service.get_state(pid, TEST_GUILD_ID).penalty_games_remaining == 5
 
@@ -354,7 +352,7 @@ class TestBankruptcyState:
         pid = create_test_player(player_repo, 1001, balance=-200)
 
         now = int(time.time())
-        bankruptcy_service.declare_bankruptcy(pid, TEST_GUILD_ID)
+        bankruptcy_service.execute_bankruptcy(pid, TEST_GUILD_ID)
 
         state = bankruptcy_service.get_state(pid, TEST_GUILD_ID)
 
@@ -375,7 +373,7 @@ class TestBankruptcyCount:
         bet_repo = db_and_repos["bet_repo"]
         pid = create_test_player(player_repo, 1001, balance=-200)
 
-        bankruptcy_service.declare_bankruptcy(pid, TEST_GUILD_ID)
+        bankruptcy_service.execute_bankruptcy(pid, TEST_GUILD_ID)
 
         count = bet_repo.get_player_bankruptcy_count(pid, TEST_GUILD_ID)
         assert count == 1
@@ -398,17 +396,17 @@ class TestBankruptcyCount:
         pid = create_test_player(player_repo, 1001, balance=-200)
 
         # First bankruptcy
-        service.declare_bankruptcy(pid, TEST_GUILD_ID)
+        service.execute_bankruptcy(pid, TEST_GUILD_ID)
         assert bet_repo.get_player_bankruptcy_count(pid, TEST_GUILD_ID) == 1
 
         # Put back in debt and declare again
         player_repo.update_balance(pid, TEST_GUILD_ID, -100)
-        service.declare_bankruptcy(pid, TEST_GUILD_ID)
+        service.execute_bankruptcy(pid, TEST_GUILD_ID)
         assert bet_repo.get_player_bankruptcy_count(pid, TEST_GUILD_ID) == 2
 
         # Third bankruptcy
         player_repo.update_balance(pid, TEST_GUILD_ID, -50)
-        service.declare_bankruptcy(pid, TEST_GUILD_ID)
+        service.execute_bankruptcy(pid, TEST_GUILD_ID)
         assert bet_repo.get_player_bankruptcy_count(pid, TEST_GUILD_ID) == 3
 
     def test_reset_cooldown_does_not_increment_count(self, db_and_repos, bankruptcy_service):
@@ -419,7 +417,7 @@ class TestBankruptcyCount:
         pid = create_test_player(player_repo, 1001, balance=-200)
 
         # Declare bankruptcy
-        bankruptcy_service.declare_bankruptcy(pid, TEST_GUILD_ID)
+        bankruptcy_service.execute_bankruptcy(pid, TEST_GUILD_ID)
         assert bet_repo.get_player_bankruptcy_count(pid, TEST_GUILD_ID) == 1
 
         # Admin resets cooldown using reset_cooldown_only (not upsert_state)
@@ -470,7 +468,7 @@ class TestBulkBankruptcyState:
         player_repo = db_and_repos["player_repo"]
         pid = create_test_player(player_repo, 1001, balance=-200)
 
-        bankruptcy_service.declare_bankruptcy(pid, TEST_GUILD_ID)
+        bankruptcy_service.execute_bankruptcy(pid, TEST_GUILD_ID)
         states = bankruptcy_service.get_bulk_states([pid], TEST_GUILD_ID)
 
         assert len(states) == 1
@@ -485,7 +483,7 @@ class TestBulkBankruptcyState:
 
         # User with bankruptcy
         pid1 = create_test_player(player_repo, 1001, balance=-200)
-        bankruptcy_service.declare_bankruptcy(pid1, TEST_GUILD_ID)
+        bankruptcy_service.execute_bankruptcy(pid1, TEST_GUILD_ID)
 
         # User without bankruptcy (positive balance)
         pid2 = create_test_player(player_repo, 1002, balance=50)
@@ -526,7 +524,7 @@ class TestBulkBankruptcyState:
         )
 
         pid = create_test_player(player_repo, 1001, balance=-200)
-        short_cooldown_service.declare_bankruptcy(pid, TEST_GUILD_ID)
+        short_cooldown_service.execute_bankruptcy(pid, TEST_GUILD_ID)
 
         # Immediately after: should be on cooldown
         states = short_cooldown_service.get_bulk_states([pid], TEST_GUILD_ID)
@@ -558,7 +556,7 @@ class TestBulkBankruptcyState:
 
         # User with bankruptcy
         pid1 = create_test_player(player_repo, 1001, balance=-200)
-        bankruptcy_service.declare_bankruptcy(pid1, TEST_GUILD_ID)
+        bankruptcy_service.execute_bankruptcy(pid1, TEST_GUILD_ID)
 
         # User without bankruptcy
         pid2 = create_test_player(player_repo, 1002, balance=50)
@@ -575,7 +573,7 @@ class TestBulkBankruptcyState:
         """Should handle duplicate IDs in input list."""
         player_repo = db_and_repos["player_repo"]
         pid = create_test_player(player_repo, 1001, balance=-200)
-        bankruptcy_service.declare_bankruptcy(pid, TEST_GUILD_ID)
+        bankruptcy_service.execute_bankruptcy(pid, TEST_GUILD_ID)
 
         # Pass same ID multiple times
         states = bankruptcy_service.get_bulk_states([pid, pid, pid], TEST_GUILD_ID)

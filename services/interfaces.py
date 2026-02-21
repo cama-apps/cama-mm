@@ -233,32 +233,6 @@ class ILoanService(ABC):
         """Get the loan state for a player."""
         ...
 
-    # Legacy dict-returning methods (kept for backward compatibility)
-
-    @abstractmethod
-    def can_take_loan(self, discord_id: int, amount: int) -> dict:
-        """Check if a player can take a loan (legacy)."""
-        ...
-
-    @abstractmethod
-    def take_loan(
-        self,
-        discord_id: int,
-        amount: int,
-        guild_id: int | None = None,
-    ) -> dict:
-        """Take a loan (legacy)."""
-        ...
-
-    @abstractmethod
-    def repay_loan(
-        self,
-        discord_id: int,
-        guild_id: int | None = None,
-    ) -> dict:
-        """Repay an outstanding loan (legacy)."""
-        ...
-
     @abstractmethod
     def get_nonprofit_fund(self, guild_id: int | None) -> int:
         """Get the nonprofit fund balance."""
@@ -317,18 +291,6 @@ class IBankruptcyService(ABC):
         discord_ids: list[int],
     ) -> dict[int, "BankruptcyState"]:
         """Get bankruptcy states for multiple players."""
-        ...
-
-    # Legacy dict-returning methods (kept for backward compatibility)
-
-    @abstractmethod
-    def can_declare_bankruptcy(self, discord_id: int) -> dict:
-        """Check if a player can declare bankruptcy (legacy)."""
-        ...
-
-    @abstractmethod
-    def declare_bankruptcy(self, discord_id: int) -> dict:
-        """Declare bankruptcy (legacy)."""
         ...
 
     @abstractmethod

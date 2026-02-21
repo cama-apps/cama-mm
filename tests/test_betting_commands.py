@@ -323,8 +323,8 @@ async def test_loan_rejects_unregistered_user():
     assert call_kwargs.get("ephemeral") is True
 
     # Loan service should NOT be called
-    loan_service.can_take_loan.assert_not_called()
-    loan_service.take_loan.assert_not_called()
+    loan_service.validate_loan.assert_not_called()
+    loan_service.execute_loan.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -339,18 +339,15 @@ async def test_loan_checks_eligibility_for_registered_user():
     # User IS registered
     player_service.get_player.return_value = MagicMock(name="TestPlayer")
 
-    # Loan is allowed
-    loan_service.can_take_loan.return_value = {"allowed": True}
-    loan_service.take_loan.return_value = {
-        "success": True,
-        "amount": 50,
-        "fee": 10,
-        "total_owed": 60,
-        "new_balance": 40,
-        "nonprofit_total": 10,
-        "total_loans_taken": 1,
-        "was_negative_loan": False,
-    }
+    # Loan is allowed - mock Result objects for validate_loan and execute_loan
+    from services.result import Result
+    from services.loan_service import LoanApproval, LoanResult
+    loan_service.validate_loan.return_value = Result.ok(
+        LoanApproval(amount=50, fee=10, total_owed=60, new_balance=40)
+    )
+    loan_service.execute_loan.return_value = Result.ok(
+        LoanResult(amount=50, fee=10, total_owed=60, new_balance=40, total_loans_taken=1, was_negative_loan=False)
+    )
 
     interaction = MagicMock()
     interaction.guild.id = 123
@@ -365,9 +362,9 @@ async def test_loan_checks_eligibility_for_registered_user():
     await commands.loan.callback(commands, interaction, amount=50)
 
     # Should check eligibility (includes guild_id now)
-    loan_service.can_take_loan.assert_called_once_with(456, 50, 123)
+    loan_service.validate_loan.assert_called_once_with(456, 50, 123)
     # Should take the loan
-    loan_service.take_loan.assert_called_once_with(456, 50, 123)
+    loan_service.execute_loan.assert_called_once_with(456, 50, 123)
 
 
 @pytest.mark.asyncio
