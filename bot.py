@@ -375,11 +375,6 @@ def _init_services():
     _services_initialized = True
 
 
-# Set non-database attributes on bot immediately (these are safe at import time)
-bot.role_emojis = ROLE_EMOJIS
-bot.role_names = ROLE_NAMES
-bot.format_role_display = format_role_display
-bot.ADMIN_USER_IDS = ADMIN_USER_IDS
 
 EXTENSIONS = [
     "commands.registration",

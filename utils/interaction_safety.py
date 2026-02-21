@@ -144,3 +144,32 @@ async def safe_followup(
         )
         # endregion agent log
         return msg
+
+
+async def update_lobby_message_closed(
+    bot, lobby_service, reason: str = "Lobby Closed"
+) -> None:
+    """Update the channel message embed to show lobby/match is closed.
+
+    Shared between match and lobby commands to avoid duplication.
+    """
+    message_id = lobby_service.get_lobby_message_id()
+    channel_id = lobby_service.get_lobby_channel_id()
+    if not message_id or not channel_id:
+        return
+
+    try:
+        channel = bot.get_channel(channel_id)
+        if not channel:
+            channel = await bot.fetch_channel(channel_id)
+        message = await channel.fetch_message(message_id)
+
+        import discord
+        embed = discord.Embed(
+            title=f"\U0001f6ab {reason}",
+            description="This lobby has been closed.",
+            color=discord.Color.dark_grey(),
+        )
+        await message.edit(embed=embed, view=None)
+    except Exception as exc:
+        logger.warning(f"Failed to update channel message as closed: {exc}")

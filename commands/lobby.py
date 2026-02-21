@@ -18,7 +18,8 @@ from config import LOBBY_CHANNEL_ID
 from services.lobby_service import LobbyService
 from services.permissions import has_admin_permission
 from utils.formatting import FROGLING_EMOJI_ID, FROGLING_EMOTE, JOPACOIN_EMOJI_ID, format_duration_short
-from utils.interaction_safety import safe_defer
+from utils.neon_helpers import get_neon_service
+from utils.interaction_safety import safe_defer, update_lobby_message_closed
 from utils.pin_helpers import safe_unpin_all_bot_messages
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
 
@@ -208,26 +209,7 @@ class LobbyCommands(commands.Cog):
 
     async def _update_channel_message_closed(self, reason: str = "Lobby Closed") -> None:
         """Update the channel message embed to show lobby is closed."""
-        message_id = self.lobby_service.get_lobby_message_id()
-        channel_id = self.lobby_service.get_lobby_channel_id()
-        if not message_id or not channel_id:
-            return
-
-        try:
-            channel = self.bot.get_channel(channel_id)
-            if not channel:
-                channel = await self.bot.fetch_channel(channel_id)
-            message = await channel.fetch_message(message_id)
-
-            # Create a closed embed
-            embed = discord.Embed(
-                title=f"🚫 {reason}",
-                description="This lobby has been closed.",
-                color=discord.Color.dark_grey(),
-            )
-            await message.edit(embed=embed, view=None)
-        except Exception as exc:
-            logger.warning(f"Failed to update channel message as closed: {exc}")
+        await update_lobby_message_closed(self.bot, self.lobby_service, reason)
 
     async def _archive_lobby_thread(self, reason: str = "Lobby Reset") -> None:
         """Lock and archive the lobby thread with a status message."""
@@ -624,7 +606,7 @@ class LobbyCommands(commands.Cog):
 
         # Neon Degen Terminal hook for lobby join
         try:
-            neon = getattr(self.bot, "neon_degen_service", None)
+            neon = get_neon_service(self.bot)
             if neon and lobby:
                 queue_position = len(lobby.players) + len(lobby.conditional_players)
                 neon_result = await neon.on_lobby_join(

@@ -27,7 +27,8 @@ from utils.formatting import (
     format_betting_display,
     get_player_display_name,
 )
-from utils.interaction_safety import safe_defer
+from utils.interaction_safety import safe_defer, update_lobby_message_closed
+from utils.neon_helpers import get_neon_service, send_neon_result
 from utils.pin_helpers import safe_unpin_all_bot_messages
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
 
@@ -59,58 +60,9 @@ class MatchCommands(commands.Cog):
         # Track scheduled betting reminder tasks per guild for cleanup
         self._betting_tasks_by_guild = {}
 
-    async def _send_neon_result(self, interaction: discord.Interaction, neon_result) -> None:
-        """Send a NeonResult to the channel, auto-deleting after 60s."""
-        try:
-            if neon_result is None:
-                return
-            msg = None
-            if neon_result.gif_file:
-                gif_file = discord.File(neon_result.gif_file, filename="jopat_terminal.gif")
-                if neon_result.text_block:
-                    msg = await interaction.channel.send(neon_result.text_block, file=gif_file)
-                else:
-                    msg = await interaction.channel.send(file=gif_file)
-            elif neon_result.text_block:
-                msg = await interaction.channel.send(neon_result.text_block)
-            elif neon_result.footer_text:
-                msg = await interaction.channel.send(neon_result.footer_text)
-            # Auto-delete after 60 seconds
-            if msg:
-                asyncio.create_task(self._delete_neon_after(msg, 60))
-        except Exception as exc:
-            logger.debug(f"Failed to send neon result: {exc}")
-
-    @staticmethod
-    async def _delete_neon_after(msg, delay: float) -> None:
-        """Delete a message after a delay, ignoring errors."""
-        try:
-            await asyncio.sleep(delay)
-            await msg.delete()
-        except Exception:
-            pass
-
     async def _update_channel_message_closed(self, reason: str = "Match Aborted") -> None:
         """Update the channel message embed to show lobby/match is closed."""
-        message_id = self.lobby_service.get_lobby_message_id()
-        channel_id = self.lobby_service.get_lobby_channel_id()
-        if not message_id or not channel_id:
-            return
-
-        try:
-            channel = self.bot.get_channel(channel_id)
-            if not channel:
-                channel = await self.bot.fetch_channel(channel_id)
-            message = await channel.fetch_message(message_id)
-
-            embed = discord.Embed(
-                title=f"🚫 {reason}",
-                description="This lobby has been closed.",
-                color=discord.Color.dark_grey(),
-            )
-            await message.edit(embed=embed, view=None)
-        except Exception as exc:
-            logger.warning(f"Failed to update channel message as closed: {exc}")
+        await update_lobby_message_closed(self.bot, self.lobby_service, reason)
 
     async def _lock_lobby_thread(
         self,
@@ -637,14 +589,14 @@ class MatchCommands(commands.Cog):
                         # Neon Degen Terminal: Bomb pot easter egg
                         if is_bomb_pot:
                             try:
-                                neon = getattr(self.bot, "neon_degen_service", None)
+                                neon = get_neon_service(self.bot)
                                 if neon:
                                     pool_total = blind_bets_result['total_radiant'] + blind_bets_result['total_dire']
                                     bomb_result = await neon.on_bomb_pot(
                                         guild_id, pool_total, blind_bets_result['created']
                                     )
                                     if bomb_result:
-                                        await self._send_neon_result(interaction, bomb_result)
+                                        await send_neon_result(interaction, bomb_result)
                             except Exception as e:
                                 logger.debug(f"neon on_bomb_pot error: {e}")
                 except Exception as exc:
@@ -1269,39 +1221,15 @@ class MatchCommands(commands.Cog):
         )
 
         # Neon Degen Terminal hook (match recorded footer / streak)
-        from services.neon_degen_service import NeonDegenService
-        _neon_svc = getattr(self.bot, "neon_degen_service", None)
-        neon = _neon_svc if isinstance(_neon_svc, NeonDegenService) else None
+        neon = get_neon_service(self.bot)
         if neon:
             try:
-                async def _send_neon_msg(neon_result):
-                    if neon_result is None:
-                        return
-                    msg = None
-                    if neon_result.gif_file:
-                        gif_file = discord.File(neon_result.gif_file, filename="jopat_terminal.gif")
-                        if neon_result.text_block:
-                            msg = await interaction.channel.send(neon_result.text_block, file=gif_file)
-                        else:
-                            msg = await interaction.channel.send(file=gif_file)
-                    elif neon_result.text_block:
-                        msg = await interaction.channel.send(neon_result.text_block)
-                    elif neon_result.footer_text:
-                        msg = await interaction.channel.send(neon_result.footer_text)
-                    if msg:
-                        async def _delete_after(m, delay):
-                            try:
-                                await asyncio.sleep(delay)
-                                await m.delete()
-                            except Exception:
-                                pass
-                        asyncio.create_task(_delete_after(msg, 60))
 
                 neon_result = await neon.on_match_recorded(
                     guild_id,
                     streak_data=record_result.get("notable_streak"),
                 )
-                await _send_neon_msg(neon_result)
+                await send_neon_result(interaction, neon_result)
 
                 # Wire on_bet_settled + on_leverage_loss for losers (max ONE per match)
                 neon_sent = neon_result is not None
@@ -1320,7 +1248,7 @@ class MatchCommands(commands.Cog):
                                 loser_id, guild_id, amount, leverage, new_bal
                             )
                             if lr:
-                                await _send_neon_msg(lr)
+                                await send_neon_result(interaction, lr)
                                 neon_sent = True
                                 break
 
@@ -1331,7 +1259,7 @@ class MatchCommands(commands.Cog):
                                 loser_id, guild_id, won=False, payout=0, new_balance=new_bal
                             )
                             if sr:
-                                await _send_neon_msg(sr)
+                                await send_neon_result(interaction, sr)
                                 neon_sent = True
                                 break
 
@@ -1345,7 +1273,7 @@ class MatchCommands(commands.Cog):
                         if degen_score is not None and degen_score >= 90:
                             mr = await neon.on_degen_milestone(loser_id, guild_id, degen_score)
                             if mr:
-                                await _send_neon_msg(mr)
+                                await send_neon_result(interaction, mr)
                                 neon_sent = True
                                 break
 
@@ -1362,7 +1290,7 @@ class MatchCommands(commands.Cog):
                             milestone["total_games"],
                         )
                         if gm_result:
-                            await _send_neon_msg(gm_result)
+                            await send_neon_result(interaction, gm_result)
                             neon_sent = True
 
                     for streak_rec in easter_data.get("win_streak_records", []):
@@ -1375,7 +1303,7 @@ class MatchCommands(commands.Cog):
                             streak_rec["previous_best"],
                         )
                         if ws_result:
-                            await _send_neon_msg(ws_result)
+                            await send_neon_result(interaction, ws_result)
                             neon_sent = True
 
                     for rivalry in easter_data.get("rivalries_detected", []):
@@ -1389,7 +1317,7 @@ class MatchCommands(commands.Cog):
                             rivalry["winrate_vs"],
                         )
                         if rv_result:
-                            await _send_neon_msg(rv_result)
+                            await send_neon_result(interaction, rv_result)
                             neon_sent = True
 
             except Exception as exc:
