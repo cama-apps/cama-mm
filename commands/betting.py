@@ -2475,7 +2475,7 @@ class BettingCommands(commands.Cog):
         )
         embed.add_field(
             name="🎲 Lottery",
-            value=f"Random player wins all\n**{votes.get('lottery', 0)}** votes",
+            value=f"Random active player wins all\n**{votes.get('lottery', 0)}** votes",
             inline=True,
         )
         embed.add_field(

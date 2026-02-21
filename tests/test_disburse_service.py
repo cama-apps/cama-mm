@@ -446,13 +446,14 @@ class TestStimulusDistribution:
 
 
 class TestLotteryEligibility:
-    """Test lottery eligibility in repository."""
+    """Test lottery eligibility in repository (activity-filtered)."""
 
     def test_get_all_registered_players_for_lottery(self, player_repo):
-        """Test that all registered players are returned for lottery."""
-        # Create 5 players
+        """Test that recently active players are returned for lottery."""
+        # Create 5 players with recent activity
         for i in range(1, 6):
             player_repo.add(discord_id=i, discord_username=f"Player{i}", guild_id=TEST_GUILD_ID, initial_mmr=3000)
+            player_repo.update_last_match_date(i, TEST_GUILD_ID)
 
         eligible = player_repo.get_all_registered_players_for_lottery(TEST_GUILD_ID)
 
@@ -461,18 +462,70 @@ class TestLotteryEligibility:
         assert eligible_ids == {1, 2, 3, 4, 5}
 
     def test_get_all_registered_players_for_lottery_includes_debtors(self, player_repo):
-        """Test that debtors are included in lottery."""
+        """Test that debtors with recent activity are included in lottery."""
         player_repo.add(discord_id=1, discord_username="Rich", guild_id=TEST_GUILD_ID, initial_mmr=3000)
         player_repo.add(discord_id=2, discord_username="Debtor", guild_id=TEST_GUILD_ID, initial_mmr=3000)
 
         player_repo.update_balance(1, TEST_GUILD_ID, 100)
         player_repo.update_balance(2, TEST_GUILD_ID, -100)  # Debtor
 
+        # Both have recent activity
+        player_repo.update_last_match_date(1, TEST_GUILD_ID)
+        player_repo.update_last_match_date(2, TEST_GUILD_ID)
+
         eligible = player_repo.get_all_registered_players_for_lottery(TEST_GUILD_ID)
 
         eligible_ids = {p["discord_id"] for p in eligible}
         assert 1 in eligible_ids
         assert 2 in eligible_ids  # Debtors included
+
+    def test_lottery_excludes_player_with_no_last_match_date(self, player_repo):
+        """Test that players who have never played are excluded from lottery."""
+        player_repo.add(discord_id=1, discord_username="Active", guild_id=TEST_GUILD_ID, initial_mmr=3000)
+        player_repo.add(discord_id=2, discord_username="NeverPlayed", guild_id=TEST_GUILD_ID, initial_mmr=3000)
+
+        # Only player 1 has a match date
+        player_repo.update_last_match_date(1, TEST_GUILD_ID)
+
+        eligible = player_repo.get_all_registered_players_for_lottery(TEST_GUILD_ID)
+
+        eligible_ids = {p["discord_id"] for p in eligible}
+        assert 1 in eligible_ids
+        assert 2 not in eligible_ids
+
+    def test_lottery_excludes_player_with_old_last_match_date(self, player_repo):
+        """Test that players inactive for more than 14 days are excluded."""
+        from datetime import datetime, timedelta, timezone
+
+        player_repo.add(discord_id=1, discord_username="Active", guild_id=TEST_GUILD_ID, initial_mmr=3000)
+        player_repo.add(discord_id=2, discord_username="Inactive", guild_id=TEST_GUILD_ID, initial_mmr=3000)
+
+        # Player 1 played recently
+        player_repo.update_last_match_date(1, TEST_GUILD_ID)
+        # Player 2 played 30 days ago
+        old_date = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+        player_repo.update_last_match_date(2, TEST_GUILD_ID, timestamp=old_date)
+
+        eligible = player_repo.get_all_registered_players_for_lottery(TEST_GUILD_ID)
+
+        eligible_ids = {p["discord_id"] for p in eligible}
+        assert 1 in eligible_ids
+        assert 2 not in eligible_ids
+
+    def test_lottery_includes_player_within_activity_window(self, player_repo):
+        """Test that players who played within 14 days are included."""
+        from datetime import datetime, timedelta, timezone
+
+        player_repo.add(discord_id=1, discord_username="Recent", guild_id=TEST_GUILD_ID, initial_mmr=3000)
+
+        # Player played 10 days ago (within 14-day window)
+        recent_date = (datetime.now(timezone.utc) - timedelta(days=10)).isoformat()
+        player_repo.update_last_match_date(1, TEST_GUILD_ID, timestamp=recent_date)
+
+        eligible = player_repo.get_all_registered_players_for_lottery(TEST_GUILD_ID)
+
+        assert len(eligible) == 1
+        assert eligible[0]["discord_id"] == 1
 
 
 class TestSocialSecurityEligibility:
@@ -826,11 +879,12 @@ class TestLotteryExecution:
         self, disburse_service, player_repo, loan_repo
     ):
         """Test full lottery disbursement execution."""
-        # Create 5 players
+        # Create 5 players with recent activity
         for i in range(1, 6):
             player_repo.add(discord_id=i, discord_username=f"Player{i}", guild_id=TEST_GUILD_ID, initial_mmr=3000)
             player_repo.increment_wins(i, TEST_GUILD_ID)
             player_repo.update_balance(i, TEST_GUILD_ID, 50)
+            player_repo.update_last_match_date(i, TEST_GUILD_ID)
 
         # Add nonprofit fund
         loan_repo.add_to_nonprofit_fund(guild_id=TEST_GUILD_ID, amount=300)

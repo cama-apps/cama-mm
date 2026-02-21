@@ -1007,16 +1007,30 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 for row in cursor.fetchall()
             ]
 
-    def get_all_registered_players_for_lottery(self, guild_id: int) -> list[dict]:
+    def get_all_registered_players_for_lottery(self, guild_id: int, activity_days: int = 14) -> list[dict]:
         """
-        Get all registered players (discord_id only) for lottery selection.
+        Get recently active players (discord_id only) for lottery selection.
+
+        Only includes players who have played a match within the last
+        ``activity_days`` days.
 
         Returns:
-            List of dicts with 'discord_id' for all registered players.
+            List of dicts with 'discord_id' for eligible players.
         """
+        from datetime import datetime, timedelta, timezone
+
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=activity_days)).isoformat()
         with self.connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT discord_id FROM players WHERE guild_id = ?", (guild_id,))
+            cursor.execute(
+                """
+                SELECT discord_id FROM players
+                WHERE guild_id = ?
+                  AND last_match_date IS NOT NULL
+                  AND last_match_date >= ?
+                """,
+                (guild_id, cutoff),
+            )
             return [{"discord_id": row["discord_id"]} for row in cursor.fetchall()]
 
     def get_players_by_games_played(self, guild_id: int) -> list[dict]:

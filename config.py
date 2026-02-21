@@ -132,6 +132,7 @@ LOAN_FEE_RATE = _parse_float("LOAN_FEE_RATE", 0.20)  # 20% flat fee
 # Disbursement configuration
 DISBURSE_MIN_FUND = _parse_int("DISBURSE_MIN_FUND", 250)  # Min fund to propose disbursement
 DISBURSE_QUORUM_PERCENTAGE = _parse_float("DISBURSE_QUORUM_PERCENTAGE", 0.40)  # 40% of players
+LOTTERY_ACTIVITY_DAYS = _parse_int("LOTTERY_ACTIVITY_DAYS", 14)  # Days of activity required for lottery eligibility
 
 # Shop pricing
 SHOP_ANNOUNCE_COST = _parse_int("SHOP_ANNOUNCE_COST", 10)

@@ -11,7 +11,7 @@ import random
 import time
 from dataclasses import dataclass, field
 
-from config import DISBURSE_MIN_FUND, DISBURSE_QUORUM_PERCENTAGE
+from config import DISBURSE_MIN_FUND, DISBURSE_QUORUM_PERCENTAGE, LOTTERY_ACTIVITY_DAYS
 from repositories.disburse_repository import DisburseRepository
 from repositories.player_repository import PlayerRepository
 from services.loan_service import LoanRepository
@@ -292,8 +292,10 @@ class DisburseService:
                 }
             distributions = self._calculate_stimulus_distribution(fund_amount, eligible)
         elif method == "lottery":
-            # Lottery: pick one random registered player, winner takes all
-            eligible = self.player_repo.get_all_registered_players_for_lottery(guild_id)
+            # Lottery: pick one random active player, winner takes all
+            eligible = self.player_repo.get_all_registered_players_for_lottery(
+                guild_id, activity_days=LOTTERY_ACTIVITY_DAYS
+            )
             if not eligible:
                 self.loan_repo.add_to_nonprofit_fund(guild_id, fund_amount)
                 self.disburse_repo.complete_proposal(guild_id)
@@ -303,7 +305,7 @@ class DisburseService:
                     "method_label": self.METHOD_LABELS[method],
                     "total_disbursed": 0,
                     "distributions": [],
-                    "message": "No registered players for lottery.",
+                    "message": f"No active players for lottery (must have played in the last {LOTTERY_ACTIVITY_DAYS} days).",
                 }
             distributions = self._calculate_lottery_distribution(fund_amount, eligible)
         elif method == "social_security":
