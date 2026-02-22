@@ -93,12 +93,10 @@ class RatingAnalysisCommands(commands.Cog):
             ephemeral=True,
         )
 
-        # Run in executor to avoid blocking
-        loop = asyncio.get_event_loop()
+        # Run in thread to avoid blocking
         try:
-            result = await loop.run_in_executor(
-                None,
-                lambda: self.match_service.backfill_openskill_ratings(guild_id=interaction.guild_id, reset_first=True),
+            result = await asyncio.to_thread(
+                lambda: self.match_service.backfill_openskill_ratings(guild_id=interaction.guild.id if interaction.guild else None, reset_first=True),
             )
         except Exception as e:
             logger.error(f"Backfill error: {e}")
@@ -144,12 +142,10 @@ class RatingAnalysisCommands(commands.Cog):
 
         comparison_service = self.rating_comparison_service
 
-        # Run in executor
-        loop = asyncio.get_event_loop()
         try:
-            guild_id = interaction.guild_id
-            comparison_data = await loop.run_in_executor(
-                None, lambda: comparison_service.get_comparison_summary(guild_id)
+            guild_id = interaction.guild.id if interaction.guild else None
+            comparison_data = await asyncio.to_thread(
+                comparison_service.get_comparison_summary, guild_id
             )
         except Exception as e:
             logger.error(f"Comparison error: {e}")
@@ -255,11 +251,10 @@ class RatingAnalysisCommands(commands.Cog):
 
         comparison_service = self.rating_comparison_service
 
-        loop = asyncio.get_event_loop()
         try:
-            guild_id = interaction.guild_id
-            curve_data = await loop.run_in_executor(
-                None, lambda: comparison_service.get_calibration_curve_data(guild_id)
+            guild_id = interaction.guild.id if interaction.guild else None
+            curve_data = await asyncio.to_thread(
+                comparison_service.get_calibration_curve_data, guild_id
             )
         except Exception as e:
             logger.error(f"Calibration curve error: {e}")
@@ -312,11 +307,10 @@ class RatingAnalysisCommands(commands.Cog):
 
         comparison_service = self.rating_comparison_service
 
-        guild_id = interaction.guild_id
-        loop = asyncio.get_event_loop()
+        guild_id = interaction.guild.id if interaction.guild else None
         try:
-            comparison_data = await loop.run_in_executor(
-                None, lambda: comparison_service.get_comparison_summary(guild_id)
+            comparison_data = await asyncio.to_thread(
+                comparison_service.get_comparison_summary, guild_id
             )
         except Exception as e:
             logger.error(f"Trend analysis error: {e}")

@@ -426,7 +426,7 @@ class DraftCommands(commands.Cog):
         interaction: discord.Interaction,
     ):
         """Restart an active draft. Only captains or admins can restart."""
-        guild_id = interaction.guild_id
+        guild_id = interaction.guild.id if interaction.guild else None
         user_id = interaction.user.id
 
         logger.info(
@@ -489,7 +489,7 @@ class DraftCommands(commands.Cog):
             return
 
         # Create a mock draft state
-        guild_id = interaction.guild_id or 0
+        guild_id = interaction.guild.id if interaction.guild else None
         state = DraftState(guild_id=guild_id)
 
         # Use fake player IDs (negative) for the sample
@@ -553,7 +553,7 @@ class DraftCommands(commands.Cog):
             return
 
         # Create a mock completed draft state
-        guild_id = interaction.guild_id or 0
+        guild_id = interaction.guild.id if interaction.guild else None
         state = DraftState(guild_id=guild_id)
 
         state.captain1_id = -101
@@ -992,7 +992,7 @@ class DraftCommands(commands.Cog):
         captain2: discord.Member | None = None,
     ):
         """Start an Immortal Draft session."""
-        guild_id = interaction.guild_id
+        guild_id = interaction.guild.id if interaction.guild else None
         logger.info(
             f"Startdraft command: User {interaction.user.id} ({interaction.user}) "
             f"in guild {guild_id}, captain1={captain1}, captain2={captain2}"

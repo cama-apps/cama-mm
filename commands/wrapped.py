@@ -14,6 +14,7 @@ from discord.ext import commands, tasks
 from config import WRAPPED_CHECK_INTERVAL_HOURS, WRAPPED_ENABLED
 from services.permissions import has_admin_permission
 from utils.hero_lookup import get_hero_name
+from utils.interaction_safety import safe_defer, safe_followup
 from utils.wrapped_drawing import (
     draw_awards_grid,
     draw_wrapped_personal,
@@ -138,7 +139,8 @@ class WrappedCog(commands.Cog):
             )
             return
 
-        await interaction.response.defer()
+        if not await safe_defer(interaction):
+            return
 
         # Default to previous month
         if month is None:
@@ -151,13 +153,14 @@ class WrappedCog(commands.Cog):
             try:
                 datetime.strptime(month, "%Y-%m")
             except ValueError:
-                await interaction.followup.send(
-                    "Invalid month format. Use YYYY-MM (e.g., 2026-01).",
+                await safe_followup(
+                    interaction,
+                    content="Invalid month format. Use YYYY-MM (e.g., 2026-01).",
                     ephemeral=True,
                 )
                 return
 
-        guild_id = interaction.guild_id or 0
+        guild_id = interaction.guild.id if interaction.guild else None
         target_user = user or interaction.user
 
         # Generate or fetch wrapped
@@ -165,8 +168,10 @@ class WrappedCog(commands.Cog):
             server_wrapped = self.wrapped_service.get_server_wrapped(guild_id, month)
 
             if not server_wrapped:
-                await interaction.followup.send(
-                    f"No match data found for {month}.", ephemeral=True
+                await safe_followup(
+                    interaction,
+                    content=f"No match data found for {month}.",
+                    ephemeral=True,
                 )
                 return
 
@@ -221,12 +226,14 @@ class WrappedCog(commands.Cog):
                     inline=False,
                 )
 
-            await interaction.followup.send(embed=embed, files=files)
+            await safe_followup(interaction, embed=embed, files=files)
 
         except Exception as e:
             logger.error(f"Error generating wrapped: {e}", exc_info=True)
-            await interaction.followup.send(
-                f"Error generating wrapped: {str(e)}", ephemeral=True
+            await safe_followup(
+                interaction,
+                content=f"Error generating wrapped: {str(e)}",
+                ephemeral=True,
             )
 
     @app_commands.command(
@@ -255,7 +262,8 @@ class WrappedCog(commands.Cog):
             )
             return
 
-        await interaction.response.defer()
+        if not await safe_defer(interaction):
+            return
 
         # Default to previous month
         if month is None:
@@ -267,13 +275,14 @@ class WrappedCog(commands.Cog):
             try:
                 datetime.strptime(month, "%Y-%m")
             except ValueError:
-                await interaction.followup.send(
-                    "Invalid month format. Use YYYY-MM (e.g., 2026-01).",
+                await safe_followup(
+                    interaction,
+                    content="Invalid month format. Use YYYY-MM (e.g., 2026-01).",
                     ephemeral=True,
                 )
                 return
 
-        guild_id = interaction.guild_id or 0
+        guild_id = interaction.guild.id if interaction.guild else None
 
         try:
             # Force regenerate
@@ -282,8 +291,10 @@ class WrappedCog(commands.Cog):
             )
 
             if not wrapped:
-                await interaction.followup.send(
-                    f"No match data found for {month}.", ephemeral=True
+                await safe_followup(
+                    interaction,
+                    content=f"No match data found for {month}.",
+                    ephemeral=True,
                 )
                 return
 
@@ -305,11 +316,13 @@ class WrappedCog(commands.Cog):
             )
             embed.set_image(url="attachment://wrapped_summary.png")
 
-            await interaction.followup.send(embed=embed, file=file)
+            await safe_followup(interaction, embed=embed, file=file)
 
         except Exception as e:
             logger.error(f"Error in testwrapped: {e}", exc_info=True)
-            await interaction.followup.send(f"Error: {str(e)}", ephemeral=True)
+            await safe_followup(
+                interaction, content=f"Error: {str(e)}", ephemeral=True
+            )
 
     @app_commands.command(
         name="wrappedawards", description="View all awards from a wrapped"
@@ -327,7 +340,8 @@ class WrappedCog(commands.Cog):
             )
             return
 
-        await interaction.response.defer()
+        if not await safe_defer(interaction):
+            return
 
         # Default to previous month
         if month is None:
@@ -336,20 +350,24 @@ class WrappedCog(commands.Cog):
             prev_month = first_of_month - timedelta(days=1)
             month = prev_month.strftime("%Y-%m")
 
-        guild_id = interaction.guild_id or 0
+        guild_id = interaction.guild.id if interaction.guild else None
 
         try:
             wrapped = self.wrapped_service.get_server_wrapped(guild_id, month)
 
             if not wrapped:
-                await interaction.followup.send(
-                    f"No wrapped data found for {month}.", ephemeral=True
+                await safe_followup(
+                    interaction,
+                    content=f"No wrapped data found for {month}.",
+                    ephemeral=True,
                 )
                 return
 
             if not wrapped.awards:
-                await interaction.followup.send(
-                    f"No awards in wrapped for {month}.", ephemeral=True
+                await safe_followup(
+                    interaction,
+                    content=f"No awards in wrapped for {month}.",
+                    ephemeral=True,
                 )
                 return
 
@@ -392,11 +410,13 @@ class WrappedCog(commands.Cog):
 
             embed.set_footer(text=f"Total: {len(wrapped.awards)} awards")
 
-            await interaction.followup.send(embed=embed)
+            await safe_followup(interaction, embed=embed)
 
         except Exception as e:
             logger.error(f"Error in wrappedawards: {e}", exc_info=True)
-            await interaction.followup.send(f"Error: {str(e)}", ephemeral=True)
+            await safe_followup(
+                interaction, content=f"Error: {str(e)}", ephemeral=True
+            )
 
 
 async def setup(bot: commands.Bot):

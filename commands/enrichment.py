@@ -52,18 +52,14 @@ class EnrichmentCommands(commands.Cog):
         """Set the league ID for match discovery."""
         logger.info(f"Setleague command: User {interaction.user.id} setting league to {league_id}")
 
+        if not has_admin_permission(interaction):
+            await interaction.response.send_message("This command is admin-only.", ephemeral=True)
+            return
+
         if not await safe_defer(interaction, ephemeral=True):
             return
 
-        if not has_admin_permission(interaction):
-            await safe_followup(
-                interaction,
-                content="This command is admin-only.",
-                ephemeral=True,
-            )
-            return
-
-        guild_id = interaction.guild_id
+        guild_id = interaction.guild.id if interaction.guild else None
         if not guild_id:
             await safe_followup(
                 interaction,
@@ -105,15 +101,11 @@ class EnrichmentCommands(commands.Cog):
             f"valve_match_id={valve_match_id}, internal_match_id={internal_match_id}"
         )
 
-        if not await safe_defer(interaction, ephemeral=True):
+        if not has_admin_permission(interaction):
+            await interaction.response.send_message("This command is admin-only.", ephemeral=True)
             return
 
-        if not has_admin_permission(interaction):
-            await safe_followup(
-                interaction,
-                content="This command is admin-only.",
-                ephemeral=True,
-            )
+        if not await safe_defer(interaction, ephemeral=True):
             return
 
         guild_id = interaction.guild.id if interaction.guild else None
@@ -228,15 +220,11 @@ class EnrichmentCommands(commands.Cog):
         """Backfill steam_id for all players who have dotabuff_url but no steam_id."""
         logger.info(f"Backfillsteamid command: User {interaction.user.id}")
 
-        if not await safe_defer(interaction, ephemeral=True):
+        if not has_admin_permission(interaction):
+            await interaction.response.send_message("This command is admin-only.", ephemeral=True)
             return
 
-        if not has_admin_permission(interaction):
-            await safe_followup(
-                interaction,
-                content="This command is admin-only.",
-                ephemeral=True,
-            )
+        if not await safe_defer(interaction, ephemeral=True):
             return
 
         result = await asyncio.to_thread(self.enrichment_service.backfill_steam_ids)
@@ -264,7 +252,7 @@ class EnrichmentCommands(commands.Cog):
         if not await safe_defer(interaction, ephemeral=True):
             return
 
-        guild_id = interaction.guild_id
+        guild_id = interaction.guild.id if interaction.guild else None
         if not guild_id:
             await safe_followup(
                 interaction,
@@ -629,7 +617,7 @@ class EnrichmentCommands(commands.Cog):
 
         # Handle refill_fantasy mode - re-enrich matches that have valve_match_id but no fantasy data
         if refill_fantasy:
-            guild_id = interaction.guild_id
+            guild_id = interaction.guild.id if interaction.guild else None
             await self._refill_fantasy_data(interaction, dry_run, guild_id)
             return
 
@@ -649,7 +637,7 @@ class EnrichmentCommands(commands.Cog):
             ephemeral=True,
         )
 
-        guild_id = interaction.guild_id
+        guild_id = interaction.guild.id if interaction.guild else None
         results = await asyncio.to_thread(
             functools.partial(
                 discovery_service.discover_all_matches,
@@ -809,7 +797,7 @@ class EnrichmentCommands(commands.Cog):
         if not await safe_defer(interaction, ephemeral=True):
             return
 
-        guild_id = interaction.guild_id
+        guild_id = interaction.guild.id if interaction.guild else None
         enriched_count = self.match_service.get_enriched_count(guild_id)
 
         if enriched_count == 0:

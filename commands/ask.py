@@ -61,7 +61,7 @@ class AskCommands(commands.Cog):
         - "Who plays pos 1 the most?"
         - "What's the best team duo?"
         """
-        guild_id = interaction.guild_id
+        guild_id = interaction.guild.id if interaction.guild else None
 
         # Rate limit check
         rl_result = AI_RATE_LIMITER.check(

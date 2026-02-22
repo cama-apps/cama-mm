@@ -19,7 +19,7 @@ from services.lobby_service import LobbyService
 from services.permissions import has_admin_permission
 from utils.formatting import FROGLING_EMOJI_ID, FROGLING_EMOTE, JOPACOIN_EMOJI_ID, format_duration_short
 from utils.neon_helpers import get_neon_service
-from utils.interaction_safety import safe_defer, update_lobby_message_closed
+from utils.interaction_safety import safe_defer, safe_followup, update_lobby_message_closed
 from utils.pin_helpers import safe_unpin_all_bot_messages
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
 
@@ -315,8 +315,8 @@ class LobbyCommands(commands.Cog):
         guild_id = interaction.guild.id if interaction.guild else None
         player = await asyncio.to_thread(self.player_service.get_player, interaction.user.id, guild_id)
         if not player:
-            await interaction.followup.send(
-                "❌ You're not registered! Use `/register` first.", ephemeral=True
+            await safe_followup(
+                interaction, content="❌ You're not registered! Use `/register` first.", ephemeral=True
             )
             return
 
@@ -357,7 +357,7 @@ class LobbyCommands(commands.Cog):
                     else:
                         response = f"[View Lobby]({message.jump_url})"
 
-                    await interaction.followup.send(response, ephemeral=True)
+                    await safe_followup(interaction, content=response, ephemeral=True)
                     return
                 except Exception:
                     # Fall through to create a new one
@@ -366,8 +366,8 @@ class LobbyCommands(commands.Cog):
             # Get target channel (dedicated or fallback to interaction channel)
             target_channel, is_dedicated = await self._get_lobby_target_channel(interaction)
             if not target_channel:
-                await interaction.followup.send(
-                    "❌ Could not find a valid channel to post the lobby.", ephemeral=True
+                await safe_followup(
+                    interaction, content="❌ Could not find a valid channel to post the lobby.", ephemeral=True
                 )
                 return
 
@@ -421,22 +421,22 @@ class LobbyCommands(commands.Cog):
                 else:
                     response = f"✅ Lobby created! [View Lobby]({channel_msg.jump_url})"
 
-                await interaction.followup.send(response, ephemeral=True)
+                await safe_followup(interaction, content=response, ephemeral=True)
                 return
 
             except discord.Forbidden:
                 # Thread permissions required
                 logger.warning("Cannot create lobby thread: missing Create Public Threads permission.")
                 await channel_msg.delete()
-                await interaction.followup.send(
-                    "❌ Bot needs 'Create Public Threads' permission to create lobbies.",
+                await safe_followup(
+                    interaction, content="❌ Bot needs 'Create Public Threads' permission to create lobbies.",
                     ephemeral=True,
                 )
             except Exception as exc:
                 logger.exception(f"Error creating lobby thread: {exc}")
                 await channel_msg.delete()
-                await interaction.followup.send(
-                    "❌ Failed to create lobby thread. Please try again or contact an admin.",
+                await safe_followup(
+                    interaction, content="❌ Failed to create lobby thread. Please try again or contact an admin.",
                     ephemeral=True,
                 )
 
@@ -453,21 +453,21 @@ class LobbyCommands(commands.Cog):
         guild_id = interaction.guild.id if interaction.guild else None
         lobby = self.lobby_service.get_lobby()
         if not lobby:
-            await interaction.followup.send("⚠️ No active lobby.", ephemeral=True)
+            await safe_followup(interaction, content="⚠️ No active lobby.", ephemeral=True)
             return
 
         is_admin = has_admin_permission(interaction)
         is_creator = lobby.created_by == interaction.user.id
         if not (is_admin or is_creator):
-            await interaction.followup.send(
-                "❌ Permission denied. Admin or lobby creator only.",
+            await safe_followup(
+                interaction, content="❌ Permission denied. Admin or lobby creator only.",
                 ephemeral=True,
             )
             return
 
         if player.id == interaction.user.id:
-            await interaction.followup.send(
-                "❌ You can't kick yourself. Use the Leave button in the lobby thread.",
+            await safe_followup(
+                interaction, content="❌ You can't kick yourself. Use the Leave button in the lobby thread.",
                 ephemeral=True,
             )
             return
@@ -477,8 +477,8 @@ class LobbyCommands(commands.Cog):
         in_conditional = player.id in lobby.conditional_players
 
         if not in_regular and not in_conditional:
-            await interaction.followup.send(
-                f"⚠️ {player.mention} is not in the lobby.", ephemeral=True
+            await safe_followup(
+                interaction, content=f"⚠️ {player.mention} is not in the lobby.", ephemeral=True
             )
             return
 
@@ -488,8 +488,8 @@ class LobbyCommands(commands.Cog):
         else:
             removed = await asyncio.to_thread(self.lobby_service.leave_lobby_conditional, player.id)
         if removed:
-            await interaction.followup.send(
-                f"✅ Kicked {player.mention} from the lobby.", ephemeral=True
+            await safe_followup(
+                interaction, content=f"✅ Kicked {player.mention} from the lobby.", ephemeral=True
             )
 
             # Update both channel message and thread embed
@@ -519,7 +519,7 @@ class LobbyCommands(commands.Cog):
             except Exception:
                 pass
         else:
-            await interaction.followup.send(f"❌ Failed to kick {player.mention}.", ephemeral=True)
+            await safe_followup(interaction, content=f"❌ Failed to kick {player.mention}.", ephemeral=True)
 
     @app_commands.command(name="join", description="Join the matchmaking lobby")
     async def join(self, interaction: discord.Interaction):
@@ -533,23 +533,23 @@ class LobbyCommands(commands.Cog):
         # Check registration
         player = await asyncio.to_thread(self.player_service.get_player, interaction.user.id, guild_id)
         if not player:
-            await interaction.followup.send(
-                "❌ You're not registered! Use `/register` first.", ephemeral=True
+            await safe_followup(
+                interaction, content="❌ You're not registered! Use `/register` first.", ephemeral=True
             )
             return
 
         # Check roles set
         if not player.preferred_roles:
-            await interaction.followup.send(
-                "❌ Set your preferred roles first! Use `/setroles`.", ephemeral=True
+            await safe_followup(
+                interaction, content="❌ Set your preferred roles first! Use `/setroles`.", ephemeral=True
             )
             return
 
         # Check lobby exists
         lobby = self.lobby_service.get_lobby()
         if not lobby:
-            await interaction.followup.send(
-                "⚠️ No active lobby. Use `/lobby` to create one.", ephemeral=True
+            await safe_followup(
+                interaction, content="⚠️ No active lobby. Use `/lobby` to create one.", ephemeral=True
             )
             return
 
@@ -566,11 +566,11 @@ class LobbyCommands(commands.Cog):
                     message_text += f" [View your match]({jump_url}) and use `/record` to complete it first."
                 else:
                     message_text += " Use `/record` to complete it first."
-                await interaction.followup.send(message_text, ephemeral=True)
+                await safe_followup(interaction, content=message_text, ephemeral=True)
             elif reason == "lobby_full":
-                await interaction.followup.send("❌ Lobby is full.", ephemeral=True)
+                await safe_followup(interaction, content="❌ Lobby is full.", ephemeral=True)
             else:
-                await interaction.followup.send("❌ Already in lobby or lobby is closed.", ephemeral=True)
+                await safe_followup(interaction, content="❌ Already in lobby or lobby is closed.", ephemeral=True)
             return
 
         # Refresh lobby state after join
@@ -602,7 +602,7 @@ class LobbyCommands(commands.Cog):
             except Exception as exc:
                 logger.warning(f"Failed to send rally/ready notification: {exc}")
 
-        await interaction.followup.send("✅ Joined the lobby!", ephemeral=True)
+        await safe_followup(interaction, content="✅ Joined the lobby!", ephemeral=True)
 
         # Neon Degen Terminal hook for lobby join
         try:
@@ -632,14 +632,14 @@ class LobbyCommands(commands.Cog):
         guild_id = interaction.guild.id if interaction.guild else None
         lobby = self.lobby_service.get_lobby()
         if not lobby:
-            await interaction.followup.send("⚠️ No active lobby.", ephemeral=True)
+            await safe_followup(interaction, content="⚠️ No active lobby.", ephemeral=True)
             return
 
         in_regular = interaction.user.id in lobby.players
         in_conditional = interaction.user.id in lobby.conditional_players
 
         if not in_regular and not in_conditional:
-            await interaction.followup.send("⚠️ You're not in the lobby.", ephemeral=True)
+            await safe_followup(interaction, content="⚠️ You're not in the lobby.", ephemeral=True)
             return
 
         # Remove from appropriate queue
@@ -659,7 +659,7 @@ class LobbyCommands(commands.Cog):
         if thread_id:
             await self._post_leave_activity(thread_id, interaction.user)
 
-        await interaction.followup.send("✅ Left the lobby.", ephemeral=True)
+        await safe_followup(interaction, content="✅ Left the lobby.", ephemeral=True)
 
     @app_commands.command(
         name="resetlobby",
@@ -684,21 +684,21 @@ class LobbyCommands(commands.Cog):
                         )
                     else:
                         message_text += " Use `/record` first."
-                    await interaction.followup.send(message_text, ephemeral=True)
+                    await safe_followup(interaction, content=message_text, ephemeral=True)
                 return
 
         lobby = self.lobby_service.get_lobby()
         if not lobby:
             if can_respond:
-                await interaction.followup.send("⚠️ No active lobby.", ephemeral=True)
+                await safe_followup(interaction, content="⚠️ No active lobby.", ephemeral=True)
             return
 
         is_admin = has_admin_permission(interaction)
         is_creator = lobby.created_by == interaction.user.id
         if not (is_admin or is_creator):
             if can_respond:
-                await interaction.followup.send(
-                    "❌ Permission denied. Admin or lobby creator only.",
+                await safe_followup(
+                    interaction, content="❌ Permission denied. Admin or lobby creator only.",
                     ephemeral=True,
                 )
             return
@@ -707,8 +707,8 @@ class LobbyCommands(commands.Cog):
         draft_state_manager = getattr(self.bot, "draft_state_manager", None)
         if draft_state_manager and draft_state_manager.has_active_draft(guild_id):
             if can_respond:
-                await interaction.followup.send(
-                    "❌ There's an active draft in progress. "
+                await safe_followup(
+                    interaction, content="❌ There's an active draft in progress. "
                     "Use `/restartdraft` first to clear the draft.",
                     ephemeral=True,
                 )
@@ -739,8 +739,8 @@ class LobbyCommands(commands.Cog):
 
         logger.info(f"Lobby reset by user {interaction.user.id}")
         if can_respond:
-            await interaction.followup.send(
-                "✅ Lobby reset. You can create a new lobby with `/lobby`.",
+            await safe_followup(
+                interaction, content="✅ Lobby reset. You can create a new lobby with `/lobby`.",
                 ephemeral=True,
             )
 
@@ -758,19 +758,19 @@ class LobbyCommands(commands.Cog):
 
         lobby = self.lobby_service.get_lobby()
         if not lobby:
-            await interaction.followup.send("⚠️ No active lobby.", ephemeral=True)
+            await safe_followup(interaction, content="⚠️ No active lobby.", ephemeral=True)
             return
 
         if lobby.get_total_count() < 10:
-            await interaction.followup.send(
-                f"⚠️ Need at least 10 players for a ready check ({lobby.get_total_count()}/10).",
+            await safe_followup(
+                interaction, content=f"⚠️ Need at least 10 players for a ready check ({lobby.get_total_count()}/10).",
                 ephemeral=True,
             )
             return
 
         guild = interaction.guild
         if not guild:
-            await interaction.followup.send("❌ This command must be used in a server.", ephemeral=True)
+            await safe_followup(interaction, content="❌ This command must be used in a server.", ephemeral=True)
             return
 
         # Global shared rate limit (1 per 120s per guild) — checked after
@@ -783,8 +783,8 @@ class LobbyCommands(commands.Cog):
             per_seconds=120,
         )
         if not rl.allowed:
-            await interaction.followup.send(
-                f"⏳ Ready check on cooldown. Try again in {rl.retry_after_seconds}s.",
+            await safe_followup(
+                interaction, content=f"⏳ Ready check on cooldown. Try again in {rl.retry_after_seconds}s.",
                 ephemeral=True,
             )
             return
@@ -894,8 +894,8 @@ class LobbyCommands(commands.Cog):
                 pass
 
         if not target_channel:
-            await interaction.followup.send(
-                "❌ No lobby thread found. Create a lobby with `/lobby` first.",
+            await safe_followup(
+                interaction, content="❌ No lobby thread found. Create a lobby with `/lobby` first.",
                 ephemeral=True,
             )
             return
@@ -914,8 +914,8 @@ class LobbyCommands(commands.Cog):
             self.lobby_service.update_readycheck_data(current_lobby_set, player_data)
             if ping_content:
                 await msg.channel.send(ping_content, allowed_mentions=allowed_mentions)
-            await interaction.followup.send(
-                f"✅ Ready check refreshed! [View]({msg.jump_url})", ephemeral=True
+            await safe_followup(
+                interaction, content=f"✅ Ready check refreshed! [View]({msg.jump_url})", ephemeral=True
             )
         else:
             # Post to lobby thread (target_channel is guaranteed to exist here)
@@ -926,8 +926,8 @@ class LobbyCommands(commands.Cog):
                 pass
             if ping_content:
                 await target_channel.send(ping_content, allowed_mentions=allowed_mentions)
-            await interaction.followup.send(
-                f"✅ Ready check posted! [View]({msg.jump_url})", ephemeral=True
+            await safe_followup(
+                interaction, content=f"✅ Ready check posted! [View]({msg.jump_url})", ephemeral=True
             )
 
             self.lobby_service.set_readycheck_state(
