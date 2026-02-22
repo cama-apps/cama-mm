@@ -6,7 +6,7 @@ import discord
 import pytest
 
 from commands.betting import BettingCommands
-from utils.wheel_drawing import WHEEL_WEDGES
+from utils.wheel_drawing import BANKRUPT_WHEEL_WEDGES, WHEEL_WEDGES
 from config import (
     WHEEL_BLUE_SHELL_EST_EV,
     WHEEL_COOLDOWN_SECONDS,
@@ -132,8 +132,9 @@ async def test_wheel_positive_applies_garnishment():
 
     commands = BettingCommands(bot, betting_service, match_service, player_service)
 
-    # Find a positive value wedge dynamically (30)
-    target_idx = next(i for i, w in enumerate(WHEEL_WEDGES) if w[1] == 30)
+    # With balance=-100 (negative), the bankrupt wheel is used — find value=20 in it
+    target_idx = next(i for i, w in enumerate(BANKRUPT_WHEEL_WEDGES) if w[1] == 20)
+    expected_win = 20
 
     # Mock _create_wheel_gif_file to avoid GIF generation calling random.randint
     with patch.object(commands, "_create_wheel_gif_file", return_value=MagicMock()):
@@ -143,7 +144,7 @@ async def test_wheel_positive_applies_garnishment():
                     await commands.gamba.callback(commands, interaction)
 
     # Should call garnishment service (user_id, amount, guild_id)
-    garnishment_service.add_income.assert_called_once_with(1002, 30, 123)
+    garnishment_service.add_income.assert_called_once_with(1002, expected_win, 123)
 
 
 @pytest.mark.asyncio
@@ -299,9 +300,10 @@ async def test_wheel_bankrupt_ignores_max_debt():
 
     # User is registered and already at -400 (near MAX_DEBT of 500)
     player_service.get_player.return_value = MagicMock(name="TestPlayer")
-    bankrupt_value = WHEEL_WEDGES[0][1]
-    # Balance will be -400, then more negative after bankrupt
-    player_service.get_balance.side_effect = [-400, -400 + bankrupt_value]
+    # With balance=-400 (negative), bankrupt wheel is used, so use BANKRUPT_WHEEL_WEDGES[0][1]
+    bankrupt_value = BANKRUPT_WHEEL_WEDGES[0][1]
+    # Three get_balance calls: (1) for is_eligible_for_bad_gamba check, (2) before processing, (3) after adjust
+    player_service.get_balance.side_effect = [-400, -400, -400 + bankrupt_value]
 
     # Mock service methods
     player_service.get_last_wheel_spin = MagicMock(return_value=None)
@@ -1365,3 +1367,58 @@ def test_jailbreak_decrements_games(repo_db_path):
 
     result = bk_service.add_penalty_games(9002, 0, -1)
     assert result == 2, f"Expected 2 after JAILBREAK on 3 games, got {result}"
+
+
+@pytest.mark.asyncio
+async def test_wheel_negative_balance_uses_bankrupt_wheel():
+    """Verify a negative balance (no formal bankruptcy) triggers the bankrupt wheel GIF."""
+    bot = MagicMock()
+    bot.bankruptcy_service = None
+    betting_service = MagicMock()
+    match_service = MagicMock()
+    player_service = MagicMock()
+
+    # User is registered and in debt but has no formal bankruptcy state
+    player_service.get_player.return_value = MagicMock(name="TestPlayer")
+    player_service.get_balance.return_value = -50  # Negative balance
+
+    # Mock service methods
+    player_service.get_last_wheel_spin = MagicMock(return_value=None)
+    player_service.set_last_wheel_spin = MagicMock()
+    player_service.try_claim_wheel_spin = MagicMock(return_value=True)
+    player_service.log_wheel_spin = MagicMock(return_value=1)
+    player_service.adjust_balance = MagicMock()
+
+    # No garnishment service on bot
+    bot.garnishment_service = None
+
+    message = MagicMock()
+    message.edit = AsyncMock()
+
+    interaction = MagicMock()
+    interaction.guild = MagicMock()
+    interaction.guild.id = 123
+    interaction.user.id = 1099
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock(return_value=message)
+
+    commands = BettingCommands(bot, betting_service, match_service, player_service)
+
+    # Find first positive-value bankrupt wheel wedge to use as the spin target
+    target_idx = next(
+        i for i, w in enumerate(BANKRUPT_WHEEL_WEDGES) if isinstance(w[1], int) and w[1] > 0
+    )
+
+    with patch.object(commands, "_create_wheel_gif_file", return_value=MagicMock()) as mock_gif:
+        with patch("commands.betting.random.randint", return_value=target_idx):
+            with patch("commands.betting.random.random", return_value=1.0):  # No explosion
+                with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
+                    await commands.gamba.callback(commands, interaction)
+
+    # GIF must have been generated with is_eligible_for_bad_gamba=True
+    mock_gif.assert_called_once()
+    assert mock_gif.call_args.args[2] is True, (
+        f"Expected is_eligible_for_bad_gamba=True for negative-balance player, got {mock_gif.call_args.args[2]}"
+    )
+    # GIF must have been sent via followup
+    interaction.followup.send.assert_awaited()

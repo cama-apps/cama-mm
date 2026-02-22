@@ -589,14 +589,22 @@ class BettingCommands(commands.Cog):
 
         elif value in ("EXTEND_1", "EXTEND_2"):
             # Bankruptcy penalty extension (only appears on bankrupt wheel)
-            title = "⛓️ PENALTY EXTENDED! ⛓️"
             color = discord.Color.dark_red()
-            description = (
-                f"**{label} GAME{'S' if extend_games_added > 1 else ''}**\n\n"
-                f"Your bankruptcy penalty has been extended by **{extend_games_added}** game{'s' if extend_games_added > 1 else ''}!\n\n"
-                f"New penalty games remaining: **{extend_new_total}**\n\n"
-                f"*The wheel remembers your sins... keep winning to escape!*"
-            )
+            if extend_games_added == 0:
+                title = "⛓️ Nothing to Extend"
+                description = (
+                    f"**{label}**\n\n"
+                    f"Your debt is punishment enough. No penalty games to extend.\n\n"
+                    f"*Pay off your debts.*"
+                )
+            else:
+                title = "⛓️ PENALTY EXTENDED! ⛓️"
+                description = (
+                    f"**{label} GAME{'S' if extend_games_added > 1 else ''}**\n\n"
+                    f"Your bankruptcy penalty has been extended by **{extend_games_added}** game{'s' if extend_games_added > 1 else ''}!\n\n"
+                    f"New penalty games remaining: **{extend_new_total}**\n\n"
+                    f"*The wheel remembers your sins... keep winning to escape!*"
+                )
 
         elif value == "RED_SHELL":
             # Mario Kart Red Shell outcome
@@ -1471,20 +1479,24 @@ class BettingCommands(commands.Cog):
             await message.edit(embed=result_embed)
             return
 
-        # Check if player is in bankruptcy penalty (uses reduced wheel)
-        is_bankrupt = False
+        # Use bankrupt wheel for negative balance OR formal bankruptcy penalty
+        balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
+        is_eligible_for_bad_gamba = balance < 0
+        penalty_games_remaining = 0
         bankruptcy_service: BankruptcyService | None = getattr(self.bot, "bankruptcy_service", None)
         if bankruptcy_service:
             state = await asyncio.to_thread(
                 bankruptcy_service.get_state, user_id, guild_id
             )
-            if state and state.penalty_games_remaining > 0:
-                is_bankrupt = True
+            if state:
+                penalty_games_remaining = state.penalty_games_remaining
+                if penalty_games_remaining > 0:
+                    is_eligible_for_bad_gamba = True
 
-        # Pre-determine the result (use bankrupt wheel if in penalty)
-        wedges = get_wheel_wedges(is_bankrupt)
+        # Pre-determine the result (use bad gamba wheel for negative balance or penalty)
+        wedges = get_wheel_wedges(is_eligible_for_bad_gamba)
         result_idx = random.randint(0, len(wedges) - 1)
-        result_wedge = get_wedge_at_index_for_player(result_idx, is_bankrupt)
+        result_wedge = get_wedge_at_index_for_player(result_idx, is_eligible_for_bad_gamba)
 
         # Defer first - GIF generation can take a few seconds
         await interaction.response.defer()
@@ -1492,7 +1504,7 @@ class BettingCommands(commands.Cog):
         # Generate the complete animation GIF (plays once, ~20 seconds)
         user_display = interaction.user.name
         gif_file = await asyncio.to_thread(
-            self._create_wheel_gif_file, result_idx, user_display, is_bankrupt
+            self._create_wheel_gif_file, result_idx, user_display, is_eligible_for_bad_gamba
         )
 
         # Send via followup (since we deferred)
@@ -1515,7 +1527,7 @@ class BettingCommands(commands.Cog):
         new_balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
 
         # Pre-resolution for interactive mechanics (TOWN_TRIAL / DISCOVER resolve to a final wedge)
-        if result_value == "TOWN_TRIAL" and is_bankrupt and interaction.channel:
+        if result_value == "TOWN_TRIAL" and is_eligible_for_bad_gamba and interaction.channel:
             from utils.wheel_drawing import get_wheel_wedges as _gww
             eligible = [w for w in _gww(is_bankrupt=True)
                         if w[1] not in ("TOWN_TRIAL", "DISCOVER", "CHAIN_REACTION")]
@@ -1546,7 +1558,7 @@ class BettingCommands(commands.Cog):
             )
             await trial_msg.edit(embed=winner_embed, view=None)
 
-        elif result_value == "DISCOVER" and is_bankrupt and interaction.channel:
+        elif result_value == "DISCOVER" and is_eligible_for_bad_gamba and interaction.channel:
             from utils.wheel_drawing import get_wheel_wedges as _gww
             eligible = [w for w in _gww(is_bankrupt=True)
                         if w[1] not in ("TOWN_TRIAL", "DISCOVER", "CHAIN_REACTION")]
@@ -1788,13 +1800,15 @@ class BettingCommands(commands.Cog):
         elif result_value in ("EXTEND_1", "EXTEND_2"):
             # Bankruptcy penalty extension slices (only appear on bankrupt wheel)
             games_to_add = 1 if result_value == "EXTEND_1" else 2
-            if bankruptcy_service:
+            if bankruptcy_service and penalty_games_remaining > 0:
                 new_penalty_total = await asyncio.to_thread(
                     bankruptcy_service.add_penalty_games, user_id, guild_id, games_to_add
                 )
             else:
-                new_penalty_total = games_to_add  # Fallback (shouldn't happen)
-            # No balance change, but penalty games increased
+                # Debt-only player (no formal penalty) — EXTEND is a no-op
+                games_to_add = 0
+                new_penalty_total = 0
+            # No balance change, but penalty games increased (for penalty players)
 
         elif isinstance(result_value, int) and result_value > 0:
             # Positive result: use garnishment service if available
@@ -1866,7 +1880,7 @@ class BettingCommands(commands.Cog):
                 guild_id=guild_id,
                 result=log_result,
                 spin_time=int(now),
-                is_bankrupt=is_bankrupt,
+                is_bankrupt=is_eligible_for_bad_gamba,
             )
         )
 
@@ -1876,7 +1890,7 @@ class BettingCommands(commands.Cog):
         extend_games_added = 0
         extend_new_total = 0
         if result_value in ("EXTEND_1", "EXTEND_2"):
-            extend_games_added = 1 if result_value == "EXTEND_1" else 2
+            extend_games_added = games_to_add
             extend_new_total = new_penalty_total if "new_penalty_total" in dir() else extend_games_added
 
         result_embed = self._wheel_result_embed(
@@ -1891,7 +1905,7 @@ class BettingCommands(commands.Cog):
             lightning_victims=lightning_victims if result_value == "LIGHTNING_BOLT" else None,
             extend_games_added=extend_games_added,
             extend_new_total=extend_new_total,
-            is_bankrupt=is_bankrupt,
+            is_bankrupt=is_eligible_for_bad_gamba,
             jailbreak_new_total=jailbreak_new_total,
             chain_value=chain_value,
             chain_username=chain_username,
@@ -1950,18 +1964,18 @@ class BettingCommands(commands.Cog):
             )
             return
 
-        # Always use bankrupt wheel for this test command
-        is_bankrupt = True
-        wedges = get_wheel_wedges(is_bankrupt)
+        # Always use bad gamba wheel for this test command
+        is_eligible_for_bad_gamba = True
+        wedges = get_wheel_wedges(is_eligible_for_bad_gamba)
         result_idx = random.randint(0, len(wedges) - 1)
-        result_wedge = get_wedge_at_index_for_player(result_idx, is_bankrupt)
+        result_wedge = get_wedge_at_index_for_player(result_idx, is_eligible_for_bad_gamba)
 
         await interaction.response.defer()
 
-        # Generate the bankrupt wheel animation
+        # Generate the bad gamba wheel animation
         user_display = interaction.user.name
         gif_file = await asyncio.to_thread(
-            self._create_wheel_gif_file, result_idx, user_display, is_bankrupt
+            self._create_wheel_gif_file, result_idx, user_display, is_eligible_for_bad_gamba
         )
 
         message = await interaction.followup.send(file=gif_file, wait=True)
