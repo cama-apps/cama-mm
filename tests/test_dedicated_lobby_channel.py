@@ -810,19 +810,19 @@ class TestNotifyLobbyRally:
         thread = MagicMock()
         thread.send = AsyncMock()
 
-        # Mock bot and lobby_service
+        # Mock bot with lobby_service attribute
         mock_bot = MagicMock()
         mock_bot.get_channel.return_value = origin_channel
-
-        mock_lobby_service = MagicMock()
-        mock_lobby_service.get_origin_channel_id.return_value = 222  # Different from reaction channel
+        mock_bot.lobby_service = MagicMock()
+        mock_bot.lobby_service.get_origin_channel_id.return_value = 222  # Different from reaction channel
+        mock_bot.lobby_service.get_lobby_message_id.return_value = 111
+        mock_bot.lobby_service.get_lobby_channel_id.return_value = 100
 
         # Patch module-level references
         with patch.object(bot_module, 'bot', mock_bot):
-            with patch.object(bot_module, 'lobby_service', mock_lobby_service):
-                with patch.object(bot_module, '_lobby_rally_cooldowns', {}):
-                    with patch.object(bot_module, 'LOBBY_RALLY_COOLDOWN_SECONDS', 0):
-                        result = await notify_lobby_rally(reaction_channel, thread, lobby, guild_id=1)
+            with patch.object(bot_module, '_lobby_rally_cooldowns', {}):
+                with patch.object(bot_module, 'LOBBY_RALLY_COOLDOWN_SECONDS', 0):
+                    result = await notify_lobby_rally(reaction_channel, thread, lobby, guild_id=1)
 
         assert result is True
         # Origin channel should receive the embed, not reaction channel
@@ -846,10 +846,13 @@ class TestNotifyLobbyRally:
         thread = MagicMock()
         thread.send = AsyncMock()
 
-        mock_lobby_service = MagicMock()
-        mock_lobby_service.get_origin_channel_id.return_value = None  # Not set
+        mock_bot = MagicMock()
+        mock_bot.lobby_service = MagicMock()
+        mock_bot.lobby_service.get_origin_channel_id.return_value = None  # Not set
+        mock_bot.lobby_service.get_lobby_message_id.return_value = 111
+        mock_bot.lobby_service.get_lobby_channel_id.return_value = 100
 
-        with patch.object(bot_module, 'lobby_service', mock_lobby_service):
+        with patch.object(bot_module, 'bot', mock_bot):
             with patch.object(bot_module, '_lobby_rally_cooldowns', {}):
                 with patch.object(bot_module, 'LOBBY_RALLY_COOLDOWN_SECONDS', 0):
                     result = await notify_lobby_rally(reaction_channel, thread, lobby, guild_id=1)
@@ -877,15 +880,15 @@ class TestNotifyLobbyRally:
         mock_bot = MagicMock()
         mock_bot.get_channel.return_value = None
         mock_bot.fetch_channel = AsyncMock(side_effect=Exception("Not found"))
-
-        mock_lobby_service = MagicMock()
-        mock_lobby_service.get_origin_channel_id.return_value = 222
+        mock_bot.lobby_service = MagicMock()
+        mock_bot.lobby_service.get_origin_channel_id.return_value = 222
+        mock_bot.lobby_service.get_lobby_message_id.return_value = 111
+        mock_bot.lobby_service.get_lobby_channel_id.return_value = 100
 
         with patch.object(bot_module, 'bot', mock_bot):
-            with patch.object(bot_module, 'lobby_service', mock_lobby_service):
-                with patch.object(bot_module, '_lobby_rally_cooldowns', {}):
-                    with patch.object(bot_module, 'LOBBY_RALLY_COOLDOWN_SECONDS', 0):
-                        result = await notify_lobby_rally(reaction_channel, thread, lobby, guild_id=1)
+            with patch.object(bot_module, '_lobby_rally_cooldowns', {}):
+                with patch.object(bot_module, 'LOBBY_RALLY_COOLDOWN_SECONDS', 0):
+                    result = await notify_lobby_rally(reaction_channel, thread, lobby, guild_id=1)
 
         assert result is True
         # Should fall back to reaction channel
@@ -907,10 +910,13 @@ class TestNotifyLobbyRally:
         thread = MagicMock()
         thread.send = AsyncMock()
 
-        mock_lobby_service = MagicMock()
-        mock_lobby_service.get_origin_channel_id.return_value = 111  # Same as reaction channel
+        mock_bot = MagicMock()
+        mock_bot.lobby_service = MagicMock()
+        mock_bot.lobby_service.get_origin_channel_id.return_value = 111  # Same as reaction channel
+        mock_bot.lobby_service.get_lobby_message_id.return_value = 111
+        mock_bot.lobby_service.get_lobby_channel_id.return_value = 100
 
-        with patch.object(bot_module, 'lobby_service', mock_lobby_service):
+        with patch.object(bot_module, 'bot', mock_bot):
             with patch.object(bot_module, '_lobby_rally_cooldowns', {}):
                 with patch.object(bot_module, 'LOBBY_RALLY_COOLDOWN_SECONDS', 0):
                     result = await notify_lobby_rally(reaction_channel, thread, lobby, guild_id=1)

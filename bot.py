@@ -43,9 +43,9 @@ _discord_logger.setLevel(logging.INFO)  # Ensure it logs at INFO level
 
 from config import (
     ADMIN_USER_IDS,
+    AI_MAX_TOKENS,
     AI_MODEL,
     AI_TIMEOUT_SECONDS,
-    AI_MAX_TOKENS,
     CEREBRAS_API_KEY,
     DB_PATH,
     GARNISHMENT_PERCENTAGE,
@@ -56,44 +56,9 @@ from config import (
     MAX_DEBT,
     USE_GLICKO,
 )
-from database import Database
-from services.lobby_manager_service import LobbyManagerService as LobbyManager
-from repositories.bet_repository import BetRepository
-from repositories.guild_config_repository import GuildConfigRepository
-from services.guild_config_service import GuildConfigService
-from repositories.lobby_repository import LobbyRepository
-from repositories.match_repository import MatchRepository
-from repositories.pairings_repository import PairingsRepository
-from repositories.player_repository import PlayerRepository
-from repositories.bankruptcy_repository import BankruptcyRepository
-from repositories.loan_repository import LoanRepository
-from services.bankruptcy_service import BankruptcyService
-from services.betting_service import BettingService
-from services.gambling_stats_service import GamblingStatsService
-from services.garnishment_service import GarnishmentService
-from services.disburse_service import DisburseService
-from services.loan_service import LoanService
-from services.lobby_service import LobbyService
-from services.recalibration_service import RecalibrationService
-from repositories.recalibration_repository import RecalibrationRepository
-from repositories.disburse_repository import DisburseRepository
-from repositories.prediction_repository import PredictionRepository
-from repositories.tip_repository import TipRepository
-from repositories.soft_avoid_repository import SoftAvoidRepository
-from repositories.package_deal_repository import PackageDealRepository
-from services.match_service import MatchService
-from services.prediction_service import PredictionService
+from infrastructure.service_container import ServiceContainer
 from services.permissions import has_admin_permission  # noqa: F401 - used by tests
-from services.player_service import PlayerService
-from services.opendota_player_service import OpenDotaPlayerService
-from services.rating_comparison_service import RatingComparisonService
-from services.match_enrichment_service import MatchEnrichmentService
-from services.match_discovery_service import MatchDiscoveryService
-from services.tip_service import TipService
-from services.soft_avoid_service import SoftAvoidService
-from services.package_deal_service import PackageDealService
-from services.pairings_service import PairingsService
-from utils.formatting import FROGLING_EMOJI_ID, FROGLING_EMOTE, JOPACOIN_EMOJI_ID, JOPACOIN_EMOTE, ROLE_EMOJIS, ROLE_NAMES, format_role_display
+from utils.formatting import FROGLING_EMOJI_ID, FROGLING_EMOTE, JOPACOIN_EMOJI_ID, JOPACOIN_EMOTE
 
 # Bot setup
 
@@ -104,16 +69,8 @@ intents.presences = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# Lazy-initialized services (created on first access to avoid blocking test collection)
-_services_initialized = False
-db = None
-lobby_manager = None
-player_service = None
-lobby_service = None
-player_repo = None
-bet_repo = None
-betting_service = None
-match_service = None
+# Lazy-initialized service container
+_container: ServiceContainer | None = None
 
 # Lobby rally notification cooldowns
 # Key: (guild_id, needed_count) -> timestamp
@@ -122,257 +79,37 @@ _lobby_rally_cooldowns: dict[tuple[int, int], float] = {}
 
 
 def _init_services():
-    """Initialize database and services lazily (on first use, not at import time)."""
-    global _services_initialized, db, lobby_manager, player_service, lobby_service
-    global player_repo, bet_repo, betting_service, match_service
+    """Initialize all services via ServiceContainer (lazy, idempotent)."""
+    global _container
 
     # region agent log
     _debug_log(
         "H2",
         "bot.py:_init_services",
         "entering _init_services",
-        {"initialized": _services_initialized},
+        {"initialized": _container is not None},
     )
     # endregion agent log
 
-    if _services_initialized:
+    if _container is not None:
         return
 
-    db = Database(db_path=DB_PATH)
-    lobby_repo = LobbyRepository(DB_PATH)
-    lobby_manager = LobbyManager(lobby_repo)
-    player_repo = PlayerRepository(DB_PATH)
-    bet_repo = BetRepository(DB_PATH)
-    match_repo = MatchRepository(DB_PATH)
-    pairings_repo = PairingsRepository(DB_PATH)
-    pairings_service = PairingsService(pairings_repo)
-    guild_config_repo = GuildConfigRepository(DB_PATH)
-    guild_config_service = GuildConfigService(guild_config_repo)
-
-    # Create garnishment service for debt repayment
-    garnishment_service = GarnishmentService(player_repo, GARNISHMENT_PERCENTAGE)
-
-    # Create bankruptcy service for debt clearing with penalties
-    bankruptcy_repo = BankruptcyRepository(DB_PATH)
-    bankruptcy_service = BankruptcyService(bankruptcy_repo, player_repo)
-
-    # Create loan service for borrowing jopacoin
-    loan_repo = LoanRepository(DB_PATH)
-    loan_service = LoanService(loan_repo, player_repo)
-
-    # Create recalibration service for rating uncertainty reset
-    recalibration_repo = RecalibrationRepository(DB_PATH)
-    recalibration_service = RecalibrationService(recalibration_repo, player_repo)
-
-    # Create disburse service for nonprofit fund distribution
-    disburse_repo = DisburseRepository(DB_PATH)
-    disburse_service = DisburseService(disburse_repo, player_repo, loan_repo)
-
-    # Create soft avoid repository and service
-    soft_avoid_repo = SoftAvoidRepository(DB_PATH)
-    soft_avoid_service = SoftAvoidService(soft_avoid_repo)
-
-    # Create match state service early (needed by lobby_service and match_service)
-    from services.match_state_service import MatchStateService
-    match_state_service = MatchStateService(match_repo)
-
-    # Create package deal repository and service
-    package_deal_repo = PackageDealRepository(DB_PATH)
-    package_deal_service = PackageDealService(package_deal_repo)
-
-    # Create betting service with garnishment and bankruptcy support
-    betting_service = BettingService(
-        bet_repo,
-        player_repo,
-        garnishment_service=garnishment_service,
-        leverage_tiers=LEVERAGE_TIERS,
-        max_debt=MAX_DEBT,
-        bankruptcy_service=bankruptcy_service,
-    )
-
-    player_service = PlayerService(player_repo)
-    lobby_service = LobbyService(
-        lobby_manager,
-        player_repo,
-        ready_threshold=LOBBY_READY_THRESHOLD,
-        max_players=LOBBY_MAX_PLAYERS,
-        bankruptcy_repo=bankruptcy_repo,
-        match_state_service=match_state_service,
-    )
-
-    # Create match service
-    match_service = MatchService(
-        player_repo=player_repo,
-        match_repo=match_repo,
-        use_glicko=USE_GLICKO,
-        betting_service=betting_service,
-        pairings_repo=pairings_repo,
-        loan_service=loan_service,
-        soft_avoid_repo=soft_avoid_repo,
-        package_deal_repo=package_deal_repo,
-        state_service=match_state_service,
-    )
-
-    # Expose on bot for cogs
-    bot.db = db
-    bot.lobby_manager = lobby_manager
-    bot.player_service = player_service
-    bot.lobby_service = lobby_service
-    bot.match_service = match_service
-    bot.player_repo = player_repo
-    bot.match_repo = match_repo
-    bot.pairings_repo = pairings_repo
-    bot.pairings_service = pairings_service
-    bot.guild_config_repo = guild_config_repo
-    bot.guild_config_service = guild_config_service
-    bot.bankruptcy_repo = bankruptcy_repo
-    bot.role_emojis = ROLE_EMOJIS
-    bot.role_names = ROLE_NAMES
-    bot.format_role_display = format_role_display
-    bot.ADMIN_USER_IDS = ADMIN_USER_IDS
-    bot.betting_service = betting_service
-    bot.bankruptcy_service = bankruptcy_service
-    bot.loan_service = loan_service
-    bot.disburse_service = disburse_service
-    bot.recalibration_service = recalibration_service
-    bot.soft_avoid_repo = soft_avoid_repo
-    bot.soft_avoid_service = soft_avoid_service
-    bot.package_deal_repo = package_deal_repo
-    bot.package_deal_service = package_deal_service
-
-    # Create gambling stats service for degen score and leaderboards
-    gambling_stats_service = GamblingStatsService(
-        bet_repo=bet_repo,
-        player_repo=player_repo,
-        match_repo=match_repo,
-        bankruptcy_service=bankruptcy_service,
-        loan_service=loan_service,
-        loan_repo=loan_repo,
-    )
-    bot.gambling_stats_service = gambling_stats_service
-
-    # Create prediction service for prediction markets
-    prediction_repo = PredictionRepository(DB_PATH)
-    prediction_service = PredictionService(
-        prediction_repo=prediction_repo,
-        player_repo=player_repo,
+    _container = ServiceContainer(
+        db_path=DB_PATH,
         admin_user_ids=ADMIN_USER_IDS,
+        lobby_ready_threshold=LOBBY_READY_THRESHOLD,
+        lobby_max_players=LOBBY_MAX_PLAYERS,
+        use_glicko=USE_GLICKO,
+        max_debt=MAX_DEBT,
+        leverage_tiers=LEVERAGE_TIERS,
+        garnishment_percentage=GARNISHMENT_PERCENTAGE,
+        cerebras_api_key=CEREBRAS_API_KEY,
+        ai_model=AI_MODEL,
+        ai_timeout_seconds=AI_TIMEOUT_SECONDS,
+        ai_max_tokens=AI_MAX_TOKENS,
     )
-    bot.prediction_service = prediction_service
-    bot.prediction_repo = prediction_repo
-
-    # Create rating comparison service for rating analysis
-    rating_comparison_service = RatingComparisonService(
-        match_repo=match_repo,
-        player_repo=player_repo,
-        match_service=match_service,
-    )
-    bot.rating_comparison_service = rating_comparison_service
-
-    # Create OpenDota player service for profile stats
-    opendota_player_service = OpenDotaPlayerService(player_repo)
-    bot.opendota_player_service = opendota_player_service
-
-    # Create match enrichment service for enriching matches with OpenDota data
-    match_enrichment_service = MatchEnrichmentService(
-        match_repo=match_repo,
-        player_repo=player_repo,
-        match_service=match_service,
-    )
-    bot.match_enrichment_service = match_enrichment_service
-
-    # Create match discovery service for auto-discovering match IDs
-    match_discovery_service = MatchDiscoveryService(
-        match_repo=match_repo,
-        player_repo=player_repo,
-        match_service=match_service,
-    )
-    bot.match_discovery_service = match_discovery_service
-
-    # Create tip repository and service for transaction logging
-    tip_repository = TipRepository(DB_PATH)
-    tip_service = TipService(tip_repository)
-    bot.tip_repository = tip_repository
-    bot.tip_service = tip_service
-
-    # Create AI services (optional - only if CEREBRAS_API_KEY is set)
-    ai_service = None
-    sql_query_service = None
-    flavor_text_service = None
-
-    if CEREBRAS_API_KEY:
-        try:
-            from services.ai_service import AIService
-            from services.sql_query_service import SQLQueryService
-            from services.flavor_text_service import FlavorTextService
-            from repositories.ai_query_repository import AIQueryRepository
-
-            ai_service = AIService(
-                model=AI_MODEL,
-                api_key=CEREBRAS_API_KEY,
-                timeout=AI_TIMEOUT_SECONDS,
-                max_tokens=AI_MAX_TOKENS,
-            )
-
-            ai_query_repo = AIQueryRepository(DB_PATH)
-            sql_query_service = SQLQueryService(
-                ai_service=ai_service,
-                ai_query_repo=ai_query_repo,
-                guild_config_repo=guild_config_repo,
-            )
-
-            flavor_text_service = FlavorTextService(
-                ai_service=ai_service,
-                player_repo=player_repo,
-                bankruptcy_service=bankruptcy_service,
-                loan_service=loan_service,
-                gambling_stats_service=gambling_stats_service,
-                guild_config_repo=guild_config_repo,
-            )
-
-            logger.info(f"AI services initialized with model: {AI_MODEL}")
-        except Exception as e:
-            logger.warning(f"Failed to initialize AI services: {e}")
-            ai_service = None
-            sql_query_service = None
-            flavor_text_service = None
-    else:
-        logger.info("AI services not initialized (CEREBRAS_API_KEY not set)")
-
-    bot.ai_service = ai_service
-    bot.sql_query_service = sql_query_service
-    bot.flavor_text_service = flavor_text_service
-
-    # Create Neon Degen Terminal service (JOPA-T/v3.7 easter egg system)
-    from repositories.neon_event_repository import NeonEventRepository
-    from services.neon_degen_service import NeonDegenService
-    neon_event_repo = NeonEventRepository(DB_PATH)
-    neon_degen_service = NeonDegenService(
-        player_repo=player_repo,
-        bet_repo=bet_repo,
-        bankruptcy_service=bankruptcy_service,
-        gambling_stats_service=gambling_stats_service,
-        ai_service=ai_service,
-        flavor_text_service=flavor_text_service,
-        neon_event_repo=neon_event_repo,
-    )
-    bot.neon_degen_service = neon_degen_service
-
-    # Create wrapped service for monthly summaries
-    from repositories.wrapped_repository import WrappedRepository
-    from services.wrapped_service import WrappedService
-
-    wrapped_repo = WrappedRepository(DB_PATH)
-    wrapped_service = WrappedService(
-        wrapped_repo=wrapped_repo,
-        player_repo=player_repo,
-        match_repo=match_repo,
-        bet_repo=bet_repo,
-        gambling_stats_service=gambling_stats_service,
-    )
-    bot.wrapped_service = wrapped_service
-
-    _services_initialized = True
+    _container.initialize()
+    _container.expose_to_bot(bot)
 
 
 
@@ -483,7 +220,7 @@ async def update_lobby_message(message, lobby, guild_id=None):
     """Refresh lobby embed on the pinned lobby message (also updates thread since msg is thread starter)."""
     _init_services()  # Ensure services are initialized
     try:
-        embed = lobby_service.build_lobby_embed(lobby, guild_id)
+        embed = bot.lobby_service.build_lobby_embed(lobby, guild_id)
         if embed:
             await message.edit(embed=embed, allowed_mentions=discord.AllowedMentions.none())
             logger.info(f"Updated lobby embed: {lobby.get_player_count()} players")
@@ -506,15 +243,15 @@ async def notify_lobby_ready(channel, lobby):
         )
 
         # Add jump link to lobby embed
-        lobby_message_id = lobby_service.get_lobby_message_id() if lobby_service else None
-        lobby_channel_id = lobby_service.get_lobby_channel_id() if lobby_service else None
+        lobby_message_id = bot.lobby_service.get_lobby_message_id() if bot.lobby_service else None
+        lobby_channel_id = bot.lobby_service.get_lobby_channel_id() if bot.lobby_service else None
         if lobby_message_id and lobby_channel_id:
             guild_id = channel.guild.id if channel.guild else 0
             jump_url = f"https://discord.com/channels/{guild_id}/{lobby_channel_id}/{lobby_message_id}"
             embed.add_field(name="", value=f"[Jump to Lobby]({jump_url})", inline=False)
 
         # Use origin channel if available (where /lobby was run), otherwise fallback to reaction channel
-        origin_channel_id = lobby_service.get_origin_channel_id() if lobby_service else None
+        origin_channel_id = bot.lobby_service.get_origin_channel_id() if bot.lobby_service else None
         target_channel = channel  # Default to reaction channel
 
         if origin_channel_id and origin_channel_id != channel.id:
@@ -560,14 +297,14 @@ async def notify_lobby_rally(channel, thread, lobby, guild_id: int) -> bool:
         )
 
         # Add jump link to lobby embed
-        lobby_message_id = lobby_service.get_lobby_message_id() if lobby_service else None
-        lobby_channel_id = lobby_service.get_lobby_channel_id() if lobby_service else None
+        lobby_message_id = bot.lobby_service.get_lobby_message_id() if bot.lobby_service else None
+        lobby_channel_id = bot.lobby_service.get_lobby_channel_id() if bot.lobby_service else None
         if lobby_message_id and lobby_channel_id:
             jump_url = f"https://discord.com/channels/{guild_id}/{lobby_channel_id}/{lobby_message_id}"
             embed.add_field(name="", value=f"[Jump to Lobby]({jump_url})", inline=False)
 
         # Use origin channel if available (where /lobby was run), otherwise fallback to reaction channel
-        origin_channel_id = lobby_service.get_origin_channel_id() if lobby_service else None
+        origin_channel_id = bot.lobby_service.get_origin_channel_id() if bot.lobby_service else None
         target_channel = channel  # Default to reaction channel
 
         if origin_channel_id and origin_channel_id != channel.id:
@@ -700,10 +437,10 @@ async def on_raw_reaction_add(payload):
     # Handle readycheck ✅ reactions
     if payload.emoji.name == "✅":
         _init_services()
-        rc_msg_id = lobby_service.get_readycheck_message_id()
+        rc_msg_id = bot.lobby_service.get_readycheck_message_id()
         if rc_msg_id and payload.message_id == rc_msg_id:
             try:
-                added = lobby_service.add_readycheck_reaction(
+                added = bot.lobby_service.add_readycheck_reaction(
                     payload.user_id, f"<@{payload.user_id}>"
                 )
                 if added:
@@ -733,10 +470,10 @@ async def on_raw_reaction_add(payload):
             return
 
         message = await channel.fetch_message(payload.message_id)
-        if message.id != lobby_service.get_lobby_message_id():
+        if message.id != bot.lobby_service.get_lobby_message_id():
             return
 
-        lobby = lobby_service.get_lobby()
+        lobby = bot.lobby_service.get_lobby()
         if not lobby or lobby.status != "open":
             return
 
@@ -747,7 +484,7 @@ async def on_raw_reaction_add(payload):
             # Only ping if user is NOT already in the lobby (regular or conditional)
             already_in_lobby = payload.user_id in lobby.players or payload.user_id in lobby.conditional_players
             if not already_in_lobby:
-                thread_id = lobby_service.get_lobby_thread_id()
+                thread_id = bot.lobby_service.get_lobby_thread_id()
                 if thread_id:
                     try:
                         thread = bot.get_channel(thread_id)
@@ -818,7 +555,7 @@ async def on_raw_reaction_add(payload):
             except Exception:
                 pass
             success, reason, pending_info = await asyncio.to_thread(
-                lobby_service.join_lobby, payload.user_id, guild_id
+                bot.lobby_service.join_lobby, payload.user_id, guild_id
             )
             join_type = "regular"
         else:
@@ -828,7 +565,7 @@ async def on_raw_reaction_add(payload):
             except Exception:
                 pass
             success, reason, pending_info = await asyncio.to_thread(
-                lobby_service.join_lobby_conditional, payload.user_id, guild_id
+                bot.lobby_service.join_lobby_conditional, payload.user_id, guild_id
             )
             join_type = "conditional"
 
@@ -864,7 +601,7 @@ async def on_raw_reaction_add(payload):
         await update_lobby_message(message, lobby, payload.guild_id)
 
         # Mention user in thread to subscribe them
-        thread_id = lobby_service.get_lobby_thread_id()
+        thread_id = bot.lobby_service.get_lobby_thread_id()
         thread = None
         if thread_id:
             try:
@@ -879,7 +616,7 @@ async def on_raw_reaction_add(payload):
                 logger.warning(f"Failed to post join activity in thread: {exc}")
 
         # Check for rally notification (+2 or +1 needed)
-        if not lobby_service.is_ready(lobby):
+        if not bot.lobby_service.is_ready(lobby):
             guild_id = payload.guild_id or 0
             await notify_lobby_rally(channel, thread, lobby, guild_id)
         else:
@@ -897,10 +634,10 @@ async def on_raw_reaction_remove(payload):
     # Handle readycheck ✅ un-reaction
     if payload.emoji.name == "✅":
         _init_services()
-        rc_msg_id = lobby_service.get_readycheck_message_id()
+        rc_msg_id = bot.lobby_service.get_readycheck_message_id()
         if rc_msg_id and payload.message_id == rc_msg_id:
             try:
-                removed = lobby_service.remove_readycheck_reaction(payload.user_id)
+                removed = bot.lobby_service.remove_readycheck_reaction(payload.user_id)
                 if removed:
                     cog = bot.get_cog("LobbyCommands")
                     embed = cog.rebuild_readycheck_embed() if cog else None
@@ -926,24 +663,24 @@ async def on_raw_reaction_remove(payload):
         if not channel:
             return
         message = await channel.fetch_message(payload.message_id)
-        if message.id != lobby_service.get_lobby_message_id():
+        if message.id != bot.lobby_service.get_lobby_message_id():
             return
 
-        lobby = lobby_service.get_lobby()
+        lobby = bot.lobby_service.get_lobby()
         if not lobby or lobby.status != "open":
             return
 
         # Remove from appropriate set based on which emoji was removed
         if is_sword:
-            left = await asyncio.to_thread(lobby_service.leave_lobby, payload.user_id)
+            left = await asyncio.to_thread(bot.lobby_service.leave_lobby, payload.user_id)
         else:
-            left = await asyncio.to_thread(lobby_service.leave_lobby_conditional, payload.user_id)
+            left = await asyncio.to_thread(bot.lobby_service.leave_lobby_conditional, payload.user_id)
 
         if left:
             await update_lobby_message(message, lobby, payload.guild_id)
 
             # Post leave message in thread
-            thread_id = lobby_service.get_lobby_thread_id()
+            thread_id = bot.lobby_service.get_lobby_thread_id()
             if thread_id:
                 try:
                     thread = bot.get_channel(thread_id)
