@@ -1952,7 +1952,8 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             return cursor.rowcount > 0
 
     def log_wheel_spin(
-        self, discord_id: int, guild_id: int | None, result: int, spin_time: int
+        self, discord_id: int, guild_id: int | None, result: int, spin_time: int,
+        is_bankrupt: bool = False,
     ) -> int:
         """
         Log a wheel spin result for gambling history tracking.
@@ -1962,6 +1963,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             guild_id: Guild ID (None for DMs)
             result: Spin result (positive for win, negative for bankrupt, 0 for lose turn)
             spin_time: Unix timestamp of the spin
+            is_bankrupt: True if this spin was on the bankruptcy wheel
 
         Returns:
             The spin_id of the created record
@@ -1971,12 +1973,42 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             cursor = conn.cursor()
             cursor.execute(
                 """
-                INSERT INTO wheel_spins (guild_id, discord_id, result, spin_time)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO wheel_spins (guild_id, discord_id, result, spin_time, is_bankrupt)
+                VALUES (?, ?, ?, ?, ?)
                 """,
-                (normalized_guild_id, discord_id, result, spin_time),
+                (normalized_guild_id, discord_id, result, spin_time, 1 if is_bankrupt else 0),
             )
             return cursor.lastrowid
+
+    def get_last_normal_wheel_spin(self, guild_id: int | None) -> dict | None:
+        """
+        Get the most recent normal-wheel (non-bankrupt) spin in this guild.
+
+        Used by CHAIN_REACTION bankrupt wheel mechanic.
+
+        Args:
+            guild_id: Guild ID to filter by
+
+        Returns:
+            Dict with 'result' (int) and 'discord_id' (int), or None if no spin found
+        """
+        normalized_guild_id = guild_id if guild_id is not None else 0
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT result, discord_id
+                FROM wheel_spins
+                WHERE guild_id = ? AND (is_bankrupt = 0 OR is_bankrupt IS NULL)
+                ORDER BY spin_time DESC
+                LIMIT 1
+                """,
+                (normalized_guild_id,),
+            )
+            row = cursor.fetchone()
+            if row:
+                return {"result": row["result"], "discord_id": row["discord_id"]}
+            return None
 
     def get_wheel_spin_history(self, discord_id: int, guild_id: int | None = None) -> list[dict]:
         """

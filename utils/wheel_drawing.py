@@ -239,6 +239,11 @@ def _create_static_overlay(size: int) -> Image.Image:
     return img
 
 
+def _is_numbered_wedge(wedge: tuple) -> bool:
+    """Check if a wedge is a numbered (positive value) wedge."""
+    return isinstance(wedge[1], int) and wedge[1] > 0
+
+
 # Base wheel wedge configuration: (label, base_value, color)
 # 24 wedges at 15 degrees each (dropped 35 and 45 from original 26 for legibility)
 # BANKRUPT value will be adjusted based on WHEEL_TARGET_EV
@@ -351,20 +356,130 @@ def _calculate_adjusted_wedges(target_ev: float) -> list[tuple[str, int | str, s
 WHEEL_WEDGES = _calculate_adjusted_wedges(WHEEL_TARGET_EV)
 
 
+# Hardcoded 24-slice bankrupt wheel for players in bankruptcy penalty.
+# Same count as normal wheel, filled with punishments, mocking micro-wins,
+# and unique social/interactive outcomes.
+# BANKRUPT value is a placeholder (-100); _calculate_bankrupt_adjusted_wedges()
+# recalculates it to maintain WHEEL_TARGET_EV.
+_BASE_BANKRUPT_WHEEL_WEDGES = [
+    # Kept from normal wheel: non-numbered special/negative
+    ("BANKRUPT", -100, "#1a1a1a"),
+    ("BANKRUPT", -100, "#1a1a1a"),
+    ("LOSE", 0, "#4a4a4a"),
+    ("BLUE", "BLUE_SHELL", "#3498db"),
+    ("BOLT", "LIGHTNING_BOLT", "#f39c12"),
+    ("RED", "RED_SHELL", "#e74c3c"),
+    # Kept: extension slices (add penalty games)
+    ("+1", "EXTEND_1", "#8B0000"),
+    ("+2", "EXTEND_2", "#660000"),
+    # Kept: low-value numbered wins
+    ("5", 5, "#2d5a27"),
+    ("5", 5, "#2d5a27"),
+    ("10", 10, "#3d7a37"),
+    ("10", 10, "#3d7a37"),
+    ("15", 15, "#4d9a47"),
+    ("15", 15, "#4d9a47"),
+    ("20", 20, "#5dba57"),
+    ("20", 20, "#5dba57"),
+    # New: mocking micro-wins
+    ("1", 1, "#3a3a1a"),
+    ("2", 2, "#3a3500"),
+    # New: unique mechanics
+    ("JAIL", "JAILBREAK", "#0a2a0a"),       # Remove 1 penalty game
+    ("CHAIN", "CHAIN_REACTION", "#1a1a3a"),  # Copy last normal wheel result
+    ("TRIAL", "TOWN_TRIAL", "#2a1a1a"),      # Server-wide vote (3 options, 5 min)
+    ("FIND", "DISCOVER", "#1a2a2a"),         # Spinner picks from 3 options (60s)
+    ("SOS", "EMERGENCY", "#2a1a00"),         # All +balance players lose ≤10 JC
+    ("SPY", "REVEAL", "#1a0a2a"),            # Posts spinner's own avoids + deals
+]
+
+
+def _calculate_bankrupt_adjusted_wedges(target_ev: float) -> list[tuple[str, int | str, str]]:
+    """
+    Calculate bankrupt wheel wedges with BANKRUPT value adjusted to hit target EV.
+
+    Same logic as _calculate_adjusted_wedges() but applied to _BASE_BANKRUPT_WHEEL_WEDGES.
+    New string-valued slices (JAILBREAK, CHAIN_REACTION, etc.) have estimated EV of 0.
+    BANKRUPT is capped at -1 minimum.
+    """
+    _load_special_wedge_evs()
+    num_wedges = len(_BASE_BANKRUPT_WHEEL_WEDGES)
+
+    non_bankrupt_sum = sum(
+        v for _, v, _ in _BASE_BANKRUPT_WHEEL_WEDGES
+        if isinstance(v, int) and v >= 0
+    )
+
+    special_ev_sum = sum(
+        _SPECIAL_WEDGE_EST_EVS.get(v, 0.0)
+        for _, v, _ in _BASE_BANKRUPT_WHEEL_WEDGES
+        if isinstance(v, str)
+    )
+
+    num_bankrupt = sum(
+        1 for _, v, _ in _BASE_BANKRUPT_WHEEL_WEDGES
+        if isinstance(v, int) and v < 0
+    )
+
+    target_sum = target_ev * num_wedges
+    if num_bankrupt > 0:
+        bankrupt_value = int((target_sum - non_bankrupt_sum - special_ev_sum) / num_bankrupt)
+        bankrupt_value = min(bankrupt_value, -1)
+    else:
+        bankrupt_value = -100
+
+    adjusted = []
+    for label, value, color in _BASE_BANKRUPT_WHEEL_WEDGES:
+        if isinstance(value, str):
+            adjusted.append((label, value, color))
+        elif value < 0:  # BANKRUPT placeholder
+            adjusted.append((str(bankrupt_value), bankrupt_value, color))
+        else:
+            adjusted.append((label, value, color))
+
+    return adjusted
+
+
+# Calculate bankrupt wheel wedges (24-slice wheel for players in bankruptcy penalty)
+BANKRUPT_WHEEL_WEDGES = _calculate_bankrupt_adjusted_wedges(WHEEL_TARGET_EV)
+
+
+def get_wheel_wedges(is_bankrupt: bool = False) -> list[tuple[str, int | str, str]]:
+    """Get the appropriate wheel wedges based on player bankruptcy status."""
+    return BANKRUPT_WHEEL_WEDGES if is_bankrupt else WHEEL_WEDGES
+
+
+def get_wedge_at_index_for_player(
+    idx: int, is_bankrupt: bool = False
+) -> tuple[str, int | str, str]:
+    """Get wedge info at given index for the appropriate wheel type."""
+    wedges = get_wheel_wedges(is_bankrupt)
+    return wedges[idx % len(wedges)]
+
+
 def hex_to_rgb(hex_color: str) -> tuple[int, int, int]:
     """Convert hex color to RGB tuple."""
     hex_color = hex_color.lstrip("#")
     return tuple(int(hex_color[i : i + 2], 16) for i in (0, 2, 4))
 
 
-def _get_wheel_face(size: int) -> Image.Image:
+# Separate cache for bankrupt wheel face
+_CACHED_BANKRUPT_WHEEL_FACE: dict[int, Image.Image] = {}
+
+
+def _get_wheel_face(size: int, is_bankrupt: bool = False) -> Image.Image:
     """Get cached wheel face sprite (pieslices + glow ring, no text)."""
-    if size not in _CACHED_WHEEL_FACE:
-        _CACHED_WHEEL_FACE[size] = _create_wheel_face(size)
-    return _CACHED_WHEEL_FACE[size]
+    if is_bankrupt:
+        if size not in _CACHED_BANKRUPT_WHEEL_FACE:
+            _CACHED_BANKRUPT_WHEEL_FACE[size] = _create_wheel_face(size, is_bankrupt=True)
+        return _CACHED_BANKRUPT_WHEEL_FACE[size]
+    else:
+        if size not in _CACHED_WHEEL_FACE:
+            _CACHED_WHEEL_FACE[size] = _create_wheel_face(size, is_bankrupt=False)
+        return _CACHED_WHEEL_FACE[size]
 
 
-def _create_wheel_face(size: int) -> Image.Image:
+def _create_wheel_face(size: int, is_bankrupt: bool = False) -> Image.Image:
     """
     Create the wheel face sprite once: glow ring and colored wedge pieslices.
 
@@ -377,10 +492,13 @@ def _create_wheel_face(size: int) -> Image.Image:
     center = size // 2
     radius = size // 2 - 30
 
-    num_wedges = len(WHEEL_WEDGES)
+    wedges = get_wheel_wedges(is_bankrupt)
+    num_wedges = len(wedges)
     angle_per_wedge = 360 / num_wedges
 
     # Draw outer glow ring (part of face so it rotates with wheel)
+    # Use red glow for bankrupt wheel to indicate danger
+    glow_color = (255, 50, 50) if is_bankrupt else (255, 215, 0)
     for glow in range(5, 0, -1):
         glow_radius = radius + glow * 3
         draw.ellipse(
@@ -390,12 +508,12 @@ def _create_wheel_face(size: int) -> Image.Image:
                 center + glow_radius,
                 center + glow_radius,
             ],
-            outline=(255, 215, 0, 30 - glow * 5),
+            outline=(*glow_color, 30 - glow * 5),
             width=2,
         )
 
     # Draw wedges
-    for i, (label, value, color) in enumerate(WHEEL_WEDGES):
+    for i, (label, value, color) in enumerate(wedges):
         start_angle = i * angle_per_wedge - 90
         end_angle = start_angle + angle_per_wedge
 
@@ -595,7 +713,10 @@ def _draw_shell_icon(shell_type: str, s: int) -> Image.Image:
     return img
 
 
-def _draw_wedge_labels(img: Image.Image, draw: ImageDraw.Draw, size: int, rotation: float) -> None:
+def _draw_wedge_labels(
+    img: Image.Image, draw: ImageDraw.Draw, size: int, rotation: float,
+    is_bankrupt: bool = False
+) -> None:
     """Draw horizontal text labels on each wedge after rotation.
 
     For shell wedges, draws a Mario Kart shell icon next to the text.
@@ -603,7 +724,8 @@ def _draw_wedge_labels(img: Image.Image, draw: ImageDraw.Draw, size: int, rotati
     """
     center = size // 2
     radius = size // 2 - 30
-    num_wedges = len(WHEEL_WEDGES)
+    wedges = get_wheel_wedges(is_bankrupt)
+    num_wedges = len(wedges)
     angle_per_wedge = 360 / num_wedges
 
     # Base font size and max arc width available at the text radius
@@ -613,7 +735,7 @@ def _draw_wedge_labels(img: Image.Image, draw: ImageDraw.Draw, size: int, rotati
     # Leave some padding inside the arc
     max_label_width = arc_width * 0.85
 
-    for i, (label, value, _color) in enumerate(WHEEL_WEDGES):
+    for i, (label, value, _color) in enumerate(wedges):
         # Determine display text
         if isinstance(value, str) or value <= 0:
             text = label
@@ -753,12 +875,16 @@ def _draw_terminal_shell(draw: ImageDraw.Draw, size: int, frame_idx: int, displa
 def create_wheel_frame_for_gif(
     size: int, rotation: float, selected_idx: int | None = None,
     display_name: str | None = None, frame_idx: int = 0,
+    is_bankrupt: bool = False,
 ) -> Image.Image:
     """
     Create a single wheel frame optimized for GIF animation.
 
     Uses cached wheel face sprite rotated to the desired angle, then composites
     the static overlay (pointer, center circle) on top.
+
+    Args:
+        is_bankrupt: If True, uses the reduced bankrupt wheel with extension slices.
     """
     img = Image.new("RGBA", (size, size), (30, 30, 35, 255))
 
@@ -767,7 +893,7 @@ def create_wheel_frame_for_gif(
 
     # Get cached wheel face (pieslices only) and rotate it
     # Use BILINEAR for faster rotation with minimal quality loss
-    face = _get_wheel_face(size)
+    face = _get_wheel_face(size, is_bankrupt)
     rotated_face = face.rotate(-rotation, center=(center, center), resample=Image.BILINEAR)
 
     # Composite rotated face onto background
@@ -775,13 +901,14 @@ def create_wheel_frame_for_gif(
 
     # Draw winner highlight on top of rotated face (if selected)
     draw = ImageDraw.Draw(img)
+    wedges = get_wheel_wedges(is_bankrupt)
     if selected_idx is not None:
-        num_wedges = len(WHEEL_WEDGES)
+        num_wedges = len(wedges)
         angle_per_wedge = 360 / num_wedges
         win_angle = selected_idx * angle_per_wedge + rotation - 90
 
         # Brighten the winning wedge by drawing a semi-transparent overlay
-        _, _, win_color = WHEEL_WEDGES[selected_idx]
+        _, _, win_color = wedges[selected_idx]
         rgb = hex_to_rgb(win_color)
         bright = tuple(min(255, c + 120) for c in rgb)
         draw.pieslice(
@@ -811,7 +938,7 @@ def create_wheel_frame_for_gif(
         _draw_matrix_rain(draw, size, frame_idx, phase)
 
     # Draw horizontal text labels on each wedge (after rotation so they stay readable)
-    _draw_wedge_labels(img, draw, size, rotation)
+    _draw_wedge_labels(img, draw, size, rotation, is_bankrupt)
 
     # Composite cached static overlay (center circle, text, pointer)
     static_overlay = _get_static_overlay(size)
@@ -831,7 +958,10 @@ def create_wheel_frame_for_gif(
     return img
 
 
-def create_wheel_gif(target_idx: int, size: int = 500, display_name: str | None = None) -> io.BytesIO:
+def create_wheel_gif(
+    target_idx: int, size: int = 500, display_name: str | None = None,
+    is_bankrupt: bool = False,
+) -> io.BytesIO:
     """
     Create an animated GIF of the wheel spinning and landing on target_idx.
 
@@ -844,6 +974,7 @@ def create_wheel_gif(target_idx: int, size: int = 500, display_name: str | None 
         target_idx: Index of wedge to land on
         size: Image size in pixels
         display_name: User's Discord display name for JOPA-T terminal prompt
+        is_bankrupt: If True, uses the reduced bankrupt wheel with extension slices.
 
     Returns:
         BytesIO buffer containing the GIF data
@@ -853,7 +984,8 @@ def create_wheel_gif(target_idx: int, size: int = 500, display_name: str | None 
     frames = []
     durations = []
 
-    num_wedges = len(WHEEL_WEDGES)
+    wedges = get_wheel_wedges(is_bankrupt)
+    num_wedges = len(wedges)
     angle_per_wedge = 360 / num_wedges
 
     # Calculate final rotation to land on target wedge
@@ -952,7 +1084,10 @@ def create_wheel_gif(target_idx: int, size: int = 500, display_name: str | None 
         chaos_keyframes.append(total_spin)
 
     # Pre-render first frame to establish shared palette
-    first_frame_rgba = create_wheel_frame_for_gif(size, 0, selected_idx=None, display_name=display_name, frame_idx=0)
+    first_frame_rgba = create_wheel_frame_for_gif(
+        size, 0, selected_idx=None, display_name=display_name, frame_idx=0,
+        is_bankrupt=is_bankrupt
+    )
     first_frame_rgb = first_frame_rgba.convert("RGB")
     palette_image = first_frame_rgb.convert("P", palette=Image.ADAPTIVE, colors=256)
 
@@ -1002,7 +1137,7 @@ def create_wheel_gif(target_idx: int, size: int = 500, display_name: str | None 
 
         frame = create_wheel_frame_for_gif(
             size, rotation, selected_idx=target_idx if is_final else None,
-            display_name=display_name, frame_idx=i,
+            display_name=display_name, frame_idx=i, is_bankrupt=is_bankrupt,
         )
 
         # Quantize against shared palette for consistent colors across frames

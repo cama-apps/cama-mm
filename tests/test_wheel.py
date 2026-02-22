@@ -20,6 +20,7 @@ from config import (
 async def test_wheel_requires_registration():
     """Verify /gamba rejects unregistered users."""
     bot = MagicMock()
+    bot.bankruptcy_service = None
     betting_service = MagicMock()
     match_service = MagicMock()
     player_service = MagicMock()
@@ -48,6 +49,7 @@ async def test_wheel_requires_registration():
 async def test_wheel_cooldown_expired_allows_spin():
     """Verify /gamba allows spin when cooldown has expired."""
     bot = MagicMock()
+    bot.bankruptcy_service = None
     betting_service = MagicMock()
     match_service = MagicMock()
     player_service = MagicMock()
@@ -95,6 +97,7 @@ async def test_wheel_cooldown_expired_allows_spin():
 async def test_wheel_positive_applies_garnishment():
     """Verify positive wheel results go through garnishment service when in debt."""
     bot = MagicMock()
+    bot.bankruptcy_service = None
     betting_service = MagicMock()
     match_service = MagicMock()
     player_service = MagicMock()
@@ -147,6 +150,7 @@ async def test_wheel_positive_applies_garnishment():
 async def test_wheel_positive_no_debt_adds_directly():
     """Verify positive wheel results add directly when not in debt."""
     bot = MagicMock()
+    bot.bankruptcy_service = None
     betting_service = MagicMock()
     match_service = MagicMock()
     player_service = MagicMock()
@@ -193,6 +197,7 @@ async def test_wheel_positive_no_debt_adds_directly():
 async def test_wheel_bankrupt_subtracts_balance():
     """Verify Bankrupt wedge subtracts from balance (value based on EV config)."""
     bot = MagicMock()
+    bot.bankruptcy_service = None
     betting_service = MagicMock()
     match_service = MagicMock()
     player_service = MagicMock()
@@ -239,6 +244,7 @@ async def test_wheel_bankrupt_subtracts_balance():
 async def test_wheel_bankrupt_credits_nonprofit_fund():
     """Verify Bankrupt wedge losses are credited to the nonprofit fund."""
     bot = MagicMock()
+    bot.bankruptcy_service = None
     betting_service = MagicMock()
     match_service = MagicMock()
     player_service = MagicMock()
@@ -286,6 +292,7 @@ async def test_wheel_bankrupt_credits_nonprofit_fund():
 async def test_wheel_bankrupt_ignores_max_debt():
     """Verify Bankrupt can push balance below MAX_DEBT floor."""
     bot = MagicMock()
+    bot.bankruptcy_service = None
     betting_service = MagicMock()
     match_service = MagicMock()
     player_service = MagicMock()
@@ -331,6 +338,7 @@ async def test_wheel_bankrupt_ignores_max_debt():
 async def test_wheel_lose_turn_no_change():
     """Verify 'Lose a Turn' wedge doesn't change balance."""
     bot = MagicMock()
+    bot.bankruptcy_service = None
     betting_service = MagicMock()
     match_service = MagicMock()
     player_service = MagicMock()
@@ -374,6 +382,7 @@ async def test_wheel_lose_turn_no_change():
 async def test_wheel_jackpot_result():
     """Verify Jackpot wedge awards 100 JC."""
     bot = MagicMock()
+    bot.bankruptcy_service = None
     betting_service = MagicMock()
     match_service = MagicMock()
     player_service = MagicMock()
@@ -491,6 +500,7 @@ def test_wheel_special_wedges_have_string_values():
 async def test_wheel_animation_uses_gif():
     """Verify the wheel animation uses a single GIF upload."""
     bot = MagicMock()
+    bot.bankruptcy_service = None
     betting_service = MagicMock()
     match_service = MagicMock()
     player_service = MagicMock()
@@ -536,6 +546,7 @@ async def test_wheel_animation_uses_gif():
 async def test_wheel_updates_cooldown_in_database():
     """Verify the wheel updates cooldown in database on spin."""
     bot = MagicMock()
+    bot.bankruptcy_service = None
     betting_service = MagicMock()
     match_service = MagicMock()
     player_service = MagicMock()
@@ -586,6 +597,7 @@ async def test_wheel_updates_cooldown_in_database():
 async def test_wheel_admin_bypasses_cooldown():
     """Verify admins can bypass wheel cooldown."""
     bot = MagicMock()
+    bot.bankruptcy_service = None
     betting_service = MagicMock()
     match_service = MagicMock()
     player_service = MagicMock()
@@ -632,6 +644,7 @@ async def test_wheel_red_shell_steals_from_player_above():
     from domain.models.player import Player
 
     bot = MagicMock()
+    bot.bankruptcy_service = None
     betting_service = MagicMock()
     match_service = MagicMock()
     player_service = MagicMock()
@@ -708,6 +721,7 @@ async def test_wheel_red_shell_steals_from_player_above():
 async def test_wheel_red_shell_misses_when_first_place():
     """Verify Red Shell misses when user is already in first place."""
     bot = MagicMock()
+    bot.bankruptcy_service = None
     betting_service = MagicMock()
     match_service = MagicMock()
     player_service = MagicMock()
@@ -756,6 +770,7 @@ async def test_wheel_blue_shell_steals_from_richest():
     from domain.models.player import Player
 
     bot = MagicMock()
+    bot.bankruptcy_service = None
     betting_service = MagicMock()
     match_service = MagicMock()
     player_service = MagicMock()
@@ -834,6 +849,7 @@ async def test_wheel_blue_shell_self_hit_when_richest():
     from domain.models.player import Player
 
     bot = MagicMock()
+    bot.bankruptcy_service = None
     betting_service = MagicMock()
     match_service = MagicMock()
     player_service = MagicMock()
@@ -906,6 +922,7 @@ async def test_wheel_lightning_bolt_taxes_all_players():
     from domain.models.player import Player
 
     bot = MagicMock()
+    bot.bankruptcy_service = None
     betting_service = MagicMock()
     match_service = MagicMock()
     player_service = MagicMock()
@@ -981,6 +998,7 @@ async def test_wheel_lightning_bolt_skips_zero_balance():
     from domain.models.player import Player
 
     bot = MagicMock()
+    bot.bankruptcy_service = None
     betting_service = MagicMock()
     match_service = MagicMock()
     player_service = MagicMock()
@@ -1052,6 +1070,7 @@ async def test_wheel_lightning_bolt_spinner_also_taxed():
     from domain.models.player import Player
 
     bot = MagicMock()
+    bot.bankruptcy_service = None
     betting_service = MagicMock()
     match_service = MagicMock()
     player_service = MagicMock()
@@ -1113,3 +1132,236 @@ async def test_wheel_lightning_bolt_spinner_also_taxed():
     # Verify the spinner was taxed
     taxed_ids = {call[0][0] for call in adjust_calls}
     assert spinner_id in taxed_ids, "Spinner should be taxed too"
+
+
+# ============================================================================
+# Bankrupt Wheel Tests (for players in bankruptcy penalty)
+# ============================================================================
+
+def test_bankrupt_wheel_has_correct_numbered_count():
+    """Bankrupt wheel has 10 numbered positive-value wedges (1,2,5,5,10,10,15,15,20,20)."""
+    from utils.wheel_drawing import BANKRUPT_WHEEL_WEDGES
+
+    numbered = sum(
+        1 for w in BANKRUPT_WHEEL_WEDGES
+        if isinstance(w[1], int) and w[1] > 0
+    )
+    assert numbered == 10, f"Expected 10 numbered wedges, got {numbered}"
+
+
+def test_bankrupt_wheel_removes_high_values():
+    """Highest value wedges (100, 80, 70, etc) should be removed."""
+    from utils.wheel_drawing import BANKRUPT_WHEEL_WEDGES
+
+    values = [w[1] for w in BANKRUPT_WHEEL_WEDGES if isinstance(w[1], int) and w[1] > 0]
+    assert 100 not in values, "100 should be removed from bankrupt wheel"
+    assert 80 not in values, "80 should be removed from bankrupt wheel"
+    assert 70 not in values, "70 should be removed from bankrupt wheel"
+    assert 60 not in values, "60 should be removed from bankrupt wheel"
+
+
+def test_bankrupt_wheel_keeps_special_wedges():
+    """Non-numbered wedges (shells, bolt, lose, bankrupt) remain."""
+    from utils.wheel_drawing import BANKRUPT_WHEEL_WEDGES
+
+    special = [w[1] for w in BANKRUPT_WHEEL_WEDGES if isinstance(w[1], str)]
+    assert "RED_SHELL" in special, "RED_SHELL should remain on bankrupt wheel"
+    assert "BLUE_SHELL" in special, "BLUE_SHELL should remain on bankrupt wheel"
+    assert "LIGHTNING_BOLT" in special, "LIGHTNING_BOLT should remain on bankrupt wheel"
+
+
+def test_bankrupt_wheel_has_extension_slices():
+    """Bankrupt wheel should have EXTEND_1 and EXTEND_2 slices."""
+    from utils.wheel_drawing import BANKRUPT_WHEEL_WEDGES
+
+    special = [w[1] for w in BANKRUPT_WHEEL_WEDGES if isinstance(w[1], str)]
+    assert "EXTEND_1" in special, "EXTEND_1 should be on bankrupt wheel"
+    assert "EXTEND_2" in special, "EXTEND_2 should be on bankrupt wheel"
+
+
+def test_bankrupt_wheel_total_wedge_count():
+    """Bankrupt wheel should have 24 wedges total (matches normal wheel count).
+
+    Composition:
+    - 2 BANKRUPT, 1 LOSE, 3 special shells/bolt, 2 extension slices = 8 non-positive
+    - 10 numbered (1,2,5,5,10,10,15,15,20,20)
+    - 6 new unique mechanics (JAILBREAK, CHAIN_REACTION, TOWN_TRIAL, DISCOVER, EMERGENCY, REVEAL)
+    Total = 8 + 10 + 6 = 24
+    """
+    from utils.wheel_drawing import BANKRUPT_WHEEL_WEDGES
+
+    assert len(BANKRUPT_WHEEL_WEDGES) == 24, f"Expected 24 wedges, got {len(BANKRUPT_WHEEL_WEDGES)}"
+
+
+def test_bankrupt_wheel_keeps_low_value_wedges():
+    """Low value wedges (5, 10, 15, 20) should remain on bankrupt wheel."""
+    from utils.wheel_drawing import BANKRUPT_WHEEL_WEDGES
+
+    values = [w[1] for w in BANKRUPT_WHEEL_WEDGES if isinstance(w[1], int) and w[1] > 0]
+    assert 5 in values, "5 should remain on bankrupt wheel"
+    assert 10 in values, "10 should remain on bankrupt wheel"
+    assert 15 in values, "15 should remain on bankrupt wheel"
+    assert 20 in values, "20 should remain on bankrupt wheel"
+
+
+def test_bankrupt_wheel_extension_slices_have_dark_red_colors():
+    """Extension slices should have dark red colors."""
+    from utils.wheel_drawing import BANKRUPT_WHEEL_WEDGES
+
+    extend_wedges = [w for w in BANKRUPT_WHEEL_WEDGES if w[1] in ("EXTEND_1", "EXTEND_2")]
+    assert len(extend_wedges) == 2, "Should have exactly 2 extension wedges"
+
+    for label, value, color in extend_wedges:
+        # Colors should be dark red variants (#8B0000, #660000)
+        assert color.startswith("#"), f"Color should be hex format, got {color}"
+        # Convert hex to RGB and check it's reddish
+        r = int(color[1:3], 16)
+        g = int(color[3:5], 16)
+        b = int(color[5:7], 16)
+        assert r > g and r > b, f"Extension slice color should be red-dominant, got {color}"
+
+
+def test_get_wheel_wedges_returns_correct_wheel():
+    """get_wheel_wedges() should return correct wheel based on is_bankrupt flag."""
+    from utils.wheel_drawing import WHEEL_WEDGES, BANKRUPT_WHEEL_WEDGES, get_wheel_wedges
+
+    normal = get_wheel_wedges(is_bankrupt=False)
+    bankrupt = get_wheel_wedges(is_bankrupt=True)
+
+    assert normal is WHEEL_WEDGES, "Should return normal wheel when not bankrupt"
+    assert bankrupt is BANKRUPT_WHEEL_WEDGES, "Should return bankrupt wheel when bankrupt"
+    assert len(normal) == 24, "Normal wheel should have 24 wedges"
+    assert len(bankrupt) == 24, "Bankrupt wheel should have 24 wedges"
+
+
+def test_get_wedge_at_index_for_player_returns_correct_wedge():
+    """get_wedge_at_index_for_player() should return wedge from correct wheel."""
+    from utils.wheel_drawing import (
+        WHEEL_WEDGES, BANKRUPT_WHEEL_WEDGES,
+        get_wedge_at_index_for_player
+    )
+
+    # Index 0 on normal wheel
+    normal_wedge = get_wedge_at_index_for_player(0, is_bankrupt=False)
+    assert normal_wedge == WHEEL_WEDGES[0]
+
+    # Index 0 on bankrupt wheel
+    bankrupt_wedge = get_wedge_at_index_for_player(0, is_bankrupt=True)
+    assert bankrupt_wedge == BANKRUPT_WHEEL_WEDGES[0]
+
+    # Index wrapping for normal wheel (24 wedges)
+    wrapped_normal = get_wedge_at_index_for_player(24, is_bankrupt=False)
+    assert wrapped_normal == WHEEL_WEDGES[0]
+
+    # Index wrapping for bankrupt wheel (24 wedges)
+    wrapped_bankrupt = get_wedge_at_index_for_player(24, is_bankrupt=True)
+    assert wrapped_bankrupt == BANKRUPT_WHEEL_WEDGES[0]
+
+
+def test_bankrupt_wheel_bankrupt_value_recalculated():
+    """BANKRUPT wedges should have recalculated value on the bankrupt wheel."""
+    from utils.wheel_drawing import WHEEL_WEDGES, BANKRUPT_WHEEL_WEDGES
+
+    normal_bankrupt_values = [w[1] for w in WHEEL_WEDGES if isinstance(w[1], int) and w[1] < 0]
+    bankrupt_bankrupt_values = [w[1] for w in BANKRUPT_WHEEL_WEDGES if isinstance(w[1], int) and w[1] < 0]
+
+    # Both should have exactly 2 BANKRUPT wedges
+    assert len(normal_bankrupt_values) == 2
+    assert len(bankrupt_bankrupt_values) == 2
+
+    # All BANKRUPT values should be negative
+    for v in normal_bankrupt_values + bankrupt_bankrupt_values:
+        assert v < 0, f"BANKRUPT value should be negative, got {v}"
+
+
+def test_bankrupt_wheel_has_all_new_slices():
+    """Bankrupt wheel should contain all 8 new unique mechanic slices."""
+    from utils.wheel_drawing import BANKRUPT_WHEEL_WEDGES
+
+    special_values = {w[1] for w in BANKRUPT_WHEEL_WEDGES if isinstance(w[1], str)}
+
+    assert "JAILBREAK" in special_values, "JAILBREAK should be on bankrupt wheel"
+    assert "CHAIN_REACTION" in special_values, "CHAIN_REACTION should be on bankrupt wheel"
+    assert "TOWN_TRIAL" in special_values, "TOWN_TRIAL should be on bankrupt wheel"
+    assert "DISCOVER" in special_values, "DISCOVER should be on bankrupt wheel"
+    assert "EMERGENCY" in special_values, "EMERGENCY should be on bankrupt wheel"
+    assert "REVEAL" in special_values, "REVEAL should be on bankrupt wheel"
+
+
+def test_bankrupt_wheel_has_micro_win_slices():
+    """Bankrupt wheel should have 1 JC and 2 JC slices."""
+    from utils.wheel_drawing import BANKRUPT_WHEEL_WEDGES
+
+    values = [w[1] for w in BANKRUPT_WHEEL_WEDGES if isinstance(w[1], int) and w[1] > 0]
+    assert 1 in values, "1 JC (BREADCRUMBS) should be on bankrupt wheel"
+    assert 2 in values, "2 JC (PITY PRIZE) should be on bankrupt wheel"
+
+
+def test_bankrupt_wheel_ev_maintained():
+    """Bankrupt wheel expected value should match WHEEL_TARGET_EV."""
+    from utils.wheel_drawing import BANKRUPT_WHEEL_WEDGES
+    from utils.wheel_drawing import _SPECIAL_WEDGE_EST_EVS, _load_special_wedge_evs
+
+    _load_special_wedge_evs()
+
+    total_value = 0.0
+    for _, v, _ in BANKRUPT_WHEEL_WEDGES:
+        if isinstance(v, int):
+            total_value += v
+        elif isinstance(v, str):
+            total_value += _SPECIAL_WEDGE_EST_EVS.get(v, 0.0)
+
+    expected_value = total_value / len(BANKRUPT_WHEEL_WEDGES)
+    assert abs(expected_value - WHEEL_TARGET_EV) <= 1, (
+        f"Bankrupt wheel EV ~{WHEEL_TARGET_EV}, got {expected_value:.2f}"
+    )
+
+
+def test_jailbreak_clamps_at_zero(repo_db_path):
+    """add_penalty_games(-1) when already at 0 should stay at 0."""
+    from repositories.player_repository import PlayerRepository
+    from services.bankruptcy_service import BankruptcyRepository, BankruptcyService
+
+    player_repo = PlayerRepository(repo_db_path)
+    bk_repo = BankruptcyRepository(repo_db_path)
+    bk_service = BankruptcyService(
+        bankruptcy_repo=bk_repo,
+        player_repo=player_repo,
+        cooldown_seconds=604800,
+        penalty_games=5,
+        penalty_rate=0.5,
+    )
+
+    player_repo.add(discord_id=9001, discord_username="TestJailbreak", guild_id=0,
+                    glicko_rating=1500.0, glicko_rd=350.0, glicko_volatility=0.06)
+    player_repo.update_balance(9001, 0, -100)
+    bk_service.execute_bankruptcy(9001, 0)        # creates state with 5 penalty games
+    bk_service.add_penalty_games(9001, 0, -5)    # reduce to 0
+
+    result = bk_service.add_penalty_games(9001, 0, -1)
+    assert result == 0, f"Expected 0 after JAILBREAK on 0 games, got {result}"
+
+
+def test_jailbreak_decrements_games(repo_db_path):
+    """add_penalty_games(-1) with 3 remaining should give 2."""
+    from repositories.player_repository import PlayerRepository
+    from services.bankruptcy_service import BankruptcyRepository, BankruptcyService
+
+    player_repo = PlayerRepository(repo_db_path)
+    bk_repo = BankruptcyRepository(repo_db_path)
+    bk_service = BankruptcyService(
+        bankruptcy_repo=bk_repo,
+        player_repo=player_repo,
+        cooldown_seconds=604800,
+        penalty_games=5,
+        penalty_rate=0.5,
+    )
+
+    player_repo.add(discord_id=9002, discord_username="TestJailbreak2", guild_id=0,
+                    glicko_rating=1500.0, glicko_rd=350.0, glicko_volatility=0.06)
+    player_repo.update_balance(9002, 0, -100)
+    bk_service.execute_bankruptcy(9002, 0)        # creates state with 5 penalty games
+    bk_service.add_penalty_games(9002, 0, -2)    # reduce to 3
+
+    result = bk_service.add_penalty_games(9002, 0, -1)
+    assert result == 2, f"Expected 2 after JAILBREAK on 3 games, got {result}"
