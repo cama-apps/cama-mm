@@ -284,7 +284,8 @@ class PlayerService:
         return self.player_repo.try_claim_wheel_spin(discord_id, guild_id, now, cooldown_seconds)
 
     def log_wheel_spin(
-        self, discord_id: int, guild_id: int | None, result: int, spin_time: int
+        self, discord_id: int, guild_id: int | None, result: int, spin_time: int,
+        is_bankrupt: bool = False,
     ) -> int:
         """
         Log a wheel spin result for gambling history tracking.
@@ -294,11 +295,23 @@ class PlayerService:
             guild_id: Guild ID (None for DMs)
             result: The spin result value (positive for win, negative for loss)
             spin_time: Unix timestamp of the spin
+            is_bankrupt: True if this was a bankrupt wheel spin
 
         Returns:
             The spin log ID
         """
-        return self.player_repo.log_wheel_spin(discord_id, guild_id, result, spin_time)
+        return self.player_repo.log_wheel_spin(discord_id, guild_id, result, spin_time, is_bankrupt)
+
+    def get_last_normal_wheel_spin(self, guild_id: int | None) -> dict | None:
+        """
+        Get the most recent normal-wheel (non-bankrupt) spin in this guild.
+
+        Used by CHAIN_REACTION bankrupt wheel mechanic.
+
+        Returns:
+            Dict with 'result' (int) and 'discord_id' (int), or None
+        """
+        return self.player_repo.get_last_normal_wheel_spin(guild_id)
 
     # --- Leaderboard and ranking operations ---
 

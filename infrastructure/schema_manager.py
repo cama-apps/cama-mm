@@ -241,6 +241,8 @@ class SchemaManager:
             ("add_pending_match_id_to_bets", self._migration_add_pending_match_id_to_bets),
             # Package deal feature
             ("create_package_deals_table", self._migration_create_package_deals_table),
+            # Bankruptcy wheel expansion: track normal vs bankrupt spins for CHAIN_REACTION
+            ("add_is_bankrupt_to_wheel_spins", self._migration_add_is_bankrupt_to_wheel_spins),
         ]
 
     # --- Migrations ---
@@ -1601,3 +1603,7 @@ class SchemaManager:
             "CREATE INDEX IF NOT EXISTS idx_package_deals_guild_active "
             "ON package_deals(guild_id, games_remaining)"
         )
+
+    def _migration_add_is_bankrupt_to_wheel_spins(self, cursor) -> None:
+        """Add is_bankrupt column to wheel_spins for CHAIN_REACTION filtering."""
+        self._add_column_if_not_exists(cursor, "wheel_spins", "is_bankrupt", "INTEGER DEFAULT 0")

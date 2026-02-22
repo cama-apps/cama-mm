@@ -54,6 +54,8 @@ from utils.wheel_drawing import (
     create_wheel_gif,
     create_explosion_gif,
     get_wedge_at_index,
+    get_wheel_wedges,
+    get_wedge_at_index_for_player,
 )
 
 # 1% chance for the wheel to explode
@@ -134,6 +136,90 @@ NEGATIVE_LOAN_MESSAGES = [
 
 
 GAMBA_GIF_URL = "https://tenor.com/view/uncut-gems-sports-betting-sports-acting-adam-sandler-gif-11474547316651780959"
+
+
+def _wedge_ev(wedge: tuple) -> float:
+    """Return a rough EV for a bankrupt wheel wedge (used to find 'worst' option)."""
+    from utils.wheel_drawing import _SPECIAL_WEDGE_EST_EVS, _load_special_wedge_evs
+    _load_special_wedge_evs()
+    _, v, _ = wedge
+    if isinstance(v, int):
+        return float(v)
+    return _SPECIAL_WEDGE_EST_EVS.get(v, 0.0)
+
+
+class TownTrialView(discord.ui.View):
+    """Server-wide vote view for the TOWN_TRIAL bankrupt wheel mechanic."""
+
+    def __init__(self, options: list[tuple], *, timeout: float = 300.0):
+        super().__init__(timeout=timeout)
+        self.options = options
+        self.votes: dict[int, int] = {}  # discord_id -> option index
+
+        for i, (label, value, _color) in enumerate(options):
+            display = label if isinstance(value, str) else f"{label} JC" if isinstance(value, int) and value > 0 else label
+            button = discord.ui.Button(
+                label=display,
+                style=discord.ButtonStyle.secondary,
+                custom_id=f"tt_{i}",
+            )
+            button.callback = self._make_callback(i)
+            self.add_item(button)
+
+    def _make_callback(self, idx: int):
+        async def callback(interaction: discord.Interaction):
+            self.votes[interaction.user.id] = idx
+            label = self.options[idx][0]
+            await interaction.response.send_message(
+                f"Voted for **{label}**!", ephemeral=True
+            )
+        return callback
+
+    def get_winner(self) -> int | None:
+        """Return the winning option index, or None if no votes."""
+        if not self.votes:
+            return None
+        from collections import Counter
+        counts = Counter(self.votes.values())
+        max_votes = max(counts.values())
+        winners = [idx for idx, cnt in counts.items() if cnt == max_votes]
+        return random.choice(winners)
+
+
+class DiscoverView(discord.ui.View):
+    """Spinner-choice view for the DISCOVER bankrupt wheel mechanic."""
+
+    def __init__(self, options: list[tuple], spinner_id: int, *, timeout: float = 60.0):
+        super().__init__(timeout=timeout)
+        self.options = options
+        self.spinner_id = spinner_id
+        self.chosen_idx: int | None = None
+
+        for i, (label, value, _color) in enumerate(options):
+            display = label if isinstance(value, str) else f"{label} JC" if isinstance(value, int) and value > 0 else label
+            button = discord.ui.Button(
+                label=display,
+                style=discord.ButtonStyle.secondary,
+                custom_id=f"disc_{i}",
+            )
+            button.callback = self._make_callback(i)
+            self.add_item(button)
+
+    def _make_callback(self, idx: int):
+        async def callback(interaction: discord.Interaction):
+            if interaction.user.id != self.spinner_id:
+                await interaction.response.send_message(
+                    "This choice isn't yours to make.", ephemeral=True
+                )
+                return
+            self.chosen_idx = idx
+            self.stop()
+            label = self.options[idx][0]
+            await interaction.response.send_message(
+                f"You chose **{label}**!", ephemeral=True
+            )
+        return callback
+
 
 class BettingCommands(commands.Cog):
     """Slash commands to place and view wagers."""
@@ -382,9 +468,13 @@ class BettingCommands(commands.Cog):
             except Exception as exc:
                 logger.warning(f"Failed to send betting reminder to thread: {exc}", exc_info=True)
 
-    def _create_wheel_gif_file(self, target_idx: int, display_name: str | None = None) -> discord.File:
+    def _create_wheel_gif_file(
+        self, target_idx: int, display_name: str | None = None, is_bankrupt: bool = False
+    ) -> discord.File:
         """Create a wheel animation and return as discord.File."""
-        buffer = create_wheel_gif(target_idx=target_idx, size=500, display_name=display_name)
+        buffer = create_wheel_gif(
+            target_idx=target_idx, size=500, display_name=display_name, is_bankrupt=is_bankrupt
+        )
         return discord.File(buffer, filename="wheel.gif")
 
     def _create_explosion_gif_file(self, display_name: str | None = None) -> discord.File:
@@ -406,11 +496,109 @@ class BettingCommands(commands.Cog):
         lightning_total: int = 0,
         lightning_count: int = 0,
         lightning_victims: list | None = None,
+        extend_games_added: int = 0,
+        extend_new_total: int = 0,
+        is_bankrupt: bool = False,
+        jailbreak_new_total: int = 0,
+        chain_value: int | None = None,
+        chain_username: str = "someone",
+        emergency_count: int = 0,
+        emergency_total: int = 0,
+        reveal_avoids: list | None = None,
+        reveal_deals: list | None = None,
     ) -> discord.Embed:
         """Build the final result embed after the wheel stops."""
         label, value = result[0], result[1]  # (label, value, color)
 
-        if value == "RED_SHELL":
+        if value == "JAILBREAK":
+            title = "🔓 JAILBREAK! 🔓"
+            color = discord.Color.from_str("#0a2a0a")
+            description = (
+                f"**JAIL**\n\n"
+                f"You found a crack in the cell wall.\n\n"
+                f"**−1 penalty game** removed!\n\n"
+                f"Penalty games remaining: **{jailbreak_new_total}**\n\n"
+                f"*Don't celebrate yet. You're still in here.*"
+            )
+
+        elif value == "CHAIN_REACTION":
+            title = "⛓️ CHAIN REACTION! ⛓️"
+            color = discord.Color.from_str("#1a1a3a")
+            if chain_value is None:
+                description = (
+                    f"**CHAIN**\n\n"
+                    f"⛓️ The chain reaches back... but finds nothing.\n\n"
+                    f"*No prior normal wheel spin found. Fallback: nothing happens.*"
+                )
+            elif chain_value > 0:
+                description = (
+                    f"**CHAIN**\n\n"
+                    f"⛓️ You copied **{chain_username}**'s last spin: **+{chain_value} JC**!\n\n"
+                    f"*Their luck became yours.*"
+                )
+            elif chain_value < 0:
+                description = (
+                    f"**CHAIN**\n\n"
+                    f"⛓️ You copied **{chain_username}**'s last spin: **{chain_value} JC**.\n\n"
+                    f"*Their misfortune became yours. Tragic.*"
+                )
+            else:
+                description = (
+                    f"**CHAIN**\n\n"
+                    f"⛓️ You copied **{chain_username}**'s last spin: **nothing happened**.\n\n"
+                    f"*The chain found only silence.*"
+                )
+
+        elif value == "EMERGENCY":
+            title = "🚨 EMERGENCY! 🚨"
+            color = discord.Color.from_str("#2a1a00")
+            description = (
+                f"**SOS**\n\n"
+                f"🚨 Economic crisis triggered!\n\n"
+                f"**{emergency_count}** players each lost up to **10** {JOPACOIN_EMOTE}.\n"
+                f"Total drained: **{emergency_total}** {JOPACOIN_EMOTE} (vanished).\n\n"
+                f"*No one is safe. Not even you.*"
+            )
+
+        elif value == "REVEAL":
+            title = "🔍 REVEAL! 🔍"
+            color = discord.Color.from_str("#1a0a2a")
+            avoids = reveal_avoids or []
+            deals = reveal_deals or []
+            if not avoids and not deals:
+                description = (
+                    f"**SPY**\n\n"
+                    f"Nothing to reveal — you have no active purchases.\n\n"
+                    f"*Anticlimactic. The crowd is disappointed.*"
+                )
+            else:
+                lines = []
+                if avoids:
+                    lines.append(f"**Soft Avoids ({len(avoids)}):**")
+                    for a in avoids:
+                        lines.append(f"• Avoiding discord_id `{a.avoided_discord_id}` — {a.games_remaining} games left")
+                if deals:
+                    lines.append(f"**Package Deals ({len(deals)}):**")
+                    for d in deals:
+                        lines.append(f"• Partnered with discord_id `{d.partner_discord_id}` — {d.games_remaining} games left, paid {d.cost_paid} JC")
+                description = (
+                    f"**SPY**\n\n"
+                    f"🔍 Your secret purchases, exposed to all:\n\n"
+                    + "\n".join(lines)
+                )
+
+        elif value in ("EXTEND_1", "EXTEND_2"):
+            # Bankruptcy penalty extension (only appears on bankrupt wheel)
+            title = "⛓️ PENALTY EXTENDED! ⛓️"
+            color = discord.Color.dark_red()
+            description = (
+                f"**{label} GAME{'S' if extend_games_added > 1 else ''}**\n\n"
+                f"Your bankruptcy penalty has been extended by **{extend_games_added}** game{'s' if extend_games_added > 1 else ''}!\n\n"
+                f"New penalty games remaining: **{extend_new_total}**\n\n"
+                f"*The wheel remembers your sins... keep winning to escape!*"
+            )
+
+        elif value == "RED_SHELL":
             # Mario Kart Red Shell outcome
             if shell_missed:
                 title = "🔴 RED SHELL MISSED! 🔴"
@@ -480,7 +668,15 @@ class BettingCommands(commands.Cog):
 
         elif isinstance(value, int) and value > 0:
             # Win
-            if value == 100:
+            if is_bankrupt and value == 1:
+                title = "🪙 One Coin. One."
+                color = discord.Color.from_str("#3a3a1a")
+                description = f"**1**\n\nThe wheel took pity on you. One coin.\n\n*It's still technically a win.*"
+            elif is_bankrupt and value == 2:
+                title = "🪙 Two Coins."
+                color = discord.Color.from_str("#3a3500")
+                description = f"**2**\n\nEven charity has standards. Here's 2.\n\n*Don't spend it all in one place.*"
+            elif value == 100:
                 title = "🌟 JACKPOT! 🌟"
                 color = discord.Color.gold()
                 description = f"**{label}**\n\nYou won **{value}** {JOPACOIN_EMOTE}!"
@@ -1275,16 +1471,29 @@ class BettingCommands(commands.Cog):
             await message.edit(embed=result_embed)
             return
 
-        # Pre-determine the result (normal spin)
-        result_idx = random.randint(0, len(WHEEL_WEDGES) - 1)
-        result_wedge = get_wedge_at_index(result_idx)
+        # Check if player is in bankruptcy penalty (uses reduced wheel)
+        is_bankrupt = False
+        bankruptcy_service: BankruptcyService | None = getattr(self.bot, "bankruptcy_service", None)
+        if bankruptcy_service:
+            state = await asyncio.to_thread(
+                bankruptcy_service.get_state, user_id, guild_id
+            )
+            if state and state.penalty_games_remaining > 0:
+                is_bankrupt = True
+
+        # Pre-determine the result (use bankrupt wheel if in penalty)
+        wedges = get_wheel_wedges(is_bankrupt)
+        result_idx = random.randint(0, len(wedges) - 1)
+        result_wedge = get_wedge_at_index_for_player(result_idx, is_bankrupt)
 
         # Defer first - GIF generation can take a few seconds
         await interaction.response.defer()
 
         # Generate the complete animation GIF (plays once, ~20 seconds)
         user_display = interaction.user.name
-        gif_file = await asyncio.to_thread(self._create_wheel_gif_file, result_idx, user_display)
+        gif_file = await asyncio.to_thread(
+            self._create_wheel_gif_file, result_idx, user_display, is_bankrupt
+        )
 
         # Send via followup (since we deferred)
         message = await interaction.followup.send(file=gif_file, wait=True)
@@ -1305,6 +1514,70 @@ class BettingCommands(commands.Cog):
         garnished_amount = 0
         new_balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
 
+        # Pre-resolution for interactive mechanics (TOWN_TRIAL / DISCOVER resolve to a final wedge)
+        if result_value == "TOWN_TRIAL" and is_bankrupt and interaction.channel:
+            from utils.wheel_drawing import get_wheel_wedges as _gww
+            eligible = [w for w in _gww(is_bankrupt=True)
+                        if w[1] not in ("TOWN_TRIAL", "DISCOVER", "CHAIN_REACTION")]
+            options = random.sample(eligible, min(3, len(eligible)))
+            view = TownTrialView(options, timeout=300.0)
+            trial_embed = discord.Embed(
+                title="⚖️ TOWN TRIAL",
+                description=(
+                    f"⚖️ **TOWN TRIAL** — The town has **5 minutes** to decide "
+                    f"{interaction.user.mention}'s fate!\n\nVote for a result:"
+                ),
+                color=discord.Color.from_str("#2a1a1a"),
+            )
+            trial_msg = await interaction.channel.send(embed=trial_embed, view=view)
+            await view.wait()
+            winner_idx = view.get_winner()
+            if winner_idx is None:
+                result_wedge = ("LOSE", 0, "#4a4a4a")
+            else:
+                result_wedge = options[winner_idx]
+            result_value = result_wedge[1]
+            winner_embed = discord.Embed(
+                title="⚖️ THE TOWN HAS SPOKEN",
+                description=(
+                    f"The town decided: **{result_wedge[0]}** for {interaction.user.mention}!"
+                ),
+                color=discord.Color.red(),
+            )
+            await trial_msg.edit(embed=winner_embed, view=None)
+
+        elif result_value == "DISCOVER" and is_bankrupt and interaction.channel:
+            from utils.wheel_drawing import get_wheel_wedges as _gww
+            eligible = [w for w in _gww(is_bankrupt=True)
+                        if w[1] not in ("TOWN_TRIAL", "DISCOVER", "CHAIN_REACTION")]
+            options = random.sample(eligible, min(3, len(eligible)))
+            view = DiscoverView(options, spinner_id=user_id, timeout=60.0)
+            discover_embed = discord.Embed(
+                title="🃏 DISCOVER",
+                description=(
+                    f"🃏 **DISCOVER** — {interaction.user.mention} must choose their fate!\n\n"
+                    "You have **60 seconds** to choose:"
+                ),
+                color=discord.Color.from_str("#1a2a2a"),
+            )
+            discover_msg = await interaction.channel.send(embed=discover_embed, view=view)
+            await view.wait()
+            if view.chosen_idx is not None:
+                result_wedge = options[view.chosen_idx]
+            else:
+                # Timeout: apply worst of 3
+                result_wedge = min(options, key=_wedge_ev)
+                timeout_embed = discord.Embed(
+                    title="🃏 DISCOVER — TIMEOUT",
+                    description=(
+                        f"{interaction.user.mention} didn't choose in time. "
+                        f"The worst fate applies: **{result_wedge[0]}**!"
+                    ),
+                    color=discord.Color.red(),
+                )
+                await discover_msg.edit(embed=timeout_embed, view=None)
+            result_value = result_wedge[1]
+
         # Shell outcome tracking for embed
         shell_victim: discord.Member | None = None
         shell_victim_new_balance: int | None = None
@@ -1312,7 +1585,96 @@ class BettingCommands(commands.Cog):
         shell_self_hit: bool = False
         shell_missed: bool = False
 
-        if result_value == "RED_SHELL":
+        # New mechanic tracking for embed
+        jailbreak_new_total: int = 0
+        chain_value: int | None = None
+        chain_username: str = "someone"
+        emergency_count: int = 0
+        emergency_total: int = 0
+        reveal_avoids: list | None = None
+        reveal_deals: list | None = None
+
+        if result_value == "JAILBREAK":
+            # Remove 1 penalty game (clamped at 0 inside add_penalty_games)
+            if bankruptcy_service:
+                jailbreak_new_total = await asyncio.to_thread(
+                    bankruptcy_service.add_penalty_games, user_id, guild_id, -1
+                )
+            # No balance change
+
+        elif result_value == "CHAIN_REACTION":
+            # Copy the last normal-wheel spin result
+            last_spin = await asyncio.to_thread(
+                self.player_service.get_last_normal_wheel_spin, guild_id
+            )
+            if last_spin:
+                chain_value = last_spin["result"]
+                chained_uid = last_spin["discord_id"]
+                if interaction.guild:
+                    chained_member = interaction.guild.get_member(chained_uid)
+                    chain_username = chained_member.display_name if chained_member else f"<@{chained_uid}>"
+                else:
+                    chain_username = f"<@{chained_uid}>"
+                if isinstance(chain_value, int) and chain_value > 0:
+                    garnishment_service_chain = getattr(self.bot, "garnishment_service", None)
+                    if garnishment_service_chain and new_balance < 0:
+                        result_chain = await asyncio.to_thread(
+                            garnishment_service_chain.add_income, user_id, chain_value, guild_id
+                        )
+                        garnished_amount = result_chain.get("garnished", 0)
+                        new_balance = result_chain.get("new_balance", new_balance + chain_value)
+                    else:
+                        await asyncio.to_thread(
+                            self.player_service.adjust_balance, user_id, guild_id, chain_value
+                        )
+                        new_balance = await asyncio.to_thread(
+                            self.player_service.get_balance, user_id, guild_id
+                        )
+                elif isinstance(chain_value, int) and chain_value < 0:
+                    await asyncio.to_thread(
+                        self.player_service.adjust_balance, user_id, guild_id, chain_value
+                    )
+                    new_balance = await asyncio.to_thread(
+                        self.player_service.get_balance, user_id, guild_id
+                    )
+            # chain_value=None means no prior spin → no effect
+
+        elif result_value == "EMERGENCY":
+            # All players with positive balance lose min(balance, 10) JC; amount vanishes
+            all_players_em = await asyncio.to_thread(
+                functools.partial(self.player_service.get_leaderboard, guild_id, limit=9999)
+            )
+            for p in all_players_em:
+                if p.jopacoin_balance > 0:
+                    loss = min(p.jopacoin_balance, 10)
+                    await asyncio.to_thread(
+                        self.player_service.adjust_balance, p.discord_id, guild_id, -loss
+                    )
+                    emergency_total += loss
+                    emergency_count += 1
+            # Re-fetch spinner's balance (may have changed)
+            new_balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
+
+        elif result_value == "REVEAL":
+            # Show spinner's own active soft avoids + package deals publicly
+            soft_avoid_svc = getattr(self.bot, "soft_avoid_service", None)
+            package_deal_svc = getattr(self.bot, "package_deal_service", None)
+            if soft_avoid_svc:
+                try:
+                    reveal_avoids = await asyncio.to_thread(
+                        soft_avoid_svc.get_user_avoids, guild_id, user_id
+                    )
+                except Exception:
+                    reveal_avoids = []
+            if package_deal_svc:
+                try:
+                    reveal_deals = await asyncio.to_thread(
+                        package_deal_svc.get_user_deals, guild_id, user_id
+                    )
+                except Exception:
+                    reveal_deals = []
+
+        elif result_value == "RED_SHELL":
             # Mario Kart Red Shell: Steal 1-5% of balance from player ranked above
             player_above = await asyncio.to_thread(
                 self.player_service.get_player_above, user_id, guild_id
@@ -1423,6 +1785,17 @@ class BettingCommands(commands.Cog):
                 self.player_service.get_balance, user_id, guild_id
             )
 
+        elif result_value in ("EXTEND_1", "EXTEND_2"):
+            # Bankruptcy penalty extension slices (only appear on bankrupt wheel)
+            games_to_add = 1 if result_value == "EXTEND_1" else 2
+            if bankruptcy_service:
+                new_penalty_total = await asyncio.to_thread(
+                    bankruptcy_service.add_penalty_games, user_id, guild_id, games_to_add
+                )
+            else:
+                new_penalty_total = games_to_add  # Fallback (shouldn't happen)
+            # No balance change, but penalty games increased
+
         elif isinstance(result_value, int) and result_value > 0:
             # Positive result: use garnishment service if available
             garnishment_service = getattr(self.bot, "garnishment_service", None)
@@ -1478,8 +1851,13 @@ class BettingCommands(commands.Cog):
                 log_result = shell_amount
         elif result_value == "LIGHTNING_BOLT":
             log_result = 0
+        elif result_value in ("EXTEND_1", "EXTEND_2"):
+            log_result = 0
+        elif result_value in ("JAILBREAK", "CHAIN_REACTION", "TOWN_TRIAL", "DISCOVER",
+                              "EMERGENCY", "REVEAL"):
+            log_result = 0
         else:
-            log_result = result_value
+            log_result = result_value if isinstance(result_value, int) else 0
 
         await asyncio.to_thread(
             functools.partial(
@@ -1488,11 +1866,19 @@ class BettingCommands(commands.Cog):
                 guild_id=guild_id,
                 result=log_result,
                 spin_time=int(now),
+                is_bankrupt=is_bankrupt,
             )
         )
 
         # Send final result embed
         await asyncio.sleep(0.5)  # Brief pause before result reveal
+        # For extension slices, pass the new penalty total
+        extend_games_added = 0
+        extend_new_total = 0
+        if result_value in ("EXTEND_1", "EXTEND_2"):
+            extend_games_added = 1 if result_value == "EXTEND_1" else 2
+            extend_new_total = new_penalty_total if "new_penalty_total" in dir() else extend_games_added
+
         result_embed = self._wheel_result_embed(
             result_wedge, new_balance, garnished_amount, next_spin_time,
             shell_victim=shell_victim,
@@ -1503,6 +1889,16 @@ class BettingCommands(commands.Cog):
             lightning_total=lightning_total if result_value == "LIGHTNING_BOLT" else 0,
             lightning_count=lightning_count if result_value == "LIGHTNING_BOLT" else 0,
             lightning_victims=lightning_victims if result_value == "LIGHTNING_BOLT" else None,
+            extend_games_added=extend_games_added,
+            extend_new_total=extend_new_total,
+            is_bankrupt=is_bankrupt,
+            jailbreak_new_total=jailbreak_new_total,
+            chain_value=chain_value,
+            chain_username=chain_username,
+            emergency_count=emergency_count,
+            emergency_total=emergency_total,
+            reveal_avoids=reveal_avoids,
+            reveal_deals=reveal_deals,
         )
         await message.edit(embed=result_embed)
 
@@ -1538,6 +1934,115 @@ class BettingCommands(commands.Cog):
 
             if candidates:
                 await self._send_first_neon_result(interaction, *candidates)
+
+    @app_commands.command(name="badgamba", description="Test spin the bankruptcy wheel (visual only, no effects)")
+    async def badgamba(self, interaction: discord.Interaction):
+        """Spin the bankruptcy penalty wheel for testing - no balance or penalty changes."""
+        user_id = interaction.user.id
+        guild_id = interaction.guild.id if interaction.guild else None
+
+        # Check if player is registered
+        player = await asyncio.to_thread(self.player_service.get_player, user_id, guild_id)
+        if not player:
+            await interaction.response.send_message(
+                "You need to `/register` before you can test the wheel.",
+                ephemeral=True,
+            )
+            return
+
+        # Always use bankrupt wheel for this test command
+        is_bankrupt = True
+        wedges = get_wheel_wedges(is_bankrupt)
+        result_idx = random.randint(0, len(wedges) - 1)
+        result_wedge = get_wedge_at_index_for_player(result_idx, is_bankrupt)
+
+        await interaction.response.defer()
+
+        # Generate the bankrupt wheel animation
+        user_display = interaction.user.name
+        gif_file = await asyncio.to_thread(
+            self._create_wheel_gif_file, result_idx, user_display, is_bankrupt
+        )
+
+        message = await interaction.followup.send(file=gif_file, wait=True)
+
+        # Wait for animation
+        await asyncio.sleep(15.0)
+
+        # Build a test result embed (no actual changes)
+        result_value = result_wedge[1]
+        label = result_wedge[0]
+
+        if result_value == "JAILBREAK":
+            title = "🔓 [TEST] JAILBREAK! 🔓"
+            description = f"**{label}**\n\nThis would remove 1 penalty game.\n\n*This is a test spin - no changes applied.*"
+            color = discord.Color.from_str("#0a2a0a")
+        elif result_value == "CHAIN_REACTION":
+            title = "⛓️ [TEST] CHAIN REACTION! ⛓️"
+            description = f"**{label}**\n\nThis would copy the last normal wheel spin.\n\n*This is a test spin - no changes applied.*"
+            color = discord.Color.from_str("#1a1a3a")
+        elif result_value == "TOWN_TRIAL":
+            title = "⚖️ [TEST] TOWN TRIAL! ⚖️"
+            description = f"**{label}**\n\nThis would trigger a 5-minute server vote (3 options).\n\n*This is a test spin - no changes applied.*"
+            color = discord.Color.from_str("#2a1a1a")
+        elif result_value == "DISCOVER":
+            title = "🃏 [TEST] DISCOVER! 🃏"
+            description = f"**{label}**\n\nThis would show 3 options for you to pick from (60s).\n\n*This is a test spin - no changes applied.*"
+            color = discord.Color.from_str("#1a2a2a")
+        elif result_value == "EMERGENCY":
+            title = "🚨 [TEST] EMERGENCY! 🚨"
+            description = f"**{label}**\n\nThis would drain up to 10 JC from all positive-balance players.\n\n*This is a test spin - no changes applied.*"
+            color = discord.Color.from_str("#2a1a00")
+        elif result_value == "REVEAL":
+            title = "🔍 [TEST] REVEAL! 🔍"
+            description = f"**{label}**\n\nThis would publicly expose your active avoids and package deals.\n\n*This is a test spin - no changes applied.*"
+            color = discord.Color.from_str("#1a0a2a")
+        elif result_value in ("EXTEND_1", "EXTEND_2"):
+            games = 1 if result_value == "EXTEND_1" else 2
+            title = "⛓️ [TEST] PENALTY EXTENDED! ⛓️"
+            description = (
+                f"**{label} GAME{'S' if games > 1 else ''}**\n\n"
+                f"This would add **{games}** penalty game{'s' if games > 1 else ''}!\n\n"
+                f"*This is a test spin - no changes applied.*"
+            )
+            color = discord.Color.dark_red()
+        elif result_value == "RED_SHELL":
+            title = "🔴 [TEST] RED SHELL! 🔴"
+            description = f"**{label}**\n\n*This is a test spin - no changes applied.*"
+            color = discord.Color.red()
+        elif result_value == "BLUE_SHELL":
+            title = "🔵 [TEST] BLUE SHELL! 🔵"
+            description = f"**{label}**\n\n*This is a test spin - no changes applied.*"
+            color = discord.Color.blue()
+        elif result_value == "LIGHTNING_BOLT":
+            title = "⚡ [TEST] LIGHTNING BOLT! ⚡"
+            description = f"**{label}**\n\n*This is a test spin - no changes applied.*"
+            color = discord.Color.from_str("#f39c12")
+        elif isinstance(result_value, int) and result_value > 0:
+            if result_value == 1:
+                title = "🪙 [TEST] One Coin."
+                description = f"**1**\n\nThe wheel took pity on you. One coin.\n\n*This is a test spin - no changes applied.*"
+            elif result_value == 2:
+                title = "🪙 [TEST] Two Coins."
+                description = f"**2**\n\nEven charity has standards. Here's 2.\n\n*This is a test spin - no changes applied.*"
+            else:
+                title = "🎉 [TEST] Winner!"
+                description = f"**+{result_value} JC**\n\n*This is a test spin - no changes applied.*"
+            color = discord.Color.green()
+        elif isinstance(result_value, int) and result_value < 0:
+            title = "💀 [TEST] BANKRUPT! 💀"
+            description = f"**{label}**\n\n*This is a test spin - no changes applied.*"
+            color = discord.Color.red()
+        else:
+            title = "🚫 [TEST] LOSE A TURN 🚫"
+            description = f"**{label}**\n\n*This is a test spin - no changes applied.*"
+            color = discord.Color.dark_gray()
+
+        embed = discord.Embed(title=title, description=description, color=color)
+        embed.set_footer(text="Bankruptcy Wheel Test - No effects applied")
+
+        await asyncio.sleep(0.5)
+        await message.edit(embed=embed)
 
     @app_commands.command(name="tip", description="Give jopacoin to another player")
     @app_commands.describe(

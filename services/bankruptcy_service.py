@@ -16,6 +16,7 @@ from config import (
 )
 from repositories.bankruptcy_repository import BankruptcyRepository
 from repositories.player_repository import PlayerRepository
+from utils.guild import normalize_guild_id
 from services.result import Result
 from services import error_codes
 from services.interfaces import IBankruptcyService
@@ -184,6 +185,41 @@ class BankruptcyService(IBankruptcyService):
         Returns the remaining penalty games.
         """
         return self.bankruptcy_repo.decrement_penalty_games(discord_id, guild_id)
+
+    def add_penalty_games(self, discord_id: int, guild_id: int | None, games: int) -> int:
+        """
+        Add penalty games to a player's bankruptcy state.
+
+        Used by the Wheel of Fortune extension slices to increase penalty.
+
+        Args:
+            discord_id: Player's Discord ID
+            guild_id: Guild ID for multi-guild support
+            games: Number of games to add to penalty
+
+        Returns:
+            New total penalty games remaining
+        """
+        normalized_id = normalize_guild_id(guild_id)
+        with self.bankruptcy_repo.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE bankruptcy_state
+                SET penalty_games_remaining = MAX(0, penalty_games_remaining + ?),
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE discord_id = ? AND guild_id = ?
+                """,
+                (games, discord_id, normalized_id),
+            )
+            conn.commit()
+            # Return new total
+            cursor.execute(
+                "SELECT penalty_games_remaining FROM bankruptcy_state WHERE discord_id = ? AND guild_id = ?",
+                (discord_id, normalized_id),
+            )
+            row = cursor.fetchone()
+            return row["penalty_games_remaining"] if row else games
 
     # =========================================================================
     # Result-returning methods (new API)
