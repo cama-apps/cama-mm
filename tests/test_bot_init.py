@@ -26,14 +26,12 @@ def test_imports():
 
 def test_bot_import():
     """Test that bot module can be imported (without running it)."""
-    # This will import the bot but not run it
-    # We need to mock the Discord token to prevent connection attempts
     import bot
 
     # Verify bot object exists
     assert hasattr(bot, "bot")
-    assert hasattr(bot, "db")
-    assert hasattr(bot, "lobby_manager")
+    # Services are lazily initialized via ServiceContainer, not module-level globals
+    assert hasattr(bot, "_init_services")
 
 
 def test_bot_commands_registered():
@@ -65,39 +63,47 @@ def test_bot_commands_registered():
 
 
 def test_role_configuration():
-    """Test that role emojis and names are configured."""
+    """Test that role emojis and names are configured after init."""
     import bot
 
-    assert hasattr(bot, "ROLE_EMOJIS")
-    assert hasattr(bot, "ROLE_NAMES")
-    assert len(bot.ROLE_EMOJIS) == 5
-    assert len(bot.ROLE_NAMES) == 5
+    # Trigger lazy init
+    bot._init_services()
+
+    # After init, these are on the bot object
+    assert hasattr(bot.bot, "role_emojis")
+    assert hasattr(bot.bot, "role_names")
+    assert len(bot.bot.role_emojis) == 5
+    assert len(bot.bot.role_names) == 5
 
     # Verify all roles 1-5 are present
     for role in ["1", "2", "3", "4", "5"]:
-        assert role in bot.ROLE_EMOJIS
-        assert role in bot.ROLE_NAMES
+        assert role in bot.bot.role_emojis
+        assert role in bot.bot.role_names
 
 
 def test_format_role_display():
     """Test the format_role_display helper function."""
     import bot
 
+    # Trigger lazy init
+    bot._init_services()
+
     # Test formatting for each role
-    # Note: format_role_display no longer includes the role number, just emoji and name
     for role in ["1", "2", "3", "4", "5"]:
-        formatted = bot.format_role_display(role)
-        # Should contain the role name and emoji, but not the number
-        assert bot.ROLE_NAMES[role] in formatted
-        assert bot.ROLE_EMOJIS[role] in formatted
+        formatted = bot.bot.format_role_display(role)
+        assert bot.bot.role_names[role] in formatted
+        assert bot.bot.role_emojis[role] in formatted
 
 
 def test_admin_configuration():
     """Test that admin configuration exists."""
     import bot
 
-    assert hasattr(bot, "ADMIN_USER_IDS")
-    assert isinstance(bot.ADMIN_USER_IDS, list)
+    # Trigger lazy init
+    bot._init_services()
+
+    assert hasattr(bot.bot, "ADMIN_USER_IDS")
+    assert isinstance(bot.bot.ADMIN_USER_IDS, list)
     assert hasattr(bot, "has_admin_permission")
 
 
