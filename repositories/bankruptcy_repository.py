@@ -3,15 +3,15 @@ Repository for bankruptcy state data access.
 """
 
 from repositories.base_repository import BaseRepository
-from utils.guild import normalize_guild_id
+from repositories.interfaces import IBankruptcyRepository
 
 
-class BankruptcyRepository(BaseRepository):
+class BankruptcyRepository(BaseRepository, IBankruptcyRepository):
     """Data access for bankruptcy state."""
 
     def get_state(self, discord_id: int, guild_id: int | None = None) -> dict | None:
         """Get bankruptcy state for a player."""
-        normalized_id = normalize_guild_id(guild_id)
+        normalized_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -48,7 +48,7 @@ class BankruptcyRepository(BaseRepository):
         """
         if not discord_ids:
             return {}
-        normalized_id = normalize_guild_id(guild_id)
+        normalized_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             placeholders = ",".join("?" * len(discord_ids))
@@ -67,7 +67,7 @@ class BankruptcyRepository(BaseRepository):
         self, discord_id: int, guild_id: int | None, last_bankruptcy_at: int, penalty_games_remaining: int
     ) -> None:
         """Create or update bankruptcy state, incrementing bankruptcy_count."""
-        normalized_id = normalize_guild_id(guild_id)
+        normalized_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -87,7 +87,7 @@ class BankruptcyRepository(BaseRepository):
         self, discord_id: int, guild_id: int | None, last_bankruptcy_at: int, penalty_games_remaining: int
     ) -> None:
         """Reset cooldown and penalty without incrementing bankruptcy_count."""
-        normalized_id = normalize_guild_id(guild_id)
+        normalized_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -107,7 +107,7 @@ class BankruptcyRepository(BaseRepository):
 
         Returns the new count.
         """
-        normalized_id = normalize_guild_id(guild_id)
+        normalized_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -128,7 +128,7 @@ class BankruptcyRepository(BaseRepository):
 
     def get_penalty_games(self, discord_id: int, guild_id: int | None = None) -> int:
         """Get the number of penalty games remaining for a player."""
-        normalized_id = normalize_guild_id(guild_id)
+        normalized_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(

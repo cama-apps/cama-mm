@@ -332,7 +332,7 @@ class WrappedService:
         losses = match_details["losses"]
 
         # Get rating change
-        rating_changes = self.wrapped_repo.get_month_rating_changes(0, start_ts, end_ts)
+        rating_changes = self.wrapped_repo.get_month_rating_changes(guild_id, start_ts, end_ts)
         rating_change = 0
         for rc in rating_changes:
             if rc["discord_id"] == discord_id:

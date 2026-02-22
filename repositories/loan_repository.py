@@ -5,15 +5,15 @@ Repository for loan state and nonprofit fund data access.
 import time
 
 from repositories.base_repository import BaseRepository
-from utils.guild import normalize_guild_id
+from repositories.interfaces import ILoanRepository
 
 
-class LoanRepository(BaseRepository):
+class LoanRepository(BaseRepository, ILoanRepository):
     """Data access for loan state and nonprofit fund."""
 
     def get_state(self, discord_id: int, guild_id: int | None = None) -> dict | None:
         """Get loan state for a player."""
-        normalized_id = normalize_guild_id(guild_id)
+        normalized_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -53,7 +53,7 @@ class LoanRepository(BaseRepository):
         outstanding_fee: int | None = None,
     ) -> None:
         """Create or update loan state."""
-        normalized_id = normalize_guild_id(guild_id)
+        normalized_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -77,7 +77,7 @@ class LoanRepository(BaseRepository):
 
     def clear_outstanding_loan(self, discord_id: int, guild_id: int | None = None) -> None:
         """Clear the outstanding loan (set principal and fee to 0)."""
-        normalized_id = normalize_guild_id(guild_id)
+        normalized_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -91,7 +91,7 @@ class LoanRepository(BaseRepository):
 
     def get_nonprofit_fund(self, guild_id: int | None) -> int:
         """Get the total collected in the nonprofit fund for a guild."""
-        normalized_id = normalize_guild_id(guild_id)
+        normalized_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -107,7 +107,7 @@ class LoanRepository(BaseRepository):
 
         Returns the new total.
         """
-        normalized_id = normalize_guild_id(guild_id)
+        normalized_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -146,7 +146,7 @@ class LoanRepository(BaseRepository):
         if amount <= 0:
             raise ValueError("Amount must be positive")
 
-        normalized_id = normalize_guild_id(guild_id)
+        normalized_id = self.normalize_guild_id(guild_id)
 
         with self.atomic_transaction() as conn:
             cursor = conn.cursor()
@@ -208,7 +208,7 @@ class LoanRepository(BaseRepository):
             ValueError with specific message on failure
         """
         now = int(time.time())
-        normalized_guild_id = normalize_guild_id(guild_id)
+        normalized_guild_id = self.normalize_guild_id(guild_id)
 
         with self.atomic_transaction() as conn:
             cursor = conn.cursor()
@@ -338,7 +338,7 @@ class LoanRepository(BaseRepository):
         if not distributions:
             return 0
 
-        normalized_id = normalize_guild_id(guild_id)
+        normalized_id = self.normalize_guild_id(guild_id)
         total = sum(amount for _, amount in distributions)
 
         with self.atomic_transaction() as conn:
