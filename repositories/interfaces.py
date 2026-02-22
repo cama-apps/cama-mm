@@ -974,6 +974,88 @@ class IAIQueryRepository(ABC):
         ...
 
 
+class ILoanRepository(ABC):
+    """Repository for loan state and nonprofit fund data access."""
+
+    @abstractmethod
+    def get_state(self, discord_id: int, guild_id: int | None = None) -> dict | None: ...
+
+    @abstractmethod
+    def upsert_state(
+        self,
+        discord_id: int,
+        guild_id: int | None = None,
+        last_loan_at: int | None = None,
+        total_loans_taken: int | None = None,
+        total_fees_paid: int | None = None,
+        negative_loans_taken: int | None = None,
+        outstanding_principal: int | None = None,
+        outstanding_fee: int | None = None,
+    ) -> None: ...
+
+    @abstractmethod
+    def clear_outstanding_loan(self, discord_id: int, guild_id: int | None = None) -> None: ...
+
+    @abstractmethod
+    def get_nonprofit_fund(self, guild_id: int | None) -> int: ...
+
+    @abstractmethod
+    def add_to_nonprofit_fund(self, guild_id: int | None, amount: int) -> int: ...
+
+    @abstractmethod
+    def deduct_from_nonprofit_fund(self, guild_id: int | None, amount: int) -> int: ...
+
+    @abstractmethod
+    def execute_loan_atomic(
+        self,
+        discord_id: int,
+        guild_id: int | None,
+        amount: int,
+        fee: int,
+        cooldown_seconds: int,
+        max_amount: int,
+    ) -> dict: ...
+
+    @abstractmethod
+    def disburse_fund_atomic(
+        self,
+        guild_id: int | None,
+        distributions: list[tuple[int, int]],
+    ) -> int: ...
+
+    @abstractmethod
+    def get_negative_loans_bulk(self, discord_ids: list[int], guild_id: int) -> dict[int, int]: ...
+
+    @abstractmethod
+    def get_total_loans_taken(self, guild_id: int) -> int: ...
+
+
+class IBankruptcyRepository(ABC):
+    """Repository for bankruptcy state data access."""
+
+    @abstractmethod
+    def get_state(self, discord_id: int, guild_id: int | None = None) -> dict | None: ...
+
+    @abstractmethod
+    def get_bulk_states(self, discord_ids: list[int], guild_id: int | None = None) -> dict[int, dict]: ...
+
+    @abstractmethod
+    def upsert_state(
+        self, discord_id: int, guild_id: int | None, last_bankruptcy_at: int, penalty_games_remaining: int
+    ) -> None: ...
+
+    @abstractmethod
+    def reset_cooldown_only(
+        self, discord_id: int, guild_id: int | None, last_bankruptcy_at: int, penalty_games_remaining: int
+    ) -> None: ...
+
+    @abstractmethod
+    def decrement_penalty_games(self, discord_id: int, guild_id: int | None = None) -> int: ...
+
+    @abstractmethod
+    def get_penalty_games(self, discord_id: int, guild_id: int | None = None) -> int: ...
+
+
 class IDisburseRepository(ABC):
     """Repository for managing nonprofit fund disbursement proposals and votes."""
 
