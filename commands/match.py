@@ -1370,10 +1370,9 @@ class MatchCommands(commands.Cog):
             for attempt, delay in enumerate(delays, 1):
                 await asyncio.sleep(delay)
 
-                # Run discovery in executor to avoid blocking
-                loop = asyncio.get_event_loop()
-                result = await loop.run_in_executor(
-                    None, discovery_service.discover_match, match_id, guild_id
+                # Run discovery in thread to avoid blocking
+                result = await asyncio.to_thread(
+                    discovery_service.discover_match, match_id, guild_id
                 )
 
                 status = result.get("status")

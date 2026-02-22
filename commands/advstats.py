@@ -151,15 +151,11 @@ class AdvancedStatsCommands(commands.Cog):
             interaction.user,
         )
 
-        if not await safe_defer(interaction, ephemeral=True):
+        if not has_admin_permission(interaction):
+            await interaction.response.send_message("This command is admin-only.", ephemeral=True)
             return
 
-        if not has_admin_permission(interaction):
-            await safe_followup(
-                interaction,
-                content="This command is admin-only.",
-                ephemeral=True,
-            )
+        if not await safe_defer(interaction, ephemeral=True):
             return
 
         try:

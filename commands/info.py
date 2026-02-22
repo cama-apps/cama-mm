@@ -1572,7 +1572,7 @@ class InfoCommands(commands.Cog):
         rating_system: CamaRatingSystem,
     ):
         """Show detailed calibration stats for an individual player."""
-        guild_id = interaction.guild_id or 0
+        guild_id = interaction.guild.id if interaction.guild else None
         # Get player data
         player = await asyncio.to_thread(self.player_service.get_player, user.id, guild_id) if self.player_service else None
         if not player:

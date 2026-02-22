@@ -236,8 +236,9 @@ class AdminCommands(commands.Cog):
         ready_threshold = self.lobby_service.ready_threshold
 
         if current >= ready_threshold:
-            await interaction.followup.send(
-                f"✅ Lobby already has {current}/{ready_threshold} players.",
+            await safe_followup(
+                interaction,
+                content=f"✅ Lobby already has {current}/{ready_threshold} players.",
                 ephemeral=True,
             )
             return
@@ -323,8 +324,9 @@ class AdminCommands(commands.Cog):
                 logger.warning(f"Failed to refresh lobby message after filllobbytest: {exc}")
 
         captain_note = " (captain-eligible)" if captain_eligible else ""
-        await interaction.followup.send(
-            f"✅ Added {len(fake_users_added)} fake user(s){captain_note} to fill lobby.",
+        await safe_followup(
+            interaction,
+            content=f"✅ Added {len(fake_users_added)} fake user(s){captain_note} to fill lobby.",
             ephemeral=True,
         )
         logger.info(f"filllobbytest completed: added {len(fake_users_added)} fake users")
@@ -1420,7 +1422,7 @@ class AdminCommands(commands.Cog):
         await interaction.response.defer(ephemeral=True)
 
         if not self.match_service:
-            await interaction.followup.send("❌ match_service not available.", ephemeral=True)
+            await safe_followup(interaction, content="❌ match_service not available.", ephemeral=True)
             return
 
         # Hero pool: 20 popular heroes with IDs from heroes.json
@@ -1510,9 +1512,12 @@ class AdminCommands(commands.Cog):
 
         matches_created = await asyncio.to_thread(_seed_data)
 
-        await interaction.followup.send(
-            f"✅ Seeded {NUM_PLAYERS} players and {matches_created} enriched matches.\n"
-            f"Run `/herogrid source:All Players min_games:1` to see the grid.",
+        await safe_followup(
+            interaction,
+            content=(
+                f"✅ Seeded {NUM_PLAYERS} players and {matches_created} enriched matches.\n"
+                f"Run `/herogrid source:All Players min_games:1` to see the grid."
+            ),
             ephemeral=True,
         )
 
