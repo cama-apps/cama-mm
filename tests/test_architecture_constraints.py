@@ -139,19 +139,64 @@ class TestCommandLayerConstraints:
         allowed_patterns = ["interfaces"]
 
         for file_path in get_all_python_files(commands_dir):
-            imports = get_imports_from_file(file_path)
-            repository_imports = [
-                imp for imp in imports
-                if imp.startswith("repositories")
-                and not any(pattern in imp for pattern in allowed_patterns)
-            ]
-            # Note: Currently commands DO import repositories. This test documents
-            # the current state but the goal is to eventually remove direct access.
-            # For now, we just track which commands use repositories.
-            if repository_imports:
-                # This is informational, not a failure (yet)
-                # When Phase 5 is complete, change this to assert
-                pass
+            # Parse the file to check for runtime repository imports
+            # (TYPE_CHECKING-guarded imports are fine)
+            try:
+                with open(file_path, "r", encoding="utf-8") as f:
+                    tree = ast.parse(f.read(), filename=str(file_path))
+            except SyntaxError:
+                continue
+
+            runtime_repo_imports = []
+            for node in ast.walk(tree):
+                # Skip imports inside TYPE_CHECKING blocks
+                if isinstance(node, ast.If):
+                    test = node.test
+                    if isinstance(test, ast.Name) and test.id == "TYPE_CHECKING":
+                        continue
+                    if isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING":
+                        continue
+
+            # Collect only top-level / runtime imports
+            for node in ast.iter_child_nodes(tree):
+                if isinstance(node, (ast.Import, ast.ImportFrom)):
+                    module = None
+                    if isinstance(node, ast.Import):
+                        for alias in node.names:
+                            module = alias.name
+                            if module.startswith("repositories") and not any(
+                                p in module for p in allowed_patterns
+                            ):
+                                runtime_repo_imports.append(module)
+                    elif isinstance(node, ast.ImportFrom) and node.module:
+                        module = node.module
+                        if module.startswith("repositories") and not any(
+                            p in module for p in allowed_patterns
+                        ):
+                            runtime_repo_imports.append(module)
+                elif isinstance(node, ast.If):
+                    # Check if this is a TYPE_CHECKING guard - skip it
+                    test = node.test
+                    is_type_checking = False
+                    if isinstance(test, ast.Name) and test.id == "TYPE_CHECKING":
+                        is_type_checking = True
+                    if isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING":
+                        is_type_checking = True
+                    if is_type_checking:
+                        continue
+                    # Non-TYPE_CHECKING if blocks: check their body for imports
+                    for child in ast.walk(node):
+                        if isinstance(child, ast.ImportFrom) and child.module:
+                            if child.module.startswith("repositories") and not any(
+                                p in child.module for p in allowed_patterns
+                            ):
+                                runtime_repo_imports.append(child.module)
+
+            assert not runtime_repo_imports, (
+                f"{file_path.name} imports repositories at runtime: {runtime_repo_imports}. "
+                "Commands should use services, not repositories directly. "
+                "Use TYPE_CHECKING guards for type-hint-only imports."
+            )
 
 
 class TestRepositoryLayerConstraints:
