@@ -856,15 +856,18 @@ class MatchService:
                     winning_team=1 if winning_team == "radiant" else 2,
                 )
 
-            # Decrement soft avoids that were effective (opposite teams)
-            effective_avoid_ids = last_shuffle.get("effective_avoid_ids", [])
-            if self.soft_avoid_repo and effective_avoid_ids:
-                self.soft_avoid_repo.decrement_avoids(guild_id, effective_avoid_ids)
+            # Decrement soft avoids and package deals only for shuffle mode (not draft)
+            # Draft mode doesn't consume avoid/deal charges
+            if not last_shuffle.get("is_draft"):
+                # Decrement soft avoids that were effective (opposite teams)
+                effective_avoid_ids = last_shuffle.get("effective_avoid_ids", [])
+                if self.soft_avoid_repo and effective_avoid_ids:
+                    self.soft_avoid_repo.decrement_avoids(guild_id, effective_avoid_ids)
 
-            # Decrement package deals that were effective (same team)
-            effective_deal_ids = last_shuffle.get("effective_deal_ids", [])
-            if self.package_deal_repo and effective_deal_ids:
-                self.package_deal_repo.decrement_deals(guild_id, effective_deal_ids)
+                # Decrement package deals that were effective (same team)
+                effective_deal_ids = last_shuffle.get("effective_deal_ids", [])
+                if self.package_deal_repo and effective_deal_ids:
+                    self.package_deal_repo.decrement_deals(guild_id, effective_deal_ids)
 
             # Find the most notable streak (longest, >=5 games) for neon hooks
             notable_streak = None
