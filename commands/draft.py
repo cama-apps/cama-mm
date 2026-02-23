@@ -2000,6 +2000,32 @@ class DraftCommands(commands.Cog):
         if is_bomb_pot:
             logger.info(f"💣 BOMB POT triggered for draft in guild {guild_id}")
 
+        # Load active package deals for these players
+        all_player_ids = state.radiant_player_ids + state.dire_player_ids
+        deals = []
+        if self.match_service.package_deal_repo:
+            deals = await asyncio.to_thread(
+                self.match_service.package_deal_repo.get_active_deals_for_players,
+                guild_id, all_player_ids
+            )
+
+        # Calculate effective package deals (same team) - will be decremented on record_match
+        effective_deal_ids = []
+        if self.match_service.package_deal_repo and deals:
+            radiant_set = set(state.radiant_player_ids)
+            dire_set = set(state.dire_player_ids)
+            for deal in deals:
+                buyer = deal.buyer_discord_id
+                partner = deal.partner_discord_id
+                # Both must be in the match
+                if buyer not in all_player_ids or partner not in all_player_ids:
+                    continue
+                # They must be on the SAME team (deal "worked")
+                both_radiant = buyer in radiant_set and partner in radiant_set
+                both_dire = buyer in dire_set and partner in dire_set
+                if both_radiant or both_dire:
+                    effective_deal_ids.append(deal.id)
+
         # Create shuffle state dict compatible with match_service
         shuffle_state = {
             "radiant_team_ids": state.radiant_player_ids,
@@ -2023,6 +2049,7 @@ class DraftCommands(commands.Cog):
             "betting_mode": "pool",  # Default to pool mode for drafts
             "is_draft": True,  # Mark as draft for any special handling
             "is_bomb_pot": is_bomb_pot,  # Bomb pot mode for higher stakes
+            "effective_deal_ids": effective_deal_ids,  # Package deals to decrement on record
         }
 
         # persist_state handles both DB persistence and in-memory cache update
