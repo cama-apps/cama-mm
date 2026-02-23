@@ -43,9 +43,9 @@ class TestConfigDefaultValue:
     """Test that config has the correct default value."""
 
     def test_config_default_value(self):
-        """Verify default recent_match_penalty_weight is 25.0."""
+        """Verify default recent_match_penalty_weight is 30.0."""
         assert "recent_match_penalty_weight" in SHUFFLER_SETTINGS
-        assert SHUFFLER_SETTINGS["recent_match_penalty_weight"] == 25.0
+        assert SHUFFLER_SETTINGS["recent_match_penalty_weight"] == 30.0
 
 
 class TestShufflerInit:
@@ -54,7 +54,7 @@ class TestShufflerInit:
     def test_shuffler_uses_default_from_config(self):
         """Shuffler should use default from config when not specified."""
         shuffler = BalancedShuffler()
-        assert shuffler.recent_match_penalty_weight == 25.0
+        assert shuffler.recent_match_penalty_weight == 30.0
 
     def test_shuffler_accepts_custom_weight(self):
         """Shuffler should accept custom recent_match_penalty_weight."""
@@ -114,7 +114,7 @@ class TestRecentMatchPenaltyInExclusion:
         """Recent match participants should be more likely to sit out."""
         shuffler = BalancedShuffler(
             recent_match_penalty_weight=100.0,  # High penalty
-            exclusion_penalty_weight=45.0,
+            exclusion_penalty_weight=50.0,
         )
 
         # Mark some players as having played recently
@@ -140,7 +140,7 @@ class TestRecentMatchPenaltyInExclusion:
         """No effect when weight is 0."""
         shuffler = BalancedShuffler(
             recent_match_penalty_weight=0.0,
-            exclusion_penalty_weight=45.0,
+            exclusion_penalty_weight=50.0,
         )
 
         recent_names = {sample_players[0].name, sample_players[1].name}
@@ -209,7 +209,7 @@ class TestRecentMatchPenaltyWithExclusionCounts:
         """Players with very high exclusion count should still be prioritized."""
         shuffler = BalancedShuffler(
             recent_match_penalty_weight=25.0,
-            exclusion_penalty_weight=45.0,
+            exclusion_penalty_weight=50.0,
         )
 
         # Player0 played recently but has high exclusion count

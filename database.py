@@ -532,13 +532,14 @@ class Database:
 
             return {row["discord_id"]: row["exclusion_count"] for row in rows}
 
-    def increment_exclusion_count(self, discord_id: int):
+    def increment_exclusion_count(self, discord_id: int, guild_id: int = 0):
         """
-        Increment a player's exclusion count by 4.
+        Increment a player's exclusion count by 5.
         Called when a player is excluded from a match.
 
         Args:
             discord_id: Discord user ID
+            guild_id: Guild ID for multi-guild isolation
         """
         with self.connection() as conn:
             cursor = conn.cursor()
@@ -546,19 +547,20 @@ class Database:
             cursor.execute(
                 """
                 UPDATE players
-                SET exclusion_count = COALESCE(exclusion_count, 0) + 4, updated_at = CURRENT_TIMESTAMP
-                WHERE discord_id = ?
+                SET exclusion_count = COALESCE(exclusion_count, 0) + 5, updated_at = CURRENT_TIMESTAMP
+                WHERE discord_id = ? AND guild_id = ?
             """,
-                (discord_id,),
+                (discord_id, guild_id),
             )
 
-    def increment_exclusion_count_half(self, discord_id: int):
+    def increment_exclusion_count_half(self, discord_id: int, guild_id: int = 0):
         """
         Increment a player's exclusion count by 2 (half the normal bonus).
         Called for conditional players who weren't picked.
 
         Args:
             discord_id: Discord user ID
+            guild_id: Guild ID for multi-guild isolation
         """
         with self.connection() as conn:
             cursor = conn.cursor()
@@ -567,18 +569,19 @@ class Database:
                 """
                 UPDATE players
                 SET exclusion_count = COALESCE(exclusion_count, 0) + 2, updated_at = CURRENT_TIMESTAMP
-                WHERE discord_id = ?
+                WHERE discord_id = ? AND guild_id = ?
             """,
-                (discord_id,),
+                (discord_id, guild_id),
             )
 
-    def decay_exclusion_count(self, discord_id: int):
+    def decay_exclusion_count(self, discord_id: int, guild_id: int = 0):
         """
         Decay a player's exclusion count by halving it (rounded down).
         Called when a player is included in a match.
 
         Args:
             discord_id: Discord user ID
+            guild_id: Guild ID for multi-guild isolation
         """
         with self.connection() as conn:
             cursor = conn.cursor()
@@ -587,9 +590,9 @@ class Database:
                 """
                 UPDATE players
                 SET exclusion_count = COALESCE(exclusion_count, 0) / 2, updated_at = CURRENT_TIMESTAMP
-                WHERE discord_id = ?
+                WHERE discord_id = ? AND guild_id = ?
             """,
-                (discord_id,),
+                (discord_id, guild_id),
             )
 
     def delete_player(self, discord_id: int) -> bool:

@@ -79,11 +79,11 @@ SHUFFLER_SETTINGS: dict[str, Any] = {
     "off_role_multiplier": _parse_float("OFF_ROLE_MULTIPLIER", 0.95),
     "off_role_flat_penalty": _parse_float("OFF_ROLE_FLAT_PENALTY", 350.0),
     "role_matchup_delta_weight": _parse_float("ROLE_MATCHUP_DELTA_WEIGHT", 0.19),
-    "exclusion_penalty_weight": _parse_float("EXCLUSION_PENALTY_WEIGHT", 45.0),
+    "exclusion_penalty_weight": _parse_float("EXCLUSION_PENALTY_WEIGHT", 50.0),
     # Recent match penalty: players who participated in the most recent match
     # get this penalty added to goodness score (making them more likely to sit out)
     # Hardcoded default - not configurable via env var (silent operation)
-    "recent_match_penalty_weight": 25.0,
+    "recent_match_penalty_weight": 30.0,
 }
 
 NEW_PLAYER_EXCLUSION_BOOST = _parse_int("NEW_PLAYER_EXCLUSION_BOOST", 4)
@@ -147,8 +147,8 @@ SOFT_AVOID_PENALTY = _parse_float("SOFT_AVOID_PENALTY", 250.0)  # Penalty added 
 SHOP_PACKAGE_DEAL_BASE_COST = _parse_int("SHOP_PACKAGE_DEAL_BASE_COST", 500)  # Base cost for package deal
 SHOP_PACKAGE_DEAL_RATING_DIVISOR = _parse_float("SHOP_PACKAGE_DEAL_RATING_DIVISOR", 10.0)  # Divide sum of ratings by this
 PACKAGE_DEAL_GAMES_DURATION = _parse_int("PACKAGE_DEAL_GAMES_DURATION", 10)  # Number of games deal lasts
-PACKAGE_DEAL_PENALTY = _parse_float("PACKAGE_DEAL_PENALTY", 100.0)  # Penalty when pair on DIFFERENT teams
-PACKAGE_DEAL_SPLIT_PENALTY = _parse_float("PACKAGE_DEAL_SPLIT_PENALTY", 100.0)  # Penalty when one selected, one excluded
+PACKAGE_DEAL_PENALTY = _parse_float("PACKAGE_DEAL_PENALTY", 110.0)  # Penalty when pair on DIFFERENT teams
+PACKAGE_DEAL_SPLIT_PENALTY = _parse_float("PACKAGE_DEAL_SPLIT_PENALTY", 110.0)  # Penalty when one selected, one excluded
 
 # Wheel of Fortune configuration
 WHEEL_COOLDOWN_SECONDS = _parse_int("WHEEL_COOLDOWN_SECONDS", 86400)  # 24 hours

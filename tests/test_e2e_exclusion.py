@@ -9,7 +9,7 @@ from shuffler import BalancedShuffler
 
 
 def _expected_after_exclusions(exclusions: int) -> int:
-    return NEW_PLAYER_EXCLUSION_BOOST + exclusions * 4
+    return NEW_PLAYER_EXCLUSION_BOOST + exclusions * 5
 
 
 class TestExclusionTracking:
@@ -210,7 +210,7 @@ class TestExclusionTracking:
 
         # Artificially set one player to have high exclusion count
         unlucky_player_id = player_ids[0]
-        for _ in range(16):  # Start with count of boost + 64 (16 * 4 per exclusion)
+        for _ in range(16):  # Start with count of boost + 80 (16 * 5 per exclusion)
             test_db_memory.increment_exclusion_count(unlucky_player_id)
 
         initial_counts = test_db_memory.get_exclusion_counts(player_ids)

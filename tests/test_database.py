@@ -13,7 +13,7 @@ from database import Database
 
 def _expected_after_exclusions(exclusions: int) -> int:
     """Return the exclusion_count after applying `exclusions` exclusions to a fresh account."""
-    return NEW_PLAYER_EXCLUSION_BOOST + exclusions * 4
+    return NEW_PLAYER_EXCLUSION_BOOST + exclusions * 5
 
 
 class TestDatabase:
@@ -240,10 +240,10 @@ class TestDatabase:
         player_id = 11101
         test_db.add_player(discord_id=player_id, discord_username="TestPlayer", initial_mmr=1500)
 
-        # Increment exclusion count twice (4 per exclusion)
+        # Increment exclusion count twice (5 per exclusion)
         test_db.increment_exclusion_count(player_id)
 
-        # Verify count increased by 4
+        # Verify count increased by 5
         exclusion_counts = test_db.get_exclusion_counts([player_id])
         assert exclusion_counts[player_id] == _expected_after_exclusions(1)
 

@@ -9,7 +9,7 @@ TEST_GUILD_ID = 12345
 
 
 def _expected_after_exclusions(exclusions: int) -> int:
-    return NEW_PLAYER_EXCLUSION_BOOST + exclusions * 4
+    return NEW_PLAYER_EXCLUSION_BOOST + exclusions * 5
 
 
 class TestPlayerRepository:
@@ -125,7 +125,7 @@ class TestPlayerRepository:
         counts = player_repository.get_exclusion_counts([12345], TEST_GUILD_ID)
         assert counts[12345] == NEW_PLAYER_EXCLUSION_BOOST
 
-        # Increment twice (4 per exclusion)
+        # Increment twice (5 per exclusion)
         player_repository.increment_exclusion_count(12345, TEST_GUILD_ID)
         player_repository.increment_exclusion_count(12345, TEST_GUILD_ID)
         counts = player_repository.get_exclusion_counts([12345], TEST_GUILD_ID)

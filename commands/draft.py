@@ -671,9 +671,14 @@ class DraftCommands(commands.Cog):
         # Track which IDs are regular for pre-pruning priority (regular > conditional)
         regular_player_ids_set = set(regular_players)
 
+        # Track promoted conditional players for exclusion bonus handling
+        promoted_conditional_set: set[int] = set()
+        unpromoted_conditional_ids: list[int] = []
+
         if len(regular_players) >= DRAFT_POOL_SIZE:
-            # Enough regular players - use them (conditional players excluded)
+            # Enough regular players - use them (all conditional players excluded)
             lobby_player_ids = regular_players
+            unpromoted_conditional_ids = conditional_players
         else:
             # Need to promote some conditional players to reach 10
             needed = DRAFT_POOL_SIZE - len(regular_players)
@@ -681,6 +686,10 @@ class DraftCommands(commands.Cog):
             promoted_conditional = random.sample(
                 conditional_players, min(needed, len(conditional_players))
             )
+            promoted_conditional_set = set(promoted_conditional)
+            unpromoted_conditional_ids = [
+                cid for cid in conditional_players if cid not in promoted_conditional_set
+            ]
             lobby_player_ids = regular_players + promoted_conditional
 
         # Get player ratings for captain selection
@@ -771,15 +780,14 @@ class DraftCommands(commands.Cog):
                     try:
                         match_repo = getattr(self.match_service, "match_repo", None)
                         if match_repo:
-                            last_match = await asyncio.to_thread(match_repo.get_last_match)
-                            if last_match:
-                                participants = await asyncio.to_thread(match_repo.get_match_participants, last_match["match_id"])
-                                recent_ids = {p["discord_id"] for p in participants}
-                                recent_match_names = {
-                                    player_map[pid].name
-                                    for pid in recent_ids
-                                    if pid in player_map
-                                }
+                            recent_ids = await asyncio.to_thread(
+                                match_repo.get_last_match_participant_ids, guild_id
+                            )
+                            recent_match_names = {
+                                player_map[pid].name
+                                for pid in recent_ids
+                                if pid in player_map
+                            }
                     except Exception:
                         pass  # Non-critical, proceed without
 
@@ -854,8 +862,18 @@ class DraftCommands(commands.Cog):
                 return False
 
         # Update exclusion counts for excluded players
+        # Regular players get full bonus (+5), conditional players get half bonus (+2)
         for excluded_id in pool_result.excluded_ids:
-            await asyncio.to_thread(self.player_repo.increment_exclusion_count, excluded_id, guild_id)
+            if excluded_id in promoted_conditional_set:
+                # Conditional player who was promoted but then excluded
+                await asyncio.to_thread(self.player_repo.increment_exclusion_count_half, excluded_id, guild_id)
+            else:
+                # Regular player excluded
+                await asyncio.to_thread(self.player_repo.increment_exclusion_count, excluded_id, guild_id)
+
+        # Conditional players who weren't even promoted get half bonus
+        for cid in unpromoted_conditional_ids:
+            await asyncio.to_thread(self.player_repo.increment_exclusion_count_half, cid, guild_id)
 
         # Create draft state
         try:
