@@ -175,6 +175,18 @@ LIGHTNING_BOLT_PCT_MIN = _parse_float("LIGHTNING_BOLT_PCT_MIN", 0.01)
 LIGHTNING_BOLT_PCT_MAX = _parse_float("LIGHTNING_BOLT_PCT_MAX", 0.03)
 LIGHTNING_BOLT_MIN_TAX = _parse_int("LIGHTNING_BOLT_MIN_TAX", 1)
 
+# Golden Wheel (exclusive to top N jopacoin balance holders)
+WHEEL_GOLDEN_TOP_N = _parse_int("WHEEL_GOLDEN_TOP_N", 3)
+WHEEL_GOLDEN_TARGET_EV = _parse_float("WHEEL_GOLDEN_TARGET_EV", 15.0)
+# Estimated EVs for special golden wedges — used to calibrate OVEREXTENDED value
+# so the overall wheel EV stays at WHEEL_GOLDEN_TARGET_EV.
+WHEEL_GOLDEN_HEIST_EST_EV = _parse_float("WHEEL_GOLDEN_HEIST_EST_EV", 18.0)          # per wedge (×2)
+WHEEL_GOLDEN_MARKET_CRASH_EST_EV = _parse_float("WHEEL_GOLDEN_MARKET_CRASH_EST_EV", 20.0)
+WHEEL_GOLDEN_COMPOUND_EST_EV = _parse_float("WHEEL_GOLDEN_COMPOUND_EST_EV", 30.0)
+WHEEL_GOLDEN_TRICKLE_DOWN_EST_EV = _parse_float("WHEEL_GOLDEN_TRICKLE_DOWN_EST_EV", 35.0)
+WHEEL_GOLDEN_DIVIDEND_EST_EV = _parse_float("WHEEL_GOLDEN_DIVIDEND_EST_EV", 10.0)
+WHEEL_GOLDEN_HOSTILE_TAKEOVER_EST_EV = _parse_float("WHEEL_GOLDEN_HOSTILE_TAKEOVER_EST_EV", 22.0)
+
 # Tip transaction fee (clamped to 0.0 - 0.5 to prevent economy-breaking values)
 _raw_tip_fee_rate = _parse_float("TIP_FEE_RATE", 0.01)
 TIP_FEE_RATE = max(0.0, min(0.5, _raw_tip_fee_rate))  # 1% default, max 50%

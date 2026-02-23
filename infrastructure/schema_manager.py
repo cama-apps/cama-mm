@@ -243,6 +243,8 @@ class SchemaManager:
             ("create_package_deals_table", self._migration_create_package_deals_table),
             # Bankruptcy wheel expansion: track normal vs bankrupt spins for CHAIN_REACTION
             ("add_is_bankrupt_to_wheel_spins", self._migration_add_is_bankrupt_to_wheel_spins),
+            # Golden wheel: track golden wheel spins separately
+            ("add_is_golden_to_wheel_spins", self._migration_add_is_golden_to_wheel_spins),
         ]
 
     # --- Migrations ---
@@ -1607,3 +1609,7 @@ class SchemaManager:
     def _migration_add_is_bankrupt_to_wheel_spins(self, cursor) -> None:
         """Add is_bankrupt column to wheel_spins for CHAIN_REACTION filtering."""
         self._add_column_if_not_exists(cursor, "wheel_spins", "is_bankrupt", "INTEGER DEFAULT 0")
+
+    def _migration_add_is_golden_to_wheel_spins(self, cursor) -> None:
+        """Add is_golden column to wheel_spins for golden wheel tracking."""
+        self._add_column_if_not_exists(cursor, "wheel_spins", "is_golden", "INTEGER DEFAULT 0")
