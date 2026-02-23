@@ -1219,7 +1219,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             )
 
     def increment_exclusion_count_half(self, discord_id: int, guild_id: int) -> None:
-        """Increment player's exclusion count by 2 (half the normal bonus).
+        """Increment player's exclusion count by 1.
 
         Used for conditional players who weren't picked.
         """
@@ -1228,7 +1228,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             cursor.execute(
                 """
                 UPDATE players
-                SET exclusion_count = COALESCE(exclusion_count, 0) + 2,
+                SET exclusion_count = COALESCE(exclusion_count, 0) + 1,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE discord_id = ? AND guild_id = ?
             """,

@@ -110,7 +110,8 @@ class DraftService:
                 )
 
             # Weighted random select first captain (higher rating = higher chance)
-            first_weights = [max(player_ratings.get(pid, 0.0), 1.0) for pid in available]
+            # Squaring amplifies differences: 1900-rated is ~4.5x more likely than 900-rated
+            first_weights = [max(player_ratings.get(pid, 0.0), 1.0) ** 2 for pid in available]
             captain1 = random.choices(available, weights=first_weights, k=1)[0]
             available.remove(captain1)
 
