@@ -644,7 +644,6 @@ class DraftCommands(commands.Cog):
         interaction: discord.Interaction,
         guild_id: int | None,
         lobby,
-        force_random_captains: bool = False,
         specified_captain1_id: int | None = None,
         specified_captain2_id: int | None = None,
     ) -> bool:
@@ -655,8 +654,6 @@ class DraftCommands(commands.Cog):
             interaction: The Discord interaction
             guild_id: The guild ID
             lobby: The Lobby object
-            force_random_captains: If True, picks any 2 random players as captains
-                                   (ignoring captain eligibility)
             specified_captain1_id: Optional specified captain 1 ID
             specified_captain2_id: Optional specified captain 2 ID
 
@@ -696,48 +693,43 @@ class DraftCommands(commands.Cog):
         players = await asyncio.to_thread(self.player_repo.get_by_ids, lobby_player_ids, guild_id)
         player_ratings = {p.discord_id: p.glicko_rating or 1500.0 for p in players}
 
-        if force_random_captains:
-            # Skip the 60s wait, but still respect captain eligibility (explicit opt-ins only)
-            # Players who did /setcaptain no should NEVER be selected as captain
-            eligible_captain_ids = await asyncio.to_thread(
-                self.player_repo.get_captain_eligible_players, lobby_player_ids, guild_id
+        # Announce the opt-in window
+        await interaction.followup.send(
+            "🎖️ **Immortal Draft starting in 30 seconds!**\n"
+            "Use `/setcaptain yes` to volunteer as captain before time runs out."
+        )
+        await asyncio.sleep(30.0)
+
+        # Check captain eligibility (require pre-existing opt-ins)
+        eligible_captain_ids = await asyncio.to_thread(
+            self.player_repo.get_captain_eligible_players, lobby_player_ids, guild_id
+        )
+
+        # Specified captains must also be eligible (no bypass)
+        if specified_captain1_id and specified_captain1_id not in eligible_captain_ids:
+            cap1_name = await self._get_member_name(interaction.guild, specified_captain1_id)
+            await interaction.followup.send(
+                f"❌ **{cap1_name}** has not opted in as captain. "
+                f"They must use `/setcaptain yes` first.",
+                ephemeral=True,
             )
-            if len(eligible_captain_ids) < 2:
-                await interaction.followup.send(
-                    "❌ Not enough captain-eligible players. "
-                    "At least 2 players must use `/setcaptain yes`.",
-                    ephemeral=True,
-                )
-                return False
-        else:
-            # Check captain eligibility (no wait - require pre-existing opt-ins)
-            eligible_captain_ids = await asyncio.to_thread(self.player_repo.get_captain_eligible_players, lobby_player_ids, guild_id)
+            return False
+        if specified_captain2_id and specified_captain2_id not in eligible_captain_ids:
+            cap2_name = await self._get_member_name(interaction.guild, specified_captain2_id)
+            await interaction.followup.send(
+                f"❌ **{cap2_name}** has not opted in as captain. "
+                f"They must use `/setcaptain yes` first.",
+                ephemeral=True,
+            )
+            return False
 
-            # Specified captains must also be eligible (no bypass)
-            if specified_captain1_id and specified_captain1_id not in eligible_captain_ids:
-                cap1_name = await self._get_member_name(interaction.guild, specified_captain1_id)
-                await interaction.followup.send(
-                    f"❌ **{cap1_name}** has not opted in as captain. "
-                    f"They must use `/setcaptain yes` first.",
-                    ephemeral=True,
-                )
-                return False
-            if specified_captain2_id and specified_captain2_id not in eligible_captain_ids:
-                cap2_name = await self._get_member_name(interaction.guild, specified_captain2_id)
-                await interaction.followup.send(
-                    f"❌ **{cap2_name}** has not opted in as captain. "
-                    f"They must use `/setcaptain yes` first.",
-                    ephemeral=True,
-                )
-                return False
-
-            if len(eligible_captain_ids) < 2:
-                await interaction.followup.send(
-                    f"❌ Not enough captain-eligible players. "
-                    f"At least 2 players must use `/setcaptain yes`.",
-                    ephemeral=True,
-                )
-                return False
+        if len(eligible_captain_ids) < 2:
+            await interaction.followup.send(
+                "❌ Not enough captain-eligible players. "
+                "At least 2 players must use `/setcaptain yes`.",
+                ephemeral=True,
+            )
+            return False
 
         # Select captains
         try:
@@ -1124,7 +1116,6 @@ class DraftCommands(commands.Cog):
             interaction,
             guild_id,
             lobby,
-            force_random_captains=False,
             specified_captain1_id=specified_captain1_id,
             specified_captain2_id=specified_captain2_id,
         )

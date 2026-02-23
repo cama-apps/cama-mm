@@ -425,7 +425,7 @@ class MatchCommands(commands.Cog):
             draft_cog = self.bot.get_cog("DraftCommands")
             if draft_cog:
                 await draft_cog._execute_draft(
-                    interaction, guild_id, lobby, force_random_captains=True
+                    interaction, guild_id, lobby
                 )
             else:
                 await interaction.followup.send(
