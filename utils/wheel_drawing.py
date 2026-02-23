@@ -5,7 +5,7 @@ import math
 import random
 from PIL import Image, ImageDraw, ImageFont
 
-from config import WHEEL_TARGET_EV
+from config import WHEEL_TARGET_EV, WHEEL_GOLDEN_TARGET_EV
 
 # Cached fonts for performance (loaded once, not per frame)
 _CACHED_FONTS: dict[str, ImageFont.FreeTypeFont | ImageFont.ImageFont] = {}
@@ -26,6 +26,7 @@ def _get_cached_font(size: int, font_key: str, bold: bool = False) -> ImageFont.
 
 # Cached static overlay (pointer, center circle, center text) - drawn once per size
 _CACHED_STATIC_OVERLAY: dict[int, Image.Image] = {}
+_CACHED_GOLDEN_STATIC_OVERLAY: dict[int, Image.Image] = {}
 
 # Cached wheel face sprite (all wedges + text + glow ring) - drawn once per size
 _CACHED_WHEEL_FACE: dict[int, Image.Image] = {}
@@ -176,14 +177,18 @@ def _draw_matrix_rain(draw: ImageDraw.Draw, size: int, frame_idx: int, phase: di
             draw.text((x, cy), glyph, fill=color, font=rain_font)
 
 
-def _get_static_overlay(size: int) -> Image.Image:
+def _get_static_overlay(size: int, is_golden: bool = False) -> Image.Image:
     """Get cached static overlay with pointer and center elements."""
+    if is_golden:
+        if size not in _CACHED_GOLDEN_STATIC_OVERLAY:
+            _CACHED_GOLDEN_STATIC_OVERLAY[size] = _create_static_overlay(size, is_golden=True)
+        return _CACHED_GOLDEN_STATIC_OVERLAY[size]
     if size not in _CACHED_STATIC_OVERLAY:
         _CACHED_STATIC_OVERLAY[size] = _create_static_overlay(size)
     return _CACHED_STATIC_OVERLAY[size]
 
 
-def _create_static_overlay(size: int) -> Image.Image:
+def _create_static_overlay(size: int, is_golden: bool = False) -> Image.Image:
     """Create the static overlay (pointer, center circle, text) once."""
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
@@ -194,7 +199,9 @@ def _create_static_overlay(size: int) -> Image.Image:
 
     title_font = _get_cached_font(max(10, size // 40), "title")
 
-    # Draw center circle
+    # Draw center circle — golden hub for golden wheel
+    hub_fill = "#3a2800" if is_golden else "#2c3e50"
+    hub_outline = "#ffd700" if is_golden else "#f1c40f"
     draw.ellipse(
         [
             center - inner_radius,
@@ -202,19 +209,24 @@ def _create_static_overlay(size: int) -> Image.Image:
             center + inner_radius,
             center + inner_radius,
         ],
-        fill="#2c3e50",
-        outline="#f1c40f",
+        fill=hub_fill,
+        outline=hub_outline,
         width=4,
     )
 
-    # Center text
-    for i, text in enumerate(["WHEEL OF", "FORTUNE"]):
+    # Center text — "GOLDEN / WHEEL" for golden, "WHEEL OF / FORTUNE" for normal
+    if is_golden:
+        center_lines = ["GOLDEN", "WHEEL"]
+    else:
+        center_lines = ["WHEEL OF", "FORTUNE"]
+    text_color = "#ffd700" if is_golden else "#f1c40f"
+    for i, text in enumerate(center_lines):
         bbox = draw.textbbox((0, 0), text, font=title_font)
         text_w = bbox[2] - bbox[0]
         draw.text(
             (center - text_w / 2, center - 14 + i * 18),
             text,
-            fill="#f1c40f",
+            fill=text_color,
             font=title_font,
         )
 
@@ -444,16 +456,135 @@ def _calculate_bankrupt_adjusted_wedges(target_ev: float) -> list[tuple[str, int
 BANKRUPT_WHEEL_WEDGES = _calculate_bankrupt_adjusted_wedges(WHEEL_TARGET_EV)
 
 
-def get_wheel_wedges(is_bankrupt: bool = False) -> list[tuple[str, int | str, str]]:
-    """Get the appropriate wheel wedges based on player bankruptcy status."""
+# ---------------------------------------------------------------------------
+# Golden Wheel — exclusive to top-N jopacoin balance holders
+# ---------------------------------------------------------------------------
+# 24 wedges, gold color palette, positive EV target (~+15 JC/spin).
+# OVEREXTENDED is the "pride goes before the fall" penalty (dynamic, like BANKRUPT).
+# All string values are golden-wheel-specific mechanics plus RED/BLUE_SHELL.
+_BASE_GOLDEN_WHEEL_WEDGES = [
+    # OVEREXTENDED penalty (dynamic, calculated to hit WHEEL_GOLDEN_TARGET_EV)
+    ("OVEREXTENDED", -398, "#4a3000"),
+    ("OVEREXTENDED", -398, "#4a3000"),
+    # Numeric wins — gold color palette, ascending value
+    ("20", 20, "#b8860b"),
+    ("20", 20, "#b8860b"),
+    ("30", 30, "#c8a000"),
+    ("40", 40, "#daa520"),
+    ("50", 50, "#d4a000"),
+    ("50", 50, "#d4a000"),
+    ("60", 60, "#e8b400"),
+    ("60", 60, "#e8b400"),
+    ("80", 80, "#f0c000"),
+    ("80", 80, "#f0c000"),
+    ("100", 100, "#f5c500"),
+    ("150", 150, "#e8d080"),
+    # Crown Jewel jackpot
+    ("CROWN", 250, "#fffacd"),
+    # Existing shell mechanics (gold-themed colors on golden wheel)
+    ("RED", "RED_SHELL", "#cc6600"),
+    ("BLUE", "BLUE_SHELL", "#4080c0"),
+    # New golden-exclusive mechanics
+    ("HEIST", "HEIST", "#7a5c00"),
+    ("HEIST", "HEIST", "#7a5c00"),
+    ("CRASH", "MARKET_CRASH", "#8a4000"),
+    ("COMPOUND", "COMPOUND_INTEREST", "#6b8c00"),
+    ("TRICKLE", "TRICKLE_DOWN", "#5c7a00"),
+    ("DIVIDEND", "DIVIDEND", "#4a7000"),
+    ("TAKEOVER", "HOSTILE_TAKEOVER", "#6a2a80"),
+]
+
+_GOLDEN_SPECIAL_WEDGE_EST_EVS: dict[str, float] = {}
+
+
+def _load_golden_special_wedge_evs() -> None:
+    """Load estimated EVs for golden wheel special wedges from config."""
+    if _GOLDEN_SPECIAL_WEDGE_EST_EVS:
+        return
+    from config import (
+        WHEEL_RED_SHELL_EST_EV,
+        WHEEL_BLUE_SHELL_EST_EV,
+        WHEEL_GOLDEN_HEIST_EST_EV,
+        WHEEL_GOLDEN_MARKET_CRASH_EST_EV,
+        WHEEL_GOLDEN_COMPOUND_EST_EV,
+        WHEEL_GOLDEN_TRICKLE_DOWN_EST_EV,
+        WHEEL_GOLDEN_DIVIDEND_EST_EV,
+        WHEEL_GOLDEN_HOSTILE_TAKEOVER_EST_EV,
+    )
+    _GOLDEN_SPECIAL_WEDGE_EST_EVS.update({
+        "RED_SHELL": WHEEL_RED_SHELL_EST_EV,
+        "BLUE_SHELL": WHEEL_BLUE_SHELL_EST_EV,
+        "HEIST": WHEEL_GOLDEN_HEIST_EST_EV,
+        "MARKET_CRASH": WHEEL_GOLDEN_MARKET_CRASH_EST_EV,
+        "COMPOUND_INTEREST": WHEEL_GOLDEN_COMPOUND_EST_EV,
+        "TRICKLE_DOWN": WHEEL_GOLDEN_TRICKLE_DOWN_EST_EV,
+        "DIVIDEND": WHEEL_GOLDEN_DIVIDEND_EST_EV,
+        "HOSTILE_TAKEOVER": WHEEL_GOLDEN_HOSTILE_TAKEOVER_EST_EV,
+    })
+
+
+def _calculate_golden_adjusted_wedges(target_ev: float) -> list[tuple[str, int | str, str]]:
+    """
+    Calculate golden wheel wedges with OVEREXTENDED value adjusted to hit target EV.
+
+    Same pattern as _calculate_adjusted_wedges() but for the golden wheel.
+    Special string wedges use golden-specific EV estimates.
+    OVEREXTENDED is capped at -1 minimum (always negative).
+    """
+    _load_golden_special_wedge_evs()
+    num_wedges = len(_BASE_GOLDEN_WHEEL_WEDGES)
+
+    non_overextended_sum = sum(
+        v for _, v, _ in _BASE_GOLDEN_WHEEL_WEDGES
+        if isinstance(v, int) and v >= 0
+    )
+
+    special_ev_sum = sum(
+        _GOLDEN_SPECIAL_WEDGE_EST_EVS.get(v, 0.0)
+        for _, v, _ in _BASE_GOLDEN_WHEEL_WEDGES
+        if isinstance(v, str)
+    )
+
+    num_overextended = sum(
+        1 for _, v, _ in _BASE_GOLDEN_WHEEL_WEDGES
+        if isinstance(v, int) and v < 0
+    )
+
+    target_sum = target_ev * num_wedges
+    if num_overextended > 0:
+        overextended_value = int((target_sum - non_overextended_sum - special_ev_sum) / num_overextended)
+        overextended_value = min(overextended_value, -1)
+    else:
+        overextended_value = -398  # Fallback
+
+    adjusted = []
+    for label, value, color in _BASE_GOLDEN_WHEEL_WEDGES:
+        if isinstance(value, str):
+            adjusted.append((label, value, color))
+        elif value < 0:  # OVEREXTENDED placeholder
+            adjusted.append((str(overextended_value), overextended_value, color))
+        else:
+            adjusted.append((label, value, color))
+
+    return adjusted
+
+
+# Calculate golden wheel wedges (24-slice, positive EV, exclusive to top-N holders)
+GOLDEN_WHEEL_WEDGES = _calculate_golden_adjusted_wedges(WHEEL_GOLDEN_TARGET_EV)
+
+
+def get_wheel_wedges(is_bankrupt: bool = False, is_golden: bool = False) -> list[tuple[str, int | str, str]]:
+    """Get the appropriate wheel wedges based on player status."""
+    if is_golden:
+        return GOLDEN_WHEEL_WEDGES
     return BANKRUPT_WHEEL_WEDGES if is_bankrupt else WHEEL_WEDGES
 
 
 def get_wedge_at_index_for_player(
-    idx: int, is_bankrupt: bool = False
+    idx: int, is_bankrupt: bool = False, is_golden: bool = False
 ) -> tuple[str, int | str, str]:
     """Get wedge info at given index for the appropriate wheel type."""
-    wedges = get_wheel_wedges(is_bankrupt)
+    wedges = get_wheel_wedges(is_bankrupt, is_golden)
     return wedges[idx % len(wedges)]
 
 
@@ -466,10 +597,17 @@ def hex_to_rgb(hex_color: str) -> tuple[int, int, int]:
 # Separate cache for bankrupt wheel face
 _CACHED_BANKRUPT_WHEEL_FACE: dict[int, Image.Image] = {}
 
+# Separate cache for golden wheel face
+_CACHED_GOLDEN_WHEEL_FACE: dict[int, Image.Image] = {}
 
-def _get_wheel_face(size: int, is_bankrupt: bool = False) -> Image.Image:
+
+def _get_wheel_face(size: int, is_bankrupt: bool = False, is_golden: bool = False) -> Image.Image:
     """Get cached wheel face sprite (pieslices + glow ring, no text)."""
-    if is_bankrupt:
+    if is_golden:
+        if size not in _CACHED_GOLDEN_WHEEL_FACE:
+            _CACHED_GOLDEN_WHEEL_FACE[size] = _create_wheel_face(size, is_bankrupt=False, is_golden=True)
+        return _CACHED_GOLDEN_WHEEL_FACE[size]
+    elif is_bankrupt:
         if size not in _CACHED_BANKRUPT_WHEEL_FACE:
             _CACHED_BANKRUPT_WHEEL_FACE[size] = _create_wheel_face(size, is_bankrupt=True)
         return _CACHED_BANKRUPT_WHEEL_FACE[size]
@@ -479,7 +617,7 @@ def _get_wheel_face(size: int, is_bankrupt: bool = False) -> Image.Image:
         return _CACHED_WHEEL_FACE[size]
 
 
-def _create_wheel_face(size: int, is_bankrupt: bool = False) -> Image.Image:
+def _create_wheel_face(size: int, is_bankrupt: bool = False, is_golden: bool = False) -> Image.Image:
     """
     Create the wheel face sprite once: glow ring and colored wedge pieslices.
 
@@ -492,13 +630,18 @@ def _create_wheel_face(size: int, is_bankrupt: bool = False) -> Image.Image:
     center = size // 2
     radius = size // 2 - 30
 
-    wedges = get_wheel_wedges(is_bankrupt)
+    wedges = get_wheel_wedges(is_bankrupt, is_golden)
     num_wedges = len(wedges)
     angle_per_wedge = 360 / num_wedges
 
     # Draw outer glow ring (part of face so it rotates with wheel)
-    # Use red glow for bankrupt wheel to indicate danger
-    glow_color = (255, 50, 50) if is_bankrupt else (255, 215, 0)
+    # Use red for bankrupt, bright golden amber for golden, gold for normal
+    if is_golden:
+        glow_color = (255, 193, 0)
+    elif is_bankrupt:
+        glow_color = (255, 50, 50)
+    else:
+        glow_color = (255, 215, 0)
     for glow in range(5, 0, -1):
         glow_radius = radius + glow * 3
         draw.ellipse(
@@ -715,7 +858,7 @@ def _draw_shell_icon(shell_type: str, s: int) -> Image.Image:
 
 def _draw_wedge_labels(
     img: Image.Image, draw: ImageDraw.Draw, size: int, rotation: float,
-    is_bankrupt: bool = False
+    is_bankrupt: bool = False, is_golden: bool = False
 ) -> None:
     """Draw horizontal text labels on each wedge after rotation.
 
@@ -724,7 +867,7 @@ def _draw_wedge_labels(
     """
     center = size // 2
     radius = size // 2 - 30
-    wedges = get_wheel_wedges(is_bankrupt)
+    wedges = get_wheel_wedges(is_bankrupt, is_golden)
     num_wedges = len(wedges)
     angle_per_wedge = 360 / num_wedges
 
@@ -875,7 +1018,7 @@ def _draw_terminal_shell(draw: ImageDraw.Draw, size: int, frame_idx: int, displa
 def create_wheel_frame_for_gif(
     size: int, rotation: float, selected_idx: int | None = None,
     display_name: str | None = None, frame_idx: int = 0,
-    is_bankrupt: bool = False,
+    is_bankrupt: bool = False, is_golden: bool = False,
 ) -> Image.Image:
     """
     Create a single wheel frame optimized for GIF animation.
@@ -885,6 +1028,7 @@ def create_wheel_frame_for_gif(
 
     Args:
         is_bankrupt: If True, uses the reduced bankrupt wheel with extension slices.
+        is_golden: If True, uses the golden wheel for top-N jopacoin holders.
     """
     img = Image.new("RGBA", (size, size), (30, 30, 35, 255))
 
@@ -893,7 +1037,7 @@ def create_wheel_frame_for_gif(
 
     # Get cached wheel face (pieslices only) and rotate it
     # Use BILINEAR for faster rotation with minimal quality loss
-    face = _get_wheel_face(size, is_bankrupt)
+    face = _get_wheel_face(size, is_bankrupt, is_golden)
     rotated_face = face.rotate(-rotation, center=(center, center), resample=Image.BILINEAR)
 
     # Composite rotated face onto background
@@ -901,7 +1045,7 @@ def create_wheel_frame_for_gif(
 
     # Draw winner highlight on top of rotated face (if selected)
     draw = ImageDraw.Draw(img)
-    wedges = get_wheel_wedges(is_bankrupt)
+    wedges = get_wheel_wedges(is_bankrupt, is_golden)
     if selected_idx is not None:
         num_wedges = len(wedges)
         angle_per_wedge = 360 / num_wedges
@@ -938,10 +1082,10 @@ def create_wheel_frame_for_gif(
         _draw_matrix_rain(draw, size, frame_idx, phase)
 
     # Draw horizontal text labels on each wedge (after rotation so they stay readable)
-    _draw_wedge_labels(img, draw, size, rotation, is_bankrupt)
+    _draw_wedge_labels(img, draw, size, rotation, is_bankrupt, is_golden)
 
     # Composite cached static overlay (center circle, text, pointer)
-    static_overlay = _get_static_overlay(size)
+    static_overlay = _get_static_overlay(size, is_golden=is_golden)
     img = Image.alpha_composite(img, static_overlay)
 
     # Status bar / terminal shell at bottom
@@ -960,7 +1104,7 @@ def create_wheel_frame_for_gif(
 
 def create_wheel_gif(
     target_idx: int, size: int = 500, display_name: str | None = None,
-    is_bankrupt: bool = False,
+    is_bankrupt: bool = False, is_golden: bool = False,
 ) -> io.BytesIO:
     """
     Create an animated GIF of the wheel spinning and landing on target_idx.
@@ -975,6 +1119,7 @@ def create_wheel_gif(
         size: Image size in pixels
         display_name: User's Discord display name for JOPA-T terminal prompt
         is_bankrupt: If True, uses the reduced bankrupt wheel with extension slices.
+        is_golden: If True, uses the golden wheel for top-N jopacoin holders.
 
     Returns:
         BytesIO buffer containing the GIF data
@@ -984,7 +1129,7 @@ def create_wheel_gif(
     frames = []
     durations = []
 
-    wedges = get_wheel_wedges(is_bankrupt)
+    wedges = get_wheel_wedges(is_bankrupt, is_golden)
     num_wedges = len(wedges)
     angle_per_wedge = 360 / num_wedges
 
@@ -1086,7 +1231,7 @@ def create_wheel_gif(
     # Pre-render first frame to establish shared palette
     first_frame_rgba = create_wheel_frame_for_gif(
         size, 0, selected_idx=None, display_name=display_name, frame_idx=0,
-        is_bankrupt=is_bankrupt
+        is_bankrupt=is_bankrupt, is_golden=is_golden
     )
     first_frame_rgb = first_frame_rgba.convert("RGB")
     palette_image = first_frame_rgb.convert("P", palette=Image.ADAPTIVE, colors=256)
@@ -1137,7 +1282,7 @@ def create_wheel_gif(
 
         frame = create_wheel_frame_for_gif(
             size, rotation, selected_idx=target_idx if is_final else None,
-            display_name=display_name, frame_idx=i, is_bankrupt=is_bankrupt,
+            display_name=display_name, frame_idx=i, is_bankrupt=is_bankrupt, is_golden=is_golden,
         )
 
         # Quantize against shared palette for consistent colors across frames

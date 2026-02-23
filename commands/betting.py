@@ -33,6 +33,7 @@ from config import (
     TIP_FEE_RATE,
     WHEEL_BANKRUPT_PENALTY,
     WHEEL_COOLDOWN_SECONDS,
+    WHEEL_GOLDEN_TOP_N,
     WHEEL_LOSE_PENALTY_COOLDOWN,
 )
 from config import DISBURSE_MIN_FUND
@@ -51,6 +52,7 @@ from utils.neon_helpers import get_neon_service, send_neon_result
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
 from utils.wheel_drawing import (
     WHEEL_WEDGES,
+    GOLDEN_WHEEL_WEDGES,
     create_wheel_gif,
     create_explosion_gif,
     get_wedge_at_index,
@@ -469,11 +471,13 @@ class BettingCommands(commands.Cog):
                 logger.warning(f"Failed to send betting reminder to thread: {exc}", exc_info=True)
 
     def _create_wheel_gif_file(
-        self, target_idx: int, display_name: str | None = None, is_bankrupt: bool = False
+        self, target_idx: int, display_name: str | None = None,
+        is_bankrupt: bool = False, is_golden: bool = False
     ) -> discord.File:
         """Create a wheel animation and return as discord.File."""
         buffer = create_wheel_gif(
-            target_idx=target_idx, size=500, display_name=display_name, is_bankrupt=is_bankrupt
+            target_idx=target_idx, size=500, display_name=display_name,
+            is_bankrupt=is_bankrupt, is_golden=is_golden
         )
         return discord.File(buffer, filename="wheel.gif")
 
@@ -499,6 +503,7 @@ class BettingCommands(commands.Cog):
         extend_games_added: int = 0,
         extend_new_total: int = 0,
         is_bankrupt: bool = False,
+        is_golden: bool = False,
         jailbreak_new_total: int = 0,
         chain_value: int | None = None,
         chain_username: str = "someone",
@@ -506,6 +511,17 @@ class BettingCommands(commands.Cog):
         emergency_total: int = 0,
         reveal_avoids: list | None = None,
         reveal_deals: list | None = None,
+        heist_total: int = 0,
+        heist_count: int = 0,
+        market_crash_total: int = 0,
+        market_crash_count: int = 0,
+        compound_amount: int = 0,
+        trickle_total: int = 0,
+        trickle_count: int = 0,
+        dividend_amount: int = 0,
+        takeover_amount: int = 0,
+        takeover_victim_name: str = "rank #4",
+        takeover_missed: bool = False,
     ) -> discord.Embed:
         """Build the final result embed after the wheel stops."""
         label, value = result[0], result[1]  # (label, value, color)
@@ -674,6 +690,95 @@ class BettingCommands(commands.Cog):
                 f"*No one is safe.*"
             )
 
+        # --- Golden Wheel mechanics ---
+        elif value == "HEIST":
+            title = "🥇 HEIST! 🥇"
+            color = discord.Color.from_str("#7a5c00")
+            if heist_count == 0:
+                description = (
+                    f"**HEIST**\n\n"
+                    f"You cased the joint... but the bottom 3 are already broke.\n\n"
+                    f"*Consolation prize: **+20** {JOPACOIN_EMOTE}.*"
+                )
+            else:
+                description = (
+                    f"**HEIST**\n\n"
+                    f"💰 You robbed **{heist_count}** players at the bottom of the ladder!\n"
+                    f"Total stolen: **{heist_total}** {JOPACOIN_EMOTE}\n\n"
+                    f"*Crime pays — when you're already on top.*"
+                )
+
+        elif value == "MARKET_CRASH":
+            title = "📉 MARKET CRASH! 📉"
+            color = discord.Color.from_str("#8a4000")
+            if market_crash_count == 0:
+                description = (
+                    f"**CRASH**\n\n"
+                    f"You triggered a crash... but you're the only whale. No one to tax.\n\n"
+                    f"*Consolation prize: **+25** {JOPACOIN_EMOTE}.*"
+                )
+            else:
+                description = (
+                    f"**CRASH**\n\n"
+                    f"📉 Market crash! You taxed **{market_crash_count}** fellow top-3 players.\n"
+                    f"Total collected: **{market_crash_total}** {JOPACOIN_EMOTE}\n\n"
+                    f"*The rich get richer. That's just economics.*"
+                )
+
+        elif value == "COMPOUND_INTEREST":
+            title = "📈 COMPOUND INTEREST! 📈"
+            color = discord.Color.from_str("#6b8c00")
+            description = (
+                f"**COMPOUND**\n\n"
+                f"📈 Your wealth grows on itself!\n"
+                f"Earned **{compound_amount}** {JOPACOIN_EMOTE} (8% of your balance).\n\n"
+                f"*The most boring way to get rich — and the most reliable.*"
+            )
+
+        elif value == "TRICKLE_DOWN":
+            title = "💧 TRICKLE DOWN! 💧"
+            color = discord.Color.from_str("#5c7a00")
+            if trickle_count == 0:
+                description = (
+                    f"**TRICKLE**\n\n"
+                    f"Trickle down economics... but there's no one else to tax.\n\n"
+                    f"*Nothing happens. As usual.*"
+                )
+            else:
+                description = (
+                    f"**TRICKLE**\n\n"
+                    f"💧 You taxed **{trickle_count}** players 1-3% of their balance.\n"
+                    f"Total received: **{trickle_total}** {JOPACOIN_EMOTE}\n\n"
+                    f"*It trickled up, actually.*"
+                )
+
+        elif value == "DIVIDEND":
+            title = "💎 DIVIDEND! 💎"
+            color = discord.Color.from_str("#4a7000")
+            description = (
+                f"**DIVIDEND**\n\n"
+                f"💎 The server's collective wealth pays out!\n"
+                f"Earned **{dividend_amount}** {JOPACOIN_EMOTE} (0.5% of total guild wealth).\n\n"
+                f"*Being rich in a rich server pays dividends. Literally.*"
+            )
+
+        elif value == "HOSTILE_TAKEOVER":
+            title = "🏴 HOSTILE TAKEOVER! 🏴"
+            color = discord.Color.from_str("#6a2a80")
+            if takeover_missed:
+                description = (
+                    f"**TAKEOVER**\n\n"
+                    f"🏴 You targeted rank #4... but they're broke or don't exist.\n\n"
+                    f"*Consolation prize: **+40** {JOPACOIN_EMOTE}.*"
+                )
+            else:
+                description = (
+                    f"**TAKEOVER**\n\n"
+                    f"🏴 Corporate raid on **{takeover_victim_name}** (rank #4)!\n"
+                    f"Seized **{takeover_amount}** {JOPACOIN_EMOTE}.\n\n"
+                    f"*So close to the top — and yet, so far.*"
+                )
+
         elif isinstance(value, int) and value > 0:
             # Win
             if is_bankrupt and value == 1:
@@ -684,10 +789,24 @@ class BettingCommands(commands.Cog):
                 title = "🪙 Two Coins."
                 color = discord.Color.from_str("#3a3500")
                 description = f"**2**\n\nEven charity has standards. Here's 2.\n\n*Don't spend it all in one place.*"
+            elif is_golden and value == 250:
+                title = "👑 CROWN JEWEL! 👑"
+                color = discord.Color.from_str("#ffd700")
+                description = (
+                    f"**CROWN**\n\n"
+                    f"✨ **+250 {JOPACOIN_EMOTE} JACKPOT!** ✨\n\n"
+                    f"The golden wheel's ultimate prize.\n"
+                    f"The crown jewel of Jopacoin fortune.\n\n"
+                    f"*The server weeps. You reign.*"
+                )
             elif value == 100:
                 title = "🌟 JACKPOT! 🌟"
                 color = discord.Color.gold()
                 description = f"**{label}**\n\nYou won **{value}** {JOPACOIN_EMOTE}!"
+            elif is_golden:
+                title = "👑 Golden Win!"
+                color = discord.Color.from_str("#daa520")
+                description = f"**+{value} JC**\n\nYou won **{value}** {JOPACOIN_EMOTE} from the Golden Wheel!"
             else:
                 title = "🎉 Winner!"
                 color = discord.Color.green()
@@ -697,14 +816,24 @@ class BettingCommands(commands.Cog):
                 description += f"\n\n*{garnished} {JOPACOIN_EMOTE} went to debt repayment.*"
 
         elif isinstance(value, int) and value < 0:
-            # Bankrupt
-            title = "💀 BANKRUPT! 💀"
-            color = discord.Color.red()
-            description = (
-                f"**{label}**\n\n"
-                f"You lost **{abs(value)}** {JOPACOIN_EMOTE}!\n\n"
-                f"*The wheel shows no mercy...*"
-            )
+            if is_golden:
+                # OVEREXTENDED — golden wheel's penalty wedge
+                title = "📉 OVEREXTENDED! 📉"
+                color = discord.Color.from_str("#4a3000")
+                description = (
+                    f"**OVEREXTENDED**\n\n"
+                    f"You flew too close to the sun.\n\n"
+                    f"Lost **{abs(value)}** {JOPACOIN_EMOTE}.\n\n"
+                    f"*Pride goes before the fall.*"
+                )
+            else:
+                title = "💀 BANKRUPT! 💀"
+                color = discord.Color.red()
+                description = (
+                    f"**{label}**\n\n"
+                    f"You lost **{abs(value)}** {JOPACOIN_EMOTE}!\n\n"
+                    f"*The wheel shows no mercy...*"
+                )
         else:
             # Lose a Turn (0) - 5 day penalty cooldown
             title = "🚫 LOSE A TURN 🚫"
@@ -1493,10 +1622,40 @@ class BettingCommands(commands.Cog):
                 if penalty_games_remaining > 0:
                     is_eligible_for_bad_gamba = True
 
+        # Golden Wheel eligibility: top-N balance holders get the golden wheel
+        # Bankrupt/penalty wheel always takes priority — golden wheel only for non-bad-gamba
+        is_golden = False
+        if not is_eligible_for_bad_gamba:
+            top_n = await asyncio.to_thread(
+                functools.partial(self.player_service.get_leaderboard, guild_id, limit=WHEEL_GOLDEN_TOP_N)
+            )
+            top_n_ids = {p.discord_id for p in top_n}
+            is_golden = user_id in top_n_ids
+
+        # Public announcement when a top-N player spins the golden wheel
+        if is_golden and interaction.channel:
+            top_3_lines = "\n".join(
+                f"**#{i+1}** {p.name} — {p.jopacoin_balance} {JOPACOIN_EMOTE}"
+                for i, p in enumerate(top_n)
+            )
+            announce_embed = discord.Embed(
+                title="👑 GOLDEN WHEEL INCOMING 👑",
+                description=(
+                    f"👑 **{interaction.user.mention} is spinning the GOLDEN WHEEL!**\n"
+                    f"They are among the top {WHEEL_GOLDEN_TOP_N} wealthiest players in the server...\n\n"
+                    f"**Current top-{WHEEL_GOLDEN_TOP_N}:**\n{top_3_lines}"
+                ),
+                color=discord.Color.from_str("#ffd700"),
+            )
+            try:
+                await interaction.channel.send(embed=announce_embed)
+            except Exception:
+                pass
+
         # Pre-determine the result (use bad gamba wheel for negative balance or penalty)
-        wedges = get_wheel_wedges(is_eligible_for_bad_gamba)
+        wedges = get_wheel_wedges(is_eligible_for_bad_gamba, is_golden)
         result_idx = random.randint(0, len(wedges) - 1)
-        result_wedge = get_wedge_at_index_for_player(result_idx, is_eligible_for_bad_gamba)
+        result_wedge = get_wedge_at_index_for_player(result_idx, is_eligible_for_bad_gamba, is_golden)
 
         # Defer first - GIF generation can take a few seconds
         await interaction.response.defer()
@@ -1504,7 +1663,7 @@ class BettingCommands(commands.Cog):
         # Generate the complete animation GIF (plays once, ~20 seconds)
         user_display = interaction.user.name
         gif_file = await asyncio.to_thread(
-            self._create_wheel_gif_file, result_idx, user_display, is_eligible_for_bad_gamba
+            self._create_wheel_gif_file, result_idx, user_display, is_eligible_for_bad_gamba, is_golden
         )
 
         # Send via followup (since we deferred)
@@ -1605,6 +1764,19 @@ class BettingCommands(commands.Cog):
         emergency_total: int = 0
         reveal_avoids: list | None = None
         reveal_deals: list | None = None
+
+        # Golden wheel mechanic tracking
+        heist_total: int = 0
+        heist_count: int = 0
+        market_crash_total: int = 0
+        market_crash_count: int = 0
+        compound_amount: int = 0
+        trickle_total: int = 0
+        trickle_count: int = 0
+        dividend_amount: int = 0
+        takeover_amount: int = 0
+        takeover_victim_name: str = "rank #4"
+        takeover_missed: bool = False
 
         if result_value == "JAILBREAK":
             # Remove 1 penalty game (clamped at 0 inside add_penalty_games)
@@ -1797,6 +1969,161 @@ class BettingCommands(commands.Cog):
                 self.player_service.get_balance, user_id, guild_id
             )
 
+        # --- Golden Wheel outcome handlers ---
+        elif result_value == "HEIST":
+            # Steal 3-8% (min 1, max 20 JC) from each of the bottom 3 positive-balance players
+            bottom_players = await asyncio.to_thread(
+                functools.partial(self.player_service.get_leaderboard_bottom, guild_id, limit=3, min_balance=1)
+            )
+            # Exclude the spinner themselves
+            victims = [p for p in bottom_players if p.discord_id != user_id]
+            heist_total = 0
+            heist_count = 0
+            for victim in victims:
+                steal_amt = max(1, min(20, int(victim.jopacoin_balance * random.uniform(0.03, 0.08))))
+                try:
+                    await asyncio.to_thread(
+                        functools.partial(
+                            self.player_service.steal_atomic,
+                            thief_discord_id=user_id,
+                            victim_discord_id=victim.discord_id,
+                            guild_id=guild_id,
+                            amount=steal_amt,
+                        )
+                    )
+                    heist_total += steal_amt
+                    heist_count += 1
+                except Exception:
+                    pass
+            if heist_count == 0:
+                # Fallback: no eligible victims
+                heist_total = 20
+                await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, 20)
+            new_balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
+
+        elif result_value == "MARKET_CRASH":
+            # Tax the other top-3 players 5-10% each; coins go to spinner
+            top_3 = await asyncio.to_thread(
+                functools.partial(self.player_service.get_leaderboard, guild_id, limit=WHEEL_GOLDEN_TOP_N)
+            )
+            crash_victims = [p for p in top_3 if p.discord_id != user_id and p.jopacoin_balance > 0]
+            market_crash_total = 0
+            market_crash_count = 0
+            for victim in crash_victims:
+                tax_amt = max(1, int(victim.jopacoin_balance * random.uniform(0.05, 0.10)))
+                try:
+                    await asyncio.to_thread(
+                        functools.partial(
+                            self.player_service.steal_atomic,
+                            thief_discord_id=user_id,
+                            victim_discord_id=victim.discord_id,
+                            guild_id=guild_id,
+                            amount=tax_amt,
+                        )
+                    )
+                    market_crash_total += tax_amt
+                    market_crash_count += 1
+                except Exception:
+                    pass
+            if market_crash_count == 0:
+                # Fallback: spinner is only top-3 player
+                market_crash_total = 25
+                await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, 25)
+            new_balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
+
+        elif result_value == "COMPOUND_INTEREST":
+            # Earn 8% of spinner's own balance (min 5, max 150 JC)
+            compound_amount = max(5, min(150, int(new_balance * 0.08)))
+            garnishment_service = getattr(self.bot, "garnishment_service", None)
+            if garnishment_service and new_balance < 0:
+                result = await asyncio.to_thread(
+                    garnishment_service.add_income, user_id, compound_amount, guild_id
+                )
+                garnished_amount = result.get("garnished", 0)
+                new_balance = result.get("new_balance", new_balance + compound_amount)
+            else:
+                await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, compound_amount)
+                new_balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
+
+        elif result_value == "TRICKLE_DOWN":
+            # Tax all positive-balance players (spinner exempt) 1-3%, min 1 JC; coins go to spinner
+            all_players_td = await asyncio.to_thread(
+                functools.partial(self.player_service.get_leaderboard, guild_id, limit=9999)
+            )
+            trickle_pct = random.uniform(LIGHTNING_BOLT_PCT_MIN, LIGHTNING_BOLT_PCT_MAX)
+            trickle_total = 0
+            trickle_count = 0
+            for p in all_players_td:
+                if p.discord_id == user_id or p.jopacoin_balance <= 0:
+                    continue
+                tax = max(1, int(p.jopacoin_balance * trickle_pct))
+                await asyncio.to_thread(self.player_service.adjust_balance, p.discord_id, guild_id, -tax)
+                trickle_total += tax
+                trickle_count += 1
+            if trickle_total > 0:
+                garnishment_service = getattr(self.bot, "garnishment_service", None)
+                if garnishment_service and new_balance < 0:
+                    result = await asyncio.to_thread(
+                        garnishment_service.add_income, user_id, trickle_total, guild_id
+                    )
+                    garnished_amount = result.get("garnished", 0)
+                    new_balance = result.get("new_balance", new_balance + trickle_total)
+                else:
+                    await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, trickle_total)
+                    new_balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
+
+        elif result_value == "DIVIDEND":
+            # Earn 0.5% of total positive JC in guild (min 10 JC)
+            total_guild_wealth = await asyncio.to_thread(
+                self.player_service.get_total_positive_balance, guild_id
+            )
+            dividend_amount = max(10, int(total_guild_wealth * 0.005))
+            garnishment_service = getattr(self.bot, "garnishment_service", None)
+            if garnishment_service and new_balance < 0:
+                result = await asyncio.to_thread(
+                    garnishment_service.add_income, user_id, dividend_amount, guild_id
+                )
+                garnished_amount = result.get("garnished", 0)
+                new_balance = result.get("new_balance", new_balance + dividend_amount)
+            else:
+                await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, dividend_amount)
+                new_balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
+
+        elif result_value == "HOSTILE_TAKEOVER":
+            # Steal 5-10% from rank #4 (just outside top 3)
+            leaderboard_4 = await asyncio.to_thread(
+                functools.partial(self.player_service.get_leaderboard, guild_id, limit=WHEEL_GOLDEN_TOP_N + 1)
+            )
+            rank4 = leaderboard_4[WHEEL_GOLDEN_TOP_N] if len(leaderboard_4) > WHEEL_GOLDEN_TOP_N else None
+            takeover_missed = False
+            takeover_amount = 0
+            takeover_victim_name = "rank #4"
+            if rank4 and rank4.jopacoin_balance > 0:
+                takeover_amount = max(1, int(rank4.jopacoin_balance * random.uniform(0.05, 0.10)))
+                try:
+                    steal_result = await asyncio.to_thread(
+                        functools.partial(
+                            self.player_service.steal_atomic,
+                            thief_discord_id=user_id,
+                            victim_discord_id=rank4.discord_id,
+                            guild_id=guild_id,
+                            amount=takeover_amount,
+                        )
+                    )
+                    new_balance = steal_result["thief_new_balance"]
+                    if interaction.guild:
+                        rank4_member = interaction.guild.get_member(rank4.discord_id)
+                        takeover_victim_name = rank4_member.mention if rank4_member else rank4.name
+                except Exception:
+                    takeover_missed = True
+                    takeover_amount = 0
+            else:
+                # No rank 4 or rank 4 is in debt
+                takeover_missed = True
+                takeover_amount = 40
+                await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, 40)
+                new_balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
+
         elif result_value in ("EXTEND_1", "EXTEND_2"):
             # Bankruptcy penalty extension slices (only appear on bankrupt wheel)
             games_to_add = 1 if result_value == "EXTEND_1" else 2
@@ -1870,6 +2197,18 @@ class BettingCommands(commands.Cog):
         elif result_value in ("JAILBREAK", "CHAIN_REACTION", "TOWN_TRIAL", "DISCOVER",
                               "EMERGENCY", "REVEAL"):
             log_result = 0
+        elif result_value == "HEIST":
+            log_result = heist_total
+        elif result_value == "MARKET_CRASH":
+            log_result = market_crash_total
+        elif result_value == "COMPOUND_INTEREST":
+            log_result = compound_amount
+        elif result_value == "TRICKLE_DOWN":
+            log_result = trickle_total
+        elif result_value == "DIVIDEND":
+            log_result = dividend_amount
+        elif result_value == "HOSTILE_TAKEOVER":
+            log_result = 0 if takeover_missed else takeover_amount
         else:
             log_result = result_value if isinstance(result_value, int) else 0
 
@@ -1881,6 +2220,7 @@ class BettingCommands(commands.Cog):
                 result=log_result,
                 spin_time=int(now),
                 is_bankrupt=is_eligible_for_bad_gamba,
+                is_golden=is_golden,
             )
         )
 
@@ -1906,6 +2246,7 @@ class BettingCommands(commands.Cog):
             extend_games_added=extend_games_added,
             extend_new_total=extend_new_total,
             is_bankrupt=is_eligible_for_bad_gamba,
+            is_golden=is_golden,
             jailbreak_new_total=jailbreak_new_total,
             chain_value=chain_value,
             chain_username=chain_username,
@@ -1913,6 +2254,17 @@ class BettingCommands(commands.Cog):
             emergency_total=emergency_total,
             reveal_avoids=reveal_avoids,
             reveal_deals=reveal_deals,
+            heist_total=heist_total,
+            heist_count=heist_count,
+            market_crash_total=market_crash_total,
+            market_crash_count=market_crash_count,
+            compound_amount=compound_amount,
+            trickle_total=trickle_total,
+            trickle_count=trickle_count,
+            dividend_amount=dividend_amount,
+            takeover_amount=takeover_amount,
+            takeover_victim_name=takeover_victim_name,
+            takeover_missed=takeover_missed,
         )
         await message.edit(embed=result_embed)
 
@@ -2054,6 +2406,96 @@ class BettingCommands(commands.Cog):
 
         embed = discord.Embed(title=title, description=description, color=color)
         embed.set_footer(text="Bankruptcy Wheel Test - No effects applied")
+
+        await asyncio.sleep(0.5)
+        await message.edit(embed=embed)
+
+    @app_commands.command(name="ashfansgamba", description="Test spin the golden wheel (visual only, no effects)")
+    async def ashfansgamba(self, interaction: discord.Interaction):
+        """Spin the golden wheel for testing - no balance changes applied."""
+        user_id = interaction.user.id
+        guild_id = interaction.guild.id if interaction.guild else None
+
+        # Check if player is registered
+        player = await asyncio.to_thread(self.player_service.get_player, user_id, guild_id)
+        if not player:
+            await interaction.response.send_message(
+                "You need to `/register` before you can test the wheel.",
+                ephemeral=True,
+            )
+            return
+
+        # Always use golden wheel for this test command
+        wedges = get_wheel_wedges(is_golden=True)
+        result_idx = random.randint(0, len(wedges) - 1)
+        result_wedge = get_wedge_at_index_for_player(result_idx, is_golden=True)
+
+        await interaction.response.defer()
+
+        user_display = interaction.user.name
+        gif_file = await asyncio.to_thread(
+            self._create_wheel_gif_file, result_idx, user_display, False, True
+        )
+
+        message = await interaction.followup.send(file=gif_file, wait=True)
+
+        # Wait for animation
+        await asyncio.sleep(15.0)
+
+        result_value = result_wedge[1]
+        label = result_wedge[0]
+
+        if result_value == "HEIST":
+            title = "🥷 [TEST] HEIST! 🥷"
+            description = f"**{label}**\n\nThis would steal 3–8% (min 1, max 20 JC) from each of the bottom 3 positive-balance players.\n\n*This is a test spin - no changes applied.*"
+            color = discord.Color.from_str("#7a5c00")
+        elif result_value == "MARKET_CRASH":
+            title = "📉 [TEST] MARKET CRASH! 📉"
+            description = f"**{label}**\n\nThis would tax the other top-3 players 5–10% each, sending the coins to you.\n\n*This is a test spin - no changes applied.*"
+            color = discord.Color.from_str("#8a4000")
+        elif result_value == "COMPOUND_INTEREST":
+            title = "📈 [TEST] COMPOUND INTEREST! 📈"
+            description = f"**{label}**\n\nThis would earn 8% of your own balance (min 5, max 150 JC).\n\n*This is a test spin - no changes applied.*"
+            color = discord.Color.from_str("#6b8c00")
+        elif result_value == "TRICKLE_DOWN":
+            title = "🌧️ [TEST] TRICKLE DOWN! 🌧️"
+            description = f"**{label}**\n\nThis would tax all positive-balance players 1–3% (min 1 JC each), sending the coins to you.\n\n*This is a test spin - no changes applied.*"
+            color = discord.Color.from_str("#5c7a00")
+        elif result_value == "DIVIDEND":
+            title = "💰 [TEST] DIVIDEND! 💰"
+            description = f"**{label}**\n\nThis would earn 0.5% of the total positive JC in the server (min 10 JC).\n\n*This is a test spin - no changes applied.*"
+            color = discord.Color.from_str("#4a7000")
+        elif result_value == "HOSTILE_TAKEOVER":
+            title = "🏦 [TEST] HOSTILE TAKEOVER! 🏦"
+            description = f"**{label}**\n\nThis would steal 5–10% from the player ranked just outside the top 3.\n\n*This is a test spin - no changes applied.*"
+            color = discord.Color.from_str("#6a2a80")
+        elif result_value == "RED_SHELL":
+            title = "🔴 [TEST] RED SHELL! 🔴"
+            description = f"**{label}**\n\n*This is a test spin - no changes applied.*"
+            color = discord.Color.from_str("#cc6600")
+        elif result_value == "BLUE_SHELL":
+            title = "🔵 [TEST] BLUE SHELL! 🔵"
+            description = f"**{label}**\n\n*This is a test spin - no changes applied.*"
+            color = discord.Color.from_str("#4080c0")
+        elif result_value == 250:
+            title = "👑 [TEST] CROWN JEWEL! 👑"
+            description = f"**+250 JC**\n\nThe ultimate golden prize.\n\n*This is a test spin - no changes applied.*"
+            color = discord.Color.from_str("#fffacd")
+        elif isinstance(result_value, int) and result_value > 0:
+            title = f"✨ [TEST] +{result_value} JC ✨"
+            description = f"**+{result_value} JC**\n\n*This is a test spin - no changes applied.*"
+            color = discord.Color.from_str("#daa520")
+        elif isinstance(result_value, int) and result_value < 0:
+            title = "📊 [TEST] OVEREXTENDED! 📊"
+            description = f"**{result_value} JC**\n\nPride goes before the fall.\n\n*This is a test spin - no changes applied.*"
+            color = discord.Color.from_str("#4a3000")
+        else:
+            title = "🚫 [TEST] Unknown outcome"
+            description = f"**{label}**\n\n*This is a test spin - no changes applied.*"
+            color = discord.Color.dark_gray()
+
+        embed = discord.Embed(title=title, description=description, color=color)
+        embed.set_footer(text="Golden Wheel Test - No effects applied")
 
         await asyncio.sleep(0.5)
         await message.edit(embed=embed)

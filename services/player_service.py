@@ -285,7 +285,7 @@ class PlayerService:
 
     def log_wheel_spin(
         self, discord_id: int, guild_id: int | None, result: int, spin_time: int,
-        is_bankrupt: bool = False,
+        is_bankrupt: bool = False, is_golden: bool = False,
     ) -> int:
         """
         Log a wheel spin result for gambling history tracking.
@@ -296,11 +296,12 @@ class PlayerService:
             result: The spin result value (positive for win, negative for loss)
             spin_time: Unix timestamp of the spin
             is_bankrupt: True if this was a bankrupt wheel spin
+            is_golden: True if this was a golden wheel spin
 
         Returns:
             The spin log ID
         """
-        return self.player_repo.log_wheel_spin(discord_id, guild_id, result, spin_time, is_bankrupt)
+        return self.player_repo.log_wheel_spin(discord_id, guild_id, result, spin_time, is_bankrupt, is_golden)
 
     def get_last_normal_wheel_spin(self, guild_id: int | None) -> dict | None:
         """
@@ -343,6 +344,36 @@ class PlayerService:
             Player object of the player ranked above, or None if user is #1
         """
         return self.player_repo.get_player_above(discord_id, guild_id)
+
+    def get_leaderboard_bottom(self, guild_id: int, limit: int = 3, min_balance: int = 1):
+        """
+        Get players with the lowest positive balance, ascending order.
+
+        Used for HEIST golden wheel mechanic.
+
+        Args:
+            guild_id: Guild ID
+            limit: Maximum number of players to return
+            min_balance: Minimum balance threshold
+
+        Returns:
+            List of Player objects sorted by balance ascending
+        """
+        return self.player_repo.get_leaderboard_bottom(guild_id, limit, min_balance)
+
+    def get_total_positive_balance(self, guild_id: int) -> int:
+        """
+        Get sum of all positive jopacoin balances in the guild.
+
+        Used for DIVIDEND golden wheel mechanic.
+
+        Args:
+            guild_id: Guild ID
+
+        Returns:
+            Total positive balance across all guild members
+        """
+        return self.player_repo.get_total_positive_balance(guild_id)
 
     # --- Atomic transfer operations ---
 

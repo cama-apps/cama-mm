@@ -182,6 +182,16 @@ class IPlayerRepository(ABC):
         ...
 
     @abstractmethod
+    def get_leaderboard_bottom(self, guild_id: int, limit: int = 3, min_balance: int = 1) -> list:
+        """Get players with the lowest positive balance, ascending order."""
+        ...
+
+    @abstractmethod
+    def get_total_positive_balance(self, guild_id: int) -> int:
+        """Get sum of all positive jopacoin balances in the guild."""
+        ...
+
+    @abstractmethod
     def get_lowest_balance(self, discord_id: int, guild_id: int) -> int | None:
         """Get a player's lowest balance ever recorded."""
         ...

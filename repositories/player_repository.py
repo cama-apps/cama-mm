@@ -1953,7 +1953,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
 
     def log_wheel_spin(
         self, discord_id: int, guild_id: int | None, result: int, spin_time: int,
-        is_bankrupt: bool = False,
+        is_bankrupt: bool = False, is_golden: bool = False,
     ) -> int:
         """
         Log a wheel spin result for gambling history tracking.
@@ -1964,6 +1964,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             result: Spin result (positive for win, negative for bankrupt, 0 for lose turn)
             spin_time: Unix timestamp of the spin
             is_bankrupt: True if this spin was on the bankruptcy wheel
+            is_golden: True if this spin was on the golden wheel
 
         Returns:
             The spin_id of the created record
@@ -1973,10 +1974,10 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             cursor = conn.cursor()
             cursor.execute(
                 """
-                INSERT INTO wheel_spins (guild_id, discord_id, result, spin_time, is_bankrupt)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO wheel_spins (guild_id, discord_id, result, spin_time, is_bankrupt, is_golden)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (normalized_guild_id, discord_id, result, spin_time, 1 if is_bankrupt else 0),
+                (normalized_guild_id, discord_id, result, spin_time, 1 if is_bankrupt else 0, 1 if is_golden else 0),
             )
             return cursor.lastrowid
 
@@ -2445,6 +2446,63 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 return None
 
             return self._row_to_player(row)
+
+    def get_leaderboard_bottom(
+        self, guild_id: int, limit: int = 3, min_balance: int = 1
+    ) -> list[Player]:
+        """
+        Get players with the lowest positive balance, ordered ascending.
+
+        Used by HEIST golden wheel mechanic (steal from bottom 3 positive-balance players).
+
+        Args:
+            guild_id: Guild ID
+            limit: Maximum number of players to return
+            min_balance: Minimum balance threshold (exclusive of debt players)
+
+        Returns:
+            List of Player objects sorted by balance ascending
+        """
+        normalized_guild_id = guild_id if guild_id is not None else 0
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT * FROM players
+                WHERE guild_id = ? AND COALESCE(jopacoin_balance, 0) >= ?
+                ORDER BY COALESCE(jopacoin_balance, 0) ASC
+                LIMIT ?
+                """,
+                (normalized_guild_id, min_balance, limit),
+            )
+            rows = cursor.fetchall()
+            return [self._row_to_player(row) for row in rows]
+
+    def get_total_positive_balance(self, guild_id: int) -> int:
+        """
+        Get sum of all positive jopacoin balances in the guild.
+
+        Used by DIVIDEND golden wheel mechanic (reward proportional to server wealth).
+
+        Args:
+            guild_id: Guild ID
+
+        Returns:
+            Total positive balance across all guild members (0 if none)
+        """
+        normalized_guild_id = guild_id if guild_id is not None else 0
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT COALESCE(SUM(jopacoin_balance), 0) AS total
+                FROM players
+                WHERE guild_id = ? AND COALESCE(jopacoin_balance, 0) > 0
+                """,
+                (normalized_guild_id,),
+            )
+            row = cursor.fetchone()
+            return int(row["total"]) if row else 0
 
     def _row_to_player(self, row) -> Player:
         """Convert database row to Player object."""

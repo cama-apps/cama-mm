@@ -833,8 +833,8 @@ async def test_wheel_blue_shell_steals_from_richest():
                     with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
                         await commands.gamba.callback(commands, interaction)
 
-    # Should call get_leaderboard
-    player_service.get_leaderboard.assert_called_once_with(123, limit=1)
+    # Should call get_leaderboard (once for golden eligibility check, once for blue shell target)
+    player_service.get_leaderboard.assert_any_call(123, limit=1)
 
     # Should call steal_atomic: max(pct=5, flat=4) = 5 JC
     player_service.steal_atomic.assert_called_once_with(
@@ -881,7 +881,13 @@ async def test_wheel_blue_shell_self_hit_when_richest():
     player_service.try_claim_wheel_spin = MagicMock(return_value=True)
     player_service.log_wheel_spin = MagicMock(return_value=1)
     player_service.adjust_balance = MagicMock()
-    player_service.get_leaderboard = MagicMock(return_value=[user_as_richest])
+
+    # Return [] for golden eligibility check (limit=3), real data for blue shell (limit=1)
+    def leaderboard_side_effect(*args, **kwargs):
+        if kwargs.get("limit") == 3:
+            return []
+        return [user_as_richest]
+    player_service.get_leaderboard = MagicMock(side_effect=leaderboard_side_effect)
 
     message = MagicMock()
     message.edit = AsyncMock()
@@ -956,7 +962,13 @@ async def test_wheel_lightning_bolt_taxes_all_players():
                glicko_rating=None, glicko_rd=None, glicko_volatility=None,
                jopacoin_balance=100),
     ]
-    player_service.get_leaderboard = MagicMock(return_value=players)
+
+    # Return [] for golden eligibility check (limit=3), real data for lightning bolt
+    def leaderboard_side_effect(*args, **kwargs):
+        if kwargs.get("limit") == 3:
+            return []
+        return players
+    player_service.get_leaderboard = MagicMock(side_effect=leaderboard_side_effect)
 
     message = MagicMock()
     message.edit = AsyncMock()
@@ -1032,7 +1044,13 @@ async def test_wheel_lightning_bolt_skips_zero_balance():
                glicko_rating=None, glicko_rd=None, glicko_volatility=None,
                jopacoin_balance=-100),
     ]
-    player_service.get_leaderboard = MagicMock(return_value=players)
+
+    # Return [] for golden eligibility check (limit=3), real data for lightning bolt
+    def leaderboard_side_effect(*args, **kwargs):
+        if kwargs.get("limit") == 3:
+            return []
+        return players
+    player_service.get_leaderboard = MagicMock(side_effect=leaderboard_side_effect)
 
     message = MagicMock()
     message.edit = AsyncMock()
@@ -1102,7 +1120,13 @@ async def test_wheel_lightning_bolt_spinner_also_taxed():
                glicko_rating=None, glicko_rd=None, glicko_volatility=None,
                jopacoin_balance=200),
     ]
-    player_service.get_leaderboard = MagicMock(return_value=players)
+
+    # Return [] for golden eligibility check (limit=3), real data for lightning bolt
+    def leaderboard_side_effect(*args, **kwargs):
+        if kwargs.get("limit") == 3:
+            return []
+        return players
+    player_service.get_leaderboard = MagicMock(side_effect=leaderboard_side_effect)
 
     message = MagicMock()
     message.edit = AsyncMock()
