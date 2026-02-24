@@ -263,6 +263,14 @@ class PlayerService:
         """
         self.player_repo.set_last_wheel_spin(discord_id, guild_id, timestamp)
 
+    def get_wheel_pardon(self, discord_id: int, guild_id: int) -> bool:
+        """Get whether a player has an active COMEBACK wheel pardon token."""
+        return self.player_repo.get_wheel_pardon(discord_id, guild_id)
+
+    def set_wheel_pardon(self, discord_id: int, guild_id: int, value: int) -> None:
+        """Set a player's COMEBACK wheel pardon token (1=active, 0=inactive)."""
+        self.player_repo.set_wheel_pardon(discord_id, guild_id, value)
+
     def try_claim_wheel_spin(
         self, discord_id: int, guild_id: int, now: int, cooldown_seconds: int
     ) -> bool:
