@@ -177,7 +177,7 @@ LIGHTNING_BOLT_MIN_TAX = _parse_int("LIGHTNING_BOLT_MIN_TAX", 1)
 
 # Golden Wheel (exclusive to top N jopacoin balance holders)
 WHEEL_GOLDEN_TOP_N = _parse_int("WHEEL_GOLDEN_TOP_N", 3)
-WHEEL_GOLDEN_TARGET_EV = _parse_float("WHEEL_GOLDEN_TARGET_EV", 15.0)
+WHEEL_GOLDEN_TARGET_EV = _parse_float("WHEEL_GOLDEN_TARGET_EV", -10.0)
 # Estimated EVs for special golden wedges — used to calibrate OVEREXTENDED value
 # so the overall wheel EV stays at WHEEL_GOLDEN_TARGET_EV.
 WHEEL_GOLDEN_HEIST_EST_EV = _parse_float("WHEEL_GOLDEN_HEIST_EST_EV", 18.0)          # per wedge (×2)

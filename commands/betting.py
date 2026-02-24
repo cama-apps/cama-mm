@@ -58,6 +58,7 @@ from utils.wheel_drawing import (
     get_wedge_at_index,
     get_wheel_wedges,
     get_wedge_at_index_for_player,
+    compute_live_golden_wedges,
 )
 
 # 1% chance for the wheel to explode
@@ -697,7 +698,7 @@ class BettingCommands(commands.Cog):
             if heist_count == 0:
                 description = (
                     f"**HEIST**\n\n"
-                    f"You cased the joint... but the bottom 3 are already broke.\n\n"
+                    f"You cased the joint... but the bottom 30 are already broke.\n\n"
                     f"*Consolation prize: **+20** {JOPACOIN_EMOTE}.*"
                 )
             else:
@@ -1653,9 +1654,39 @@ class BettingCommands(commands.Cog):
                 pass
 
         # Pre-determine the result (use bad gamba wheel for negative balance or penalty)
-        wedges = get_wheel_wedges(is_eligible_for_bad_gamba, is_golden)
+        if is_golden:
+            # Fetch live data to compute OVEREXTENDED dynamically so EV stays pinned to target
+            # as server wealth changes (TRICKLE_DOWN, DIVIDEND, COMPOUND all scale with balances)
+            top_n_extended = await asyncio.to_thread(
+                functools.partial(self.player_service.get_leaderboard, guild_id, limit=WHEEL_GOLDEN_TOP_N + 1)
+            )
+            rank_next_live = top_n_extended[WHEEL_GOLDEN_TOP_N] if len(top_n_extended) > WHEEL_GOLDEN_TOP_N else None
+            rank_next_balance_live = (
+                rank_next_live.jopacoin_balance
+                if rank_next_live and rank_next_live.jopacoin_balance > 0
+                else None
+            )
+            total_positive_live = await asyncio.to_thread(
+                self.player_service.get_total_positive_balance, guild_id
+            )
+            bottom_players_live = await asyncio.to_thread(
+                functools.partial(self.player_service.get_leaderboard_bottom, guild_id, limit=30, min_balance=1)
+            )
+            bottom_balances_live = [p.jopacoin_balance for p in bottom_players_live if p.discord_id != user_id]
+            other_top_balances_live = [
+                p.jopacoin_balance for p in top_n if p.discord_id != user_id and p.jopacoin_balance > 0
+            ]
+            wedges = compute_live_golden_wedges(
+                spinner_balance=balance,
+                other_top_balances=other_top_balances_live,
+                rank_next_balance=rank_next_balance_live,
+                total_positive_balance=total_positive_live,
+                bottom_player_balances=bottom_balances_live,
+            )
+        else:
+            wedges = get_wheel_wedges(is_eligible_for_bad_gamba, is_golden)
         result_idx = random.randint(0, len(wedges) - 1)
-        result_wedge = get_wedge_at_index_for_player(result_idx, is_eligible_for_bad_gamba, is_golden)
+        result_wedge = wedges[result_idx % len(wedges)]
 
         # Defer first - GIF generation can take a few seconds
         await interaction.response.defer()
@@ -1971,16 +2002,16 @@ class BettingCommands(commands.Cog):
 
         # --- Golden Wheel outcome handlers ---
         elif result_value == "HEIST":
-            # Steal 3-8% (min 1, max 20 JC) from each of the bottom 3 positive-balance players
+            # Steal 3-8% (min 1 JC) from each of the bottom 30 positive-balance players
             bottom_players = await asyncio.to_thread(
-                functools.partial(self.player_service.get_leaderboard_bottom, guild_id, limit=3, min_balance=1)
+                functools.partial(self.player_service.get_leaderboard_bottom, guild_id, limit=30, min_balance=1)
             )
             # Exclude the spinner themselves
             victims = [p for p in bottom_players if p.discord_id != user_id]
             heist_total = 0
             heist_count = 0
             for victim in victims:
-                steal_amt = max(1, min(20, int(victim.jopacoin_balance * random.uniform(0.03, 0.08))))
+                steal_amt = max(1, int(victim.jopacoin_balance * random.uniform(0.03, 0.08)))
                 try:
                     await asyncio.to_thread(
                         functools.partial(
@@ -2425,10 +2456,36 @@ class BettingCommands(commands.Cog):
             )
             return
 
-        # Always use golden wheel for this test command
-        wedges = get_wheel_wedges(is_golden=True)
+        # Always use golden wheel for this test command, with live OVEREXTENDED calculation
+        top_n_test = await asyncio.to_thread(
+            functools.partial(self.player_service.get_leaderboard, guild_id, limit=WHEEL_GOLDEN_TOP_N + 1)
+        )
+        rank_next_test = top_n_test[WHEEL_GOLDEN_TOP_N] if len(top_n_test) > WHEEL_GOLDEN_TOP_N else None
+        rank_next_bal_test = (
+            rank_next_test.jopacoin_balance
+            if rank_next_test and rank_next_test.jopacoin_balance > 0
+            else None
+        )
+        total_positive_test = await asyncio.to_thread(
+            self.player_service.get_total_positive_balance, guild_id
+        )
+        bottom_players_test = await asyncio.to_thread(
+            functools.partial(self.player_service.get_leaderboard_bottom, guild_id, limit=30, min_balance=1)
+        )
+        bottom_bals_test = [p.jopacoin_balance for p in bottom_players_test if p.discord_id != user_id]
+        other_top_bals_test = [
+            p.jopacoin_balance for p in top_n_test[:WHEEL_GOLDEN_TOP_N]
+            if p.discord_id != user_id and p.jopacoin_balance > 0
+        ]
+        wedges = compute_live_golden_wedges(
+            spinner_balance=player.jopacoin_balance,
+            other_top_balances=other_top_bals_test,
+            rank_next_balance=rank_next_bal_test,
+            total_positive_balance=total_positive_test,
+            bottom_player_balances=bottom_bals_test,
+        )
         result_idx = random.randint(0, len(wedges) - 1)
-        result_wedge = get_wedge_at_index_for_player(result_idx, is_golden=True)
+        result_wedge = wedges[result_idx % len(wedges)]
 
         await interaction.response.defer()
 
@@ -2447,7 +2504,7 @@ class BettingCommands(commands.Cog):
 
         if result_value == "HEIST":
             title = "🥷 [TEST] HEIST! 🥷"
-            description = f"**{label}**\n\nThis would steal 3–8% (min 1, max 20 JC) from each of the bottom 3 positive-balance players.\n\n*This is a test spin - no changes applied.*"
+            description = f"**{label}**\n\nThis would steal 3–8% (min 1 JC) from each of the bottom 30 positive-balance players.\n\n*This is a test spin - no changes applied.*"
             color = discord.Color.from_str("#7a5c00")
         elif result_value == "MARKET_CRASH":
             title = "📉 [TEST] MARKET CRASH! 📉"

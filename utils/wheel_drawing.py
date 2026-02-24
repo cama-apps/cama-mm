@@ -569,7 +569,104 @@ def _calculate_golden_adjusted_wedges(target_ev: float) -> list[tuple[str, int |
     return adjusted
 
 
-# Calculate golden wheel wedges (24-slice, positive EV, exclusive to top-N holders)
+def compute_live_golden_wedges(
+    spinner_balance: int,
+    other_top_balances: list[int],
+    rank_next_balance: int | None,
+    total_positive_balance: int,
+    bottom_player_balances: list[int],
+    target_ev: float | None = None,
+) -> list[tuple[str, int | str, str]]:
+    """
+    Compute golden wheel wedges with OVEREXTENDED dynamically set to hit target_ev
+    based on current server state, so the EV stays accurate as the economy scales.
+
+    Args:
+        spinner_balance: Current JC balance of the spinning player.
+        other_top_balances: Positive balances of the other top-N players (MARKET_CRASH targets).
+        rank_next_balance: Balance of rank N+1 player (HOSTILE_TAKEOVER target), or None.
+        total_positive_balance: Sum of all positive JC balances in the guild.
+        bottom_player_balances: Positive balances of bottom-30 players excluding spinner (HEIST).
+        target_ev: Target EV per spin. Defaults to config.WHEEL_GOLDEN_TARGET_EV.
+    """
+    from config import (
+        WHEEL_GOLDEN_TARGET_EV,
+        LIGHTNING_BOLT_PCT_MIN,
+        LIGHTNING_BOLT_PCT_MAX,
+        WHEEL_RED_SHELL_EST_EV,
+        WHEEL_BLUE_SHELL_EST_EV,
+    )
+
+    if target_ev is None:
+        target_ev = WHEEL_GOLDEN_TARGET_EV
+
+    avg_trickle_pct = (LIGHTNING_BOLT_PCT_MIN + LIGHTNING_BOLT_PCT_MAX) / 2.0
+
+    # HEIST: steal 3-8% (avg 5.5%, min 1) from each of the bottom 30 players
+    heist_ev = float(sum(max(1, int(b * 0.055)) for b in bottom_player_balances))
+
+    # MARKET_CRASH: tax other top-N players 5-10% (avg 7.5%); fallback 25 if solo
+    if other_top_balances:
+        market_crash_ev = float(sum(max(1, int(b * 0.075)) for b in other_top_balances))
+    else:
+        market_crash_ev = 25.0
+
+    # COMPOUND_INTEREST: 8% of spinner's balance, hard-capped at 150 in code
+    compound_ev = float(max(5, min(150, int(max(0, spinner_balance) * 0.08))))
+
+    # TRICKLE_DOWN: tax all others 1-3% (avg 2%); approximate from total
+    others_positive = max(0, total_positive_balance - max(0, spinner_balance))
+    trickle_ev = float(int(others_positive * avg_trickle_pct))
+
+    # DIVIDEND: 0.5% of total guild positive balance, min 10
+    dividend_ev = float(max(10, int(total_positive_balance * 0.005)))
+
+    # HOSTILE_TAKEOVER: steal 5-10% (avg 7.5%) from rank N+1; fallback 40
+    if rank_next_balance:
+        hostile_ev = float(max(1, int(rank_next_balance * 0.075)))
+    else:
+        hostile_ev = 40.0
+
+    live_evs: dict[str, float] = {
+        "RED_SHELL": WHEEL_RED_SHELL_EST_EV,
+        "BLUE_SHELL": WHEEL_BLUE_SHELL_EST_EV,
+        "HEIST": heist_ev,
+        "MARKET_CRASH": market_crash_ev,
+        "COMPOUND_INTEREST": compound_ev,
+        "TRICKLE_DOWN": trickle_ev,
+        "DIVIDEND": dividend_ev,
+        "HOSTILE_TAKEOVER": hostile_ev,
+    }
+
+    num_wedges = len(_BASE_GOLDEN_WHEEL_WEDGES)
+    non_overextended_sum = sum(
+        v for _, v, _ in _BASE_GOLDEN_WHEEL_WEDGES if isinstance(v, int) and v >= 0
+    )
+    special_ev_sum = sum(
+        live_evs.get(v, 0.0)
+        for _, v, _ in _BASE_GOLDEN_WHEEL_WEDGES
+        if isinstance(v, str)
+    )
+    num_overextended = sum(
+        1 for _, v, _ in _BASE_GOLDEN_WHEEL_WEDGES if isinstance(v, int) and v < 0
+    )
+
+    target_sum = target_ev * num_wedges
+    if num_overextended > 0:
+        overextended_value = int(
+            (target_sum - non_overextended_sum - special_ev_sum) / num_overextended
+        )
+        overextended_value = min(overextended_value, -1)
+    else:
+        overextended_value = -1
+
+    return [
+        (label, overextended_value if (isinstance(v, int) and v < 0) else v, color)
+        for label, v, color in _BASE_GOLDEN_WHEEL_WEDGES
+    ]
+
+
+# Calculate golden wheel wedges (24-slice, exclusive to top-N holders)
 GOLDEN_WHEEL_WEDGES = _calculate_golden_adjusted_wedges(WHEEL_GOLDEN_TARGET_EV)
 
 
