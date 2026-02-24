@@ -106,6 +106,6 @@ def test_goodness_score_respects_role_matchup_weight(repo_db_path, monkeypatch):
     result = service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
 
     # value diff = |6500 - 6800| = 300
-    # role delta = sum(100, 400, 0) = 500; weighted by 0.19 -> 95
+    # role delta = sum(100, 400, 0, 0, 0) = 500; weighted by 0.17 -> 85
     # off-role penalty and exclusion penalty = 0
-    assert result["goodness_score"] == pytest.approx(395)
+    assert result["goodness_score"] == pytest.approx(385)

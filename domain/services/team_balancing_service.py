@@ -79,13 +79,15 @@ class TeamBalancingService:
         - Team1 carry (1) vs Team2 offlane (3)
         - Team2 carry (1) vs Team1 offlane (3)
         - Team1 mid (2) vs Team2 mid (2)
+        - Team1 pos4 vs Team2 pos5 (cross-lane support)
+        - Team2 pos4 vs Team1 pos5 (cross-lane support)
 
         Args:
             team1: First team
             team2: Second team
 
         Returns:
-            Sum of deltas across the three critical matchups
+            Sum of deltas across the five critical matchups
         """
         # Get players and their effective values for each role
         team1_carry_player, team1_carry_value = team1.get_player_by_role(
@@ -97,6 +99,12 @@ class TeamBalancingService:
         team1_mid_player, team1_mid_value = team1.get_player_by_role(
             "2", self.use_glicko, self.off_role_multiplier
         )
+        team1_pos4_player, team1_pos4_value = team1.get_player_by_role(
+            "4", self.use_glicko, self.off_role_multiplier
+        )
+        team1_pos5_player, team1_pos5_value = team1.get_player_by_role(
+            "5", self.use_glicko, self.off_role_multiplier
+        )
 
         team2_carry_player, team2_carry_value = team2.get_player_by_role(
             "1", self.use_glicko, self.off_role_multiplier
@@ -107,14 +115,22 @@ class TeamBalancingService:
         team2_mid_player, team2_mid_value = team2.get_player_by_role(
             "2", self.use_glicko, self.off_role_multiplier
         )
+        team2_pos4_player, team2_pos4_value = team2.get_player_by_role(
+            "4", self.use_glicko, self.off_role_multiplier
+        )
+        team2_pos5_player, team2_pos5_value = team2.get_player_by_role(
+            "5", self.use_glicko, self.off_role_multiplier
+        )
 
-        # Calculate the three critical matchups
+        # Calculate the five critical matchups
         carry_vs_offlane_1 = abs(team1_carry_value - team2_offlane_value)
         carry_vs_offlane_2 = abs(team2_carry_value - team1_offlane_value)
         mid_vs_mid = abs(team1_mid_value - team2_mid_value)
+        support_cross_1 = abs(team1_pos4_value - team2_pos5_value)
+        support_cross_2 = abs(team2_pos4_value - team1_pos5_value)
 
-        # Return the sum of all three deltas
-        return carry_vs_offlane_1 + carry_vs_offlane_2 + mid_vs_mid
+        # Return the sum of all five deltas
+        return carry_vs_offlane_1 + carry_vs_offlane_2 + mid_vs_mid + support_cross_1 + support_cross_2
 
     def calculate_matchup_score(self, team1: Team, team2: Team) -> float:
         """

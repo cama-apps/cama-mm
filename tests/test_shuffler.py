@@ -504,14 +504,16 @@ class TestRoleMatchupDelta:
         # carry1 vs offlane2 = |2000 - 1900| = 100
         # carry2 vs offlane1 = |1000 - 1200| = 200
         # mid vs mid = |1500 - 1500| = 0
-        # sum = 100 + 200 + 0 = 300
-        assert delta == 300
+        # pos4 cross = |1100 - 950| = 150
+        # pos4 cross = |1050 - 1000| = 50
+        # sum = 100 + 200 + 0 + 150 + 50 = 500
+        assert delta == 500
 
         score = service.calculate_matchup_score(team1, team2)
         # value difference = |6800 - 6400| = 400
         # off-role penalty = 0
-        # total should therefore be 400 + 300 = 700
-        assert score == pytest.approx(700)
+        # total should therefore be 400 + 500 = 900
+        assert score == pytest.approx(900)
 
     def test_role_matchup_delta_weight_applied_in_service(self):
         """Weight should scale the matchup delta when computing scores."""
@@ -538,13 +540,13 @@ class TestRoleMatchupDelta:
         )
 
         delta = service.calculate_role_matchup_delta(team1, team2)
-        assert delta == 300  # sum of the three matchups (100 + 200 + 0)
+        assert delta == 500  # sum of the five matchups (100 + 200 + 0 + 150 + 50)
 
         score = service.calculate_matchup_score(team1, team2)
         # value difference = |6800 - 6400| = 400
-        # weighted role delta = 300 * 0.5 = 150
+        # weighted role delta = 500 * 0.5 = 250
         # off-role penalty = 0
-        assert score == pytest.approx(550)
+        assert score == pytest.approx(650)
 
     def test_role_matchup_delta_weight_applied_in_shuffler_scoring(self):
         """BalancedShuffler should apply the weight when scoring matchups."""
@@ -588,9 +590,45 @@ class TestRoleMatchupDelta:
         )
 
         # value diff = |6500 - 6800| = 300
-        # role delta = sum(|2000-1900|, |1400-1000|, |1500-1500|) = 100 + 400 + 0 = 500
+        # role delta = sum(|2000-1900|, |1400-1000|, |1500-1500|, |1000-1000|, |1000-1000|)
+        #            = 100 + 400 + 0 + 0 + 0 = 500
         assert score_full == pytest.approx(800)  # 300 + 500
         assert score_half == pytest.approx(550)  # 300 + (500 * 0.5)
+
+    def test_support_cross_lane_delta_in_shuffler(self):
+        """BalancedShuffler should include pos4 vs pos5 cross-lane deltas."""
+        team1_players = [
+            Player(name="RadiantCarry", mmr=1500, preferred_roles=["1"]),
+            Player(name="RadiantMid", mmr=1500, preferred_roles=["2"]),
+            Player(name="RadiantOfflane", mmr=1500, preferred_roles=["3"]),
+            Player(name="RadiantSoft", mmr=1300, preferred_roles=["4"]),
+            Player(name="RadiantHard", mmr=900, preferred_roles=["5"]),
+        ]
+        team2_players = [
+            Player(name="DireCarry", mmr=1500, preferred_roles=["1"]),
+            Player(name="DireMid", mmr=1500, preferred_roles=["2"]),
+            Player(name="DireOfflane", mmr=1500, preferred_roles=["3"]),
+            Player(name="DireSoft", mmr=1100, preferred_roles=["4"]),
+            Player(name="DireHard", mmr=1200, preferred_roles=["5"]),
+        ]
+
+        team1 = Team(team1_players, role_assignments=["1", "2", "3", "4", "5"])
+        team2 = Team(team2_players, role_assignments=["1", "2", "3", "4", "5"])
+
+        shuffler = BalancedShuffler(
+            use_glicko=False,
+            consider_roles=True,
+            off_role_multiplier=1.0,
+            off_role_flat_penalty=0.0,
+            role_matchup_delta_weight=1.0,
+        )
+        delta = shuffler._calculate_role_matchup_delta(team1, team2)
+
+        # carry/offlane/mid all equal → 0
+        # pos4 cross 1: |1300 - 1200| = 100
+        # pos4 cross 2: |1100 - 900| = 200
+        # total = 0 + 0 + 0 + 100 + 200 = 300
+        assert delta == 300
 
 
 def _create_players_with_roles(count: int, base_mmr: int = 1500, spread: int = 50) -> list[Player]:
