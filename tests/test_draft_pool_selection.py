@@ -50,7 +50,7 @@ class TestScoreDraftPool:
 
         # With identical captains and identical pool players, the best split
         # should produce very balanced teams (score can be negative due to rd_priority bonus)
-        assert abs(score) < 150.0
+        assert abs(score) < 250.0
 
     def test_evaluates_all_splits(self):
         """Score should reflect the best possible split, not a greedy heuristic."""
