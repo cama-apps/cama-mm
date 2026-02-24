@@ -12,7 +12,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from config import BOMB_POT_CHANCE, ENRICHMENT_RETRY_DELAYS, JOPACOIN_MIN_BET, OPENSKILL_SHUFFLE_CHANCE
+from config import BOMB_POT_CHANCE, ENRICHMENT_RETRY_DELAYS, JOPACOIN_MIN_BET, OPENSKILL_SHUFFLE_CHANCE, STREAMING_BONUS
 from services.flavor_text_service import FlavorEvent
 from services.lobby_service import LobbyService
 from services.match_discovery_service import MatchDiscoveryService
@@ -31,6 +31,7 @@ from utils.interaction_safety import safe_defer, update_lobby_message_closed
 from utils.neon_helpers import get_neon_service, send_neon_result
 from utils.pin_helpers import safe_unpin_all_bot_messages
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
+from utils.streaming import get_streaming_dota_player_ids
 
 logger = logging.getLogger("cama_bot.commands.match")
 
@@ -602,6 +603,26 @@ class MatchCommands(commands.Cog):
                 except Exception as exc:
                     logger.warning(f"Failed to create blind bets: {exc}", exc_info=True)
 
+        # Streaming bonus: award +1 JC to all lobby players (including excluded) who are Go Live + Dota 2
+        # Awarded at both shuffle and record time (intentional: rewards continuous streaming)
+        streaming_bonus_names = []
+        if guild and hasattr(guild, "get_member") and STREAMING_BONUS > 0:
+            all_lobby_ids = list(player_ids) + list(excluded_conditional_ids)
+            streaming_ids = get_streaming_dota_player_ids(guild, all_lobby_ids)
+            if streaming_ids:
+                betting_svc = getattr(self.bot, "betting_service", None)
+                if betting_svc:
+                    betting_svc.award_streaming_bonus(list(streaming_ids), guild_id)
+                for sid in streaming_ids:
+                    player_obj = self.player_service.get_player(sid, guild_id)
+                    if player_obj:
+                        streaming_bonus_names.append(
+                            get_player_display_name(player_obj, discord_id=sid, guild=guild)
+                        )
+                logger.info(
+                    f"Streaming bonus (+{STREAMING_BONUS} JC) at shuffle: {streaming_ids}"
+                )
+
         radiant_lines = self._format_team_lines(
             radiant_team, radiant_roles, player_ids, players, guild, balancing_system=rs
         )
@@ -700,6 +721,8 @@ class MatchCommands(commands.Cog):
                 else:
                     conditional_names.append(f"Unknown({pid})")
             balance_info += f"\n{FROGLING_EMOTE} **Pulled from conditional:** {', '.join(conditional_names)}"
+        if streaming_bonus_names:
+            balance_info += f"\n📺 **Streaming bonus (+{STREAMING_BONUS} {JOPACOIN_EMOTE}):** {', '.join(streaming_bonus_names)}"
         embed.add_field(name="📊 Balance", value=balance_info, inline=False)
 
         # Betting instructions (mode-aware)
@@ -1200,6 +1223,25 @@ class MatchCommands(commands.Cog):
             distribution_text += f"\n\n💬 {ai_flavor}"
         if match_flavor:
             distribution_text += f"\n\n🎮 {match_flavor}"
+
+        # Streaming bonus at record time: award +1 JC to match participants who are Go Live + Dota 2
+        # Awarded at both shuffle and record time (intentional: rewards continuous streaming)
+        if guild and hasattr(guild, "get_member") and STREAMING_BONUS > 0:
+            all_participant_ids = list(record_result.get("winning_player_ids", [])) + list(
+                record_result.get("losing_player_ids", [])
+            )
+            streaming_ids = get_streaming_dota_player_ids(guild, all_participant_ids)
+            if streaming_ids:
+                betting_svc = getattr(self.bot, "betting_service", None)
+                if betting_svc:
+                    betting_svc.award_streaming_bonus(list(streaming_ids), guild_id)
+                streamer_mentions = ", ".join(f"<@{sid}>" for sid in streaming_ids)
+                distribution_text += (
+                    f"\n📺 Streaming bonus (+{STREAMING_BONUS} {JOPACOIN_EMOTE}): {streamer_mentions}"
+                )
+                logger.info(
+                    f"Streaming bonus (+{STREAMING_BONUS} JC) at record: {streaming_ids}"
+                )
 
         admin_override = (
             is_admin
