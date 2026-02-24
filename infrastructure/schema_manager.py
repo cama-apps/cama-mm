@@ -245,6 +245,8 @@ class SchemaManager:
             ("add_is_bankrupt_to_wheel_spins", self._migration_add_is_bankrupt_to_wheel_spins),
             # Golden wheel: track golden wheel spins separately
             ("add_is_golden_to_wheel_spins", self._migration_add_is_golden_to_wheel_spins),
+            # Comeback mechanic: one-use pardon token for next BANKRUPT
+            ("add_wheel_pardon_to_players", self._migration_add_wheel_pardon_to_players),
         ]
 
     # --- Migrations ---
@@ -1613,3 +1615,7 @@ class SchemaManager:
     def _migration_add_is_golden_to_wheel_spins(self, cursor) -> None:
         """Add is_golden column to wheel_spins for golden wheel tracking."""
         self._add_column_if_not_exists(cursor, "wheel_spins", "is_golden", "INTEGER DEFAULT 0")
+
+    def _migration_add_wheel_pardon_to_players(self, cursor) -> None:
+        """Add has_wheel_pardon column to players for COMEBACK mechanic one-use pardon token."""
+        self._add_column_if_not_exists(cursor, "players", "has_wheel_pardon", "INTEGER DEFAULT 0")

@@ -510,8 +510,9 @@ class BettingCommands(commands.Cog):
         chain_username: str = "someone",
         emergency_count: int = 0,
         emergency_total: int = 0,
-        reveal_avoids: list | None = None,
-        reveal_deals: list | None = None,
+        commune_total: int = 0,
+        commune_count: int = 0,
+        pardon_consumed: bool = False,
         heist_total: int = 0,
         heist_count: int = 0,
         market_crash_total: int = 0,
@@ -577,32 +578,24 @@ class BettingCommands(commands.Cog):
                 f"*No one is safe. Not even you.*"
             )
 
-        elif value == "REVEAL":
-            title = "🔍 REVEAL! 🔍"
-            color = discord.Color.from_str("#1a0a2a")
-            avoids = reveal_avoids or []
-            deals = reveal_deals or []
-            if not avoids and not deals:
-                description = (
-                    f"**SPY**\n\n"
-                    f"Nothing to reveal — you have no active purchases.\n\n"
-                    f"*Anticlimactic. The crowd is disappointed.*"
-                )
-            else:
-                lines = []
-                if avoids:
-                    lines.append(f"**Soft Avoids ({len(avoids)}):**")
-                    for a in avoids:
-                        lines.append(f"• Avoiding discord_id `{a.avoided_discord_id}` — {a.games_remaining} games left")
-                if deals:
-                    lines.append(f"**Package Deals ({len(deals)}):**")
-                    for d in deals:
-                        lines.append(f"• Partnered with discord_id `{d.partner_discord_id}` — {d.games_remaining} games left, paid {d.cost_paid} JC")
-                description = (
-                    f"**SPY**\n\n"
-                    f"🔍 Your secret purchases, exposed to all:\n\n"
-                    + "\n".join(lines)
-                )
+        elif value == "COMMUNE":
+            title = "🫳 SEIZE THE MEANS! 🫳"
+            color = discord.Color.from_str("#1a2a1a")
+            description = (
+                f"**SEIZE**\n\n"
+                f"{commune_count} players each donated 1 JC. "
+                f"You received **+{commune_total} JC** from the collective.\n\n"
+                f"*From each according to their balance, to you.*"
+            )
+
+        elif value == "COMEBACK":
+            title = "🃏 CLUTCH SAVE! 🃏"
+            color = discord.Color.from_str("#0a1a2a")
+            description = (
+                f"**CLUTCH**\n\n"
+                f"Fortune smiles — once. Your next BANKRUPT will be converted to a LOSE instead. "
+                f"*Don't waste it.*"
+            )
 
         elif value in ("EXTEND_1", "EXTEND_2"):
             # Bankruptcy penalty extension (only appears on bankrupt wheel)
@@ -835,6 +828,14 @@ class BettingCommands(commands.Cog):
                     f"You lost **{abs(value)}** {JOPACOIN_EMOTE}!\n\n"
                     f"*The wheel shows no mercy...*"
                 )
+        elif pardon_consumed:
+            # COMEBACK pardon absorbed the BANKRUPT
+            title = "🃏 CLUTCH ACTIVATED! — BANKRUPT SAVED 🃏"
+            color = discord.Color.from_str("#0a1a2a")
+            description = (
+                f"**CLUTCH**\n\n"
+                f"You were about to go BANKRUPT... but your CLUTCH token saved you. Treated as LOSE."
+            )
         else:
             # Lose a Turn (0) - 5 day penalty cooldown
             title = "🚫 LOSE A TURN 🚫"
@@ -1793,8 +1794,9 @@ class BettingCommands(commands.Cog):
         chain_username: str = "someone"
         emergency_count: int = 0
         emergency_total: int = 0
-        reveal_avoids: list | None = None
-        reveal_deals: list | None = None
+        commune_total: int = 0
+        commune_count: int = 0
+        pardon_consumed: bool = False
 
         # Golden wheel mechanic tracking
         heist_total: int = 0
@@ -1870,24 +1872,40 @@ class BettingCommands(commands.Cog):
             # Re-fetch spinner's balance (may have changed)
             new_balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
 
-        elif result_value == "REVEAL":
-            # Show spinner's own active soft avoids + package deals publicly
-            soft_avoid_svc = getattr(self.bot, "soft_avoid_service", None)
-            package_deal_svc = getattr(self.bot, "package_deal_service", None)
-            if soft_avoid_svc:
-                try:
-                    reveal_avoids = await asyncio.to_thread(
-                        soft_avoid_svc.get_user_avoids, guild_id, user_id
+        elif result_value == "COMMUNE":
+            # All positive-balance players donate 1 JC to the spinner
+            all_players_cm = await asyncio.to_thread(
+                functools.partial(self.player_service.get_leaderboard, guild_id, limit=9999)
+            )
+            for p in all_players_cm:
+                if p.discord_id != user_id and p.jopacoin_balance > 0:
+                    await asyncio.to_thread(
+                        self.player_service.adjust_balance, p.discord_id, guild_id, -1
                     )
-                except Exception:
-                    reveal_avoids = []
-            if package_deal_svc:
-                try:
-                    reveal_deals = await asyncio.to_thread(
-                        package_deal_svc.get_user_deals, guild_id, user_id
+                    commune_total += 1
+                    commune_count += 1
+            if commune_total > 0:
+                garnishment_service_cm = getattr(self.bot, "garnishment_service", None)
+                if garnishment_service_cm and new_balance < 0:
+                    result_cm = await asyncio.to_thread(
+                        garnishment_service_cm.add_income, user_id, commune_total, guild_id
                     )
-                except Exception:
-                    reveal_deals = []
+                    garnished_amount = result_cm.get("garnished", 0)
+                    new_balance = result_cm.get("new_balance", new_balance + commune_total)
+                else:
+                    await asyncio.to_thread(
+                        self.player_service.adjust_balance, user_id, guild_id, commune_total
+                    )
+                    new_balance = await asyncio.to_thread(
+                        self.player_service.get_balance, user_id, guild_id
+                    )
+
+        elif result_value == "COMEBACK":
+            # Grant one-use pardon token: next BANKRUPT becomes LOSE
+            await asyncio.to_thread(
+                self.player_service.set_wheel_pardon, user_id, guild_id, 1
+            )
+            # No balance change
 
         elif result_value == "RED_SHELL":
             # Mario Kart Red Shell: Steal 1-5% of balance from player ranked above
@@ -2185,19 +2203,32 @@ class BettingCommands(commands.Cog):
                 )
                 new_balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
         elif isinstance(result_value, int) and result_value < 0:
-            # Bankrupt: subtract penalty (ignores MAX_DEBT floor - can go deeper into debt)
-            await asyncio.to_thread(
-                self.player_service.adjust_balance, user_id, guild_id, result_value
-            )
-            new_balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
-            # Add losses to nonprofit fund
-            if self.loan_service:
-                try:
+            # Check for COMEBACK pardon token before applying BANKRUPT penalty
+            if is_eligible_for_bad_gamba:
+                pardon_active = await asyncio.to_thread(
+                    self.player_service.get_wheel_pardon, user_id, guild_id
+                )
+                if pardon_active:
                     await asyncio.to_thread(
-                        self.loan_service.add_to_nonprofit_fund, guild_id, abs(int(result_value))
+                        self.player_service.set_wheel_pardon, user_id, guild_id, 0
                     )
-                except Exception:
-                    logger.warning("Failed to add wheel loss to nonprofit fund")
+                    result_value = 0  # Convert to LOSE (no balance change, normal cooldown)
+                    result_wedge = (result_wedge[0], 0, result_wedge[2])
+                    pardon_consumed = True
+            if not pardon_consumed:
+                # Bankrupt: subtract penalty (ignores MAX_DEBT floor - can go deeper into debt)
+                await asyncio.to_thread(
+                    self.player_service.adjust_balance, user_id, guild_id, result_value
+                )
+                new_balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
+                # Add losses to nonprofit fund
+                if self.loan_service:
+                    try:
+                        await asyncio.to_thread(
+                            self.loan_service.add_to_nonprofit_fund, guild_id, abs(int(result_value))
+                        )
+                    except Exception:
+                        logger.warning("Failed to add wheel loss to nonprofit fund")
         # result_value == 0: "Lose a Turn" - no balance change, but extended cooldown
         if result_value == 0:
             # Apply the 1-week penalty cooldown for "Lose a Turn"
@@ -2226,8 +2257,10 @@ class BettingCommands(commands.Cog):
         elif result_value in ("EXTEND_1", "EXTEND_2"):
             log_result = 0
         elif result_value in ("JAILBREAK", "CHAIN_REACTION", "TOWN_TRIAL", "DISCOVER",
-                              "EMERGENCY", "REVEAL"):
+                              "EMERGENCY", "COMEBACK"):
             log_result = 0
+        elif result_value == "COMMUNE":
+            log_result = commune_total
         elif result_value == "HEIST":
             log_result = heist_total
         elif result_value == "MARKET_CRASH":
@@ -2283,8 +2316,9 @@ class BettingCommands(commands.Cog):
             chain_username=chain_username,
             emergency_count=emergency_count,
             emergency_total=emergency_total,
-            reveal_avoids=reveal_avoids,
-            reveal_deals=reveal_deals,
+            commune_total=commune_total,
+            commune_count=commune_count,
+            pardon_consumed=pardon_consumed,
             heist_total=heist_total,
             heist_count=heist_count,
             market_crash_total=market_crash_total,
@@ -2390,10 +2424,14 @@ class BettingCommands(commands.Cog):
             title = "🚨 [TEST] EMERGENCY! 🚨"
             description = f"**{label}**\n\nThis would drain up to 10 JC from all positive-balance players.\n\n*This is a test spin - no changes applied.*"
             color = discord.Color.from_str("#2a1a00")
-        elif result_value == "REVEAL":
-            title = "🔍 [TEST] REVEAL! 🔍"
-            description = f"**{label}**\n\nThis would publicly expose your active avoids and package deals.\n\n*This is a test spin - no changes applied.*"
-            color = discord.Color.from_str("#1a0a2a")
+        elif result_value == "COMMUNE":
+            title = "🫳 [TEST] SEIZE THE MEANS! 🫳"
+            description = f"**{label}**\n\nThis would collect 1 JC from every positive-balance player and give it to you.\n\n*This is a test spin - no changes applied.*"
+            color = discord.Color.from_str("#1a2a1a")
+        elif result_value == "COMEBACK":
+            title = "🃏 [TEST] CLUTCH SAVE! 🃏"
+            description = f"**{label}**\n\nThis would grant you a one-use pardon: your next BANKRUPT becomes a LOSE instead.\n\n*This is a test spin - no changes applied.*"
+            color = discord.Color.from_str("#0a1a2a")
         elif result_value in ("EXTEND_1", "EXTEND_2"):
             games = 1 if result_value == "EXTEND_1" else 2
             title = "⛓️ [TEST] PENALTY EXTENDED! ⛓️"

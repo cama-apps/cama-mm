@@ -1920,6 +1920,30 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 (timestamp, discord_id, guild_id),
             )
 
+    def get_wheel_pardon(self, discord_id: int, guild_id: int) -> bool:
+        """Get whether a player has an active COMEBACK wheel pardon token."""
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT has_wheel_pardon FROM players WHERE discord_id = ? AND guild_id = ?",
+                (discord_id, guild_id),
+            )
+            row = cursor.fetchone()
+            return bool(row and row["has_wheel_pardon"])
+
+    def set_wheel_pardon(self, discord_id: int, guild_id: int, value: int) -> None:
+        """Set a player's COMEBACK wheel pardon token (1=active, 0=inactive)."""
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE players
+                SET has_wheel_pardon = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE discord_id = ? AND guild_id = ?
+                """,
+                (value, discord_id, guild_id),
+            )
+
     def try_claim_wheel_spin(self, discord_id: int, guild_id: int, now: int, cooldown_seconds: int) -> bool:
         """
         Atomically check cooldown and claim a wheel spin.

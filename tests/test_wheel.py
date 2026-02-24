@@ -311,6 +311,9 @@ async def test_wheel_bankrupt_ignores_max_debt():
     player_service.try_claim_wheel_spin = MagicMock(return_value=True)
     player_service.log_wheel_spin = MagicMock(return_value=1)
     player_service.adjust_balance = MagicMock()
+    # No COMEBACK pardon active (so BANKRUPT applies normally)
+    player_service.get_wheel_pardon = MagicMock(return_value=False)
+    player_service.set_wheel_pardon = MagicMock()
 
     message = MagicMock()
     message.edit = AsyncMock()
@@ -1165,14 +1168,14 @@ async def test_wheel_lightning_bolt_spinner_also_taxed():
 # ============================================================================
 
 def test_bankrupt_wheel_has_correct_numbered_count():
-    """Bankrupt wheel has 10 numbered positive-value wedges (1,2,5,5,10,10,15,15,20,20)."""
+    """Bankrupt wheel has 9 numbered positive-value wedges (1,2,5,10,10,15,15,20,20)."""
     from utils.wheel_drawing import BANKRUPT_WHEEL_WEDGES
 
     numbered = sum(
         1 for w in BANKRUPT_WHEEL_WEDGES
         if isinstance(w[1], int) and w[1] > 0
     )
-    assert numbered == 10, f"Expected 10 numbered wedges, got {numbered}"
+    assert numbered == 9, f"Expected 9 numbered wedges, got {numbered}"
 
 
 def test_bankrupt_wheel_removes_high_values():
@@ -1210,9 +1213,9 @@ def test_bankrupt_wheel_total_wedge_count():
 
     Composition:
     - 2 BANKRUPT, 1 LOSE, 3 special shells/bolt, 2 extension slices = 8 non-positive
-    - 10 numbered (1,2,5,5,10,10,15,15,20,20)
-    - 6 new unique mechanics (JAILBREAK, CHAIN_REACTION, TOWN_TRIAL, DISCOVER, EMERGENCY, REVEAL)
-    Total = 8 + 10 + 6 = 24
+    - 9 numbered (1,2,5,10,10,15,15,20,20)
+    - 7 new unique mechanics (JAILBREAK, CHAIN_REACTION, TOWN_TRIAL, DISCOVER, EMERGENCY, COMMUNE, COMEBACK)
+    Total = 8 + 9 + 7 = 24
     """
     from utils.wheel_drawing import BANKRUPT_WHEEL_WEDGES
 
@@ -1301,7 +1304,7 @@ def test_bankrupt_wheel_bankrupt_value_recalculated():
 
 
 def test_bankrupt_wheel_has_all_new_slices():
-    """Bankrupt wheel should contain all 8 new unique mechanic slices."""
+    """Bankrupt wheel should contain all new unique mechanic slices."""
     from utils.wheel_drawing import BANKRUPT_WHEEL_WEDGES
 
     special_values = {w[1] for w in BANKRUPT_WHEEL_WEDGES if isinstance(w[1], str)}
@@ -1311,7 +1314,9 @@ def test_bankrupt_wheel_has_all_new_slices():
     assert "TOWN_TRIAL" in special_values, "TOWN_TRIAL should be on bankrupt wheel"
     assert "DISCOVER" in special_values, "DISCOVER should be on bankrupt wheel"
     assert "EMERGENCY" in special_values, "EMERGENCY should be on bankrupt wheel"
-    assert "REVEAL" in special_values, "REVEAL should be on bankrupt wheel"
+    assert "COMMUNE" in special_values, "COMMUNE should be on bankrupt wheel"
+    assert "COMEBACK" in special_values, "COMEBACK should be on bankrupt wheel"
+    assert "REVEAL" not in special_values, "REVEAL should NOT be on bankrupt wheel"
 
 
 def test_bankrupt_wheel_has_micro_win_slices():
@@ -1446,3 +1451,64 @@ async def test_wheel_negative_balance_uses_bankrupt_wheel():
     )
     # GIF must have been sent via followup
     interaction.followup.send.assert_awaited()
+
+
+def test_commune_credits_spinner_debits_positive_balance_players(repo_db_path):
+    """COMMUNE: each positive-balance player loses 1 JC; spinner gains total."""
+    from repositories.player_repository import PlayerRepository
+
+    player_repo = PlayerRepository(repo_db_path)
+
+    # Spinner (in debt)
+    player_repo.add(discord_id=8001, discord_username="Spinner", guild_id=0,
+                    glicko_rating=1500.0, glicko_rd=350.0, glicko_volatility=0.06)
+    player_repo.update_balance(8001, 0, -20)
+
+    # Two positive-balance donors
+    player_repo.add(discord_id=8002, discord_username="Donor1", guild_id=0,
+                    glicko_rating=1500.0, glicko_rd=350.0, glicko_volatility=0.06)
+    player_repo.update_balance(8002, 0, 50)
+
+    player_repo.add(discord_id=8003, discord_username="Donor2", guild_id=0,
+                    glicko_rating=1500.0, glicko_rd=350.0, glicko_volatility=0.06)
+    player_repo.update_balance(8003, 0, 10)
+
+    # One zero-balance player (should not donate)
+    player_repo.add(discord_id=8004, discord_username="Broke", guild_id=0,
+                    glicko_rating=1500.0, glicko_rd=350.0, glicko_volatility=0.06)
+    player_repo.update_balance(8004, 0, 0)  # explicitly set to 0
+
+    # Simulate COMMUNE: debit each positive-balance donor 1 JC, credit spinner
+    commune_total = 0
+    all_players = player_repo.get_leaderboard(0, limit=9999)
+    for p in all_players:
+        if p.discord_id != 8001 and p.jopacoin_balance > 0:
+            player_repo.add_balance(p.discord_id, 0, -1)
+            commune_total += 1
+    player_repo.add_balance(8001, 0, commune_total)
+
+    assert commune_total == 2, f"Expected 2 donors, got {commune_total}"
+    assert player_repo.get_balance(8001, 0) == -20 + 2, "Spinner should have gained commune_total JC"
+    assert player_repo.get_balance(8002, 0) == 49, "Donor1 should have lost 1 JC"
+    assert player_repo.get_balance(8003, 0) == 9, "Donor2 should have lost 1 JC"
+    assert player_repo.get_balance(8004, 0) == 0, "Zero-balance player should be unchanged"
+
+
+def test_comeback_sets_and_consumes_pardon(repo_db_path):
+    """COMEBACK sets pardon token; next BANKRUPT check consumes it and returns True."""
+    from repositories.player_repository import PlayerRepository
+
+    player_repo = PlayerRepository(repo_db_path)
+    player_repo.add(discord_id=8010, discord_username="ComebackPlayer", guild_id=0,
+                    glicko_rating=1500.0, glicko_rd=350.0, glicko_volatility=0.06)
+
+    # Initially no pardon
+    assert player_repo.get_wheel_pardon(8010, 0) is False, "Should have no pardon initially"
+
+    # Simulate rolling COMEBACK: grant pardon
+    player_repo.set_wheel_pardon(8010, 0, 1)
+    assert player_repo.get_wheel_pardon(8010, 0) is True, "Pardon should be active after COMEBACK"
+
+    # Simulate rolling BANKRUPT: consume pardon
+    player_repo.set_wheel_pardon(8010, 0, 0)
+    assert player_repo.get_wheel_pardon(8010, 0) is False, "Pardon should be consumed after BANKRUPT"

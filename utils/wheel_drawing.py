@@ -297,6 +297,8 @@ def _load_special_wedge_evs() -> None:
         return
     from config import (
         WHEEL_BLUE_SHELL_EST_EV,
+        WHEEL_COMEBACK_EST_EV,
+        WHEEL_COMMUNE_EST_EV,
         WHEEL_LIGHTNING_BOLT_EST_EV,
         WHEEL_RED_SHELL_EST_EV,
     )
@@ -304,6 +306,8 @@ def _load_special_wedge_evs() -> None:
         "RED_SHELL": WHEEL_RED_SHELL_EST_EV,
         "BLUE_SHELL": WHEEL_BLUE_SHELL_EST_EV,
         "LIGHTNING_BOLT": WHEEL_LIGHTNING_BOLT_EST_EV,
+        "COMMUNE": WHEEL_COMMUNE_EST_EV,
+        "COMEBACK": WHEEL_COMEBACK_EST_EV,
     })
 
 
@@ -386,7 +390,6 @@ _BASE_BANKRUPT_WHEEL_WEDGES = [
     ("+2", "EXTEND_2", "#660000"),
     # Kept: low-value numbered wins
     ("5", 5, "#2d5a27"),
-    ("5", 5, "#2d5a27"),
     ("10", 10, "#3d7a37"),
     ("10", 10, "#3d7a37"),
     ("15", 15, "#4d9a47"),
@@ -402,7 +405,8 @@ _BASE_BANKRUPT_WHEEL_WEDGES = [
     ("TRIAL", "TOWN_TRIAL", "#2a1a1a"),      # Server-wide vote (3 options, 5 min)
     ("FIND", "DISCOVER", "#1a2a2a"),         # Spinner picks from 3 options (60s)
     ("SOS", "EMERGENCY", "#2a1a00"),         # All +balance players lose ≤10 JC
-    ("SPY", "REVEAL", "#1a0a2a"),            # Posts spinner's own avoids + deals
+    ("SEIZE", "COMMUNE", "#1a2a1a"),         # All +balance players donate 1 JC to spinner
+    ("CLUTCH", "COMEBACK", "#0a1a2a"),       # One-use pardon: next BANKRUPT becomes LOSE
 ]
 
 

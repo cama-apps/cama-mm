@@ -169,6 +169,12 @@ WHEEL_BLUE_SHELL_EST_EV = _parse_float("WHEEL_BLUE_SHELL_EST_EV", -2.0)
 # LIGHTNING_BOLT: taxes ALL positive-balance players 1-3%, all to nonprofit sink
 # estimate ~15 active players * ~100 avg balance * ~2% avg tax = ~30 JC destroyed
 WHEEL_LIGHTNING_BOLT_EST_EV = _parse_float("WHEEL_LIGHTNING_BOLT_EST_EV", -30.0)
+# COMMUNE: all positive-balance players donate 1 JC to spinner; positive for spinner
+# estimate ~8 active players with positive balance → spinner receives ~8 JC
+WHEEL_COMMUNE_EST_EV = _parse_float("WHEEL_COMMUNE_EST_EV", 8.0)
+# COMEBACK: grants one-use pardon token; next BANKRUPT becomes LOSE
+# estimated ~15 JC value (soft positive: negates a future BANKRUPT hit)
+WHEEL_COMEBACK_EST_EV = _parse_float("WHEEL_COMEBACK_EST_EV", 15.0)
 
 # Lightning Bolt (wheel wedge: server-wide tax to nonprofit)
 LIGHTNING_BOLT_PCT_MIN = _parse_float("LIGHTNING_BOLT_PCT_MIN", 0.01)
