@@ -83,6 +83,7 @@ class ServiceContainer:
         self._init_match_services()
         self._init_advanced_services()
         self._init_ai_services()
+        self._init_rebellion_service()
         self._init_extras()
 
         self._initialized = True
@@ -114,6 +115,7 @@ class ServiceContainer:
         from repositories.tip_repository import TipRepository
         from repositories.neon_event_repository import NeonEventRepository
         from repositories.wrapped_repository import WrappedRepository
+        from repositories.rebellion_repository import RebellionRepository
 
         p = self.db_path
         self._components.update({
@@ -133,6 +135,7 @@ class ServiceContainer:
             "tip_repo": TipRepository(p),
             "neon_event_repo": NeonEventRepository(p),
             "wrapped_repo": WrappedRepository(p),
+            "rebellion_repo": RebellionRepository(p),
         })
 
     def _init_core_services(self) -> None:
@@ -301,6 +304,17 @@ class ServiceContainer:
         c["sql_query_service"] = sql_query_service
         c["flavor_text_service"] = flavor_text_service
 
+    def _init_rebellion_service(self) -> None:
+        """Rebellion (Wheel War) service."""
+        from services.rebellion_service import RebellionService
+
+        c = self._components
+        c["rebellion_service"] = RebellionService(
+            rebellion_repo=c["rebellion_repo"],
+            bankruptcy_repo=c["bankruptcy_repo"],
+            player_repo=c["player_repo"],
+        )
+
     def _init_extras(self) -> None:
         """Neon Degen Terminal and Wrapped services."""
         from services.neon_degen_service import NeonDegenService
@@ -376,6 +390,8 @@ class ServiceContainer:
         bot.rating_comparison_service = c["rating_comparison_service"]
         bot.neon_degen_service = c["neon_degen_service"]
         bot.wrapped_service = c["wrapped_service"]
+        bot.rebellion_service = c["rebellion_service"]
+        bot.rebellion_repo = c["rebellion_repo"]
 
         # AI services (may be None)
         bot.ai_service = c["ai_service"]

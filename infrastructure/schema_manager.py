@@ -247,6 +247,9 @@ class SchemaManager:
             ("add_is_golden_to_wheel_spins", self._migration_add_is_golden_to_wheel_spins),
             # Comeback mechanic: one-use pardon token for next BANKRUPT
             ("add_wheel_pardon_to_players", self._migration_add_wheel_pardon_to_players),
+            # Wheel War (Rebellion) feature
+            ("create_wheel_wars_table", self._migration_create_wheel_wars_table),
+            ("create_war_bets_table", self._migration_create_war_bets_table),
         ]
 
     # --- Migrations ---
@@ -1619,3 +1622,67 @@ class SchemaManager:
     def _migration_add_wheel_pardon_to_players(self, cursor) -> None:
         """Add has_wheel_pardon column to players for COMEBACK mechanic one-use pardon token."""
         self._add_column_if_not_exists(cursor, "players", "has_wheel_pardon", "INTEGER DEFAULT 0")
+
+    def _migration_create_wheel_wars_table(self, cursor) -> None:
+        """Create wheel_wars table for the Wheel War (Rebellion) feature."""
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS wheel_wars (
+                war_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                inciter_id INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'voting',
+                attack_voter_ids TEXT NOT NULL DEFAULT '[]',
+                defend_voter_ids TEXT NOT NULL DEFAULT '[]',
+                effective_attack_count REAL NOT NULL DEFAULT 0,
+                effective_defend_count REAL NOT NULL DEFAULT 0,
+                vote_closes_at INTEGER NOT NULL,
+                battle_roll INTEGER,
+                victory_threshold INTEGER,
+                outcome TEXT,
+                wheel_effect_spins_remaining INTEGER NOT NULL DEFAULT 0,
+                war_scar_wedge_label TEXT,
+                celebration_spins_used TEXT NOT NULL DEFAULT '[]',
+                celebration_spin_expires_at INTEGER,
+                rebel_bet_ids TEXT NOT NULL DEFAULT '[]',
+                wheel_bet_ids TEXT NOT NULL DEFAULT '[]',
+                meta_bet_closes_at INTEGER,
+                inciter_cooldown_until INTEGER,
+                created_at INTEGER NOT NULL,
+                resolved_at INTEGER
+            )
+            """
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_wheel_wars_guild_status "
+            "ON wheel_wars(guild_id, status)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_wheel_wars_guild_active "
+            "ON wheel_wars(guild_id, wheel_effect_spins_remaining)"
+        )
+
+    def _migration_create_war_bets_table(self, cursor) -> None:
+        """Create war_bets table for meta-betting during wheel wars."""
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS war_bets (
+                bet_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                war_id INTEGER NOT NULL,
+                guild_id INTEGER NOT NULL,
+                discord_id INTEGER NOT NULL,
+                side TEXT NOT NULL,
+                amount INTEGER NOT NULL,
+                payout INTEGER,
+                created_at INTEGER NOT NULL,
+                FOREIGN KEY (war_id) REFERENCES wheel_wars(war_id)
+            )
+            """
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_war_bets_war_id ON war_bets(war_id)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_war_bets_guild_discord "
+            "ON war_bets(guild_id, discord_id)"
+        )

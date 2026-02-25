@@ -248,6 +248,32 @@ WRAPPED_MIN_GAMES = _parse_int("WRAPPED_MIN_GAMES", 3)  # Min games to appear in
 WRAPPED_MIN_BETS = _parse_int("WRAPPED_MIN_BETS", 3)  # Min bets for betting awards
 WRAPPED_CHECK_INTERVAL_HOURS = _parse_int("WRAPPED_CHECK_INTERVAL_HOURS", 12)  # Hours between checks (12-24)
 
+# Wheel War (Rebellion) configuration
+REBELLION_VOTE_WINDOW_SECONDS = _parse_int("REBELLION_VOTE_WINDOW_SECONDS", 900)          # 15 min vote window
+REBELLION_ATTACK_QUORUM = _parse_int("REBELLION_ATTACK_QUORUM", 5)                        # Min effective ATTACK votes for war
+REBELLION_BASE_THRESHOLD = _parse_int("REBELLION_BASE_THRESHOLD", 25)                     # Base JC threshold (wheel must roll ≥ this)
+REBELLION_THRESHOLD_STEP = _parse_int("REBELLION_THRESHOLD_STEP", 5)                      # JC per net voter difference
+REBELLION_MIN_THRESHOLD = _parse_int("REBELLION_MIN_THRESHOLD", 5)
+REBELLION_MAX_THRESHOLD = _parse_int("REBELLION_MAX_THRESHOLD", 60)
+REBELLION_DEFENDER_STAKE = _parse_int("REBELLION_DEFENDER_STAKE", 10)                     # JC to vote DEFEND
+REBELLION_VETERAN_REBEL_VOTE_WEIGHT = _parse_float("REBELLION_VETERAN_REBEL_VOTE_WEIGHT", 1.5)  # Vote multiplier for 2+ bankruptcies
+REBELLION_VETERAN_REBEL_MIN_BANKRUPTCIES = _parse_int("REBELLION_VETERAN_REBEL_MIN_BANKRUPTCIES", 2)
+REBELLION_ATTACKER_FLAT_REWARD = _parse_int("REBELLION_ATTACKER_FLAT_REWARD", 15)         # JC per attacker on win
+REBELLION_INCITER_FLAT_REWARD = _parse_int("REBELLION_INCITER_FLAT_REWARD", 30)           # JC for inciter on win
+REBELLION_DEFENDER_WIN_REWARD = _parse_int("REBELLION_DEFENDER_WIN_REWARD", 20)           # JC per defender on win
+REBELLION_FIRST_DEFENDER_BONUS = _parse_int("REBELLION_FIRST_DEFENDER_BONUS", 10)         # Extra JC for champion defender
+REBELLION_WHEEL_EFFECT_SPINS = _parse_int("REBELLION_WHEEL_EFFECT_SPINS", 10)             # Spins the wheel effect lasts
+REBELLION_BANKRUPT_WEAKEN_RATE = _parse_float("REBELLION_BANKRUPT_WEAKEN_RATE", 0.25)     # BANKRUPT * 0.75 when attackers win
+REBELLION_BANKRUPT_STRENGTHEN_RATE = _parse_float("REBELLION_BANKRUPT_STRENGTHEN_RATE", 0.50)  # BANKRUPT * 1.50 when defenders win
+REBELLION_WAR_TROPHY_VALUE = _parse_int("REBELLION_WAR_TROPHY_VALUE", 80)                 # JC value of WAR TROPHY wedge
+REBELLION_RETRIBUTION_STEAL = _parse_int("REBELLION_RETRIBUTION_STEAL", 20)               # JC stolen by RETRIBUTION from attackers
+REBELLION_CELEBRATION_SPIN_WINDOW = _parse_int("REBELLION_CELEBRATION_SPIN_WINDOW", 86400)  # 24h to use free spin
+REBELLION_INCITER_COOLDOWN_SECONDS = _parse_int("REBELLION_INCITER_COOLDOWN_SECONDS", 604800)  # 7 days between incitements
+REBELLION_META_BET_WINDOW_SECONDS = _parse_int("REBELLION_META_BET_WINDOW_SECONDS", 120)  # 2-min betting window after war declared
+REBELLION_META_BET_MAX = _parse_int("REBELLION_META_BET_MAX", 50)                         # Max JC per meta-bet
+REBELLION_FIZZLE_SPIN_MAX_WIN = _parse_int("REBELLION_FIZZLE_SPIN_MAX_WIN", 5)            # Fizzle consolation spin max win cap
+REBELLION_GAMBA_COOLDOWN_PENALTY = _parse_int("REBELLION_GAMBA_COOLDOWN_PENALTY", 172800)  # 48h extra cooldown for attackers on defender win
+
 # Neon Degen Terminal Easter Egg configuration
 NEON_DEGEN_ENABLED = _parse_bool("NEON_DEGEN_ENABLED", True)
 NEON_LAYER1_CHANCE = _parse_float("NEON_LAYER1_CHANCE", 0.35)  # Subtle text triggers

@@ -35,6 +35,13 @@ from config import (
     WHEEL_COOLDOWN_SECONDS,
     WHEEL_GOLDEN_TOP_N,
     WHEEL_LOSE_PENALTY_COOLDOWN,
+    REBELLION_DEFENDER_STAKE,
+    REBELLION_VOTE_WINDOW_SECONDS,
+    REBELLION_META_BET_WINDOW_SECONDS,
+    REBELLION_META_BET_MAX,
+    REBELLION_RETRIBUTION_STEAL,
+    REBELLION_GAMBA_COOLDOWN_PENALTY,
+    REBELLION_FIZZLE_SPIN_MAX_WIN,
 )
 from config import DISBURSE_MIN_FUND
 from services.bankruptcy_service import BankruptcyService
@@ -59,6 +66,7 @@ from utils.wheel_drawing import (
     get_wheel_wedges,
     get_wedge_at_index_for_player,
     compute_live_golden_wedges,
+    apply_war_effects,
 )
 
 # 1% chance for the wheel to explode
@@ -151,6 +159,190 @@ def _wedge_ev(wedge: tuple) -> float:
     return _SPECIAL_WEDGE_EST_EVS.get(v, 0.0)
 
 
+class RebellionVoteView(discord.ui.View):
+    """15-minute vote view for the Wheel War rebellion."""
+
+    def __init__(self, war_id: int, guild_id: int, inciter_id: int, rebellion_service, *, timeout: float = 900.0):
+        super().__init__(timeout=timeout)
+        self.war_id = war_id
+        self.guild_id = guild_id
+        self.inciter_id = inciter_id
+        self.rebellion_service = rebellion_service
+        self.message: discord.Message | None = None
+
+    def build_embed(self, effective_attack: float, effective_defend: float, attack_voter_count: int, defend_voter_count: int, inciter_name: str) -> discord.Embed:
+        from config import REBELLION_ATTACK_QUORUM
+        embed = discord.Embed(
+            title="⚔️ REBELLION AGAINST THE WHEEL ⚔️",
+            description=(
+                f"**{inciter_name}** has had enough of the Wheel's tyranny and calls the people to arms!\n\n"
+                f"The Wheel has oppressed the gamblers long enough. Will the realm rise?\n\n"
+                f"**⚔️ ATTACK** — Free. Join the rebellion.\n"
+                f"**🛡️ DEFEND** — Costs **{REBELLION_DEFENDER_STAKE} JC**. Defend the Wheel's honor.\n\n"
+                f"*Veteran rebels (2+ bankruptcies) count as 1.5 votes.*\n\n"
+                f"⏱️ Vote window: {REBELLION_VOTE_WINDOW_SECONDS // 60} minutes\n"
+                f"Quorum needed: **{REBELLION_ATTACK_QUORUM} effective ATTACK votes** with more ATTACK than DEFEND"
+            ),
+            color=discord.Color.from_str("#8b0000"),
+        )
+        embed.add_field(
+            name="⚔️ ATTACK",
+            value=f"{attack_voter_count} rebels ({effective_attack:.1f} effective votes)",
+            inline=True,
+        )
+        embed.add_field(
+            name="🛡️ DEFEND",
+            value=f"{defend_voter_count} defenders ({effective_defend:.1f} effective votes)",
+            inline=True,
+        )
+        return embed
+
+    @discord.ui.button(label="⚔️ ATTACK", style=discord.ButtonStyle.danger, custom_id="rebellion:attack")
+    async def attack_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        result = await asyncio.to_thread(
+            self.rebellion_service.process_attack_vote,
+            self.war_id, interaction.user.id, self.guild_id,
+        )
+        if not result["success"]:
+            await interaction.response.send_message(result["message"], ephemeral=True)
+            return
+        if result.get("duplicate"):
+            await interaction.response.send_message("You already voted ATTACK, warrior.", ephemeral=True)
+            return
+        veteran_note = " *(Veteran Rebel — 1.5 votes!)*" if result.get("is_veteran") else ""
+        await interaction.response.send_message(
+            f"⚔️ You join the rebellion!{veteran_note}", ephemeral=True
+        )
+        await self._refresh_embed()
+
+    @discord.ui.button(label="🛡️ DEFEND (10 JC)", style=discord.ButtonStyle.primary, custom_id="rebellion:defend")
+    async def defend_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        result = await asyncio.to_thread(
+            self.rebellion_service.process_defend_vote,
+            self.war_id, interaction.user.id, self.guild_id,
+        )
+        if not result["success"]:
+            await interaction.response.send_message(result["message"], ephemeral=True)
+            return
+        if result.get("duplicate"):
+            await interaction.response.send_message("You already pledged your sword to the Wheel.", ephemeral=True)
+            return
+        await interaction.response.send_message(
+            f"🛡️ You stake **{REBELLION_DEFENDER_STAKE} JC** to defend the Wheel!", ephemeral=True
+        )
+        await self._refresh_embed()
+
+    async def _refresh_embed(self):
+        if not self.message:
+            return
+        try:
+            import json
+            war = await asyncio.to_thread(self.rebellion_service.rebellion_repo.get_war, self.war_id)
+            if not war:
+                return
+            attack_voters = json.loads(war["attack_voter_ids"])
+            defend_voters = json.loads(war["defend_voter_ids"])
+            # Get inciter name from first attack voter (the inciter)
+            embed = self.build_embed(
+                effective_attack=war["effective_attack_count"],
+                effective_defend=war["effective_defend_count"],
+                attack_voter_count=len(attack_voters),
+                defend_voter_count=len(defend_voters),
+                inciter_name=f"<@{war['inciter_id']}>",
+            )
+            await self.message.edit(embed=embed)
+        except Exception as e:
+            logger.debug(f"RebellionVoteView embed refresh error: {e}")
+
+
+class WarBetAmountModal(discord.ui.Modal):
+    """Modal for entering meta-bet amount during a wheel war."""
+
+    amount = discord.ui.TextInput(
+        label="Bet Amount (1–50 JC)",
+        placeholder="e.g., 25",
+        min_length=1,
+        max_length=3,
+        required=True,
+    )
+
+    def __init__(self, war_id: int, guild_id: int, side: str, rebellion_service, player_service):
+        super().__init__(title=f"Bet on {'REBELS ⚔️' if side == 'rebels' else 'THE WHEEL ⚙️'}")
+        self.war_id = war_id
+        self.guild_id = guild_id
+        self.side = side
+        self.rebellion_service = rebellion_service
+        self.player_service = player_service
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            bet_amount = int(self.amount.value)
+        except ValueError:
+            await interaction.response.send_message("Enter a number between 1 and 50.", ephemeral=True)
+            return
+
+        if bet_amount < 1 or bet_amount > REBELLION_META_BET_MAX:
+            await interaction.response.send_message(
+                f"Bet must be between 1 and {REBELLION_META_BET_MAX} JC.", ephemeral=True
+            )
+            return
+
+        try:
+            await asyncio.to_thread(
+                self.rebellion_service.rebellion_repo.place_meta_bet_atomic,
+                self.war_id,
+                self.guild_id,
+                interaction.user.id,
+                self.side,
+                bet_amount,
+                int(time.time()),
+                MAX_DEBT,
+            )
+            side_name = "REBELS ⚔️" if self.side == "rebels" else "THE WHEEL ⚙️"
+            await interaction.response.send_message(
+                f"**{bet_amount} JC** wagered on **{side_name}**! May fortune favor the bold.",
+                ephemeral=True,
+            )
+        except ValueError as e:
+            await interaction.response.send_message(str(e), ephemeral=True)
+        except Exception as e:
+            logger.error(f"Meta-bet placement error: {e}")
+            await interaction.response.send_message("Failed to place bet. Try again.", ephemeral=True)
+
+
+class WarBetView(discord.ui.View):
+    """2-minute meta-betting view during a declared wheel war."""
+
+    def __init__(self, war_id: int, guild_id: int, rebellion_service, player_service, *, timeout: float = 120.0):
+        super().__init__(timeout=timeout)
+        self.war_id = war_id
+        self.guild_id = guild_id
+        self.rebellion_service = rebellion_service
+        self.player_service = player_service
+
+    @discord.ui.button(label="⚔️ Bet REBELS (1–50 JC)", style=discord.ButtonStyle.danger)
+    async def bet_rebels(self, interaction: discord.Interaction, button: discord.ui.Button):
+        modal = WarBetAmountModal(
+            war_id=self.war_id,
+            guild_id=self.guild_id,
+            side="rebels",
+            rebellion_service=self.rebellion_service,
+            player_service=self.player_service,
+        )
+        await interaction.response.send_modal(modal)
+
+    @discord.ui.button(label="⚙️ Bet WHEEL (1–50 JC)", style=discord.ButtonStyle.primary)
+    async def bet_wheel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        modal = WarBetAmountModal(
+            war_id=self.war_id,
+            guild_id=self.guild_id,
+            side="wheel",
+            rebellion_service=self.rebellion_service,
+            player_service=self.player_service,
+        )
+        await interaction.response.send_modal(modal)
+
+
 class TownTrialView(discord.ui.View):
     """Server-wide vote view for the TOWN_TRIAL bankrupt wheel mechanic."""
 
@@ -239,6 +431,7 @@ class BettingCommands(commands.Cog):
         disburse_service: DisburseService | None = None,
         flavor_text_service: FlavorTextService | None = None,
         tip_service: TipService | None = None,
+        rebellion_service=None,
     ):
         self.bot = bot
         self.betting_service = betting_service
@@ -250,6 +443,7 @@ class BettingCommands(commands.Cog):
         self.loan_service = loan_service
         self.disburse_service = disburse_service
         self.tip_service = tip_service
+        self.rebellion_service = rebellion_service
 
     def _get_neon_service(self):
         """Get the NeonDegenService from the bot, or None if unavailable."""
@@ -1530,29 +1724,44 @@ class BettingCommands(commands.Cog):
                 user_id, guild_id, int(now), WHEEL_COOLDOWN_SECONDS,
             )
             if not claimed:
-                # Spin was not claimed - still on cooldown. Get remaining time.
-                last_spin = await asyncio.to_thread(
-                    self.player_service.get_last_wheel_spin, user_id, guild_id
-                )
-                if last_spin:
-                    remaining = WHEEL_COOLDOWN_SECONDS - (now - last_spin)
-                    hours = int(remaining // 3600)
-                    minutes = int((remaining % 3600) // 60)
-                else:
-                    hours, minutes = 24, 0  # Fallback
-                await interaction.response.send_message(
-                    f"You already spun the wheel today! Try again in **{hours}h {minutes}m**.",
-                    ephemeral=True,
-                )
-                # Neon Degen Terminal hook (cooldown hit)
-                neon = self._get_neon_service()
-                if neon:
-                    try:
-                        neon_result = await neon.on_cooldown_hit(user_id, guild_id, "gamba")
-                        await send_neon_result(interaction, neon_result)
-                    except Exception:
-                        pass
-                return
+                # Check for free celebration spin (attackers_win war effect)
+                _rebellion_svc = self.rebellion_service or getattr(self.bot, "rebellion_service", None)
+                _celebration_granted = False
+                if _rebellion_svc:
+                    _active_war_cs = await asyncio.to_thread(
+                        _rebellion_svc.get_active_war_effect, guild_id
+                    )
+                    if _active_war_cs and _active_war_cs.get("outcome") == "attackers_win":
+                        _celebration_granted = await asyncio.to_thread(
+                            _rebellion_svc.check_and_use_celebration_spin,
+                            _active_war_cs["war_id"], user_id, guild_id,
+                        )
+
+                if not _celebration_granted:
+                    # Spin was not claimed - still on cooldown. Get remaining time.
+                    last_spin = await asyncio.to_thread(
+                        self.player_service.get_last_wheel_spin, user_id, guild_id
+                    )
+                    if last_spin:
+                        remaining = WHEEL_COOLDOWN_SECONDS - (now - last_spin)
+                        hours = int(remaining // 3600)
+                        minutes = int((remaining % 3600) // 60)
+                    else:
+                        hours, minutes = 24, 0  # Fallback
+                    await interaction.response.send_message(
+                        f"You already spun the wheel today! Try again in **{hours}h {minutes}m**.",
+                        ephemeral=True,
+                    )
+                    # Neon Degen Terminal hook (cooldown hit)
+                    neon = self._get_neon_service()
+                    if neon:
+                        try:
+                            neon_result = await neon.on_cooldown_hit(user_id, guild_id, "gamba")
+                            await send_neon_result(interaction, neon_result)
+                        except Exception:
+                            pass
+                    return
+                # Celebration spin granted — bypass cooldown, continue with spin
         else:
             # Admin bypass - still set the timestamp for consistency
             await asyncio.to_thread(
@@ -1686,8 +1895,27 @@ class BettingCommands(commands.Cog):
             )
         else:
             wedges = get_wheel_wedges(is_eligible_for_bad_gamba, is_golden)
+
+        # Apply active war effects to normal (non-golden, non-bankrupt) wheel
+        _active_war_state = None
+        _active_war_id = None
+        _rebellion_svc_gamba = self.rebellion_service or getattr(self.bot, "rebellion_service", None)
+        if _rebellion_svc_gamba and not is_golden and not is_eligible_for_bad_gamba:
+            _active_war_state = await asyncio.to_thread(
+                _rebellion_svc_gamba.get_active_war_effect, guild_id
+            )
+            if _active_war_state:
+                _active_war_id = _active_war_state["war_id"]
+                wedges = apply_war_effects(wedges, _active_war_state)
+
         result_idx = random.randint(0, len(wedges) - 1)
         result_wedge = wedges[result_idx % len(wedges)]
+
+        # Consume war spin if active
+        if _active_war_id and _rebellion_svc_gamba:
+            await asyncio.to_thread(
+                _rebellion_svc_gamba.consume_war_spin, _active_war_id, guild_id, user_id
+            )
 
         # Defer first - GIF generation can take a few seconds
         await interaction.response.defer()
@@ -1811,7 +2039,31 @@ class BettingCommands(commands.Cog):
         takeover_victim_name: str = "rank #4"
         takeover_missed: bool = False
 
-        if result_value == "JAILBREAK":
+        if result_value == "RETRIBUTION":
+            # War effect: steal from attackers, LOSE for everyone else
+            _spinner_is_attacker = False
+            if _active_war_id and _rebellion_svc_gamba:
+                _spinner_is_attacker = await asyncio.to_thread(
+                    _rebellion_svc_gamba.is_attacker, _active_war_id, user_id
+                )
+            if _spinner_is_attacker:
+                await asyncio.to_thread(
+                    self.player_service.adjust_balance, user_id, guild_id, -REBELLION_RETRIBUTION_STEAL
+                )
+                new_balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
+            else:
+                result_value = "LOSE"  # Non-attackers just get LOSE
+                result_wedge = ("RETRIBUTION (miss)", 0, "#4a4a4a")
+
+        elif result_value == "WAR SCAR 💀":
+            # Broken wedge — value is already 0, nothing to pay out
+            pass
+
+        elif result_value == "WAR TROPHY 🏆":
+            # Positive JC win handled by normal numeric path below
+            pass
+
+        elif result_value == "JAILBREAK":
             # Remove 1 penalty game (clamped at 0 inside add_penalty_games)
             if bankruptcy_service:
                 jailbreak_new_total = await asyncio.to_thread(
@@ -3609,6 +3861,377 @@ class BettingCommands(commands.Cog):
         except Exception as e:
             logger.warning(f"Failed to update disburse message: {e}")
 
+    # ------------------------------------------------------------------
+    # /incite — Wheel War rebellion command
+    # ------------------------------------------------------------------
+
+    @app_commands.command(
+        name="incite",
+        description="Rise against the Wheel of Fortune! (Requires recent bankruptcy or penalty games)",
+    )
+    async def incite(self, interaction: discord.Interaction):
+        user_id = interaction.user.id
+        guild_id = interaction.guild.id if interaction.guild else None
+
+        rebellion_service = self.rebellion_service or getattr(self.bot, "rebellion_service", None)
+        if not rebellion_service:
+            await interaction.response.send_message(
+                "The rebellion system is not available.", ephemeral=True
+            )
+            return
+
+        # Check eligibility
+        eligibility = await asyncio.to_thread(
+            rebellion_service.check_incite_eligibility, user_id, guild_id
+        )
+        if not eligibility["eligible"]:
+            await interaction.response.send_message(
+                f"**The court rejects your petition.** {eligibility['reason']}", ephemeral=True
+            )
+            return
+
+        # Defer - this command runs for up to 15+ minutes
+        await interaction.response.defer()
+
+        # Create the rebellion
+        war_info = await asyncio.to_thread(
+            rebellion_service.create_rebellion, user_id, guild_id
+        )
+        war_id = war_info["war_id"]
+        vote_closes_at = war_info["vote_closes_at"]
+        bankruptcy_count = war_info["bankruptcy_count"]
+        is_veteran = bankruptcy_count >= 2
+
+        inciter_name = interaction.user.display_name
+        veteran_note = f" *(Veteran Rebel — {bankruptcy_count} bankruptcies, 1.5 votes!)*" if is_veteran else ""
+
+        # Build initial vote embed
+        vote_view = RebellionVoteView(
+            war_id=war_id,
+            guild_id=guild_id,
+            inciter_id=user_id,
+            rebellion_service=rebellion_service,
+        )
+        embed = vote_view.build_embed(
+            effective_attack=1.5 if is_veteran else 1.0,
+            effective_defend=0.0,
+            attack_voter_count=1,
+            defend_voter_count=0,
+            inciter_name=interaction.user.mention,
+        )
+        embed.set_footer(text=f"{inciter_name} has risen.{veteran_note}")
+
+        vote_msg = await interaction.followup.send(embed=embed, view=vote_view, wait=True)
+        vote_view.message = vote_msg
+
+        # Wait for vote window
+        await asyncio.sleep(REBELLION_VOTE_WINDOW_SECONDS)
+
+        # Stop the vote view
+        vote_view.stop()
+
+        # Evaluate result
+        vote_result = await asyncio.to_thread(rebellion_service.resolve_vote, war_id)
+
+        # ----------------------------------------------------------------
+        # FIZZLE PATH
+        # ----------------------------------------------------------------
+        if vote_result["outcome"] == "fizzled":
+            fizzle_info = await asyncio.to_thread(
+                rebellion_service.resolve_fizzle, war_id, guild_id
+            )
+
+            import json
+            war = await asyncio.to_thread(rebellion_service.rebellion_repo.get_war, war_id)
+            eff_atk = war["effective_attack_count"] if war else vote_result.get("effective_attack_count", 0)
+            eff_def = war["effective_defend_count"] if war else vote_result.get("effective_defend_count", 0)
+
+            fizzle_embed = discord.Embed(
+                title="💨 THE REBELLION FIZZLES",
+                description=(
+                    f"*The Wheel watches. The Wheel laughs.*\n\n"
+                    f"**{interaction.user.mention}'s rebellion has failed to reach quorum.**\n"
+                    f"{vote_result.get('reason', 'The people have spoken... or rather, they have not.')}\n\n"
+                    f"⚔️ **{eff_atk:.1f}** effective attack vs 🛡️ **{eff_def:.1f}** effective defend.\n\n"
+                    f"*The Wheel offers you a consolation spin, inciter. Don't spend it all in one place.*"
+                ),
+                color=discord.Color.from_str("#4a4a4a"),
+            )
+            try:
+                await vote_msg.edit(embed=fizzle_embed, view=None)
+            except Exception:
+                if interaction.channel:
+                    await interaction.channel.send(embed=fizzle_embed)
+
+            # Give inciter a weakened consolation spin (max REBELLION_FIZZLE_SPIN_MAX_WIN JC win)
+            await self._do_fizzle_consolation_spin(interaction, user_id, guild_id)
+            return
+
+        # ----------------------------------------------------------------
+        # WAR DECLARED PATH
+        # ----------------------------------------------------------------
+        eff_atk = vote_result["effective_attack_count"]
+        eff_def = vote_result["effective_defend_count"]
+        attack_ids = [v["discord_id"] for v in vote_result["attack_voter_ids"]]
+        defend_ids = list(vote_result["defend_voter_ids"])
+
+        victory_threshold = rebellion_service.calculate_threshold(eff_atk, eff_def)
+
+        war_embed = discord.Embed(
+            title="⚔️ THE WHEEL TAKES THE FIELD ⚔️",
+            description=(
+                f"**WAR HAS BEEN DECLARED!**\n\n"
+                f"The realm has spoken. **{eff_atk:.1f}** rebels rise against **{eff_def:.1f}** defenders.\n\n"
+                f"**The Wheel rolls to battle. If it rolls ≥ {victory_threshold}, the Wheel survives.**\n\n"
+                f"*Stakes for the victors:*\n"
+                f"⚔️ **Rebel win:** +{15} JC each, inciter penalty halved, WAR SCAR on wheel\n"
+                f"🛡️ **Wheel win:** Defenders get stake back + 20 JC, inciter +1 penalty, WAR TROPHY on wheel\n\n"
+                f"**Meta-bets open for {REBELLION_META_BET_WINDOW_SECONDS // 60} minutes!**"
+            ),
+            color=discord.Color.from_str("#8b0000"),
+        )
+
+        # Open meta-bet window
+        await asyncio.to_thread(
+            rebellion_service.rebellion_repo.set_meta_bet_window,
+            war_id,
+            int(time.time()) + REBELLION_META_BET_WINDOW_SECONDS,
+        )
+
+        bet_view = WarBetView(
+            war_id=war_id,
+            guild_id=guild_id,
+            rebellion_service=rebellion_service,
+            player_service=self.player_service,
+        )
+
+        try:
+            war_msg = await vote_msg.edit(embed=war_embed, view=bet_view)
+        except Exception:
+            war_msg = None
+            if interaction.channel:
+                war_msg = await interaction.channel.send(embed=war_embed, view=bet_view)
+
+        # Wait for meta-bet window
+        await asyncio.sleep(REBELLION_META_BET_WINDOW_SECONDS)
+        bet_view.stop()
+
+        # 5-second countdown
+        countdown_msg = war_msg
+        for i in range(5, 0, -1):
+            countdown_embed = discord.Embed(
+                title=f"⚔️ BATTLE COMMENCES IN {i}... ⚔️",
+                description=(
+                    f"The armies are assembled. The Wheel trembles.\n"
+                    f"Victory threshold: **{victory_threshold}**"
+                ),
+                color=discord.Color.from_str("#ff4444"),
+            )
+            try:
+                if countdown_msg:
+                    await countdown_msg.edit(embed=countdown_embed, view=None)
+                elif interaction.channel:
+                    countdown_msg = await interaction.channel.send(embed=countdown_embed)
+            except Exception:
+                pass
+            await asyncio.sleep(1.0)
+
+        # BATTLE ROLL
+        battle_roll = rebellion_service.roll_battle()
+
+        # Resolve all outcomes
+        resolution = await asyncio.to_thread(
+            rebellion_service.resolve_battle,
+            war_id, guild_id, battle_roll, victory_threshold,
+        )
+
+        # Settle meta-bets
+        outcome = resolution["outcome"]
+        winning_side = "rebels" if outcome == "attackers_win" else "wheel"
+        meta_bet_result = await asyncio.to_thread(
+            rebellion_service.rebellion_repo.settle_meta_bets, war_id, winning_side
+        )
+
+        # Build result embed
+        if outcome == "attackers_win":
+            result_embed = self._build_attacker_win_embed(
+                interaction=interaction,
+                battle_roll=battle_roll,
+                victory_threshold=victory_threshold,
+                resolution=resolution,
+                meta_bet_result=meta_bet_result,
+            )
+            # Apply attacker penalty to defenders: +48h cooldown (stored in player last_wheel_spin)
+            # Note: we do NOT apply cooldown to attackers — they *won*
+        else:  # defenders_win
+            result_embed = self._build_defender_win_embed(
+                interaction=interaction,
+                battle_roll=battle_roll,
+                victory_threshold=victory_threshold,
+                resolution=resolution,
+                meta_bet_result=meta_bet_result,
+                inciter_name=inciter_name,
+                bankruptcy_count=bankruptcy_count,
+            )
+            # Attackers get +48h gamba cooldown as punishment
+            now_ts = int(time.time())
+            for did in attack_ids:
+                last_spin = await asyncio.to_thread(self.player_service.get_last_wheel_spin, did, guild_id)
+                penalized_spin = max(now_ts - 86400 + REBELLION_GAMBA_COOLDOWN_PENALTY, last_spin or 0)
+                await asyncio.to_thread(self.player_service.set_last_wheel_spin, did, guild_id, penalized_spin)
+
+        try:
+            if countdown_msg:
+                await countdown_msg.edit(embed=result_embed, view=None)
+            elif interaction.channel:
+                await interaction.channel.send(embed=result_embed)
+        except Exception:
+            if interaction.channel:
+                try:
+                    await interaction.channel.send(embed=result_embed)
+                except Exception:
+                    pass
+
+        # Pin shame embed if defenders won
+        if outcome == "defenders_win" and interaction.channel:
+            shame_embed = discord.Embed(
+                title="📌 HALL OF SHAME",
+                description=(
+                    f"**{interaction.user.mention}** ({bankruptcy_count} bankruptcies) tried to incite "
+                    f"a rebellion against the Wheel... and LOST.\n\n"
+                    f"*\"You thought you could stop me? Spin again, coward.\" — The Wheel*"
+                ),
+                color=discord.Color.from_str("#4a0000"),
+            )
+            try:
+                shame_msg = await interaction.channel.send(embed=shame_embed)
+                await shame_msg.pin()
+            except Exception:
+                pass
+
+    def _build_attacker_win_embed(
+        self,
+        interaction: discord.Interaction,
+        battle_roll: int,
+        victory_threshold: int,
+        resolution: dict,
+        meta_bet_result: dict,
+    ) -> discord.Embed:
+        war_scar = resolution.get("war_scar_label", "unknown")
+        embed = discord.Embed(
+            title="🎉 THE REBELS TRIUMPH! THE WHEEL IS HUMILIATED! 🎉",
+            description=(
+                f"**The Wheel rolled {battle_roll}. Victory threshold was {victory_threshold}.**\n"
+                f"*The Wheel crumbles before the righteous fury of the people!*\n\n"
+                f"**Rewards:**\n"
+                f"⚔️ **Inciter:** +{resolution.get('inciter_reward', 30)} JC — "
+                f"Penalty games cut from {resolution.get('inciter_penalty_before', 0)} to {resolution.get('inciter_penalty_after', 0)}\n"
+                f"⚔️ **All Attackers:** +{resolution.get('attacker_flat_reward', 15)} JC + equal share of defender stakes\n\n"
+                f"**Wheel Effects (next 10 guild spins):**\n"
+                f"💀 **WAR SCAR:** The {war_scar} JC wedge becomes 0 JC\n"
+                f"🩹 **BANKRUPT weakened** (-25%)\n"
+                f"🎁 **Free spin** for all guild members within 24 hours!\n\n"
+                f"*Meta-bet pool: {meta_bet_result.get('total_pool', 0)} JC settled.*"
+            ),
+            color=discord.Color.green(),
+        )
+        return embed
+
+    def _build_defender_win_embed(
+        self,
+        interaction: discord.Interaction,
+        battle_roll: int,
+        victory_threshold: int,
+        resolution: dict,
+        meta_bet_result: dict,
+        inciter_name: str,
+        bankruptcy_count: int,
+    ) -> discord.Embed:
+        embed = discord.Embed(
+            title="🎰 THE WHEEL STANDS VICTORIOUS! THE REBELLION IS CRUSHED! 🎰",
+            description=(
+                f"**The Wheel rolled {battle_roll}. Victory threshold was {victory_threshold}.**\n"
+                f"*The Wheel's iron grip is unbroken. The rebels scatter in disgrace.*\n\n"
+                f"**Outcomes:**\n"
+                f"🛡️ **Defenders:** Stake returned + 20 JC each\n"
+                f"🏆 **Champion Defender:** Additional +10 JC\n"
+                f"😤 **Inciter ({inciter_name}):** +1 penalty game (now {resolution.get('inciter_penalty_added', 1)} added)\n"
+                f"⏰ **All Attackers:** +48h gamba cooldown as punishment\n\n"
+                f"**Wheel Effects (next 10 guild spins):**\n"
+                f"🏆 **WAR TROPHY** wedge (+80 JC) added\n"
+                f"⚔️ **RETRIBUTION** wedge added (steals from attackers)\n"
+                f"💪 **BANKRUPT emboldened** (+50%)\n\n"
+                f"*Meta-bet pool: {meta_bet_result.get('total_pool', 0)} JC settled.*"
+            ),
+            color=discord.Color.from_str("#8b0000"),
+        )
+        return embed
+
+    async def _do_fizzle_consolation_spin(
+        self,
+        interaction: discord.Interaction,
+        user_id: int,
+        guild_id: int | None,
+    ) -> None:
+        """Give the inciter a weakened consolation spin after a fizzle."""
+        try:
+            # Get normal wedges and cap wins at REBELLION_FIZZLE_SPIN_MAX_WIN
+            wedges = get_wheel_wedges(is_bankrupt=False, is_golden=False)
+            # Weaken all positive wedges
+            weakened = []
+            for label, value, color in wedges:
+                if isinstance(value, int) and value > 0:
+                    weakened.append((label, min(value, REBELLION_FIZZLE_SPIN_MAX_WIN), color))
+                else:
+                    weakened.append((label, value, color))
+            result_idx = random.randint(0, len(weakened) - 1)
+            result_wedge = weakened[result_idx]
+            result_value = result_wedge[1]
+
+            # Apply the result
+            if isinstance(result_value, int) and result_value > 0:
+                await asyncio.to_thread(
+                    self.player_service.adjust_balance, user_id, guild_id, result_value
+                )
+                new_balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
+                embed = discord.Embed(
+                    title="🎰 The Wheel's Consolation",
+                    description=(
+                        f"*'Not today, little rebel. But here, have a crumb.'*\n\n"
+                        f"{interaction.user.mention} spins the weakened wheel... and gets **{result_value} JC**.\n"
+                        f"Balance: {new_balance} JC"
+                    ),
+                    color=discord.Color.from_str("#4a4a4a"),
+                )
+            elif isinstance(result_value, int) and result_value < 0:
+                await asyncio.to_thread(
+                    self.player_service.adjust_balance, user_id, guild_id, result_value
+                )
+                new_balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
+                embed = discord.Embed(
+                    title="🎰 The Wheel's Consolation",
+                    description=(
+                        f"*'I do not offer gifts, fool.'*\n\n"
+                        f"{interaction.user.mention} lands on **{result_wedge[0]}** — loses {abs(result_value)} JC.\n"
+                        f"Balance: {new_balance} JC"
+                    ),
+                    color=discord.Color.red(),
+                )
+            else:
+                embed = discord.Embed(
+                    title="🎰 The Wheel's Consolation",
+                    description=(
+                        f"*'Even in defeat, you land on something useless.'*\n\n"
+                        f"{interaction.user.mention} lands on **{result_wedge[0]}**."
+                    ),
+                    color=discord.Color.from_str("#4a4a4a"),
+                )
+
+            if interaction.channel:
+                await interaction.channel.send(embed=embed)
+        except Exception as e:
+            logger.error(f"Fizzle consolation spin error: {e}")
+
 
 class DisburseVoteView(discord.ui.View):
     """Persistent view for disbursement voting."""
@@ -3829,7 +4452,8 @@ async def setup(bot: commands.Bot):
     disburse_service = getattr(bot, "disburse_service", None)
     flavor_text_service = getattr(bot, "flavor_text_service", None)
     tip_service = getattr(bot, "tip_service", None)
-    # bankruptcy_service, gambling_stats_service, loan_service, disburse_service, flavor_text_service, tip_service are optional
+    rebellion_service = getattr(bot, "rebellion_service", None)
+    # optional services: bankruptcy_service, gambling_stats_service, loan_service, disburse_service, flavor_text_service, tip_service, rebellion_service
 
     cog = BettingCommands(
         bot,
@@ -3842,6 +4466,7 @@ async def setup(bot: commands.Bot):
         disburse_service,
         flavor_text_service,
         tip_service,
+        rebellion_service=rebellion_service,
     )
     await bot.add_cog(cog)
 
