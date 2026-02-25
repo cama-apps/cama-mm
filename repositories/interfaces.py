@@ -1148,3 +1148,127 @@ class IDisburseRepository(ABC):
     def get_last_disbursement(self, guild_id: int | None) -> dict | None:
         """Get the most recent disbursement for a guild."""
         ...
+
+
+class IRebellionRepository(ABC):
+    """Repository for wheel war (rebellion) data access."""
+
+    @abstractmethod
+    def get_active_war(self, guild_id: int) -> dict | None:
+        """Get the active (voting/betting/war status) wheel war for a guild."""
+        ...
+
+    @abstractmethod
+    def get_war(self, war_id: int) -> dict | None:
+        """Get a specific wheel war by ID."""
+        ...
+
+    @abstractmethod
+    def create_war(
+        self,
+        guild_id: int,
+        inciter_id: int,
+        vote_closes_at: int,
+        created_at: int,
+    ) -> int:
+        """Create a new wheel war. Returns war_id."""
+        ...
+
+    @abstractmethod
+    def add_attack_vote(self, war_id: int, discord_id: int, bankruptcy_count: int) -> dict:
+        """Add an attack vote. Returns updated effective counts."""
+        ...
+
+    @abstractmethod
+    def add_defend_vote(self, war_id: int, discord_id: int) -> dict:
+        """Add a defend vote (deducts stake from player balance). Returns updated counts."""
+        ...
+
+    @abstractmethod
+    def update_war_status(self, war_id: int, status: str) -> None:
+        """Update war status (voting -> betting/war/resolved/fizzled)."""
+        ...
+
+    @abstractmethod
+    def set_war_outcome(
+        self,
+        war_id: int,
+        outcome: str,
+        battle_roll: int,
+        victory_threshold: int,
+        wheel_effect_spins_remaining: int,
+        war_scar_wedge_label: str | None,
+        celebration_spin_expires_at: int | None,
+        resolved_at: int,
+    ) -> None:
+        """Record the final outcome of a war."""
+        ...
+
+    @abstractmethod
+    def set_meta_bet_window(self, war_id: int, meta_bet_closes_at: int) -> None:
+        """Set the meta-bet window close time when war is declared."""
+        ...
+
+    @abstractmethod
+    def place_meta_bet_atomic(
+        self,
+        war_id: int,
+        guild_id: int,
+        discord_id: int,
+        side: str,
+        amount: int,
+        created_at: int,
+        max_debt: int,
+    ) -> int:
+        """Atomically place a meta-bet (debit balance + insert). Returns bet_id."""
+        ...
+
+    @abstractmethod
+    def get_meta_bets(self, war_id: int) -> list[dict]:
+        """Get all meta-bets for a war."""
+        ...
+
+    @abstractmethod
+    def settle_meta_bets(self, war_id: int, winning_side: str) -> dict:
+        """Settle meta-bets for the war. Returns payout summary."""
+        ...
+
+    @abstractmethod
+    def consume_war_spin(self, war_id: int, discord_id: int) -> int:
+        """Decrement wheel_effect_spins_remaining. Returns new count."""
+        ...
+
+    @abstractmethod
+    def use_celebration_spin(self, war_id: int, discord_id: int) -> bool:
+        """Mark a player as having used their free celebration spin. Returns True if used."""
+        ...
+
+    @abstractmethod
+    def get_recent_wars(self, guild_id: int, limit: int = 5) -> list[dict]:
+        """Get the most recent wars for a guild."""
+        ...
+
+    @abstractmethod
+    def get_player_war_stats(self, discord_id: int, guild_id: int) -> dict:
+        """Get rebellion stats for a player (wars incited, attack/defend votes, outcomes)."""
+        ...
+
+    @abstractmethod
+    def get_inciter_cooldown(self, discord_id: int, guild_id: int) -> int | None:
+        """Get the unix timestamp when the inciter's cooldown expires (or None)."""
+        ...
+
+    @abstractmethod
+    def set_inciter_cooldown(self, war_id: int, discord_id: int, guild_id: int, cooldown_until: int) -> None:
+        """Set inciter cooldown expiry timestamp."""
+        ...
+
+    @abstractmethod
+    def get_active_war_effect(self, guild_id: int) -> dict | None:
+        """Get the most recent war with active wheel effects (spins_remaining > 0)."""
+        ...
+
+    @abstractmethod
+    def get_war_leaderboard(self, guild_id: int) -> list[dict]:
+        """Get rebellion leaderboard stats for all players."""
+        ...
