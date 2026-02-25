@@ -65,7 +65,12 @@ def _schema_template_path(tmp_path_factory):
     """
     template_dir = tmp_path_factory.mktemp("schema_template")
     template_path = str(template_dir / "template.db")
-    Database(template_path)
+    db = Database(template_path)
+    # Checkpoint WAL so all data is in the main .db file before copies.
+    # Without this, shutil.copy2 misses data in the -wal file.
+    if db._anchor_connection:
+        db._anchor_connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        db._anchor_connection.close()
     yield template_path
 
 

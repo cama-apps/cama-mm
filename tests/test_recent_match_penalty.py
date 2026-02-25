@@ -43,9 +43,9 @@ class TestConfigDefaultValue:
     """Test that config has the correct default value."""
 
     def test_config_default_value(self):
-        """Verify default recent_match_penalty_weight is 30.0."""
+        """Verify default recent_match_penalty_weight is 150.0."""
         assert "recent_match_penalty_weight" in SHUFFLER_SETTINGS
-        assert SHUFFLER_SETTINGS["recent_match_penalty_weight"] == 30.0
+        assert SHUFFLER_SETTINGS["recent_match_penalty_weight"] == 150.0
 
 
 class TestShufflerInit:
@@ -54,7 +54,7 @@ class TestShufflerInit:
     def test_shuffler_uses_default_from_config(self):
         """Shuffler should use default from config when not specified."""
         shuffler = BalancedShuffler()
-        assert shuffler.recent_match_penalty_weight == 30.0
+        assert shuffler.recent_match_penalty_weight == 150.0
 
     def test_shuffler_accepts_custom_weight(self):
         """Shuffler should accept custom recent_match_penalty_weight."""
