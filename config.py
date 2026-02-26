@@ -91,6 +91,8 @@ RD_PRIORITY_WEIGHT = _parse_float("RD_PRIORITY_WEIGHT", 0.2)
 
 JOPACOIN_PER_GAME = _parse_int("JOPACOIN_PER_GAME", 1)
 STREAMING_BONUS = _parse_int("STREAMING_BONUS", 1)  # JC awarded for Go Live + Dota 2
+FIRST_GAME_BONUS = _parse_int("FIRST_GAME_BONUS", 1)  # JC awarded to all players in first game after 5pm PST
+FIRST_GAME_RESET_HOUR = _parse_int("FIRST_GAME_RESET_HOUR", 17)  # Hour (0-23) in America/Los_Angeles
 JOPACOIN_MIN_BET = _parse_int("JOPACOIN_MIN_BET", 1)
 JOPACOIN_WIN_REWARD = _parse_int("JOPACOIN_WIN_REWARD", 2)
 JOPACOIN_EXCLUSION_REWARD = _parse_int("JOPACOIN_EXCLUSION_REWARD", 3)
@@ -273,6 +275,11 @@ REBELLION_META_BET_WINDOW_SECONDS = _parse_int("REBELLION_META_BET_WINDOW_SECOND
 REBELLION_META_BET_MAX = _parse_int("REBELLION_META_BET_MAX", 50)                         # Max JC per meta-bet
 REBELLION_FIZZLE_SPIN_MAX_WIN = _parse_int("REBELLION_FIZZLE_SPIN_MAX_WIN", 5)            # Fizzle consolation spin max win cap
 REBELLION_GAMBA_COOLDOWN_PENALTY = _parse_int("REBELLION_GAMBA_COOLDOWN_PENALTY", 172800)  # 48h extra cooldown for attackers on defender win
+
+# Trivia configuration
+TRIVIA_COOLDOWN_SECONDS = _parse_int("TRIVIA_COOLDOWN_SECONDS", 21600)  # 6 hours
+TRIVIA_ANSWER_TIMEOUT_SECONDS = _parse_int("TRIVIA_ANSWER_TIMEOUT_SECONDS", 15)
+TRIVIA_REWARD_PER_QUESTION = _parse_int("TRIVIA_REWARD_PER_QUESTION", 1)
 
 # Neon Degen Terminal Easter Egg configuration
 NEON_DEGEN_ENABLED = _parse_bool("NEON_DEGEN_ENABLED", True)

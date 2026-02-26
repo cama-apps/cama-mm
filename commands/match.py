@@ -12,7 +12,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from config import BOMB_POT_CHANCE, ENRICHMENT_RETRY_DELAYS, JOPACOIN_MIN_BET, OPENSKILL_SHUFFLE_CHANCE, STREAMING_BONUS
+from config import BOMB_POT_CHANCE, ENRICHMENT_RETRY_DELAYS, FIRST_GAME_BONUS, JOPACOIN_MIN_BET, OPENSKILL_SHUFFLE_CHANCE, STREAMING_BONUS
 from services.flavor_text_service import FlavorEvent
 from services.lobby_service import LobbyService
 from services.match_discovery_service import MatchDiscoveryService
@@ -990,6 +990,14 @@ class MatchCommands(commands.Cog):
             pending_state.get("thread_shuffle_thread_id") if pending_state else None
         )
 
+        # Check first-game-of-night BEFORE recording (0 matches since boundary = first game)
+        is_first_game = False
+        if FIRST_GAME_BONUS > 0:
+            try:
+                is_first_game = self.match_service.is_first_game_of_night(guild_id)
+            except Exception:
+                logger.warning("Failed to check first game of night", exc_info=True)
+
         try:
             record_result = await asyncio.to_thread(
                 functools.partial(self.match_service.record_match,
@@ -1242,6 +1250,22 @@ class MatchCommands(commands.Cog):
                 logger.info(
                     f"Streaming bonus (+{STREAMING_BONUS} JC) at record: {streaming_ids}"
                 )
+
+        # First game of the night bonus — all lobby participants (including excluded)
+        if is_first_game and FIRST_GAME_BONUS > 0:
+            all_ids = list(set(
+                list(record_result.get("winning_player_ids", []))
+                + list(record_result.get("losing_player_ids", []))
+                + list(record_result.get("excluded_player_ids", []))
+                + list(record_result.get("excluded_conditional_player_ids", []))
+            ))
+            betting_svc = getattr(self.bot, "betting_service", None)
+            if betting_svc and all_ids:
+                betting_svc.award_first_game_bonus(all_ids, guild_id)
+                distribution_text += (
+                    f"\n🌙 First game of the night! (+{FIRST_GAME_BONUS} {JOPACOIN_EMOTE} each)"
+                )
+                logger.info(f"First game bonus (+{FIRST_GAME_BONUS} JC) awarded to {all_ids}")
 
         admin_override = (
             is_admin

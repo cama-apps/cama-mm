@@ -250,6 +250,8 @@ class SchemaManager:
             # Wheel War (Rebellion) feature
             ("create_wheel_wars_table", self._migration_create_wheel_wars_table),
             ("create_war_bets_table", self._migration_create_war_bets_table),
+            # Trivia cooldown tracking
+            ("add_last_trivia_session_to_players", self._migration_add_last_trivia_session),
         ]
 
     # --- Migrations ---
@@ -1686,3 +1688,6 @@ class SchemaManager:
             "CREATE INDEX IF NOT EXISTS idx_war_bets_guild_discord "
             "ON war_bets(guild_id, discord_id)"
         )
+
+    def _migration_add_last_trivia_session(self, cursor) -> None:
+        self._add_column_if_not_exists(cursor, "players", "last_trivia_session", "INTEGER")

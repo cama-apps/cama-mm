@@ -2565,3 +2565,33 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             total_bets_placed=total_bets_placed or 0,
             first_leverage_used=first_leverage_used,
         )
+
+    # --- Trivia cooldown ---
+
+    def get_last_trivia_session(self, discord_id: int, guild_id: int) -> int | None:
+        """Get the timestamp of a player's last trivia session."""
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT last_trivia_session FROM players WHERE discord_id = ? AND guild_id = ?",
+                (discord_id, guild_id),
+            )
+            row = cursor.fetchone()
+            if not row or row["last_trivia_session"] is None:
+                return None
+            return int(row["last_trivia_session"])
+
+    def try_claim_trivia_session(self, discord_id: int, guild_id: int, now: int, cooldown_seconds: int) -> bool:
+        """Atomically check cooldown and claim a trivia session."""
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE players
+                SET last_trivia_session = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE discord_id = ? AND guild_id = ?
+                  AND (last_trivia_session IS NULL OR last_trivia_session < ?)
+                """,
+                (now, discord_id, guild_id, now - cooldown_seconds),
+            )
+            return cursor.rowcount > 0
