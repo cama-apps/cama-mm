@@ -693,13 +693,6 @@ class DraftCommands(commands.Cog):
         players = await asyncio.to_thread(self.player_repo.get_by_ids, lobby_player_ids, guild_id)
         player_ratings = {p.discord_id: p.glicko_rating or 1500.0 for p in players}
 
-        # Announce the opt-in window
-        await interaction.followup.send(
-            "🎖️ **Immortal Draft starting in 30 seconds!**\n"
-            "Use `/setcaptain yes` to volunteer as captain before time runs out."
-        )
-        await asyncio.sleep(30.0)
-
         # Check captain eligibility (require pre-existing opt-ins)
         eligible_captain_ids = await asyncio.to_thread(
             self.player_repo.get_captain_eligible_players, lobby_player_ids, guild_id
@@ -1008,7 +1001,8 @@ class DraftCommands(commands.Cog):
             f"in guild {guild_id}, captain1={captain1}, captain2={captain2}"
         )
 
-        await safe_defer(interaction)
+        if not await safe_defer(interaction):
+            return
 
         # Acquire shuffle lock to prevent race conditions with /shuffle or concurrent /startdraft
         self.lobby_manager._check_stale_lock(guild_id)

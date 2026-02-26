@@ -73,7 +73,7 @@ if _lobby_channel_raw:
     except ValueError:
         LOBBY_CHANNEL_ID = None
 USE_GLICKO = _parse_bool("USE_GLICKO", True)
-OPENSKILL_SHUFFLE_CHANCE = _parse_float("OPENSKILL_SHUFFLE_CHANCE", 0.10)  # 10% chance per shuffle
+OPENSKILL_SHUFFLE_CHANCE = _parse_float("OPENSKILL_SHUFFLE_CHANCE", 0.05)  # 5% chance per shuffle
 
 SHUFFLER_SETTINGS: dict[str, Any] = {
     "off_role_multiplier": _parse_float("OFF_ROLE_MULTIPLIER", 0.95),
