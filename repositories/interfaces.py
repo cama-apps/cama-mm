@@ -959,6 +959,20 @@ class IWrappedRepository(ABC):
         """Get high-level summary stats for the month."""
         ...
 
+    @abstractmethod
+    def get_player_year_matches(
+        self, discord_id: int, guild_id: int | None, year: int, end_ts: int
+    ) -> list[dict]:
+        """Get per-match rows for a player from Jan 1 of year through end_ts."""
+        ...
+
+    @abstractmethod
+    def get_month_player_match_details(
+        self, discord_id: int, guild_id: int, start_ts: int, end_ts: int
+    ) -> dict | None:
+        """Get a player's match stats for a time period."""
+        ...
+
 
 class IAIQueryRepository(ABC):
     """Repository for executing AI-generated SQL queries safely."""

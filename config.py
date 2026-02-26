@@ -63,6 +63,7 @@ if _admin_env:
 LOBBY_READY_THRESHOLD = _parse_int("LOBBY_READY_THRESHOLD", 10)
 LOBBY_MAX_PLAYERS = _parse_int("LOBBY_MAX_PLAYERS", 20)
 LOBBY_RALLY_COOLDOWN_SECONDS = _parse_int("LOBBY_RALLY_COOLDOWN_SECONDS", 120)  # 2 minutes
+LOBBY_READY_COOLDOWN_SECONDS = _parse_int("LOBBY_READY_COOLDOWN_SECONDS", 60)
 
 # Dedicated lobby channel - if set, lobby embeds are posted here instead of command channel
 LOBBY_CHANNEL_ID: int | None = None
