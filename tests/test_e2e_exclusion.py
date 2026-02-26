@@ -9,7 +9,7 @@ from shuffler import BalancedShuffler
 
 
 def _expected_after_exclusions(exclusions: int) -> int:
-    return NEW_PLAYER_EXCLUSION_BOOST + exclusions * 5
+    return NEW_PLAYER_EXCLUSION_BOOST + exclusions * 6
 
 
 class TestExclusionTracking:

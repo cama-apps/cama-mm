@@ -458,6 +458,35 @@ class RegistrationCommands(commands.Cog):
                 ephemeral=True,
             )
 
+    @app_commands.command(name="exclusion", description="Check your exclusion factor")
+    async def exclusion(self, interaction: discord.Interaction):
+        """Show the player's current exclusion count."""
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+
+        guild_id = interaction.guild.id if interaction.guild else None
+
+        player = await asyncio.to_thread(
+            self.player_service.get_player, interaction.user.id, guild_id
+        )
+        if not player:
+            await interaction.followup.send(
+                "You are not registered. Use `/register` first.",
+                ephemeral=True,
+            )
+            return
+
+        count = await asyncio.to_thread(
+            self.player_service.get_exclusion_count, interaction.user.id, guild_id
+        )
+
+        await interaction.followup.send(
+            f"Your exclusion factor is **{count}**.\n"
+            "Higher = more priority to play next game when there are extra players.",
+            ephemeral=True,
+        )
+
+
 async def setup(bot: commands.Bot):
     """Setup function called when loading the cog."""
     # Get db and config from bot

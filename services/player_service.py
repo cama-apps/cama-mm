@@ -175,6 +175,11 @@ class PlayerService:
 
     # --- Exclusion count operations ---
 
+    def get_exclusion_count(self, discord_id: int, guild_id: int) -> int:
+        """Get a player's exclusion count."""
+        counts = self.player_repo.get_exclusion_counts([discord_id], guild_id)
+        return counts.get(discord_id, 0)
+
     def increment_exclusion_count_half(self, discord_id: int, guild_id: int) -> None:
         """
         Increment player's exclusion count by 2 (half the normal bonus).
