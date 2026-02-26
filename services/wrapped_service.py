@@ -61,6 +61,68 @@ class PlayerWrapped:
 
 
 @dataclass
+class PersonalRecord:
+    """A single personal record (best or worst)."""
+
+    stat_key: str  # e.g. "kills_best"
+    stat_label: str  # e.g. "Most Kills" or "Feeding Frenzy"
+    value: float | int | None
+    display_value: str  # e.g. "25 kills"
+    hero_id: int | None
+    match_id: int | None
+    valve_match_id: int | None
+    match_date: str | None
+    is_worst: bool = False
+
+
+# Slide definitions for personal records: (title, color_key, stat_keys)
+RECORDS_SLIDE_DEFS: list[tuple[str, str, list[str]]] = [
+    ("Combat", "combat", [
+        "kills_best", "assists_best", "kda_best",
+        "deaths_worst", "kda_worst", "kill_participation_best",
+    ]),
+    ("Farming", "farming", [
+        "gpm_best", "xpm_best", "last_hits_best", "denies_best",
+        "gpm_worst", "last_hits_worst",
+    ]),
+    ("Impact", "impact", [
+        "hero_damage_best", "tower_damage_best", "towers_killed_best",
+        "hero_healing_best", "comeback_best", "throw_worst",
+    ]),
+    ("Vision & Utility", "vision", [
+        "obs_placed_best", "sen_placed_best", "stuns_best",
+        "courier_kills_best", "pings_worst", "apm_best",
+    ]),
+    ("Endurance & Streaks", "endurance", [
+        "longest_game", "shortest_game",
+        "win_streak_best", "lose_streak_worst", "rapiers_best",
+    ]),
+]
+
+
+@dataclass
+class PersonalRecordsWrapped:
+    """Personal records wrapped for a player."""
+
+    discord_id: int
+    discord_username: str
+    year: int
+    month_name: str  # e.g. "January 2026" (end month)
+    games_played: int
+    records: list[PersonalRecord] = field(default_factory=list)
+
+    def get_slides(self) -> list[tuple[str, str, list["PersonalRecord"]]]:
+        """Returns [(slide_title, color_key, records), ...]"""
+        record_map = {r.stat_key: r for r in self.records}
+        slides = []
+        for title, color_key, stat_keys in RECORDS_SLIDE_DEFS:
+            slide_records = [record_map[k] for k in stat_keys if k in record_map]
+            if slide_records:
+                slides.append((title, color_key, slide_records))
+        return slides
+
+
+@dataclass
 class ServerWrapped:
     """Server-wide wrapped summary."""
 
@@ -386,6 +448,362 @@ class WrappedService:
             betting_pnl=betting_pnl,
             degen_score=degen_score,
         )
+
+    def get_player_records_wrapped(
+        self,
+        discord_id: int,
+        year_month: str,
+        guild_id: int | None = None,
+    ) -> PersonalRecordsWrapped | None:
+        """
+        Generate personal records wrapped for a player.
+
+        Covers Jan 1 of the year through end of specified month.
+
+        Returns:
+            PersonalRecordsWrapped or None if insufficient data
+        """
+        year, month = map(int, year_month.split("-"))
+        _, end_ts = self._get_month_timestamps(year_month)
+
+        rows = self.wrapped_repo.get_player_year_matches(
+            discord_id, guild_id, year, end_ts
+        )
+        if len(rows) < WRAPPED_MIN_GAMES:
+            return None
+
+        player = self.player_repo.get_by_id(discord_id, guild_id)
+        if not player:
+            return None
+
+        # Build steam_id set for enrichment_data player lookup
+        steam_ids = set(self.player_repo.get_steam_ids(discord_id))
+
+        records: list[PersonalRecord] = []
+
+        # --- Column-based stats (best and worst) ---
+        # (best_key, worst_key, column, best_label, worst_label, unit, best_is_worst)
+        # best_is_worst: True when max value is semantically bad (e.g. most deaths)
+        stat_defs = [
+            ("kills_best", None, "kills", "Most Kills", None, "kills", False),
+            ("assists_best", None, "assists", "Most Assists", None, "assists", False),
+            ("deaths_worst", None, "deaths", "Feeding Frenzy", None, "deaths", True),
+            ("gpm_best", "gpm_worst", "gpm", "Highest GPM", "AFK Simulator", "GPM", False),
+            ("xpm_best", None, "xpm", "Highest XPM", None, "XPM", False),
+            ("last_hits_best", "last_hits_worst", "last_hits", "Most Last Hits", "Allergic to Creeps", "last hits", False),
+            ("denies_best", None, "denies", "Most Denies", None, "denies", False),
+            ("hero_damage_best", None, "hero_damage", "Most Hero Damage", None, "damage", False),
+            ("tower_damage_best", None, "tower_damage", "Most Tower Damage", None, "damage", False),
+            ("towers_killed_best", None, "towers_killed", "Most Tower Kills", None, "towers", False),
+            ("hero_healing_best", None, "hero_healing", "Most Hero Healing", None, "healing", False),
+            ("obs_placed_best", None, "obs_placed", "Most Obs Placed", None, "obs", False),
+            ("sen_placed_best", None, "sen_placed", "Most Sentries Placed", None, "sentries", False),
+            ("stuns_best", None, "stuns", "Most Stuns", None, "sec stuns", False),
+        ]
+
+        for best_key, worst_key, col, best_label, worst_label, unit, best_is_worst in stat_defs:
+            valid_rows = [r for r in rows if r.get(col) is not None]
+            if not valid_rows:
+                continue
+
+            # Best (max)
+            best_row = max(valid_rows, key=lambda r: r[col])
+            val = best_row[col]
+            display = f"{val:,.1f} {unit}" if isinstance(val, float) else f"{val:,} {unit}"
+            records.append(PersonalRecord(
+                stat_key=best_key,
+                stat_label=best_label,
+                value=val,
+                display_value=display,
+                hero_id=best_row.get("hero_id"),
+                match_id=best_row.get("match_id"),
+                valve_match_id=best_row.get("valve_match_id"),
+                match_date=str(best_row.get("match_date", ""))[:10] if best_row.get("match_date") else None,
+                is_worst=best_is_worst,
+            ))
+
+            # Worst (min) if defined
+            if worst_key and worst_label:
+                worst_row = min(valid_rows, key=lambda r: r[col])
+                wval = worst_row[col]
+                wdisplay = f"{wval:,.1f} {unit}" if isinstance(wval, float) else f"{wval:,} {unit}"
+                records.append(PersonalRecord(
+                    stat_key=worst_key,
+                    stat_label=worst_label,
+                    value=wval,
+                    display_value=wdisplay,
+                    hero_id=worst_row.get("hero_id"),
+                    match_id=worst_row.get("match_id"),
+                    valve_match_id=worst_row.get("valve_match_id"),
+                    match_date=str(worst_row.get("match_date", ""))[:10] if worst_row.get("match_date") else None,
+                    is_worst=True,
+                ))
+
+        # --- KDA ratio ---
+        kda_rows = [r for r in rows if r.get("kills") is not None and r.get("assists") is not None and r.get("deaths") is not None]
+        if kda_rows:
+            def _kda(r):
+                return (r["kills"] + r["assists"]) / max(r["deaths"], 1)
+
+            best_kda_row = max(kda_rows, key=_kda)
+            best_kda_val = _kda(best_kda_row)
+            records.append(PersonalRecord(
+                stat_key="kda_best",
+                stat_label="Best KDA",
+                value=round(best_kda_val, 2),
+                display_value=f"{best_kda_val:.2f} KDA",
+                hero_id=best_kda_row.get("hero_id"),
+                match_id=best_kda_row.get("match_id"),
+                valve_match_id=best_kda_row.get("valve_match_id"),
+                match_date=str(best_kda_row.get("match_date", ""))[:10] if best_kda_row.get("match_date") else None,
+            ))
+
+            worst_kda_row = min(kda_rows, key=_kda)
+            worst_kda_val = _kda(worst_kda_row)
+            records.append(PersonalRecord(
+                stat_key="kda_worst",
+                stat_label="Clown Fiesta",
+                value=round(worst_kda_val, 2),
+                display_value=f"{worst_kda_val:.2f} KDA",
+                hero_id=worst_kda_row.get("hero_id"),
+                match_id=worst_kda_row.get("match_id"),
+                valve_match_id=worst_kda_row.get("valve_match_id"),
+                match_date=str(worst_kda_row.get("match_date", ""))[:10] if worst_kda_row.get("match_date") else None,
+                is_worst=True,
+            ))
+
+        # --- Duration records ---
+        duration_rows = [r for r in rows if r.get("duration_seconds") and r["duration_seconds"] > 0]
+        if duration_rows:
+            longest = max(duration_rows, key=lambda r: r["duration_seconds"])
+            dur_min = longest["duration_seconds"] // 60
+            records.append(PersonalRecord(
+                stat_key="longest_game",
+                stat_label="Longest Game",
+                value=longest["duration_seconds"],
+                display_value=f"{dur_min}:{longest['duration_seconds'] % 60:02d} min",
+                hero_id=longest.get("hero_id"),
+                match_id=longest.get("match_id"),
+                valve_match_id=longest.get("valve_match_id"),
+                match_date=str(longest.get("match_date", ""))[:10] if longest.get("match_date") else None,
+            ))
+
+            shortest = min(duration_rows, key=lambda r: r["duration_seconds"])
+            sdur_min = shortest["duration_seconds"] // 60
+            records.append(PersonalRecord(
+                stat_key="shortest_game",
+                stat_label="Shortest Game",
+                value=shortest["duration_seconds"],
+                display_value=f"{sdur_min}:{shortest['duration_seconds'] % 60:02d} min",
+                hero_id=shortest.get("hero_id"),
+                match_id=shortest.get("match_id"),
+                valve_match_id=shortest.get("valve_match_id"),
+                match_date=str(shortest.get("match_date", ""))[:10] if shortest.get("match_date") else None,
+            ))
+
+        # --- Enrichment-data stats ---
+        enrichment_stats = self._extract_enrichment_records(rows, steam_ids)
+        records.extend(enrichment_stats)
+
+        # --- Kill participation ---
+        kp_records = []
+        for r in rows:
+            if r.get("kills") is None or r.get("assists") is None:
+                continue
+            team_score = 0
+            if r.get("side") == "radiant":
+                team_score = r.get("radiant_score") or 0
+            elif r.get("side") == "dire":
+                team_score = r.get("dire_score") or 0
+            if team_score > 0:
+                kp = (r["kills"] + r["assists"]) / team_score
+                kp_records.append((kp, r))
+        if kp_records:
+            best_kp_val, best_kp_row = max(kp_records, key=lambda x: x[0])
+            records.append(PersonalRecord(
+                stat_key="kill_participation_best",
+                stat_label="Highest Kill Participation",
+                value=round(best_kp_val * 100, 1),
+                display_value=f"{best_kp_val * 100:.1f}%",
+                hero_id=best_kp_row.get("hero_id"),
+                match_id=best_kp_row.get("match_id"),
+                valve_match_id=best_kp_row.get("valve_match_id"),
+                match_date=str(best_kp_row.get("match_date", ""))[:10] if best_kp_row.get("match_date") else None,
+            ))
+
+        # --- Streaks ---
+        win_streak, lose_streak = self._compute_streaks(rows)
+        if win_streak > 0:
+            records.append(PersonalRecord(
+                stat_key="win_streak_best",
+                stat_label="Longest Win Streak",
+                value=win_streak,
+                display_value=f"{win_streak} wins",
+                hero_id=None,
+                match_id=None,
+                valve_match_id=None,
+                match_date=None,
+            ))
+        if lose_streak > 0:
+            records.append(PersonalRecord(
+                stat_key="lose_streak_worst",
+                stat_label="Tilt Master",
+                value=lose_streak,
+                display_value=f"{lose_streak} losses",
+                hero_id=None,
+                match_id=None,
+                valve_match_id=None,
+                match_date=None,
+                is_worst=True,
+            ))
+
+        month_name = f"{calendar.month_name[month]} {year}"
+
+        return PersonalRecordsWrapped(
+            discord_id=discord_id,
+            discord_username=player.name,
+            year=year,
+            month_name=month_name,
+            games_played=len(rows),
+            records=records,
+        )
+
+    def _extract_enrichment_records(
+        self, rows: list[dict], steam_ids: set[int]
+    ) -> list[PersonalRecord]:
+        """Extract records from enrichment_data JSON for each match."""
+        records: list[PersonalRecord] = []
+
+        # Track best per enrichment stat: stat_key -> (value, row)
+        best_apm: tuple[float, dict] | None = None
+        best_courier_kills: tuple[int, dict] | None = None
+        worst_pings: tuple[int, dict] | None = None
+        best_rapiers: tuple[int, dict] | None = None
+        best_comeback: tuple[int, dict] | None = None
+        worst_throw: tuple[int, dict] | None = None
+
+        for row in rows:
+            raw = row.get("enrichment_data")
+            if not raw:
+                continue
+            try:
+                data = json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                continue
+
+            # Find player in enrichment data by account_id (steam_id)
+            player_data = None
+            for p in data.get("players", []):
+                if p.get("account_id") in steam_ids:
+                    player_data = p
+                    break
+
+            if player_data:
+                # APM
+                apm = player_data.get("actions_per_min")
+                if apm is not None and (best_apm is None or apm > best_apm[0]):
+                    best_apm = (apm, row)
+
+                # Courier kills
+                ck = player_data.get("courier_kills")
+                if ck is not None and ck > 0 and (best_courier_kills is None or ck > best_courier_kills[0]):
+                    best_courier_kills = (ck, row)
+
+                # Map pings
+                pings = player_data.get("pings")
+                if pings is not None and (worst_pings is None or pings > worst_pings[0]):
+                    worst_pings = (pings, row)
+
+                # Rapiers from purchase_log
+                purchase_log = player_data.get("purchase_log")
+                if purchase_log:
+                    rapier_count = sum(1 for item in purchase_log if item.get("key") == "rapier")
+                    if rapier_count > 0 and (best_rapiers is None or rapier_count > best_rapiers[0]):
+                        best_rapiers = (rapier_count, row)
+
+            # Match-level: comeback / throw
+            comeback = data.get("comeback")
+            if comeback is not None and comeback > 0 and (best_comeback is None or comeback > best_comeback[0]):
+                best_comeback = (comeback, row)
+
+            throw = data.get("throw")
+            if throw is not None and throw > 0 and (worst_throw is None or throw > worst_throw[0]):
+                worst_throw = (throw, row)
+
+        def _make_record(key, label, val, display, row, is_worst=False):
+            return PersonalRecord(
+                stat_key=key,
+                stat_label=label,
+                value=val,
+                display_value=display,
+                hero_id=row.get("hero_id"),
+                match_id=row.get("match_id"),
+                valve_match_id=row.get("valve_match_id"),
+                match_date=str(row.get("match_date", ""))[:10] if row.get("match_date") else None,
+                is_worst=is_worst,
+            )
+
+        def _na_record(key, label, is_worst=False):
+            return PersonalRecord(
+                stat_key=key, stat_label=label, value=None,
+                display_value="N/A", hero_id=None, match_id=None,
+                valve_match_id=None, match_date=None, is_worst=is_worst,
+            )
+
+        # Enrichment stats: emit record or N/A placeholder
+        enrichment_pairs = [
+            ("apm_best", "Highest APM", best_apm, False),
+            ("courier_kills_best", "Most Courier Kills", best_courier_kills, False),
+            ("pings_worst", "Signal Spammer", worst_pings, True),
+            ("rapiers_best", "Gambler's Spirit", best_rapiers, False),
+            ("comeback_best", "Biggest Comeback", best_comeback, False),
+            ("throw_worst", "Charity Case", worst_throw, True),
+        ]
+        format_fns = {
+            "apm_best": lambda v: f"{v:,.0f} APM",
+            "courier_kills_best": lambda v: f"{v} couriers",
+            "pings_worst": lambda v: f"{v:,} pings",
+            "rapiers_best": lambda v: f"{v} rapiers",
+            "comeback_best": lambda v: f"{v:,} gold",
+            "throw_worst": lambda v: f"{v:,} gold",
+        }
+
+        for key, label, best_val_row, is_worst in enrichment_pairs:
+            if best_val_row:
+                val, row = best_val_row
+                records.append(_make_record(key, label, val, format_fns[key](val), row, is_worst=is_worst))
+            else:
+                records.append(_na_record(key, label, is_worst=is_worst))
+
+        return records
+
+    @staticmethod
+    def _compute_streaks(matches: list[dict]) -> tuple[int, int]:
+        """Compute longest win and lose streaks from sequential match results.
+
+        Returns:
+            (longest_win_streak, longest_lose_streak)
+        """
+        best_win = 0
+        best_lose = 0
+        current_win = 0
+        current_lose = 0
+
+        for m in matches:
+            if m.get("won") is None:
+                current_win = 0
+                current_lose = 0
+                continue
+            if m["won"]:
+                current_win += 1
+                current_lose = 0
+                best_win = max(best_win, current_win)
+            else:
+                current_lose += 1
+                current_win = 0
+                best_lose = max(best_lose, current_lose)
+
+        return best_win, best_lose
 
     def _generate_awards(
         self,

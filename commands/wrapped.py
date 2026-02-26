@@ -4,6 +4,8 @@ Cama Wrapped commands - Monthly summary feature.
 Provides /wrapped command and scheduled task for auto-generation.
 """
 
+import asyncio
+import io
 import logging
 from datetime import datetime, timedelta
 
@@ -16,8 +18,9 @@ from services.permissions import has_admin_permission
 from utils.hero_lookup import get_hero_name
 from utils.interaction_safety import safe_defer, safe_followup
 from utils.wrapped_drawing import (
+    SLIDE_COLORS,
     draw_awards_grid,
-    draw_wrapped_personal,
+    draw_records_slide,
     draw_wrapped_summary,
 )
 
@@ -33,6 +36,70 @@ def _get_hero_names_dict() -> dict[int, str]:
         if name and name != "Unknown":
             hero_names[hero_id] = name
     return hero_names
+
+
+class WrappedRecordsView(discord.ui.View):
+    """View with Prev/Next buttons for navigating personal records slides."""
+
+    def __init__(self, records_wrapped, hero_names: dict[int, str], timeout: int = 120):
+        super().__init__(timeout=timeout)
+        self.records_wrapped = records_wrapped
+        self.slides = records_wrapped.get_slides()
+        self.hero_names = hero_names
+        self.current_slide = 0
+        self._slide_cache: dict[int, bytes] = {}
+        self.message: discord.Message | None = None
+        self._update_buttons()
+
+    def _update_buttons(self):
+        """Update button disabled states based on current slide."""
+        self.prev_button.disabled = self.current_slide == 0
+        self.next_button.disabled = self.current_slide >= len(self.slides) - 1
+
+    async def _render_slide(self, index: int) -> discord.File:
+        """Render a slide, using cache if available."""
+        if index not in self._slide_cache:
+            title, color_key, records = self.slides[index]
+            accent = SLIDE_COLORS.get(color_key, (241, 196, 15))
+            buf = await asyncio.to_thread(
+                draw_records_slide,
+                title,
+                accent,
+                records,
+                self.records_wrapped.discord_username,
+                self.records_wrapped.month_name,
+                index + 1,
+                len(self.slides),
+                self.hero_names,
+            )
+            self._slide_cache[index] = buf.read()
+        return discord.File(io.BytesIO(self._slide_cache[index]), filename="records_slide.png")
+
+    @discord.ui.button(label="< Prev", style=discord.ButtonStyle.secondary)
+    async def prev_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.current_slide > 0:
+            self.current_slide -= 1
+            self._update_buttons()
+            file = await self._render_slide(self.current_slide)
+            await interaction.response.edit_message(attachments=[file], view=self)
+
+    @discord.ui.button(label="Next >", style=discord.ButtonStyle.primary)
+    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.current_slide < len(self.slides) - 1:
+            self.current_slide += 1
+            self._update_buttons()
+            file = await self._render_slide(self.current_slide)
+            await interaction.response.edit_message(attachments=[file], view=self)
+
+    async def on_timeout(self):
+        """Disable buttons on timeout."""
+        if self.message:
+            try:
+                self.prev_button.disabled = True
+                self.next_button.disabled = True
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
 
 
 class WrappedCog(commands.Cog):
@@ -187,30 +254,11 @@ class WrappedCog(commands.Cog):
                 awards_buffer = draw_awards_grid(server_wrapped.awards[:6])
                 files.append(discord.File(awards_buffer, filename="wrapped_awards.png"))
 
-            # Personal wrapped if viewing self or specific user
-            player_wrapped = self.wrapped_service.get_player_wrapped(
-                target_user.id, month, guild_id
-            )
-            if player_wrapped:
-                personal_buffer = draw_wrapped_personal(player_wrapped, self.hero_names)
-                files.append(
-                    discord.File(personal_buffer, filename="wrapped_personal.png")
-                )
-
-            # Build embed
+            # Build embed for server summary
             embed = discord.Embed(
                 title=f"Cama Wrapped - {server_wrapped.month_name}",
                 color=discord.Color.gold(),
             )
-
-            if player_wrapped:
-                embed.description = (
-                    f"**{target_user.display_name}'s Month:**\n"
-                    f"{player_wrapped.games_played} games | "
-                    f"{player_wrapped.wins}W-{player_wrapped.losses}L | "
-                    f"{player_wrapped.win_rate*100:.0f}% WR"
-                )
-
             embed.set_image(url="attachment://wrapped_summary.png")
 
             # Add award highlights to embed
@@ -227,6 +275,22 @@ class WrappedCog(commands.Cog):
                 )
 
             await safe_followup(interaction, embed=embed, files=files)
+
+            # Personal records wrapped (replaces old personal card)
+            records_wrapped = self.wrapped_service.get_player_records_wrapped(
+                target_user.id, month, guild_id
+            )
+            if records_wrapped and records_wrapped.records:
+                view = WrappedRecordsView(records_wrapped, self.hero_names)
+                first_slide_file = await view._render_slide(0)
+                msg = await safe_followup(
+                    interaction,
+                    content=f"**{target_user.display_name}'s Personal Records** ({records_wrapped.games_played} games)",
+                    file=first_slide_file,
+                    view=view,
+                )
+                if msg:
+                    view.message = msg
 
         except Exception as e:
             logger.error(f"Error generating wrapped: {e}", exc_info=True)
