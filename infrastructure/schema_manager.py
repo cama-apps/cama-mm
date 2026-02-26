@@ -252,6 +252,7 @@ class SchemaManager:
             ("create_war_bets_table", self._migration_create_war_bets_table),
             # Trivia cooldown tracking
             ("add_last_trivia_session_to_players", self._migration_add_last_trivia_session),
+            ("create_player_mana_table", self._migration_create_player_mana_table),
         ]
 
     # --- Migrations ---
@@ -1691,3 +1692,19 @@ class SchemaManager:
 
     def _migration_add_last_trivia_session(self, cursor) -> None:
         self._add_column_if_not_exists(cursor, "players", "last_trivia_session", "INTEGER")
+
+    def _migration_create_player_mana_table(self, cursor) -> None:
+        """Create table for daily MTG mana land assignments (one row per player per guild)."""
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS player_mana (
+                discord_id   INTEGER NOT NULL,
+                guild_id     INTEGER NOT NULL DEFAULT 0,
+                current_land TEXT,
+                assigned_date TEXT,
+                created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (discord_id, guild_id)
+            )
+            """
+        )

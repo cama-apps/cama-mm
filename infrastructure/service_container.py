@@ -84,6 +84,7 @@ class ServiceContainer:
         self._init_advanced_services()
         self._init_ai_services()
         self._init_rebellion_service()
+        self._init_mana_service()
         self._init_extras()
 
         self._initialized = True
@@ -116,6 +117,7 @@ class ServiceContainer:
         from repositories.neon_event_repository import NeonEventRepository
         from repositories.wrapped_repository import WrappedRepository
         from repositories.rebellion_repository import RebellionRepository
+        from repositories.mana_repository import ManaRepository
 
         p = self.db_path
         self._components.update({
@@ -136,6 +138,7 @@ class ServiceContainer:
             "neon_event_repo": NeonEventRepository(p),
             "wrapped_repo": WrappedRepository(p),
             "rebellion_repo": RebellionRepository(p),
+            "mana_repo": ManaRepository(p),
         })
 
     def _init_core_services(self) -> None:
@@ -315,6 +318,18 @@ class ServiceContainer:
             player_repo=c["player_repo"],
         )
 
+    def _init_mana_service(self) -> None:
+        from services.mana_service import ManaService
+
+        c = self._components
+        c["mana_service"] = ManaService(
+            mana_repo=c["mana_repo"],
+            player_repo=c["player_repo"],
+            gambling_stats_service=c["gambling_stats_service"],
+            bankruptcy_service=c["bankruptcy_service"],
+            tip_repo=c["tip_repo"],
+        )
+
     def _init_extras(self) -> None:
         """Neon Degen Terminal and Wrapped services."""
         from services.neon_degen_service import NeonDegenService
@@ -392,6 +407,8 @@ class ServiceContainer:
         bot.wrapped_service = c["wrapped_service"]
         bot.rebellion_service = c["rebellion_service"]
         bot.rebellion_repo = c["rebellion_repo"]
+        bot.mana_service = c["mana_service"]
+        bot.mana_repo = c["mana_repo"]
 
         # AI services (may be None)
         bot.ai_service = c["ai_service"]

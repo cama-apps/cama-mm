@@ -1172,6 +1172,25 @@ class IDisburseRepository(ABC):
         ...
 
 
+class IManaRepository(ABC):
+    """Repository for daily MTG mana land assignments."""
+
+    @abstractmethod
+    def get_mana(self, discord_id: int, guild_id: int | None) -> dict | None:
+        """Return {current_land, assigned_date} or None if never assigned."""
+        ...
+
+    @abstractmethod
+    def set_mana(self, discord_id: int, guild_id: int | None, land: str, assigned_date: str) -> None:
+        """Upsert today's mana for the player."""
+        ...
+
+    @abstractmethod
+    def get_all_mana(self, guild_id: int | None) -> list[dict]:
+        """Return all mana rows for the guild."""
+        ...
+
+
 class IRebellionRepository(ABC):
     """Repository for wheel war (rebellion) data access."""
 
