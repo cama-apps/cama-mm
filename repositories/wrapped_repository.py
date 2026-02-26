@@ -421,6 +421,68 @@ class WrappedRepository(BaseRepository, IWrappedRepository):
 
             return result
 
+    def get_player_year_matches(
+        self, discord_id: int, guild_id: int | None, year: int, end_ts: int
+    ) -> list[dict]:
+        """
+        Get per-match rows for a player from Jan 1 of year through end_ts.
+
+        Args:
+            discord_id: Player's Discord ID
+            guild_id: Guild ID
+            year: Year to start from (Jan 1)
+            end_ts: End Unix timestamp
+
+        Returns:
+            List of dicts with per-match stats including enrichment_data
+        """
+        guild_id = self.normalize_guild_id(guild_id)
+        # Jan 1 of year at 00:00 UTC
+        from datetime import datetime, timezone
+        start_ts = int(datetime(year, 1, 1, tzinfo=timezone.utc).timestamp())
+        with self.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT
+                    mp.match_id,
+                    mp.discord_id,
+                    mp.hero_id,
+                    mp.kills,
+                    mp.deaths,
+                    mp.assists,
+                    mp.last_hits,
+                    mp.denies,
+                    mp.gpm,
+                    mp.xpm,
+                    mp.hero_damage,
+                    mp.tower_damage,
+                    mp.hero_healing,
+                    mp.obs_placed,
+                    mp.sen_placed,
+                    mp.stuns,
+                    mp.towers_killed,
+                    mp.won,
+                    m.match_date,
+                    m.duration_seconds,
+                    m.valve_match_id,
+                    m.enrichment_data,
+                    mp.team_number,
+                    mp.side,
+                    m.radiant_score,
+                    m.dire_score
+                FROM match_participants mp
+                JOIN matches m ON mp.match_id = m.match_id
+                WHERE mp.discord_id = ?
+                  AND m.guild_id = ?
+                  AND m.winning_team IS NOT NULL
+                  AND m.match_date >= datetime(?, 'unixepoch')
+                  AND m.match_date < datetime(?, 'unixepoch')
+                ORDER BY m.match_date ASC
+                """,
+                (discord_id, guild_id, start_ts, end_ts),
+            )
+            return [dict(row) for row in cursor.fetchall()]
+
     def get_month_player_match_details(
         self, discord_id: int, guild_id: int, start_ts: int, end_ts: int
     ) -> dict | None:
