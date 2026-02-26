@@ -10,6 +10,7 @@ from utils.drawing import (
     draw_attribute_distribution,
     draw_lane_distribution,
     draw_matches_table,
+    draw_rating_history_chart,
     draw_role_graph,
 )
 
@@ -302,3 +303,124 @@ class TestImageIntegrity:
             result = func(*args)
             img = Image.open(result)
             assert img.mode == "RGBA"
+
+
+def _make_history_entry(rating=1500, won=True, os_mu=None):
+    """Helper to create a rating history dict."""
+    return {
+        "rating": rating,
+        "rating_before": rating - (50 if won else -50),
+        "rd_before": 100,
+        "rd_after": 95,
+        "volatility_before": 0.06,
+        "volatility_after": 0.06,
+        "expected_team_win_prob": 0.5,
+        "team_number": 1,
+        "won": won,
+        "match_id": 1,
+        "timestamp": "2025-01-01T00:00:00",
+        "lobby_type": "shuffle",
+        "os_mu_before": os_mu - 1 if os_mu else None,
+        "os_mu_after": os_mu,
+        "os_sigma_before": 8.0 if os_mu else None,
+        "os_sigma_after": 7.5 if os_mu else None,
+    }
+
+
+class TestDrawRatingHistoryChart:
+    """Tests for draw_rating_history_chart function."""
+
+    def test_empty_history_returns_image(self):
+        """Test that empty history returns valid image with message."""
+        result = draw_rating_history_chart("TestUser", [])
+        assert isinstance(result, BytesIO)
+        img = Image.open(result)
+        assert img.format == "PNG"
+        assert img.size == (700, 400)
+
+    def test_basic_chart_with_both_ratings(self):
+        """Test chart with both Glicko and OpenSkill data."""
+        history = [
+            _make_history_entry(rating=1600, won=True, os_mu=40),
+            _make_history_entry(rating=1550, won=False, os_mu=38),
+            _make_history_entry(rating=1500, won=True, os_mu=35),
+        ]
+        result = draw_rating_history_chart("TestUser", history)
+        img = Image.open(result)
+        assert img.format == "PNG"
+        assert img.size == (700, 400)
+        assert img.mode == "RGBA"
+
+    def test_chart_without_openskill(self):
+        """Test chart with only Glicko data (no OpenSkill)."""
+        history = [
+            _make_history_entry(rating=1600, won=True),
+            _make_history_entry(rating=1550, won=False),
+            _make_history_entry(rating=1500, won=True),
+        ]
+        result = draw_rating_history_chart("TestUser", history)
+        img = Image.open(result)
+        assert img.format == "PNG"
+        assert img.size == (700, 400)
+
+    def test_two_matches_minimum(self):
+        """Test that exactly 2 matches produces a valid chart."""
+        history = [
+            _make_history_entry(rating=1550, won=True, os_mu=40),
+            _make_history_entry(rating=1500, won=False, os_mu=35),
+        ]
+        result = draw_rating_history_chart("TestUser", history)
+        img = Image.open(result)
+        assert img.format == "PNG"
+        assert img.size == (700, 400)
+
+    def test_large_history(self):
+        """Test chart with 50+ matches."""
+        history = [
+            _make_history_entry(
+                rating=1500 + i * 10,
+                won=i % 3 != 0,
+                os_mu=30 + i * 0.5,
+            )
+            for i in range(60, 0, -1)  # most-recent-first
+        ]
+        result = draw_rating_history_chart("TestUser", history)
+        img = Image.open(result)
+        assert img.format == "PNG"
+        assert img.size == (700, 400)
+
+    def test_partial_openskill_data(self):
+        """Test chart where only some entries have OpenSkill data."""
+        history = [
+            _make_history_entry(rating=1600, won=True, os_mu=40),
+            _make_history_entry(rating=1550, won=False),  # No OS
+            _make_history_entry(rating=1500, won=True, os_mu=35),
+        ]
+        result = draw_rating_history_chart("TestUser", history)
+        img = Image.open(result)
+        assert img.format == "PNG"
+
+    def test_flat_ratings(self):
+        """Test chart with identical ratings (div-by-zero guard)."""
+        history = [
+            _make_history_entry(rating=1500, won=True, os_mu=35),
+            _make_history_entry(rating=1500, won=False, os_mu=35),
+            _make_history_entry(rating=1500, won=True, os_mu=35),
+        ]
+        result = draw_rating_history_chart("TestUser", history)
+        img = Image.open(result)
+        assert img.format == "PNG"
+        assert img.size == (700, 400)
+
+    def test_returns_seekable_bytesio(self):
+        """Test that returned BytesIO is seeked to start."""
+        history = [
+            _make_history_entry(rating=1600, won=True),
+            _make_history_entry(rating=1500, won=False),
+        ]
+        result = draw_rating_history_chart("TestUser", history)
+        assert isinstance(result, BytesIO)
+        assert result.tell() == 0
+        # Should be readable without seeking
+        data = result.read(8)
+        assert data[:4] == b"\x89PNG"

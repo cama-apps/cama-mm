@@ -25,6 +25,7 @@ from utils.drawing import (
     draw_gamba_chart,
     draw_hero_performance_chart,
     draw_lane_distribution,
+    draw_rating_history_chart,
     draw_role_graph,
 )
 from utils.formatting import JOPACOIN_EMOTE, TOMBSTONE_EMOJI, format_role_display
@@ -421,7 +422,7 @@ class ProfileCommands(commands.Cog):
         # Get rating history for trend analysis
         history = []
         if match_repo and hasattr(match_repo, "get_player_rating_history_detailed"):
-            history = match_repo.get_player_rating_history_detailed(target_discord_id, guild_id, limit=50)
+            history = match_repo.get_player_rating_history_detailed(target_discord_id, guild_id, limit=999)
 
         # Calculate percentile
         all_players = player_repo.get_all(guild_id)
@@ -604,7 +605,22 @@ class ProfileCommands(commands.Cog):
 
         embed.set_footer(text="Tip: Use /calibration for full analysis | ✅=expected W | 🔥=upset | ❌=expected L | 💀=choke")
 
-        return embed, None
+        chart_file = None
+        if history and len(history) >= 2:
+            try:
+                chart_bytes = await asyncio.to_thread(
+                    functools.partial(
+                        draw_rating_history_chart,
+                        username=target_user.display_name,
+                        history=history,
+                    )
+                )
+                chart_file = discord.File(chart_bytes, filename="rating_chart.png")
+                embed.set_image(url="attachment://rating_chart.png")
+            except Exception as e:
+                logger.debug(f"Could not generate rating chart: {e}")
+
+        return embed, chart_file
 
     async def _build_economy_embed(
         self,
