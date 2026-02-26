@@ -274,6 +274,11 @@ REBELLION_META_BET_MAX = _parse_int("REBELLION_META_BET_MAX", 50)               
 REBELLION_FIZZLE_SPIN_MAX_WIN = _parse_int("REBELLION_FIZZLE_SPIN_MAX_WIN", 5)            # Fizzle consolation spin max win cap
 REBELLION_GAMBA_COOLDOWN_PENALTY = _parse_int("REBELLION_GAMBA_COOLDOWN_PENALTY", 172800)  # 48h extra cooldown for attackers on defender win
 
+# Trivia configuration
+TRIVIA_COOLDOWN_SECONDS = _parse_int("TRIVIA_COOLDOWN_SECONDS", 21600)  # 6 hours
+TRIVIA_ANSWER_TIMEOUT_SECONDS = _parse_int("TRIVIA_ANSWER_TIMEOUT_SECONDS", 15)
+TRIVIA_REWARD_PER_QUESTION = _parse_int("TRIVIA_REWARD_PER_QUESTION", 1)
+
 # Neon Degen Terminal Easter Egg configuration
 NEON_DEGEN_ENABLED = _parse_bool("NEON_DEGEN_ENABLED", True)
 NEON_LAYER1_CHANCE = _parse_float("NEON_LAYER1_CHANCE", 0.35)  # Subtle text triggers

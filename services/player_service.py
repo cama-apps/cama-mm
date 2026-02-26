@@ -322,6 +322,18 @@ class PlayerService:
         """
         return self.player_repo.get_last_normal_wheel_spin(guild_id)
 
+    # --- Trivia cooldown operations ---
+
+    def get_last_trivia_session(self, discord_id: int, guild_id: int) -> int | None:
+        """Get the timestamp of a player's last trivia session."""
+        return self.player_repo.get_last_trivia_session(discord_id, guild_id)
+
+    def try_claim_trivia_session(
+        self, discord_id: int, guild_id: int, now: int, cooldown_seconds: int
+    ) -> bool:
+        """Atomically check cooldown and claim a trivia session."""
+        return self.player_repo.try_claim_trivia_session(discord_id, guild_id, now, cooldown_seconds)
+
     # --- Leaderboard and ranking operations ---
 
     def get_leaderboard(self, guild_id: int, limit: int = 20, offset: int = 0):
