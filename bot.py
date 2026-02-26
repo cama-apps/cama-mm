@@ -52,6 +52,7 @@ from config import (
     LEVERAGE_TIERS,
     LOBBY_MAX_PLAYERS,
     LOBBY_RALLY_COOLDOWN_SECONDS,
+    LOBBY_READY_COOLDOWN_SECONDS,
     LOBBY_READY_THRESHOLD,
     MAX_DEBT,
     USE_GLICKO,
@@ -76,6 +77,10 @@ _container: ServiceContainer | None = None
 # Key: (guild_id, needed_count) -> timestamp
 # Allows independent cooldowns for +2 and +1 notifications
 _lobby_rally_cooldowns: dict[tuple[int, int], float] = {}
+
+# Lobby ready notification cooldowns
+# Key: guild_id -> timestamp
+_lobby_ready_cooldowns: dict[int, float] = {}
 
 
 def _init_services():
@@ -229,8 +234,12 @@ async def update_lobby_message(message, lobby, guild_id=None):
         logger.error(f"Error updating lobby message: {exc}", exc_info=True)
 
 
-async def notify_lobby_ready(channel, lobby):
+async def notify_lobby_ready(channel, lobby, guild_id: int = 0):
     """Notify that lobby is ready to shuffle."""
+    now = time.time()
+    last_sent = _lobby_ready_cooldowns.get(guild_id, 0)
+    if now - last_sent < LOBBY_READY_COOLDOWN_SECONDS:
+        return
     try:
         embed = discord.Embed(
             title="🎮 Lobby Ready!",
@@ -247,8 +256,8 @@ async def notify_lobby_ready(channel, lobby):
         lobby_message_id = bot.lobby_service.get_lobby_message_id() if bot.lobby_service else None
         lobby_channel_id = bot.lobby_service.get_lobby_channel_id() if bot.lobby_service else None
         if lobby_message_id and lobby_channel_id:
-            guild_id = channel.guild.id if channel.guild else 0
-            jump_url = f"https://discord.com/channels/{guild_id}/{lobby_channel_id}/{lobby_message_id}"
+            jump_guild_id = channel.guild.id if channel.guild else guild_id
+            jump_url = f"https://discord.com/channels/{jump_guild_id}/{lobby_channel_id}/{lobby_message_id}"
             embed.add_field(name="", value=f"[Jump to Lobby]({jump_url})", inline=False)
 
         # Use origin channel if available (where /lobby was run), otherwise fallback to reaction channel
@@ -265,6 +274,7 @@ async def notify_lobby_ready(channel, lobby):
                 target_channel = channel  # Fallback
 
         await target_channel.send(embed=embed)
+        _lobby_ready_cooldowns[guild_id] = time.time()
     except Exception as exc:
         logger.error(f"Error notifying lobby ready: {exc}", exc_info=True)
 
@@ -332,10 +342,11 @@ async def notify_lobby_rally(channel, thread, lobby, guild_id: int) -> bool:
 
 
 def clear_lobby_rally_cooldowns(guild_id: int) -> None:
-    """Clear lobby rally cooldowns for a guild. Called on /resetlobby and shuffle."""
+    """Clear lobby rally and ready cooldowns for a guild. Called on /resetlobby and shuffle."""
     keys_to_remove = [k for k in _lobby_rally_cooldowns if k[0] == guild_id]
     for key in keys_to_remove:
         del _lobby_rally_cooldowns[key]
+    _lobby_ready_cooldowns.pop(guild_id, None)
 
 
 @bot.event
@@ -621,7 +632,7 @@ async def on_raw_reaction_add(payload):
             guild_id = payload.guild_id or 0
             await notify_lobby_rally(channel, thread, lobby, guild_id)
         else:
-            await notify_lobby_ready(channel, lobby)
+            await notify_lobby_ready(channel, lobby, guild_id=payload.guild_id or 0)
     except Exception as exc:
         logger.error(f"Error handling reaction add: {exc}", exc_info=True)
 
@@ -687,10 +698,21 @@ async def on_raw_reaction_remove(payload):
                     thread = bot.get_channel(thread_id)
                     if not thread:
                         thread = await bot.fetch_channel(thread_id)
-                    user = bot.get_user(payload.user_id)
-                    if not user:
-                        user = await bot.fetch_user(payload.user_id)
-                    await thread.send(f"🚪 {user.display_name} left the lobby.")
+                    guild = bot.get_guild(payload.guild_id)
+                    member = guild.get_member(payload.user_id) if guild else None
+                    if not member and guild:
+                        try:
+                            member = await guild.fetch_member(payload.user_id)
+                        except discord.NotFound:
+                            member = None
+                    if member:
+                        display = member.display_name
+                    else:
+                        user = bot.get_user(payload.user_id)
+                        if not user:
+                            user = await bot.fetch_user(payload.user_id)
+                        display = user.display_name
+                    await thread.send(f"🚪 {display} left the lobby.")
                 except Exception as exc:
                     logger.warning(f"Failed to post leave activity in thread: {exc}")
     except Exception as exc:
