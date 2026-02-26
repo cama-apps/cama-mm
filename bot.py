@@ -132,6 +132,7 @@ EXTENSIONS = [
     "commands.herogrid",
     "commands.scout",
     "commands.wrapped",
+    "commands.trivia",
 ]
 
 
