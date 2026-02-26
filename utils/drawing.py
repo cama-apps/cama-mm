@@ -941,7 +941,6 @@ def draw_rating_history_chart(
 
     # Fonts
     title_font = _get_font(22)
-    label_font = _get_font(14)
     value_font = _get_font(13)
     legend_font = _get_font(14)
 
@@ -1017,6 +1016,8 @@ def draw_rating_history_chart(
 
     # Helper: OpenSkill value to pixel Y
     def os_to_y(val: float) -> int:
+        if os_range == 0:
+            return chart_y + chart_height // 2
         return chart_y + int((os_max - val) / os_range * chart_height)
 
     # Draw faint horizontal grid lines
@@ -1067,7 +1068,13 @@ def draw_rating_history_chart(
     for i in range(n):
         px = idx_to_x(i)
         py = glicko_to_y(glicko_values[i])
-        color = DISCORD_GREEN if won_flags[i] else DISCORD_RED
+        won = won_flags[i]
+        if won is None:
+            color = DISCORD_GREY
+        elif won:
+            color = DISCORD_GREEN
+        else:
+            color = DISCORD_RED
         draw.ellipse(
             [(px - dot_r, py - dot_r), (px + dot_r, py + dot_r)],
             fill=color,

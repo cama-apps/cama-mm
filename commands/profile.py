@@ -419,10 +419,11 @@ class ProfileCommands(commands.Cog):
                 color=COLOR_RED,
             ), None
 
-        # Get rating history for trend analysis
-        history = []
+        # Get rating history — full for chart, recent slice for analytics
+        full_history = []
         if match_repo and hasattr(match_repo, "get_player_rating_history_detailed"):
-            history = match_repo.get_player_rating_history_detailed(target_discord_id, guild_id, limit=999)
+            full_history = match_repo.get_player_rating_history_detailed(target_discord_id, guild_id, limit=999)
+        history = full_history[:50]
 
         # Calculate percentile
         all_players = player_repo.get_all(guild_id)
@@ -606,13 +607,13 @@ class ProfileCommands(commands.Cog):
         embed.set_footer(text="Tip: Use /calibration for full analysis | ✅=expected W | 🔥=upset | ❌=expected L | 💀=choke")
 
         chart_file = None
-        if history and len(history) >= 2:
+        if full_history and len(full_history) >= 2:
             try:
                 chart_bytes = await asyncio.to_thread(
                     functools.partial(
                         draw_rating_history_chart,
                         username=target_user.display_name,
-                        history=history,
+                        history=full_history,
                     )
                 )
                 chart_file = discord.File(chart_bytes, filename="rating_chart.png")

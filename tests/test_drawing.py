@@ -412,6 +412,17 @@ class TestDrawRatingHistoryChart:
         assert img.format == "PNG"
         assert img.size == (700, 400)
 
+    def test_won_none_renders_grey(self):
+        """Test that won=None entries render without error (grey dot)."""
+        history = [
+            _make_history_entry(rating=1600, won=True),
+            _make_history_entry(rating=1550, won=None),
+            _make_history_entry(rating=1500, won=False),
+        ]
+        result = draw_rating_history_chart("TestUser", history)
+        img = Image.open(result)
+        assert img.format == "PNG"
+
     def test_returns_seekable_bytesio(self):
         """Test that returned BytesIO is seeked to start."""
         history = [
