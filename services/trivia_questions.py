@@ -566,9 +566,10 @@ def gen_ability_cooldown() -> TriviaQuestion | None:
     if len(abilities) < 4:
         return None
     ability = random.choice(abilities)
-    # Cooldown can be multi-level like "22 / 18 / 14 / 10" — take the last value
-    cd_parts = ability.cooldown.replace(" ", "").split("/")
-    correct = cd_parts[-1].strip()
+    # Cooldown can be "22 / 18 / 14 / 10" or "20 19 18 17" — take the last value
+    cd_str = ability.cooldown.replace("/", " ")
+    cd_parts = cd_str.split()
+    correct = cd_parts[-1].strip() if cd_parts else ""
     if not correct:
         return None
     # Generate plausible wrong cooldowns
@@ -576,6 +577,8 @@ def gen_ability_cooldown() -> TriviaQuestion | None:
         cd_val = float(correct)
     except ValueError:
         return None
+    if cd_val > 300:
+        return None  # sanity check — reject absurd values
     offsets = [-10, -5, -3, 3, 5, 10, 15]
     random.shuffle(offsets)
     wrong = []
@@ -682,7 +685,8 @@ def gen_innate_ability() -> TriviaQuestion | None:
 
 def gen_item_by_icon() -> TriviaQuestion | None:
     """E8: Name this item from its icon."""
-    items = [i for i in load_items() if i.icon_url and i.localized_name]
+    # Exclude recipes — they all share the same scroll icon
+    items = [i for i in load_items() if i.icon_url and i.localized_name and "Recipe" not in i.localized_name]
     if len(items) < 4:
         return None
     item = random.choice(items)

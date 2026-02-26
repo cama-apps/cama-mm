@@ -44,6 +44,27 @@ class TestCDNUrls:
     def test_item_icon_url_none(self):
         assert item_icon_url(None) is None
 
+    def test_item_icon_url_recipe(self):
+        """Recipe icons end in .png (not _png.png) — must not produce double .png."""
+        url = item_icon_url("/panorama/images/items/recipe.png")
+        assert url is not None
+        assert url.endswith("/items/recipe.png")
+        assert ".png.png" not in url
+
+    def test_item_icon_url_normal(self):
+        """Standard items with _png.png suffix still work."""
+        url = item_icon_url("/panorama/images/items/blink_png.png")
+        assert url is not None
+        assert url.endswith("/items/blink.png")
+        assert ".png.png" not in url
+
+    def test_ability_icon_url_trailing_png(self):
+        """Ability icons ending in .png (not _png.png) must not produce double .png."""
+        url = ability_icon_url("/panorama/images/spellicons/some_ability.png")
+        assert url is not None
+        assert url.endswith("/abilities/some_ability.png")
+        assert ".png.png" not in url
+
 
 class TestDataLoading:
     def test_load_heroes(self):
@@ -66,6 +87,12 @@ class TestDataLoading:
         # At least some should have cost
         with_cost = [i for i in items if i.cost]
         assert len(with_cost) > 50
+
+    def test_load_items_excludes_internal_names(self):
+        """Items with underscores in localized_name are internal and should be filtered."""
+        items = load_items()
+        bad = [i for i in items if "_" in i.localized_name]
+        assert bad == [], f"Internal-named items leaked: {[i.localized_name for i in bad[:5]]}"
 
     def test_load_voicelines(self):
         voicelines = load_voicelines()

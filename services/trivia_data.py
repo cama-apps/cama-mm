@@ -94,6 +94,8 @@ def ability_icon_url(icon_path: str | None) -> str | None:
         return None
     # e.g. /panorama/images/spellicons/antimage_mana_break_png.png
     slug = icon_path.replace("/panorama/images/spellicons/", "").replace("_png.png", "")
+    if slug.endswith(".png"):
+        slug = slug[:-4]
     if not slug:
         return None
     return f"{_STEAM_CDN}/abilities/{slug}.png"
@@ -105,6 +107,8 @@ def item_icon_url(icon_path: str | None) -> str | None:
         return None
     # e.g. /panorama/images/items/blink_png.png
     slug = icon_path.replace("/panorama/images/items/", "").replace("_png.png", "")
+    if slug.endswith(".png"):
+        slug = slug[:-4]
     if not slug:
         return None
     return f"{_STEAM_CDN}/items/{slug}.png"
@@ -173,7 +177,7 @@ def load_items() -> list[ItemData]:
     items = session.query(Item).all()
     result = []
     for i in items:
-        if not i.localized_name:
+        if not i.localized_name or "_" in i.localized_name:
             continue
         result.append(ItemData(
             id=i.id,

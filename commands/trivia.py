@@ -40,6 +40,7 @@ OPTION_STYLES = [
 class TriviaSession:
     user_id: int
     guild_id: int
+    user: discord.User | discord.Member
     streak: int = 0
     total_jc: int = 0
     recent_categories: list[str] = field(default_factory=list)
@@ -48,7 +49,7 @@ class TriviaSession:
     active: bool = True
 
 
-def _question_embed(question: TriviaQuestion, question_num: int, streak: int, jc_earned: int) -> discord.Embed:
+def _question_embed(question: TriviaQuestion, question_num: int, streak: int, jc_earned: int, user: discord.User | discord.Member | None = None) -> discord.Embed:
     """Build the embed for a trivia question."""
     tier = question.difficulty
     color = DIFFICULTY_COLORS.get(tier, 0x9E9E9E)
@@ -64,22 +65,26 @@ def _question_embed(question: TriviaQuestion, question_num: int, streak: int, jc
     embed.add_field(name="Options", value=option_text, inline=False)
     if question.image_url:
         embed.set_thumbnail(url=question.image_url)
+    if user:
+        embed.set_author(name=user.display_name, icon_url=user.display_avatar.url)
     embed.set_footer(text=f"Streak: {streak} | Difficulty: {tier.capitalize()} | JC earned: {jc_earned} | {TRIVIA_ANSWER_TIMEOUT_SECONDS}s to answer")
     return embed
 
 
-def _correct_embed(question: TriviaQuestion, question_num: int, streak: int, jc_earned: int) -> discord.Embed:
+def _correct_embed(question: TriviaQuestion, question_num: int, streak: int, jc_earned: int, user: discord.User | discord.Member | None = None) -> discord.Embed:
     """Build the embed shown after a correct answer."""
     embed = discord.Embed(
         title=f"Question {question_num} — Correct! +{TRIVIA_REWARD_PER_QUESTION} {JOPACOIN_EMOTE}",
         description=f"**{OPTION_LABELS[question.correct_index]}.** {question.options[question.correct_index]}",
         color=0x43A047,
     )
+    if user:
+        embed.set_author(name=user.display_name, icon_url=user.display_avatar.url)
     embed.set_footer(text=f"Streak: {streak} | JC earned: {jc_earned}")
     return embed
 
 
-def _game_over_embed(question: TriviaQuestion | None, question_num: int, streak: int, jc_earned: int, timed_out: bool) -> discord.Embed:
+def _game_over_embed(question: TriviaQuestion | None, question_num: int, streak: int, jc_earned: int, timed_out: bool, user: discord.User | discord.Member | None = None) -> discord.Embed:
     """Build the final game-over embed."""
     if timed_out:
         title = f"Question {question_num} — Time's up!"
@@ -98,6 +103,9 @@ def _game_over_embed(question: TriviaQuestion | None, question_num: int, streak:
         description="\n".join(desc_parts) if desc_parts else None,
         color=0xE53935,
     )
+
+    if user:
+        embed.set_author(name=user.display_name, icon_url=user.display_avatar.url)
 
     # Streak compliments
     summary = f"Final streak: **{streak}**\nTotal earned: **{jc_earned}** {JOPACOIN_EMOTE}"
@@ -180,7 +188,7 @@ class TriviaView(discord.ui.View):
 
             # Edit current message to show it was answered correctly
             correct_embed = _correct_embed(
-                self.question, self.question_num, self.session.streak, self.session.total_jc
+                self.question, self.question_num, self.session.streak, self.session.total_jc, self.session.user
             )
             try:
                 await interaction.response.edit_message(embed=correct_embed, view=None)
@@ -198,7 +206,7 @@ class TriviaView(discord.ui.View):
             )
             if next_q is None:
                 # Ran out of questions somehow
-                over_embed = _game_over_embed(None, self.question_num, self.session.streak, self.session.total_jc, False)
+                over_embed = _game_over_embed(None, self.question_num, self.session.streak, self.session.total_jc, False, self.session.user)
                 over_embed.title = "Trivia — No more questions!"
                 try:
                     await interaction.followup.send(embed=over_embed)
@@ -209,7 +217,7 @@ class TriviaView(discord.ui.View):
 
             next_num = self.question_num + 1
             next_view = TriviaView(self.session, next_q, next_num, self.cog)
-            next_embed = _question_embed(next_q, next_num, self.session.streak, self.session.total_jc)
+            next_embed = _question_embed(next_q, next_num, self.session.streak, self.session.total_jc, self.session.user)
             try:
                 msg = await interaction.followup.send(embed=next_embed, view=next_view)
                 self.session.message = msg
@@ -224,7 +232,7 @@ class TriviaView(discord.ui.View):
                 except (discord.NotFound, discord.HTTPException):
                     pass
             over_embed = _game_over_embed(
-                self.question, self.question_num, self.session.streak, self.session.total_jc, False
+                self.question, self.question_num, self.session.streak, self.session.total_jc, False, self.session.user
             )
             try:
                 await interaction.response.edit_message(embed=over_embed, view=None)
@@ -246,7 +254,7 @@ class TriviaView(discord.ui.View):
                 pass
 
         over_embed = _game_over_embed(
-            self.question, self.question_num, self.session.streak, self.session.total_jc, True
+            self.question, self.question_num, self.session.streak, self.session.total_jc, True, self.session.user
         )
         if self.session.message:
             try:
@@ -319,7 +327,7 @@ class TriviaCog(commands.Cog):
                 return
 
         # Create session
-        session = TriviaSession(user_id=user_id, guild_id=guild_id)
+        session = TriviaSession(user_id=user_id, guild_id=guild_id, user=interaction.user)
         self._sessions[key] = session
 
         # Generate first question
@@ -329,7 +337,7 @@ class TriviaCog(commands.Cog):
             self._end_session(session)
             return
 
-        embed = _question_embed(question, 1, 0, 0)
+        embed = _question_embed(question, 1, 0, 0, interaction.user)
         view = TriviaView(session, question, 1, self)
         msg = await safe_followup(interaction, embed=embed, view=view)
         session.message = msg
