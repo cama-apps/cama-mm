@@ -7,6 +7,7 @@ from io import BytesIO
 from PIL import Image
 
 from utils.drawing import (
+    draw_advantage_graph,
     draw_attribute_distribution,
     draw_lane_distribution,
     draw_matches_table,
@@ -435,3 +436,46 @@ class TestDrawRatingHistoryChart:
         # Should be readable without seeking
         data = result.read(8)
         assert data[:4] == b"\x89PNG"
+
+
+class TestDrawAdvantageGraph:
+    """Tests for draw_advantage_graph function."""
+
+    def test_returns_valid_png(self):
+        """Test that valid data produces a PNG image."""
+        data = {
+            "radiant_gold_adv": [0, 500, 1200, -300, 2000, 5000, 3000],
+            "radiant_xp_adv": [0, 200, 800, 100, 1500, 3000, 2500],
+        }
+        result = draw_advantage_graph(data, match_id=42)
+        assert isinstance(result, BytesIO)
+        img = Image.open(result)
+        assert img.format == "PNG"
+        assert img.size[0] > 0 and img.size[1] > 0
+
+    def test_returns_none_without_advantage_data(self):
+        """Test that missing arrays returns None."""
+        data = {"duration": 2400, "radiant_win": True}
+        result = draw_advantage_graph(data)
+        assert result is None
+
+    def test_returns_none_with_empty_dict(self):
+        """Test that empty dict returns None."""
+        result = draw_advantage_graph({})
+        assert result is None
+
+    def test_gold_only(self):
+        """Test chart works with only gold advantage data."""
+        data = {"radiant_gold_adv": [0, 1000, 2000, -500, 3000]}
+        result = draw_advantage_graph(data)
+        assert isinstance(result, BytesIO)
+        img = Image.open(result)
+        assert img.format == "PNG"
+
+    def test_xp_only(self):
+        """Test chart works with only XP advantage data."""
+        data = {"radiant_xp_adv": [0, 300, 600, 1200, 900]}
+        result = draw_advantage_graph(data)
+        assert isinstance(result, BytesIO)
+        img = Image.open(result)
+        assert img.format == "PNG"

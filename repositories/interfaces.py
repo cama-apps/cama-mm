@@ -366,6 +366,9 @@ class IMatchRepository(ABC):
     def get_match(self, match_id: int, guild_id: int | None = None): ...
 
     @abstractmethod
+    def get_enrichment_data(self, match_id: int, guild_id: int | None = None) -> dict | None: ...
+
+    @abstractmethod
     def get_player_matches(self, discord_id: int, guild_id: int, limit: int = 10): ...
 
     @abstractmethod

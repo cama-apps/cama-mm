@@ -19,6 +19,7 @@ from services.match_discovery_service import MatchDiscoveryService
 from services.match_service import MatchService
 from services.permissions import has_admin_permission
 from utils.embeds import create_enriched_match_embed
+from utils.match_views import EnrichedMatchView
 from utils.formatting import (
     FROGLING_EMOTE,
     JOPACOIN_EMOTE,
@@ -1519,10 +1520,16 @@ class MatchCommands(commands.Cog):
                     lobby_type=match_data.get("lobby_type", "shuffle"),
                 )
 
-                await channel.send(
+                enrichment_data = self.match_service.get_enrichment_data(
+                    match_id, guild_id
+                )
+                view = EnrichedMatchView(embed, enrichment_data, match_id)
+                msg = await channel.send(
                     f"📊 Match #{match_id} auto-enriched ({confidence:.0%} confidence)",
                     embed=embed,
+                    view=view,
                 )
+                view.message = msg
             else:
                 # Fallback to simple message
                 await channel.send(

@@ -1740,6 +1740,10 @@ class MatchService:
         """
         return self.match_repo.get_match(match_id, guild_id)
 
+    def get_enrichment_data(self, match_id: int, guild_id: int | None = None) -> dict | None:
+        """Get parsed enrichment_data JSON for a match."""
+        return self.match_repo.get_enrichment_data(match_id, guild_id)
+
     def get_most_recent_match(self, guild_id: int | None = None) -> dict | None:
         """
         Get the most recently recorded match for a guild.

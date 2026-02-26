@@ -451,6 +451,20 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 else "glicko",
             }
 
+    def get_enrichment_data(self, match_id: int, guild_id: int | None = None) -> dict | None:
+        """Get parsed enrichment_data JSON for a match, or None if not enriched."""
+        normalized_guild = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT enrichment_data FROM matches WHERE match_id = ? AND guild_id = ?",
+                (match_id, normalized_guild),
+            )
+            row = cursor.fetchone()
+            if not row or not row["enrichment_data"]:
+                return None
+            return json.loads(row["enrichment_data"])
+
     def get_player_matches(self, discord_id: int, guild_id: int, limit: int = 10) -> list[dict]:
         """Get recent matches for a player in a guild."""
         with self.connection() as conn:
