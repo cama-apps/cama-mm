@@ -1602,6 +1602,86 @@ def draw_prediction_over_time(match_data: list[dict], window: int = 20) -> Bytes
     return fp
 
 
+def draw_advantage_graph(
+    enrichment_data: dict,
+    match_id: int | None = None,
+) -> BytesIO | None:
+    """
+    Draw a team advantage per minute graph (gold + XP) from OpenDota enrichment data.
+
+    Args:
+        enrichment_data: Parsed OpenDota match JSON (from enrichment_data column)
+        match_id: Optional match ID for the title
+
+    Returns:
+        BytesIO containing PNG image, or None if no advantage data available
+    """
+    gold_adv = enrichment_data.get("radiant_gold_adv")
+    xp_adv = enrichment_data.get("radiant_xp_adv")
+
+    if not gold_adv and not xp_adv:
+        return None
+
+    fig, ax = plt.subplots(figsize=(8, 3.5), facecolor=DISCORD_BG)
+    ax.set_facecolor(DISCORD_DARKER)
+
+    has_legend = False
+
+    if gold_adv:
+        minutes = list(range(len(gold_adv)))
+        gold_arr = np.array(gold_adv, dtype=float)
+        ax.plot(minutes, gold_arr, color=DISCORD_YELLOW, linewidth=2, label="Gold", zorder=3)
+        ax.fill_between(minutes, gold_arr, 0, where=gold_arr >= 0,
+                        color=DISCORD_GREEN, alpha=0.15, interpolate=True)
+        ax.fill_between(minutes, gold_arr, 0, where=gold_arr <= 0,
+                        color=DISCORD_RED, alpha=0.15, interpolate=True)
+        has_legend = True
+
+    if xp_adv:
+        minutes_xp = list(range(len(xp_adv)))
+        ax.plot(minutes_xp, xp_adv, color=DISCORD_ACCENT, linewidth=1.5,
+                linestyle="--", label="XP", zorder=2)
+        has_legend = True
+
+    # Zero reference line
+    ax.axhline(0, color=DISCORD_GREY, linewidth=0.8, alpha=0.5)
+
+    # Radiant/Dire labels
+    ax.text(0.01, 0.97, "Radiant", transform=ax.transAxes, color=DISCORD_GREEN,
+            fontsize=9, va="top", ha="left", alpha=0.7)
+    ax.text(0.01, 0.03, "Dire", transform=ax.transAxes, color=DISCORD_RED,
+            fontsize=9, va="bottom", ha="left", alpha=0.7)
+
+    # Format y-axis with "k" suffix
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(
+        lambda v, _: f"{v / 1000:.0f}k" if abs(v) >= 1000 else f"{v:.0f}"
+    ))
+
+    ax.set_xlabel("Minutes", color=DISCORD_GREY, fontsize=10)
+    ax.set_ylabel("Advantage", color=DISCORD_GREY, fontsize=10)
+    ax.tick_params(colors=DISCORD_GREY, labelsize=9)
+    for spine in ax.spines.values():
+        spine.set_color("#4F545C")
+    ax.grid(True, alpha=0.15, color=DISCORD_GREY)
+
+    title_text = "Team Advantages Per Minute"
+    if match_id is not None:
+        title_text += f" — Match #{match_id}"
+    ax.set_title(title_text, color="white", fontsize=12, fontweight="bold", pad=8)
+
+    if has_legend:
+        ax.legend(loc="upper right", facecolor=DISCORD_DARKER, edgecolor="#4F545C",
+                  labelcolor="white", fontsize=9)
+
+    plt.tight_layout()
+
+    fp = BytesIO()
+    fig.savefig(fp, format="PNG", dpi=100, bbox_inches="tight", facecolor=DISCORD_BG)
+    plt.close(fig)
+    fp.seek(0)
+    return fp
+
+
 def draw_hero_grid(
     grid_data: list[dict],
     player_names: dict[int, str],

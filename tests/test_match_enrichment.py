@@ -314,3 +314,56 @@ class TestMatchRepositoryEnrichment:
 
         unenriched = repo.get_matches_without_enrichment(guild_id=TEST_GUILD_ID)
         assert len(unenriched) == 0
+
+
+class TestGetEnrichmentData:
+    """Tests for MatchRepository.get_enrichment_data."""
+
+    @pytest.fixture
+    def temp_db_path(self, tmp_path):
+        """Create temporary database."""
+        return str(tmp_path / "test.db")
+
+    def test_get_enrichment_data_returns_parsed_json(self, temp_db_path):
+        """Test that enriched match returns parsed dict."""
+        from infrastructure.schema_manager import SchemaManager
+        from repositories.match_repository import MatchRepository
+
+        SchemaManager(temp_db_path).initialize()
+        repo = MatchRepository(temp_db_path)
+
+        match_id = repo.record_match([1, 2, 3, 4, 5], [6, 7, 8, 9, 10], 1, guild_id=TEST_GUILD_ID)
+
+        enrichment_payload = {
+            "radiant_gold_adv": [0, 500, 1200, 2000],
+            "radiant_xp_adv": [0, 200, 800, 1500],
+            "duration": 2400,
+        }
+        repo.update_match_enrichment(
+            match_id=match_id,
+            valve_match_id=8181518332,
+            duration_seconds=2400,
+            radiant_score=35,
+            dire_score=22,
+            game_mode=2,
+            enrichment_data=json.dumps(enrichment_payload),
+        )
+
+        result = repo.get_enrichment_data(match_id, guild_id=TEST_GUILD_ID)
+        assert result is not None
+        assert result["radiant_gold_adv"] == [0, 500, 1200, 2000]
+        assert result["radiant_xp_adv"] == [0, 200, 800, 1500]
+        assert result["duration"] == 2400
+
+    def test_get_enrichment_data_returns_none_when_not_enriched(self, temp_db_path):
+        """Test that unenriched match returns None."""
+        from infrastructure.schema_manager import SchemaManager
+        from repositories.match_repository import MatchRepository
+
+        SchemaManager(temp_db_path).initialize()
+        repo = MatchRepository(temp_db_path)
+
+        match_id = repo.record_match([1, 2, 3, 4, 5], [6, 7, 8, 9, 10], 1, guild_id=TEST_GUILD_ID)
+
+        result = repo.get_enrichment_data(match_id, guild_id=TEST_GUILD_ID)
+        assert result is None

@@ -15,6 +15,7 @@ from services.match_enrichment_service import MatchEnrichmentService
 from services.opendota_player_service import OpenDotaPlayerService
 from services.permissions import has_admin_permission
 from utils.drawing import draw_matches_table
+from utils.match_views import EnrichedMatchView
 from utils.embeds import _determine_lane_outcomes, create_enriched_match_embed
 from utils.interaction_safety import safe_defer, safe_followup
 
@@ -563,7 +564,18 @@ class EnrichmentCommands(commands.Cog):
                     # Override MVP thumbnail with user's hero
                     embed.set_thumbnail(url=hero_img)
 
-            await safe_followup(interaction, embed=embed)
+            # Fetch enrichment data for advantage graph pagination
+            enrichment_data = None
+            try:
+                enrichment_data = await asyncio.to_thread(
+                    self.match_service.get_enrichment_data, match_id, guild_id
+                )
+            except Exception:
+                logger.debug("Failed to fetch enrichment data for match %s", match_id)
+
+            view = EnrichedMatchView(embed, enrichment_data, match_id)
+            msg = await safe_followup(interaction, embed=embed, view=view)
+            view.message = msg
         else:
             # Not enriched - show basic info
             from utils.embeds import create_match_summary_embed
