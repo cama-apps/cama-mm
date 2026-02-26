@@ -383,6 +383,11 @@ class IMatchRepository(ABC):
     def get_match_count(self, guild_id: int) -> int: ...
 
     @abstractmethod
+    def get_match_count_since(self, guild_id: int, since_iso: str) -> int:
+        """Get count of matches recorded since a given ISO timestamp."""
+        ...
+
+    @abstractmethod
     def add_match_prediction(
         self,
         match_id: int,

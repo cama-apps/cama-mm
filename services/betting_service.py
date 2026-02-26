@@ -253,6 +253,17 @@ class BettingService:
         from config import STREAMING_BONUS
         return self._award_with_penalties(player_ids, STREAMING_BONUS, guild_id)
 
+    def award_first_game_bonus(
+        self, player_ids: list[int], guild_id: int | None = None
+    ) -> dict[int, dict[str, int]]:
+        """
+        Reward all players in the first game of the night with a jopacoin bonus.
+
+        Same processing as other awards so bankruptcy and garnishment rules still apply.
+        """
+        from config import FIRST_GAME_BONUS
+        return self._award_with_penalties(player_ids, FIRST_GAME_BONUS, guild_id)
+
     def _award_with_penalties(
         self, player_ids: list[int], reward_amount: int, guild_id: int | None = None
     ) -> dict[int, dict[str, int]]:
