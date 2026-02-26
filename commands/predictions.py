@@ -479,7 +479,8 @@ class PredictionCommands(commands.Cog):
         self, interaction: discord.Interaction, question: str, closes_in: str
     ):
         """Create a new prediction market."""
-        await safe_defer(interaction)
+        if not await safe_defer(interaction):
+            return
 
         guild_id = interaction.guild.id if interaction.guild else None
 
@@ -591,7 +592,8 @@ class PredictionCommands(commands.Cog):
         outcome: app_commands.Choice[str],
     ):
         """Vote to resolve a prediction."""
-        await safe_defer(interaction)
+        if not await safe_defer(interaction):
+            return
 
         # Check if user has admin permissions (for immediate resolution)
         is_admin = has_admin_permission(interaction)
@@ -789,7 +791,8 @@ class PredictionCommands(commands.Cog):
     @app_commands.describe(prediction_id="The prediction ID to cancel")
     async def cancel(self, interaction: discord.Interaction, prediction_id: int):
         """Cancel a prediction and refund all bets (admin only)."""
-        await safe_defer(interaction)
+        if not await safe_defer(interaction):
+            return
 
         # Check admin permissions (ADMIN_USER_IDS or Discord Administrator/Manage Server)
         if not has_admin_permission(interaction):
@@ -857,7 +860,8 @@ class PredictionCommands(commands.Cog):
     @app_commands.describe(prediction_id="The prediction ID to close")
     async def closebet(self, interaction: discord.Interaction, prediction_id: int):
         """Close betting on a prediction early (admin only)."""
-        await safe_defer(interaction)
+        if not await safe_defer(interaction):
+            return
 
         if not has_admin_permission(interaction):
             await safe_followup(
@@ -940,7 +944,8 @@ class PredictionCommands(commands.Cog):
         limit: int = 10,
     ):
         """List predictions."""
-        await safe_defer(interaction)
+        if not await safe_defer(interaction):
+            return
 
         guild_id = interaction.guild.id if interaction.guild else None
         limit = max(1, min(limit, 25))  # Cap between 1 and 25
@@ -1091,7 +1096,8 @@ class PredictionCommands(commands.Cog):
         history: bool = False,
     ):
         """View user's prediction positions."""
-        await safe_defer(interaction, ephemeral=True)
+        if not await safe_defer(interaction, ephemeral=True):
+            return
 
         if history:
             guild_id = interaction.guild.id if interaction.guild else None

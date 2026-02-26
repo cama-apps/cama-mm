@@ -913,7 +913,7 @@ class BetRepository(BaseRepository, IBetRepository):
                     bet_payout = user_final_payout - allocated
                 else:
                     # Proportional share, floored
-                    bet_payout = int((entry["raw_payout"] / user_raw_total) * user_final_payout)
+                    bet_payout = int((entry["raw_payout"] / user_raw_total) * user_final_payout) if user_raw_total else 0
                     allocated += bet_payout
 
                 entry["payout"] = bet_payout
@@ -1486,12 +1486,13 @@ class BetRepository(BaseRepository, IBetRepository):
                 balance_deltas[discord_id] = user_payout
 
                 # Distribute across individual bets
+                bet_sum = sum(b["effective_bet"] for b in bets)
                 allocated = 0
                 for i, bet in enumerate(bets):
                     if i == len(bets) - 1:
                         bet_payout = user_payout - allocated
                     else:
-                        bet_payout = int((bet["effective_bet"] / sum(b["effective_bet"] for b in bets)) * user_payout)
+                        bet_payout = int((bet["effective_bet"] / bet_sum) * user_payout) if bet_sum else 0
                         allocated += bet_payout
                     payout_updates.append((bet_payout, bet["bet_id"]))
         else:
