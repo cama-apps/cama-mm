@@ -13,7 +13,7 @@ from database import Database
 
 def _expected_after_exclusions(exclusions: int) -> int:
     """Return the exclusion_count after applying `exclusions` exclusions to a fresh account."""
-    return NEW_PLAYER_EXCLUSION_BOOST + exclusions * 5
+    return NEW_PLAYER_EXCLUSION_BOOST + exclusions * 6
 
 
 class TestDatabase:

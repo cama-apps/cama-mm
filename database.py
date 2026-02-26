@@ -547,7 +547,7 @@ class Database:
             cursor.execute(
                 """
                 UPDATE players
-                SET exclusion_count = COALESCE(exclusion_count, 0) + 5, updated_at = CURRENT_TIMESTAMP
+                SET exclusion_count = COALESCE(exclusion_count, 0) + 6, updated_at = CURRENT_TIMESTAMP
                 WHERE discord_id = ? AND guild_id = ?
             """,
                 (discord_id, guild_id),
