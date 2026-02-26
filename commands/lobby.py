@@ -300,7 +300,7 @@ class LobbyCommands(commands.Cog):
                 if not self.lobby_service.is_ready(lobby):
                     await notify_lobby_rally(channel, thread, lobby, guild_id or 0)
                 else:
-                    await notify_lobby_ready(channel, lobby)
+                    await notify_lobby_ready(channel, lobby, guild_id=guild_id or 0)
             except Exception as exc:
                 logger.warning(f"Failed to send rally/ready notification on auto-join: {exc}")
 
@@ -598,7 +598,7 @@ class LobbyCommands(commands.Cog):
                 if not self.lobby_service.is_ready(lobby):
                     await notify_lobby_rally(channel, thread, lobby, guild_id or 0)
                 else:
-                    await notify_lobby_ready(channel, lobby)
+                    await notify_lobby_ready(channel, lobby, guild_id=guild_id or 0)
             except Exception as exc:
                 logger.warning(f"Failed to send rally/ready notification: {exc}")
 

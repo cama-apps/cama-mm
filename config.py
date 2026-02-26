@@ -63,6 +63,7 @@ if _admin_env:
 LOBBY_READY_THRESHOLD = _parse_int("LOBBY_READY_THRESHOLD", 10)
 LOBBY_MAX_PLAYERS = _parse_int("LOBBY_MAX_PLAYERS", 20)
 LOBBY_RALLY_COOLDOWN_SECONDS = _parse_int("LOBBY_RALLY_COOLDOWN_SECONDS", 120)  # 2 minutes
+LOBBY_READY_COOLDOWN_SECONDS = _parse_int("LOBBY_READY_COOLDOWN_SECONDS", 60)
 
 # Dedicated lobby channel - if set, lobby embeds are posted here instead of command channel
 LOBBY_CHANNEL_ID: int | None = None
@@ -73,7 +74,7 @@ if _lobby_channel_raw:
     except ValueError:
         LOBBY_CHANNEL_ID = None
 USE_GLICKO = _parse_bool("USE_GLICKO", True)
-OPENSKILL_SHUFFLE_CHANCE = _parse_float("OPENSKILL_SHUFFLE_CHANCE", 0.10)  # 10% chance per shuffle
+OPENSKILL_SHUFFLE_CHANCE = _parse_float("OPENSKILL_SHUFFLE_CHANCE", 0.05)  # 5% chance per shuffle
 
 SHUFFLER_SETTINGS: dict[str, Any] = {
     "off_role_multiplier": _parse_float("OFF_ROLE_MULTIPLIER", 0.95),
