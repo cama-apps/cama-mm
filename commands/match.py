@@ -1251,10 +1251,13 @@ class MatchCommands(commands.Cog):
                     f"Streaming bonus (+{STREAMING_BONUS} JC) at record: {streaming_ids}"
                 )
 
-        # First game of the night bonus
+        # First game of the night bonus — all lobby participants (including excluded)
         if is_first_game and FIRST_GAME_BONUS > 0:
-            all_ids = list(record_result.get("winning_player_ids", [])) + list(
-                record_result.get("losing_player_ids", [])
+            all_ids = (
+                list(record_result.get("winning_player_ids", []))
+                + list(record_result.get("losing_player_ids", []))
+                + list(record_result.get("excluded_player_ids", []))
+                + list(record_result.get("excluded_conditional_player_ids", []))
             )
             betting_svc = getattr(self.bot, "betting_service", None)
             if betting_svc and all_ids:
