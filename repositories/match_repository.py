@@ -706,6 +706,17 @@ class MatchRepository(BaseRepository, IMatchRepository):
             row = cursor.fetchone()
             return row["count"] if row else 0
 
+    def get_match_count_since(self, guild_id: int, since_iso: str) -> int:
+        """Get count of matches recorded since a given ISO timestamp."""
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT COUNT(*) as count FROM matches WHERE guild_id = ? AND match_date >= ?",
+                (guild_id, since_iso),
+            )
+            row = cursor.fetchone()
+            return row["count"] if row else 0
+
     def add_match_prediction(
         self,
         match_id: int,
