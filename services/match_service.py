@@ -949,6 +949,8 @@ class MatchService:
                 "updated_count": updated_count,
                 "winning_player_ids": winning_ids,
                 "losing_player_ids": losing_ids,
+                "excluded_player_ids": excluded_player_ids,
+                "excluded_conditional_player_ids": last_shuffle.get("excluded_conditional_player_ids", []),
                 "bet_distributions": distributions,
                 "loan_repayments": loan_repayments,
                 "notable_streak": notable_streak,
