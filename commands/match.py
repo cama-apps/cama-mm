@@ -1253,19 +1253,19 @@ class MatchCommands(commands.Cog):
 
         # First game of the night bonus — all lobby participants (including excluded)
         if is_first_game and FIRST_GAME_BONUS > 0:
-            all_ids = (
+            all_ids = list(set(
                 list(record_result.get("winning_player_ids", []))
                 + list(record_result.get("losing_player_ids", []))
                 + list(record_result.get("excluded_player_ids", []))
                 + list(record_result.get("excluded_conditional_player_ids", []))
-            )
+            ))
             betting_svc = getattr(self.bot, "betting_service", None)
             if betting_svc and all_ids:
                 betting_svc.award_first_game_bonus(all_ids, guild_id)
                 distribution_text += (
                     f"\n🌙 First game of the night! (+{FIRST_GAME_BONUS} {JOPACOIN_EMOTE} each)"
                 )
-                logger.info(f"First game bonus (+{FIRST_GAME_BONUS} JC) awarded to {len(all_ids)} players")
+                logger.info(f"First game bonus (+{FIRST_GAME_BONUS} JC) awarded to {all_ids}")
 
         admin_override = (
             is_admin
