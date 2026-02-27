@@ -44,6 +44,7 @@ class LeaderboardTab(Enum):
     GLICKO = "glicko"
     OPENSKILL = "openskill"
     TIPS = "tips"
+    TRIVIA = "trivia"
 
 
 @dataclass
@@ -97,6 +98,7 @@ class UnifiedLeaderboardView(discord.ui.View):
             LeaderboardTab.GLICKO: self.glicko_btn,
             LeaderboardTab.OPENSKILL: self.openskill_btn,
             LeaderboardTab.TIPS: self.tips_btn,
+            LeaderboardTab.TRIVIA: self.trivia_btn,
         }
         for tab, button in tab_buttons.items():
             if tab == self.current_tab:
@@ -149,6 +151,8 @@ class UnifiedLeaderboardView(discord.ui.View):
             await self._fetch_openskill_data(state)
         elif tab == LeaderboardTab.TIPS:
             await self._fetch_tips_data(state)
+        elif tab == LeaderboardTab.TRIVIA:
+            await self._fetch_trivia_data(state)
 
         state.loaded = True
 
@@ -399,6 +403,22 @@ class UnifiedLeaderboardView(discord.ui.View):
         )
         state.max_page = max(0, (max_entries - 1) // MULTI_SECTION_PAGE_SIZE)
 
+    async def _fetch_trivia_data(self, state: TabState) -> None:
+        """Fetch trivia leaderboard data (best streaks, 7-day rolling window)."""
+        entries = await asyncio.to_thread(
+            self.cog.player_service.get_trivia_leaderboard, self.guild_id,
+            7, self.limit,
+        )
+
+        guild_members = self._get_guild_members()
+
+        # Filter out users who have left the server (only in guild context)
+        if self._should_filter_by_guild():
+            entries = [e for e in entries if e["discord_id"] in guild_members]
+
+        state.data = entries
+        state.max_page = max(0, (len(entries) - 1) // SINGLE_SECTION_PAGE_SIZE)
+
     def _get_display_name(self, discord_id: int) -> str:
         """Get display name for a user, with fallback if not in guild."""
         member = self._get_guild_members().get(discord_id)
@@ -433,6 +453,8 @@ class UnifiedLeaderboardView(discord.ui.View):
             return self._build_openskill_embed(state)
         elif self.current_tab == LeaderboardTab.TIPS:
             return self._build_tips_embed(state)
+        elif self.current_tab == LeaderboardTab.TRIVIA:
+            return self._build_trivia_embed(state)
 
         # Fallback
         return discord.Embed(title="Leaderboard", description="Unknown tab")
@@ -772,6 +794,40 @@ class UnifiedLeaderboardView(discord.ui.View):
 
         return embed
 
+    def _build_trivia_embed(self, state: TabState) -> discord.Embed:
+        """Build Trivia tab embed."""
+        embed = discord.Embed(
+            title="LEADERBOARD > Trivia",
+            description="Best streaks in the last 7 days",
+            color=0xFFA000,
+        )
+
+        if not state.data:
+            embed.description = "No trivia sessions in the last 7 days."
+            return embed
+
+        entries = state.data
+
+        start_idx = state.current_page * SINGLE_SECTION_PAGE_SIZE
+        end_idx = start_idx + SINGLE_SECTION_PAGE_SIZE
+        page_entries = entries[start_idx:end_idx]
+
+        lines = []
+        for i, entry in enumerate(page_entries, start=start_idx + 1):
+            medal = "\U0001f947" if i == 1 else "\U0001f948" if i == 2 else "\U0001f949" if i == 3 else f"{i}."
+            name = self._get_display_name(entry["discord_id"])
+            lines.append(f"{medal} **{name}** — streak of **{entry['best_streak']}**")
+
+        embed.add_field(
+            name="Best Streaks",
+            value="\n".join(lines) if lines else "No entries.",
+            inline=False,
+        )
+
+        embed.set_footer(text=f"Page {state.current_page + 1}/{state.max_page + 1}")
+
+        return embed
+
     async def _handle_tab_switch(self, interaction: discord.Interaction, tab: LeaderboardTab) -> None:
         """Handle tab button click with rate limiting and concurrency control."""
         # Rate limiting: 1.5s cooldown between tab switches per user
@@ -838,10 +894,14 @@ class UnifiedLeaderboardView(discord.ui.View):
     async def openskill_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._handle_tab_switch(interaction, LeaderboardTab.OPENSKILL)
 
-    # Row 1: Tips tab and pagination buttons
+    # Row 1: Overflow tabs and pagination buttons
     @discord.ui.button(label="Tips", style=discord.ButtonStyle.secondary, row=1)
     async def tips_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._handle_tab_switch(interaction, LeaderboardTab.TIPS)
+
+    @discord.ui.button(label="Trivia", style=discord.ButtonStyle.secondary, row=1)
+    async def trivia_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._handle_tab_switch(interaction, LeaderboardTab.TRIVIA)
 
     @discord.ui.button(label=" Previous", style=discord.ButtonStyle.secondary, row=1)
     async def prev_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -987,6 +1047,7 @@ class InfoCommands(commands.Cog):
                 "`/leaderboard type:gambling` - Gambling rankings & Hall of Degen\n"
                 "`/leaderboard type:predictions` - Prediction market rankings\n"
                 "`/leaderboard type:tips` - Tipping rankings (generous/popular)\n"
+                "`/leaderboard type:trivia` - Trivia best streaks (7-day)\n"
                 "`/calibration` - Rating system health & calibration stats"
             ),
             inline=False,
@@ -1024,6 +1085,7 @@ class InfoCommands(commands.Cog):
         app_commands.Choice(name="Gambling", value="gambling"),
         app_commands.Choice(name="Predictions", value="predictions"),
         app_commands.Choice(name="Tips", value="tips"),
+        app_commands.Choice(name="Trivia", value="trivia"),
     ])
     async def leaderboard(
         self,
@@ -1072,6 +1134,7 @@ class InfoCommands(commands.Cog):
                 "glicko": LeaderboardTab.GLICKO,
                 "openskill": LeaderboardTab.OPENSKILL,
                 "tips": LeaderboardTab.TIPS,
+                "trivia": LeaderboardTab.TRIVIA,
             }
             initial_tab = tab_mapping.get(leaderboard_type, LeaderboardTab.BALANCE)
 

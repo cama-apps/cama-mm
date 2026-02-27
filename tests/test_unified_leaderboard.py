@@ -111,8 +111,8 @@ class TestLeaderboardTab:
         assert LeaderboardTab.TIPS.value == "tips"
 
     def test_tab_count(self):
-        """Test we have exactly 6 tabs."""
-        assert len(LeaderboardTab) == 6
+        """Test we have exactly 7 tabs."""
+        assert len(LeaderboardTab) == 7
 
 
 class TestTabState:
@@ -175,7 +175,7 @@ class TestUnifiedLeaderboardViewInitialization:
             guild_id=12345,
             interaction=mock_interaction,
         )
-        assert len(view._tab_states) == 6
+        assert len(view._tab_states) == 7
         for tab in LeaderboardTab:
             assert tab in view._tab_states
             assert isinstance(view._tab_states[tab], TabState)
