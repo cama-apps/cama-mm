@@ -28,6 +28,8 @@ LAND_COLORS: dict[str, str] = {
     "Swamp": "Black",
 }
 
+LAND_ORDER = ("Island", "Mountain", "Forest", "Plains", "Swamp")
+
 LAND_EMOJIS: dict[str, str] = {
     "Island": "🏝️",
     "Mountain": "⛰️",
@@ -95,6 +97,32 @@ class ManaService:
             "emoji": LAND_EMOJIS.get(land, "❓"),
             "assigned_date": row["assigned_date"],
         }
+
+    def assign_all_daily_mana(
+        self, guild_id: int | None, *, ash_fan_ids: set[int] | None = None
+    ) -> None:
+        """Assign today's mana to every registered player who hasn't been assigned yet.
+
+        Args:
+            guild_id: Guild to process.
+            ash_fan_ids: Discord IDs that have an "ash" role (checked by the command layer).
+        """
+        gid = self.player_repo.normalize_guild_id(guild_id)
+        players = self.player_repo.get_all(gid)
+        ash_fan_ids = ash_fan_ids or set()
+
+        for player in players:
+            if player.discord_id is None:
+                continue
+            if self.has_assigned_today(player.discord_id, guild_id):
+                continue
+            try:
+                self.assign_daily_mana(
+                    player.discord_id, guild_id,
+                    is_ash_fan=player.discord_id in ash_fan_ids,
+                )
+            except ValueError:
+                pass  # Race condition — already assigned
 
     def assign_daily_mana(
         self, discord_id: int, guild_id: int | None, *, is_ash_fan: bool = False
