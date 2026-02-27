@@ -3540,6 +3540,7 @@ class BettingCommands(commands.Cog):
             app_commands.Choice(name="status", value="status"),
             app_commands.Choice(name="reset", value="reset"),
             app_commands.Choice(name="votes", value="votes"),
+            app_commands.Choice(name="execute", value="execute"),
         ]
     )
     async def disburse(
@@ -3565,6 +3566,8 @@ class BettingCommands(commands.Cog):
             await self._disburse_reset(interaction, guild_id)
         elif action_value == "votes":
             await self._disburse_votes(interaction, guild_id)
+        elif action_value == "execute":
+            await self._disburse_execute(interaction, guild_id)
 
     async def _disburse_propose(
         self, interaction: discord.Interaction, guild_id: int | None
@@ -3695,6 +3698,97 @@ class BettingCommands(commands.Cog):
         # Create admin-only embed with voter details
         embed = await self._create_disburse_votes_embed(proposal)
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    async def _disburse_execute(
+        self, interaction: discord.Interaction, guild_id: int | None
+    ):
+        """Force-execute the active proposal using the current leading method. Admin only."""
+        if interaction.user.id not in self.bot.ADMIN_USER_IDS:
+            await interaction.response.send_message(
+                "Only admins can force-execute disbursement proposals.", ephemeral=True
+            )
+            return
+
+        # Show current state before executing
+        proposal = await asyncio.to_thread(self.disburse_service.get_proposal, guild_id)
+        if not proposal:
+            await interaction.response.send_message(
+                "No active disbursement proposal.", ephemeral=True
+            )
+            return
+
+        if not await safe_defer(interaction):
+            return
+
+        try:
+            disbursement = await asyncio.to_thread(
+                self.disburse_service.force_execute, guild_id
+            )
+        except ValueError as e:
+            await safe_followup(
+                interaction, content=f"Cannot execute: {e}", ephemeral=True
+            )
+            return
+
+        # Handle cancel
+        if disbursement.get("cancelled"):
+            embed = discord.Embed(
+                title="❌ Proposal Cancelled (Admin)",
+                description=disbursement.get("message", "Proposal cancelled."),
+                color=0xFF6B6B,
+            )
+            await safe_followup(interaction, embed=embed)
+        elif disbursement["total_disbursed"] == 0:
+            embed = discord.Embed(
+                title="💝 Disbursement Complete (Admin)",
+                description=disbursement.get("message", "No funds were distributed."),
+                color=0x00FF00,
+            )
+            await safe_followup(interaction, embed=embed)
+        else:
+            recipients = disbursement["distributions"]
+            recipient_lines = []
+            for discord_id, amount in recipients[:10]:
+                recipient_lines.append(f"<@{discord_id}>: +{amount}")
+            if len(recipients) > 10:
+                recipient_lines.append(f"...and {len(recipients) - 10} more")
+
+            result_msg = (
+                f"**{disbursement['total_disbursed']}** {JOPACOIN_EMOTE} "
+                f"distributed via **{disbursement['method_label']}** to "
+                f"{disbursement['recipient_count']} player(s):\n"
+                + "\n".join(recipient_lines)
+            )
+
+            embed = discord.Embed(
+                title="💝 Disbursement Complete (Admin)",
+                description=result_msg,
+                color=0x00FF00,
+            )
+            embed.set_footer(text=f"Force-executed by {interaction.user.display_name}")
+            await safe_followup(interaction, embed=embed)
+
+        # Disable buttons on the original voting message
+        try:
+            if proposal.message_id and proposal.channel_id:
+                channel = self.bot.get_channel(proposal.channel_id)
+                if channel:
+                    msg = await channel.fetch_message(proposal.message_id)
+                    disabled_view = discord.ui.View(timeout=None)
+                    for method in ["even", "proportional", "neediest", "stimulus", "lottery", "social_security", "cancel"]:
+                        label = self.disburse_service.METHOD_LABELS[method]
+                        emoji = {"even": "📊", "proportional": "📈", "neediest": "🎯",
+                                 "stimulus": "💸", "lottery": "🎲",
+                                 "social_security": "👴", "cancel": "❌"}.get(method)
+                        style = discord.ButtonStyle.danger if method == "cancel" else discord.ButtonStyle.secondary
+                        btn = discord.ui.Button(
+                            label=label, emoji=emoji, style=style,
+                            disabled=True, custom_id=f"disburse:{method}",
+                        )
+                        disabled_view.add_item(btn)
+                    await msg.edit(view=disabled_view)
+        except Exception as e:
+            logger.warning(f"Failed to disable vote buttons after force-execute: {e}")
 
     def _create_disburse_embed(self, proposal) -> discord.Embed:
         """Create embed for disbursement proposal."""

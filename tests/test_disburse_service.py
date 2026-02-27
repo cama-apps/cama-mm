@@ -1151,3 +1151,90 @@ class TestGetIndividualVotes:
 
         votes = disburse_repo.get_individual_votes(TEST_GUILD_ID)
         assert votes == []
+
+
+class TestForceExecute:
+    """Test admin force-execute bypassing quorum."""
+
+    def test_force_execute_with_single_vote(
+        self, disburse_service, player_repo, setup_players, setup_nonprofit_fund
+    ):
+        """Force-execute should work with just one vote (no quorum needed)."""
+        disburse_service.create_proposal(guild_id=TEST_GUILD_ID)
+        disburse_service.add_vote(TEST_GUILD_ID, 1003, "even")
+
+        # Quorum not reached (need 2, have 1)
+        reached, _ = disburse_service.check_quorum(TEST_GUILD_ID)
+        assert not reached
+
+        # Force-execute should still work
+        result = disburse_service.force_execute(TEST_GUILD_ID)
+        assert result["success"]
+        assert result["method"] == "even"
+        assert result["total_disbursed"] > 0
+
+    def test_force_execute_picks_leading_method(
+        self, disburse_service, player_repo, setup_players, setup_nonprofit_fund
+    ):
+        """Force-execute should use the method with the most votes."""
+        # Add more players so quorum is higher
+        for i in range(6, 11):
+            player_repo.add(
+                discord_id=1000 + i, discord_username=f"Voter{i}",
+                guild_id=TEST_GUILD_ID, initial_mmr=3000,
+            )
+            player_repo.update_balance(1000 + i, TEST_GUILD_ID, 100)
+
+        disburse_service.create_proposal(guild_id=TEST_GUILD_ID)
+
+        # 1 vote even, 2 votes proportional
+        disburse_service.add_vote(TEST_GUILD_ID, 1003, "even")
+        disburse_service.add_vote(TEST_GUILD_ID, 1004, "proportional")
+        disburse_service.add_vote(TEST_GUILD_ID, 1005, "proportional")
+
+        result = disburse_service.force_execute(TEST_GUILD_ID)
+        assert result["method"] == "proportional"
+
+    def test_force_execute_no_votes_raises(
+        self, disburse_service, setup_players, setup_nonprofit_fund
+    ):
+        """Force-execute with zero votes should raise ValueError."""
+        disburse_service.create_proposal(guild_id=TEST_GUILD_ID)
+
+        with pytest.raises(ValueError, match="No votes"):
+            disburse_service.force_execute(TEST_GUILD_ID)
+
+    def test_force_execute_no_proposal_raises(self, disburse_service):
+        """Force-execute with no active proposal should raise ValueError."""
+        with pytest.raises(ValueError, match="No active proposal"):
+            disburse_service.force_execute(TEST_GUILD_ID)
+
+    def test_force_execute_cancel_returns_funds(
+        self, disburse_service, loan_repo, setup_players, setup_nonprofit_fund
+    ):
+        """Force-execute with cancel winning should return funds to nonprofit."""
+        initial_fund = loan_repo.get_nonprofit_fund(TEST_GUILD_ID)
+        disburse_service.create_proposal(guild_id=TEST_GUILD_ID)
+
+        # After proposal, fund is reserved (should be 0)
+        assert loan_repo.get_nonprofit_fund(TEST_GUILD_ID) == 0
+
+        disburse_service.add_vote(TEST_GUILD_ID, 1003, "cancel")
+        result = disburse_service.force_execute(TEST_GUILD_ID)
+
+        assert result["cancelled"]
+        assert result["total_disbursed"] == 0
+        # Funds should be returned
+        assert loan_repo.get_nonprofit_fund(TEST_GUILD_ID) == initial_fund
+
+    def test_force_execute_completes_proposal(
+        self, disburse_service, setup_players, setup_nonprofit_fund
+    ):
+        """After force-execute, proposal should be completed (allow new proposals)."""
+        disburse_service.create_proposal(guild_id=TEST_GUILD_ID)
+        disburse_service.add_vote(TEST_GUILD_ID, 1003, "even")
+        disburse_service.force_execute(TEST_GUILD_ID)
+
+        # Proposal should no longer be active
+        proposal = disburse_service.get_proposal(TEST_GUILD_ID)
+        assert proposal is None
