@@ -30,7 +30,7 @@ class DisburseProposal:
     status: str
     votes: dict[str, int] = field(default_factory=lambda: {
         "even": 0, "proportional": 0, "neediest": 0, "stimulus": 0,
-        "lottery": 0, "social_security": 0, "cancel": 0
+        "lottery": 0, "social_security": 0, "richest": 0, "cancel": 0
     })
 
     @property
@@ -58,7 +58,7 @@ class DisburseService:
     - neediest: All funds go to player with most debt (capped)
     """
 
-    METHODS = ("even", "proportional", "neediest", "stimulus", "lottery", "social_security", "cancel")
+    METHODS = ("even", "proportional", "neediest", "stimulus", "lottery", "social_security", "richest", "cancel")
     METHOD_LABELS = {
         "even": "Even Split",
         "proportional": "Proportional",
@@ -66,6 +66,7 @@ class DisburseService:
         "stimulus": "Stimulus",
         "lottery": "Lottery",
         "social_security": "Social Security",
+        "richest": "Richest",
         "cancel": "Cancel",
     }
 
@@ -334,6 +335,21 @@ class DisburseService:
                     "message": "No players with games played for social security.",
                 }
             distributions = self._calculate_social_security_distribution(fund_amount, eligible)
+        elif method == "richest":
+            # Richest: all funds to the richest player
+            richest = self.player_repo.get_richest_player(guild_id)
+            if not richest:
+                self.loan_repo.add_to_nonprofit_fund(guild_id, fund_amount)
+                self.disburse_repo.complete_proposal(guild_id)
+                return {
+                    "success": True,
+                    "method": method,
+                    "method_label": self.METHOD_LABELS[method],
+                    "total_disbursed": 0,
+                    "distributions": [],
+                    "message": "No players found for richest distribution.",
+                }
+            distributions = self._calculate_richest_distribution(fund_amount, richest)
         else:
             # Debtor-based methods: even, proportional, neediest
             debtors = self.player_repo.get_players_with_negative_balance(guild_id)
@@ -705,6 +721,19 @@ class DisburseService:
                 remaining -= amount
 
         return distributions
+
+    def _calculate_richest_distribution(
+        self, fund: int, richest: dict
+    ) -> list[tuple[int, int]]:
+        """
+        All funds go to the richest player (reverse of neediest).
+
+        Winner takes all - no cap. The rich get richer.
+        """
+        if not richest:
+            return []
+
+        return [(richest["discord_id"], fund)]
 
     def get_individual_votes(self, guild_id: int | None) -> dict[int, str]:
         """

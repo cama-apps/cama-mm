@@ -115,9 +115,9 @@ class DisburseRepository(BaseRepository, IDisburseRepository):
             guild_id: Guild ID
             proposal_id: Proposal ID to vote on
             discord_id: Voter's Discord ID
-            method: 'even', 'proportional', 'neediest', 'stimulus', 'lottery', 'social_security', or 'cancel'
+            method: 'even', 'proportional', 'neediest', 'stimulus', 'lottery', 'social_security', 'richest', or 'cancel'
         """
-        if method not in ("even", "proportional", "neediest", "stimulus", "lottery", "social_security", "cancel"):
+        if method not in ("even", "proportional", "neediest", "stimulus", "lottery", "social_security", "richest", "cancel"):
             raise ValueError(f"Invalid vote method: {method}")
 
         normalized_guild = self.normalize_guild_id(guild_id)
@@ -153,7 +153,7 @@ class DisburseRepository(BaseRepository, IDisburseRepository):
             if not row:
                 return {
                     "even": 0, "proportional": 0, "neediest": 0, "stimulus": 0,
-                    "lottery": 0, "social_security": 0, "cancel": 0
+                    "lottery": 0, "social_security": 0, "richest": 0, "cancel": 0
                 }
 
             proposal_id = row["proposal_id"]
@@ -170,7 +170,7 @@ class DisburseRepository(BaseRepository, IDisburseRepository):
 
             counts = {
                 "even": 0, "proportional": 0, "neediest": 0, "stimulus": 0,
-                "lottery": 0, "social_security": 0, "cancel": 0
+                "lottery": 0, "social_security": 0, "richest": 0, "cancel": 0
             }
             for row in cursor.fetchall():
                 counts[row["vote_method"]] = row["count"]

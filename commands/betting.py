@@ -4520,6 +4520,17 @@ class DisburseVoteView(discord.ui.View):
         await self._handle_vote(interaction, "social_security", "Social Security")
 
     @discord.ui.button(
+        label="Richest",
+        emoji="💎",
+        style=discord.ButtonStyle.primary,
+        custom_id="disburse:richest",
+    )
+    async def vote_richest(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        await self._handle_vote(interaction, "richest", "Richest")
+
+    @discord.ui.button(
         label="Cancel",
         emoji="❌",
         style=discord.ButtonStyle.danger,

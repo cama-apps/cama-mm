@@ -820,6 +820,82 @@ class TestSocialSecurityDistribution:
         assert total == 100
 
 
+class TestRichestDistribution:
+    """Test richest distribution calculation."""
+
+    def test_richest_distribution_basic(self, disburse_service):
+        """Test that all funds go to the richest player."""
+        richest = {"discord_id": 1001, "jopacoin_balance": 500}
+        distributions = disburse_service._calculate_richest_distribution(100, richest)
+
+        assert len(distributions) == 1
+        assert distributions[0] == (1001, 100)
+
+    def test_richest_distribution_empty(self, disburse_service):
+        """Test richest with no player."""
+        distributions = disburse_service._calculate_richest_distribution(100, None)
+        assert distributions == []
+
+    def test_richest_distributes_all_funds(self, disburse_service):
+        """Test that all funds are distributed (no cap)."""
+        richest = {"discord_id": 1001, "jopacoin_balance": 10}
+        distributions = disburse_service._calculate_richest_distribution(500, richest)
+
+        assert len(distributions) == 1
+        total = sum(d[1] for d in distributions)
+        assert total == 500
+
+
+class TestRichestEligibility:
+    """Test richest eligibility in repository."""
+
+    def test_get_richest_player_basic(self, player_repo):
+        """Test that the richest player is returned."""
+        player_repo.add(discord_id=1, discord_username="Poor", guild_id=TEST_GUILD_ID, initial_mmr=3000)
+        player_repo.add(discord_id=2, discord_username="Middle", guild_id=TEST_GUILD_ID, initial_mmr=3000)
+        player_repo.add(discord_id=3, discord_username="Rich", guild_id=TEST_GUILD_ID, initial_mmr=3000)
+
+        player_repo.update_balance(1, TEST_GUILD_ID, -100)  # Debtor
+        player_repo.update_balance(2, TEST_GUILD_ID, 100)   # Middle
+        player_repo.update_balance(3, TEST_GUILD_ID, 1000)  # Richest
+
+        richest = player_repo.get_richest_player(TEST_GUILD_ID)
+
+        assert richest is not None
+        assert richest["discord_id"] == 3
+        assert richest["jopacoin_balance"] == 1000
+
+    def test_get_richest_player_no_players(self, player_repo):
+        """Test that None is returned when no players exist."""
+        richest = player_repo.get_richest_player(TEST_GUILD_ID)
+        assert richest is None
+
+    def test_get_richest_player_single_player(self, player_repo):
+        """Test with a single player."""
+        player_repo.add(discord_id=1, discord_username="Solo", guild_id=TEST_GUILD_ID, initial_mmr=3000)
+        player_repo.update_balance(1, TEST_GUILD_ID, 50)
+
+        richest = player_repo.get_richest_player(TEST_GUILD_ID)
+
+        assert richest is not None
+        assert richest["discord_id"] == 1
+        assert richest["jopacoin_balance"] == 50
+
+    def test_get_richest_player_includes_debtors(self, player_repo):
+        """Test that debtors can still be richest (if they're the least poor)."""
+        player_repo.add(discord_id=1, discord_username="VeryPoor", guild_id=TEST_GUILD_ID, initial_mmr=3000)
+        player_repo.add(discord_id=2, discord_username="LessPoor", guild_id=TEST_GUILD_ID, initial_mmr=3000)
+
+        player_repo.update_balance(1, TEST_GUILD_ID, -100)
+        player_repo.update_balance(2, TEST_GUILD_ID, -50)
+
+        richest = player_repo.get_richest_player(TEST_GUILD_ID)
+
+        assert richest is not None
+        assert richest["discord_id"] == 2  # Less poor is richest
+        assert richest["jopacoin_balance"] == -50
+
+
 class TestCancelDisbursement:
     """Test cancel vote handling."""
 
@@ -963,6 +1039,83 @@ class TestSocialSecurityExecution:
 
         assert bal1 > bal2 > bal3
         assert bal4 == 50  # Unchanged (not eligible, 0 games)
+
+
+class TestRichestExecution:
+    """Test full richest execution flow."""
+
+    def test_execute_richest_disbursement(
+        self, disburse_service, player_repo, loan_repo
+    ):
+        """Test full richest disbursement execution."""
+        # Create 5 players with varying balances
+        player_repo.add(discord_id=1, discord_username="Poor", guild_id=TEST_GUILD_ID, initial_mmr=3000)
+        player_repo.add(discord_id=2, discord_username="Middle", guild_id=TEST_GUILD_ID, initial_mmr=3000)
+        player_repo.add(discord_id=3, discord_username="Rich", guild_id=TEST_GUILD_ID, initial_mmr=3000)
+        player_repo.add(discord_id=4, discord_username="Voter1", guild_id=TEST_GUILD_ID, initial_mmr=3000)
+        player_repo.add(discord_id=5, discord_username="Voter2", guild_id=TEST_GUILD_ID, initial_mmr=3000)
+
+        # Set balances
+        player_repo.update_balance(1, TEST_GUILD_ID, -50)   # Poor (debtor to meet proposal creation requirement)
+        player_repo.update_balance(2, TEST_GUILD_ID, 100)   # Middle
+        player_repo.update_balance(3, TEST_GUILD_ID, 500)   # Richest
+        player_repo.update_balance(4, TEST_GUILD_ID, 50)
+        player_repo.update_balance(5, TEST_GUILD_ID, 50)
+
+        # Add nonprofit fund
+        loan_repo.add_to_nonprofit_fund(guild_id=TEST_GUILD_ID, amount=300)
+
+        # Create proposal
+        disburse_service.create_proposal(guild_id=TEST_GUILD_ID)
+
+        # Vote for richest
+        disburse_service.add_vote(guild_id=TEST_GUILD_ID, discord_id=4, method="richest")
+        disburse_service.add_vote(guild_id=TEST_GUILD_ID, discord_id=5, method="richest")
+
+        result = disburse_service.execute_disbursement(guild_id=TEST_GUILD_ID)
+
+        assert result["success"]
+        assert result["method"] == "richest"
+        assert result["recipient_count"] == 1  # Only richest player
+        assert result["total_disbursed"] == 300  # All funds to richest
+
+        # Verify richest player now has 800 (500 + 300)
+        assert player_repo.get_balance(3, TEST_GUILD_ID) == 800
+
+        # Others unchanged
+        assert player_repo.get_balance(1, TEST_GUILD_ID) == -50
+        assert player_repo.get_balance(2, TEST_GUILD_ID) == 100
+        assert player_repo.get_balance(4, TEST_GUILD_ID) == 50
+        assert player_repo.get_balance(5, TEST_GUILD_ID) == 50
+
+    def test_richest_even_with_debtors(
+        self, disburse_service, player_repo, loan_repo
+    ):
+        """Test that richest can win even if they're the least poor debtor."""
+        # Create 3 players, all with negative balances
+        player_repo.add(discord_id=1, discord_username="VeryPoor", guild_id=TEST_GUILD_ID, initial_mmr=3000)
+        player_repo.add(discord_id=2, discord_username="LessPoor", guild_id=TEST_GUILD_ID, initial_mmr=3000)
+        player_repo.add(discord_id=3, discord_username="Voter", guild_id=TEST_GUILD_ID, initial_mmr=3000)
+
+        player_repo.update_balance(1, TEST_GUILD_ID, -100)
+        player_repo.update_balance(2, TEST_GUILD_ID, -50)  # Richest (least poor)
+        player_repo.update_balance(3, TEST_GUILD_ID, -75)
+
+        loan_repo.add_to_nonprofit_fund(guild_id=TEST_GUILD_ID, amount=200)
+
+        disburse_service.create_proposal(guild_id=TEST_GUILD_ID)
+        # Need 2 votes for quorum (40% of 3 players = 2)
+        disburse_service.add_vote(guild_id=TEST_GUILD_ID, discord_id=1, method="richest")
+        disburse_service.add_vote(guild_id=TEST_GUILD_ID, discord_id=3, method="richest")
+
+        result = disburse_service.execute_disbursement(guild_id=TEST_GUILD_ID)
+
+        assert result["success"]
+        assert result["method"] == "richest"
+        assert result["recipient_count"] == 1
+
+        # Player 2 is richest (-50 > -75 > -100)
+        assert player_repo.get_balance(2, TEST_GUILD_ID) == 150  # -50 + 200
 
 
 class TestFundReservation:

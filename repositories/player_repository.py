@@ -1067,6 +1067,30 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 for row in cursor.fetchall()
             ]
 
+    def get_richest_player(self, guild_id: int) -> dict | None:
+        """
+        Get the single richest player by jopacoin balance.
+
+        Used for 'richest' disbursement method (reverse of neediest).
+
+        Returns:
+            Dict with 'discord_id' and 'jopacoin_balance', or None if no players exist.
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT discord_id, jopacoin_balance
+                FROM players
+                WHERE guild_id = ?
+                ORDER BY jopacoin_balance DESC
+                LIMIT 1
+                """,
+                (guild_id,),
+            )
+            row = cursor.fetchone()
+            return {"discord_id": row["discord_id"], "jopacoin_balance": row["jopacoin_balance"]} if row else None
+
     def apply_interest_bulk(self, updates: list[tuple[int, int]], guild_id: int) -> int:
         """
         Apply interest charges to multiple players in a single transaction.
