@@ -94,6 +94,12 @@ class TestDataLoading:
         bad = [i for i in items if "_" in i.localized_name]
         assert bad == [], f"Internal-named items leaked: {[i.localized_name for i in bad[:5]]}"
 
+    def test_load_abilities_excludes_internal_names(self):
+        """Abilities with underscores in localized_name are internal and should be filtered."""
+        abilities = load_abilities()
+        bad = [a for a in abilities if "_" in a.localized_name]
+        assert bad == [], f"Internal-named abilities leaked: {[a.localized_name for a in bad[:5]]}"
+
     def test_load_voicelines(self):
         voicelines = load_voicelines()
         assert len(voicelines) > 100

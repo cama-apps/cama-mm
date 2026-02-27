@@ -151,6 +151,8 @@ def load_abilities() -> list[AbilityData]:
         name = a.localized_name
         if not name:
             continue
+        if "_" in name:
+            continue  # skip internal/hidden abilities (e.g., rubick_hidden3)
         hero_name = a.hero.localized_name if a.hero else None
         result.append(AbilityData(
             id=a.id,

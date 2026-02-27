@@ -48,6 +48,8 @@ def _get_all_abilities() -> list[tuple[str, int]]:
         name = a.localized_name
         if not name or name in seen:
             continue
+        if "_" in name:
+            continue  # skip internal/hidden abilities (e.g., rubick_hidden3)
         seen.add(name)
         result.append((name, a.id))
     return result
