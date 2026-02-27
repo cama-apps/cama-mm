@@ -253,6 +253,8 @@ class SchemaManager:
             # Trivia cooldown tracking
             ("add_last_trivia_session_to_players", self._migration_add_last_trivia_session),
             ("create_player_mana_table", self._migration_create_player_mana_table),
+            # Trivia session recording for leaderboard
+            ("create_trivia_sessions_table", self._migration_create_trivia_sessions_table),
         ]
 
     # --- Migrations ---
@@ -1706,5 +1708,26 @@ class SchemaManager:
                 updated_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (discord_id, guild_id)
             )
+            """
+        )
+
+    def _migration_create_trivia_sessions_table(self, cursor) -> None:
+        """Create table for recording trivia session results (leaderboard)."""
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS trivia_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                discord_id INTEGER NOT NULL,
+                guild_id INTEGER NOT NULL DEFAULT 0,
+                streak INTEGER NOT NULL DEFAULT 0,
+                jc_earned INTEGER NOT NULL DEFAULT 0,
+                played_at INTEGER NOT NULL
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_trivia_sessions_guild_played
+            ON trivia_sessions(guild_id, played_at)
             """
         )

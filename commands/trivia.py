@@ -279,6 +279,24 @@ class TriviaCog(commands.Cog):
         session.active = False
         self._sessions.pop((session.user_id, session.guild_id), None)
 
+        # Record session for leaderboard (skip zero-streak to reduce noise)
+        if session.streak > 0:
+            try:
+                player_service = self.bot.player_service
+                asyncio.get_event_loop().call_soon(
+                    lambda: asyncio.ensure_future(
+                        asyncio.to_thread(
+                            player_service.record_trivia_session,
+                            session.user_id,
+                            session.guild_id,
+                            session.streak,
+                            session.total_jc,
+                        )
+                    )
+                )
+            except Exception:
+                logger.exception("Failed to record trivia session")
+
     @app_commands.command(name="trivia", description="Test your Dota 2 knowledge! Earn 1 JC per correct answer.")
     @app_commands.checks.cooldown(1, 5.0)  # Rate limit: 1 per 5 seconds
     async def trivia(self, interaction: discord.Interaction):
@@ -357,6 +375,57 @@ class TriviaCog(commands.Cog):
                     await interaction.followup.send("An error occurred.", ephemeral=True)
             except discord.HTTPException:
                 pass
+
+    @app_commands.command(
+        name="trivia-leaderboard",
+        description="Show top trivia streaks from the last 7 days.",
+    )
+    @app_commands.checks.cooldown(1, 10.0)
+    async def trivia_leaderboard(self, interaction: discord.Interaction):
+        guild_id = interaction.guild.id if interaction.guild else 0
+
+        if not await safe_defer(interaction):
+            return
+
+        player_service = self.bot.player_service
+        entries = await asyncio.to_thread(
+            player_service.get_trivia_leaderboard, guild_id
+        )
+
+        if not entries:
+            await safe_followup(
+                interaction,
+                content="No trivia sessions in the last 7 days.",
+                ephemeral=True,
+            )
+            return
+
+        medals = ["\U0001f947", "\U0001f948", "\U0001f949"]  # gold, silver, bronze
+        lines = []
+        for i, entry in enumerate(entries):
+            medal = medals[i] if i < len(medals) else f"**#{i + 1}**"
+            try:
+                user = await self.bot.fetch_user(entry["discord_id"])
+                name = user.display_name
+            except Exception:
+                name = f"User {entry['discord_id']}"
+            lines.append(f"{medal} **{name}** — streak of **{entry['best_streak']}**")
+
+        embed = discord.Embed(
+            title="Trivia Leaderboard (Last 7 Days)",
+            description="\n".join(lines),
+            color=0xFFA000,
+        )
+        await safe_followup(interaction, embed=embed)
+
+    @trivia_leaderboard.error
+    async def trivia_leaderboard_error(
+        self, interaction: discord.Interaction, error: app_commands.AppCommandError
+    ):
+        if isinstance(error, app_commands.CommandOnCooldown):
+            await interaction.response.send_message(
+                f"Slow down! Try again in {error.retry_after:.0f}s.", ephemeral=True
+            )
 
 
 async def setup(bot: commands.Bot):

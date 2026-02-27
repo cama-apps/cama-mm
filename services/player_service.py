@@ -2,6 +2,8 @@
 Player-facing business logic (registration, roles, stats).
 """
 
+import time
+
 from domain.models.player import Player
 from opendota_integration import OpenDotaAPI
 from openskill_rating_system import CamaOpenSkillSystem
@@ -338,6 +340,25 @@ class PlayerService:
     ) -> bool:
         """Atomically check cooldown and claim a trivia session."""
         return self.player_repo.try_claim_trivia_session(discord_id, guild_id, now, cooldown_seconds)
+
+    def reset_trivia_cooldown(self, discord_id: int, guild_id: int) -> bool:
+        """Reset a player's trivia cooldown."""
+        return self.player_repo.reset_trivia_cooldown(discord_id, guild_id)
+
+    def record_trivia_session(
+        self, discord_id: int, guild_id: int, streak: int, jc_earned: int
+    ) -> None:
+        """Record a completed trivia session for leaderboard tracking."""
+        self.player_repo.record_trivia_session(
+            discord_id, guild_id, streak, jc_earned, int(time.time())
+        )
+
+    def get_trivia_leaderboard(
+        self, guild_id: int, days: int = 7, limit: int = 3
+    ) -> list[dict]:
+        """Get top trivia players by best streak in rolling window."""
+        since = int(time.time()) - days * 86400
+        return self.player_repo.get_trivia_leaderboard(guild_id, since, limit)
 
     # --- Leaderboard and ranking operations ---
 

@@ -97,3 +97,72 @@ class TestTriviaCooldownGuildIsolation:
         assert player_service.try_claim_trivia_session(registered_player, guild_a, now, 21600)
         # Should still be available in guild B
         assert player_service.try_claim_trivia_session(registered_player, guild_b, now, 21600)
+
+
+class TestTriviaSessionRecording:
+    def test_record_and_leaderboard(self, player_service, registered_player):
+        now = int(time.time())
+        # Record a few sessions
+        player_service.record_trivia_session(registered_player, TEST_GUILD_ID, streak=5, jc_earned=5)
+
+        # Register a second player and record
+        discord_id_2 = 100002
+        player_service.register_player(
+            discord_id=discord_id_2,
+            discord_username="trivia_tester_2",
+            guild_id=TEST_GUILD_ID,
+            steam_id=12346,
+            mmr_override=3000,
+        )
+        player_service.record_trivia_session(discord_id_2, TEST_GUILD_ID, streak=10, jc_earned=10)
+
+        # Leaderboard should return player 2 first (higher streak)
+        lb = player_service.get_trivia_leaderboard(TEST_GUILD_ID)
+        assert len(lb) == 2
+        assert lb[0]["discord_id"] == discord_id_2
+        assert lb[0]["best_streak"] == 10
+        assert lb[1]["discord_id"] == registered_player
+        assert lb[1]["best_streak"] == 5
+
+    def test_leaderboard_uses_max_streak(self, player_service, registered_player):
+        """If a player has multiple sessions, leaderboard shows their best."""
+        player_service.record_trivia_session(registered_player, TEST_GUILD_ID, streak=3, jc_earned=3)
+        player_service.record_trivia_session(registered_player, TEST_GUILD_ID, streak=8, jc_earned=8)
+        player_service.record_trivia_session(registered_player, TEST_GUILD_ID, streak=2, jc_earned=2)
+
+        lb = player_service.get_trivia_leaderboard(TEST_GUILD_ID)
+        assert len(lb) == 1
+        assert lb[0]["best_streak"] == 8
+
+    def test_leaderboard_empty_when_no_sessions(self, player_service):
+        lb = player_service.get_trivia_leaderboard(TEST_GUILD_ID)
+        assert lb == []
+
+    def test_leaderboard_respects_time_window(self, player_service, registered_player):
+        """Sessions older than the window should not appear."""
+        repo = player_service.player_repo
+        old_time = int(time.time()) - 8 * 86400  # 8 days ago
+        repo.record_trivia_session(registered_player, TEST_GUILD_ID, streak=20, jc_earned=20, played_at=old_time)
+
+        lb = player_service.get_trivia_leaderboard(TEST_GUILD_ID, days=7)
+        assert lb == []
+
+    def test_leaderboard_limit(self, player_service):
+        """Leaderboard should respect the limit parameter."""
+        for i in range(5):
+            discord_id = 200000 + i
+            player_service.register_player(
+                discord_id=discord_id,
+                discord_username=f"lb_test_{i}",
+                guild_id=TEST_GUILD_ID,
+                steam_id=50000 + i,
+                mmr_override=3000,
+            )
+            player_service.record_trivia_session(discord_id, TEST_GUILD_ID, streak=i + 1, jc_earned=i + 1)
+
+        lb = player_service.get_trivia_leaderboard(TEST_GUILD_ID, limit=3)
+        assert len(lb) == 3
+        # Top 3 by streak should be players with streaks 5, 4, 3
+        assert lb[0]["best_streak"] == 5
+        assert lb[1]["best_streak"] == 4
+        assert lb[2]["best_streak"] == 3

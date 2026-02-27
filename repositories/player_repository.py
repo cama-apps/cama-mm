@@ -2595,3 +2595,49 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 (now, discord_id, guild_id, now - cooldown_seconds),
             )
             return cursor.rowcount > 0
+
+    def reset_trivia_cooldown(self, discord_id: int, guild_id: int) -> bool:
+        """Reset a player's trivia cooldown by clearing last_trivia_session."""
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE players SET last_trivia_session = NULL WHERE discord_id = ? AND guild_id = ?",
+                (discord_id, guild_id),
+            )
+            return cursor.rowcount > 0
+
+    def record_trivia_session(
+        self, discord_id: int, guild_id: int, streak: int, jc_earned: int, played_at: int
+    ) -> None:
+        """Record a completed trivia session for leaderboard tracking."""
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO trivia_sessions (discord_id, guild_id, streak, jc_earned, played_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (discord_id, guild_id, streak, jc_earned, played_at),
+            )
+
+    def get_trivia_leaderboard(
+        self, guild_id: int, since_timestamp: int, limit: int = 3
+    ) -> list[dict]:
+        """Get top trivia players by best streak in time window."""
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT discord_id, MAX(streak) as best_streak
+                FROM trivia_sessions
+                WHERE guild_id = ? AND played_at >= ?
+                GROUP BY discord_id
+                ORDER BY best_streak DESC
+                LIMIT ?
+                """,
+                (guild_id, since_timestamp, limit),
+            )
+            return [
+                {"discord_id": row["discord_id"], "best_streak": row["best_streak"]}
+                for row in cursor.fetchall()
+            ]
