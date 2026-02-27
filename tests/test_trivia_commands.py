@@ -99,6 +99,29 @@ class TestTriviaCooldownGuildIsolation:
         assert player_service.try_claim_trivia_session(registered_player, guild_b, now, 21600)
 
 
+class TestTriviaResetCooldown:
+    def test_reset_clears_cooldown(self, player_service, registered_player):
+        now = int(time.time())
+        # Claim session (sets cooldown)
+        assert player_service.try_claim_trivia_session(registered_player, TEST_GUILD_ID, now, 21600)
+        # Blocked within cooldown
+        assert not player_service.try_claim_trivia_session(registered_player, TEST_GUILD_ID, now + 100, 21600)
+        # Reset cooldown
+        assert player_service.reset_trivia_cooldown(registered_player, TEST_GUILD_ID)
+        # Should be able to claim again
+        assert player_service.try_claim_trivia_session(registered_player, TEST_GUILD_ID, now + 100, 21600)
+
+    def test_reset_returns_false_for_missing_player(self, player_service):
+        assert not player_service.reset_trivia_cooldown(999999, TEST_GUILD_ID)
+
+    def test_get_last_trivia_session_none_after_reset(self, player_service, registered_player):
+        now = int(time.time())
+        player_service.try_claim_trivia_session(registered_player, TEST_GUILD_ID, now, 21600)
+        assert player_service.get_last_trivia_session(registered_player, TEST_GUILD_ID) == now
+        player_service.reset_trivia_cooldown(registered_player, TEST_GUILD_ID)
+        assert player_service.get_last_trivia_session(registered_player, TEST_GUILD_ID) is None
+
+
 class TestTriviaSessionRecording:
     def test_record_and_leaderboard(self, player_service, registered_player):
         now = int(time.time())

@@ -428,5 +428,36 @@ class TriviaCog(commands.Cog):
             )
 
 
+    @app_commands.command(
+        name="trivia-reset-cooldown",
+        description="(Admin) Reset a user's trivia cooldown.",
+    )
+    @app_commands.describe(user="The user whose trivia cooldown to reset")
+    async def trivia_reset_cooldown(
+        self, interaction: discord.Interaction, user: discord.User
+    ):
+        if not has_admin_permission(interaction):
+            await interaction.response.send_message(
+                "You need admin permissions to use this command.", ephemeral=True
+            )
+            return
+
+        guild_id = interaction.guild.id if interaction.guild else 0
+        player_service = self.bot.player_service
+        reset = await asyncio.to_thread(
+            player_service.reset_trivia_cooldown, user.id, guild_id
+        )
+
+        if reset:
+            await interaction.response.send_message(
+                f"Trivia cooldown reset for **{user.display_name}**.", ephemeral=True
+            )
+        else:
+            await interaction.response.send_message(
+                f"No player found for **{user.display_name}** (not registered or no cooldown).",
+                ephemeral=True,
+            )
+
+
 async def setup(bot: commands.Bot):
     await bot.add_cog(TriviaCog(bot))
