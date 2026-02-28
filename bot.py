@@ -139,6 +139,7 @@ EXTENSIONS = [
     "commands.wrapped",
     "commands.trivia",
     "commands.mana",
+    "commands.roll",
 ]
 
 
