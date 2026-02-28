@@ -397,7 +397,7 @@ def draw_awards_grid(awards: list["Award"], max_awards: int = 6, viewer_discord_
     cols = min(3, len(awards))
     rows = (len(awards) + cols - 1) // cols
 
-    card_width, card_height = 250, 180
+    card_width, card_height = 250, 200
     padding = 20
     total_width = cols * card_width + (cols + 1) * padding
     total_height = rows * card_height + (rows + 1) * padding + 60  # Extra for header
@@ -417,6 +417,10 @@ def draw_awards_grid(awards: list["Award"], max_awards: int = 6, viewer_discord_
     title_font = _get_font(14, bold=True)
     name_font = _get_font(12, bold=True)
     stat_font = _get_font(11)
+    flavor_font = _get_font(10)
+
+    # Max text width inside a card (card_width minus left/right padding)
+    text_max_w = card_width - 20
 
     # Draw each award card
     for i, award in enumerate(awards):
@@ -450,27 +454,40 @@ def draw_awards_grid(awards: list["Award"], max_awards: int = 6, viewer_discord_
             with Pilmoji(img) as pilmoji:
                 pilmoji.text((x + 10, y + 8), award.emoji, font=emoji_font)
 
-        # Title (next to emoji)
+        # Title (next to emoji) — truncate only if truly too wide
         title_text = award.title.upper()
-        if len(title_text) > 18:
-            title_text = title_text[:16] + ".."
+        title_w = draw.textlength(title_text, font=title_font)
+        title_max = card_width - 55  # space after emoji
+        if title_w > title_max:
+            while draw.textlength(title_text + "..", font=title_font) > title_max and len(title_text) > 1:
+                title_text = title_text[:-1]
+            title_text = title_text.rstrip() + ".."
         draw.text((x + 45, y + 12), title_text, fill=accent_color, font=title_font)
 
-        # Player name
+        # Player name — truncate only if too wide
         player_text = f"@{award.discord_username}"
-        if len(player_text) > 22:
-            player_text = player_text[:20] + ".."
+        player_w = draw.textlength(player_text, font=name_font)
+        if player_w > text_max_w:
+            while draw.textlength(player_text + "..", font=name_font) > text_max_w and len(player_text) > 1:
+                player_text = player_text[:-1]
+            player_text = player_text.rstrip() + ".."
         draw.text((x + 10, y + 50), player_text, fill=TEXT_WHITE, font=name_font)
 
-        # Stat
-        draw.text((x + 10, y + 75), award.stat_value, fill=ACCENT_GOLD, font=stat_font)
+        # Stat — truncate only if too wide
+        stat_text = award.stat_value
+        stat_w = draw.textlength(stat_text, font=stat_font)
+        if stat_w > text_max_w:
+            while draw.textlength(stat_text + "..", font=stat_font) > text_max_w and len(stat_text) > 1:
+                stat_text = stat_text[:-1]
+            stat_text = stat_text.rstrip() + ".."
+        draw.text((x + 10, y + 75), stat_text, fill=ACCENT_GOLD, font=stat_font)
 
-        # Flavor text (truncated)
+        # Flavor text — word-wrap up to 3 lines
         if award.flavor_text:
             flavor = f'"{award.flavor_text}"'
-            if len(flavor) > 30:
-                flavor = flavor[:28] + '.."'
-            draw.text((x + 10, y + 100), flavor, fill=TEXT_GREY, font=stat_font)
+            lines = _word_wrap(flavor, flavor_font, text_max_w, draw)
+            for li, line in enumerate(lines[:3]):
+                draw.text((x + 10, y + 100 + li * 16), line, fill=TEXT_GREY, font=flavor_font)
 
     # Save to buffer
     buffer = io.BytesIO()
@@ -573,15 +590,17 @@ def draw_records_slide(
         y = y_start + i * row_height
         is_na = record.value is None or record.display_value == "N/A"
 
-        # Hero portrait (48x48)
+        # Hero portrait (48x27, natural Dota aspect ratio)
         hero_x = 30
         if record.hero_id and not is_na:
             try:
-                hero_img = _fetch_hero_image(record.hero_id, (48, 48))
+                hero_img = _fetch_hero_image(record.hero_id, (48, 27))
                 if hero_img:
                     if hero_img.mode != "RGBA":
                         hero_img = hero_img.convert("RGBA")
-                    img.paste(hero_img, (hero_x, y + 4), hero_img)
+                    # Center vertically in the row
+                    hero_y_offset = (row_height - 27) // 2
+                    img.paste(hero_img, (hero_x, y + hero_y_offset), hero_img)
             except Exception:
                 pass
 
@@ -630,6 +649,32 @@ def draw_records_slide(
 # ============ NEW WRAPPED STORY SLIDE DRAWING FUNCTIONS ============
 
 ACCENT_PURPLE = (155, 89, 182)
+
+
+def _word_wrap(text: str, font, max_width: int, draw: ImageDraw.Draw) -> list[str]:
+    """Break text into lines that fit within max_width pixels."""
+    words = text.split()
+    lines: list[str] = []
+    current = ""
+    for word in words:
+        test = f"{current} {word}".strip()
+        if draw.textlength(test, font=font) <= max_width:
+            current = test
+        else:
+            if current:
+                lines.append(current)
+            current = word
+    if current:
+        lines.append(current)
+    # Truncate any single line that still exceeds max_width
+    result = []
+    for line in lines:
+        if draw.textlength(line, font=font) > max_width:
+            while draw.textlength(line + "..", font=font) > max_width and len(line) > 1:
+                line = line[:-1]
+            line = line.rstrip() + ".."
+        result.append(line)
+    return result
 
 
 def _center_text(draw: ImageDraw.Draw, text: str, font, y: int, width: int, fill: tuple) -> None:
@@ -953,14 +998,15 @@ def draw_hero_spotlight_slide(
     bar_y = 260
     max_picks = max((h.get("picks", 0) for h in top_3_heroes), default=1)
     bar_max_width = 500
-    bar_height_px = 40
-    bar_spacing = 55
+    bar_height_px = 35
+    bar_spacing = 85
 
     bar_colors = [accent, (88, 101, 242), (241, 196, 15)]
 
     for i, hero in enumerate(top_3_heroes[:3]):
         y_bar = bar_y + i * bar_spacing
         picks_h = hero.get("picks", 0)
+        wins_h = hero.get("wins", 0)
         bar_w = max(int((picks_h / max_picks) * bar_max_width), 30) if max_picks > 0 else 30
         color = bar_colors[i] if i < len(bar_colors) else accent
 
@@ -968,12 +1014,12 @@ def draw_hero_spotlight_slide(
         draw.text((50, y_bar), hero.get("name", "?"), fill=TEXT_WHITE, font=bar_label_font)
 
         # Bar
-        _draw_rounded_rect(draw, (50, y_bar + 18, 50 + bar_w, y_bar + 18 + bar_height_px), radius=6, fill=(*color, 180))
+        _draw_rounded_rect(draw, (50, y_bar + 20, 50 + bar_w, y_bar + 20 + bar_height_px), radius=6, fill=(*color, 180))
 
-        # Stats inside/after bar
+        # Stats inside bar
         wr_h = hero.get("win_rate", 0)
-        bar_text = f"{picks_h}g · {wr_h*100:.0f}%"
-        draw.text((60, y_bar + 26), bar_text, fill=TEXT_WHITE, font=bar_value_font)
+        bar_text = f"{picks_h} games · {wins_h}W · {wr_h*100:.0f}% WR"
+        draw.text((60, y_bar + 27), bar_text, fill=TEXT_WHITE, font=bar_value_font)
 
     buffer = io.BytesIO()
     img.save(buffer, format="PNG")
@@ -986,13 +1032,15 @@ def draw_lane_breakdown_slide(
     year_label: str,
     lane_freq: dict[int, int],
     total_games: int,
+    assigned_freq: dict[int, int] | None = None,
 ) -> io.BytesIO:
     """
-    Draw lane breakdown slide showing lane distribution.
+    Draw lane breakdown slide showing actual vs assigned lane distribution.
 
     Args:
-        lane_freq: Dict of lane_role -> count (from OpenDota enrichment)
-        total_games: Total games played that year
+        lane_freq: Dict of lane_role -> count (actual lane from OpenDota)
+        total_games: Total games with lane data
+        assigned_freq: Dict of lane -> count (assigned lane from OpenDota)
     """
     width, height = 800, 600
     img = Image.new("RGBA", (width, height), (*BG_GRADIENT_START, 255))
@@ -1023,37 +1071,63 @@ def draw_lane_breakdown_slide(
     label_font = _get_font(16, bold=True)
     value_font = _get_font(14)
     bar_font = _get_font(14, bold=True)
+    small_font = _get_font(11)
 
     if lane_freq:
-        draw.text((50, 100), "LANE DISTRIBUTION", fill=TEXT_GREY, font=label_font)
+        has_assigned = assigned_freq and any(assigned_freq.values())
 
-        max_count = max(lane_freq.values(), default=1)
-        bar_max_width = 500
+        if has_assigned:
+            draw.text((50, 100), "ACTUAL LANE", fill=TEXT_GREY, font=label_font)
+        else:
+            draw.text((50, 100), "LANE DISTRIBUTION", fill=TEXT_GREY, font=label_font)
+
+        all_counts = list(lane_freq.values())
+        if has_assigned:
+            all_counts += list(assigned_freq.values())
+        max_count = max(all_counts, default=1)
+
+        bar_max_width = 450
         bar_y = 130
-        bar_spacing = 65
-        bar_height_px = 35
+        bar_height_px = 30
+        lane_spacing = 100 if has_assigned else 65
 
         for i, (lane_role, count) in enumerate(sorted(lane_freq.items())):
-            y_bar = bar_y + i * bar_spacing
+            y_bar = bar_y + i * lane_spacing
             name = lane_names.get(lane_role, f"Lane {lane_role}")
             color = lane_colors.get(lane_role, accent)
 
             # Lane name
             draw.text((50, y_bar), name, fill=TEXT_WHITE, font=bar_font)
 
-            # Bar
+            # Actual bar
             bar_w = max(int((count / max_count) * bar_max_width), 30) if max_count > 0 else 30
-            _draw_rounded_rect(draw, (50, y_bar + 22, 50 + bar_w, y_bar + 22 + bar_height_px), radius=6, fill=(*color, 180))
+            _draw_rounded_rect(draw, (50, y_bar + 20, 50 + bar_w, y_bar + 20 + bar_height_px), radius=6, fill=(*color, 180))
 
             # Count and percentage
             pct = (count / total_games * 100) if total_games > 0 else 0
-            draw.text((60, y_bar + 28), f"{count} games ({pct:.0f}%)", fill=TEXT_WHITE, font=value_font)
+            draw.text((60, y_bar + 24), f"{count} games ({pct:.0f}%)", fill=TEXT_WHITE, font=value_font)
+
+            # Assigned bar (dimmed, below actual)
+            if has_assigned:
+                assigned_count = assigned_freq.get(lane_role, 0)
+                if assigned_count > 0:
+                    assigned_bar_w = max(int((assigned_count / max_count) * bar_max_width), 20) if max_count > 0 else 20
+                    dimmed = tuple(c // 2 for c in color)
+                    _draw_rounded_rect(draw, (50, y_bar + 55, 50 + assigned_bar_w, y_bar + 55 + bar_height_px), radius=6, fill=(*dimmed, 120))
+                    assigned_pct = (assigned_count / total_games * 100) if total_games > 0 else 0
+                    draw.text((60, y_bar + 59), f"{assigned_count} assigned ({assigned_pct:.0f}%)", fill=TEXT_GREY, font=small_font)
+
+        # Legend if showing comparison
+        if has_assigned:
+            legend_y = height - 70
+            draw.text((50, legend_y), "Bright = Actual lane", fill=TEXT_GREY, font=small_font)
+            draw.text((50, legend_y + 16), "Dim = Assigned lane", fill=TEXT_DARK, font=small_font)
     else:
         _center_text(draw, "No lane data available", label_font, 250, width, TEXT_GREY)
         _center_text(draw, "(Requires match enrichment from OpenDota)", value_font, 280, width, TEXT_DARK)
 
     # Total games footer
-    _center_text(draw, f"{total_games} total games", value_font, height - 50, width, TEXT_GREY)
+    _center_text(draw, f"{total_games} total games with lane data", value_font, height - 50, width, TEXT_GREY)
 
     buffer = io.BytesIO()
     img.save(buffer, format="PNG")
@@ -1192,7 +1266,7 @@ def wrap_chart_in_slide(
 
     # Flavor text at bottom
     if flavor_text:
-        _center_text(draw, f'"{flavor_text}"', flavor_font, height - 40, width, TEXT_GREY)
+        _center_text(draw, flavor_text, flavor_font, height - 40, width, TEXT_GREY)
 
     buffer = io.BytesIO()
     img.save(buffer, format="PNG")

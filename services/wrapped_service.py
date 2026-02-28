@@ -137,6 +137,7 @@ class RoleBreakdownWrapped:
     """Lane breakdown data for wrapped (from OpenDota lane_role)."""
 
     lane_freq: dict[int, int] = field(default_factory=dict)  # lane_role -> count
+    assigned_freq: dict[int, int] = field(default_factory=dict)  # lane (assigned) -> count
     total_games: int = 0
 
 
@@ -303,52 +304,6 @@ FLAVOR_POOLS: dict[str, list[str]] = {
         "Your throne is basically on a timer",
         "Even Techies has a better win rate",
         "Losing is a strategy. Yours, apparently.",
-    ],
-    # Gamba story
-    "gamba_degen": [
-        "The house sends its regards",
-        "Your gambling addiction has a gambling addiction",
-        "Financial literacy was never on the menu",
-        "Vegas would comps you a suite at this point",
-        "You are the reason the house always wins",
-        "All-in like a Wraith King with Aegis and Buyback",
-        "Your betting history reads like a horror novel",
-        "The JC economy revolves around you",
-        "You gamble like Alchemist farms — recklessly and constantly",
-        "Even Riki isn't as committed to going invisible (your JC balance)",
-    ],
-    "gamba_winner": [
-        "The market bends to your will",
-        "Someone call the SEC",
-        "Diamond hands energy",
-        "The bookie is sweating",
-        "Luck is a skill, apparently",
-        "Printing JC like an Alchemist with Greevil's Greed",
-        "Your P&L graph is basically a Battle Fury cleave",
-        "The Oracle predicted this would happen",
-        "Better reads than a Rubick main",
-        "Every bet hits like a Finger of Death",
-    ],
-    "gamba_loser": [
-        "Thank you for subsidizing everyone else's payouts",
-        "The house's employee of the year",
-        "Have you considered just... not betting?",
-        "Your P&L chart is modern art (abstract expressionism)",
-        "At least you're consistent at donating",
-        "Your JC bleeds faster than a hero without armor",
-        "Donating JC like a courier delivering items to the enemy",
-        "You lose bets like a Techies loses teammates",
-        "Every bet is a Divine Rapier drop",
-        "The Shopkeeper sends condolences",
-    ],
-    "gamba_casual": [
-        "Dipping toes, not diving in",
-        "The responsible gambler. How boring.",
-        "You bet like someone who reads the terms of service",
-        "Conservative like a Dazzle in the back lines",
-        "Small bets, small drama — like laning phase farming",
-        "You gamble like you pick — safely and boringly",
-        "The equivalent of buying a Magic Wand and calling it a day",
     ],
     # Teammate flavors
     "teammate_best": [
@@ -1011,8 +966,12 @@ class WrappedService:
                     is_worst=True,
                 ))
 
-        # --- KDA ratio ---
-        kda_rows = [r for r in rows if r.get("kills") is not None and r.get("assists") is not None and r.get("deaths") is not None]
+        # --- KDA ratio (exclude 0/0/0 rows — likely incomplete data) ---
+        kda_rows = [
+            r for r in rows
+            if r.get("kills") is not None and r.get("assists") is not None and r.get("deaths") is not None
+            and (r["kills"] + r["assists"] + r["deaths"]) > 0
+        ]
         if kda_rows:
             def _kda(r):
                 return (r["kills"] + r["assists"]) / max(r["deaths"], 1)
@@ -1034,7 +993,7 @@ class WrappedService:
             worst_kda_val = _kda(worst_kda_row)
             records.append(PersonalRecord(
                 stat_key="kda_worst",
-                stat_label="Clown Fiesta",
+                stat_label="Worst KDA",
                 value=round(worst_kda_val, 2),
                 display_value=f"{worst_kda_val:.2f} KDA",
                 hero_id=worst_kda_row.get("hero_id"),
@@ -1225,7 +1184,7 @@ class WrappedService:
             ("apm_best", "Highest APM", best_apm, False),
             ("courier_kills_best", "Most Courier Kills", best_courier_kills, False),
             ("pings_worst", "Signal Spammer", worst_pings, True),
-            ("rapiers_best", "Gambler's Spirit", best_rapiers, False),
+            ("rapiers_best", "Most Rapiers", best_rapiers, False),
             ("comeback_best", "Biggest Comeback", best_comeback, False),
             ("throw_worst", "Charity Case", worst_throw, True),
         ]
@@ -1550,6 +1509,7 @@ class WrappedService:
         steam_ids = set(self.player_repo.get_steam_ids(discord_id))
 
         pos_freq: dict[int, int] = {}
+        assigned_freq: dict[int, int] = {}
         for row in rows:
             raw = row.get("enrichment_data")
             if raw:
@@ -1560,6 +1520,16 @@ class WrappedService:
                             lane_role = p.get("lane_role", 0)
                             if lane_role in (1, 2, 3):  # safe, mid, off only
                                 pos_freq[lane_role] = pos_freq.get(lane_role, 0) + 1
+                            # Convert absolute lane (bot/mid/top) to relative
+                            # (safe/mid/off) using side.  Radiant: 1=safe,3=off.
+                            # Dire: 1=off,3=safe.  Mid is always 2.
+                            assigned_lane = p.get("lane", 0)
+                            if assigned_lane in (1, 2, 3):
+                                is_radiant = p.get("isRadiant", True)
+                                if not is_radiant and assigned_lane != 2:
+                                    # Dire: swap bot(1)↔top(3)
+                                    assigned_lane = 4 - assigned_lane
+                                assigned_freq[assigned_lane] = assigned_freq.get(assigned_lane, 0) + 1
                             break
                 except (json.JSONDecodeError, TypeError):
                     pass
@@ -1567,6 +1537,7 @@ class WrappedService:
         lane_games = sum(pos_freq.values())
         return RoleBreakdownWrapped(
             lane_freq=pos_freq,
+            assigned_freq=assigned_freq,
             total_games=lane_games,
         )
 
