@@ -71,7 +71,7 @@ class WrappedSlide:
 class WrappedStoryView(discord.ui.View):
     """Unified view for the wrapped story experience with Prev/Next navigation."""
 
-    def __init__(self, slides: list[WrappedSlide], owner_id: int, timeout: int = 300):
+    def __init__(self, slides: list[WrappedSlide], owner_id: int, timeout: int = 600):
         super().__init__(timeout=timeout)
         self.slides = slides
         self.owner_id = owner_id
@@ -96,7 +96,8 @@ class WrappedStoryView(discord.ui.View):
         """Render a slide, using cache if available."""
         if index not in self._slide_cache:
             buf = await asyncio.to_thread(self.slides[index].render_fn)
-            self._slide_cache[index] = buf.read()
+            if index not in self._slide_cache:
+                self._slide_cache[index] = buf.read()
         return discord.File(io.BytesIO(self._slide_cache[index]), filename="wrapped_slide.png")
 
     @discord.ui.button(label="< Prev", style=discord.ButtonStyle.secondary)
@@ -104,23 +105,35 @@ class WrappedStoryView(discord.ui.View):
         if self.current_slide > 0:
             self.current_slide -= 1
             self._update_buttons()
-            file = await self.render_slide(self.current_slide)
-            await interaction.response.edit_message(attachments=[file], view=self)
+            try:
+                file = await self.render_slide(self.current_slide)
+                await interaction.response.edit_message(attachments=[file], view=self)
+            except Exception:
+                self.current_slide += 1
+                self._update_buttons()
+                await interaction.response.send_message(
+                    "Failed to render this slide.", ephemeral=True
+                )
 
     @discord.ui.button(label="Next >", style=discord.ButtonStyle.primary)
     async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if self.current_slide < len(self.slides) - 1:
             self.current_slide += 1
             self._update_buttons()
-            file = await self.render_slide(self.current_slide)
-            await interaction.response.edit_message(attachments=[file], view=self)
+            try:
+                file = await self.render_slide(self.current_slide)
+                await interaction.response.edit_message(attachments=[file], view=self)
+            except Exception:
+                self.current_slide -= 1
+                self._update_buttons()
+                await interaction.response.send_message(
+                    "Failed to render this slide.", ephemeral=True
+                )
 
     async def on_timeout(self):
         if self.message:
             try:
-                self.prev_button.disabled = True
-                self.next_button.disabled = True
-                await self.message.edit(view=self)
+                await self.message.delete()
             except discord.HTTPException:
                 pass
 
@@ -245,7 +258,7 @@ def _build_slides(
     # --- Slide 11: Lane Breakdown ---
     if role_breakdown and role_breakdown.lane_freq:
         def _render_lanes(rb=role_breakdown, yl=year_label, u=target_username):
-            return draw_lane_breakdown_slide(u, yl, rb.lane_freq, rb.total_games)
+            return draw_lane_breakdown_slide(u, yl, rb.lane_freq, rb.total_games, rb.assigned_freq)
         slides.append(WrappedSlide("story_lanes", "Lane Breakdown", _render_lanes))
 
     # --- Slide 12: Teammates (all-time) ---
@@ -319,45 +332,19 @@ def _build_slides(
             return wrap_chart_in_slide(chart_bytes, "Rating History (All-Time)", "")
         slides.append(WrappedSlide("chart_rating", "Rating Chart", _render_rating_chart))
 
-    # --- Slides 16-17: Gamba Story + Chart (all-time, conditional) ---
+    # --- Slide 16: Gamba Chart (all-time, conditional) ---
     if gamba_data:
         pnl_series, gamba_stats = gamba_data
         if pnl_series:
-            def _render_gamba_story(gs=gamba_stats, u=target_username):
-                degen_score = gs.get("degen_score", 0)
-                net_pnl = gs.get("net_pnl", 0)
-                total_bets = gs.get("total_bets", 0)
-                pnl_str = f"+{net_pnl}" if net_pnl >= 0 else str(net_pnl)
-
-                if degen_score >= 60:
-                    flavor = get_random_flavor("gamba_degen")
-                elif net_pnl > 0:
-                    flavor = get_random_flavor("gamba_winner")
-                elif net_pnl < 0:
-                    flavor = get_random_flavor("gamba_loser")
-                else:
-                    flavor = get_random_flavor("gamba_casual")
-
-                comparisons = [
-                    f"{total_bets} total bets",
-                    f"Degen Score: {degen_score}",
-                ]
-                return draw_story_slide(
-                    headline="YOUR GAMBA JOURNEY",
-                    stat_value=f"{pnl_str} JC",
-                    stat_label="NET P&L (ALL-TIME)",
-                    flavor_text=flavor,
-                    accent_color=(87, 242, 135) if net_pnl >= 0 else (237, 66, 69),
-                    username=u,
-                    year_label="All-Time",
-                    comparisons=comparisons,
-                )
-            slides.append(WrappedSlide("story_gamba", "Gamba Story", _render_gamba_story))
-
             def _render_gamba_chart(
                 ps=pnl_series, gs=gamba_stats, u=target_username,
             ):
                 from utils.drawing import draw_gamba_chart
+                net_pnl = gs.get("net_pnl", 0)
+                total_bets = gs.get("total_bets", 0)
+                degen_score = gs.get("degen_score", 0)
+                pnl_str = f"+{net_pnl}" if net_pnl >= 0 else str(net_pnl)
+                subtitle = f"{pnl_str} JC · {total_bets} bets · Degen Score: {degen_score}"
                 chart_buf = draw_gamba_chart(
                     u,
                     gs.get("degen_score", 0),
@@ -367,7 +354,7 @@ def _build_slides(
                     gs,
                 )
                 chart_bytes = chart_buf.read()
-                return wrap_chart_in_slide(chart_bytes, "Gamba Chart (All-Time)", "")
+                return wrap_chart_in_slide(chart_bytes, "Gamba (All-Time)", subtitle)
             slides.append(WrappedSlide("chart_gamba", "Gamba Chart", _render_gamba_chart))
 
     return slides
@@ -445,6 +432,7 @@ class WrappedCog(commands.Cog):
     @app_commands.describe(
         user="View another user's wrapped",
     )
+    @app_commands.checks.cooldown(1, 60)
     async def wrapped(
         self,
         interaction: discord.Interaction,
@@ -540,7 +528,7 @@ class WrappedCog(commands.Cog):
             logger.error(f"Error generating wrapped: {e}", exc_info=True)
             await safe_followup(
                 interaction,
-                content=f"Error generating wrapped: {str(e)}",
+                content="Something went wrong generating your wrapped. Please try again later.",
                 ephemeral=True,
             )
 
