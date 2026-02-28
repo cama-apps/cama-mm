@@ -1,5 +1,5 @@
 """
-Spotify Wrapped style image generation for Cama monthly summaries.
+Spotify Wrapped style image generation for Cama yearly summaries.
 """
 
 import io
@@ -98,7 +98,7 @@ def draw_wrapped_summary(wrapped: "ServerWrapped", hero_names: dict[int, str] | 
     draw.text(((width - text_w) // 2, 30), header_text, fill=ACCENT_GOLD, font=title_font)
 
     # Month/Year
-    month_text = wrapped.month_name.upper()
+    month_text = wrapped.year_label.upper()
     bbox = draw.textbbox((0, 0), month_text, font=subtitle_font)
     text_w = bbox[2] - bbox[0]
     draw.text(((width - text_w) // 2, 85), month_text, fill=TEXT_WHITE, font=subtitle_font)
@@ -369,13 +369,14 @@ def draw_wrapped_personal(
     return buffer
 
 
-def draw_awards_grid(awards: list["Award"], max_awards: int = 6) -> io.BytesIO:
+def draw_awards_grid(awards: list["Award"], max_awards: int = 6, viewer_discord_id: int | None = None) -> io.BytesIO:
     """
     Generate a grid of award cards.
 
     Args:
         awards: List of Award objects
         max_awards: Maximum awards to show
+        viewer_discord_id: If provided, highlight awards won by this user
 
     Returns:
         BytesIO containing PNG image
@@ -424,16 +425,25 @@ def draw_awards_grid(awards: list["Award"], max_awards: int = 6) -> io.BytesIO:
         x = padding + col * (card_width + padding)
         y = 60 + padding + row * (card_height + padding)
 
-        # Card background
+        # Card background — highlight if viewer won this award
+        is_viewer = viewer_discord_id is not None and award.discord_id == viewer_discord_id
         accent_color = CATEGORY_COLORS.get(award.category, ACCENT_GOLD)
+        card_fill = (50, 45, 30) if is_viewer else (40, 40, 50)
+        card_outline = ACCENT_GOLD if is_viewer else accent_color
+        card_border_width = 3 if is_viewer else 2
         _draw_rounded_rect(
             draw,
             (x, y, x + card_width, y + card_height),
             radius=10,
-            fill=(40, 40, 50),
-            outline=accent_color,
-            width=2,
+            fill=card_fill,
+            outline=card_outline,
+            width=card_border_width,
         )
+
+        # Star badge for viewer's award
+        if is_viewer:
+            star_font = _get_font(12, bold=True)
+            draw.text((x + card_width - 40, y + 8), "YOU", fill=ACCENT_GOLD, font=star_font)
 
         # Emoji using pilmoji
         if award.emoji:
@@ -469,13 +479,25 @@ def draw_awards_grid(awards: list["Award"], max_awards: int = 6) -> io.BytesIO:
     return buffer
 
 
-# Slide accent colors for personal records
+# Slide accent colors for personal records and story slides
 SLIDE_COLORS = {
     "combat": (237, 66, 69),
     "farming": (241, 196, 15),
     "impact": (88, 101, 242),
     "vision": (87, 242, 135),
     "endurance": (155, 89, 182),
+    # Story slides
+    "story_games": (88, 101, 242),  # Blurple
+    "story_summary": (241, 196, 15),  # Gold
+    "story_hero": (46, 204, 113),  # Green
+    "story_role": (52, 152, 219),  # Blue
+    "story_teammates": (87, 242, 135),  # Discord green
+    "story_rivals": (237, 66, 69),  # Discord red
+    "story_packages": (155, 89, 182),  # Purple
+    "story_rating": (241, 196, 15),  # Gold
+    "story_gamba": (231, 76, 60),  # Red
+    "server_summary": (241, 196, 15),  # Gold
+    "awards": (88, 101, 242),  # Blurple
 }
 
 # Dimmed color for worst/N/A records
@@ -488,7 +510,7 @@ def draw_records_slide(
     accent_color: tuple[int, int, int],
     records: list["PersonalRecord"],
     username: str,
-    month_name: str,
+    year_label: str,
     slide_number: int,
     total_slides: int,
     hero_names: dict[int, str],
@@ -501,7 +523,7 @@ def draw_records_slide(
         accent_color: RGB tuple for the slide theme
         records: PersonalRecord objects for this slide
         username: Player's display name
-        month_name: e.g. "January 2026"
+        year_label: e.g. "Cama Wrapped 2026"
         slide_number: 1-based slide index
         total_slides: Total number of slides
         hero_names: Dict mapping hero_id to hero name
@@ -534,7 +556,7 @@ def draw_records_slide(
 
     # Header
     draw.text((30, 20), f"{username}'s Records", fill=TEXT_WHITE, font=header_font)
-    draw.text((30, 50), f"— {month_name}", fill=TEXT_GREY, font=subheader_font)
+    draw.text((30, 50), f"— {year_label}", fill=TEXT_GREY, font=subheader_font)
 
     # Slide title
     draw.text((30, 80), slide_title.upper(), fill=accent_color, font=slide_title_font)
@@ -598,13 +620,580 @@ def draw_records_slide(
                 name_w = bbox[2] - bbox[0]
                 draw.text((width - 30 - name_w, y + 8), hero_name, fill=TEXT_GREY, font=info_font)
 
-    # Footer
-    footer_text = f"Slide {slide_number} of {total_slides}"
-    bbox = draw.textbbox((0, 0), footer_text, font=footer_font)
-    text_w = bbox[2] - bbox[0]
-    draw.text(((width - text_w) // 2, height - 35), footer_text, fill=TEXT_GREY, font=footer_font)
+    # Save to buffer (no slide counter for clean story flow)
+    buffer = io.BytesIO()
+    img.save(buffer, format="PNG")
+    buffer.seek(0)
+    return buffer
 
-    # Save to buffer
+
+# ============ NEW WRAPPED STORY SLIDE DRAWING FUNCTIONS ============
+
+ACCENT_PURPLE = (155, 89, 182)
+
+
+def _center_text(draw: ImageDraw.Draw, text: str, font, y: int, width: int, fill: tuple) -> None:
+    """Draw centered text at given y position."""
+    bbox = draw.textbbox((0, 0), text, font=font)
+    text_w = bbox[2] - bbox[0]
+    draw.text(((width - text_w) // 2, y), text, fill=fill, font=font)
+
+
+def _draw_wrapped_header(draw: ImageDraw.Draw, username: str, year_label: str, width: int) -> None:
+    """Draw the standard wrapped story header."""
+    header_font = _get_font(14)
+    draw.text((30, 15), f"@{username}", fill=TEXT_GREY, font=header_font)
+    bbox = draw.textbbox((0, 0), year_label.upper(), font=header_font)
+    text_w = bbox[2] - bbox[0]
+    draw.text((width - 30 - text_w, 15), year_label.upper(), fill=TEXT_GREY, font=header_font)
+
+
+def draw_story_slide(
+    headline: str,
+    stat_value: str,
+    stat_label: str,
+    flavor_text: str,
+    accent_color: tuple[int, int, int],
+    username: str,
+    year_label: str,
+    comparisons: list[str] | None = None,
+) -> io.BytesIO:
+    """
+    Draw a big-number story reveal slide.
+
+    Used for: Your Year, Rating Story, Gamba Story slides.
+    """
+    width, height = 800, 600
+    img = Image.new("RGBA", (width, height), (*BG_GRADIENT_START, 255))
+    draw = ImageDraw.Draw(img)
+
+    # Gradient background
+    for y in range(height):
+        ratio = y / height
+        r = int(BG_GRADIENT_START[0] + (BG_GRADIENT_END[0] - BG_GRADIENT_START[0]) * ratio)
+        g = int(BG_GRADIENT_START[1] + (BG_GRADIENT_END[1] - BG_GRADIENT_START[1]) * ratio)
+        b = int(BG_GRADIENT_START[2] + (BG_GRADIENT_END[2] - BG_GRADIENT_START[2]) * ratio)
+        draw.line([(0, y), (width, y)], fill=(r, g, b, 255))
+
+    # Fonts
+    headline_font = _get_font(18, bold=True)
+    big_font = _get_font(72, bold=True)
+    label_font = _get_font(22)
+    flavor_font = _get_font(16)
+    comparison_font = _get_font(16)
+
+    # Header
+    _draw_wrapped_header(draw, username, year_label, width)
+
+    # Headline
+    _center_text(draw, headline.upper(), headline_font, 80, width, TEXT_GREY)
+
+    # Big stat number
+    _center_text(draw, stat_value, big_font, 140, width, accent_color)
+
+    # Stat label
+    _center_text(draw, stat_label, label_font, 230, width, TEXT_WHITE)
+
+    # Comparisons (percentile lines)
+    if comparisons:
+        y_pos = 290
+        for comp in comparisons:
+            _center_text(draw, comp, comparison_font, y_pos, width, TEXT_GREY)
+            y_pos += 30
+
+    # Flavor text
+    if flavor_text:
+        _center_text(draw, f'"{flavor_text}"', flavor_font, 480, width, TEXT_GREY)
+
+    # Accent line at bottom
+    draw.line([(100, 540), (width - 100, 540)], fill=(*accent_color, 128), width=2)
+
+    buffer = io.BytesIO()
+    img.save(buffer, format="PNG")
+    buffer.seek(0)
+    return buffer
+
+
+def draw_summary_stats_slide(
+    username: str,
+    year_label: str,
+    stats_list: list[tuple[str, str, str, tuple[int, int, int]]],
+) -> io.BytesIO:
+    """
+    Draw a 2x3 summary stats grid.
+
+    Args:
+        stats_list: List of (value, label, quip, color) tuples, up to 6
+    """
+    width, height = 800, 600
+    img = Image.new("RGBA", (width, height), (*BG_GRADIENT_START, 255))
+    draw = ImageDraw.Draw(img)
+
+    for y in range(height):
+        ratio = y / height
+        r = int(BG_GRADIENT_START[0] + (BG_GRADIENT_END[0] - BG_GRADIENT_START[0]) * ratio)
+        g = int(BG_GRADIENT_START[1] + (BG_GRADIENT_END[1] - BG_GRADIENT_START[1]) * ratio)
+        b = int(BG_GRADIENT_START[2] + (BG_GRADIENT_END[2] - BG_GRADIENT_START[2]) * ratio)
+        draw.line([(0, y), (width, y)], fill=(r, g, b, 255))
+
+    _draw_wrapped_header(draw, username, year_label, width)
+
+    title_font = _get_font(20, bold=True)
+    _center_text(draw, "YOUR STATS", title_font, 50, width, ACCENT_GOLD)
+
+    draw.line([(50, 80), (width - 50, 80)], fill=(*ACCENT_GOLD, 128), width=1)
+
+    value_font = _get_font(32, bold=True)
+    label_font = _get_font(14, bold=True)
+    quip_font = _get_font(12)
+
+    cols = 2
+    rows = 3
+    cell_w = (width - 80) // cols
+    cell_h = 150
+    start_y = 100
+
+    for i, (value, label, quip, color) in enumerate(stats_list[:6]):
+        col = i % cols
+        row = i // cols
+        cx = 40 + col * cell_w + cell_w // 2
+        cy = start_y + row * cell_h
+
+        # Card background
+        card_x1 = 40 + col * cell_w + 10
+        card_y1 = cy
+        card_x2 = card_x1 + cell_w - 20
+        card_y2 = cy + cell_h - 20
+        _draw_rounded_rect(draw, (card_x1, card_y1, card_x2, card_y2), radius=8, fill=(40, 40, 50))
+
+        # Value
+        bbox = draw.textbbox((0, 0), value, font=value_font)
+        tw = bbox[2] - bbox[0]
+        draw.text((cx - tw // 2, cy + 15), value, fill=color, font=value_font)
+
+        # Label
+        bbox = draw.textbbox((0, 0), label, font=label_font)
+        tw = bbox[2] - bbox[0]
+        draw.text((cx - tw // 2, cy + 60), label, fill=TEXT_WHITE, font=label_font)
+
+        # Quip
+        if quip:
+            bbox = draw.textbbox((0, 0), quip, font=quip_font)
+            tw = bbox[2] - bbox[0]
+            draw.text((cx - tw // 2, cy + 82), quip, fill=TEXT_GREY, font=quip_font)
+
+    buffer = io.BytesIO()
+    img.save(buffer, format="PNG")
+    buffer.seek(0)
+    return buffer
+
+
+def draw_pairwise_slide(
+    username: str,
+    year_label: str,
+    entries: list[dict],
+    slide_type: str = "teammates",
+    avatar_images: dict[int, bytes] | None = None,
+) -> io.BytesIO:
+    """
+    Draw a pairwise teammates or rivals slide.
+
+    Args:
+        entries: List of dicts with {discord_id, username, games, wins, win_rate, label, flavor}
+        slide_type: "teammates" (green accent) or "rivals" (red accent)
+        avatar_images: Dict mapping discord_id -> avatar bytes (48x48)
+    """
+    width, height = 800, 600
+    img = Image.new("RGBA", (width, height), (*BG_GRADIENT_START, 255))
+    draw = ImageDraw.Draw(img)
+
+    for y in range(height):
+        ratio = y / height
+        r = int(BG_GRADIENT_START[0] + (BG_GRADIENT_END[0] - BG_GRADIENT_START[0]) * ratio)
+        g = int(BG_GRADIENT_START[1] + (BG_GRADIENT_END[1] - BG_GRADIENT_START[1]) * ratio)
+        b = int(BG_GRADIENT_START[2] + (BG_GRADIENT_END[2] - BG_GRADIENT_START[2]) * ratio)
+        draw.line([(0, y), (width, y)], fill=(r, g, b, 255))
+
+    accent = ACCENT_GREEN if slide_type == "teammates" else ACCENT_RED
+    title = "YOUR TEAMMATES" if slide_type == "teammates" else "YOUR RIVALS"
+    subtitle = "All-time pairwise data" if slide_type == "teammates" else "All-time matchup data"
+
+    _draw_wrapped_header(draw, username, year_label, width)
+
+    title_font = _get_font(20, bold=True)
+    subtitle_font = _get_font(14)
+    name_font = _get_font(18, bold=True)
+    stat_font = _get_font(14)
+    label_font = _get_font(12, bold=True)
+    flavor_font = _get_font(12)
+
+    _center_text(draw, title, title_font, 50, width, accent)
+    _center_text(draw, subtitle, subtitle_font, 78, width, TEXT_GREY)
+
+    draw.line([(50, 100), (width - 50, 100)], fill=(*accent, 128), width=1)
+
+    y_pos = 115
+    row_height = 75
+
+    for i, entry in enumerate(entries[:6]):
+        y = y_pos + i * row_height
+        avatar_x = 40
+
+        # Draw avatar or fallback circle
+        discord_id = entry.get("discord_id")
+        drew_avatar = False
+        if avatar_images and discord_id and discord_id in avatar_images:
+            try:
+                avatar_data = avatar_images[discord_id]
+                avatar_img = Image.open(io.BytesIO(avatar_data)).convert("RGBA").resize((48, 48))
+                # Create circular mask
+                mask = Image.new("L", (48, 48), 0)
+                mask_draw = ImageDraw.Draw(mask)
+                mask_draw.ellipse((0, 0, 47, 47), fill=255)
+                img.paste(avatar_img, (avatar_x, y + 8), mask)
+                drew_avatar = True
+            except Exception:
+                pass
+
+        if not drew_avatar:
+            # Fallback: colored circle with initial
+            initial = entry.get("username", "?")[0].upper()
+            draw.ellipse((avatar_x, y + 8, avatar_x + 48, y + 56), fill=(*accent, 100))
+            init_font = _get_font(20, bold=True)
+            bbox = draw.textbbox((0, 0), initial, font=init_font)
+            iw = bbox[2] - bbox[0]
+            ih = bbox[3] - bbox[1]
+            draw.text((avatar_x + 24 - iw // 2, y + 32 - ih // 2), initial, fill=TEXT_WHITE, font=init_font)
+
+        text_x = avatar_x + 60
+
+        # Section label if present
+        label = entry.get("label")
+        if label:
+            draw.text((text_x, y + 2), label.upper(), fill=accent, font=label_font)
+
+        # Username
+        uname = f"@{entry.get('username', '?')}"
+        name_y = y + 16 if label else y + 8
+        draw.text((text_x, name_y), uname, fill=TEXT_WHITE, font=name_font)
+
+        # Stats
+        games = entry.get("games", 0)
+        wins = entry.get("wins", 0)
+        losses = games - wins
+        wr = entry.get("win_rate", 0)
+        stat_text = f"{wins}W {losses}L ({wr*100:.0f}% WR) · {games} games"
+        draw.text((text_x, name_y + 22), stat_text, fill=TEXT_GREY, font=stat_font)
+
+        # Flavor
+        flavor = entry.get("flavor")
+        if flavor:
+            draw.text((text_x, name_y + 40), f'"{flavor}"', fill=TEXT_DARK, font=flavor_font)
+
+    buffer = io.BytesIO()
+    img.save(buffer, format="PNG")
+    buffer.seek(0)
+    return buffer
+
+
+def draw_hero_spotlight_slide(
+    username: str,
+    year_label: str,
+    top_hero: dict,
+    top_3_heroes: list[dict],
+    unique_count: int,
+) -> io.BytesIO:
+    """
+    Draw hero spotlight slide with featured hero and top 3 bar chart.
+
+    Args:
+        top_hero: {name, picks, wins, win_rate}
+        top_3_heroes: [{name, picks, wins, win_rate}, ...]
+        unique_count: Total unique heroes played
+    """
+    width, height = 800, 600
+    img = Image.new("RGBA", (width, height), (*BG_GRADIENT_START, 255))
+    draw = ImageDraw.Draw(img)
+
+    for y in range(height):
+        ratio = y / height
+        r = int(BG_GRADIENT_START[0] + (BG_GRADIENT_END[0] - BG_GRADIENT_START[0]) * ratio)
+        g = int(BG_GRADIENT_START[1] + (BG_GRADIENT_END[1] - BG_GRADIENT_START[1]) * ratio)
+        b = int(BG_GRADIENT_START[2] + (BG_GRADIENT_END[2] - BG_GRADIENT_START[2]) * ratio)
+        draw.line([(0, y), (width, y)], fill=(r, g, b, 255))
+
+    accent = (46, 204, 113)  # Green
+    _draw_wrapped_header(draw, username, year_label, width)
+
+    title_font = _get_font(20, bold=True)
+    hero_font = _get_font(36, bold=True)
+    stat_font = _get_font(18)
+    bar_label_font = _get_font(14, bold=True)
+    bar_value_font = _get_font(12)
+    small_font = _get_font(14)
+
+    _center_text(draw, "HERO SPOTLIGHT", title_font, 50, width, accent)
+    draw.line([(50, 80), (width - 50, 80)], fill=(*accent, 128), width=1)
+
+    # Featured hero
+    _center_text(draw, top_hero.get("name", "Unknown"), hero_font, 100, width, TEXT_WHITE)
+
+    wr = top_hero.get("win_rate", 0)
+    picks = top_hero.get("picks", 0)
+    wins = top_hero.get("wins", 0)
+    stat_text = f"{picks} games · {wins} wins · {wr*100:.0f}% win rate"
+    _center_text(draw, stat_text, stat_font, 150, width, accent)
+
+    # Unique heroes count
+    _center_text(draw, f"{unique_count} unique heroes played", small_font, 185, width, TEXT_GREY)
+
+    # Top 3 bar chart
+    draw.text((50, 230), "TOP HEROES", fill=TEXT_GREY, font=bar_label_font)
+
+    bar_y = 260
+    max_picks = max((h.get("picks", 0) for h in top_3_heroes), default=1)
+    bar_max_width = 500
+    bar_height_px = 40
+    bar_spacing = 55
+
+    bar_colors = [accent, (88, 101, 242), (241, 196, 15)]
+
+    for i, hero in enumerate(top_3_heroes[:3]):
+        y_bar = bar_y + i * bar_spacing
+        picks_h = hero.get("picks", 0)
+        bar_w = max(int((picks_h / max_picks) * bar_max_width), 30) if max_picks > 0 else 30
+        color = bar_colors[i] if i < len(bar_colors) else accent
+
+        # Hero name
+        draw.text((50, y_bar), hero.get("name", "?"), fill=TEXT_WHITE, font=bar_label_font)
+
+        # Bar
+        _draw_rounded_rect(draw, (50, y_bar + 18, 50 + bar_w, y_bar + 18 + bar_height_px), radius=6, fill=(*color, 180))
+
+        # Stats inside/after bar
+        wr_h = hero.get("win_rate", 0)
+        bar_text = f"{picks_h}g · {wr_h*100:.0f}%"
+        draw.text((60, y_bar + 26), bar_text, fill=TEXT_WHITE, font=bar_value_font)
+
+    buffer = io.BytesIO()
+    img.save(buffer, format="PNG")
+    buffer.seek(0)
+    return buffer
+
+
+def draw_lane_breakdown_slide(
+    username: str,
+    year_label: str,
+    lane_freq: dict[int, int],
+    total_games: int,
+) -> io.BytesIO:
+    """
+    Draw lane breakdown slide showing lane distribution.
+
+    Args:
+        lane_freq: Dict of lane_role -> count (from OpenDota enrichment)
+        total_games: Total games played that year
+    """
+    width, height = 800, 600
+    img = Image.new("RGBA", (width, height), (*BG_GRADIENT_START, 255))
+    draw = ImageDraw.Draw(img)
+
+    for y in range(height):
+        ratio = y / height
+        r = int(BG_GRADIENT_START[0] + (BG_GRADIENT_END[0] - BG_GRADIENT_START[0]) * ratio)
+        g = int(BG_GRADIENT_START[1] + (BG_GRADIENT_END[1] - BG_GRADIENT_START[1]) * ratio)
+        b = int(BG_GRADIENT_START[2] + (BG_GRADIENT_END[2] - BG_GRADIENT_START[2]) * ratio)
+        draw.line([(0, y), (width, y)], fill=(r, g, b, 255))
+
+    accent = (52, 152, 219)  # Blue
+    _draw_wrapped_header(draw, username, year_label, width)
+
+    title_font = _get_font(20, bold=True)
+    _center_text(draw, "LANE BREAKDOWN", title_font, 50, width, accent)
+    draw.line([(50, 80), (width - 50, 80)], fill=(*accent, 128), width=1)
+
+    # Lane role names (OpenDota lane_role: 1=safe, 2=mid, 3=off)
+    lane_names = {1: "Safe Lane", 2: "Mid Lane", 3: "Off Lane"}
+    lane_colors = {
+        1: (87, 242, 135),   # Green
+        2: (241, 196, 15),   # Gold
+        3: (237, 66, 69),    # Red
+    }
+
+    label_font = _get_font(16, bold=True)
+    value_font = _get_font(14)
+    bar_font = _get_font(14, bold=True)
+
+    if lane_freq:
+        draw.text((50, 100), "LANE DISTRIBUTION", fill=TEXT_GREY, font=label_font)
+
+        max_count = max(lane_freq.values(), default=1)
+        bar_max_width = 500
+        bar_y = 130
+        bar_spacing = 65
+        bar_height_px = 35
+
+        for i, (lane_role, count) in enumerate(sorted(lane_freq.items())):
+            y_bar = bar_y + i * bar_spacing
+            name = lane_names.get(lane_role, f"Lane {lane_role}")
+            color = lane_colors.get(lane_role, accent)
+
+            # Lane name
+            draw.text((50, y_bar), name, fill=TEXT_WHITE, font=bar_font)
+
+            # Bar
+            bar_w = max(int((count / max_count) * bar_max_width), 30) if max_count > 0 else 30
+            _draw_rounded_rect(draw, (50, y_bar + 22, 50 + bar_w, y_bar + 22 + bar_height_px), radius=6, fill=(*color, 180))
+
+            # Count and percentage
+            pct = (count / total_games * 100) if total_games > 0 else 0
+            draw.text((60, y_bar + 28), f"{count} games ({pct:.0f}%)", fill=TEXT_WHITE, font=value_font)
+    else:
+        _center_text(draw, "No lane data available", label_font, 250, width, TEXT_GREY)
+        _center_text(draw, "(Requires match enrichment from OpenDota)", value_font, 280, width, TEXT_DARK)
+
+    # Total games footer
+    _center_text(draw, f"{total_games} total games", value_font, height - 50, width, TEXT_GREY)
+
+    buffer = io.BytesIO()
+    img.save(buffer, format="PNG")
+    buffer.seek(0)
+    return buffer
+
+
+def draw_package_deal_slide(
+    username: str,
+    year_label: str,
+    times_bought: int,
+    times_bought_on_you: int,
+    unique_buyers: int,
+    jc_spent: int,
+    jc_spent_on_you: int,
+    total_games: int,
+) -> io.BytesIO:
+    """
+    Draw anonymized package deal stats slide.
+
+    Shows how many deals the player bought and how many were bought on them,
+    without revealing any names.
+    """
+    width, height = 800, 600
+    img = Image.new("RGBA", (width, height), (*BG_GRADIENT_START, 255))
+    draw = ImageDraw.Draw(img)
+
+    for y in range(height):
+        ratio = y / height
+        r = int(BG_GRADIENT_START[0] + (BG_GRADIENT_END[0] - BG_GRADIENT_START[0]) * ratio)
+        g = int(BG_GRADIENT_START[1] + (BG_GRADIENT_END[1] - BG_GRADIENT_START[1]) * ratio)
+        b = int(BG_GRADIENT_START[2] + (BG_GRADIENT_END[2] - BG_GRADIENT_START[2]) * ratio)
+        draw.line([(0, y), (width, y)], fill=(r, g, b, 255))
+
+    accent = ACCENT_PURPLE
+    _draw_wrapped_header(draw, username, year_label, width)
+
+    title_font = _get_font(20, bold=True)
+    _center_text(draw, "PACKAGE DEALS", title_font, 50, width, accent)
+    draw.line([(50, 80), (width - 50, 80)], fill=(*accent, 128), width=1)
+
+    from services.wrapped_service import get_random_flavor
+
+    # --- "Bought on you" card ---
+    card_y = 110
+    _draw_rounded_rect(draw, (40, card_y, width - 40, card_y + 100), radius=10, fill=(40, 40, 50), outline=(*accent, 100))
+
+    big_font = _get_font(36, bold=True)
+    label_font = _get_font(14, bold=True)
+    detail_font = _get_font(14)
+
+    # Big number
+    draw.text((70, card_y + 10), str(times_bought_on_you), fill=accent, font=big_font)
+
+    # Label
+    buyer_label = f"person bought a deal on you" if unique_buyers == 1 else f"people bought deals on you"
+    draw.text((70, card_y + 55), f"{unique_buyers} {buyer_label}", fill=TEXT_WHITE, font=label_font)
+    draw.text((70, card_y + 75), f"{jc_spent_on_you} JC spent on you", fill=TEXT_GREY, font=detail_font)
+
+    # --- "You bought" card ---
+    card_y2 = 230
+    _draw_rounded_rect(draw, (40, card_y2, width - 40, card_y2 + 100), radius=10, fill=(40, 40, 50), outline=(*accent, 100))
+
+    draw.text((70, card_y2 + 10), str(times_bought), fill=ACCENT_GOLD, font=big_font)
+    draw.text((70, card_y2 + 55), "deals you purchased", fill=TEXT_WHITE, font=label_font)
+    draw.text((70, card_y2 + 75), f"{jc_spent} JC spent", fill=TEXT_GREY, font=detail_font)
+
+    # --- Total games ---
+    games_y = 360
+    _draw_rounded_rect(draw, (40, games_y, width - 40, games_y + 70), radius=10, fill=(40, 40, 50), outline=(*ACCENT_GREEN, 80))
+    draw.text((70, games_y + 10), str(total_games), fill=ACCENT_GREEN, font=_get_font(28, bold=True))
+    draw.text((70, games_y + 45), "games committed across all deals", fill=TEXT_GREY, font=detail_font)
+
+    # Flavor
+    flavor = get_random_flavor("package_deal")
+    if flavor:
+        flavor_font = _get_font(14)
+        _center_text(draw, f'"{flavor}"', flavor_font, height - 60, width, TEXT_GREY)
+
+    buffer = io.BytesIO()
+    img.save(buffer, format="PNG")
+    buffer.seek(0)
+    return buffer
+
+
+def wrap_chart_in_slide(
+    chart_bytes: bytes,
+    title: str,
+    flavor_text: str,
+    accent_color: tuple[int, int, int] = ACCENT_GOLD,
+) -> io.BytesIO:
+    """
+    Wrap a 700x400 chart in an 800x600 wrapped-styled canvas.
+
+    Args:
+        chart_bytes: PNG bytes of the chart (700x400)
+        title: Title text above the chart
+        flavor_text: Flavor text below the chart
+        accent_color: Accent color for title
+    """
+    width, height = 800, 600
+    img = Image.new("RGBA", (width, height), (*BG_GRADIENT_START, 255))
+    draw = ImageDraw.Draw(img)
+
+    for y in range(height):
+        ratio = y / height
+        r = int(BG_GRADIENT_START[0] + (BG_GRADIENT_END[0] - BG_GRADIENT_START[0]) * ratio)
+        g = int(BG_GRADIENT_START[1] + (BG_GRADIENT_END[1] - BG_GRADIENT_START[1]) * ratio)
+        b = int(BG_GRADIENT_START[2] + (BG_GRADIENT_END[2] - BG_GRADIENT_START[2]) * ratio)
+        draw.line([(0, y), (width, y)], fill=(r, g, b, 255))
+
+    title_font = _get_font(16, bold=True)
+    flavor_font = _get_font(14)
+
+    # Title
+    _center_text(draw, title.upper(), title_font, 15, width, accent_color)
+
+    # Chart
+    try:
+        chart_img = Image.open(io.BytesIO(chart_bytes)).convert("RGBA")
+        # Scale to fit if needed
+        chart_w, chart_h = chart_img.size
+        max_w, max_h = 740, 480
+        if chart_w > max_w or chart_h > max_h:
+            ratio = min(max_w / chart_w, max_h / chart_h)
+            new_w = int(chart_w * ratio)
+            new_h = int(chart_h * ratio)
+            chart_img = chart_img.resize((new_w, new_h), Image.LANCZOS)
+            chart_w, chart_h = new_w, new_h
+
+        x_offset = (width - chart_w) // 2
+        y_offset = 45
+        img.paste(chart_img, (x_offset, y_offset), chart_img)
+    except Exception:
+        _center_text(draw, "Chart unavailable", title_font, 250, width, TEXT_GREY)
+
+    # Flavor text at bottom
+    if flavor_text:
+        _center_text(draw, f'"{flavor_text}"', flavor_font, height - 40, width, TEXT_GREY)
+
     buffer = io.BytesIO()
     img.save(buffer, format="PNG")
     buffer.seek(0)

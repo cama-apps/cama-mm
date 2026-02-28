@@ -882,31 +882,7 @@ class ITipRepository(ABC):
 
 
 class IWrappedRepository(ABC):
-    """Repository for Cama Wrapped monthly summary data access."""
-
-    @abstractmethod
-    def get_wrapped(self, guild_id: int, year_month: str) -> dict | None:
-        """Get existing wrapped generation record for a guild/month."""
-        ...
-
-    @abstractmethod
-    def get_last_generation(self, guild_id: int) -> dict | None:
-        """Get the most recent wrapped generation for a guild."""
-        ...
-
-    @abstractmethod
-    def save_wrapped(
-        self,
-        guild_id: int,
-        year_month: str,
-        stats: dict,
-        channel_id: int | None = None,
-        message_id: int | None = None,
-        generated_by: int | None = None,
-        generation_type: str = "auto",
-    ) -> int:
-        """Save wrapped generation record."""
-        ...
+    """Repository for Cama Wrapped data access."""
 
     @abstractmethod
     def get_month_match_stats(

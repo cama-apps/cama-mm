@@ -164,7 +164,7 @@ class TestGetPlayerRecordsBasic:
         player_repo.get_by_id.return_value = player_mock
         player_repo.get_steam_ids.return_value = []
 
-        result = svc.get_player_records_wrapped(111, "2026-01", guild_id=0)
+        result = svc.get_player_records_wrapped(111, 2026, guild_id=0)
 
         assert result is not None
         assert result.discord_username == "TestPlayer"
@@ -182,7 +182,7 @@ class TestGetPlayerRecordsBasic:
         # Only 2 rows, below WRAPPED_MIN_GAMES (3)
         wrapped_repo.get_player_year_matches.return_value = _sample_rows(2)
 
-        result = svc.get_player_records_wrapped(111, "2026-01", guild_id=0)
+        result = svc.get_player_records_wrapped(111, 2026, guild_id=0)
         assert result is None
 
     def test_worst_records_included(self):
@@ -195,7 +195,7 @@ class TestGetPlayerRecordsBasic:
         player_repo.get_by_id.return_value = player_mock
         player_repo.get_steam_ids.return_value = []
 
-        result = svc.get_player_records_wrapped(111, "2026-01", guild_id=0)
+        result = svc.get_player_records_wrapped(111, 2026, guild_id=0)
         worst_records = [r for r in result.records if r.is_worst]
         assert len(worst_records) > 0
 
@@ -263,7 +263,7 @@ class TestKDARatioNoDeaths:
         player_repo.get_by_id.return_value = player_mock
         player_repo.get_steam_ids.return_value = []
 
-        result = svc.get_player_records_wrapped(111, "2026-01", guild_id=0)
+        result = svc.get_player_records_wrapped(111, 2026, guild_id=0)
         kda_best = [r for r in result.records if r.stat_key == "kda_best"]
         assert len(kda_best) == 1
         # (10 + 5) / max(0, 1) = 15.0
@@ -294,7 +294,7 @@ class TestEnrichmentDataParsing:
         player_repo.get_by_id.return_value = player_mock
         player_repo.get_steam_ids.return_value = [steam_id]
 
-        result = svc.get_player_records_wrapped(111, "2026-01", guild_id=0)
+        result = svc.get_player_records_wrapped(111, 2026, guild_id=0)
         keys = {r.stat_key for r in result.records}
 
         assert "apm_best" in keys
@@ -324,7 +324,7 @@ class TestEnrichmentDataParsing:
         player_repo.get_by_id.return_value = player_mock
         player_repo.get_steam_ids.return_value = [123]
 
-        result = svc.get_player_records_wrapped(111, "2026-01", guild_id=0)
+        result = svc.get_player_records_wrapped(111, 2026, guild_id=0)
         # Should still produce records, enrichment stats should be N/A placeholders
         assert result is not None
         enrichment_keys = {"apm_best", "courier_kills_best", "pings_worst", "rapiers_best", "comeback_best", "throw_worst"}
@@ -385,7 +385,7 @@ class TestSlideGrouping:
         player_repo.get_by_id.return_value = player_mock
         player_repo.get_steam_ids.return_value = [steam_id]
 
-        result = svc.get_player_records_wrapped(111, "2026-01", guild_id=0)
+        result = svc.get_player_records_wrapped(111, 2026, guild_id=0)
         slides = result.get_slides()
 
         assert len(slides) == 5
@@ -476,7 +476,7 @@ class TestDrawRecordsSlideBasic:
             accent_color=SLIDE_COLORS["combat"],
             records=records,
             username="TestPlayer",
-            month_name="January 2026",
+            year_label="Cama Wrapped 2026",
             slide_number=1,
             total_slides=5,
             hero_names={1: "Anti-Mage", 2: "Axe", 3: "Bane", 4: "Bloodseeker", 5: "Crystal Maiden"},
@@ -497,7 +497,7 @@ class TestDrawRecordsSlideBasic:
             accent_color=SLIDE_COLORS["combat"],
             records=records,
             username="TestPlayer",
-            month_name="January 2026",
+            year_label="Cama Wrapped 2026",
             slide_number=1,
             total_slides=5,
             hero_names={4: "Bloodseeker", 5: "Crystal Maiden"},
@@ -517,7 +517,7 @@ class TestDrawRecordsSlideBasic:
             accent_color=SLIDE_COLORS["vision"],
             records=records,
             username="TestPlayer",
-            month_name="January 2026",
+            year_label="Cama Wrapped 2026",
             slide_number=4,
             total_slides=5,
             hero_names={},

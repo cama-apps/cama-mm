@@ -1,8 +1,7 @@
 """
-Tests for Cama Wrapped monthly summary feature.
+Tests for Cama Wrapped yearly summary feature.
 """
 
-import json
 import time
 from datetime import datetime
 from unittest.mock import MagicMock
@@ -15,71 +14,6 @@ from services.wrapped_service import Award, WrappedService
 
 class TestWrappedRepository:
     """Tests for WrappedRepository."""
-
-    def test_save_and_get_wrapped(self, repo_db_path):
-        """Test saving and retrieving wrapped generation record."""
-        repo = WrappedRepository(repo_db_path)
-
-        year_month = "2026-01"
-        stats = {"total_matches": 47, "unique_players": 15}
-
-        # Save wrapped
-        record_id = repo.save_wrapped(
-            guild_id=123,
-            year_month=year_month,
-            stats=stats,
-            channel_id=456,
-            message_id=789,
-            generated_by=111,
-            generation_type="manual",
-        )
-
-        assert record_id > 0
-
-        # Retrieve wrapped
-        result = repo.get_wrapped(123, year_month)
-        assert result is not None
-        assert result["year_month"] == year_month
-        assert result["channel_id"] == 456
-        assert result["message_id"] == 789
-        assert result["generated_by"] == 111
-        assert result["generation_type"] == "manual"
-
-        # Verify stats JSON
-        parsed_stats = json.loads(result["stats_json"])
-        assert parsed_stats["total_matches"] == 47
-
-    def test_get_wrapped_not_found(self, repo_db_path):
-        """Test getting non-existent wrapped returns None."""
-        repo = WrappedRepository(repo_db_path)
-        result = repo.get_wrapped(123, "2020-01")
-        assert result is None
-
-    def test_save_wrapped_upsert(self, repo_db_path):
-        """Test that saving wrapped for same guild/month updates existing record."""
-        repo = WrappedRepository(repo_db_path)
-
-        year_month = "2026-01"
-
-        # First save
-        repo.save_wrapped(
-            guild_id=123,
-            year_month=year_month,
-            stats={"version": 1},
-        )
-
-        # Second save (update)
-        repo.save_wrapped(
-            guild_id=123,
-            year_month=year_month,
-            stats={"version": 2},
-            generation_type="auto",
-        )
-
-        # Should only have one record with updated stats
-        result = repo.get_wrapped(123, year_month)
-        parsed = json.loads(result["stats_json"])
-        assert parsed["version"] == 2
 
     def test_get_month_summary_empty(self, repo_db_path):
         """Test getting month summary with no matches."""
@@ -97,8 +31,8 @@ class TestWrappedRepository:
 class TestWrappedService:
     """Tests for WrappedService."""
 
-    def test_get_month_timestamps(self, repo_db_path):
-        """Test month timestamp calculation."""
+    def test_get_year_timestamps(self, repo_db_path):
+        """Test year timestamp calculation."""
         repo = WrappedRepository(repo_db_path)
         service = WrappedService(
             wrapped_repo=repo,
@@ -107,164 +41,19 @@ class TestWrappedService:
             bet_repo=MagicMock(),
         )
 
-        start_ts, end_ts = service._get_month_timestamps("2026-01")
+        start_ts, end_ts = service._get_year_timestamps(2026)
 
-        # January 2026
-        start_dt = datetime.fromtimestamp(start_ts)
-        end_dt = datetime.fromtimestamp(end_ts - 1)  # -1 to get last second of month
+        from datetime import timezone
+        start_dt = datetime.fromtimestamp(start_ts, tz=timezone.utc)
+        end_dt = datetime.fromtimestamp(end_ts - 1, tz=timezone.utc)
 
         assert start_dt.year == 2026
         assert start_dt.month == 1
         assert start_dt.day == 1
 
         assert end_dt.year == 2026
-        assert end_dt.month == 1
+        assert end_dt.month == 12
         assert end_dt.day == 31
-
-    def test_get_month_timestamps_february(self, repo_db_path):
-        """Test month timestamp for February (shorter month)."""
-        repo = WrappedRepository(repo_db_path)
-        service = WrappedService(
-            wrapped_repo=repo,
-            player_repo=MagicMock(),
-            match_repo=MagicMock(),
-            bet_repo=MagicMock(),
-        )
-
-        start_ts, end_ts = service._get_month_timestamps("2026-02")
-
-        end_dt = datetime.fromtimestamp(end_ts - 1)
-        assert end_dt.month == 2
-        assert end_dt.day == 28  # 2026 is not a leap year
-
-    def test_was_wrapped_generated(self, repo_db_path):
-        """Test checking if wrapped was generated."""
-        repo = WrappedRepository(repo_db_path)
-        service = WrappedService(
-            wrapped_repo=repo,
-            player_repo=MagicMock(),
-            match_repo=MagicMock(),
-            bet_repo=MagicMock(),
-        )
-
-        # Not generated yet
-        assert service.was_wrapped_generated(123, "2026-01") is False
-
-        # Mark as generated
-        service.mark_wrapped_generated(
-            guild_id=123,
-            year_month="2026-01",
-            stats={"test": True},
-        )
-
-        # Now should be generated
-        assert service.was_wrapped_generated(123, "2026-01") is True
-
-    def test_get_cached_wrapped(self, repo_db_path):
-        """Test retrieving cached wrapped stats."""
-        repo = WrappedRepository(repo_db_path)
-        service = WrappedService(
-            wrapped_repo=repo,
-            player_repo=MagicMock(),
-            match_repo=MagicMock(),
-            bet_repo=MagicMock(),
-        )
-
-        # No cache yet
-        assert service.get_cached_wrapped(123, "2026-01") is None
-
-        # Save with stats
-        service.mark_wrapped_generated(
-            guild_id=123,
-            year_month="2026-01",
-            stats={"total_matches": 50, "awards": []},
-        )
-
-        # Get cached
-        cached = service.get_cached_wrapped(123, "2026-01")
-        assert cached is not None
-        assert cached["total_matches"] == 50
-
-    def test_can_generate_wrapped_month_not_complete(self, repo_db_path):
-        """Test that wrapped cannot be generated for incomplete months."""
-        repo = WrappedRepository(repo_db_path)
-        service = WrappedService(
-            wrapped_repo=repo,
-            player_repo=MagicMock(),
-            match_repo=MagicMock(),
-            bet_repo=MagicMock(),
-        )
-
-        # Try to generate for current month (should fail)
-        now = datetime.now()
-        current_month = now.strftime("%Y-%m")
-        can_gen, reason = service.can_generate_wrapped(123, current_month)
-        assert can_gen is False
-        assert "not yet complete" in reason
-
-        # Try to generate for a future month (should fail)
-        can_gen, reason = service.can_generate_wrapped(123, "2030-01")
-        assert can_gen is False
-        assert "not yet complete" in reason
-
-    def test_can_generate_wrapped_already_generated(self, repo_db_path):
-        """Test that wrapped cannot be regenerated for same month."""
-        repo = WrappedRepository(repo_db_path)
-        service = WrappedService(
-            wrapped_repo=repo,
-            player_repo=MagicMock(),
-            match_repo=MagicMock(),
-            bet_repo=MagicMock(),
-        )
-
-        # Mark 2026-01 as generated
-        service.mark_wrapped_generated(
-            guild_id=123,
-            year_month="2026-01",
-            stats={"test": True},
-        )
-
-        # Try to generate again (should fail)
-        can_gen, reason = service.can_generate_wrapped(123, "2026-01")
-        assert can_gen is False
-        assert "already generated" in reason
-
-    def test_can_generate_wrapped_cooldown(self, repo_db_path):
-        """Test that wrapped requires 25 days between generations."""
-        repo = WrappedRepository(repo_db_path)
-        service = WrappedService(
-            wrapped_repo=repo,
-            player_repo=MagicMock(),
-            match_repo=MagicMock(),
-            bet_repo=MagicMock(),
-        )
-
-        # Mark 2025-12 as generated recently
-        service.mark_wrapped_generated(
-            guild_id=123,
-            year_month="2025-12",
-            stats={"test": True},
-        )
-
-        # Try to generate 2026-01 immediately (should fail due to cooldown)
-        can_gen, reason = service.can_generate_wrapped(123, "2026-01")
-        assert can_gen is False
-        assert "days since last" in reason
-
-    def test_can_generate_wrapped_success(self, repo_db_path):
-        """Test that wrapped can be generated for completed month with no cooldown."""
-        repo = WrappedRepository(repo_db_path)
-        service = WrappedService(
-            wrapped_repo=repo,
-            player_repo=MagicMock(),
-            match_repo=MagicMock(),
-            bet_repo=MagicMock(),
-        )
-
-        # No previous generation, completed month - should succeed
-        can_gen, reason = service.can_generate_wrapped(123, "2026-01")
-        assert can_gen is True
-        assert reason == "OK"
 
     def test_generate_awards_empty_data(self, repo_db_path):
         """Test award generation with no data."""
@@ -406,7 +195,7 @@ class TestWrappedServiceIntegration:
         )
 
         # Should return None with no data
-        result = service.get_server_wrapped(0, "2026-01")
+        result = service.get_server_wrapped(0, 2026)
         assert result is None
 
     def test_get_player_wrapped_not_registered(self, repo_db_path):
@@ -428,5 +217,5 @@ class TestWrappedServiceIntegration:
         )
 
         # Should return None for non-existent player
-        result = service.get_player_wrapped(999999, "2026-01")
+        result = service.get_player_wrapped(999999, 2026)
         assert result is None
