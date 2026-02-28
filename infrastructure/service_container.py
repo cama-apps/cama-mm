@@ -351,6 +351,8 @@ class ServiceContainer:
             match_repo=c["match_repo"],
             bet_repo=c["bet_repo"],
             gambling_stats_service=c["gambling_stats_service"],
+            pairings_repo=c["pairings_repo"],
+            package_deal_service=c["package_deal_service"],
         )
 
     # ------------------------------------------------------------------

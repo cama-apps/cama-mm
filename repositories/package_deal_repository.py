@@ -146,6 +146,48 @@ class PackageDealRepository(BaseRepository, IPackageDealRepository):
             for row in rows
         ]
 
+    def get_deals_involving_player(
+        self,
+        guild_id: int | None,
+        discord_id: int,
+    ) -> list[PackageDeal]:
+        """
+        Get all active deals where player is buyer OR partner.
+
+        Used for wrapped to show all deals involving a player.
+        """
+        normalized_guild = self.normalize_guild_id(guild_id)
+
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT id, guild_id, buyer_discord_id, partner_discord_id,
+                       games_remaining, cost_paid, created_at, updated_at
+                FROM package_deals
+                WHERE guild_id = ?
+                  AND (buyer_discord_id = ? OR partner_discord_id = ?)
+                  AND games_remaining > 0
+                ORDER BY created_at DESC
+                """,
+                (normalized_guild, discord_id, discord_id),
+            )
+            rows = cursor.fetchall()
+
+        return [
+            PackageDeal(
+                id=row["id"],
+                guild_id=row["guild_id"],
+                buyer_discord_id=row["buyer_discord_id"],
+                partner_discord_id=row["partner_discord_id"],
+                games_remaining=row["games_remaining"],
+                cost_paid=row["cost_paid"],
+                created_at=row["created_at"],
+                updated_at=row["updated_at"],
+            )
+            for row in rows
+        ]
+
     def get_user_deals(
         self,
         guild_id: int | None,

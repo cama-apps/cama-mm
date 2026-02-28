@@ -1,10 +1,8 @@
 """
-Repository for Cama Wrapped monthly summary data access.
+Repository for Cama Wrapped yearly summary data access.
 """
 
-import json
 import logging
-import time
 from typing import Any
 
 from repositories.base_repository import BaseRepository
@@ -17,111 +15,6 @@ class WrappedRepository(BaseRepository, IWrappedRepository):
     """
     Data access layer for wrapped generation tracking and stats queries.
     """
-
-    def get_wrapped(self, guild_id: int, year_month: str) -> dict | None:
-        """
-        Get existing wrapped generation record for a guild/month.
-
-        Args:
-            guild_id: Discord guild ID
-            year_month: Month in "YYYY-MM" format
-
-        Returns:
-            Wrapped record dict or None if not generated
-        """
-        guild_id = self.normalize_guild_id(guild_id)
-        with self.cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT id, guild_id, year_month, channel_id, message_id,
-                       generated_at, generated_by, generation_type, stats_json
-                FROM wrapped_generation
-                WHERE guild_id = ? AND year_month = ?
-                """,
-                (guild_id, year_month),
-            )
-            row = cursor.fetchone()
-            if row:
-                return dict(row)
-            return None
-
-    def get_last_generation(self, guild_id: int) -> dict | None:
-        """
-        Get the most recent wrapped generation for a guild.
-
-        Returns:
-            Most recent wrapped record dict or None
-        """
-        guild_id = self.normalize_guild_id(guild_id)
-        with self.cursor() as cursor:
-            cursor.execute(
-                """
-                SELECT id, guild_id, year_month, generated_at, generation_type
-                FROM wrapped_generation
-                WHERE guild_id = ?
-                ORDER BY generated_at DESC
-                LIMIT 1
-                """,
-                (guild_id,),
-            )
-            row = cursor.fetchone()
-            if row:
-                return dict(row)
-            return None
-
-    def save_wrapped(
-        self,
-        guild_id: int,
-        year_month: str,
-        stats: dict,
-        channel_id: int | None = None,
-        message_id: int | None = None,
-        generated_by: int | None = None,
-        generation_type: str = "auto",
-    ) -> int:
-        """
-        Save wrapped generation record.
-
-        Args:
-            guild_id: Discord guild ID
-            year_month: Month in "YYYY-MM" format
-            stats: Stats dictionary to cache
-            channel_id: Channel where posted
-            message_id: Message ID of posted wrapped
-            generated_by: Discord ID of user who triggered (None for auto)
-            generation_type: 'auto' or 'manual'
-
-        Returns:
-            ID of the saved record
-        """
-        guild_id = self.normalize_guild_id(guild_id)
-        with self.cursor() as cursor:
-            cursor.execute(
-                """
-                INSERT INTO wrapped_generation
-                    (guild_id, year_month, channel_id, message_id, generated_at,
-                     generated_by, generation_type, stats_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(guild_id, year_month) DO UPDATE SET
-                    channel_id = excluded.channel_id,
-                    message_id = excluded.message_id,
-                    generated_at = excluded.generated_at,
-                    generated_by = excluded.generated_by,
-                    generation_type = excluded.generation_type,
-                    stats_json = excluded.stats_json
-                """,
-                (
-                    guild_id,
-                    year_month,
-                    channel_id,
-                    message_id,
-                    int(time.time()),
-                    generated_by,
-                    generation_type,
-                    json.dumps(stats),
-                ),
-            )
-            return cursor.lastrowid or 0
 
     def get_month_match_stats(
         self, guild_id: int, start_ts: int, end_ts: int
