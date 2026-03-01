@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from PIL import Image
+from tests.conftest import TEST_GUILD_ID
 
 from services.wrapped_service import (
     PersonalRecord,
@@ -425,9 +426,6 @@ class TestSlideGrouping:
 # ---------------------------------------------------------------------------
 # Repository Integration Test
 # ---------------------------------------------------------------------------
-
-TEST_GUILD_ID = 12345
-
 
 class TestGetPlayerYearMatchesRepo:
     """Integration test exercising the actual SQL query."""

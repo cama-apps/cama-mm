@@ -1014,6 +1014,9 @@ class ILoanRepository(ABC):
     def deduct_from_nonprofit_fund(self, guild_id: int | None, amount: int) -> int: ...
 
     @abstractmethod
+    def get_and_deduct_nonprofit_fund_atomic(self, guild_id: int | None, min_amount: int = 0) -> int: ...
+
+    @abstractmethod
     def execute_loan_atomic(
         self,
         discord_id: int,

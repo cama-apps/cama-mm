@@ -9,8 +9,7 @@ from services.disburse_service import DisburseService
 from repositories.loan_repository import LoanRepository
 from repositories.disburse_repository import DisburseRepository
 from repositories.player_repository import PlayerRepository
-
-TEST_GUILD_ID = 12345
+from tests.conftest import TEST_GUILD_ID
 
 
 @pytest.fixture

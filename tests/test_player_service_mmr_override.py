@@ -3,8 +3,7 @@
 import pytest
 
 from services.player_service import PlayerService
-
-TEST_GUILD_ID = 12345
+from tests.conftest import TEST_GUILD_ID
 
 
 class FakeRepo:

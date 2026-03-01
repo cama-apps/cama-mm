@@ -122,9 +122,14 @@ class DisburseService:
             raise ValueError(f"Cannot create proposal: {reason}")
 
         proposal_id = int(time.time())
-        fund_amount = self.loan_repo.get_nonprofit_fund(guild_id)
         player_count = self.player_repo.get_registered_player_count(guild_id)
         quorum_required = max(1, math.ceil(player_count * self.quorum_percentage))
+
+        # Atomically read and deduct the entire nonprofit fund to prevent race
+        # conditions where fund_amount could change between read and deduct.
+        fund_amount = self.loan_repo.get_and_deduct_nonprofit_fund_atomic(
+            guild_id, min_amount=self.min_fund
+        )
 
         self.disburse_repo.create_proposal(
             guild_id=guild_id,
@@ -132,9 +137,6 @@ class DisburseService:
             fund_amount=fund_amount,
             quorum_required=quorum_required,
         )
-
-        # Reserve funds by deducting from nonprofit
-        self.loan_repo.deduct_from_nonprofit_fund(guild_id, fund_amount)
 
         return DisburseProposal(
             guild_id=guild_id if guild_id is not None else 0,

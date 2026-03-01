@@ -8,8 +8,7 @@ from domain.models.draft import DraftPhase, DraftState, SNAKE_DRAFT_ORDER
 from domain.services.draft_service import DraftService
 from repositories.player_repository import PlayerRepository
 from services.draft_state_manager import DraftStateManager
-
-TEST_GUILD_ID = 12345
+from tests.conftest import TEST_GUILD_ID
 
 
 class TestDraftState:

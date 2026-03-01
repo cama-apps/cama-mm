@@ -32,6 +32,7 @@ from utils.interaction_safety import safe_defer, update_lobby_message_closed
 from utils.neon_helpers import get_neon_service, send_neon_result
 from utils.pin_helpers import safe_unpin_all_bot_messages
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
+from utils.guild import normalize_guild_id
 from utils.streaming import get_streaming_dota_player_ids
 
 logger = logging.getLogger("cama_bot.commands.match")
@@ -847,7 +848,8 @@ class MatchCommands(commands.Cog):
                 lobby_channel = self.bot.get_channel(lobby_channel_id)
                 if not lobby_channel:
                     lobby_channel = await self.bot.fetch_channel(lobby_channel_id)
-            except Exception:
+            except Exception as e:
+                logger.debug("Failed to fetch lobby channel, falling back to interaction channel: %s", e)
                 lobby_channel = interaction.channel
         else:
             lobby_channel = interaction.channel
@@ -1666,17 +1668,18 @@ class MatchCommands(commands.Cog):
     def _register_betting_tasks(self, guild_id: int | None, tasks) -> None:
         """Store reminder tasks for the guild and cancel any existing tasks first."""
         self._cancel_betting_tasks(guild_id)
-        normalized = self.match_service._normalize_guild_id(guild_id)  # type: ignore[attr-defined]
+        normalized = normalize_guild_id(guild_id)
         self._betting_tasks_by_guild[normalized] = tasks
 
     def _cancel_betting_tasks(self, guild_id: int | None) -> None:
         """Cancel any scheduled betting reminder tasks for the guild."""
-        normalized = self.match_service._normalize_guild_id(guild_id)  # type: ignore[attr-defined]
+        normalized = normalize_guild_id(guild_id)
         tasks = self._betting_tasks_by_guild.pop(normalized, [])
         for task in tasks:
             try:
                 task.cancel()
-            except Exception:
+            except Exception as e:
+                logger.debug("Failed to cancel betting task: %s", e)
                 continue
 
 

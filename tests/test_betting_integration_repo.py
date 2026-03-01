@@ -8,8 +8,7 @@ from repositories.match_repository import MatchRepository
 from repositories.player_repository import PlayerRepository
 from services.betting_service import BettingService
 from services.match_service import MatchService
-
-TEST_GUILD_ID = 12345
+from tests.conftest import TEST_GUILD_ID
 
 
 def _seed_players(repo: PlayerRepository, ids, guild_id: int = TEST_GUILD_ID):

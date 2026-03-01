@@ -4,8 +4,7 @@ from domain.models.team import Team
 from repositories.match_repository import MatchRepository
 from repositories.player_repository import PlayerRepository
 from services.match_service import MatchService
-
-TEST_GUILD_ID = 12345
+from tests.conftest import TEST_GUILD_ID
 
 
 def _seed_players(repo: PlayerRepository, count: int = 10):

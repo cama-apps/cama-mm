@@ -688,8 +688,8 @@ class PredictionCommands(commands.Cog):
                                     try:
                                         await asyncio.sleep(d)
                                         await m.delete()
-                                    except Exception:
-                                        pass
+                                    except Exception as e:
+                                        logger.debug("Failed to delete neon message: %s", e)
                                 asyncio.create_task(_del_neon(msg, 60))
 
                         # Check for unanimous wrong (90%+ consensus loses)
@@ -714,8 +714,8 @@ class PredictionCommands(commands.Cog):
                                     uw_msg = await interaction.channel.send(uw_result.text_block)
                                 if uw_msg:
                                     asyncio.create_task(_del_neon(uw_msg, 120))
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Failed to send prediction settlement neon result: %s", e)
 
                 # Post to thread, lock, and archive
                 if pred and pred.get("thread_id"):

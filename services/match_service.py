@@ -21,6 +21,7 @@ from services.betting_service import BettingService
 from services.match_state_service import MatchStateService
 from services.match_voting_service import MatchVotingService
 from shuffler import BalancedShuffler
+from utils.guild import normalize_guild_id
 
 logger = logging.getLogger("cama_bot.services.match")
 
@@ -94,9 +95,6 @@ class MatchService:
 
     # ==================== State Management (delegated to MatchStateService) ====================
 
-    def _normalize_guild_id(self, guild_id: int | None) -> int:
-        """Normalize guild_id (delegates to state_service)."""
-        return self.state_service._normalize_guild_id(guild_id)
 
     def get_last_shuffle(self, guild_id: int | None = None, pending_match_id: int | None = None) -> dict | None:
         """Get the pending shuffle state (delegates to state_service)."""
@@ -571,7 +569,7 @@ class MatchService:
 
         Thread-safe: prevents concurrent finalization for the same match.
         """
-        normalized_gid = self._normalize_guild_id(guild_id)
+        normalized_gid = normalize_guild_id(guild_id)
 
         # Get state first to determine the actual pending_match_id
         last_shuffle = self.get_last_shuffle(guild_id, pending_match_id)
@@ -1896,7 +1894,7 @@ class MatchService:
         boundary_utc = boundary_la.astimezone(timezone.utc)
         boundary_iso = boundary_utc.strftime("%Y-%m-%d %H:%M:%S")
 
-        normalized_gid = self._normalize_guild_id(guild_id)
+        normalized_gid = normalize_guild_id(guild_id)
         return self.match_repo.get_match_count_since(normalized_gid, boundary_iso) == 0
 
     def get_recent_match_predictions(self, guild_id: int | None, limit: int = 200) -> list[dict]:

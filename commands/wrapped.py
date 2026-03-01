@@ -492,8 +492,8 @@ class WrappedCog(commands.Cog):
                             member = await interaction.guild.fetch_member(award.discord_id)
                         if member:
                             award.discord_username = member.display_name
-                    except Exception:
-                        pass  # keep DB username as fallback
+                    except Exception as e:
+                        logger.debug("Failed to fetch member display name for award: %s", e)
 
             # Collect all referenced discord IDs for avatar pre-fetching
             avatar_ids: set[int] = set()

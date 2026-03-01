@@ -9,8 +9,7 @@ import pytest
 from repositories.player_repository import PlayerRepository
 from repositories.prediction_repository import PredictionRepository
 from services.prediction_service import PredictionService
-
-TEST_GUILD_ID = 12345
+from tests.conftest import TEST_GUILD_ID
 
 
 @pytest.fixture

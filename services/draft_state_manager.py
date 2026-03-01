@@ -7,6 +7,7 @@ Handles in-memory state for active drafts, separated from business logic.
 import logging
 
 from domain.models.draft import DraftPhase, DraftState
+from utils.guild import normalize_guild_id
 
 logger = logging.getLogger("cama_bot.services.draft_state_manager")
 
@@ -26,10 +27,6 @@ class DraftStateManager:
     def __init__(self):
         self._states: dict[int, DraftState] = {}
 
-    def _normalize_guild_id(self, guild_id: int | None) -> int:
-        """Normalize guild ID (0 for DMs/None)."""
-        return guild_id if guild_id is not None else 0
-
     def get_state(self, guild_id: int | None = None) -> DraftState | None:
         """
         Get the current draft state for a guild.
@@ -40,7 +37,7 @@ class DraftStateManager:
         Returns:
             DraftState or None if no active draft
         """
-        return self._states.get(self._normalize_guild_id(guild_id))
+        return self._states.get(normalize_guild_id(guild_id))
 
     def create_draft(self, guild_id: int | None) -> DraftState:
         """
@@ -55,7 +52,7 @@ class DraftStateManager:
         Raises:
             ValueError: If a draft already exists for this guild
         """
-        normalized = self._normalize_guild_id(guild_id)
+        normalized = normalize_guild_id(guild_id)
         if normalized in self._states:
             raise ValueError("A draft is already in progress for this server.")
 
@@ -72,7 +69,7 @@ class DraftStateManager:
             guild_id: Guild ID (or None for DMs)
             state: Draft state to store
         """
-        self._states[self._normalize_guild_id(guild_id)] = state
+        self._states[normalize_guild_id(guild_id)] = state
 
     def clear_state(self, guild_id: int | None) -> DraftState | None:
         """
@@ -84,7 +81,7 @@ class DraftStateManager:
         Returns:
             The cleared state, or None if no state existed
         """
-        normalized = self._normalize_guild_id(guild_id)
+        normalized = normalize_guild_id(guild_id)
         state = self._states.pop(normalized, None)
         if state:
             logger.info(f"Cleared draft state for guild {normalized}")

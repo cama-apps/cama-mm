@@ -9,8 +9,7 @@ from database import Database
 from repositories.player_repository import PlayerRepository
 from repositories.recalibration_repository import RecalibrationRepository
 from services.recalibration_service import RecalibrationService
-
-TEST_GUILD_ID = 12345
+from tests.conftest import TEST_GUILD_ID
 
 
 @pytest.fixture

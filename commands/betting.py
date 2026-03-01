@@ -483,8 +483,8 @@ class BettingCommands(commands.Cog):
                 if result is not None:
                     await send_neon_result(interaction, result)
                     return
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Failed to send neon result: %s", e)
 
     async def _update_shuffle_message_wagers(
         self, guild_id: int | None, pending_match_id: int | None = None
@@ -1758,8 +1758,8 @@ class BettingCommands(commands.Cog):
                         try:
                             neon_result = await neon.on_cooldown_hit(user_id, guild_id, "gamba")
                             await send_neon_result(interaction, neon_result)
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.debug("Failed to send gamba cooldown neon result: %s", e)
                     return
                 # Celebration spin granted — bypass cooldown, continue with spin
         else:
@@ -1860,8 +1860,8 @@ class BettingCommands(commands.Cog):
             )
             try:
                 await interaction.channel.send(embed=announce_embed)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Failed to send golden wheel announcement: %s", e)
 
         # Pre-determine the result (use bad gamba wheel for negative balance or penalty)
         if is_golden:
@@ -2294,8 +2294,8 @@ class BettingCommands(commands.Cog):
                     )
                     heist_total += steal_amt
                     heist_count += 1
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning("Failed to execute heist steal from victim %s: %s", victim.discord_id, e)
             if heist_count == 0:
                 # Fallback: no eligible victims
                 heist_total = 20
@@ -2324,8 +2324,8 @@ class BettingCommands(commands.Cog):
                     )
                     market_crash_total += tax_amt
                     market_crash_count += 1
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning("Failed to execute market crash tax on victim %s: %s", victim.discord_id, e)
             if market_crash_count == 0:
                 # Fallback: spinner is only top-3 player
                 market_crash_total = 25
@@ -3131,8 +3131,8 @@ class BettingCommands(commands.Cog):
                     try:
                         neon_result = await neon.on_cooldown_hit(user_id, guild_id, "bankruptcy")
                         await send_neon_result(interaction, neon_result)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("Failed to send bankruptcy cooldown neon result: %s", e)
                 return
 
         # Declare bankruptcy
@@ -3210,8 +3210,8 @@ class BettingCommands(commands.Cog):
                 return await asyncio.to_thread(
                     gambling_stats.get_player_bankruptcy_count, discord_id, guild_id
                 )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Failed to get bankruptcy filing number: %s", e)
         return 1
 
     @app_commands.command(name="loan", description="Borrow jopacoin (with a fee)")
@@ -3286,8 +3286,8 @@ class BettingCommands(commands.Cog):
                     try:
                         neon_result = await neon.on_cooldown_hit(user_id, guild_id, "loan")
                         await send_neon_result(interaction, neon_result)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("Failed to send loan cooldown neon result: %s", e)
                 return
             elif check.error_code == _ec.LOAN_AMOUNT_EXCEEDED:
                 await interaction.followup.send(check.error)
@@ -4126,8 +4126,8 @@ class BettingCommands(commands.Cog):
                     await countdown_msg.edit(embed=countdown_embed, view=None)
                 elif interaction.channel:
                     countdown_msg = await interaction.channel.send(embed=countdown_embed)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Failed to update rebellion countdown message: %s", e)
             await asyncio.sleep(1.0)
 
         # BATTLE ROLL
@@ -4179,12 +4179,13 @@ class BettingCommands(commands.Cog):
                 await countdown_msg.edit(embed=result_embed, view=None)
             elif interaction.channel:
                 await interaction.channel.send(embed=result_embed)
-        except Exception:
+        except Exception as e:
+            logger.debug("Failed to edit countdown with result, falling back to new message: %s", e)
             if interaction.channel:
                 try:
                     await interaction.channel.send(embed=result_embed)
-                except Exception:
-                    pass
+                except Exception as e2:
+                    logger.warning("Failed to send rebellion result embed: %s", e2)
 
         # Pin shame embed if defenders won
         if outcome == "defenders_win" and interaction.channel:
@@ -4200,8 +4201,8 @@ class BettingCommands(commands.Cog):
             try:
                 shame_msg = await interaction.channel.send(embed=shame_embed)
                 await shame_msg.pin()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Failed to send or pin shame embed: %s", e)
 
     def _build_attacker_win_embed(
         self,

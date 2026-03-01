@@ -10,8 +10,7 @@ import pytest
 from services.match_discovery_service import (
     MatchDiscoveryService,
 )
-
-TEST_GUILD_ID = 12345
+from tests.conftest import TEST_GUILD_ID
 
 
 class TestMatchDiscoveryService:

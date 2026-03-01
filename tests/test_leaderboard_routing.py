@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from database import Database
 from repositories.player_repository import PlayerRepository
+from tests.conftest import TEST_GUILD_ID
 
 
 @pytest.fixture
@@ -45,9 +46,6 @@ def mock_discord_helpers():
             mock_defer.return_value = True
             mock_followup.return_value = MagicMock()
             yield {"defer": mock_defer, "followup": mock_followup}
-
-
-TEST_GUILD_ID = 12345
 
 
 def create_mock_members(player_ids):

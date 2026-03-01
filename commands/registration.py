@@ -82,11 +82,11 @@ class RegistrationCommands(commands.Cog):
                             try:
                                 await asyncio.sleep(d)
                                 await m.delete()
-                            except Exception:
-                                pass
+                            except Exception as e:
+                                logger.debug("Failed to delete neon message: %s", e)
                         asyncio.create_task(_del_neon(msg, 60))
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Failed to send registration neon result: %s", e)
 
         try:
             await _finalize_register()

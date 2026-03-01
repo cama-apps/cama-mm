@@ -250,8 +250,8 @@ class PlayerContext:
                 bankruptcy_count = gambling_stats_service.bet_repo.get_player_bankruptcy_count(
                     discord_id, guild_id
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Failed to get gambling stats for player %s: %s", discord_id, e)
 
         # Get lowest balance ever from player record
         lowest_balance = getattr(player, "lowest_balance_ever", None)

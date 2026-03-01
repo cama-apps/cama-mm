@@ -12,6 +12,7 @@ from repositories.player_repository import PlayerRepository
 from repositories.bankruptcy_repository import BankruptcyRepository
 from services.bankruptcy_service import BankruptcyService
 from services.betting_service import BettingService
+from tests.conftest import TEST_GUILD_ID
 
 
 @pytest.fixture
@@ -41,9 +42,6 @@ def bankruptcy_service(db_and_repos):
         penalty_games=5,
         penalty_rate=0.5,
     )
-
-
-TEST_GUILD_ID = 12345
 
 
 def create_test_player(player_repo, discord_id, balance=3):

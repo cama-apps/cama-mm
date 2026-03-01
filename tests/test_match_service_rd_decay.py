@@ -4,8 +4,7 @@ import math
 from datetime import datetime, timedelta, timezone
 
 from services.match_service import MatchService
-
-TEST_GUILD_ID = 12345
+from tests.conftest import TEST_GUILD_ID
 
 
 class FakePlayerRepo:

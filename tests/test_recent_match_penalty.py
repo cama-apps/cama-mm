@@ -6,8 +6,7 @@ from config import SHUFFLER_SETTINGS
 from domain.models.player import Player
 from repositories.match_repository import MatchRepository
 from shuffler import BalancedShuffler
-
-TEST_GUILD_ID = 12345
+from tests.conftest import TEST_GUILD_ID
 
 
 @pytest.fixture

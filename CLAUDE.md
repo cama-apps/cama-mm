@@ -169,3 +169,18 @@ See `config.py` for the full list (50+ options). See `README.md` for high level 
 2. Implement in `repositories/<name>_repository.py`
 3. Extend `BaseRepository` for connection management
 4. Initialize in `bot.py::_init_services()`
+
+## Parallel Agent Fleets
+
+When a task involves 2+ independent file changes, spawn parallel agents in a single message rather than working sequentially. Use `Skill(superpowers:dispatching-parallel-agents)` to coordinate.
+
+**Rules:**
+- Issue all independent tool calls in one message block -- never serialize work that can run concurrently
+- Each agent should own a distinct set of files to avoid merge conflicts
+- When multiple workstreams may touch the same files, use worktree isolation (`EnterWorktree`) to prevent conflicts
+- Recombine and verify after all agents complete
+
+**Examples of parallelizable work:**
+- Adding a new command + its tests + updating documentation
+- Modifying independent services or repositories simultaneously
+- Running exploration/search agents while planning implementation

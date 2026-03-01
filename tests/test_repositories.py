@@ -3,9 +3,7 @@ Tests for the repository layer.
 """
 
 from config import NEW_PLAYER_EXCLUSION_BOOST
-
-# Test guild ID used for all repository tests
-TEST_GUILD_ID = 12345
+from tests.conftest import TEST_GUILD_ID
 
 
 def _expected_after_exclusions(exclusions: int) -> int:

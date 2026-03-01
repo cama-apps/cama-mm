@@ -14,8 +14,7 @@ from services.gambling_stats_service import (
     GamblingStatsService,
 )
 from services.match_service import MatchService
-
-TEST_GUILD_ID = 12345
+from tests.conftest import TEST_GUILD_ID
 
 
 @pytest.fixture

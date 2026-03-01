@@ -16,8 +16,7 @@ from database import Database
 from domain.models.player import Player
 from services.lobby_manager_service import LobbyManagerService as LobbyManager
 from services.lobby_service import LobbyService
-
-TEST_GUILD_ID = 12345
+from tests.conftest import TEST_GUILD_ID
 
 
 class FakeGuild:

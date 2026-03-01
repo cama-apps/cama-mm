@@ -338,8 +338,8 @@ class ShopCommands(commands.Cog):
                     self.gambling_stats_service.get_player_bankruptcy_count,
                     discord_id, guild_id,
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Failed to fetch gambling stats for shop profile: %s", e)
 
         return stats
 
@@ -706,11 +706,11 @@ class ShopCommands(commands.Cog):
                                     try:
                                         await asyncio.sleep(d)
                                         await m.delete()
-                                    except Exception:
-                                        pass
+                                    except Exception as e:
+                                        logger.debug("Failed to delete neon message: %s", e)
                                 asyncio.create_task(_del(msg, 60))
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Failed to send neon cooldown result: %s", e)
                 return
 
         # Check balance
@@ -872,11 +872,11 @@ class ShopCommands(commands.Cog):
                             try:
                                 await asyncio.sleep(d)
                                 await m.delete()
-                            except Exception:
-                                pass
+                            except Exception as e:
+                                logger.debug("Failed to delete neon message: %s", e)
                         asyncio.create_task(_del_neon(msg, 60))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Failed to send neon shop purchase result: %s", e)
 
     async def _handle_soft_avoid(
         self,
@@ -983,11 +983,11 @@ class ShopCommands(commands.Cog):
                             try:
                                 await asyncio.sleep(d)
                                 await m.delete()
-                            except Exception:
-                                pass
+                            except Exception as e:
+                                logger.debug("Failed to delete neon message: %s", e)
                         asyncio.create_task(_del_neon(msg, 60))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Failed to send neon soft avoid result: %s", e)
 
     async def _handle_package_deal(
         self,

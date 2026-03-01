@@ -87,11 +87,13 @@ class AdminCommands(commands.Cog):
         # Mark interaction as being processed
         _processed_interactions.add(interaction_key)
 
-        # Clean up old entries (keep only last 1000 to prevent memory leak)
+        # Clean up old entries (keep only newest 500 to prevent memory leak)
         if len(_processed_interactions) > 1000:
-            # Remove oldest entries (simple approach: clear half)
-            _processed_interactions.clear()
-            # Note: We clear entirely to avoid complexity, interactions expire after 15 minutes anyway
+            # Interaction keys are "{id}_{user_id}" where id increases over time.
+            # Sort lexicographically and keep the newest 500.
+            sorted_keys = sorted(_processed_interactions)
+            keep = set(sorted_keys[-500:])
+            _processed_interactions.intersection_update(keep)
 
         logger.info(
             f"addfake command invoked by user {interaction.user.id} ({interaction.user}) "
@@ -383,8 +385,8 @@ class AdminCommands(commands.Cog):
                 await user.send(
                     f"Your account was reset by an administrator ({interaction.user.mention}). You can register again with `/register`."
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Failed to DM user about account reset: %s", e)
         else:
             await safe_followup(
                 interaction,

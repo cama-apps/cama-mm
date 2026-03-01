@@ -9,7 +9,7 @@ import os
 import sqlite3
 import uuid
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 from config import NEW_PLAYER_EXCLUSION_BOOST
 from infrastructure.schema_manager import SchemaManager
@@ -251,7 +251,7 @@ class Database:
                 return (row[0], row[1], row[2])
             return None
 
-    def get_player(self, discord_id: int) -> Optional["Player"]:
+    def get_player(self, discord_id: int) -> "Player | None":
         """
         Get player data by Discord ID.
 

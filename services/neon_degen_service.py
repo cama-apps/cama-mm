@@ -204,8 +204,8 @@ class NeonDegenService:
                 player = self.player_repo.get_by_id(discord_id, guild_id)
                 if player:
                     return player.name
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Failed to get player name for %s: %s", discord_id, e)
         return f"Client-{discord_id % 10000}"
 
     def _get_bankruptcy_count(self, discord_id: int, guild_id: int | None) -> int:
@@ -213,8 +213,8 @@ class NeonDegenService:
         if self.bet_repo:
             try:
                 return self.bet_repo.get_player_bankruptcy_count(discord_id, guild_id)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Failed to get bankruptcy count for %s: %s", discord_id, e)
         return 0
 
     def _get_degen_score(self, discord_id: int, guild_id: int | None) -> int | None:
@@ -223,8 +223,8 @@ class NeonDegenService:
             try:
                 score = self.gambling_stats_service.calculate_degen_score(discord_id, guild_id)
                 return score.total if score else None
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Failed to get degen score for %s: %s", discord_id, e)
         return None
 
     async def _get_llm_terminal_commentary(
@@ -355,8 +355,8 @@ class NeonDegenService:
                     games = (player.wins or 0) + (player.losses or 0)
                     if games > 0:
                         ctx["win_rate"] = f"{(player.wins or 0) / games * 100:.0f}%"
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Failed to build player context for %s: %s", discord_id, e)
 
         ctx["bankruptcy_count"] = self._get_bankruptcy_count(discord_id, guild_id)
         degen = self._get_degen_score(discord_id, guild_id)

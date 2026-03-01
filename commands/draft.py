@@ -354,8 +354,8 @@ class DraftCommands(commands.Cog):
             if channel:
                 msg = await channel.fetch_message(state.captain_ping_message_id)
                 await msg.delete()
-        except Exception:
-            pass  # Message already deleted or not found
+        except Exception as e:
+            logger.debug("Failed to delete captain ping message: %s", e)
         finally:
             state.captain_ping_message_id = None
 
@@ -773,8 +773,8 @@ class DraftCommands(commands.Cog):
                                 for pid in recent_ids
                                 if pid in player_map
                             }
-                    except Exception:
-                        pass  # Non-critical, proceed without
+                    except Exception as e:
+                        logger.debug("Failed to fetch recent match participants: %s", e)
 
                 # Pre-prune candidates if too many
                 # Beam search algorithm handles up to 24 candidates efficiently
@@ -961,8 +961,8 @@ class DraftCommands(commands.Cog):
                 f"<@{captain_pair.captain1_id}> <@{captain_pair.captain2_id}> Draft starting!"
             )
             state.captain_ping_message_id = ping_msg.id
-        except Exception:
-            pass  # Don't fail draft if ping fails
+        except Exception as e:
+            logger.debug("Failed to send captain ping message: %s", e)
 
         # Neon Degen Terminal hook (draft coinflip)
         try:
@@ -971,8 +971,8 @@ class DraftCommands(commands.Cog):
                 loser_id = captain_pair.captain2_id if coinflip_winner_id == captain_pair.captain1_id else captain_pair.captain1_id
                 neon_result = await neon.on_draft_coinflip(guild_id, coinflip_winner_id, loser_id)
                 await send_neon_result(interaction, neon_result)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Failed to send draft coinflip neon result: %s", e)
 
         return True
 

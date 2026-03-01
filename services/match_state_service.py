@@ -15,6 +15,7 @@ from contextlib import contextmanager
 from typing import Any, Generator
 
 from repositories.interfaces import IMatchRepository
+from utils.guild import normalize_guild_id
 
 
 class MatchStateService:
@@ -40,10 +41,6 @@ class MatchStateService:
         # Nested dict: guild_id -> pending_match_id -> state
         self._last_shuffle_by_guild: dict[int, dict[int, dict]] = {}
         self._shuffle_state_lock = threading.RLock()
-
-    def _normalize_guild_id(self, guild_id: int | None) -> int:
-        """Normalize guild_id to handle None case."""
-        return guild_id if guild_id is not None else 0
 
     @contextmanager
     def state_lock(self) -> Generator[None, None, None]:
@@ -81,7 +78,7 @@ class MatchStateService:
             Pending match state dict or None if no pending shuffle
         """
         with self._shuffle_state_lock:
-            normalized = self._normalize_guild_id(guild_id)
+            normalized = normalize_guild_id(guild_id)
             guild_states = self._last_shuffle_by_guild.get(normalized, {})
 
             if pending_match_id is not None:
@@ -120,7 +117,7 @@ class MatchStateService:
             List of pending match state dicts
         """
         with self._shuffle_state_lock:
-            normalized = self._normalize_guild_id(guild_id)
+            normalized = normalize_guild_id(guild_id)
 
             # Load from database
             persisted = self.match_repo.get_pending_matches(guild_id)
@@ -177,7 +174,7 @@ class MatchStateService:
                 # Legacy single-match mode - use 0 as placeholder
                 pending_match_id = 0
 
-            normalized = self._normalize_guild_id(guild_id)
+            normalized = normalize_guild_id(guild_id)
             if normalized not in self._last_shuffle_by_guild:
                 self._last_shuffle_by_guild[normalized] = {}
             self._last_shuffle_by_guild[normalized][pending_match_id] = payload
@@ -288,7 +285,7 @@ class MatchStateService:
                              If None, clear ALL matches for the guild.
         """
         with self._shuffle_state_lock:
-            normalized = self._normalize_guild_id(guild_id)
+            normalized = normalize_guild_id(guild_id)
 
             if pending_match_id is not None:
                 # Clear specific match
@@ -420,7 +417,7 @@ class MatchStateService:
     def has_pending_match(self, guild_id: int | None = None) -> bool:
         """Check if there's any pending match for the guild."""
         with self._shuffle_state_lock:
-            normalized = self._normalize_guild_id(guild_id)
+            normalized = normalize_guild_id(guild_id)
 
             # Check in-memory first
             if self._last_shuffle_by_guild.get(normalized):

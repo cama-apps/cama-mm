@@ -19,8 +19,7 @@ from repositories.player_repository import PlayerRepository
 from services.lobby_service import LobbyService
 from services.match_service import MatchService
 from services.player_service import PlayerService
-
-TEST_GUILD_ID = 12345
+from tests.conftest import TEST_GUILD_ID
 
 
 class MockDiscordUser:

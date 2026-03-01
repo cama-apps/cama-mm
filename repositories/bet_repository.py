@@ -5,9 +5,12 @@ Repository for managing betting data.
 from __future__ import annotations
 
 import json
+import logging
 import math
 
 from repositories.base_repository import BaseRepository
+
+logger = logging.getLogger("cama_bot.repositories.bet")
 from repositories.interfaces import IBetRepository
 
 
@@ -230,7 +233,8 @@ class BetRepository(BaseRepository, IBetRepository):
                             if discord_id in radiant or discord_id in dire:
                                 row = r
                                 break
-                        except Exception:
+                        except Exception as e:
+                            logger.warning("Failed to parse pending match payload: %s", e)
                             continue
                     if row is None:
                         raise ValueError(

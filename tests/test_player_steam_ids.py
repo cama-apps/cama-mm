@@ -4,7 +4,7 @@ Tests for multi-Steam ID functionality.
 
 import pytest
 
-TEST_GUILD_ID = 12345
+from tests.conftest import TEST_GUILD_ID
 
 
 class TestPlayerSteamIds:

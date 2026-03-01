@@ -17,8 +17,7 @@ import pytest
 
 from config import STREAK_THRESHOLD, STREAK_MULTIPLIER_PER_GAME
 from rating_system import CamaRatingSystem
-
-TEST_GUILD_ID = 12345
+from tests.conftest import TEST_GUILD_ID
 
 
 class TestStreakMultiplierCalculation:

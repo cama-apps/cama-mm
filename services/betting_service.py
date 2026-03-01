@@ -4,7 +4,7 @@ Handles betting-related business logic.
 
 import logging
 import time
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 logger = logging.getLogger("cama_bot.services.betting")
 
@@ -37,10 +37,10 @@ class BettingService:
         self,
         bet_repo: BetRepository,
         player_repo: PlayerRepository,
-        garnishment_service: Optional["GarnishmentService"] = None,
+        garnishment_service: "GarnishmentService | None" = None,
         leverage_tiers: list[int] | None = None,
         max_debt: int | None = None,
-        bankruptcy_service: Optional["BankruptcyService"] = None,
+        bankruptcy_service: "BankruptcyService | None" = None,
     ):
         self.bet_repo = bet_repo
         self.player_repo = player_repo

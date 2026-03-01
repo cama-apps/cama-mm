@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 import pytest
 
 from services.opendota_player_service import CACHE_TTL_SECONDS, OpenDotaPlayerService
+from tests.conftest import TEST_GUILD_ID
 
 
 class TestOpenDotaPlayerService:
@@ -151,9 +152,6 @@ class TestOpenDotaPlayerService:
         assert result["title"] == "Profile: TestUser"
         assert len(result["fields"]) >= 4
         assert result["last_match_id"] == 8181518332
-
-
-TEST_GUILD_ID = 12345
 
 
 class TestPlayerRepositorySteamId:

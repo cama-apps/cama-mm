@@ -6,6 +6,7 @@ import pytest
 
 from repositories.player_repository import PlayerRepository
 from repositories.tip_repository import TipRepository
+from tests.conftest import TEST_GUILD_ID
 
 
 @pytest.fixture
@@ -18,9 +19,6 @@ def tip_repo(repo_db_path):
 def player_repo(repo_db_path):
     """Create a PlayerRepository instance."""
     return PlayerRepository(repo_db_path)
-
-
-TEST_GUILD_ID = 12345
 
 
 def register_player(player_repo, discord_id, balance=100, guild_id=TEST_GUILD_ID):

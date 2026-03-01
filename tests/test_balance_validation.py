@@ -9,15 +9,13 @@ from services.balance_validation import (
 )
 from services import error_codes
 from repositories.player_repository import PlayerRepository
+from tests.conftest import TEST_GUILD_ID
 
 
 @pytest.fixture
 def player_repo(repo_db_path):
     """Create a player repository using centralized fast fixture."""
     return PlayerRepository(repo_db_path)
-
-
-TEST_GUILD_ID = 12345
 
 
 @pytest.fixture

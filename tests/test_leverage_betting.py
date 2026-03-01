@@ -11,8 +11,7 @@ from repositories.bet_repository import BetRepository
 from repositories.player_repository import PlayerRepository
 from services.betting_service import BettingService
 from services.garnishment_service import GarnishmentService
-
-TEST_GUILD_ID = 12345
+from tests.conftest import TEST_GUILD_ID
 
 
 @pytest.fixture

@@ -13,8 +13,7 @@ from commands.herogrid import HeroGridCommands
 from repositories.match_repository import MatchRepository
 from repositories.player_repository import PlayerRepository
 from utils.drawing import draw_hero_grid
-
-TEST_GUILD_ID = 12345
+from tests.conftest import TEST_GUILD_ID
 
 
 # ---------------------------------------------------------------------------

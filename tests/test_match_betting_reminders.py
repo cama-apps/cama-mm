@@ -10,9 +10,7 @@ from commands.match import MatchCommands
 
 class _StubMatchService:
     """Minimal stub to satisfy MatchCommands reminder helpers."""
-
-    def _normalize_guild_id(self, guild_id):
-        return guild_id if guild_id is not None else 0
+    pass
 
 
 @pytest.mark.asyncio

@@ -6,8 +6,7 @@ import pytest
 
 from repositories.player_repository import PlayerRepository
 from services.player_service import PlayerService
-
-TEST_GUILD_ID = 12345
+from tests.conftest import TEST_GUILD_ID
 
 
 def _set_wins_losses(repo: PlayerRepository, discord_id: int, wins: int, losses: int, guild_id: int = TEST_GUILD_ID) -> None:

@@ -5,9 +5,12 @@ Each player may claim exactly one mana land per day (reset at 4 AM PST).
 The land is randomly selected from five options weighted by player attributes.
 """
 
+import logging
 import random
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
+
+logger = logging.getLogger("cama_bot.services.mana")
 
 if TYPE_CHECKING:
     from repositories.mana_repository import ManaRepository
@@ -122,7 +125,7 @@ class ManaService:
                     is_ash_fan=player.discord_id in ash_fan_ids,
                 )
             except ValueError:
-                pass  # Race condition — already assigned
+                logger.debug("Race condition: mana already assigned for player %s in guild %s", player.discord_id, guild_id)
 
     def assign_daily_mana(
         self, discord_id: int, guild_id: int | None, *, is_ash_fan: bool = False
@@ -325,5 +328,6 @@ class ManaService:
                 else:
                     break
             return streak
-        except Exception:
+        except Exception as e:
+            logger.debug("Failed to get win streak for %s: %s", discord_id, e)
             return 0

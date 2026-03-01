@@ -118,14 +118,14 @@ class LobbyCommands(commands.Cog):
             # Remove sword reaction
             try:
                 await message.remove_reaction("⚔️", user)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Failed to remove sword reaction: %s", e)
             # Remove frogling reaction
             try:
                 frogling_emoji = discord.PartialEmoji(name="frogling", id=FROGLING_EMOJI_ID)
                 await message.remove_reaction(frogling_emoji, user)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Failed to remove frogling reaction: %s", e)
         except discord.Forbidden:
             logger.warning("Cannot remove reaction: missing Manage Messages permission.")
         except Exception as exc:
@@ -228,16 +228,16 @@ class LobbyCommands(commands.Cog):
 
             try:
                 await thread.send(f"🚫 **{reason}**")
-            except Exception:
-                pass  # Thread might be archived already
+            except Exception as e:
+                logger.debug("Failed to send archive message to thread: %s", e)
 
             try:
                 await thread.edit(name=f"🚫 {reason}", locked=True, archived=True)
             except discord.Forbidden:
                 try:
                     await thread.edit(archived=True)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Failed to archive thread: %s", e)
         except Exception as exc:
             logger.warning(f"Failed to archive lobby thread: {exc}")
 
@@ -389,8 +389,8 @@ class LobbyCommands(commands.Cog):
                 # Add jopacoin emoji for subscribing to gamba notifications
                 jopacoin_emoji = discord.PartialEmoji(name="jopacoin", id=JOPACOIN_EMOJI_ID)
                 await channel_msg.add_reaction(jopacoin_emoji)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Failed to add lobby reactions: %s", e)
 
             # Create thread from message (static name to avoid rate limits)
             try:
@@ -516,8 +516,8 @@ class LobbyCommands(commands.Cog):
                 await player.send(
                     f"You were kicked from the matchmaking lobby by {interaction.user.mention}."
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Failed to DM kicked player: %s", e)
         else:
             await safe_followup(interaction, content=f"❌ Failed to kick {player.mention}.", ephemeral=True)
 
@@ -890,8 +890,8 @@ class LobbyCommands(commands.Cog):
                 target_channel = self.bot.get_channel(lobby_thread_id)
                 if not target_channel:
                     target_channel = await self.bot.fetch_channel(lobby_thread_id)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Failed to fetch lobby thread channel: %s", e)
 
         if not target_channel:
             await safe_followup(
@@ -922,8 +922,8 @@ class LobbyCommands(commands.Cog):
             msg = await target_channel.send(embed=embed)
             try:
                 await msg.add_reaction("✅")
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Failed to add checkmark reaction: %s", e)
             if ping_content:
                 await target_channel.send(ping_content, allowed_mentions=allowed_mentions)
             await safe_followup(

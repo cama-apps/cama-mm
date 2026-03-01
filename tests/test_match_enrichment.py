@@ -8,8 +8,7 @@ from unittest.mock import Mock
 import pytest
 
 from services.match_enrichment_service import MatchEnrichmentService
-
-TEST_GUILD_ID = 12345
+from tests.conftest import TEST_GUILD_ID
 
 
 class TestMatchEnrichmentService:

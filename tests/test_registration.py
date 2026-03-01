@@ -11,8 +11,7 @@ import pytest
 from database import Database
 from repositories.player_repository import PlayerRepository
 from services.player_service import PlayerService
-
-TEST_GUILD_ID = 12345
+from tests.conftest import TEST_GUILD_ID
 
 
 class TestRoleDeduplication:
