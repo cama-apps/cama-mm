@@ -106,7 +106,10 @@ class WrappedRepository(BaseRepository, IWrappedRepository):
                     mp.discord_id,
                     mp.hero_id,
                     COUNT(*) as picks,
-                    SUM(CASE WHEN mp.won = 1 THEN 1 ELSE 0 END) as wins
+                    SUM(CASE WHEN mp.won = 1 THEN 1 ELSE 0 END) as wins,
+                    SUM(COALESCE(mp.kills, 0)) as total_kills,
+                    SUM(COALESCE(mp.deaths, 0)) as total_deaths,
+                    SUM(COALESCE(mp.assists, 0)) as total_assists
                 FROM match_participants mp
                 JOIN matches m ON mp.match_id = m.match_id
                 WHERE m.winning_team IS NOT NULL

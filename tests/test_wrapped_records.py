@@ -203,6 +203,7 @@ class TestGetPlayerRecordsBasic:
         worst_keys = {r.stat_key for r in worst_records}
         assert "kda_worst" in worst_keys
         assert "gpm_worst" in worst_keys
+        assert "xpm_worst" in worst_keys
         assert "deaths_worst" in worst_keys
 
 
@@ -210,43 +211,67 @@ class TestStreakComputation:
     def test_wwlwwwlll(self):
         """WWLWWWLLL -> (3, 3)"""
         matches = [
-            {"won": True}, {"won": True}, {"won": False},
-            {"won": True}, {"won": True}, {"won": True},
-            {"won": False}, {"won": False}, {"won": False},
+            {"won": True, "hero_id": 1}, {"won": True, "hero_id": 2}, {"won": False, "hero_id": 3},
+            {"won": True, "hero_id": 4}, {"won": True, "hero_id": 5}, {"won": True, "hero_id": 6},
+            {"won": False, "hero_id": 7}, {"won": False, "hero_id": 8}, {"won": False, "hero_id": 9},
         ]
-        win, lose = WrappedService._compute_streaks(matches)
+        win, lose, win_breaker, lose_breaker = WrappedService._compute_streaks(matches)
         assert win == 3
         assert lose == 3
+        # Win streak ends at idx 5, breaker at idx 6 (hero_id 7)
+        assert win_breaker == 7
+        # Lose streak ends at idx 8, no breaker after
+        assert lose_breaker is None
 
     def test_all_wins(self):
         matches = [{"won": True}] * 5
-        win, lose = WrappedService._compute_streaks(matches)
+        win, lose, win_breaker, lose_breaker = WrappedService._compute_streaks(matches)
         assert win == 5
         assert lose == 0
+        assert win_breaker is None
+        assert lose_breaker is None
 
     def test_all_losses(self):
         matches = [{"won": False}] * 4
-        win, lose = WrappedService._compute_streaks(matches)
+        win, lose, win_breaker, lose_breaker = WrappedService._compute_streaks(matches)
         assert win == 0
         assert lose == 4
+        assert win_breaker is None
+        assert lose_breaker is None
 
     def test_alternating(self):
-        matches = [{"won": True}, {"won": False}, {"won": True}, {"won": False}]
-        win, lose = WrappedService._compute_streaks(matches)
+        matches = [
+            {"won": True, "hero_id": 1}, {"won": False, "hero_id": 2},
+            {"won": True, "hero_id": 3}, {"won": False, "hero_id": 4},
+        ]
+        win, lose, win_breaker, lose_breaker = WrappedService._compute_streaks(matches)
         assert win == 1
         assert lose == 1
 
     def test_empty(self):
-        win, lose = WrappedService._compute_streaks([])
+        win, lose, win_breaker, lose_breaker = WrappedService._compute_streaks([])
         assert win == 0
         assert lose == 0
+        assert win_breaker is None
+        assert lose_breaker is None
 
     def test_none_won_resets_streaks(self):
         matches = [{"won": True}, {"won": None}, {"won": True}]
-        win, lose = WrappedService._compute_streaks(matches)
+        win, lose, win_breaker, lose_breaker = WrappedService._compute_streaks(matches)
         # None resets both counters — unknown result breaks streaks
         assert win == 1
         assert lose == 0
+
+    def test_breaker_hero_returned(self):
+        """The hero that broke the win streak is the first loss after the best run."""
+        matches = [
+            {"won": True, "hero_id": 10}, {"won": True, "hero_id": 11},
+            {"won": False, "hero_id": 99},  # this breaks the 2-win streak
+            {"won": True, "hero_id": 12},
+        ]
+        win, lose, win_breaker, lose_breaker = WrappedService._compute_streaks(matches)
+        assert win == 2
+        assert win_breaker == 99
 
 
 class TestKDARatioNoDeaths:

@@ -258,55 +258,67 @@ def _build_slides(
     # --- Slide 11: Lane Breakdown ---
     if role_breakdown and role_breakdown.lane_freq:
         def _render_lanes(rb=role_breakdown, yl=year_label, u=target_username):
-            return draw_lane_breakdown_slide(u, yl, rb.lane_freq, rb.total_games, rb.assigned_freq)
+            return draw_lane_breakdown_slide(u, yl, rb.lane_freq, rb.total_games)
         slides.append(WrappedSlide("story_lanes", "Lane Breakdown", _render_lanes))
 
     # --- Slide 12: Teammates (all-time) ---
     if pairwise_data and (pairwise_data.best_teammates or pairwise_data.most_played_with):
         def _render_teammates(pw=pairwise_data, u=target_username, ac=avatar_cache):
             entries = []
+            section_labels = []
+            if pw.best_teammates:
+                section_labels.append((0, "Best Teammate"))
             for tm in pw.best_teammates[:3]:
                 entries.append({
                     "discord_id": tm.discord_id, "username": tm.username,
                     "games": tm.games, "wins": tm.wins, "win_rate": tm.win_rate,
-                    "label": "Best Teammate", "flavor": get_random_flavor("teammate_best"),
+                    "flavor": get_random_flavor("teammate_best"),
                 })
+            mpw_start = len(entries)
             for tm in pw.most_played_with[:3]:
                 if not any(e["discord_id"] == tm.discord_id for e in entries):
                     entries.append({
                         "discord_id": tm.discord_id, "username": tm.username,
                         "games": tm.games, "wins": tm.wins, "win_rate": tm.win_rate,
-                        "label": "Most Played With", "flavor": None,
+                        "flavor": None,
                     })
-            return draw_pairwise_slide(u, "All-Time", entries[:6], "teammates", ac)
+            if len(entries) > mpw_start:
+                section_labels.append((mpw_start, "Most Played With"))
+            return draw_pairwise_slide(u, "All-Time", entries[:6], "teammates", ac, section_labels=section_labels)
         slides.append(WrappedSlide("story_teammates", "Teammates", _render_teammates))
 
     # --- Slide 13: Rivals (all-time) ---
     if pairwise_data and (pairwise_data.nemesis or pairwise_data.punching_bag or pairwise_data.most_played_against):
         def _render_rivals(pw=pairwise_data, u=target_username, ac=avatar_cache):
             entries = []
+            section_labels = []
             if pw.nemesis:
+                section_labels.append((len(entries), "Nemesis"))
                 entries.append({
                     "discord_id": pw.nemesis.discord_id, "username": pw.nemesis.username,
                     "games": pw.nemesis.games, "wins": pw.nemesis.wins,
                     "win_rate": pw.nemesis.win_rate,
-                    "label": "Nemesis", "flavor": get_random_flavor("rival_nemesis"),
+                    "flavor": get_random_flavor("rival_nemesis"),
                 })
             if pw.punching_bag:
+                section_labels.append((len(entries), "Punching Bag"))
                 entries.append({
                     "discord_id": pw.punching_bag.discord_id, "username": pw.punching_bag.username,
                     "games": pw.punching_bag.games, "wins": pw.punching_bag.wins,
                     "win_rate": pw.punching_bag.win_rate,
-                    "label": "Punching Bag", "flavor": get_random_flavor("rival_punching_bag"),
+                    "flavor": get_random_flavor("rival_punching_bag"),
                 })
+            mpa_start = len(entries)
             for opp in pw.most_played_against[:3]:
                 if not any(e["discord_id"] == opp.discord_id for e in entries):
                     entries.append({
                         "discord_id": opp.discord_id, "username": opp.username,
                         "games": opp.games, "wins": opp.wins, "win_rate": opp.win_rate,
-                        "label": "Most Faced", "flavor": None,
+                        "flavor": None,
                     })
-            return draw_pairwise_slide(u, "All-Time", entries[:6], "rivals", ac)
+            if len(entries) > mpa_start:
+                section_labels.append((mpa_start, "Most Faced"))
+            return draw_pairwise_slide(u, "All-Time", entries[:6], "rivals", ac, section_labels=section_labels)
         slides.append(WrappedSlide("story_rivals", "Rivals", _render_rivals))
 
     # --- Slide 14: Package Deals (all-time, conditional) ---
@@ -340,7 +352,7 @@ def _build_slides(
                 ps=pnl_series, gs=gamba_stats, u=target_username,
             ):
                 from utils.drawing import draw_gamba_chart
-                net_pnl = gs.get("net_pnl", 0)
+                net_pnl = ps[-1][1] if ps else 0  # Use series endpoint to match chart
                 total_bets = gs.get("total_bets", 0)
                 degen_score = gs.get("degen_score", 0)
                 pnl_str = f"+{net_pnl}" if net_pnl >= 0 else str(net_pnl)
@@ -470,6 +482,18 @@ class WrappedCog(commands.Cog):
                     ephemeral=True,
                 )
                 return
+
+            # Patch award display names with Discord display names
+            if server_wrapped.awards and interaction.guild:
+                for award in server_wrapped.awards:
+                    try:
+                        member = interaction.guild.get_member(award.discord_id)
+                        if not member:
+                            member = await interaction.guild.fetch_member(award.discord_id)
+                        if member:
+                            award.discord_username = member.display_name
+                    except Exception:
+                        pass  # keep DB username as fallback
 
             # Collect all referenced discord IDs for avatar pre-fetching
             avatar_ids: set[int] = set()

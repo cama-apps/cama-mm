@@ -137,7 +137,6 @@ class RoleBreakdownWrapped:
     """Lane breakdown data for wrapped (from OpenDota lane_role)."""
 
     lane_freq: dict[int, int] = field(default_factory=dict)  # lane_role -> count
-    assigned_freq: dict[int, int] = field(default_factory=dict)  # lane (assigned) -> count
     total_games: int = 0
 
 
@@ -164,7 +163,7 @@ RECORDS_SLIDE_DEFS: list[tuple[str, str, list[str]]] = [
     ]),
     ("Farming", "farming", [
         "gpm_best", "xpm_best", "last_hits_best", "denies_best",
-        "gpm_worst", "last_hits_worst",
+        "gpm_worst", "xpm_worst", "last_hits_worst",
     ]),
     ("Impact", "impact", [
         "hero_damage_best", "tower_damage_best", "towers_killed_best",
@@ -915,8 +914,8 @@ class WrappedService:
             ("kills_best", None, "kills", "Most Kills", None, "kills", False),
             ("assists_best", None, "assists", "Most Assists", None, "assists", False),
             ("deaths_worst", None, "deaths", "Feeding Frenzy", None, "deaths", True),
-            ("gpm_best", "gpm_worst", "gpm", "Highest GPM", "AFK Simulator", "GPM", False),
-            ("xpm_best", None, "xpm", "Highest XPM", None, "XPM", False),
+            ("gpm_best", "gpm_worst", "gpm", "Highest GPM", "Lowest GPM", "GPM", False),
+            ("xpm_best", "xpm_worst", "xpm", "Highest XPM", "AFK Simulator", "XPM", False),
             ("last_hits_best", "last_hits_worst", "last_hits", "Most Last Hits", "Allergic to Creeps", "last hits", False),
             ("denies_best", None, "denies", "Most Denies", None, "denies", False),
             ("hero_damage_best", None, "hero_damage", "Most Hero Damage", None, "damage", False),
@@ -1063,14 +1062,14 @@ class WrappedService:
             ))
 
         # --- Streaks ---
-        win_streak, lose_streak = self._compute_streaks(rows)
+        win_streak, lose_streak, win_breaker_hero, lose_breaker_hero = self._compute_streaks(rows)
         if win_streak > 0:
             records.append(PersonalRecord(
                 stat_key="win_streak_best",
                 stat_label="Longest Win Streak",
                 value=win_streak,
                 display_value=f"{win_streak} wins",
-                hero_id=None,
+                hero_id=win_breaker_hero,
                 match_id=None,
                 valve_match_id=None,
                 match_date=None,
@@ -1081,7 +1080,7 @@ class WrappedService:
                 stat_label="Tilt Master",
                 value=lose_streak,
                 display_value=f"{lose_streak} losses",
-                hero_id=None,
+                hero_id=lose_breaker_hero,
                 match_id=None,
                 valve_match_id=None,
                 match_date=None,
@@ -1207,18 +1206,22 @@ class WrappedService:
         return records
 
     @staticmethod
-    def _compute_streaks(matches: list[dict]) -> tuple[int, int]:
+    def _compute_streaks(matches: list[dict]) -> tuple[int, int, int | None, int | None]:
         """Compute longest win and lose streaks from sequential match results.
 
         Returns:
-            (longest_win_streak, longest_lose_streak)
+            (longest_win_streak, longest_lose_streak,
+             win_streak_breaker_hero_id, lose_streak_breaker_hero_id)
         """
         best_win = 0
         best_lose = 0
         current_win = 0
         current_lose = 0
+        # Track which streak instance is the best so far
+        best_win_end_idx = -1
+        best_lose_end_idx = -1
 
-        for m in matches:
+        for idx, m in enumerate(matches):
             if m.get("won") is None:
                 current_win = 0
                 current_lose = 0
@@ -1226,13 +1229,30 @@ class WrappedService:
             if m["won"]:
                 current_win += 1
                 current_lose = 0
-                best_win = max(best_win, current_win)
+                if current_win > best_win:
+                    best_win = current_win
+                    best_win_end_idx = idx
             else:
                 current_lose += 1
                 current_win = 0
-                best_lose = max(best_lose, current_lose)
+                if current_lose > best_lose:
+                    best_lose = current_lose
+                    best_lose_end_idx = idx
 
-        return best_win, best_lose
+        # Find the hero that broke each streak (the match right after the streak ended)
+        win_breaker_hero: int | None = None
+        if best_win > 0 and best_win_end_idx + 1 < len(matches):
+            breaker = matches[best_win_end_idx + 1]
+            if not breaker.get("won"):
+                win_breaker_hero = breaker.get("hero_id")
+
+        lose_breaker_hero: int | None = None
+        if best_lose > 0 and best_lose_end_idx + 1 < len(matches):
+            breaker = matches[best_lose_end_idx + 1]
+            if breaker.get("won"):
+                lose_breaker_hero = breaker.get("hero_id")
+
+        return best_win, best_lose, win_breaker_hero, lose_breaker_hero
 
     # ============ NEW WRAPPED STORY METHODS ============
 
@@ -1474,11 +1494,16 @@ class WrappedService:
         for h in my_heroes[:3]:
             wr = h["wins"] / h["picks"] if h["picks"] > 0 else 0
             hero_name = get_hero_name(h["hero_id"]) or f"Hero #{h['hero_id']}"
+            total_kills = h.get("total_kills") or 0
+            total_deaths = h.get("total_deaths") or 0
+            total_assists = h.get("total_assists") or 0
+            kda = (total_kills + total_assists) / max(total_deaths, 1)
             top_3.append({
                 "name": hero_name,
                 "picks": h["picks"],
                 "wins": h["wins"],
                 "win_rate": wr,
+                "kda": kda,
             })
 
         top = my_heroes[0]
@@ -1509,7 +1534,6 @@ class WrappedService:
         steam_ids = set(self.player_repo.get_steam_ids(discord_id))
 
         pos_freq: dict[int, int] = {}
-        assigned_freq: dict[int, int] = {}
         for row in rows:
             raw = row.get("enrichment_data")
             if raw:
@@ -1520,16 +1544,6 @@ class WrappedService:
                             lane_role = p.get("lane_role", 0)
                             if lane_role in (1, 2, 3):  # safe, mid, off only
                                 pos_freq[lane_role] = pos_freq.get(lane_role, 0) + 1
-                            # Convert absolute lane (bot/mid/top) to relative
-                            # (safe/mid/off) using side.  Radiant: 1=safe,3=off.
-                            # Dire: 1=off,3=safe.  Mid is always 2.
-                            assigned_lane = p.get("lane", 0)
-                            if assigned_lane in (1, 2, 3):
-                                is_radiant = p.get("isRadiant", True)
-                                if not is_radiant and assigned_lane != 2:
-                                    # Dire: swap bot(1)↔top(3)
-                                    assigned_lane = 4 - assigned_lane
-                                assigned_freq[assigned_lane] = assigned_freq.get(assigned_lane, 0) + 1
                             break
                 except (json.JSONDecodeError, TypeError):
                     pass
@@ -1537,7 +1551,6 @@ class WrappedService:
         lane_games = sum(pos_freq.values())
         return RoleBreakdownWrapped(
             lane_freq=pos_freq,
-            assigned_freq=assigned_freq,
             total_games=lane_games,
         )
 
@@ -1596,7 +1609,7 @@ class WrappedService:
 
         # Worst KDA (fun award)
         worst_kda = min(eligible_players, key=lambda x: x.get("avg_kda") or float("inf"))
-        if worst_kda.get("avg_kda") is not None and worst_kda != best_kda:
+        if worst_kda.get("avg_kda") and worst_kda["avg_kda"] > 0 and worst_kda != best_kda:
             awards.append(
                 Award(
                     category="performance",

@@ -397,7 +397,7 @@ def draw_awards_grid(awards: list["Award"], max_awards: int = 6, viewer_discord_
     cols = min(3, len(awards))
     rows = (len(awards) + cols - 1) // cols
 
-    card_width, card_height = 250, 200
+    card_width, card_height = 250, 220
     padding = 20
     total_width = cols * card_width + (cols + 1) * padding
     total_height = rows * card_height + (rows + 1) * padding + 60  # Extra for header
@@ -452,7 +452,7 @@ def draw_awards_grid(awards: list["Award"], max_awards: int = 6, viewer_discord_
         # Emoji using pilmoji
         if award.emoji:
             with Pilmoji(img) as pilmoji:
-                pilmoji.text((x + 10, y + 8), award.emoji, font=emoji_font)
+                pilmoji.text((x + 10, y + 10), award.emoji, font=emoji_font)
 
         # Title (next to emoji) — truncate only if truly too wide
         title_text = award.title.upper()
@@ -462,7 +462,7 @@ def draw_awards_grid(awards: list["Award"], max_awards: int = 6, viewer_discord_
             while draw.textlength(title_text + "..", font=title_font) > title_max and len(title_text) > 1:
                 title_text = title_text[:-1]
             title_text = title_text.rstrip() + ".."
-        draw.text((x + 45, y + 12), title_text, fill=accent_color, font=title_font)
+        draw.text((x + 45, y + 14), title_text, fill=accent_color, font=title_font)
 
         # Player name — truncate only if too wide
         player_text = f"@{award.discord_username}"
@@ -471,7 +471,7 @@ def draw_awards_grid(awards: list["Award"], max_awards: int = 6, viewer_discord_
             while draw.textlength(player_text + "..", font=name_font) > text_max_w and len(player_text) > 1:
                 player_text = player_text[:-1]
             player_text = player_text.rstrip() + ".."
-        draw.text((x + 10, y + 50), player_text, fill=TEXT_WHITE, font=name_font)
+        draw.text((x + 10, y + 55), player_text, fill=TEXT_WHITE, font=name_font)
 
         # Stat — truncate only if too wide
         stat_text = award.stat_value
@@ -480,14 +480,14 @@ def draw_awards_grid(awards: list["Award"], max_awards: int = 6, viewer_discord_
             while draw.textlength(stat_text + "..", font=stat_font) > text_max_w and len(stat_text) > 1:
                 stat_text = stat_text[:-1]
             stat_text = stat_text.rstrip() + ".."
-        draw.text((x + 10, y + 75), stat_text, fill=ACCENT_GOLD, font=stat_font)
+        draw.text((x + 10, y + 80), stat_text, fill=ACCENT_GOLD, font=stat_font)
 
         # Flavor text — word-wrap up to 3 lines
         if award.flavor_text:
             flavor = f'"{award.flavor_text}"'
             lines = _word_wrap(flavor, flavor_font, text_max_w, draw)
             for li, line in enumerate(lines[:3]):
-                draw.text((x + 10, y + 100 + li * 16), line, fill=TEXT_GREY, font=flavor_font)
+                draw.text((x + 10, y + 110 + li * 16), line, fill=TEXT_GREY, font=flavor_font)
 
     # Save to buffer
     buffer = io.BytesIO()
@@ -839,14 +839,16 @@ def draw_pairwise_slide(
     entries: list[dict],
     slide_type: str = "teammates",
     avatar_images: dict[int, bytes] | None = None,
+    section_labels: list[tuple[int, str]] | None = None,
 ) -> io.BytesIO:
     """
     Draw a pairwise teammates or rivals slide.
 
     Args:
-        entries: List of dicts with {discord_id, username, games, wins, win_rate, label, flavor}
+        entries: List of dicts with {discord_id, username, games, wins, win_rate, flavor}
         slide_type: "teammates" (green accent) or "rivals" (red accent)
         avatar_images: Dict mapping discord_id -> avatar bytes (48x48)
+        section_labels: List of (entry_index, label) to draw section headers
     """
     width, height = 800, 600
     img = Image.new("RGBA", (width, height), (*BG_GRADIENT_START, 255))
@@ -869,7 +871,7 @@ def draw_pairwise_slide(
     subtitle_font = _get_font(14)
     name_font = _get_font(18, bold=True)
     stat_font = _get_font(14)
-    label_font = _get_font(12, bold=True)
+    section_font = _get_font(12, bold=True)
     flavor_font = _get_font(12)
 
     _center_text(draw, title, title_font, 50, width, accent)
@@ -877,11 +879,21 @@ def draw_pairwise_slide(
 
     draw.line([(50, 100), (width - 50, 100)], fill=(*accent, 128), width=1)
 
+    # Build set of entry indices that start a section
+    section_map = {idx: label for idx, label in (section_labels or [])}
+
     y_pos = 115
     row_height = 75
 
     for i, entry in enumerate(entries[:6]):
         y = y_pos + i * row_height
+
+        # Draw section header if this entry starts a new section
+        has_section = i in section_map
+        if has_section:
+            draw.text((40, y + 2), section_map[i].upper(), fill=accent, font=section_font)
+            y += 16  # shift content down under header
+
         avatar_x = 40
 
         # Draw avatar or fallback circle
@@ -895,7 +907,7 @@ def draw_pairwise_slide(
                 mask = Image.new("L", (48, 48), 0)
                 mask_draw = ImageDraw.Draw(mask)
                 mask_draw.ellipse((0, 0, 47, 47), fill=255)
-                img.paste(avatar_img, (avatar_x, y + 8), mask)
+                img.paste(avatar_img, (avatar_x, y), mask)
                 drew_avatar = True
             except Exception:
                 pass
@@ -903,24 +915,18 @@ def draw_pairwise_slide(
         if not drew_avatar:
             # Fallback: colored circle with initial
             initial = entry.get("username", "?")[0].upper()
-            draw.ellipse((avatar_x, y + 8, avatar_x + 48, y + 56), fill=(*accent, 100))
+            draw.ellipse((avatar_x, y, avatar_x + 48, y + 48), fill=(*accent, 100))
             init_font = _get_font(20, bold=True)
             bbox = draw.textbbox((0, 0), initial, font=init_font)
             iw = bbox[2] - bbox[0]
             ih = bbox[3] - bbox[1]
-            draw.text((avatar_x + 24 - iw // 2, y + 32 - ih // 2), initial, fill=TEXT_WHITE, font=init_font)
+            draw.text((avatar_x + 24 - iw // 2, y + 24 - ih // 2), initial, fill=TEXT_WHITE, font=init_font)
 
         text_x = avatar_x + 60
 
-        # Section label if present
-        label = entry.get("label")
-        if label:
-            draw.text((text_x, y + 2), label.upper(), fill=accent, font=label_font)
-
         # Username
         uname = f"@{entry.get('username', '?')}"
-        name_y = y + 16 if label else y + 8
-        draw.text((text_x, name_y), uname, fill=TEXT_WHITE, font=name_font)
+        draw.text((text_x, y), uname, fill=TEXT_WHITE, font=name_font)
 
         # Stats
         games = entry.get("games", 0)
@@ -928,12 +934,12 @@ def draw_pairwise_slide(
         losses = games - wins
         wr = entry.get("win_rate", 0)
         stat_text = f"{wins}W {losses}L ({wr*100:.0f}% WR) · {games} games"
-        draw.text((text_x, name_y + 22), stat_text, fill=TEXT_GREY, font=stat_font)
+        draw.text((text_x, y + 22), stat_text, fill=TEXT_GREY, font=stat_font)
 
         # Flavor
         flavor = entry.get("flavor")
         if flavor:
-            draw.text((text_x, name_y + 40), f'"{flavor}"', fill=TEXT_DARK, font=flavor_font)
+            draw.text((text_x, y + 40), f'"{flavor}"', fill=TEXT_DARK, font=flavor_font)
 
     buffer = io.BytesIO()
     img.save(buffer, format="PNG")
@@ -1018,7 +1024,11 @@ def draw_hero_spotlight_slide(
 
         # Stats inside bar
         wr_h = hero.get("win_rate", 0)
-        bar_text = f"{picks_h} games · {wins_h}W · {wr_h*100:.0f}% WR"
+        kda_h = hero.get("kda")
+        if kda_h is not None:
+            bar_text = f"{picks_h} games · {wins_h}W · {wr_h*100:.0f}% WR · {kda_h:.1f} KDA"
+        else:
+            bar_text = f"{picks_h} games · {wins_h}W · {wr_h*100:.0f}% WR"
         draw.text((60, y_bar + 27), bar_text, fill=TEXT_WHITE, font=bar_value_font)
 
     buffer = io.BytesIO()
@@ -1032,15 +1042,13 @@ def draw_lane_breakdown_slide(
     year_label: str,
     lane_freq: dict[int, int],
     total_games: int,
-    assigned_freq: dict[int, int] | None = None,
 ) -> io.BytesIO:
     """
-    Draw lane breakdown slide showing actual vs assigned lane distribution.
+    Draw lane breakdown slide showing lane distribution.
 
     Args:
-        lane_freq: Dict of lane_role -> count (actual lane from OpenDota)
+        lane_freq: Dict of lane_role -> count (detected lane from OpenDota)
         total_games: Total games with lane data
-        assigned_freq: Dict of lane -> count (assigned lane from OpenDota)
     """
     width, height = 800, 600
     img = Image.new("RGBA", (width, height), (*BG_GRADIENT_START, 255))
@@ -1071,25 +1079,16 @@ def draw_lane_breakdown_slide(
     label_font = _get_font(16, bold=True)
     value_font = _get_font(14)
     bar_font = _get_font(14, bold=True)
-    small_font = _get_font(11)
 
     if lane_freq:
-        has_assigned = assigned_freq and any(assigned_freq.values())
+        draw.text((50, 100), "LANE DISTRIBUTION", fill=TEXT_GREY, font=label_font)
 
-        if has_assigned:
-            draw.text((50, 100), "ACTUAL LANE", fill=TEXT_GREY, font=label_font)
-        else:
-            draw.text((50, 100), "LANE DISTRIBUTION", fill=TEXT_GREY, font=label_font)
-
-        all_counts = list(lane_freq.values())
-        if has_assigned:
-            all_counts += list(assigned_freq.values())
-        max_count = max(all_counts, default=1)
+        max_count = max(lane_freq.values(), default=1)
 
         bar_max_width = 450
         bar_y = 130
         bar_height_px = 30
-        lane_spacing = 100 if has_assigned else 65
+        lane_spacing = 65
 
         for i, (lane_role, count) in enumerate(sorted(lane_freq.items())):
             y_bar = bar_y + i * lane_spacing
@@ -1099,29 +1098,13 @@ def draw_lane_breakdown_slide(
             # Lane name
             draw.text((50, y_bar), name, fill=TEXT_WHITE, font=bar_font)
 
-            # Actual bar
+            # Bar
             bar_w = max(int((count / max_count) * bar_max_width), 30) if max_count > 0 else 30
             _draw_rounded_rect(draw, (50, y_bar + 20, 50 + bar_w, y_bar + 20 + bar_height_px), radius=6, fill=(*color, 180))
 
             # Count and percentage
             pct = (count / total_games * 100) if total_games > 0 else 0
             draw.text((60, y_bar + 24), f"{count} games ({pct:.0f}%)", fill=TEXT_WHITE, font=value_font)
-
-            # Assigned bar (dimmed, below actual)
-            if has_assigned:
-                assigned_count = assigned_freq.get(lane_role, 0)
-                if assigned_count > 0:
-                    assigned_bar_w = max(int((assigned_count / max_count) * bar_max_width), 20) if max_count > 0 else 20
-                    dimmed = tuple(c // 2 for c in color)
-                    _draw_rounded_rect(draw, (50, y_bar + 55, 50 + assigned_bar_w, y_bar + 55 + bar_height_px), radius=6, fill=(*dimmed, 120))
-                    assigned_pct = (assigned_count / total_games * 100) if total_games > 0 else 0
-                    draw.text((60, y_bar + 59), f"{assigned_count} assigned ({assigned_pct:.0f}%)", fill=TEXT_GREY, font=small_font)
-
-        # Legend if showing comparison
-        if has_assigned:
-            legend_y = height - 70
-            draw.text((50, legend_y), "Bright = Actual lane", fill=TEXT_GREY, font=small_font)
-            draw.text((50, legend_y + 16), "Dim = Assigned lane", fill=TEXT_DARK, font=small_font)
     else:
         _center_text(draw, "No lane data available", label_font, 250, width, TEXT_GREY)
         _center_text(draw, "(Requires match enrichment from OpenDota)", value_font, 280, width, TEXT_DARK)

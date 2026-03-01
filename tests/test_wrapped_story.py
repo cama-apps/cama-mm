@@ -198,7 +198,6 @@ class TestNewDataclasses:
     def test_role_breakdown_wrapped_defaults(self):
         rbw = RoleBreakdownWrapped()
         assert rbw.lane_freq == {}
-        assert rbw.assigned_freq == {}
         assert rbw.total_games == 0
 
 
@@ -578,66 +577,6 @@ class TestGetRoleBreakdownWrapped:
         assert result is not None
         assert result.lane_freq == {}
 
-    def test_assigned_freq_radiant_no_swap(self):
-        """Radiant lane=1 (bot=safe) stays as assigned_freq key 1."""
-        svc, wrapped_repo, player_repo = _build_service()
-        steam_id = 76561198000000001
-        player_repo.get_steam_ids.return_value = [steam_id]
-
-        enrichment = json.dumps({"players": [
-            {"account_id": steam_id, "lane_role": 1, "lane": 1, "isRadiant": True},
-        ]})
-        wrapped_repo.get_player_year_matches.return_value = [
-            {"match_date": "2026-01-05 20:00:00", "enrichment_data": enrichment},
-        ]
-
-        result = svc.get_role_breakdown_wrapped(111, 2026, guild_id=0)
-        assert result is not None
-        assert result.assigned_freq == {1: 1}
-
-    def test_assigned_freq_dire_swaps_bot_top(self):
-        """Dire lane=1 (bot=off) swaps to assigned_freq key 3, lane=3 (top=safe) to key 1."""
-        svc, wrapped_repo, player_repo = _build_service()
-        steam_id = 76561198000000001
-        player_repo.get_steam_ids.return_value = [steam_id]
-
-        enrichment_bot = json.dumps({"players": [
-            {"account_id": steam_id, "lane_role": 3, "lane": 1, "isRadiant": False},
-        ]})
-        enrichment_top = json.dumps({"players": [
-            {"account_id": steam_id, "lane_role": 1, "lane": 3, "isRadiant": False},
-        ]})
-        wrapped_repo.get_player_year_matches.return_value = [
-            {"match_date": "2026-01-05 20:00:00", "enrichment_data": enrichment_bot},
-            {"match_date": "2026-01-06 20:00:00", "enrichment_data": enrichment_top},
-        ]
-
-        result = svc.get_role_breakdown_wrapped(111, 2026, guild_id=0)
-        assert result is not None
-        # Dire bot(lane=1) -> off(3), Dire top(lane=3) -> safe(1)
-        assert result.assigned_freq == {3: 1, 1: 1}
-
-    def test_assigned_freq_mid_unchanged_both_sides(self):
-        """Mid lane (lane=2) stays key 2 regardless of side."""
-        svc, wrapped_repo, player_repo = _build_service()
-        steam_id = 76561198000000001
-        player_repo.get_steam_ids.return_value = [steam_id]
-
-        enrichment_rad = json.dumps({"players": [
-            {"account_id": steam_id, "lane_role": 2, "lane": 2, "isRadiant": True},
-        ]})
-        enrichment_dire = json.dumps({"players": [
-            {"account_id": steam_id, "lane_role": 2, "lane": 2, "isRadiant": False},
-        ]})
-        wrapped_repo.get_player_year_matches.return_value = [
-            {"match_date": "2026-01-05 20:00:00", "enrichment_data": enrichment_rad},
-            {"match_date": "2026-01-06 20:00:00", "enrichment_data": enrichment_dire},
-        ]
-
-        result = svc.get_role_breakdown_wrapped(111, 2026, guild_id=0)
-        assert result is not None
-        assert result.assigned_freq == {2: 2}
-
     def test_skips_jungle_lane_role_4(self):
         """Jungle (lane_role=4) is intentionally excluded from lane breakdown."""
         svc, wrapped_repo, player_repo = _build_service()
@@ -911,18 +850,6 @@ class TestDrawLaneBreakdownSlide:
         buf = draw_lane_breakdown_slide("TestPlayer", "Cama Wrapped 2026", {}, total_games=10)
         img = Image.open(buf)
         assert img.size == (800, 600)
-
-    def test_with_assigned_freq(self):
-        from utils.wrapped_drawing import draw_lane_breakdown_slide
-
-        freq = {1: 5, 2: 8, 3: 3}
-        assigned = {1: 4, 2: 9, 3: 4}
-        buf = draw_lane_breakdown_slide(
-            "TestPlayer", "Cama Wrapped 2026", freq, total_games=16, assigned_freq=assigned
-        )
-        img = Image.open(buf)
-        assert img.size == (800, 600)
-
 
 class TestWordWrap:
     def test_empty_string(self):
