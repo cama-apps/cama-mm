@@ -62,7 +62,7 @@ class BalancedShuffler:
             exclusion_penalty_weight: Penalty per exclusion count for excluded players (default 50.0)
             use_openskill: Whether to use OpenSkill ratings instead of Glicko-2 (default False)
             use_jopacoin: Whether to use jopacoin balance instead of ratings (default False)
-            recent_match_penalty_weight: Penalty per recent match participant selected (default 25.0)
+            recent_match_penalty_weight: Penalty per recent match participant selected (see SHUFFLER_SETTINGS)
             soft_avoid_penalty: Penalty added when avoider/avoided pair are on same team (default 500.0)
             package_deal_penalty: Penalty added when buyer/partner pair are on DIFFERENT teams (default 100.0)
             package_deal_split_penalty: Penalty added when one of the pair is excluded from the match (default 100.0)
