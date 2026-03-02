@@ -311,14 +311,13 @@ class TriviaCog(commands.Cog):
             )
             return
 
-        if not await safe_defer(interaction):
-            return
-
-        # Check registration
+        # Check registration and cooldown BEFORE deferring (so responses can be ephemeral)
         player_service = self.bot.player_service
         player = await asyncio.to_thread(player_service.get_player, user_id, guild_id)
         if not player:
-            await safe_followup(interaction, content="You must be registered to play trivia. Use `/register` first.", ephemeral=True)
+            await interaction.response.send_message(
+                "You must be registered to play trivia. Use `/register` first.", ephemeral=True
+            )
             return
 
         # Atomic cooldown check (admins bypass)
@@ -335,14 +334,18 @@ class TriviaCog(commands.Cog):
                     remaining = next_available - now
                     hours = remaining // 3600
                     minutes = (remaining % 3600) // 60
-                    await safe_followup(
-                        interaction,
-                        content=f"Trivia is on cooldown! Next session available in **{hours}h {minutes}m**.",
+                    await interaction.response.send_message(
+                        f"Trivia is on cooldown! Next session available in **{hours}h {minutes}m**.",
                         ephemeral=True,
                     )
                 else:
-                    await safe_followup(interaction, content="Trivia is on cooldown.", ephemeral=True)
+                    await interaction.response.send_message(
+                        "Trivia is on cooldown.", ephemeral=True
+                    )
                 return
+
+        if not await safe_defer(interaction):
+            return
 
         # Create session
         session = TriviaSession(user_id=user_id, guild_id=guild_id, user=interaction.user)
