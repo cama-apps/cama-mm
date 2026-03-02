@@ -26,6 +26,7 @@ from config import (
     SHOP_PACKAGE_DEAL_BASE_COST,
     SHOP_PACKAGE_DEAL_RATING_DIVISOR,
     SHOP_PROTECT_HERO_COST,
+    SHOP_RECALIBRATE_COST,
     SHOP_SOFT_AVOID_COST,
     SOFT_AVOID_GAMES_DURATION,
 )
@@ -41,6 +42,7 @@ if TYPE_CHECKING:
     from services.match_service import MatchService
     from services.flavor_text_service import FlavorTextService
     from services.gambling_stats_service import GamblingStatsService
+    from services.recalibration_service import RecalibrationService
 
 logger = logging.getLogger("cama_bot.commands.shop")
 
@@ -87,12 +89,14 @@ class ShopCommands(commands.Cog):
         match_service: MatchService | None = None,
         flavor_text_service: FlavorTextService | None = None,
         gambling_stats_service: GamblingStatsService | None = None,
+        recalibration_service: RecalibrationService | None = None,
     ):
         self.bot = bot
         self.player_service = player_service
         self.match_service = match_service
         self.flavor_text_service = flavor_text_service
         self.gambling_stats_service = gambling_stats_service
+        self.recalibration_service = recalibration_service
 
     async def hero_autocomplete(
         self, interaction: discord.Interaction, current: str
@@ -106,14 +110,11 @@ class ShopCommands(commands.Cog):
         ]
         return matches[:25]  # Discord limit
 
-    @app_commands.command(name="shop", description="Spend jopacoin in the shop")
-    @app_commands.describe(
-        item="What to buy",
-        target="User to interact with (required for 'Announce + Tag', 'Soft Avoid', and 'Package Deal' options)",
-        hero="Hero to protect from bans (required for 'Protect Hero' option)",
-    )
-    @app_commands.choices(
-        item=[
+    async def item_autocomplete(
+        self, interaction: discord.Interaction, current: str
+    ) -> list[app_commands.Choice[str]]:
+        """Autocomplete for shop items (dynamic per-user for recalibrate cooldown)."""
+        static_items = [
             app_commands.Choice(
                 name=f"Announce Balance ({SHOP_ANNOUNCE_COST} jopacoin)",
                 value="announce",
@@ -143,12 +144,45 @@ class ShopCommands(commands.Cog):
                 value="package_deal",
             ),
         ]
+
+        # Build recalibrate choice — dynamic based on cooldown
+        recal_choice = app_commands.Choice(
+            name=f"Recalibrate ({SHOP_RECALIBRATE_COST} jopacoin)",
+            value="recalibrate",
+        )
+        if self.recalibration_service:
+            try:
+                guild_id = interaction.guild.id if interaction.guild else None
+                check = await asyncio.to_thread(
+                    self.recalibration_service.can_recalibrate,
+                    interaction.user.id,
+                    guild_id,
+                )
+                if not check["allowed"] and check.get("reason") == "on_cooldown":
+                    recal_choice = app_commands.Choice(
+                        name="Recalibrate (ON COOLDOWN)",
+                        value="recalibrate_cooldown",
+                    )
+            except Exception:
+                pass  # Fall back to default label
+
+        all_items = static_items + [recal_choice]
+
+        if current:
+            all_items = [c for c in all_items if current.lower() in c.name.lower()]
+        return all_items[:25]
+
+    @app_commands.command(name="shop", description="Spend jopacoin in the shop")
+    @app_commands.describe(
+        item="What to buy",
+        target="User to interact with (required for 'Announce + Tag', 'Soft Avoid', and 'Package Deal' options)",
+        hero="Hero to protect from bans (required for 'Protect Hero' option)",
     )
-    @app_commands.autocomplete(hero=hero_autocomplete)
+    @app_commands.autocomplete(item=item_autocomplete, hero=hero_autocomplete)
     async def shop(
         self,
         interaction: discord.Interaction,
-        item: app_commands.Choice[str],
+        item: str,
         target: discord.Member | None = None,
         hero: str | None = None,
     ):
@@ -169,10 +203,10 @@ class ShopCommands(commands.Cog):
             )
             return
 
-        if item.value == "announce":
+        if item == "announce":
             # Basic announcement - ignore target if provided
             await self._handle_announce(interaction, target=None)
-        elif item.value == "announce_target":
+        elif item == "announce_target":
             # Targeted announcement - require target
             if not target:
                 await interaction.response.send_message(
@@ -182,7 +216,7 @@ class ShopCommands(commands.Cog):
                 )
                 return
             await self._handle_announce(interaction, target=target)
-        elif item.value == "protect_hero":
+        elif item == "protect_hero":
             # Protect hero from bans - require hero selection
             if not hero:
                 await interaction.response.send_message(
@@ -192,11 +226,11 @@ class ShopCommands(commands.Cog):
                 )
                 return
             await self._handle_protect_hero(interaction, hero=hero)
-        elif item.value == "mystery_gift":
+        elif item == "mystery_gift":
             await self._handle_mystery_gift(interaction)
-        elif item.value == "double_or_nothing":
+        elif item == "double_or_nothing":
             await self._handle_double_or_nothing(interaction)
-        elif item.value == "soft_avoid":
+        elif item == "soft_avoid":
             if not target:
                 await interaction.response.send_message(
                     "You selected 'Soft Avoid' but didn't specify a target. "
@@ -205,7 +239,7 @@ class ShopCommands(commands.Cog):
                 )
                 return
             await self._handle_soft_avoid(interaction, target=target)
-        elif item.value == "package_deal":
+        elif item == "package_deal":
             if not target:
                 await interaction.response.send_message(
                     "You selected 'Package Deal' but didn't specify a target. "
@@ -214,6 +248,126 @@ class ShopCommands(commands.Cog):
                 )
                 return
             await self._handle_package_deal(interaction, target=target)
+        elif item == "recalibrate":
+            await self._handle_recalibrate(interaction)
+        elif item == "recalibrate_cooldown":
+            # User selected the ON COOLDOWN item — block with cooldown info
+            guild_id = interaction.guild.id if interaction.guild else None
+            if self.recalibration_service:
+                check = await asyncio.to_thread(
+                    self.recalibration_service.can_recalibrate,
+                    interaction.user.id,
+                    guild_id,
+                )
+                ends_at = check.get("cooldown_ends_at")
+                if ends_at:
+                    await interaction.response.send_message(
+                        f"Recalibration is on cooldown. You can recalibrate again <t:{ends_at}:R>.",
+                        ephemeral=True,
+                    )
+                    return
+            await interaction.response.send_message(
+                "Recalibration is on cooldown.", ephemeral=True
+            )
+
+    async def _handle_recalibrate(self, interaction: discord.Interaction):
+        """Handle the recalibration purchase."""
+        user_id = interaction.user.id
+        guild_id = interaction.guild.id if interaction.guild else None
+
+        if not self.recalibration_service:
+            await interaction.response.send_message(
+                "Recalibration is not available.", ephemeral=True
+            )
+            return
+
+        # Server-side validation (handles not_registered, no_rating, insufficient_games, on_cooldown)
+        check = await asyncio.to_thread(
+            self.recalibration_service.can_recalibrate, user_id, guild_id
+        )
+        if not check["allowed"]:
+            reason = check["reason"]
+            if reason == "not_registered":
+                msg = "You need to `/register` before you can recalibrate."
+            elif reason == "no_rating":
+                msg = "You don't have a rating yet. Play some games first!"
+            elif reason == "insufficient_games":
+                msg = (
+                    f"You need at least {check['min_games']} games to recalibrate "
+                    f"(you have {check['games_played']})."
+                )
+            elif reason == "on_cooldown":
+                ends_at = check.get("cooldown_ends_at")
+                msg = f"Recalibration is on cooldown. You can recalibrate again <t:{ends_at}:R>."
+            else:
+                msg = "You cannot recalibrate right now."
+            await interaction.response.send_message(msg, ephemeral=True)
+            return
+
+        # Check balance
+        balance = await asyncio.to_thread(
+            self.player_service.get_balance, user_id, guild_id
+        )
+        if balance < SHOP_RECALIBRATE_COST:
+            await interaction.response.send_message(
+                f"You need **{SHOP_RECALIBRATE_COST}** {JOPACOIN_EMOTE} to recalibrate "
+                f"but only have **{balance}** {JOPACOIN_EMOTE}.",
+                ephemeral=True,
+            )
+            return
+
+        # Defer (public) — recalibration is a notable event
+        await safe_defer(interaction)
+
+        # Deduct cost
+        await asyncio.to_thread(
+            self.player_service.adjust_balance, user_id, guild_id, -SHOP_RECALIBRATE_COST
+        )
+
+        # Execute recalibration
+        result = await asyncio.to_thread(
+            self.recalibration_service.recalibrate, user_id, guild_id
+        )
+
+        if not result["success"]:
+            # Refund on unexpected failure
+            await asyncio.to_thread(
+                self.player_service.adjust_balance, user_id, guild_id, SHOP_RECALIBRATE_COST
+            )
+            await safe_followup(
+                interaction, content="Recalibration failed unexpectedly. You have been refunded."
+            )
+            return
+
+        # Build public embed
+        embed = discord.Embed(
+            title="Rating Recalibration",
+            description=(
+                f"{interaction.user.mention} has recalibrated their rating!\n\n"
+                f"Their rating deviation has been reset — expect bigger rating swings "
+                f"for the next ~20 games."
+            ),
+            color=0xE74C3C,  # Red for dramatic effect
+        )
+        embed.add_field(name="Rating", value=f"{result['old_rating']:.0f} (unchanged)", inline=True)
+        embed.add_field(
+            name="RD",
+            value=f"{result['old_rd']:.0f} → {result['new_rd']:.0f}",
+            inline=True,
+        )
+        embed.add_field(
+            name="Next Recalibration",
+            value=f"<t:{result['cooldown_ends_at']}:R>",
+            inline=True,
+        )
+        embed.add_field(
+            name="Cost",
+            value=f"{SHOP_RECALIBRATE_COST} {JOPACOIN_EMOTE}",
+            inline=True,
+        )
+        embed.set_thumbnail(url=get_hero_image_url(str(BOUNTY_HUNTER_ID)))
+
+        await safe_followup(interaction, embed=embed)
 
     async def _handle_announce(
         self,
@@ -1172,7 +1326,9 @@ async def setup(bot: commands.Bot):
     match_service = getattr(bot, "match_service", None)
     flavor_text_service = getattr(bot, "flavor_text_service", None)
     gambling_stats_service = getattr(bot, "gambling_stats_service", None)
+    recalibration_service = getattr(bot, "recalibration_service", None)
 
     await bot.add_cog(ShopCommands(
-        bot, player_service, match_service, flavor_text_service, gambling_stats_service
+        bot, player_service, match_service, flavor_text_service, gambling_stats_service,
+        recalibration_service,
     ))
