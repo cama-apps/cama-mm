@@ -154,6 +154,9 @@ PACKAGE_DEAL_GAMES_DURATION = _parse_int("PACKAGE_DEAL_GAMES_DURATION", 10)  # N
 PACKAGE_DEAL_PENALTY = _parse_float("PACKAGE_DEAL_PENALTY", 120.0)  # Penalty when pair on DIFFERENT teams
 PACKAGE_DEAL_SPLIT_PENALTY = _parse_float("PACKAGE_DEAL_SPLIT_PENALTY", 120.0)  # Penalty when one selected, one excluded
 
+# Recalibrate shop item
+SHOP_RECALIBRATE_COST = _parse_int("SHOP_RECALIBRATE_COST", 1500)
+
 # Wheel of Fortune configuration
 WHEEL_COOLDOWN_SECONDS = _parse_int("WHEEL_COOLDOWN_SECONDS", 86400)  # 24 hours
 WHEEL_LOSE_PENALTY_COOLDOWN = _parse_int("WHEEL_LOSE_PENALTY_COOLDOWN", 432000)  # 5 days for LOSE
