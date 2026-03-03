@@ -145,7 +145,7 @@ DOUBLE_OR_NOTHING_COOLDOWN_SECONDS = _parse_int("DOUBLE_OR_NOTHING_COOLDOWN_SECO
 # Soft Avoid configuration
 SHOP_SOFT_AVOID_COST = _parse_int("SHOP_SOFT_AVOID_COST", 500)  # Cost to soft avoid a player
 SOFT_AVOID_GAMES_DURATION = _parse_int("SOFT_AVOID_GAMES_DURATION", 10)  # Number of games avoid lasts
-SOFT_AVOID_PENALTY = _parse_float("SOFT_AVOID_PENALTY", 230.0)  # Penalty added to shuffler when pair on same team
+SOFT_AVOID_PENALTY = _parse_float("SOFT_AVOID_PENALTY", 250.0)  # Penalty added to shuffler when pair on same team
 
 # Package Deal configuration
 SHOP_PACKAGE_DEAL_BASE_COST = _parse_int("SHOP_PACKAGE_DEAL_BASE_COST", 500)  # Base cost for package deal
@@ -155,7 +155,7 @@ PACKAGE_DEAL_PENALTY = _parse_float("PACKAGE_DEAL_PENALTY", 120.0)  # Penalty wh
 PACKAGE_DEAL_SPLIT_PENALTY = _parse_float("PACKAGE_DEAL_SPLIT_PENALTY", 120.0)  # Penalty when one selected, one excluded
 
 # Recalibrate shop item
-SHOP_RECALIBRATE_COST = _parse_int("SHOP_RECALIBRATE_COST", 1500)
+SHOP_RECALIBRATE_COST = _parse_int("SHOP_RECALIBRATE_COST", 300)
 
 # Wheel of Fortune configuration
 WHEEL_COOLDOWN_SECONDS = _parse_int("WHEEL_COOLDOWN_SECONDS", 86400)  # 24 hours

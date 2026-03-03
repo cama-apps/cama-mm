@@ -277,7 +277,7 @@ async def test_handle_recalibrate_insufficient_balance():
 
     interaction.response.send_message.assert_awaited_once()
     msg = interaction.response.send_message.call_args.args[0]
-    assert "1500" in msg
+    assert "300" in msg
     assert "100" in msg
     # Balance NOT deducted
     player_service.adjust_balance.assert_not_called()
@@ -349,4 +349,4 @@ async def test_item_autocomplete_shows_price_when_available():
 
     recal_choices = [c for c in choices if c.value == "recalibrate"]
     assert len(recal_choices) == 1
-    assert "1500" in recal_choices[0].name
+    assert "300" in recal_choices[0].name

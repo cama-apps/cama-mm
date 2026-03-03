@@ -38,7 +38,7 @@ class RecalibrationService:
     """
     Handles player rating recalibration.
 
-    Recalibration allows players to reset their RD (rating deviation) to 350,
+    Recalibration allows players to set their RD (rating deviation) to at least 300,
     effectively entering a new calibration phase where their rating can change
     more rapidly. The player's current rating is preserved.
 
@@ -153,7 +153,7 @@ class RecalibrationService:
         Execute recalibration for a player.
 
         - Preserves current rating
-        - Resets RD to initial_rd (350)
+        - Sets RD to max(300, current_rd)
         - Resets volatility to initial_volatility (0.06)
         - Records recalibration timestamp and increments count
 
@@ -175,12 +175,13 @@ class RecalibrationService:
         old_rd = check["current_rd"]
         old_volatility = check["current_volatility"]
 
-        # Update player's Glicko rating (preserve rating, reset RD and volatility)
+        # Update player's Glicko rating (preserve rating, bump RD to at least 300, reset volatility)
+        new_rd = max(300.0, old_rd)
         self.player_repo.update_glicko_rating(
             discord_id=discord_id,
             guild_id=normalized_guild_id,
             rating=old_rating,
-            rd=self.initial_rd,
+            rd=new_rd,
             volatility=self.initial_volatility,
         )
 
@@ -197,7 +198,7 @@ class RecalibrationService:
 
         logger.info(
             f"Player {discord_id} recalibrated: rating={old_rating:.1f}, "
-            f"RD {old_rd:.1f} -> {self.initial_rd}, "
+            f"RD {old_rd:.1f} -> {new_rd}, "
             f"volatility {old_volatility:.4f} -> {self.initial_volatility}, "
             f"total_recalibrations={state.total_recalibrations + 1}"
         )
@@ -207,7 +208,7 @@ class RecalibrationService:
             "old_rating": old_rating,
             "old_rd": old_rd,
             "old_volatility": old_volatility,
-            "new_rd": self.initial_rd,
+            "new_rd": new_rd,
             "new_volatility": self.initial_volatility,
             "total_recalibrations": state.total_recalibrations + 1,
             "cooldown_ends_at": cooldown_ends_at,
