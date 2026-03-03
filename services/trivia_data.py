@@ -30,6 +30,10 @@ class HeroData:
     is_melee: bool
     base_movement: int | None
     base_armor: int | None
+    attack_rate: float | None
+    attr_str_gain: float | None
+    attr_agi_gain: float | None
+    attr_int_gain: float | None
     image_url: str | None
 
 
@@ -135,6 +139,10 @@ def load_heroes() -> list[HeroData]:
             is_melee=bool(h.is_melee),
             base_movement=h.base_movement,
             base_armor=h.base_armor,
+            attack_rate=h.attack_rate if h.attack_rate else None,
+            attr_str_gain=h.attr_strength_gain if h.attr_strength_gain else None,
+            attr_agi_gain=h.attr_agility_gain if h.attr_agility_gain else None,
+            attr_int_gain=h.attr_intelligence_gain if h.attr_intelligence_gain else None,
             image_url=hero_image_url(h.name or ""),
         ))
     return result

@@ -3,6 +3,7 @@
 import pytest
 
 from services.trivia_questions import (
+    CHALLENGING_GENERATORS,
     EASY_GENERATORS,
     HARD_GENERATORS,
     IMAGE_GENERATORS,
@@ -11,6 +12,8 @@ from services.trivia_questions import (
     _hero_name_leaks,
     generate_question,
     get_difficulty_tier,
+    gen_attribute_gain,
+    gen_base_attack_time,
     gen_hero_by_image,
     gen_primary_attribute,
     gen_ability_to_hero,
@@ -51,8 +54,11 @@ class TestDifficultyTier:
 
     def test_hard(self):
         assert get_difficulty_tier(6) == "hard"
-        assert get_difficulty_tier(10) == "hard"
-        assert get_difficulty_tier(100) == "hard"
+        assert get_difficulty_tier(9) == "hard"
+
+    def test_challenging(self):
+        assert get_difficulty_tier(10) == "challenging"
+        assert get_difficulty_tier(100) == "challenging"
 
 
 def _validate_question(q: TriviaQuestion):
@@ -60,7 +66,7 @@ def _validate_question(q: TriviaQuestion):
     assert q is not None
     assert len(q.options) == 4
     assert 0 <= q.correct_index <= 3
-    assert q.difficulty in ("easy", "medium", "hard")
+    assert q.difficulty in ("easy", "medium", "hard", "challenging")
     assert q.category
     assert q.text
     # All options should be unique
@@ -145,15 +151,6 @@ class TestMediumGenerators:
         _validate_question(q)
         assert q.difficulty == "medium"
 
-    def test_move_speed(self):
-        for _ in range(10):
-            q = gen_move_speed()
-            if q is not None:
-                _validate_question(q)
-                assert q.difficulty == "medium"
-                return
-        pytest.skip("gen_move_speed returned None")
-
     def test_facet_to_hero(self):
         q = gen_facet_to_hero()
         _validate_question(q)
@@ -208,14 +205,14 @@ class TestHardGenerators:
         _validate_question(q)
         assert q.difficulty == "hard"
 
-    def test_voiceline(self):
+    def test_move_speed(self):
         for _ in range(10):
-            q = gen_voiceline()
+            q = gen_move_speed()
             if q is not None:
                 _validate_question(q)
                 assert q.difficulty == "hard"
                 return
-        pytest.skip("gen_voiceline returned None")
+        pytest.skip("gen_move_speed returned None")
 
     def test_ability_cooldown(self):
         for _ in range(10):
@@ -239,6 +236,39 @@ class TestHardGenerators:
                 assert q.difficulty == "hard"
                 return
         pytest.skip("gen_base_armor_compare returned None")
+
+
+class TestChallengingGenerators:
+    def test_voiceline(self):
+        for _ in range(10):
+            q = gen_voiceline()
+            if q is not None:
+                _validate_question(q)
+                assert q.difficulty == "challenging"
+                return
+        pytest.skip("gen_voiceline returned None")
+
+    def test_base_attack_time(self):
+        for _ in range(20):
+            q = gen_base_attack_time()
+            if q is not None:
+                _validate_question(q)
+                assert q.difficulty == "challenging"
+                assert q.category == "base_attack_time"
+                assert "BAT" in q.text
+                return
+        pytest.skip("gen_base_attack_time returned None")
+
+    def test_attribute_gain(self):
+        for _ in range(20):
+            q = gen_attribute_gain()
+            if q is not None:
+                _validate_question(q)
+                assert q.difficulty == "challenging"
+                assert q.category == "attribute_gain"
+                assert "gain per level" in q.text
+                return
+        pytest.skip("gen_attribute_gain returned None")
 
 
 class TestAnswerLeaks:
@@ -305,7 +335,7 @@ class TestAnswerLeaks:
 class TestImageGenerators:
     def test_image_generators_set_accurate(self):
         """Verify IMAGE_GENERATORS set matches generators that actually produce images."""
-        all_gens = EASY_GENERATORS + MEDIUM_GENERATORS + HARD_GENERATORS
+        all_gens = EASY_GENERATORS + MEDIUM_GENERATORS + HARD_GENERATORS + CHALLENGING_GENERATORS
         for gen in all_gens:
             # Try a few times to get a non-None result
             for _ in range(10):
@@ -334,6 +364,11 @@ class TestGenerateQuestion:
         assert q is not None
         assert q.difficulty == "hard"
 
+    def test_challenging_streak(self):
+        q = generate_question(10)
+        assert q is not None
+        assert q.difficulty == "challenging"
+
     def test_avoids_recent_categories(self):
         # Generate many questions, checking that recent categories are usually avoided
         recent = []
@@ -344,5 +379,6 @@ class TestGenerateQuestion:
 
     def test_all_generators_registered(self):
         assert len(EASY_GENERATORS) == 9
-        assert len(MEDIUM_GENERATORS) == 5
+        assert len(MEDIUM_GENERATORS) == 4
         assert len(HARD_GENERATORS) == 10
+        assert len(CHALLENGING_GENERATORS) == 3

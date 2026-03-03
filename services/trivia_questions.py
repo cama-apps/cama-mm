@@ -29,7 +29,7 @@ class TriviaQuestion:
     text: str
     options: list[str]       # 4 options
     correct_index: int       # 0-3
-    difficulty: str           # "easy" / "medium" / "hard"
+    difficulty: str           # "easy" / "medium" / "hard" / "challenging"
     image_url: str | None     # Steam CDN thumbnail
     category: str             # e.g. "hero_by_image"
     explanation: str | None   # Shown on wrong answer
@@ -368,7 +368,7 @@ def gen_move_speed() -> TriviaQuestion | None:
         text="Which of these heroes has the highest base move speed?",
         options=options,
         correct_index=idx,
-        difficulty="medium",
+        difficulty="hard",
         image_url=None,
         category="move_speed",
         explanation=f"{fastest.localized_name} has {fastest.base_movement} base move speed.",
@@ -553,10 +553,80 @@ def gen_voiceline() -> TriviaQuestion | None:
         text=f'Which hero says: "{text}"?',
         options=options,
         correct_index=idx,
-        difficulty="hard",
+        difficulty="challenging",
         image_url=None,
         category="voiceline",
         explanation=f"This is a {hero.localized_name} voiceline.",
+    )
+
+
+def gen_base_attack_time() -> TriviaQuestion | None:
+    """C1: Which hero has the lowest base attack time?"""
+    heroes = [h for h in load_heroes() if h.attack_rate and h.attack_rate > 0]
+    if len(heroes) < 4:
+        return None
+    chosen = random.sample(heroes, 4)
+    # Ensure all 4 are within ±0.3 BAT of each other for difficulty
+    bats = [h.attack_rate for h in chosen]
+    if max(bats) - min(bats) > 0.3:
+        # Try to find a tighter cluster
+        heroes_sorted = sorted(heroes, key=lambda h: h.attack_rate)
+        found = False
+        for start in range(len(heroes_sorted) - 3):
+            window = heroes_sorted[start:start + 4]
+            if window[-1].attack_rate - window[0].attack_rate <= 0.3:
+                chosen = list(window)
+                random.shuffle(chosen)
+                found = True
+                break
+        if not found:
+            return None
+    # Need unique BATs for a clear answer
+    bats = [h.attack_rate for h in chosen]
+    if len(set(bats)) < 2:
+        return None
+    lowest = min(chosen, key=lambda h: h.attack_rate)
+    distractors = [h.localized_name for h in chosen if h != lowest][:3]
+    options, idx = _shuffle_options(lowest.localized_name, distractors)
+    return TriviaQuestion(
+        text="Which of these heroes has the lowest base attack time (BAT)?",
+        options=options,
+        correct_index=idx,
+        difficulty="challenging",
+        image_url=None,
+        category="base_attack_time",
+        explanation=f"{lowest.localized_name} has a {lowest.attack_rate:.2f}s BAT.",
+    )
+
+
+def gen_attribute_gain() -> TriviaQuestion | None:
+    """C2: Which [attr] hero has the highest [attr] gain?"""
+    attr_map = {
+        "strength": ("str", "attr_str_gain"),
+        "agility": ("agi", "attr_agi_gain"),
+        "intelligence": ("int", "attr_int_gain"),
+    }
+    attr_key = random.choice(list(attr_map.keys()))
+    short_name, gain_field = attr_map[attr_key]
+    heroes = [h for h in _heroes_by_attr(attr_key) if getattr(h, gain_field) and getattr(h, gain_field) > 0]
+    if len(heroes) < 4:
+        return None
+    chosen = random.sample(heroes, 4)
+    gains = [getattr(h, gain_field) for h in chosen]
+    if len(set(gains)) < 2:
+        return None
+    highest = max(chosen, key=lambda h: getattr(h, gain_field))
+    gain_val = getattr(highest, gain_field)
+    distractors = [h.localized_name for h in chosen if h != highest][:3]
+    options, idx = _shuffle_options(highest.localized_name, distractors)
+    return TriviaQuestion(
+        text=f"Which {attr_key} hero has the highest {attr_key} gain per level?",
+        options=options,
+        correct_index=idx,
+        difficulty="challenging",
+        image_url=None,
+        category="attribute_gain",
+        explanation=f"{highest.localized_name} gains {gain_val:.1f} {short_name}/level.",
     )
 
 
@@ -724,7 +794,6 @@ EASY_GENERATORS = [
 
 MEDIUM_GENERATORS = [
     gen_hero_real_name,
-    gen_move_speed,
     gen_facet_to_hero,
     gen_hero_by_hype,
     gen_innate_ability,
@@ -737,10 +806,16 @@ HARD_GENERATORS = [
     gen_ability_lore,
     gen_item_lore,
     gen_hero_bio,
-    gen_voiceline,
+    gen_move_speed,
     gen_ability_cooldown,
     gen_facet_name,
     gen_base_armor_compare,
+]
+
+CHALLENGING_GENERATORS = [
+    gen_voiceline,
+    gen_base_attack_time,
+    gen_attribute_gain,
 ]
 
 # Generators known to produce images — given 2x weight in selection
@@ -779,8 +854,10 @@ def get_difficulty_tier(streak: int) -> str:
         return "easy"
     elif streak <= 5:
         return "medium"
-    else:
+    elif streak <= 9:
         return "hard"
+    else:
+        return "challenging"
 
 
 def generate_question(streak: int, recent_categories: list[str] | None = None, max_retries: int = 15) -> TriviaQuestion | None:
@@ -795,8 +872,10 @@ def generate_question(streak: int, recent_categories: list[str] | None = None, m
         generators = EASY_GENERATORS
     elif tier == "medium":
         generators = MEDIUM_GENERATORS
-    else:
+    elif tier == "hard":
         generators = HARD_GENERATORS
+    else:
+        generators = CHALLENGING_GENERATORS
 
     weighted = _build_weighted(generators)
     avoid = set(recent_categories[-2:]) if recent_categories else set()

@@ -15,6 +15,7 @@ from discord.ext import commands
 
 from config import TRIVIA_ANSWER_TIMEOUT_SECONDS, TRIVIA_COOLDOWN_SECONDS, TRIVIA_REWARD_PER_QUESTION
 from services.permissions import has_admin_permission
+from services.trivia_image_cache import get_trivia_image
 from services.trivia_questions import TriviaQuestion, generate_question, get_difficulty_tier
 from utils.formatting import JOPACOIN_EMOTE
 from utils.interaction_safety import safe_defer, safe_followup
@@ -22,9 +23,10 @@ from utils.interaction_safety import safe_defer, safe_followup
 logger = logging.getLogger("cama_bot.commands.trivia")
 
 DIFFICULTY_COLORS = {
-    "easy": 0x43A047,    # Green
-    "medium": 0xFFA000,  # Amber
-    "hard": 0xE53935,    # Red
+    "easy": 0x43A047,        # Green
+    "medium": 0xFFA000,      # Amber
+    "hard": 0xE53935,        # Red
+    "challenging": 0x7B1FA2, # Deep purple
 }
 
 OPTION_LABELS = ["A", "B", "C", "D"]
@@ -109,13 +111,27 @@ def _game_over_embed(question: TriviaQuestion | None, question_num: int, streak:
 
     # Streak compliments
     summary = f"Final streak: **{streak}**\nTotal earned: **{jc_earned}** {JOPACOIN_EMOTE}"
-    if streak >= 10:
+    if streak >= 15:
         summary += "\nDota encyclopedia! Incredible run!"
+    elif streak >= 10:
+        summary += "\nYou're a beast!"
     elif streak >= 5:
         summary += "\nImpressive knowledge!"
 
     embed.add_field(name="Game Over", value=summary, inline=False)
     return embed
+
+
+def _prepare_question(embed: discord.Embed, question: TriviaQuestion) -> discord.File | None:
+    """Try to attach a cached image file instead of using a remote URL."""
+    if not question.image_url:
+        return None
+    cached = get_trivia_image(question.image_url)
+    if cached:
+        embed.set_thumbnail(url=f"attachment://{cached.filename}")
+        return cached
+    # Fallback: remote URL already set by _question_embed
+    return None
 
 
 class TriviaView(discord.ui.View):
@@ -191,7 +207,7 @@ class TriviaView(discord.ui.View):
                 self.question, self.question_num, self.session.streak, self.session.total_jc, self.session.user
             )
             try:
-                await interaction.response.edit_message(embed=correct_embed, view=None)
+                await interaction.response.edit_message(embed=correct_embed, view=None, attachments=[])
             except discord.NotFound:
                 pass
 
@@ -218,8 +234,12 @@ class TriviaView(discord.ui.View):
             next_num = self.question_num + 1
             next_view = TriviaView(self.session, next_q, next_num, self.cog)
             next_embed = _question_embed(next_q, next_num, self.session.streak, self.session.total_jc, self.session.user)
+            next_file = _prepare_question(next_embed, next_q)
             try:
-                msg = await interaction.followup.send(embed=next_embed, view=next_view)
+                send_kwargs = {"embed": next_embed, "view": next_view}
+                if next_file:
+                    send_kwargs["file"] = next_file
+                msg = await interaction.followup.send(**send_kwargs)
                 self.session.message = msg
             except discord.HTTPException:
                 logger.exception("Failed to send next trivia question")
@@ -235,7 +255,7 @@ class TriviaView(discord.ui.View):
                 self.question, self.question_num, self.session.streak, self.session.total_jc, False, self.session.user
             )
             try:
-                await interaction.response.edit_message(embed=over_embed, view=None)
+                await interaction.response.edit_message(embed=over_embed, view=None, attachments=[])
             except discord.NotFound:
                 pass
             self.cog._end_session(self.session)
@@ -258,7 +278,7 @@ class TriviaView(discord.ui.View):
         )
         if self.session.message:
             try:
-                await self.session.message.edit(embed=over_embed, view=None)
+                await self.session.message.edit(embed=over_embed, view=None, attachments=[])
             except discord.NotFound:
                 pass
         self.cog._end_session(self.session)
@@ -359,8 +379,12 @@ class TriviaCog(commands.Cog):
             return
 
         embed = _question_embed(question, 1, 0, 0, interaction.user)
+        file = _prepare_question(embed, question)
         view = TriviaView(session, question, 1, self)
-        msg = await safe_followup(interaction, embed=embed, view=view)
+        send_kwargs = {"embed": embed, "view": view}
+        if file:
+            send_kwargs["file"] = file
+        msg = await safe_followup(interaction, **send_kwargs)
         session.message = msg
 
     @trivia.error

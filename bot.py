@@ -397,6 +397,13 @@ async def on_ready():
     except Exception as exc:
         logger.error(f"Failed to sync commands: {exc}", exc_info=True)
 
+    # Warm trivia image cache in background
+    try:
+        from services.trivia_image_cache import warm_cache
+        asyncio.ensure_future(asyncio.to_thread(warm_cache))
+    except Exception as exc:
+        logger.debug(f"Trivia image cache warm failed: {exc}")
+
 
 @bot.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: discord.app_commands.AppCommandError):
