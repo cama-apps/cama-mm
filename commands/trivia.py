@@ -13,7 +13,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from config import TRIVIA_ANSWER_TIMEOUT_SECONDS, TRIVIA_COOLDOWN_SECONDS, TRIVIA_REWARD_PER_QUESTION
+from config import TRIVIA_ANSWER_TIMEOUT_SECONDS, TRIVIA_COOLDOWN_SECONDS
 from services.permissions import has_admin_permission
 from services.trivia_image_cache import get_trivia_image
 from services.trivia_questions import TriviaQuestion, generate_question, get_difficulty_tier
@@ -28,6 +28,22 @@ DIFFICULTY_COLORS = {
     "hard": 0xE53935,        # Red
     "challenging": 0x7B1FA2, # Deep purple
 }
+
+_TIER_BREAKPOINTS = frozenset({3, 6, 10})  # end of easy, medium, hard
+
+
+def _jc_for_streak(streak: int) -> int:
+    """JC earned for reaching this streak (0 or 1).
+
+    +1 JC for completing each tier (easy@3, medium@6, hard@10),
+    then +1 JC every 4 questions in uncapped challenging mode.
+    """
+    if streak in _TIER_BREAKPOINTS:
+        return 1
+    if streak > 10 and (streak - 10) % 4 == 0:
+        return 1
+    return 0
+
 
 OPTION_LABELS = ["A", "B", "C", "D"]
 OPTION_STYLES = [
@@ -73,10 +89,10 @@ def _question_embed(question: TriviaQuestion, question_num: int, streak: int, jc
     return embed
 
 
-def _correct_embed(question: TriviaQuestion, question_num: int, streak: int, jc_earned: int, user: discord.User | discord.Member | None = None) -> discord.Embed:
+def _correct_embed(question: TriviaQuestion, question_num: int, streak: int, jc_earned: int, user: discord.User | discord.Member | None = None, jc_awarded: int = 0) -> discord.Embed:
     """Build the embed shown after a correct answer."""
     embed = discord.Embed(
-        title=f"Question {question_num} — Correct! +{TRIVIA_REWARD_PER_QUESTION} {JOPACOIN_EMOTE}",
+        title=f"Question {question_num} — Correct! +{jc_awarded} {JOPACOIN_EMOTE}",
         description=f"**{OPTION_LABELS[question.correct_index]}.** {question.options[question.correct_index]}",
         color=0x43A047,
     )
@@ -180,20 +196,22 @@ class TriviaView(discord.ui.View):
 
         if is_correct:
             self.session.streak += 1
-            self.session.total_jc += TRIVIA_REWARD_PER_QUESTION
+            jc = _jc_for_streak(self.session.streak)
+            self.session.total_jc += jc
             self.session.recent_categories.append(self.question.category)
 
-            # Award jopacoin
-            try:
-                player_service = self.cog.bot.player_service
-                await asyncio.to_thread(
-                    player_service.adjust_balance,
-                    self.session.user_id,
-                    self.session.guild_id,
-                    TRIVIA_REWARD_PER_QUESTION,
-                )
-            except Exception:
-                logger.exception("Failed to award trivia JC")
+            # Award jopacoin (only when jc > 0)
+            if jc > 0:
+                try:
+                    player_service = self.cog.bot.player_service
+                    await asyncio.to_thread(
+                        player_service.adjust_balance,
+                        self.session.user_id,
+                        self.session.guild_id,
+                        jc,
+                    )
+                except Exception:
+                    logger.exception("Failed to award trivia JC")
 
             # Delete the previous "correct" message if it exists (keep only last 2)
             if self.session.prev_message:
@@ -204,7 +222,7 @@ class TriviaView(discord.ui.View):
 
             # Edit current message to show it was answered correctly
             correct_embed = _correct_embed(
-                self.question, self.question_num, self.session.streak, self.session.total_jc, self.session.user
+                self.question, self.question_num, self.session.streak, self.session.total_jc, self.session.user, jc_awarded=jc
             )
             try:
                 await interaction.response.edit_message(embed=correct_embed, view=None, attachments=[])

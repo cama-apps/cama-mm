@@ -45,6 +45,7 @@ class AbilityData:
     hero_id: int | None
     hero_name: str | None
     damage_type: str | None
+    damage: str | None
     cooldown: str | None
     lore: str | None
     scepter_upgrades: bool
@@ -63,6 +64,8 @@ class ItemData:
     lore: str | None
     neutral_tier: int | None
     icon_url: str | None
+    is_neutral_enhancement: bool
+    ability_special: str | None  # JSON string of bonus descriptions
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,6 +172,7 @@ def load_abilities() -> list[AbilityData]:
             hero_id=a.hero_id,
             hero_name=hero_name,
             damage_type=a.damage_type if a.damage_type else None,
+            damage=a.damage if a.damage and a.damage != "0" else None,
             cooldown=a.cooldown if a.cooldown and a.cooldown != "0" else None,
             lore=a.lore if a.lore else None,
             scepter_upgrades=bool(a.scepter_upgrades),
@@ -196,6 +200,8 @@ def load_items() -> list[ItemData]:
             lore=i.lore if i.lore else None,
             neutral_tier=i.neutral_tier,
             icon_url=item_icon_url(i.icon),
+            is_neutral_enhancement=bool(getattr(i, 'is_neutral_enhancement', False)),
+            ability_special=i.ability_special if i.ability_special else None,
         ))
     return result
 

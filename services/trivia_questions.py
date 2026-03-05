@@ -9,6 +9,8 @@ from __future__ import annotations
 import random
 from dataclasses import dataclass
 
+import json
+
 from services.trivia_data import (
     AbilityData,
     FacetData,
@@ -359,9 +361,10 @@ def gen_move_speed() -> TriviaQuestion | None:
         return None
     chosen = random.sample(heroes, 4)
     speeds = [h.base_movement for h in chosen]
-    if len(set(speeds)) < 3:
-        return None
     fastest = max(chosen, key=lambda h: h.base_movement)
+    # Ensure the fastest speed is unique (no ties)
+    if sum(1 for s in speeds if s == fastest.base_movement) > 1:
+        return None
     distractors = [h.localized_name for h in chosen if h != fastest][:3]
     options, idx = _shuffle_options(fastest.localized_name, distractors)
     return TriviaQuestion(
@@ -404,7 +407,7 @@ def gen_facet_to_hero() -> TriviaQuestion | None:
 def gen_damage_type() -> TriviaQuestion | None:
     """M7: What damage type is this ability?"""
     dmg_types = {"magical": "Magical", "physical": "Physical", "pure": "Pure"}
-    abilities = [a for a in load_abilities() if a.damage_type and a.damage_type.lower() in dmg_types and a.icon_url]
+    abilities = [a for a in load_abilities() if a.damage_type and a.damage_type.lower() in dmg_types and a.icon_url and a.damage]
     if len(abilities) < 4:
         return None
     ability = random.choice(abilities)
@@ -581,11 +584,11 @@ def gen_base_attack_time() -> TriviaQuestion | None:
                 break
         if not found:
             return None
-    # Need unique BATs for a clear answer
     bats = [h.attack_rate for h in chosen]
-    if len(set(bats)) < 2:
-        return None
     lowest = min(chosen, key=lambda h: h.attack_rate)
+    # Ensure the lowest BAT is unique (no ties)
+    if sum(1 for b in bats if b == lowest.attack_rate) > 1:
+        return None
     distractors = [h.localized_name for h in chosen if h != lowest][:3]
     options, idx = _shuffle_options(lowest.localized_name, distractors)
     return TriviaQuestion(
@@ -613,10 +616,11 @@ def gen_attribute_gain() -> TriviaQuestion | None:
         return None
     chosen = random.sample(heroes, 4)
     gains = [getattr(h, gain_field) for h in chosen]
-    if len(set(gains)) < 2:
-        return None
     highest = max(chosen, key=lambda h: getattr(h, gain_field))
     gain_val = getattr(highest, gain_field)
+    # Ensure the highest gain is unique (no ties)
+    if sum(1 for g in gains if g == gain_val) > 1:
+        return None
     distractors = [h.localized_name for h in chosen if h != highest][:3]
     options, idx = _shuffle_options(highest.localized_name, distractors)
     return TriviaQuestion(
@@ -776,6 +780,42 @@ def gen_item_by_icon() -> TriviaQuestion | None:
     )
 
 
+def gen_enchantment_effect() -> TriviaQuestion | None:
+    """M5: Which neutral item enchantment provides these bonuses?"""
+    enchantments = [
+        i for i in load_items()
+        if i.is_neutral_enhancement and i.neutral_tier and i.ability_special
+    ]
+    if len(enchantments) < 4:
+        return None
+    chosen = random.choice(enchantments)
+    try:
+        specials = json.loads(chosen.ability_special)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    footers = [
+        f"{s.get('header', '')}{s.get('footer', '')}"
+        for s in specials if s.get('footer')
+    ]
+    if not footers:
+        return None
+    bonus_text = ", ".join(footers)
+    pool = [e.localized_name for e in enchantments if e.localized_name != chosen.localized_name]
+    distractors = _pick_distractors(chosen.localized_name, pool)
+    if not distractors:
+        return None
+    options, idx = _shuffle_options(chosen.localized_name, distractors)
+    return TriviaQuestion(
+        text=f"Which neutral item enchantment provides these bonuses: {bonus_text}?",
+        options=options,
+        correct_index=idx,
+        difficulty="medium",
+        image_url=None,
+        category="enchantment_effect",
+        explanation=f"{chosen.localized_name} (Tier {chosen.neutral_tier}): {bonus_text}",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Generator registry + selection
 # ---------------------------------------------------------------------------
@@ -797,6 +837,7 @@ MEDIUM_GENERATORS = [
     gen_facet_to_hero,
     gen_hero_by_hype,
     gen_innate_ability,
+    gen_enchantment_effect,
 ]
 
 HARD_GENERATORS = [

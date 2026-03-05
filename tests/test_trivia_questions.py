@@ -38,6 +38,7 @@ from services.trivia_questions import (
     gen_base_armor_compare,
     gen_innate_ability,
     gen_item_by_icon,
+    gen_enchantment_effect,
 )
 
 
@@ -170,6 +171,13 @@ class TestMediumGenerators:
         _validate_question(q)
         assert q.difficulty == "medium"
         assert q.image_url is not None
+
+    def test_enchantment_effect(self):
+        q = gen_enchantment_effect()
+        _validate_question(q)
+        assert q.difficulty == "medium"
+        assert q.category == "enchantment_effect"
+        assert "bonuses" in q.text
 
 
 class TestHardGenerators:
@@ -379,6 +387,6 @@ class TestGenerateQuestion:
 
     def test_all_generators_registered(self):
         assert len(EASY_GENERATORS) == 9
-        assert len(MEDIUM_GENERATORS) == 4
+        assert len(MEDIUM_GENERATORS) == 5
         assert len(HARD_GENERATORS) == 10
         assert len(CHALLENGING_GENERATORS) == 3
