@@ -17,6 +17,7 @@ from config import TRIVIA_ANSWER_TIMEOUT_SECONDS, TRIVIA_COOLDOWN_SECONDS
 from services.permissions import has_admin_permission
 from services.trivia_image_cache import get_trivia_image
 from services.trivia_questions import TriviaQuestion, generate_question, get_difficulty_tier
+from commands.checks import require_gamba_channel
 from utils.formatting import JOPACOIN_EMOTE
 from utils.interaction_safety import safe_defer, safe_followup
 
@@ -338,6 +339,9 @@ class TriviaCog(commands.Cog):
     @app_commands.command(name="trivia", description="Test your Dota 2 knowledge! Earn 1 JC per correct answer.")
     @app_commands.checks.cooldown(1, 5.0)  # Rate limit: 1 per 5 seconds
     async def trivia(self, interaction: discord.Interaction):
+        if not await require_gamba_channel(interaction):
+            return
+
         guild_id = interaction.guild.id if interaction.guild else 0
         user_id = interaction.user.id
         key = (user_id, guild_id)

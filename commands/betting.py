@@ -53,6 +53,7 @@ from services.match_service import MatchService
 from services.permissions import has_admin_permission
 from services.player_service import PlayerService
 from services.tip_service import TipService
+from commands.checks import require_gamba_channel
 from utils.formatting import JOPACOIN_EMOTE, TOMBSTONE_EMOJI, format_betting_display
 from utils.interaction_safety import safe_defer
 from utils.neon_helpers import get_neon_service, send_neon_result
@@ -1803,6 +1804,9 @@ class BettingCommands(commands.Cog):
 
     @app_commands.command(name="gamba", description="Spin the Wheel of Fortune! (once per day)")
     async def gamba(self, interaction: discord.Interaction):
+        if not await require_gamba_channel(interaction):
+            return
+
         user_id = interaction.user.id
         guild_id = interaction.guild.id if interaction.guild else None
         now = time.time()
@@ -2969,6 +2973,9 @@ class BettingCommands(commands.Cog):
     @app_commands.command(name="badgamba", description="Test spin the bankruptcy wheel (visual only, no effects)")
     async def badgamba(self, interaction: discord.Interaction):
         """Spin the bankruptcy penalty wheel for testing - no balance or penalty changes."""
+        if not await require_gamba_channel(interaction):
+            return
+
         user_id = interaction.user.id
         guild_id = interaction.guild.id if interaction.guild else None
 
@@ -3082,6 +3089,9 @@ class BettingCommands(commands.Cog):
     @app_commands.command(name="ashfansgamba", description="Test spin the golden wheel (visual only, no effects)")
     async def ashfansgamba(self, interaction: discord.Interaction):
         """Spin the golden wheel for testing - no balance changes applied."""
+        if not await require_gamba_channel(interaction):
+            return
+
         user_id = interaction.user.id
         guild_id = interaction.guild.id if interaction.guild else None
 
@@ -4416,6 +4426,9 @@ class BettingCommands(commands.Cog):
         description="Rise against the Wheel of Fortune! (Requires recent bankruptcy or penalty games)",
     )
     async def incite(self, interaction: discord.Interaction):
+        if not await require_gamba_channel(interaction):
+            return
+
         user_id = interaction.user.id
         guild_id = interaction.guild.id if interaction.guild else None
 

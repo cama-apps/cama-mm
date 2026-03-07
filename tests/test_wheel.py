@@ -29,6 +29,7 @@ async def test_wheel_requires_registration():
     player_service.get_player.return_value = None
 
     interaction = MagicMock()
+    interaction.channel.name = "gamba"
     interaction.guild = MagicMock()
     interaction.guild.id = 123
     interaction.user.id = 456
@@ -69,6 +70,7 @@ async def test_wheel_cooldown_expired_allows_spin():
     message.edit = AsyncMock()
 
     interaction = MagicMock()
+    interaction.channel.name = "gamba"
     interaction.guild = MagicMock()
     interaction.guild.id = 123
     interaction.user.id = 1001
@@ -124,6 +126,7 @@ async def test_wheel_positive_applies_garnishment():
     message.edit = AsyncMock()
 
     interaction = MagicMock()
+    interaction.channel.name = "gamba"
     interaction.guild = MagicMock()
     interaction.guild.id = 123
     interaction.user.id = 1002
@@ -174,6 +177,7 @@ async def test_wheel_positive_no_debt_adds_directly():
     message.edit = AsyncMock()
 
     interaction = MagicMock()
+    interaction.channel.name = "gamba"
     interaction.guild = MagicMock()
     interaction.guild.id = 123
     interaction.user.id = 1003
@@ -219,6 +223,7 @@ async def test_wheel_bankrupt_subtracts_balance():
     message.edit = AsyncMock()
 
     interaction = MagicMock()
+    interaction.channel.name = "gamba"
     interaction.guild = MagicMock()
     interaction.guild.id = 123
     interaction.user.id = 1004
@@ -266,6 +271,7 @@ async def test_wheel_bankrupt_credits_nonprofit_fund():
     message.edit = AsyncMock()
 
     interaction = MagicMock()
+    interaction.channel.name = "gamba"
     interaction.guild = MagicMock()
     interaction.guild.id = 123
     interaction.user.id = 1004
@@ -319,6 +325,7 @@ async def test_wheel_bankrupt_ignores_max_debt():
     message.edit = AsyncMock()
 
     interaction = MagicMock()
+    interaction.channel.name = "gamba"
     interaction.guild = MagicMock()
     interaction.guild.id = 123
     interaction.user.id = 1005
@@ -363,6 +370,7 @@ async def test_wheel_lose_turn_no_change():
     message.edit = AsyncMock()
 
     interaction = MagicMock()
+    interaction.channel.name = "gamba"
     interaction.guild = MagicMock()
     interaction.guild.id = 123
     interaction.user.id = 1006
@@ -407,6 +415,7 @@ async def test_wheel_jackpot_result():
     message.edit = AsyncMock()
 
     interaction = MagicMock()
+    interaction.channel.name = "gamba"
     interaction.guild = MagicMock()
     interaction.guild.id = 123
     interaction.user.id = 1007
@@ -525,6 +534,7 @@ async def test_wheel_animation_uses_gif():
     message.edit = AsyncMock()
 
     interaction = MagicMock()
+    interaction.channel.name = "gamba"
     interaction.guild = MagicMock()
     interaction.guild.id = 123
     interaction.user.id = 1008
@@ -571,6 +581,7 @@ async def test_wheel_updates_cooldown_in_database():
     message.edit = AsyncMock()
 
     interaction = MagicMock()
+    interaction.channel.name = "gamba"
     interaction.guild = MagicMock()
     interaction.guild.id = 123
     interaction.user.id = 1009
@@ -622,6 +633,7 @@ async def test_wheel_admin_bypasses_cooldown():
     message.edit = AsyncMock()
 
     interaction = MagicMock()
+    interaction.channel.name = "gamba"
     interaction.guild = MagicMock()
     interaction.guild.id = 123
     interaction.user.id = 789
@@ -688,6 +700,7 @@ async def test_wheel_red_shell_steals_from_player_above():
     message.edit = AsyncMock()
 
     interaction = MagicMock()
+    interaction.channel.name = "gamba"
     interaction.guild = MagicMock()
     interaction.guild.id = 123
     interaction.guild.get_member = MagicMock(return_value=MagicMock(mention="@RicherPlayer"))
@@ -747,6 +760,7 @@ async def test_wheel_red_shell_misses_when_first_place():
     message.edit = AsyncMock()
 
     interaction = MagicMock()
+    interaction.channel.name = "gamba"
     interaction.guild = MagicMock()
     interaction.guild.id = 123
     interaction.user.id = 1011
@@ -814,6 +828,7 @@ async def test_wheel_blue_shell_steals_from_richest():
     message.edit = AsyncMock()
 
     interaction = MagicMock()
+    interaction.channel.name = "gamba"
     interaction.guild = MagicMock()
     interaction.guild.id = 123
     interaction.guild.get_member = MagicMock(return_value=MagicMock(mention="@RichestPlayer"))
@@ -896,6 +911,7 @@ async def test_wheel_blue_shell_self_hit_when_richest():
     message.edit = AsyncMock()
 
     interaction = MagicMock()
+    interaction.channel.name = "gamba"
     interaction.guild = MagicMock()
     interaction.guild.id = 123
     interaction.user.id = 1013  # Same as richest
@@ -977,6 +993,7 @@ async def test_wheel_lightning_bolt_taxes_all_players():
     message.edit = AsyncMock()
 
     interaction = MagicMock()
+    interaction.channel.name = "gamba"
     interaction.guild = MagicMock()
     interaction.guild.id = 123
     interaction.user.id = 2001
@@ -1059,6 +1076,7 @@ async def test_wheel_lightning_bolt_skips_zero_balance():
     message.edit = AsyncMock()
 
     interaction = MagicMock()
+    interaction.channel.name = "gamba"
     interaction.guild = MagicMock()
     interaction.guild.id = 123
     interaction.user.id = 3001
@@ -1135,6 +1153,7 @@ async def test_wheel_lightning_bolt_spinner_also_taxed():
     message.edit = AsyncMock()
 
     interaction = MagicMock()
+    interaction.channel.name = "gamba"
     interaction.guild = MagicMock()
     interaction.guild.id = 123
     interaction.user.id = spinner_id
@@ -1425,6 +1444,7 @@ async def test_wheel_negative_balance_uses_bankrupt_wheel():
     message.edit = AsyncMock()
 
     interaction = MagicMock()
+    interaction.channel.name = "gamba"
     interaction.guild = MagicMock()
     interaction.guild.id = 123
     interaction.user.id = 1099
