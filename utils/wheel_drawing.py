@@ -717,7 +717,9 @@ def compute_live_golden_wedges(
         overextended_value = -1
 
     return [
-        (label, overextended_value if (isinstance(v, int) and v < 0) else v, color)
+        (str(overextended_value) if (isinstance(v, int) and v < 0) else label,
+         overextended_value if (isinstance(v, int) and v < 0) else v,
+         color)
         for label, v, color in _BASE_GOLDEN_WHEEL_WEDGES
     ]
 
