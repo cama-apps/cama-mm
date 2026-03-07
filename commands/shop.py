@@ -1317,6 +1317,199 @@ class ShopCommands(commands.Cog):
         # Ephemeral response (private)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
+    @app_commands.command(name="manashop", description="Buy exclusive items from your mana color's shop")
+    @app_commands.describe(
+        item="The mana item to purchase",
+        target="Target player (for Guardian Angel only)",
+    )
+    @app_commands.choices(item=[
+        app_commands.Choice(name="Pyroclasm (Red, 100 JC) - Destroy 10-30 JC from 3 random players", value="pyroclasm"),
+        app_commands.Choice(name="Mana Shield (Blue, 200 JC) - Next loss today halved", value="mana_shield"),
+        app_commands.Choice(name="Regrowth (Green, 100 JC) - Recover 25% of today's losses", value="regrowth"),
+        app_commands.Choice(name="Guardian Angel (Plains, 300 JC) - Protect a player from BANKRUPT", value="guardian_angel"),
+        app_commands.Choice(name="Soul Harvest (Swamp, 75 JC) - Drain 1 JC from all positive players", value="soul_harvest"),
+    ])
+    @app_commands.checks.cooldown(1, 10)
+    async def manashop(
+        self,
+        interaction: discord.Interaction,
+        item: app_commands.Choice[str],
+        target: discord.Member = None,
+    ):
+        if not await safe_defer(interaction, ephemeral=False):
+            return
+
+        guild_id = interaction.guild.id if interaction.guild else None
+        user_id = interaction.user.id
+
+        # Check registration
+        player = await asyncio.to_thread(self.player_service.get_player, user_id, guild_id)
+        if not player:
+            await interaction.followup.send("You need to `/register` first.", ephemeral=True)
+            return
+
+        # Get mana effects
+        mana_effects_service = getattr(self.bot, "mana_effects_service", None)
+        if not mana_effects_service:
+            await interaction.followup.send("Mana system not available.", ephemeral=True)
+            return
+        effects = await asyncio.to_thread(mana_effects_service.get_effects, user_id, guild_id)
+        if not effects.color:
+            await interaction.followup.send("You have no active mana today. Use `/mana` first!", ephemeral=True)
+            return
+
+        # Item definitions: {item_key: (required_color, cost, display_name)}
+        MANA_ITEMS = {
+            "pyroclasm": ("Red", 100, "Pyroclasm"),
+            "mana_shield": ("Blue", 200, "Mana Shield"),
+            "regrowth": ("Green", 100, "Regrowth"),
+            "guardian_angel": ("White", 300, "Guardian Angel"),
+            "soul_harvest": ("Black", 75, "Soul Harvest"),
+        }
+
+        item_key = item.value
+        if item_key not in MANA_ITEMS:
+            await interaction.followup.send("Unknown item.", ephemeral=True)
+            return
+
+        required_color, cost, display_name = MANA_ITEMS[item_key]
+        if effects.color != required_color:
+            color_to_land = {"Red": "Mountain", "Blue": "Island", "Green": "Forest", "White": "Plains", "Black": "Swamp"}
+            await interaction.followup.send(
+                f"**{display_name}** requires **{required_color}** mana ({color_to_land.get(required_color, '?')}). "
+                f"Your current mana is **{effects.color}**.",
+                ephemeral=True,
+            )
+            return
+
+        # Check balance
+        balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
+        if balance < cost:
+            await interaction.followup.send(
+                f"You need {cost} {JOPACOIN_EMOTE} for {display_name}. You have {balance}.",
+                ephemeral=True,
+            )
+            return
+
+        # Deduct cost
+        await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, -cost)
+
+        # Execute item effect
+        if item_key == "pyroclasm":
+            # Destroy 10-30 JC from 3 random players (JC destroyed, not transferred)
+            import random as _rand
+            all_players = await asyncio.to_thread(
+                functools.partial(self.player_service.get_leaderboard, guild_id, limit=9999)
+            )
+            eligible = [p for p in all_players if p.discord_id != user_id and p.jopacoin_balance > 0]
+            targets = _rand.sample(eligible, min(3, len(eligible)))
+            total_destroyed = 0
+            victim_lines = []
+            for t in targets:
+                destroy_amt = _rand.randint(10, 30)
+                destroy_amt = min(destroy_amt, t.jopacoin_balance)
+                if destroy_amt > 0:
+                    await asyncio.to_thread(self.player_service.adjust_balance, t.discord_id, guild_id, -destroy_amt)
+                    total_destroyed += destroy_amt
+                    victim_lines.append(f"  - {t.name}: -{destroy_amt} {JOPACOIN_EMOTE}")
+            victims_text = "\n".join(victim_lines) if victim_lines else "  No eligible targets."
+            await interaction.followup.send(
+                f"⛰️🔥 **PYROCLASM** — {interaction.user.mention} unleashes chaos!\n"
+                f"{victims_text}\n"
+                f"**{total_destroyed} {JOPACOIN_EMOTE} destroyed** (cost: {cost} {JOPACOIN_EMOTE})"
+            )
+
+        elif item_key == "mana_shield":
+            # Store shield state (expires at 4 AM PST)
+            import time as _time
+            from services.mana_service import get_today_pst
+            # Shield persists until next reset (4 AM PST)
+            # For simplicity, store in mana_shop_items table
+            db = getattr(self.bot, "db", None)
+            if db:
+                now_ts = int(_time.time())
+                await asyncio.to_thread(
+                    lambda: db.execute_write(
+                        "INSERT INTO mana_shop_items (discord_id, guild_id, item_type, purchased_at, data) VALUES (?, ?, ?, ?, ?)",
+                        (user_id, interaction.guild.id if interaction.guild else 0, "mana_shield", now_ts, get_today_pst()),
+                    )
+                )
+            new_balance = balance - cost
+            await interaction.followup.send(
+                f"🏝️🛡️ **MANA SHIELD** — {interaction.user.mention}'s next JC loss today is reduced by 50%!\n"
+                f"Expires at 4 AM PST. (cost: {cost} {JOPACOIN_EMOTE}, balance: {new_balance})"
+            )
+
+        elif item_key == "regrowth":
+            # Recover 25% of JC lost today (capped at 400 JC)
+            from services.mana_service import get_today_pst
+            db = getattr(self.bot, "db", None)
+            recovery = 0
+            if db:
+                today = get_today_pst()
+                row = await asyncio.to_thread(
+                    lambda: db.execute_read(
+                        "SELECT total_lost FROM mana_daily_losses WHERE discord_id=? AND guild_id=? AND loss_date=?",
+                        (user_id, interaction.guild.id if interaction.guild else 0, today),
+                    )
+                )
+                total_lost = row[0]["total_lost"] if row else 0
+                recovery = min(400, int(total_lost * 0.25))
+            if recovery > 0:
+                await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, recovery)
+            new_balance = balance - cost + recovery
+            await interaction.followup.send(
+                f"🌲💚 **REGROWTH** — {interaction.user.mention} recovers {recovery} {JOPACOIN_EMOTE}!\n"
+                f"(25% of today's losses, capped at 400. Cost: {cost} {JOPACOIN_EMOTE}, balance: {new_balance})"
+            )
+
+        elif item_key == "guardian_angel":
+            if not target:
+                # Refund
+                await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, cost)
+                await interaction.followup.send(
+                    "Guardian Angel requires a `target` player. Usage: `/manashop item:Guardian Angel target:@player`",
+                    ephemeral=True,
+                )
+                return
+            import time as _time
+            db = getattr(self.bot, "db", None)
+            if db:
+                now_ts = int(_time.time())
+                expires = now_ts + 7 * 24 * 3600  # 7 days
+                await asyncio.to_thread(
+                    lambda: db.execute_write(
+                        "INSERT INTO mana_shop_items (discord_id, guild_id, item_type, target_id, purchased_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
+                        (user_id, interaction.guild.id if interaction.guild else 0, "guardian_angel", target.id, now_ts, expires),
+                    )
+                )
+            new_balance = balance - cost
+            await interaction.followup.send(
+                f"🌾👼 **GUARDIAN ANGEL** — {interaction.user.mention} protects {target.mention}!\n"
+                f"Their next BANKRUPT spin will convert to LOSE. Expires in 7 days.\n"
+                f"(cost: {cost} {JOPACOIN_EMOTE}, balance: {new_balance})"
+            )
+
+        elif item_key == "soul_harvest":
+            # Drain 1 JC from every positive-balance player
+            all_players = await asyncio.to_thread(
+                functools.partial(self.player_service.get_leaderboard, guild_id, limit=9999)
+            )
+            eligible = [p for p in all_players if p.discord_id != user_id and p.jopacoin_balance > 0]
+            total_drained = 0
+            for p in eligible:
+                await asyncio.to_thread(self.player_service.adjust_balance, p.discord_id, guild_id, -1)
+                total_drained += 1
+            if total_drained > 0:
+                await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, total_drained)
+            new_balance = balance - cost + total_drained
+            await interaction.followup.send(
+                f"🌿💀 **SOUL HARVEST** — {interaction.user.mention} drains the living!\n"
+                f"Drained **1 {JOPACOIN_EMOTE}** from **{total_drained}** players. "
+                f"Gained **{total_drained} {JOPACOIN_EMOTE}**.\n"
+                f"(cost: {cost} {JOPACOIN_EMOTE}, balance: {new_balance})"
+            )
+
 
 async def setup(bot: commands.Bot):
     player_service = getattr(bot, "player_service", None)

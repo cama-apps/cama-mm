@@ -67,6 +67,7 @@ from utils.wheel_drawing import (
     get_wedge_at_index_for_player,
     compute_live_golden_wedges,
     apply_war_effects,
+    apply_mana_wedge,
 )
 
 # 1% chance for the wheel to explode
@@ -414,6 +415,38 @@ class DiscoverView(discord.ui.View):
                 f"You chose **{label}**!", ephemeral=True
             )
         return callback
+
+
+class ScryingView(discord.ui.View):
+    """Blue mana scrying: choose between two wheel outcomes."""
+
+    def __init__(self, option_a: str, option_b: str, user_id: int, **kwargs):
+        super().__init__(**kwargs)
+        self.option_a = option_a
+        self.option_b = option_b
+        self.user_id = user_id
+        self.chosen: str | None = None
+        # Update button labels
+        self.children[0].label = f"A: {option_a}"
+        self.children[1].label = f"B: {option_b}"
+
+    @discord.ui.button(label="A", style=discord.ButtonStyle.primary)
+    async def choose_a(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("This isn't your scrying!", ephemeral=True)
+            return
+        self.chosen = "A"
+        await interaction.response.defer()
+        self.stop()
+
+    @discord.ui.button(label="B", style=discord.ButtonStyle.primary)
+    async def choose_b(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("This isn't your scrying!", ephemeral=True)
+            return
+        self.chosen = "B"
+        await interaction.response.defer()
+        self.stop()
 
 
 class BettingCommands(commands.Cog):
@@ -967,6 +1000,55 @@ class BettingCommands(commands.Cog):
                     f"*So close to the top — and yet, so far.*"
                 )
 
+        # --- Mana bonus wedge embeds ---
+        elif value == "ERUPTION":
+            title = "⛰️🔥 ERUPTION!"
+            color = discord.Color.from_str("#ff4500")
+            description = (
+                f"**ERUPTION**\n\n"
+                f"The Mountain erupts! You gain **2x** the last spinner's result.\n\n"
+                f"*Red mana burns bright.*"
+            )
+
+        elif value == "FROZEN_ASSETS":
+            title = "🏝️❄️ FROZEN ASSETS"
+            color = discord.Color.from_str("#1e90ff")
+            description = (
+                f"**FROZEN**\n\n"
+                f"Your assets are frozen. Win 0 now, but your next gamba "
+                f"is guaranteed to land on a 50+ JC wedge.\n\n"
+                f"*The Island remembers.*"
+            )
+
+        elif value == "OVERGROWTH":
+            title = "🌲🌿 OVERGROWTH!"
+            color = discord.Color.from_str("#228b22")
+            description = (
+                f"**OVERGROWTH**\n\n"
+                f"The Forest rewards consistency. You earn 10 JC per game played this week.\n\n"
+                f"*Slow and steady wins the race.*"
+            )
+
+        elif value == "SANCTUARY":
+            title = "🌾✨ SANCTUARY"
+            color = discord.Color.from_str("#f5f5dc")
+            description = (
+                f"**SANCTUARY**\n\n"
+                f"A blessing radiates outward. Win 0, but all players who spin "
+                f"the wheel in the next 24 hours get +5 JC added to their result.\n\n"
+                f"*The Plains protect all.*"
+            )
+
+        elif value == "DECAY":
+            title = "🌿💀 DECAY!"
+            color = discord.Color.from_str("#4b0082")
+            description = (
+                f"**DECAY**\n\n"
+                f"Rot spreads to the wealthy. The top 3 wealthiest lose 40 JC each, "
+                f"rank #4 loses 50 JC. You consume the remains.\n\n"
+                f"*The Swamp claims what it is owed.*"
+            )
+
         elif isinstance(value, int) and value > 0:
             # Win
             if is_bankrupt and value == 1:
@@ -1120,6 +1202,7 @@ class BettingCommands(commands.Cog):
             app_commands.Choice(name="2x", value=2),
             app_commands.Choice(name="3x", value=3),
             app_commands.Choice(name="5x", value=5),
+            app_commands.Choice(name="10x", value=10),
         ],
     )
     @app_commands.autocomplete(match=match_autocomplete)
@@ -1209,6 +1292,25 @@ class BettingCommands(commands.Cog):
 
         # Unified betting through BettingService (works for both shuffle and draft modes)
         lev = leverage.value if leverage else 1
+
+        # Red mana: unlock 10x leverage
+        if lev == 10:
+            _mana_fx = getattr(self.bot, "mana_effects_service", None)
+            _has_10x = False
+            if _mana_fx:
+                try:
+                    from domain.models.mana_effects import ManaEffects as _MEBet
+                    _bet_effects = await asyncio.to_thread(_mana_fx.get_effects, user_id, guild_id)
+                    if isinstance(_bet_effects, _MEBet):
+                        _has_10x = _bet_effects.red_10x_leverage
+                except Exception:
+                    pass
+            if not _has_10x:
+                await interaction.followup.send(
+                    "❌ 10x leverage is exclusive to **Red mana (Mountain)** players!", ephemeral=True
+                )
+                return
+
         effective_bet = amount * lev
 
         try:
@@ -1908,8 +2010,117 @@ class BettingCommands(commands.Cog):
                 _active_war_id = _active_war_state["war_id"]
                 wedges = apply_war_effects(wedges, _active_war_state)
 
-        result_idx = random.randint(0, len(wedges) - 1)
-        result_wedge = wedges[result_idx % len(wedges)]
+        # Mana effects
+        mana_effects_service = getattr(self.bot, "mana_effects_service", None)
+        effects = None
+        if mana_effects_service:
+            try:
+                _fx = await asyncio.to_thread(mana_effects_service.get_effects, user_id, guild_id)
+                # Only use effects if it's a real ManaEffects object with a color
+                from domain.models.mana_effects import ManaEffects as _ManaEffectsType
+                if isinstance(_fx, _ManaEffectsType):
+                    effects = _fx
+            except Exception:
+                effects = None
+
+        # Green variance compression
+        if effects and effects.color == "Green" and not is_golden and not is_eligible_for_bad_gamba:
+            compressed = []
+            for label, value, color in wedges:
+                if isinstance(value, int):
+                    if value < effects.green_bankrupt_penalty:
+                        compressed.append((str(effects.green_bankrupt_penalty), effects.green_bankrupt_penalty, color))
+                    elif value > effects.green_max_wheel_win:
+                        compressed.append((str(effects.green_max_wheel_win), effects.green_max_wheel_win, color))
+                    else:
+                        compressed.append((label, value, color))
+                else:
+                    compressed.append((label, value, color))
+            wedges = compressed
+
+        # Plains max wheel win cap
+        if effects and effects.color == "White" and effects.plains_max_wheel_win is not None and not is_golden and not is_eligible_for_bad_gamba:
+            capped = []
+            for label, value, color in wedges:
+                if isinstance(value, int) and value > effects.plains_max_wheel_win:
+                    capped.append((str(effects.plains_max_wheel_win), effects.plains_max_wheel_win, color))
+                else:
+                    capped.append((label, value, color))
+            wedges = capped
+
+        # Mana bonus wedge: replace one generic wedge with color-specific bonus
+        if effects and effects.color and not is_golden and not is_eligible_for_bad_gamba:
+            wedges = apply_mana_wedge(wedges, effects.color)
+
+        # Blue Gamba Scrying: show 2 outcomes, player picks
+        _scrying_active = effects and effects.color == "Blue" and effects.blue_gamba_scrying and not is_golden and not is_eligible_for_bad_gamba
+        if _scrying_active:
+            idx_a = random.randint(0, len(wedges) - 1)
+            idx_b = random.randint(0, len(wedges) - 1)
+            while idx_b == idx_a and len(wedges) > 1:
+                idx_b = random.randint(0, len(wedges) - 1)
+            wedge_a = wedges[idx_a]
+            wedge_b = wedges[idx_b]
+
+            # Defer and present choice
+            await interaction.response.defer()
+
+            def _wedge_display(w):
+                label, val, _ = w
+                if isinstance(val, int):
+                    return f"{'+' if val > 0 else ''}{val} JC" if val != 0 else "LOSE (0 JC)"
+                return str(label)
+
+            scry_view = ScryingView(
+                option_a=_wedge_display(wedge_a),
+                option_b=_wedge_display(wedge_b),
+                user_id=user_id,
+                timeout=30.0,
+            )
+            scry_embed = discord.Embed(
+                title="\U0001f3dd\ufe0f MANA SCRYING",
+                description=(
+                    f"\U0001f52e {interaction.user.mention}, the Island reveals two fates:\n\n"
+                    f"**A:** {_wedge_display(wedge_a)}\n"
+                    f"**B:** {_wedge_display(wedge_b)}\n\n"
+                    f"Choose wisely. *(Blue mana: winnings reduced by 25%)*"
+                ),
+                color=discord.Color.blue(),
+            )
+            scry_msg = await interaction.followup.send(embed=scry_embed, view=scry_view, wait=True)
+            await scry_view.wait()
+
+            if scry_view.chosen == "A":
+                result_idx = idx_a
+                result_wedge = wedge_a
+            elif scry_view.chosen == "B":
+                result_idx = idx_b
+                result_wedge = wedge_b
+            else:
+                # Timeout: random pick
+                result_idx = random.choice([idx_a, idx_b])
+                result_wedge = wedges[result_idx]
+
+            # Clean up scrying message
+            try:
+                await scry_msg.delete()
+            except Exception:
+                pass
+
+            # Skip the normal defer (already deferred above)
+            _scrying_deferred = True
+        else:
+            _scrying_deferred = False
+
+        if not _scrying_active:
+            result_idx = random.randint(0, len(wedges) - 1)
+            result_wedge = wedges[result_idx % len(wedges)]
+
+        # Plains Guardian Aura: BANKRUPT -> LOSE
+        _guardian_activated = False
+        if effects and effects.plains_guardian_aura and isinstance(result_wedge[1], int) and result_wedge[1] < 0:
+            result_wedge = ("LOSE", 0, "#4a4a4a")
+            _guardian_activated = True
 
         # Consume war spin if active
         if _active_war_id and _rebellion_svc_gamba:
@@ -1918,7 +2129,8 @@ class BettingCommands(commands.Cog):
             )
 
         # Defer first - GIF generation can take a few seconds
-        await interaction.response.defer()
+        if not _scrying_deferred:
+            await interaction.response.defer()
 
         # Generate the complete animation GIF (plays once, ~20 seconds)
         user_display = interaction.user.name
@@ -2158,6 +2370,120 @@ class BettingCommands(commands.Cog):
                 self.player_service.set_wheel_pardon, user_id, guild_id, 1
             )
             # No balance change
+
+        # --- Mana bonus wedge outcomes ---
+        elif result_value == "ERUPTION":
+            # Red: Win 2x what previous spinner won (or 50 JC fallback)
+            last_spin = await asyncio.to_thread(
+                self.player_service.get_last_normal_wheel_spin, guild_id
+            )
+            eruption_amount = 50  # fallback
+            if last_spin and isinstance(last_spin.get("result"), int):
+                eruption_amount = abs(last_spin["result"]) * 2
+                if eruption_amount == 0:
+                    eruption_amount = 50
+            garnishment_service = getattr(self.bot, "garnishment_service", None)
+            if garnishment_service and new_balance < 0:
+                _res = await asyncio.to_thread(
+                    garnishment_service.add_income, user_id, eruption_amount, guild_id
+                )
+                garnished_amount = _res.get("garnished", 0)
+                new_balance = _res.get("new_balance", new_balance + eruption_amount)
+            else:
+                await asyncio.to_thread(
+                    self.player_service.adjust_balance, user_id, guild_id, eruption_amount
+                )
+                new_balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
+
+        elif result_value == "FROZEN_ASSETS":
+            # Blue: Win 0 now, but next gamba guaranteed 50+ wedge (stored as pardon-like token)
+            # For simplicity, store a "frozen_assets" flag in mana_shop_items
+            db = getattr(self.bot, "db", None)
+            if db:
+                import time as _time_fa
+                await asyncio.to_thread(
+                    lambda: db.execute_write(
+                        "INSERT INTO mana_shop_items (discord_id, guild_id, item_type, purchased_at, data) VALUES (?, ?, ?, ?, ?)",
+                        (user_id, interaction.guild.id if interaction.guild else 0, "frozen_assets", int(_time_fa.time()), "pending"),
+                    )
+                )
+            # No balance change
+
+        elif result_value == "OVERGROWTH":
+            # Green: Win 10 JC per game played this week
+            player_obj = await asyncio.to_thread(self.player_service.get_player, user_id, guild_id)
+            games_this_week = 0
+            if player_obj:
+                import time as _time_og
+                week_ago = int(_time_og.time()) - 7 * 24 * 3600
+                try:
+                    recent = await asyncio.to_thread(
+                        functools.partial(self.player_service.get_recent_matches, user_id, guild_id, since=week_ago)
+                    )
+                    games_this_week = len(recent) if recent else 0
+                except Exception:
+                    games_this_week = max(1, (player_obj.wins + player_obj.losses) // 10)
+            overgrowth_amount = max(10, games_this_week * 10)  # min 10 JC
+            # Apply green gain cap
+            if effects and effects.green_gain_cap is not None:
+                overgrowth_amount = min(overgrowth_amount, effects.green_gain_cap)
+            garnishment_service = getattr(self.bot, "garnishment_service", None)
+            if garnishment_service and new_balance < 0:
+                _res = await asyncio.to_thread(
+                    garnishment_service.add_income, user_id, overgrowth_amount, guild_id
+                )
+                garnished_amount = _res.get("garnished", 0)
+                new_balance = _res.get("new_balance", new_balance + overgrowth_amount)
+            else:
+                await asyncio.to_thread(
+                    self.player_service.adjust_balance, user_id, guild_id, overgrowth_amount
+                )
+                new_balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
+
+        elif result_value == "SANCTUARY":
+            # White: Win 0, but all spinners in next 24h get +5 JC
+            db = getattr(self.bot, "db", None)
+            if db:
+                import time as _time_sc
+                now_ts = int(_time_sc.time())
+                expires = now_ts + 24 * 3600
+                await asyncio.to_thread(
+                    lambda: db.execute_write(
+                        "INSERT INTO mana_shop_items (discord_id, guild_id, item_type, purchased_at, expires_at, data) VALUES (?, ?, ?, ?, ?, ?)",
+                        (user_id, interaction.guild.id if interaction.guild else 0, "sanctuary", now_ts, expires, "active"),
+                    )
+                )
+            # No balance change
+
+        elif result_value == "DECAY":
+            # Black: Top 3 wealthiest lose 40 JC each, #4 loses 50, spinner gains total
+            top_4 = await asyncio.to_thread(
+                functools.partial(self.player_service.get_leaderboard, guild_id, limit=4)
+            )
+            decay_total = 0
+            for i, p in enumerate(top_4):
+                if p.discord_id == user_id:
+                    continue
+                loss = 50 if i == 3 else 40
+                loss = min(loss, max(0, p.jopacoin_balance))
+                if loss > 0:
+                    await asyncio.to_thread(
+                        self.player_service.adjust_balance, p.discord_id, guild_id, -loss
+                    )
+                    decay_total += loss
+            if decay_total > 0:
+                garnishment_service = getattr(self.bot, "garnishment_service", None)
+                if garnishment_service and new_balance < 0:
+                    _res = await asyncio.to_thread(
+                        garnishment_service.add_income, user_id, decay_total, guild_id
+                    )
+                    garnished_amount = _res.get("garnished", 0)
+                    new_balance = _res.get("new_balance", new_balance + decay_total)
+                else:
+                    await asyncio.to_thread(
+                        self.player_service.adjust_balance, user_id, guild_id, decay_total
+                    )
+                    new_balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
 
         elif result_value == "RED_SHELL":
             # Mario Kart Red Shell: Steal 1-5% of balance from player ranked above
@@ -2439,6 +2765,11 @@ class BettingCommands(commands.Cog):
             # No balance change, but penalty games increased (for penalty players)
 
         elif isinstance(result_value, int) and result_value > 0:
+            # Blue mana: 25% reduction on gamba winnings
+            if effects and effects.blue_gamba_reduction > 0 and result_value > 0:
+                reduction = int(result_value * effects.blue_gamba_reduction)
+                result_value = result_value - reduction
+
             # Positive result: use garnishment service if available
             garnishment_service = getattr(self.bot, "garnishment_service", None)
             if garnishment_service and new_balance < 0:
@@ -2583,6 +2914,23 @@ class BettingCommands(commands.Cog):
             takeover_victim_name=takeover_victim_name,
             takeover_missed=takeover_missed,
         )
+
+        # Add Guardian Aura notification if it triggered
+        if _guardian_activated:
+            result_embed.add_field(
+                name="🌾 Guardian Aura",
+                value="Plains mana converted BANKRUPT to LOSE!",
+                inline=False,
+            )
+
+        # Add Blue reduction note if applicable
+        if effects and effects.blue_gamba_reduction > 0 and isinstance(result_value, int) and result_value > 0:
+            result_embed.add_field(
+                name="🏝️ Blue Mana Tax",
+                value=f"Winnings reduced by {int(effects.blue_gamba_reduction * 100)}%",
+                inline=False,
+            )
+
         await message.edit(embed=result_embed)
 
         # Neon Degen Terminal hook - at most ONE neon event per /gamba action
@@ -2915,8 +3263,24 @@ class BettingCommands(commands.Cog):
             )
             return
 
+        # Get mana effects for sender
+        mana_effects_service = getattr(self.bot, "mana_effects_service", None)
+        effects = None
+        if mana_effects_service:
+            try:
+                from domain.models.mana_effects import ManaEffects as _METip
+                _fx_tip = await asyncio.to_thread(mana_effects_service.get_effects, interaction.user.id, guild_id)
+                if isinstance(_fx_tip, _METip):
+                    effects = _fx_tip
+            except Exception:
+                effects = None
+
         # Calculate fee (1% minimum 1 coin, rounded up)
-        fee = max(1, math.ceil(amount * TIP_FEE_RATE))
+        # Plains: free tips (0% fee)
+        if effects and effects.color == "White" and effects.plains_tip_fee_rate is not None:
+            fee = 0
+        else:
+            fee = max(1, math.ceil(amount * TIP_FEE_RATE))
         total_cost = amount + fee
 
         # Check sender balance first (most fundamental constraint)
@@ -2972,10 +3336,45 @@ class BettingCommands(commands.Cog):
             except Exception as nonprofit_exc:
                 logger.warning(f"Failed to add tip fee to nonprofit fund: {nonprofit_exc}")
 
+        # Mana post-effects on tip
+        mana_notes = []
+        if effects and mana_effects_service:
+            # Green steady bonus: recipient gets +1 JC
+            if effects.green_steady_bonus > 0:
+                await asyncio.to_thread(self.player_service.adjust_balance, player.id, guild_id, effects.green_steady_bonus)
+                mana_notes.append(f"🌲 +{effects.green_steady_bonus} bonus to recipient")
+
+            # Swamp self-tax
+            if effects.swamp_self_tax > 0:
+                await asyncio.to_thread(self.player_service.adjust_balance, interaction.user.id, guild_id, -effects.swamp_self_tax)
+                mana_notes.append(f"🌿 Swamp tax: -{effects.swamp_self_tax}")
+
+            # Swamp siphon
+            if effects.swamp_siphon:
+                siphon = await asyncio.to_thread(mana_effects_service.execute_siphon, interaction.user.id, guild_id)
+                if siphon:
+                    mana_notes.append(f"🌿 Siphon: +{siphon['amount']}")
+
+            # Plains tithe on the tip received
+            if effects.plains_tithe_rate > 0:
+                tithe = max(1, int(amount * effects.plains_tithe_rate))
+                await asyncio.to_thread(self.player_service.adjust_balance, interaction.user.id, guild_id, -tithe)
+                # Add tithe to nonprofit
+                if self.loan_service:
+                    try:
+                        await asyncio.to_thread(self.loan_service.add_to_nonprofit_fund, guild_id, tithe)
+                    except Exception:
+                        pass
+                mana_notes.append(f"🌾 Tithe: -{tithe}")
+
+        mana_suffix = ""
+        if mana_notes:
+            mana_suffix = "\n" + " | ".join(mana_notes)
+
         # Transfer succeeded - send success message
         await interaction.followup.send(
             f"{interaction.user.mention} tipped {amount} {JOPACOIN_EMOTE} to {player.mention}! "
-            f"({fee} {JOPACOIN_EMOTE} fee to nonprofit)",
+            f"({fee} {JOPACOIN_EMOTE} fee to nonprofit){mana_suffix}",
             ephemeral=False,
         )
 
@@ -3146,6 +3545,30 @@ class BettingCommands(commands.Cog):
             return
 
         decl = result.value
+
+        # Swamp mana: reduced bankruptcy penalty (3 games instead of 5)
+        _mana_fx_bk = getattr(self.bot, "mana_effects_service", None)
+        if _mana_fx_bk:
+            try:
+                from domain.models.mana_effects import ManaEffects as _MEBk
+                _bk_effects = await asyncio.to_thread(_mana_fx_bk.get_effects, user_id, guild_id)
+                if not isinstance(_bk_effects, _MEBk):
+                    _bk_effects = None
+            except Exception:
+                _bk_effects = None
+            if _bk_effects and _bk_effects.color == "Black" and _bk_effects.swamp_bankruptcy_games < decl.penalty_games:
+                # Reduce penalty games to swamp level
+                reduction = decl.penalty_games - _bk_effects.swamp_bankruptcy_games
+                await asyncio.to_thread(
+                    self.bankruptcy_service.add_penalty_games, user_id, guild_id, -reduction
+                )
+                decl = type(decl)(
+                    debt_cleared=decl.debt_cleared,
+                    penalty_games=_bk_effects.swamp_bankruptcy_games,
+                    penalty_rate=decl.penalty_rate,
+                    new_balance=decl.new_balance,
+                )
+
         # Format success message
         message = random.choice(BANKRUPTCY_SUCCESS_MESSAGES).format(
             debt=decl.debt_cleared,
@@ -3403,6 +3826,35 @@ class BettingCommands(commands.Cog):
             embed.set_footer(
                 text=f"Loan #{result.total_loans_taken} | Fee donated to Gambling Addiction Nonprofit"
             )
+
+        # Mana post-effects on loan
+        mana_notes_loan = []
+        _mana_fx_loan = getattr(self.bot, "mana_effects_service", None)
+        _loan_effects = None
+        if _mana_fx_loan:
+            try:
+                from domain.models.mana_effects import ManaEffects as _MELoan
+                _loan_effects_raw = await asyncio.to_thread(_mana_fx_loan.get_effects, user_id, guild_id)
+                if isinstance(_loan_effects_raw, _MELoan):
+                    _loan_effects = _loan_effects_raw
+            except Exception:
+                pass
+            if _loan_effects:
+                # Swamp self-tax
+                if _loan_effects.swamp_self_tax > 0:
+                    await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, -_loan_effects.swamp_self_tax)
+                    mana_notes_loan.append(f"🌿 Swamp tax: -{_loan_effects.swamp_self_tax}")
+                # Swamp siphon
+                if _loan_effects.swamp_siphon:
+                    siphon = await asyncio.to_thread(_mana_fx_loan.execute_siphon, user_id, guild_id)
+                    if siphon:
+                        mana_notes_loan.append(f"🌿 Siphon: +{siphon['amount']}")
+        _loan_mana_suffix = ""
+        if mana_notes_loan:
+            _loan_mana_suffix = "\n" + " | ".join(mana_notes_loan)
+
+        if _loan_mana_suffix:
+            embed.add_field(name="Mana Effects", value=_loan_mana_suffix.strip(), inline=False)
 
         await interaction.followup.send(embed=embed)
 

@@ -94,6 +94,18 @@ class RollCommands(commands.Cog):
             )
             return
 
+        # Get mana effects
+        mana_effects_service = getattr(self.bot, "mana_effects_service", None)
+        effects = None
+        if mana_effects_service:
+            try:
+                from domain.models.mana_effects import ManaEffects as _MERoll
+                _fx = await asyncio.to_thread(mana_effects_service.get_effects, user_id, guild_id)
+                if isinstance(_fx, _MERoll):
+                    effects = _fx
+            except Exception:
+                pass
+
         # --- doggeh easter egg ---
         if value.strip().lower() == "doggeh":
             balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
@@ -141,11 +153,14 @@ class RollCommands(commands.Cog):
             )
             return
 
-        # Balance check (always costs at least 1)
+        # Balance check
+        roll_cost = effects.red_roll_cost if effects else 1
+        jackpot_amount = effects.red_roll_jackpot if effects else 20
+
         balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
-        if balance < 1:
+        if balance < roll_cost:
             await interaction.response.send_message(
-                f"You need at least 1 {JOPACOIN_EMOTE} to roll. The cosmos charge a fee.",
+                f"You need at least {roll_cost} {JOPACOIN_EMOTE} to roll. The cosmos charge a fee.",
                 ephemeral=True,
             )
             return
@@ -158,21 +173,69 @@ class RollCommands(commands.Cog):
         if n >= 100:
             won = random.randint(0, n) == 0
             if won:
-                await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, +20)
-                new_balance = balance + 20
-                outcome = f"+20 {JOPACOIN_EMOTE} **JACKPOT!** New balance: **{new_balance}**"
+                win_amount = jackpot_amount
+                # Green gain cap
+                if effects and effects.green_gain_cap is not None:
+                    win_amount = min(win_amount, effects.green_gain_cap)
+                # Green steady bonus
+                if effects and effects.green_steady_bonus > 0:
+                    win_amount += effects.green_steady_bonus
+                await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, win_amount)
+                new_balance = balance + win_amount
+                outcome = f"+{win_amount} {JOPACOIN_EMOTE} **JACKPOT!** New balance: **{new_balance}**"
             else:
-                await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, -1)
-                new_balance = balance - 1
-                outcome = f"-1 {JOPACOIN_EMOTE} — new balance: **{new_balance}**"
+                await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, -roll_cost)
+                new_balance = balance - roll_cost
+                outcome = f"-{roll_cost} {JOPACOIN_EMOTE} — new balance: **{new_balance}**"
         else:
-            await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, -1)
-            new_balance = balance - 1
-            outcome = f"-1 {JOPACOIN_EMOTE} — new balance: **{new_balance}**"
+            await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, -roll_cost)
+            new_balance = balance - roll_cost
+            outcome = f"-{roll_cost} {JOPACOIN_EMOTE} — new balance: **{new_balance}**"
+
+        # Mana post-effects
+        mana_notes = []
+        if effects and mana_effects_service:
+            # Swamp self-tax
+            if effects.swamp_self_tax > 0:
+                await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, -effects.swamp_self_tax)
+                new_balance -= effects.swamp_self_tax
+                mana_notes.append(f"🌿 Swamp tax: -{effects.swamp_self_tax} {JOPACOIN_EMOTE}")
+
+            # Swamp siphon
+            if effects.swamp_siphon:
+                siphon = await asyncio.to_thread(mana_effects_service.execute_siphon, user_id, guild_id)
+                if siphon:
+                    new_balance += siphon["amount"]
+                    mana_notes.append(f"🌿 Siphon: +{siphon['amount']} {JOPACOIN_EMOTE}")
+
+            # Blue cashback on loss
+            if roll_cost > 0 and not (n >= 100 and won):
+                cashback = await asyncio.to_thread(mana_effects_service.apply_blue_cashback, user_id, guild_id, roll_cost)
+                if cashback > 0:
+                    new_balance += cashback
+                    mana_notes.append(f"🏝️ Cashback: +{cashback} {JOPACOIN_EMOTE}")
+
+            # Blue tax on gains (jackpot win)
+            if n >= 100 and won:
+                tax = await asyncio.to_thread(mana_effects_service.apply_blue_tax, user_id, guild_id, win_amount)
+                if tax > 0:
+                    new_balance -= tax
+                    mana_notes.append(f"🏝️ Tax: -{tax} {JOPACOIN_EMOTE}")
+
+            # Plains tithe on gains
+            if n >= 100 and won:
+                tithe = await asyncio.to_thread(mana_effects_service.apply_plains_tithe, user_id, guild_id, win_amount)
+                if tithe > 0:
+                    new_balance -= tithe
+                    mana_notes.append(f"🌾 Tithe: -{tithe} {JOPACOIN_EMOTE}")
+
+        mana_suffix = ""
+        if mana_notes:
+            mana_suffix = "\n" + " | ".join(mana_notes)
 
         await safe_followup(
             interaction,
-            content=f"{interaction.user.mention} rolled **{result}** (0–{n})\n{outcome}",
+            content=f"{interaction.user.mention} rolled **{result}** (0–{n})\n{outcome}{mana_suffix}",
         )
 
 
