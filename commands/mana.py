@@ -15,6 +15,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from commands.checks import require_gamba_channel
 from services.mana_service import LAND_COLORS, LAND_EMOJIS, LAND_ORDER, get_today_pst
 from utils.interaction_safety import safe_defer, safe_followup
 
@@ -84,6 +85,9 @@ class ManaCommands(commands.Cog):
         user: discord.Member | None = None,
         all: bool = False,
     ):
+        if not await require_gamba_channel(interaction):
+            return
+
         await safe_defer(interaction, ephemeral=False)
 
         guild_id = interaction.guild.id if interaction.guild else None

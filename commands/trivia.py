@@ -13,19 +13,38 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from config import TRIVIA_ANSWER_TIMEOUT_SECONDS, TRIVIA_COOLDOWN_SECONDS, TRIVIA_REWARD_PER_QUESTION
+from config import TRIVIA_ANSWER_TIMEOUT_SECONDS, TRIVIA_COOLDOWN_SECONDS
 from services.permissions import has_admin_permission
+from services.trivia_image_cache import get_trivia_image
 from services.trivia_questions import TriviaQuestion, generate_question, get_difficulty_tier
+from commands.checks import require_gamba_channel
 from utils.formatting import JOPACOIN_EMOTE
 from utils.interaction_safety import safe_defer, safe_followup
 
 logger = logging.getLogger("cama_bot.commands.trivia")
 
 DIFFICULTY_COLORS = {
-    "easy": 0x43A047,    # Green
-    "medium": 0xFFA000,  # Amber
-    "hard": 0xE53935,    # Red
+    "easy": 0x43A047,        # Green
+    "medium": 0xFFA000,      # Amber
+    "hard": 0xE53935,        # Red
+    "challenging": 0x7B1FA2, # Deep purple
 }
+
+_TIER_BREAKPOINTS = frozenset({3, 6, 10})  # end of easy, medium, hard
+
+
+def _jc_for_streak(streak: int) -> int:
+    """JC earned for reaching this streak (0 or 1).
+
+    +1 JC for completing each tier (easy@3, medium@6, hard@10),
+    then +1 JC every 4 questions in uncapped challenging mode.
+    """
+    if streak in _TIER_BREAKPOINTS:
+        return 1
+    if streak > 10 and (streak - 10) % 4 == 0:
+        return 1
+    return 0
+
 
 OPTION_LABELS = ["A", "B", "C", "D"]
 OPTION_STYLES = [
@@ -71,10 +90,10 @@ def _question_embed(question: TriviaQuestion, question_num: int, streak: int, jc
     return embed
 
 
-def _correct_embed(question: TriviaQuestion, question_num: int, streak: int, jc_earned: int, user: discord.User | discord.Member | None = None) -> discord.Embed:
+def _correct_embed(question: TriviaQuestion, question_num: int, streak: int, jc_earned: int, user: discord.User | discord.Member | None = None, jc_awarded: int = 0) -> discord.Embed:
     """Build the embed shown after a correct answer."""
     embed = discord.Embed(
-        title=f"Question {question_num} — Correct! +{TRIVIA_REWARD_PER_QUESTION} {JOPACOIN_EMOTE}",
+        title=f"Question {question_num} — Correct! +{jc_awarded} {JOPACOIN_EMOTE}",
         description=f"**{OPTION_LABELS[question.correct_index]}.** {question.options[question.correct_index]}",
         color=0x43A047,
     )
@@ -109,13 +128,27 @@ def _game_over_embed(question: TriviaQuestion | None, question_num: int, streak:
 
     # Streak compliments
     summary = f"Final streak: **{streak}**\nTotal earned: **{jc_earned}** {JOPACOIN_EMOTE}"
-    if streak >= 10:
+    if streak >= 15:
         summary += "\nDota encyclopedia! Incredible run!"
+    elif streak >= 10:
+        summary += "\nYou're a beast!"
     elif streak >= 5:
         summary += "\nImpressive knowledge!"
 
     embed.add_field(name="Game Over", value=summary, inline=False)
     return embed
+
+
+def _prepare_question(embed: discord.Embed, question: TriviaQuestion) -> discord.File | None:
+    """Try to attach a cached image file instead of using a remote URL."""
+    if not question.image_url:
+        return None
+    cached = get_trivia_image(question.image_url)
+    if cached:
+        embed.set_thumbnail(url=f"attachment://{cached.filename}")
+        return cached
+    # Fallback: remote URL already set by _question_embed
+    return None
 
 
 class TriviaView(discord.ui.View):
@@ -164,20 +197,22 @@ class TriviaView(discord.ui.View):
 
         if is_correct:
             self.session.streak += 1
-            self.session.total_jc += TRIVIA_REWARD_PER_QUESTION
+            jc = _jc_for_streak(self.session.streak)
+            self.session.total_jc += jc
             self.session.recent_categories.append(self.question.category)
 
-            # Award jopacoin
-            try:
-                player_service = self.cog.bot.player_service
-                await asyncio.to_thread(
-                    player_service.adjust_balance,
-                    self.session.user_id,
-                    self.session.guild_id,
-                    TRIVIA_REWARD_PER_QUESTION,
-                )
-            except Exception:
-                logger.exception("Failed to award trivia JC")
+            # Award jopacoin (only when jc > 0)
+            if jc > 0:
+                try:
+                    player_service = self.cog.bot.player_service
+                    await asyncio.to_thread(
+                        player_service.adjust_balance,
+                        self.session.user_id,
+                        self.session.guild_id,
+                        jc,
+                    )
+                except Exception:
+                    logger.exception("Failed to award trivia JC")
 
             # Delete the previous "correct" message if it exists (keep only last 2)
             if self.session.prev_message:
@@ -188,10 +223,10 @@ class TriviaView(discord.ui.View):
 
             # Edit current message to show it was answered correctly
             correct_embed = _correct_embed(
-                self.question, self.question_num, self.session.streak, self.session.total_jc, self.session.user
+                self.question, self.question_num, self.session.streak, self.session.total_jc, self.session.user, jc_awarded=jc
             )
             try:
-                await interaction.response.edit_message(embed=correct_embed, view=None)
+                await interaction.response.edit_message(embed=correct_embed, view=None, attachments=[])
             except discord.NotFound:
                 pass
 
@@ -218,8 +253,12 @@ class TriviaView(discord.ui.View):
             next_num = self.question_num + 1
             next_view = TriviaView(self.session, next_q, next_num, self.cog)
             next_embed = _question_embed(next_q, next_num, self.session.streak, self.session.total_jc, self.session.user)
+            next_file = _prepare_question(next_embed, next_q)
             try:
-                msg = await interaction.followup.send(embed=next_embed, view=next_view)
+                send_kwargs = {"embed": next_embed, "view": next_view}
+                if next_file:
+                    send_kwargs["file"] = next_file
+                msg = await interaction.followup.send(**send_kwargs)
                 self.session.message = msg
             except discord.HTTPException:
                 logger.exception("Failed to send next trivia question")
@@ -235,7 +274,7 @@ class TriviaView(discord.ui.View):
                 self.question, self.question_num, self.session.streak, self.session.total_jc, False, self.session.user
             )
             try:
-                await interaction.response.edit_message(embed=over_embed, view=None)
+                await interaction.response.edit_message(embed=over_embed, view=None, attachments=[])
             except discord.NotFound:
                 pass
             self.cog._end_session(self.session)
@@ -258,7 +297,7 @@ class TriviaView(discord.ui.View):
         )
         if self.session.message:
             try:
-                await self.session.message.edit(embed=over_embed, view=None)
+                await self.session.message.edit(embed=over_embed, view=None, attachments=[])
             except discord.NotFound:
                 pass
         self.cog._end_session(self.session)
@@ -300,6 +339,9 @@ class TriviaCog(commands.Cog):
     @app_commands.command(name="trivia", description="Test your Dota 2 knowledge! Earn 1 JC per correct answer.")
     @app_commands.checks.cooldown(1, 5.0)  # Rate limit: 1 per 5 seconds
     async def trivia(self, interaction: discord.Interaction):
+        if not await require_gamba_channel(interaction):
+            return
+
         guild_id = interaction.guild.id if interaction.guild else 0
         user_id = interaction.user.id
         key = (user_id, guild_id)
@@ -359,8 +401,12 @@ class TriviaCog(commands.Cog):
             return
 
         embed = _question_embed(question, 1, 0, 0, interaction.user)
+        file = _prepare_question(embed, question)
         view = TriviaView(session, question, 1, self)
-        msg = await safe_followup(interaction, embed=embed, view=view)
+        send_kwargs = {"embed": embed, "view": view}
+        if file:
+            send_kwargs["file"] = file
+        msg = await safe_followup(interaction, **send_kwargs)
         session.message = msg
 
     @trivia.error

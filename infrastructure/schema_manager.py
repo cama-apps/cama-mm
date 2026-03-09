@@ -255,6 +255,9 @@ class SchemaManager:
             ("create_player_mana_table", self._migration_create_player_mana_table),
             # Trivia session recording for leaderboard
             ("create_trivia_sessions_table", self._migration_create_trivia_sessions_table),
+            # Mana shop items and daily loss tracking
+            ("create_mana_shop_items_table", self._migration_create_mana_shop_items_table),
+            ("create_mana_daily_losses_table", self._migration_create_mana_daily_losses_table),
         ]
 
     # --- Migrations ---
@@ -1729,5 +1732,49 @@ class SchemaManager:
             """
             CREATE INDEX IF NOT EXISTS idx_trivia_sessions_guild_played
             ON trivia_sessions(guild_id, played_at)
+            """
+        )
+
+    def _migration_create_mana_shop_items_table(self, cursor) -> None:
+        """Create table for mana-exclusive shop items (Guardian Angel, Mana Shield, etc.)."""
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS mana_shop_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                discord_id INTEGER NOT NULL,
+                guild_id INTEGER NOT NULL DEFAULT 0,
+                item_type TEXT NOT NULL,
+                target_id INTEGER,
+                purchased_at INTEGER NOT NULL,
+                expires_at INTEGER,
+                triggered INTEGER NOT NULL DEFAULT 0,
+                data TEXT
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_mana_shop_items_guild_discord
+            ON mana_shop_items(guild_id, discord_id)
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_mana_shop_items_type_active
+            ON mana_shop_items(guild_id, item_type, triggered)
+            """
+        )
+
+    def _migration_create_mana_daily_losses_table(self, cursor) -> None:
+        """Create table for tracking daily JC losses (for Green's Regrowth shop item)."""
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS mana_daily_losses (
+                discord_id INTEGER NOT NULL,
+                guild_id INTEGER NOT NULL DEFAULT 0,
+                loss_date TEXT NOT NULL,
+                total_lost INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (discord_id, guild_id, loss_date)
+            )
             """
         )

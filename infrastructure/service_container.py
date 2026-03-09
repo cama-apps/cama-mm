@@ -320,6 +320,7 @@ class ServiceContainer:
 
     def _init_mana_service(self) -> None:
         from services.mana_service import ManaService
+        from services.mana_effects_service import ManaEffectsService
 
         c = self._components
         c["mana_service"] = ManaService(
@@ -328,6 +329,11 @@ class ServiceContainer:
             gambling_stats_service=c["gambling_stats_service"],
             bankruptcy_service=c["bankruptcy_service"],
             tip_repo=c["tip_repo"],
+        )
+        c["mana_effects_service"] = ManaEffectsService(
+            mana_service=c["mana_service"],
+            player_repo=c["player_repo"],
+            mana_repo=c["mana_repo"],
         )
 
     def _init_extras(self) -> None:
@@ -411,6 +417,7 @@ class ServiceContainer:
         bot.rebellion_repo = c["rebellion_repo"]
         bot.mana_service = c["mana_service"]
         bot.mana_repo = c["mana_repo"]
+        bot.mana_effects_service = c["mana_effects_service"]
 
         # AI services (may be None)
         bot.ai_service = c["ai_service"]

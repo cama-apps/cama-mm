@@ -30,6 +30,10 @@ class HeroData:
     is_melee: bool
     base_movement: int | None
     base_armor: int | None
+    attack_rate: float | None
+    attr_str_gain: float | None
+    attr_agi_gain: float | None
+    attr_int_gain: float | None
     image_url: str | None
 
 
@@ -41,6 +45,7 @@ class AbilityData:
     hero_id: int | None
     hero_name: str | None
     damage_type: str | None
+    damage: str | None
     cooldown: str | None
     lore: str | None
     scepter_upgrades: bool
@@ -59,6 +64,8 @@ class ItemData:
     lore: str | None
     neutral_tier: int | None
     icon_url: str | None
+    is_neutral_enhancement: bool
+    ability_special: str | None  # JSON string of bonus descriptions
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,6 +142,10 @@ def load_heroes() -> list[HeroData]:
             is_melee=bool(h.is_melee),
             base_movement=h.base_movement,
             base_armor=h.base_armor,
+            attack_rate=h.attack_rate if h.attack_rate else None,
+            attr_str_gain=h.attr_strength_gain if h.attr_strength_gain else None,
+            attr_agi_gain=h.attr_agility_gain if h.attr_agility_gain else None,
+            attr_int_gain=h.attr_intelligence_gain if h.attr_intelligence_gain else None,
             image_url=hero_image_url(h.name or ""),
         ))
     return result
@@ -161,6 +172,7 @@ def load_abilities() -> list[AbilityData]:
             hero_id=a.hero_id,
             hero_name=hero_name,
             damage_type=a.damage_type if a.damage_type else None,
+            damage=a.damage if a.damage and a.damage != "0" else None,
             cooldown=a.cooldown if a.cooldown and a.cooldown != "0" else None,
             lore=a.lore if a.lore else None,
             scepter_upgrades=bool(a.scepter_upgrades),
@@ -188,6 +200,8 @@ def load_items() -> list[ItemData]:
             lore=i.lore if i.lore else None,
             neutral_tier=i.neutral_tier,
             icon_url=item_icon_url(i.icon),
+            is_neutral_enhancement=bool(getattr(i, 'is_neutral_enhancement', False)),
+            ability_special=i.ability_special if i.ability_special else None,
         ))
     return result
 

@@ -84,8 +84,10 @@ class BettingService:
             raise ValueError("Bet amount must be positive.")
 
         # Validate leverage tier
-        if leverage != 1 and leverage not in self.leverage_tiers:
-            valid_tiers = ", ".join(str(t) for t in self.leverage_tiers)
+        # 10x is a valid tier (gated by Red mana in the command layer)
+        valid_leverages = list(self.leverage_tiers) + [10]
+        if leverage != 1 and leverage not in valid_leverages:
+            valid_tiers = ", ".join(str(t) for t in valid_leverages)
             raise ValueError(f"Invalid leverage. Valid tiers: 1 (none), {valid_tiers}")
 
         # Get pending_match_id for concurrent match support
@@ -376,6 +378,7 @@ class BettingService:
         shuffle_timestamp: int,
         is_bomb_pot: bool = False,
         pending_match_id: int | None = None,
+        ante_overrides: dict[int, int] | None = None,
     ) -> dict[str, Any]:
         """
         Create auto-liquidity blind bets for all eligible players after shuffle.
@@ -396,6 +399,7 @@ class BettingService:
             shuffle_timestamp: The shuffle timestamp for bet timing
             is_bomb_pot: Whether this is a bomb pot match (higher stakes, mandatory)
             pending_match_id: Optional specific match ID for concurrent match support
+            ante_overrides: Optional per-player ante override (e.g. Red mana tripled ante)
 
         Returns:
             {
@@ -441,13 +445,15 @@ class BettingService:
 
                     if is_bomb_pot:
                         # Bomb pot: mandatory ante for everyone, no threshold check
+                        # Per-player ante (e.g. Red mana tripled)
+                        player_ante = (ante_overrides or {}).get(discord_id, BOMB_POT_ANTE)
                         # Calculate: 10% of balance + flat ante
                         percentage_amount = round(balance * blind_percentage) if balance > 0 else 0
-                        blind_amount = percentage_amount + BOMB_POT_ANTE
+                        blind_amount = percentage_amount + player_ante
 
                         # Ensure minimum bet is at least the ante
-                        if blind_amount < BOMB_POT_ANTE:
-                            blind_amount = BOMB_POT_ANTE
+                        if blind_amount < player_ante:
+                            blind_amount = player_ante
                     else:
                         # Normal mode: skip players below threshold
                         if balance < AUTO_BLIND_THRESHOLD:
