@@ -189,6 +189,7 @@ class TriviaView(discord.ui.View):
             await interaction.response.send_message("This isn't your trivia session!", ephemeral=True)
             return
         if self.answered:
+            await interaction.response.defer()
             return
         self.answered = True
         self.stop()
@@ -322,15 +323,13 @@ class TriviaCog(commands.Cog):
         if session.streak > 0:
             try:
                 player_service = self.bot.player_service
-                asyncio.get_event_loop().call_soon(
-                    lambda: asyncio.ensure_future(
-                        asyncio.to_thread(
-                            player_service.record_trivia_session,
-                            session.user_id,
-                            session.guild_id,
-                            session.streak,
-                            session.total_jc,
-                        )
+                asyncio.ensure_future(
+                    asyncio.to_thread(
+                        player_service.record_trivia_session,
+                        session.user_id,
+                        session.guild_id,
+                        session.streak,
+                        session.total_jc,
                     )
                 )
             except Exception:

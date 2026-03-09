@@ -61,6 +61,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         Raises:
             ValueError: If player with this discord_id already exists in this guild
         """
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
 
@@ -108,6 +109,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         Returns:
             Player object or None if not found
         """
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -194,6 +196,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
 
     def get_all(self, guild_id: int) -> list[Player]:
         """Get all players from database for a specific guild."""
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM players WHERE guild_id = ?", (guild_id,))
@@ -359,6 +362,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
 
     def exists(self, discord_id: int, guild_id: int) -> bool:
         """Check if a player exists in a guild."""
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -533,6 +537,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
 
     def get_balance(self, discord_id: int, guild_id: int) -> int:
         """Get a player's jopacoin balance."""
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -544,6 +549,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
 
     def update_balance(self, discord_id: int, guild_id: int, amount: int) -> None:
         """Set a player's jopacoin balance to a specific amount."""
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -567,6 +573,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
 
     def add_balance(self, discord_id: int, guild_id: int, amount: int) -> None:
         """Add or subtract from a player's jopacoin balance."""
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
