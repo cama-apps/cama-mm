@@ -262,6 +262,10 @@ class MatchService:
             p.name for p in players if p.discord_id in recent_match_ids
         }
 
+        # Fall back to Glicko if any player lacks OpenSkill ratings
+        if rating_system == "openskill" and any(p.os_mu is None for p in players):
+            rating_system = "glicko"
+
         # Create a shuffler configured for the requested rating system
         use_openskill = rating_system == "openskill"
         use_jopacoin = rating_system == "jopacoin"

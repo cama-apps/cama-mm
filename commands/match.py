@@ -530,6 +530,9 @@ class MatchCommands(commands.Cog):
         dire_roles = result["dire_roles"]
         value_diff = result["value_diff"]
         goodness_score = result.get("goodness_score")
+        # Use actual rating system (may have fallen back from openskill to glicko)
+        rs = result.get("balancing_rating_system", rs)
+        is_openskill_shuffle = is_openskill_shuffle and rs == "openskill"
         # Sum of raw ratings (without off-role multipliers) for display
         use_os = rs == "openskill"
         use_jc = rs == "jopacoin"

@@ -7,7 +7,7 @@ from services.match_service import MatchService
 from tests.conftest import TEST_GUILD_ID
 
 
-def _seed_players(repo: PlayerRepository, count: int = 10):
+def _seed_players(repo: PlayerRepository, count: int = 10, *, os_mu=None, os_sigma=None):
     for i in range(count):
         pid = 1000 + i
         repo.add(
@@ -20,6 +20,8 @@ def _seed_players(repo: PlayerRepository, count: int = 10):
             glicko_rd=350.0,
             glicko_volatility=0.06,
         )
+        if os_mu is not None:
+            repo.update_openskill_rating(pid, TEST_GUILD_ID, os_mu, os_sigma or 8.333)
     return [1000 + i for i in range(count)]
 
 
@@ -108,3 +110,43 @@ def test_goodness_score_respects_role_matchup_weight(repo_db_path, monkeypatch):
     # role delta = sum(100, 400, 0, 0, 0) = 500; weighted by 0.18 -> 90
     # off-role penalty and exclusion penalty = 0
     assert result["goodness_score"] == pytest.approx(390)
+
+
+def test_openskill_falls_back_to_glicko_when_player_missing_os_mu(repo_db_path):
+    """OpenSkill shuffle silently falls back to Glicko when any player lacks os_mu."""
+    player_repo = PlayerRepository(repo_db_path)
+    match_repo = MatchRepository(repo_db_path)
+    service = MatchService(
+        player_repo=player_repo,
+        match_repo=match_repo,
+        use_glicko=True,
+        betting_service=None,
+    )
+
+    # Seed 10 players, none with OpenSkill ratings
+    player_ids = _seed_players(player_repo, 10)
+
+    result = service.shuffle_players(
+        player_ids, guild_id=TEST_GUILD_ID, rating_system="openskill"
+    )
+    assert result["balancing_rating_system"] == "glicko"
+
+
+def test_openskill_used_when_all_players_have_os_mu(repo_db_path):
+    """OpenSkill shuffle proceeds when all players have os_mu."""
+    player_repo = PlayerRepository(repo_db_path)
+    match_repo = MatchRepository(repo_db_path)
+    service = MatchService(
+        player_repo=player_repo,
+        match_repo=match_repo,
+        use_glicko=True,
+        betting_service=None,
+    )
+
+    # Seed 10 players WITH OpenSkill ratings
+    player_ids = _seed_players(player_repo, 10, os_mu=30.0, os_sigma=8.0)
+
+    result = service.shuffle_players(
+        player_ids, guild_id=TEST_GUILD_ID, rating_system="openskill"
+    )
+    assert result["balancing_rating_system"] == "openskill"
