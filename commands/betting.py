@@ -2882,7 +2882,7 @@ class BettingCommands(commands.Cog):
         extend_new_total = 0
         if result_value in ("EXTEND_1", "EXTEND_2"):
             extend_games_added = games_to_add
-            extend_new_total = new_penalty_total if "new_penalty_total" in dir() else extend_games_added
+            extend_new_total = new_penalty_total if "new_penalty_total" in locals() else extend_games_added
 
         result_embed = self._wheel_result_embed(
             result_wedge, new_balance, garnished_amount, next_spin_time,
@@ -3517,7 +3517,7 @@ class BettingCommands(commands.Cog):
             from services import error_codes
             if check.error_code == error_codes.NOT_IN_DEBT:
                 message = random.choice(BANKRUPTCY_DENIED_MESSAGES)
-                balance = await asyncio.to_thread(self.player_repo.get_balance, user_id, guild_id)
+                balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
                 await interaction.followup.send(
                     f"{interaction.user.mention} tried to declare bankruptcy...\n\n"
                     f"{message}\n\nTheir balance: {balance} {JOPACOIN_EMOTE}",

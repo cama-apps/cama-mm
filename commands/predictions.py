@@ -101,6 +101,9 @@ class PredictionBetModal(discord.ui.Modal):
             return
 
         try:
+            # Acknowledge the modal first (Discord requires response within 3s)
+            await interaction.response.defer()
+
             result = await asyncio.to_thread(
                 functools.partial(
                     self.prediction_service.place_bet,
@@ -116,9 +119,6 @@ class PredictionBetModal(discord.ui.Modal):
                 self.prediction_service.get_prediction, self.prediction_id
             )
             new_odds = result["odds"][self.position]
-
-            # Acknowledge the modal (no visible response)
-            await interaction.response.defer()
 
             # Post public activity message in thread
             if pred and pred.get("thread_id"):
@@ -140,10 +140,10 @@ class PredictionBetModal(discord.ui.Modal):
                 )
 
         except ValueError as e:
-            await interaction.response.send_message(f"❌ {e}", ephemeral=True)
+            await interaction.followup.send(f"❌ {e}", ephemeral=True)
         except Exception as e:
             logger.exception(f"Error placing prediction bet: {e}")
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "An error occurred while placing your bet.", ephemeral=True
             )
 

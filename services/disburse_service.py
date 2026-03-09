@@ -149,7 +149,7 @@ class DisburseService:
             status="active",
             votes={
                 "even": 0, "proportional": 0, "neediest": 0, "stimulus": 0,
-                "lottery": 0, "social_security": 0, "cancel": 0
+                "lottery": 0, "social_security": 0, "richest": 0, "cancel": 0
             },
         )
 
@@ -234,7 +234,7 @@ class DisburseService:
         max_votes = max(votes.values())
         winners = [m for m, v in votes.items() if v == max_votes]
 
-        for method in ("even", "proportional", "neediest", "stimulus", "lottery", "social_security", "cancel"):
+        for method in ("even", "proportional", "neediest", "stimulus", "lottery", "social_security", "richest", "cancel"):
             if method in winners:
                 return method
 
@@ -475,6 +475,18 @@ class DisburseService:
                     "message": "No players with games played for social security.",
                 }
             distributions = self._calculate_social_security_distribution(fund_amount, eligible)
+        elif method == "richest":
+            richest = self.player_repo.get_richest_player(guild_id)
+            if not richest:
+                self.loan_repo.add_to_nonprofit_fund(guild_id, fund_amount)
+                self.disburse_repo.complete_proposal(guild_id)
+                return {
+                    "success": True, "method": method,
+                    "method_label": self.METHOD_LABELS[method],
+                    "total_disbursed": 0, "distributions": [],
+                    "message": "No players found for richest distribution.",
+                }
+            distributions = self._calculate_richest_distribution(fund_amount, richest)
         else:
             debtors = self.player_repo.get_players_with_negative_balance(guild_id)
             if not debtors:
