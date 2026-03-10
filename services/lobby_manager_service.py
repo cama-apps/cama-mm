@@ -82,13 +82,14 @@ class LobbyManagerService:
         normalized = guild_id if guild_id is not None else 0
         self._shuffle_lock_times.pop(normalized, None)
 
-    def get_or_create_lobby(self, creator_id: int | None = None) -> Lobby:
+    def get_or_create_lobby(self, creator_id: int | None = None, game_mode: str = "cm") -> Lobby:
         with self._state_lock:
             if self.lobby is None or self.lobby.status != "open":
                 self.lobby = Lobby(
                     lobby_id=self.DEFAULT_LOBBY_ID,
                     created_by=creator_id or 0,
                     created_at=datetime.now(),
+                    game_mode=game_mode,
                 )
                 self._persist_lobby()
             return self.lobby
@@ -195,6 +196,7 @@ class LobbyManagerService:
             embed_message_id=self.lobby_embed_message_id,
             origin_channel_id=self.origin_channel_id,
             player_join_times=self.lobby.player_join_times,
+            game_mode=self.lobby.game_mode,
         )
 
     def _clear_persistent_lobby(self) -> None:

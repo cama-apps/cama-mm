@@ -307,7 +307,12 @@ class LobbyCommands(commands.Cog):
         return True, None
 
     @app_commands.command(name="lobby", description="Create or view the matchmaking lobby")
-    async def lobby(self, interaction: discord.Interaction):
+    @app_commands.describe(mode="Game mode for this lobby (only applies when creating a new lobby)")
+    @app_commands.choices(mode=[
+        app_commands.Choice(name="Captain's Mode (CM)", value="cm"),
+        app_commands.Choice(name="Captain's Draft (CD)", value="cd"),
+    ])
+    async def lobby(self, interaction: discord.Interaction, mode: app_commands.Choice[str] | None = None):
         logger.info(f"Lobby command: User {interaction.user.id} ({interaction.user})")
         if not await safe_defer(interaction, ephemeral=False):
             return
@@ -320,10 +325,12 @@ class LobbyCommands(commands.Cog):
             )
             return
 
+        game_mode = mode.value if mode else "cm"
+
         # Acquire lock to prevent race condition when multiple users call /lobby simultaneously
         async with self.lobby_service.creation_lock:
             lobby = await asyncio.to_thread(
-                functools.partial(self.lobby_service.get_or_create_lobby, creator_id=interaction.user.id)
+                functools.partial(self.lobby_service.get_or_create_lobby, creator_id=interaction.user.id, game_mode=game_mode)
             )
             embed = await asyncio.to_thread(self.lobby_service.build_lobby_embed, lobby, guild_id)
 

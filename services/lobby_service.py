@@ -34,8 +34,8 @@ class LobbyService:
         """Lock for protecting the full lobby creation flow."""
         return self.lobby_manager.creation_lock
 
-    def get_or_create_lobby(self, creator_id: int | None = None) -> Lobby:
-        return self.lobby_manager.get_or_create_lobby(creator_id=creator_id)
+    def get_or_create_lobby(self, creator_id: int | None = None, game_mode: str = "cm") -> Lobby:
+        return self.lobby_manager.get_or_create_lobby(creator_id=creator_id, game_mode=game_mode)
 
     def get_lobby(self) -> Lobby | None:
         return self.lobby_manager.get_lobby()
@@ -244,6 +244,7 @@ class LobbyService:
             max_players=self.max_players,
             bankruptcy_repo=self.bankruptcy_repo,
             captain_eligible_ids=captain_eligible_ids,
+            game_mode=lobby.game_mode,
         )
 
     def is_ready(self, lobby: Lobby) -> bool:
