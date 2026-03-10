@@ -27,6 +27,7 @@ class LobbyRepository(BaseRepository, ILobbyRepository):
         conditional_players: list[int] | None = None,
         origin_channel_id: int | None = None,
         player_join_times: dict[int, float] | None = None,
+        game_mode: str | None = None,
     ) -> None:
         payload = json.dumps(players)
         conditional_payload = json.dumps(conditional_players or [])
@@ -39,8 +40,8 @@ class LobbyRepository(BaseRepository, ILobbyRepository):
                 """
                 INSERT INTO lobby_state (lobby_id, players, conditional_players, status, created_by, created_at,
                                          message_id, channel_id, thread_id, embed_message_id, origin_channel_id,
-                                         player_join_times)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                         player_join_times, game_mode)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(lobby_id) DO UPDATE SET
                     players = excluded.players,
                     conditional_players = excluded.conditional_players,
@@ -53,10 +54,11 @@ class LobbyRepository(BaseRepository, ILobbyRepository):
                     embed_message_id = excluded.embed_message_id,
                     origin_channel_id = excluded.origin_channel_id,
                     player_join_times = excluded.player_join_times,
+                    game_mode = excluded.game_mode,
                     updated_at = CURRENT_TIMESTAMP
                 """,
                 (lobby_id, payload, conditional_payload, status, created_by, created_at, message_id, channel_id,
-                 thread_id, embed_message_id, origin_channel_id, join_times_payload),
+                 thread_id, embed_message_id, origin_channel_id, join_times_payload, game_mode or "cm"),
             )
 
     def load_lobby_state(self, lobby_id: int) -> dict | None:
@@ -82,6 +84,7 @@ class LobbyRepository(BaseRepository, ILobbyRepository):
                 "thread_id": row_dict.get("thread_id"),
                 "embed_message_id": row_dict.get("embed_message_id"),
                 "origin_channel_id": row_dict.get("origin_channel_id"),
+                "game_mode": row_dict.get("game_mode", "cm"),
             }
 
     def clear_lobby_state(self, lobby_id: int) -> None:

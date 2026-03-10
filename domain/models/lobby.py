@@ -20,6 +20,7 @@ class Lobby:
     conditional_players: set[int] = field(default_factory=set)  # "Frogling" players
     player_join_times: dict[int, float] = field(default_factory=dict)  # discord_id -> unix timestamp
     status: str = "open"
+    game_mode: str = "cm"  # "cm" = Captain's Mode, "cd" = Captain's Draft
 
     def add_player(self, discord_id: int) -> bool:
         """Add a player to the regular queue. Removes from conditional if present."""
@@ -103,6 +104,7 @@ class Lobby:
             "conditional_players": list(self.conditional_players),
             "player_join_times": {str(k): v for k, v in self.player_join_times.items()},
             "status": self.status,
+            "game_mode": self.game_mode,
         }
 
     @classmethod
@@ -120,6 +122,7 @@ class Lobby:
             conditional_players=conditional_players,
             player_join_times=player_join_times,
             status=data.get("status", "open"),
+            game_mode=data.get("game_mode", "cm"),
         )
 
 

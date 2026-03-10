@@ -85,7 +85,7 @@ def create_lobby_embed(
     lobby, players, player_ids,
     conditional_players=None, conditional_ids=None,
     ready_threshold: int = 10, max_players: int = 14, bankruptcy_repo=None,
-    captain_eligible_ids=None,
+    captain_eligible_ids=None, game_mode: str = "cm",
 ):
     """Create the lobby embed with player list and status.
 
@@ -109,10 +109,15 @@ def create_lobby_embed(
     else:
         timestamp_text = "Opened just now"
 
+    _MODE_LABELS = {
+        "cm": ("⚔️ Captain's Mode Lobby", "Captain's Mode (CM)"),
+        "cd": ("🐉 Captain's Draft Lobby", "Captain's Draft (CD)"),
+    }
+    title, mode_label = _MODE_LABELS.get(game_mode, _MODE_LABELS["cm"])
     # Green if ready (total meets threshold), blue if not
     embed = discord.Embed(
-        title="🎮 Matchmaking Lobby",
-        description=f"Join to play!\n{timestamp_text}",
+        title=title,
+        description=f"**{mode_label}** | Join to play!\n{timestamp_text}",
         color=discord.Color.green() if total_count >= ready_threshold else discord.Color.blue(),
     )
 

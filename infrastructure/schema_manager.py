@@ -259,6 +259,8 @@ class SchemaManager:
             ("create_mana_shop_items_table", self._migration_create_mana_shop_items_table),
             ("create_mana_daily_losses_table", self._migration_create_mana_daily_losses_table),
             ("add_solo_grinder_columns", self._migration_add_solo_grinder_columns),
+            # Lobby game mode
+            ("add_game_mode_to_lobby", self._migration_add_game_mode_to_lobby),
         ]
 
     # --- Migrations ---
@@ -1784,3 +1786,7 @@ class SchemaManager:
         """Add columns for solo ranked grinder detection."""
         self._add_column_if_not_exists(cursor, "players", "is_solo_grinder", "INTEGER DEFAULT 0")
         self._add_column_if_not_exists(cursor, "players", "solo_grinder_checked_at", "TEXT")
+
+    def _migration_add_game_mode_to_lobby(self, cursor) -> None:
+        """Add game_mode column to lobby_state for CM/CD selection."""
+        self._add_column_if_not_exists(cursor, "lobby_state", "game_mode", "TEXT DEFAULT 'cm'")

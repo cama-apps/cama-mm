@@ -479,6 +479,7 @@ class ILobbyRepository(ABC):
         conditional_players: list[int] | None = None,
         origin_channel_id: int | None = None,
         player_join_times: dict[int, float] | None = None,
+        game_mode: str | None = None,
     ) -> None: ...
 
     @abstractmethod
