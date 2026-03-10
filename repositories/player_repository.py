@@ -2568,6 +2568,10 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         total_bets_placed = row["total_bets_placed"] if "total_bets_placed" in keys else 0
         first_leverage_used = bool(row["first_leverage_used"]) if "first_leverage_used" in keys else False
 
+        # Solo grinder detection fields (may not exist in older schemas)
+        is_solo_grinder = bool(row["is_solo_grinder"]) if "is_solo_grinder" in keys else False
+        solo_grinder_checked_at = row["solo_grinder_checked_at"] if "solo_grinder_checked_at" in keys else None
+
         return Player(
             name=row["discord_username"],
             mmr=int(row["current_mmr"]) if row["current_mmr"] else None,
@@ -2588,7 +2592,26 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             personal_best_win_streak=personal_best_win_streak or 0,
             total_bets_placed=total_bets_placed or 0,
             first_leverage_used=first_leverage_used,
+            is_solo_grinder=is_solo_grinder,
+            solo_grinder_checked_at=solo_grinder_checked_at,
         )
+
+    # --- Solo grinder detection ---
+
+    def update_solo_grinder_status(
+        self, discord_id: int, guild_id: int, is_grinder: bool, checked_at: str
+    ) -> None:
+        """Update a player's solo grinder status and check timestamp."""
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE players
+                SET is_solo_grinder = ?, solo_grinder_checked_at = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE discord_id = ? AND guild_id = ?
+                """,
+                (int(is_grinder), checked_at, discord_id, self.normalize_guild_id(guild_id)),
+            )
 
     # --- Trivia cooldown ---
 

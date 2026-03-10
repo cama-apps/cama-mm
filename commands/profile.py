@@ -359,6 +359,10 @@ class ProfileCommands(commands.Cog):
         if player.main_role:
             embed.add_field(name="Main", value=format_role_display(player.main_role), inline=True)
 
+        # Solo grinder indicator
+        if player.is_solo_grinder:
+            embed.add_field(name="Solo Queue", value="Active", inline=True)
+
         # Hero stats from enriched matches
         match_repo = self._get_match_repo()
         if match_repo and hasattr(match_repo, "get_player_hero_stats"):

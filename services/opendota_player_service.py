@@ -3,7 +3,7 @@ Service for fetching player profile statistics from OpenDota API.
 """
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from opendota_integration import OpenDotaAPI
 from utils.hero_lookup import get_hero_name
@@ -617,3 +617,53 @@ class OpenDotaPlayerService:
         except Exception as e:
             logger.error(f"Error loading hero roles from dotabase: {e}")
             return {}
+
+    # --- Solo grinder detection ---
+
+    def check_is_solo_grinder(self, steam_id: int) -> bool:
+        """
+        Check if a player has played solo ranked in the last 30 days.
+
+        Args:
+            steam_id: Steam32 account ID
+
+        Returns:
+            True if any solo queue ranked match found in last 30 days
+        """
+        try:
+            response = self.api._make_request(
+                f"{self.api.BASE_URL}/players/{steam_id}/matches",
+                params={
+                    "lobby_type": 7,  # Ranked
+                    "date": 30,  # Last 30 days
+                    "project": ["party_size"],
+                },
+            )
+            if response and response.status_code == 200:
+                matches = response.json()
+                return any(m.get("party_size") == 1 for m in matches)
+        except Exception as e:
+            logger.error(f"Error checking solo grinder status for steam_id {steam_id}: {e}")
+        return False
+
+    def update_solo_grinder_status(self, discord_id: int, guild_id: int) -> bool:
+        """
+        Check and persist solo grinder status for a player.
+
+        Args:
+            discord_id: Player's Discord ID
+            guild_id: Guild ID
+
+        Returns:
+            True if player is a solo grinder, False otherwise
+        """
+        steam_id = self.player_repo.get_steam_id(discord_id)
+        if not steam_id:
+            logger.debug(f"No steam_id for discord {discord_id}, skipping grinder check")
+            return False
+
+        is_grinder = self.check_is_solo_grinder(steam_id)
+        checked_at = datetime.now(timezone.utc).isoformat()
+        self.player_repo.update_solo_grinder_status(discord_id, guild_id, is_grinder, checked_at)
+        logger.info(f"Solo grinder status for {discord_id}: {is_grinder}")
+        return is_grinder

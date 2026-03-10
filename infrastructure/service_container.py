@@ -235,6 +235,7 @@ class ServiceContainer:
             soft_avoid_repo=c["soft_avoid_repo"],
             package_deal_repo=c["package_deal_repo"],
             state_service=c["match_state_service"],
+            opendota_player_service=c["opendota_player_service"],
         )
 
     def _init_advanced_services(self) -> None:

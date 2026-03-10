@@ -10,7 +10,7 @@ from typing import Any
 
 import logging
 
-from config import BET_LOCK_SECONDS, CALIBRATION_RD_THRESHOLD, FIRST_GAME_RESET_HOUR
+from config import BET_LOCK_SECONDS, CALIBRATION_RD_THRESHOLD, FIRST_GAME_RESET_HOUR, SOLO_GRINDER_CACHE_TTL_SECONDS
 from domain.models.player import Player
 from domain.models.team import Team
 from domain.services.team_balancing_service import TeamBalancingService
@@ -43,6 +43,7 @@ class MatchService:
         soft_avoid_repo=None,
         package_deal_repo=None,
         state_service: MatchStateService | None = None,
+        opendota_player_service=None,
     ):
         """
         Initialize MatchService with required repository dependencies.
@@ -57,6 +58,7 @@ class MatchService:
             soft_avoid_repo: Optional repository for soft avoid feature
             package_deal_repo: Optional repository for package deal feature
             state_service: Optional state service (created if not provided)
+            opendota_player_service: Optional service for solo grinder detection
         """
         self.player_repo = player_repo
         self.match_repo = match_repo
@@ -79,11 +81,25 @@ class MatchService:
         self.loan_service = loan_service
         self.soft_avoid_repo = soft_avoid_repo
         self.package_deal_repo = package_deal_repo
+        self.opendota_player_service = opendota_player_service
         # Guard against concurrent finalizations per guild
         self._recording_lock = threading.Lock()
         # Track matches being recorded as (guild_id, pending_match_id) tuples
         # to allow concurrent recording of different matches in the same guild
         self._recording_in_progress: set[tuple[int, int | None]] = set()
+
+    @staticmethod
+    def _is_grinder_cache_stale(checked_at: str | None) -> bool:
+        """Check if a player's solo grinder cache needs refreshing."""
+        if checked_at is None:
+            return True
+        try:
+            ts = datetime.fromisoformat(checked_at)
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            return (datetime.now(timezone.utc) - ts).total_seconds() > SOLO_GRINDER_CACHE_TTL_SECONDS
+        except (ValueError, TypeError):
+            return True
 
     def _map_player_ids(self, player_ids: list[int], players: list[Player]) -> dict[int, int]:
         """Map Player object identity (id()) to Discord ID for stable lookups."""
@@ -285,12 +301,31 @@ class MatchService:
         if self.package_deal_repo:
             deals = self.package_deal_repo.get_active_deals_for_players(guild_id, player_ids)
 
+        # Extract solo grinder IDs for team composition penalty
+        grinder_ids = {p.discord_id for p in players if p.is_solo_grinder and p.discord_id is not None}
+
+        # Fire-and-forget refresh for stale grinder caches (don't block the shuffle)
+        if self.opendota_player_service:
+            stale_players = [
+                p for p in players
+                if p.discord_id is not None and self._is_grinder_cache_stale(p.solo_grinder_checked_at)
+            ]
+            if stale_players:
+                import threading
+                def _refresh_grinder_status():
+                    for p in stale_players:
+                        try:
+                            self.opendota_player_service.update_solo_grinder_status(p.discord_id, guild_id)
+                        except Exception as e:
+                            logger.debug(f"Failed to refresh grinder status for {p.discord_id}: {e}")
+                threading.Thread(target=_refresh_grinder_status, daemon=True).start()
+
         if len(players) > 10:
             team1, team2, excluded_players = shuffler.shuffle_from_pool(
-                players, exclusion_counts, recent_match_names, avoids=avoids, deals=deals
+                players, exclusion_counts, recent_match_names, avoids=avoids, deals=deals, grinder_ids=grinder_ids
             )
         else:
-            team1, team2 = shuffler.shuffle(players, avoids=avoids, deals=deals)
+            team1, team2 = shuffler.shuffle(players, avoids=avoids, deals=deals, grinder_ids=grinder_ids)
             excluded_players = []
 
         off_role_mult = shuffler.off_role_multiplier
@@ -386,8 +421,19 @@ class MatchService:
                 if on_opposite:
                     package_deal_penalty += shuffler.package_deal_penalty
 
+        # Calculate solo grinder mix penalty (for display only - already factored into shuffler)
+        solo_grinder_penalty = 0.0
+        if grinder_ids:
+            for team_ids_set in (radiant_ids_set, dire_ids_set):
+                t_grinders = len(grinder_ids & team_ids_set)
+                t_casuals = len(team_ids_set) - t_grinders
+                if t_grinders > 0 and t_casuals > 0:
+                    solo_grinder_penalty += shuffler.solo_grinder_mix_penalty
+
         goodness_score = (
-            value_diff + off_role_penalty + weighted_role_matchup_delta + excluded_penalty + recent_match_penalty + soft_avoid_penalty + package_deal_penalty
+            value_diff + off_role_penalty + weighted_role_matchup_delta
+            + excluded_penalty + recent_match_penalty + soft_avoid_penalty
+            + package_deal_penalty + solo_grinder_penalty
         )
 
         # Calculate Glicko-2 win probability for Radiant

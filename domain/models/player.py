@@ -36,6 +36,9 @@ class Player:
     personal_best_win_streak: int = 0
     total_bets_placed: int = 0
     first_leverage_used: bool = False
+    # Solo grinder detection
+    is_solo_grinder: bool = False
+    solo_grinder_checked_at: str | None = None
 
     def get_value(self, use_glicko: bool = True, use_openskill: bool = False, use_jopacoin: bool = False) -> float:
         """

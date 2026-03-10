@@ -69,6 +69,16 @@ class RegistrationCommands(commands.Cog):
                 f"Use `/setroles` to set your preferred roles."
             )
 
+            # Seed solo grinder status (fire-and-forget)
+            try:
+                opendota_svc = getattr(self.bot, "opendota_player_service", None)
+                if opendota_svc and guild_id is not None:
+                    asyncio.create_task(asyncio.to_thread(
+                        opendota_svc.update_solo_grinder_status, interaction.user.id, guild_id
+                    ))
+            except Exception as e:
+                logger.debug(f"Failed to seed grinder status: {e}")
+
             # Neon Degen Terminal hook (registration)
             try:
                 neon = get_neon_service(self.bot)

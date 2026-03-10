@@ -111,6 +111,13 @@ class IPlayerRepository(ABC):
         """Get all players with dotabuff_url but no steam_id set."""
         ...
 
+    @abstractmethod
+    def update_solo_grinder_status(
+        self, discord_id: int, guild_id: int, is_grinder: bool, checked_at: str
+    ) -> None:
+        """Update a player's solo grinder status and check timestamp."""
+        ...
+
     # --- Multi-Steam ID methods ---
 
     @abstractmethod

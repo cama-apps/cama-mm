@@ -1524,6 +1524,55 @@ class AdminCommands(commands.Cog):
         )
 
 
+    @app_commands.command(
+        name="refreshgrinders", description="Refresh solo grinder status for all players (Admin only)"
+    )
+    async def refreshgrinders(self, interaction: discord.Interaction):
+        """Admin command to batch-check solo grinder status via OpenDota."""
+        if not has_admin_permission(interaction):
+            await interaction.response.send_message(
+                "❌ Admin only! You need Administrator or Manage Server permissions.",
+                ephemeral=True,
+            )
+            return
+
+        await safe_defer(interaction, ephemeral=True)
+
+        guild_id = interaction.guild.id if interaction.guild else None
+        opendota_svc = getattr(self.bot, "opendota_player_service", None)
+        player_repo = getattr(self.bot, "player_repo", None)
+
+        if not opendota_svc or not player_repo:
+            await safe_followup(interaction, content="❌ Required services unavailable.", ephemeral=True)
+            return
+
+        def _refresh_all():
+            players = player_repo.get_all(guild_id)
+            grinder_count = 0
+            checked = 0
+            for p in players:
+                if p.discord_id is None:
+                    continue
+                try:
+                    is_grinder = opendota_svc.update_solo_grinder_status(p.discord_id, guild_id)
+                    checked += 1
+                    if is_grinder:
+                        grinder_count += 1
+                    # Rate limit: ~1 req/sec to respect OpenDota
+                    time.sleep(1)
+                except Exception as e:
+                    logger.warning(f"Failed to check grinder status for {p.discord_id}: {e}")
+            return checked, grinder_count
+
+        checked, grinder_count = await asyncio.to_thread(_refresh_all)
+
+        await safe_followup(
+            interaction,
+            content=f"✅ Checked {checked} players. {grinder_count} solo grinders found.",
+            ephemeral=True,
+        )
+
+
 async def setup(bot: commands.Bot):
     lobby_service = getattr(bot, "lobby_service", None)
     player_service = getattr(bot, "player_service", None)
@@ -1561,6 +1610,7 @@ async def setup(bot: commands.Bot):
             "recalibrate",
             "resetrecalibrationcooldown",
             "correctmatch",
+            "refreshgrinders",
         ]
     ]
     logger.info(

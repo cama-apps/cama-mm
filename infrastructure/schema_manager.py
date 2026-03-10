@@ -258,6 +258,7 @@ class SchemaManager:
             # Mana shop items and daily loss tracking
             ("create_mana_shop_items_table", self._migration_create_mana_shop_items_table),
             ("create_mana_daily_losses_table", self._migration_create_mana_daily_losses_table),
+            ("add_solo_grinder_columns", self._migration_add_solo_grinder_columns),
         ]
 
     # --- Migrations ---
@@ -1778,3 +1779,8 @@ class SchemaManager:
             )
             """
         )
+
+    def _migration_add_solo_grinder_columns(self, cursor) -> None:
+        """Add columns for solo ranked grinder detection."""
+        self._add_column_if_not_exists(cursor, "players", "is_solo_grinder", "INTEGER DEFAULT 0")
+        self._add_column_if_not_exists(cursor, "players", "solo_grinder_checked_at", "TEXT")
