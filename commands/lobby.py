@@ -900,14 +900,14 @@ class LobbyCommands(commands.Cog):
             )
             return
 
-        # Ping AFK players (exclude those who already reacted)
+        # Ping all lobby members (exclude those who already reacted)
         allowed_mentions = discord.AllowedMentions(
             users=[discord.Object(id=uid) for uid in mention_ids]
         )
         ping_content = None
         if mention_ids:
             tags = " ".join(f"<@{uid}>" for uid in mention_ids)
-            ping_content = f"**Possibly AFK:** {tags}"
+            ping_content = f"⚔️ **Ready check!** {tags}"
 
         if is_refresh and msg:
             await msg.edit(embed=embed)
@@ -941,7 +941,7 @@ def build_readycheck_embed(
 ) -> tuple[discord.Embed, list[int]]:
     """Build the readycheck embed from stored classification data.
 
-    Returns (embed, mention_ids) where mention_ids are AFK members to ping.
+    Returns (embed, mention_ids) where mention_ids are all lobby members to ping.
     """
     now = time.time()
     embed = discord.Embed(
@@ -957,6 +957,8 @@ def build_readycheck_embed(
     for pid, d in player_data.items():
         if pid in reacted:
             continue
+        if d["is_member"]:
+            mention_ids.append(pid)
         frogling = f" {FROGLING_EMOTE}" if d["is_conditional"] else ""
         join_ts = d.get("join_ts")
         time_str = f" ({format_duration_short(now - join_ts)})" if join_ts else ""
@@ -964,7 +966,6 @@ def build_readycheck_embed(
             active_lines.append(f"{d['name']} {d['signals']}{frogling}{time_str}")
         else:
             if d["is_member"]:
-                mention_ids.append(pid)
                 afk_lines.append(f"<@{pid}> {d['signals']}{frogling}{time_str}")
             else:
                 afk_lines.append(f"{d['name']} {d['signals']}{frogling}{time_str}")
