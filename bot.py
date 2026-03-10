@@ -488,7 +488,7 @@ async def on_raw_reaction_add(payload):
     try:
         channel = bot.get_channel(payload.channel_id)
         if not channel:
-            return
+            channel = await bot.fetch_channel(payload.channel_id)
 
         message = await channel.fetch_message(payload.message_id)
         if message.id != bot.lobby_service.get_lobby_message_id():
@@ -682,7 +682,7 @@ async def on_raw_reaction_remove(payload):
     try:
         channel = bot.get_channel(payload.channel_id)
         if not channel:
-            return
+            channel = await bot.fetch_channel(payload.channel_id)
         message = await channel.fetch_message(payload.message_id)
         if message.id != bot.lobby_service.get_lobby_message_id():
             return
