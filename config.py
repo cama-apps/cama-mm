@@ -78,9 +78,9 @@ OPENSKILL_SHUFFLE_CHANCE = _parse_float("OPENSKILL_SHUFFLE_CHANCE", 0.05)  # 5% 
 
 SHUFFLER_SETTINGS: dict[str, Any] = {
     "off_role_multiplier": _parse_float("OFF_ROLE_MULTIPLIER", 0.95),
-    "off_role_flat_penalty": _parse_float("OFF_ROLE_FLAT_PENALTY", 350.0),
+    "off_role_flat_penalty": _parse_float("OFF_ROLE_FLAT_PENALTY", 380.0),
     "role_matchup_delta_weight": _parse_float("ROLE_MATCHUP_DELTA_WEIGHT", 0.18),
-    "exclusion_penalty_weight": _parse_float("EXCLUSION_PENALTY_WEIGHT", 50.0),
+    "exclusion_penalty_weight": _parse_float("EXCLUSION_PENALTY_WEIGHT", 55.0),
     # Recent match penalty: players who participated in the most recent match
     # get this penalty added to goodness score (making them more likely to sit out)
     # Hardcoded default - not configurable via env var (silent operation)
@@ -286,7 +286,7 @@ TRIVIA_ANSWER_TIMEOUT_SECONDS = _parse_int("TRIVIA_ANSWER_TIMEOUT_SECONDS", 15)
 TRIVIA_REWARD_PER_QUESTION = _parse_int("TRIVIA_REWARD_PER_QUESTION", 1)
 
 # Solo grinder detection
-SOLO_GRINDER_MIX_PENALTY = _parse_float("SOLO_GRINDER_MIX_PENALTY", 100.0)
+SOLO_GRINDER_MIX_PENALTY = _parse_float("SOLO_GRINDER_MIX_PENALTY", 110.0)
 SOLO_GRINDER_CACHE_TTL_SECONDS = _parse_int("SOLO_GRINDER_CACHE_TTL_SECONDS", 604800)  # 7 days
 
 # Neon Degen Terminal Easter Egg configuration

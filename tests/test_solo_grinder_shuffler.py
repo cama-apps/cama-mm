@@ -43,15 +43,15 @@ class TestSoloGrinderPenalty:
         team1_ids = {1, 2, 3, 4, 5}
         team2_ids = {6, 7, 8, 9, 10}
         grinder_ids = {1, 2, 3}  # 3 grinders on team1 (mixed), 0 on team2 (pure casual)
-        assert shuffler._calculate_solo_grinder_penalty(team1_ids, team2_ids, grinder_ids) == 100.0
+        assert shuffler._calculate_solo_grinder_penalty(team1_ids, team2_ids, grinder_ids) == 110.0
 
-    def test_both_mixed_teams_returns_200(self):
-        """Both teams mixed = 200 penalty."""
+    def test_both_mixed_teams_returns_220(self):
+        """Both teams mixed = 220 penalty."""
         shuffler = BalancedShuffler()
         team1_ids = {1, 2, 3, 4, 5}
         team2_ids = {6, 7, 8, 9, 10}
         grinder_ids = {1, 2, 7, 8}  # 2 on each team, both mixed
-        assert shuffler._calculate_solo_grinder_penalty(team1_ids, team2_ids, grinder_ids) == 200.0
+        assert shuffler._calculate_solo_grinder_penalty(team1_ids, team2_ids, grinder_ids) == 220.0
 
     def test_custom_penalty_value(self):
         shuffler = BalancedShuffler(solo_grinder_mix_penalty=50.0)
