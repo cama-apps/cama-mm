@@ -567,28 +567,32 @@ async def on_raw_reaction_add(payload):
                 pass
             return
 
-        # Handle mutual exclusivity: remove the other reaction if present
+        # Handle mutual exclusivity: join first (atomically moves between sets),
+        # then remove the old reaction. This order prevents on_raw_reaction_remove
+        # from seeing the player still in the old set and posting a spurious leave.
         if is_sword:
-            # Joining as regular player - remove frogling if present
-            try:
-                frogling_emoji = discord.PartialEmoji(name="frogling", id=FROGLING_EMOJI_ID)
-                await message.remove_reaction(frogling_emoji, user)
-            except Exception:
-                pass
             success, reason, pending_info = await asyncio.to_thread(
                 bot.lobby_service.join_lobby, payload.user_id, guild_id
             )
             join_type = "regular"
+            if success:
+                # Remove frogling after join so the reaction_remove handler finds nothing to leave
+                try:
+                    frogling_emoji = discord.PartialEmoji(name="frogling", id=FROGLING_EMOJI_ID)
+                    await message.remove_reaction(frogling_emoji, user)
+                except Exception:
+                    pass
         else:
-            # Joining as conditional (frogling) - remove sword if present
-            try:
-                await message.remove_reaction("⚔️", user)
-            except Exception:
-                pass
             success, reason, pending_info = await asyncio.to_thread(
                 bot.lobby_service.join_lobby_conditional, payload.user_id, guild_id
             )
             join_type = "conditional"
+            if success:
+                # Remove sword after join so the reaction_remove handler finds nothing to leave
+                try:
+                    await message.remove_reaction("⚔️", user)
+                except Exception:
+                    pass
 
         if not success:
             try:
