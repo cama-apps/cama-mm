@@ -43,6 +43,7 @@ if TYPE_CHECKING:
     from services.flavor_text_service import FlavorTextService
     from services.gambling_stats_service import GamblingStatsService
     from services.recalibration_service import RecalibrationService
+    from services.dig_service import DigService
 
 logger = logging.getLogger("cama_bot.commands.shop")
 
@@ -90,6 +91,7 @@ class ShopCommands(commands.Cog):
         flavor_text_service: FlavorTextService | None = None,
         gambling_stats_service: GamblingStatsService | None = None,
         recalibration_service: RecalibrationService | None = None,
+        dig_service: DigService | None = None,
     ):
         self.bot = bot
         self.player_service = player_service
@@ -97,6 +99,7 @@ class ShopCommands(commands.Cog):
         self.flavor_text_service = flavor_text_service
         self.gambling_stats_service = gambling_stats_service
         self.recalibration_service = recalibration_service
+        self.dig_service = dig_service
 
     async def hero_autocomplete(
         self, interaction: discord.Interaction, current: str
@@ -166,7 +169,18 @@ class ShopCommands(commands.Cog):
             except Exception:
                 pass  # Fall back to default label
 
-        all_items = static_items + [recal_choice]
+        # Dig items
+        dig_items = []
+        if self.dig_service:
+            dig_items = [
+                app_commands.Choice(name="Dynamite (5 jopacoin) — +5 blocks", value="dig_dynamite"),
+                app_commands.Choice(name="Hard Hat (8 jopacoin) — cave-in shield", value="dig_hard_hat"),
+                app_commands.Choice(name="Lantern (4 jopacoin) — scan + protection", value="dig_lantern"),
+                app_commands.Choice(name="Reinforcement (6 jopacoin) — decay + sabotage shield", value="dig_reinforcement"),
+                app_commands.Choice(name="Pickaxe Upgrade — upgrade your pickaxe", value="dig_upgrade"),
+            ]
+
+        all_items = static_items + [recal_choice] + dig_items
 
         if current:
             all_items = [c for c in all_items if current.lower() in c.name.lower()]
@@ -250,6 +264,8 @@ class ShopCommands(commands.Cog):
             await self._handle_package_deal(interaction, target=target)
         elif item == "recalibrate":
             await self._handle_recalibrate(interaction)
+        elif item.startswith("dig_"):
+            await self._handle_dig_item(interaction, item)
         elif item == "recalibrate_cooldown":
             # User selected the ON COOLDOWN item — block with cooldown info
             guild_id = interaction.guild.id if interaction.guild else None
@@ -1511,6 +1527,75 @@ class ShopCommands(commands.Cog):
             )
 
 
+    async def _handle_dig_item(self, interaction: discord.Interaction, item: str):
+        """Handle dig consumable and pickaxe upgrade purchases from /shop."""
+        if not self.dig_service:
+            await interaction.response.send_message(
+                "Mining system is not available.", ephemeral=True
+            )
+            return
+
+        user_id = interaction.user.id
+        guild_id = interaction.guild.id if interaction.guild else None
+
+        # Check registration
+        player = await asyncio.to_thread(self.player_service.get_player, user_id, guild_id)
+        if not player:
+            await interaction.response.send_message(
+                "You need to `/register` before you can buy dig items.", ephemeral=True
+            )
+            return
+
+        if item == "dig_upgrade":
+            await safe_defer(interaction)
+            result = await asyncio.to_thread(
+                self.dig_service.upgrade_pickaxe, user_id, guild_id
+            )
+            if not result.get("success"):
+                await safe_followup(
+                    interaction,
+                    content=result.get("error", "Upgrade failed."),
+                    ephemeral=True,
+                )
+                return
+            embed = discord.Embed(
+                title="Pickaxe Upgraded!",
+                description=(
+                    f"You upgraded to **{result.get('new_tier', 'next tier')}**!\n"
+                    f"Cost: **{result.get('cost', 0)}** {JOPACOIN_EMOTE}"
+                ),
+                color=0xB0BEC5,
+            )
+            await safe_followup(interaction, embed=embed)
+            return
+
+        # Consumable purchase: dig_dynamite -> dynamite, etc.
+        item_type = item.removeprefix("dig_")
+        await safe_defer(interaction)
+        result = await asyncio.to_thread(
+            self.dig_service.buy_item, user_id, guild_id, item_type
+        )
+        if not result.get("success"):
+            await safe_followup(
+                interaction,
+                content=result.get("error", "Purchase failed."),
+                ephemeral=True,
+            )
+            return
+
+        embed = discord.Embed(
+            title="Item Purchased!",
+            description=(
+                f"Bought **{result.get('item', item_type)}** for "
+                f"**{result.get('cost', 0)}** {JOPACOIN_EMOTE}\n"
+                f"Balance: **{result.get('balance_after', '?')}** {JOPACOIN_EMOTE}\n\n"
+                f"Use `/dig_use {item_type}` to queue it for your next dig."
+            ),
+            color=0xD4AF37,
+        )
+        await safe_followup(interaction, embed=embed)
+
+
 async def setup(bot: commands.Bot):
     player_service = getattr(bot, "player_service", None)
     if player_service is None:
@@ -1520,8 +1605,9 @@ async def setup(bot: commands.Bot):
     flavor_text_service = getattr(bot, "flavor_text_service", None)
     gambling_stats_service = getattr(bot, "gambling_stats_service", None)
     recalibration_service = getattr(bot, "recalibration_service", None)
+    dig_service = getattr(bot, "dig_service", None)
 
     await bot.add_cog(ShopCommands(
         bot, player_service, match_service, flavor_text_service, gambling_stats_service,
-        recalibration_service,
+        recalibration_service, dig_service,
     ))

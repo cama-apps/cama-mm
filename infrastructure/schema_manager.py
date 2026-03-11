@@ -259,6 +259,7 @@ class SchemaManager:
             ("create_mana_shop_items_table", self._migration_create_mana_shop_items_table),
             ("create_mana_daily_losses_table", self._migration_create_mana_daily_losses_table),
             ("add_solo_grinder_columns", self._migration_add_solo_grinder_columns),
+            ("create_dig_system_tables", self._migration_create_dig_system_tables),
         ]
 
     # --- Migrations ---
@@ -1784,3 +1785,130 @@ class SchemaManager:
         """Add columns for solo ranked grinder detection."""
         self._add_column_if_not_exists(cursor, "players", "is_solo_grinder", "INTEGER DEFAULT 0")
         self._add_column_if_not_exists(cursor, "players", "solo_grinder_checked_at", "TEXT")
+
+    def _migration_create_dig_system_tables(self, cursor) -> None:
+        """Create all tables for the tunnel digging minigame."""
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS tunnels (
+                discord_id       INTEGER NOT NULL,
+                guild_id         INTEGER NOT NULL DEFAULT 0,
+                depth            INTEGER NOT NULL DEFAULT 0,
+                max_depth        INTEGER NOT NULL DEFAULT 0,
+                total_digs       INTEGER NOT NULL DEFAULT 0,
+                total_jc_earned  INTEGER NOT NULL DEFAULT 0,
+                last_dig_at      INTEGER,
+                streak_days      INTEGER NOT NULL DEFAULT 0,
+                streak_last_date TEXT,
+                pickaxe_tier     INTEGER NOT NULL DEFAULT 0,
+                prestige_level   INTEGER NOT NULL DEFAULT 0,
+                prestige_perks   TEXT,
+                tunnel_name      TEXT,
+                boss_progress    TEXT,
+                boss_attempts    TEXT,
+                trap_active      INTEGER NOT NULL DEFAULT 0,
+                trap_free_today  INTEGER NOT NULL DEFAULT 1,
+                trap_date        TEXT,
+                insured_until    INTEGER,
+                reinforced_until INTEGER,
+                injury_state     TEXT,
+                paid_digs_today  INTEGER NOT NULL DEFAULT 0,
+                paid_dig_date    TEXT,
+                revenge_target   INTEGER,
+                revenge_type     TEXT,
+                revenge_until    INTEGER,
+                hard_hat_charges INTEGER NOT NULL DEFAULT 0,
+                cheer_data       TEXT,
+                created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (discord_id, guild_id)
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS dig_actions (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id         INTEGER NOT NULL DEFAULT 0,
+                actor_id         INTEGER NOT NULL,
+                target_id        INTEGER,
+                action_type      TEXT NOT NULL,
+                depth_before     INTEGER NOT NULL,
+                depth_after      INTEGER NOT NULL,
+                jc_delta         INTEGER NOT NULL DEFAULT 0,
+                detail           TEXT,
+                created_at       INTEGER NOT NULL
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_dig_actions_guild_actor
+            ON dig_actions(guild_id, actor_id)
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_dig_actions_guild_target
+            ON dig_actions(guild_id, target_id)
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS dig_inventory (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                discord_id       INTEGER NOT NULL,
+                guild_id         INTEGER NOT NULL DEFAULT 0,
+                item_type        TEXT NOT NULL,
+                queued           INTEGER NOT NULL DEFAULT 0,
+                created_at       INTEGER NOT NULL
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_dig_inventory_player
+            ON dig_inventory(discord_id, guild_id)
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS dig_artifacts (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                discord_id       INTEGER NOT NULL,
+                guild_id         INTEGER NOT NULL DEFAULT 0,
+                artifact_id      TEXT NOT NULL,
+                found_at         INTEGER NOT NULL,
+                is_relic         INTEGER NOT NULL DEFAULT 0,
+                equipped         INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_dig_artifacts_player
+            ON dig_artifacts(discord_id, guild_id)
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS dig_achievements (
+                discord_id       INTEGER NOT NULL,
+                guild_id         INTEGER NOT NULL DEFAULT 0,
+                achievement_id   TEXT NOT NULL,
+                unlocked_at      INTEGER NOT NULL,
+                PRIMARY KEY (discord_id, guild_id, achievement_id)
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS dig_artifact_registry (
+                artifact_id      TEXT NOT NULL,
+                guild_id         INTEGER NOT NULL DEFAULT 0,
+                first_finder_id  INTEGER,
+                first_found_at   INTEGER,
+                total_found      INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (artifact_id, guild_id)
+            )
+            """
+        )

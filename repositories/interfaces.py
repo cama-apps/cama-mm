@@ -1299,3 +1299,117 @@ class IRebellionRepository(ABC):
     def get_war_leaderboard(self, guild_id: int) -> list[dict]:
         """Get rebellion leaderboard stats for all players."""
         ...
+
+
+class IDigRepository(ABC):
+    """Repository for dig minigame data access."""
+
+    # Tunnel CRUD
+    @abstractmethod
+    def get_tunnel(self, discord_id: int, guild_id: int) -> dict | None: ...
+
+    @abstractmethod
+    def create_tunnel(self, discord_id: int, guild_id: int, tunnel_name: str) -> dict: ...
+
+    @abstractmethod
+    def update_tunnel(self, discord_id: int, guild_id: int, **kwargs) -> None: ...
+
+    @abstractmethod
+    def get_leaderboard(self, guild_id: int, limit: int = 10) -> list[dict]: ...
+
+    @abstractmethod
+    def get_player_rank(self, discord_id: int, guild_id: int) -> int: ...
+
+    @abstractmethod
+    def get_all_tunnels(self, guild_id: int) -> list[dict]: ...
+
+    # Action Logging
+    @abstractmethod
+    def log_action(
+        self, guild_id: int, actor_id: int, target_id: int | None,
+        action_type: str, depth_before: int, depth_after: int,
+        jc_delta: int = 0, detail: dict | None = None,
+    ) -> int: ...
+
+    @abstractmethod
+    def get_recent_actions(self, discord_id: int, guild_id: int, limit: int = 5, *, action_type: str | None = None, hours: int | None = None) -> list[dict]: ...
+
+    @abstractmethod
+    def get_sabotage_history(self, actor_id: int, target_id: int, guild_id: int, since_ts: int) -> list[dict]: ...
+
+    @abstractmethod
+    def get_helper_actions(self, target_id: int, guild_id: int, since_ts: int) -> list[dict]: ...
+
+    # Inventory
+    @abstractmethod
+    def get_inventory(self, discord_id: int, guild_id: int) -> list[dict]: ...
+
+    @abstractmethod
+    def add_item(self, discord_id: int, guild_id: int, item_type: str) -> int: ...
+
+    @abstractmethod
+    def remove_item(self, item_id: int) -> None: ...
+
+    @abstractmethod
+    def get_queued_items(self, discord_id: int, guild_id: int) -> list[dict]: ...
+
+    @abstractmethod
+    def queue_item(self, item_id: int) -> None: ...
+
+    @abstractmethod
+    def unqueue_all(self, discord_id: int, guild_id: int) -> None: ...
+
+    @abstractmethod
+    def count_items(self, discord_id: int, guild_id: int) -> int: ...
+
+    # Artifacts
+    @abstractmethod
+    def add_artifact(self, discord_id: int, guild_id: int, artifact_id: str, is_relic: bool = False) -> int: ...
+
+    @abstractmethod
+    def get_artifacts(self, discord_id: int, guild_id: int) -> list[dict]: ...
+
+    @abstractmethod
+    def get_equipped_relics(self, discord_id: int, guild_id: int) -> list[dict]: ...
+
+    @abstractmethod
+    def equip_relic(self, artifact_db_id: int, equipped: bool = True) -> None: ...
+
+    @abstractmethod
+    def unequip_relic(self, artifact_db_id: int) -> None: ...
+
+    @abstractmethod
+    def count_equipped_relics(self, discord_id: int, guild_id: int) -> int: ...
+
+    @abstractmethod
+    def remove_artifact(self, artifact_db_id: int) -> None: ...
+
+    @abstractmethod
+    def has_artifact(self, discord_id: int, guild_id: int, artifact_id: str) -> bool: ...
+
+    # Artifact Registry
+    @abstractmethod
+    def register_artifact_find(self, artifact_id: str, guild_id: int, finder_id: int, found_at: int) -> bool: ...
+
+    @abstractmethod
+    def get_registry(self, guild_id: int) -> list[dict]: ...
+
+    @abstractmethod
+    def get_registry_entry(self, artifact_id: str, guild_id: int) -> dict | None: ...
+
+    # Achievements
+    @abstractmethod
+    def add_achievement(self, discord_id: int, guild_id: int, achievement_id: str, unlocked_at: int) -> bool: ...
+
+    @abstractmethod
+    def get_achievements(self, discord_id: int, guild_id: int) -> list[dict]: ...
+
+    @abstractmethod
+    def has_achievement(self, discord_id: int, guild_id: int, achievement_id: str) -> bool: ...
+
+    # Atomic Operations
+    @abstractmethod
+    def atomic_dig(self, discord_id: int, guild_id: int, depth_delta: int, jc_delta: int, updates: dict) -> dict: ...
+
+    @abstractmethod
+    def atomic_sabotage(self, actor_id: int, target_id: int, guild_id: int, target_depth_delta: int, actor_jc_cost: int) -> dict: ...

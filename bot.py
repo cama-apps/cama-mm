@@ -140,6 +140,7 @@ EXTENSIONS = [
     "commands.trivia",
     "commands.mana",
     "commands.roll",
+    "commands.dig",
 ]
 
 
