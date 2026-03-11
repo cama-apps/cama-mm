@@ -79,7 +79,7 @@ OPENSKILL_SHUFFLE_CHANCE = _parse_float("OPENSKILL_SHUFFLE_CHANCE", 0.05)  # 5% 
 SHUFFLER_SETTINGS: dict[str, Any] = {
     "off_role_multiplier": _parse_float("OFF_ROLE_MULTIPLIER", 0.95),
     "off_role_flat_penalty": _parse_float("OFF_ROLE_FLAT_PENALTY", 380.0),
-    "role_matchup_delta_weight": _parse_float("ROLE_MATCHUP_DELTA_WEIGHT", 0.18),
+    "role_matchup_delta_weight": _parse_float("ROLE_MATCHUP_DELTA_WEIGHT", 0.19),
     "exclusion_penalty_weight": _parse_float("EXCLUSION_PENALTY_WEIGHT", 55.0),
     # Recent match penalty: players who participated in the most recent match
     # get this penalty added to goodness score (making them more likely to sit out)
@@ -143,9 +143,9 @@ SHOP_DOUBLE_OR_NOTHING_COST = _parse_int("SHOP_DOUBLE_OR_NOTHING_COST", 50)
 DOUBLE_OR_NOTHING_COOLDOWN_SECONDS = _parse_int("DOUBLE_OR_NOTHING_COOLDOWN_SECONDS", 2592000)  # 30 days
 
 # Soft Avoid configuration
-SHOP_SOFT_AVOID_COST = _parse_int("SHOP_SOFT_AVOID_COST", 500)  # Cost to soft avoid a player
+SHOP_SOFT_AVOID_COST = _parse_int("SHOP_SOFT_AVOID_COST", 600)  # Cost to soft avoid a player
 SOFT_AVOID_GAMES_DURATION = _parse_int("SOFT_AVOID_GAMES_DURATION", 10)  # Number of games avoid lasts
-SOFT_AVOID_PENALTY = _parse_float("SOFT_AVOID_PENALTY", 250.0)  # Penalty added to shuffler when pair on same team
+SOFT_AVOID_PENALTY = _parse_float("SOFT_AVOID_PENALTY", 200.0)  # Penalty added to shuffler when pair on same team
 
 # Package Deal configuration
 SHOP_PACKAGE_DEAL_BASE_COST = _parse_int("SHOP_PACKAGE_DEAL_BASE_COST", 500)  # Base cost for package deal

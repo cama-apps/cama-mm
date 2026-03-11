@@ -107,9 +107,9 @@ def test_goodness_score_respects_role_matchup_weight(repo_db_path, monkeypatch):
     result = service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
 
     # value diff = |6500 - 6800| = 300
-    # role delta = sum(100, 400, 0, 0, 0) = 500; weighted by 0.18 -> 90
+    # role delta = sum(100, 400, 0, 0, 0) = 500; weighted by 0.19 -> 95
     # off-role penalty and exclusion penalty = 0
-    assert result["goodness_score"] == pytest.approx(390)
+    assert result["goodness_score"] == pytest.approx(395)
 
 
 def test_openskill_falls_back_to_glicko_when_player_missing_os_mu(repo_db_path):
