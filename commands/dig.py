@@ -5,8 +5,10 @@ Tunnel digging minigame commands.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import random
+import time
 from typing import TYPE_CHECKING
 
 import discord
@@ -17,6 +19,7 @@ from commands.checks import require_gamba_channel
 from utils.formatting import JOPACOIN_EMOTE
 from utils.interaction_safety import safe_defer, safe_followup
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
+from services.dig_constants import PICKAXE_TIERS
 
 if TYPE_CHECKING:
     from services.dig_service import DigService
@@ -36,16 +39,16 @@ LAYER_COLORS = {
 }
 
 PROGRESSIVE_TIPS = [
-    "Tip: Use /dig_shop to buy consumables that help you dig faster.",
-    "Tip: /dig_help <user> lets you assist a friend's tunnel.",
-    "Tip: Set a /dig_trap to punish would-be saboteurs.",
-    "Tip: /dig_insure protects you from catastrophic cave-ins.",
+    "Tip: Use /dig shop to buy consumables that help you dig faster.",
+    "Tip: /dig help <user> lets you assist a friend's tunnel.",
+    "Tip: Set a /dig trap to punish would-be saboteurs.",
+    "Tip: /dig insure protects you from catastrophic cave-ins.",
     "Tip: Prestige resets depth but unlocks powerful perks.",
     "Tip: Bosses guard layer transitions. Bring friends to cheer!",
-    "Tip: Relics from /dig_museum are rare — gift duplicates to friends.",
+    "Tip: Relics from /dig museum are rare — gift duplicates to friends.",
     "Tip: Higher pickaxe tiers dig more blocks per action.",
     "Tip: Streaks grant bonus JC — keep digging daily!",
-    "Tip: /dig_flex shows off your achievements and titles.",
+    "Tip: /dig flex shows off your achievements and titles.",
 ]
 
 # "Dig Dug" flavor — classic arcade game references sprinkled in
@@ -91,16 +94,16 @@ GUIDE_PAGES = [
         title="Dig Guide — Items & Pickaxes",
         description=(
             "**Consumables**\n"
-            "Buy consumables from `/dig_shop` and queue them with `/dig_use`. "
+            "Buy consumables from `/dig shop` and queue them with `/dig use`. "
             "You can hold up to 5 items at a time. Queued items are used on "
             "your next dig.\n\n"
             "**Pickaxes**\n"
-            "Upgrade your pickaxe with `/dig_upgrade`. Higher tiers require depth "
+            "Upgrade your pickaxe with `/dig upgrade`. Higher tiers require depth "
             "milestones, JC, and prestige levels. Better pickaxes dig more blocks "
             "per action.\n\n"
             "**Relics**\n"
             "Rare artifacts found while digging. Equip them for passive bonuses. "
-            "Gift duplicates to friends with `/dig_gift`."
+            "Gift duplicates to friends with `/dig gift`."
         ),
         color=LAYER_COLORS["Stone"],
     ),
@@ -139,7 +142,7 @@ GUIDE_PAGES = [
             "Choose wisely — they shape your digging strategy.\n\n"
             "**Relics**\n"
             "Some relics are only available at higher prestige levels. Collect "
-            "them all and fill the `/dig_museum`!"
+            "them all and fill the `/dig museum`!"
         ),
         color=LAYER_COLORS["Magma"],
     ),
@@ -149,6 +152,26 @@ GUIDE_PAGES = [
 # ---------------------------------------------------------------------------
 # Helper
 # ---------------------------------------------------------------------------
+
+class _DictObj:
+    """Thin wrapper so ``getattr(obj, key, default)`` works on dicts."""
+    __slots__ = ("_d",)
+    def __init__(self, d):
+        self._d = d if isinstance(d, dict) else {}
+    def __getattr__(self, name):
+        try:
+            v = self._d[name]
+            return _DictObj(v) if isinstance(v, dict) else v
+        except KeyError:
+            raise AttributeError(name)
+
+
+def _wrap(result):
+    """Wrap a service result dict so getattr access works throughout the cog."""
+    if isinstance(result, dict):
+        return _DictObj(result)
+    return result
+
 
 def _layer_color(layer: str | None) -> int:
     """Return embed color for a layer name, defaulting to Dirt brown."""
@@ -160,6 +183,22 @@ def _layer_color(layer: str | None) -> int:
 def _tip(index: int) -> str:
     """Return a rotating progressive tip."""
     return PROGRESSIVE_TIPS[index % len(PROGRESSIVE_TIPS)]
+
+
+def _fmt_duration(seconds: int) -> str:
+    """Format seconds into a human-readable duration."""
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        m, s = divmod(seconds, 60)
+        return f"{m}m {s}s" if s else f"{m}m"
+    if seconds < 86400:
+        h, rem = divmod(seconds, 3600)
+        m = rem // 60
+        return f"{h}h {m}m" if m else f"{h}h"
+    d, rem = divmod(seconds, 86400)
+    h = rem // 3600
+    return f"{d}d {h}h" if h else f"{d}d"
 
 
 async def _check_registered(interaction: discord.Interaction, bot: commands.Bot):
@@ -294,13 +333,13 @@ class BossWagerModal(discord.ui.Modal):
 
         await interaction.response.defer()
         try:
-            self.result = await asyncio.to_thread(
+            self.result = _wrap(await asyncio.to_thread(
                 self.dig_service.fight_boss,
                 self.user_id,
                 self.guild_id,
                 tier,
                 amount,
-            )
+            ))
             embed = discord.Embed(
                 title="Boss Fight Result",
                 color=0x00FF00 if getattr(self.result, "won", False) else 0xFF0000,
@@ -360,9 +399,9 @@ class BossEncounterView(discord.ui.View):
             return
         await interaction.response.defer()
         try:
-            result = await asyncio.to_thread(
+            result = _wrap(await asyncio.to_thread(
                 self.dig_service.retreat_boss, self.user_id, self.guild_id
-            )
+            ))
             await interaction.followup.send(
                 f"You retreated safely. {getattr(result, 'message', 'The boss waits...')}"
             )
@@ -378,9 +417,9 @@ class BossEncounterView(discord.ui.View):
             return
         await interaction.response.defer()
         try:
-            info = await asyncio.to_thread(
+            info = _wrap(await asyncio.to_thread(
                 self.dig_service.scout_boss, self.user_id, self.guild_id
-            )
+            ))
             embed = discord.Embed(
                 title="Boss Scouted",
                 description=getattr(info, "description", str(info)),
@@ -398,12 +437,12 @@ class BossEncounterView(discord.ui.View):
             return
         await interaction.response.defer()
         try:
-            result = await asyncio.to_thread(
+            result = _wrap(await asyncio.to_thread(
                 self.dig_service.cheer_boss,
                 self.user_id,
                 interaction.user.id,
                 self.guild_id,
-            )
+            ))
             await interaction.followup.send(
                 f"{interaction.user.display_name} cheers for the fighter! "
                 f"{getattr(result, 'message', 'Morale boosted!')}"
@@ -444,12 +483,12 @@ class PrestigePerksView(discord.ui.View):
                 return
             await interaction.response.defer()
             try:
-                result = await asyncio.to_thread(
+                result = _wrap(await asyncio.to_thread(
                     self.dig_service.prestige,
                     self.user_id,
                     self.guild_id,
                     perk.get("id", index),
-                )
+                ))
                 embed = discord.Embed(
                     title="Prestige Complete!",
                     description=(
@@ -567,9 +606,9 @@ class UpgradeView(discord.ui.View):
             return
         await interaction.response.defer()
         try:
-            result = await asyncio.to_thread(
+            result = _wrap(await asyncio.to_thread(
                 self.dig_service.upgrade_pickaxe, self.user_id, self.guild_id
-            )
+            ))
             embed = discord.Embed(
                 title="Pickaxe Upgraded!",
                 description=getattr(result, "message", "Your pickaxe has been upgraded!"),
@@ -589,6 +628,8 @@ class UpgradeView(discord.ui.View):
 # ---------------------------------------------------------------------------
 
 class DigCommands(commands.Cog):
+    dig = app_commands.Group(name="dig", description="Tunnel digging minigame")
+
     def __init__(self, bot: commands.Bot, dig_service: "DigService"):
         self.bot = bot
         self.dig_service = dig_service
@@ -637,8 +678,8 @@ class DigCommands(commands.Cog):
     # 1. /dig — Main dig command
     # ------------------------------------------------------------------
 
-    @app_commands.command(name="dig", description="Dig deeper into your tunnel")
-    async def dig(self, interaction: discord.Interaction):
+    @dig.command(name="go", description="Dig deeper into your tunnel")
+    async def dig_go(self, interaction: discord.Interaction):
         if not await require_gamba_channel(interaction):
             return
 
@@ -660,22 +701,31 @@ class DigCommands(commands.Cog):
         await safe_defer(interaction)
 
         try:
-            result = await asyncio.to_thread(
+            result = _wrap(await asyncio.to_thread(
                 self.dig_service.dig, interaction.user.id, guild_id
-            )
+            ))
         except Exception as e:
             logger.error("Dig error: %s", e)
             await safe_followup(interaction, content="Dig failed. Try again later.", ephemeral=True)
             return
 
+        # Check for non-cooldown errors (cooldown handled below via paid_dig_available)
+        if not getattr(result, "success", False) and not getattr(result, "paid_dig_available", False):
+            await safe_followup(
+                interaction,
+                content=getattr(result, "error", "Dig failed."),
+                ephemeral=True,
+            )
+            return
+
         # First dig welcome
-        if getattr(result, "first_dig", False):
+        if getattr(result, "is_first_dig", False):
             embed = discord.Embed(
                 title="Welcome to the Mines!",
                 description=(
                     "You've started digging your very own tunnel!\n\n"
-                    "Use `/dig` to advance deeper, `/dig_shop` to buy items, "
-                    "and `/dig_guide` for a full tutorial.\n\n"
+                    "Use `/dig` to advance deeper, `/dig shop` to buy items, "
+                    "and `/dig guide` for a full tutorial.\n\n"
                     "Good luck, miner! **DIG DUG!**"
                 ),
                 color=LAYER_COLORS["Dirt"],
@@ -704,8 +754,8 @@ class DigCommands(commands.Cog):
             return
 
         # Paid dig confirmation
-        if getattr(result, "paid_dig", False):
-            cost = getattr(result, "cost", 0)
+        if getattr(result, "paid_dig_available", False):
+            cost = getattr(result, "paid_dig_cost", 0)
             embed = discord.Embed(
                 title="Paid Dig Required",
                 description=f"Continuing costs **{cost}** {JOPACOIN_EMOTE}. Proceed?",
@@ -717,11 +767,15 @@ class DigCommands(commands.Cog):
                 await view.wait()
                 if view.value:
                     try:
-                        paid_result = await asyncio.to_thread(
+                        paid_result = _wrap(await asyncio.to_thread(
                             self.dig_service.dig, interaction.user.id, guild_id, paid=True
-                        )
-                        paid_embed = _build_dig_embed(paid_result, interaction.user)
-                        await msg.edit(embed=paid_embed, view=None)
+                        ))
+                        if not getattr(paid_result, "success", False):
+                            err = getattr(paid_result, "error", "Paid dig failed.")
+                            await msg.edit(content=err, embed=None, view=None)
+                        else:
+                            paid_embed = _build_dig_embed(paid_result, interaction.user)
+                            await msg.edit(embed=paid_embed, view=None)
                     except Exception as e:
                         logger.error("Paid dig error: %s", e)
                         await msg.edit(content="Paid dig failed.", embed=None, view=None)
@@ -750,7 +804,7 @@ class DigCommands(commands.Cog):
     # 2. /dig_help — Help another player
     # ------------------------------------------------------------------
 
-    @app_commands.command(name="dig_help", description="Help another player's tunnel")
+    @dig.command(name="help", description="Help another player's tunnel")
     @app_commands.describe(user="The player to help")
     async def dig_help(self, interaction: discord.Interaction, user: discord.Member):
         if not await require_gamba_channel(interaction):
@@ -763,13 +817,29 @@ class DigCommands(commands.Cog):
         await safe_defer(interaction)
 
         guild_id = interaction.guild.id if interaction.guild else None
+        if user.id == interaction.user.id:
+            self_help_lines = [
+                "You tried to help yourself. The pickaxe is confused.",
+                "That's not how teamwork works, chief.",
+                "Mining solo is fine, but helping yourself is just sad.",
+                "Your tunnel filed a restraining order against your own help.",
+                "You can't pat your own back with a pickaxe. Well, you can, but you shouldn't.",
+                "Self-help books are in aisle 3. This is a mine.",
+            ]
+            await safe_followup(
+                interaction,
+                content=random.choice(self_help_lines),
+                ephemeral=True,
+            )
+            return
+
         try:
-            result = await asyncio.to_thread(
+            result = _wrap(await asyncio.to_thread(
                 self.dig_service.help_tunnel,
                 interaction.user.id,
                 user.id,
                 guild_id,
-            )
+            ))
         except ValueError as e:
             await safe_followup(interaction, content=str(e), ephemeral=True)
             return
@@ -778,24 +848,30 @@ class DigCommands(commands.Cog):
             await safe_followup(interaction, content="Help failed.", ephemeral=True)
             return
 
+        if not getattr(result, "success", False):
+            await safe_followup(
+                interaction,
+                content=getattr(result, "error", "Help failed."),
+                ephemeral=True,
+            )
+            return
+
+        blocks = getattr(result, "advance", 0)
         embed = discord.Embed(
             title="Tunnel Assistance",
             description=(
                 f"You helped **{user.display_name}**'s tunnel!\n"
-                f"Blocks added: **{getattr(result, 'blocks_added', '?')}**"
+                f"Blocks added: **{blocks}**"
             ),
             color=0x2ECC71,
         )
-        cooldown = getattr(result, "cooldown_remaining", None)
-        if cooldown:
-            embed.set_footer(text=f"Help cooldown: {cooldown}s")
         await safe_followup(interaction, embed=embed)
 
     # ------------------------------------------------------------------
     # 3. /dig_sabotage — Sabotage another player
     # ------------------------------------------------------------------
 
-    @app_commands.command(name="dig_sabotage", description="Sabotage another player's tunnel")
+    @dig.command(name="sabotage", description="Sabotage another player's tunnel")
     @app_commands.describe(user="The player to sabotage")
     async def dig_sabotage(self, interaction: discord.Interaction, user: discord.Member):
         if not await require_gamba_channel(interaction):
@@ -809,18 +885,25 @@ class DigCommands(commands.Cog):
 
         # Get sabotage preview info
         try:
-            preview = await asyncio.to_thread(
+            preview = _wrap(await asyncio.to_thread(
                 self.dig_service.preview_sabotage,
                 interaction.user.id,
                 user.id,
                 guild_id,
-            )
+            ))
         except ValueError as e:
             await interaction.response.send_message(str(e), ephemeral=True)
             return
         except Exception as e:
             logger.error("Sabotage preview error: %s", e)
             await interaction.response.send_message("Sabotage failed.", ephemeral=True)
+            return
+
+        if not getattr(preview, "success", False):
+            await interaction.response.send_message(
+                getattr(preview, "error", "Sabotage failed."),
+                ephemeral=True,
+            )
             return
 
         cost = getattr(preview, "cost", 0)
@@ -833,25 +916,33 @@ class DigCommands(commands.Cog):
 
         if view.value:
             try:
-                result = await asyncio.to_thread(
+                result = _wrap(await asyncio.to_thread(
                     self.dig_service.sabotage_tunnel,
                     interaction.user.id,
                     user.id,
                     guild_id,
-                )
+                ))
+                if not getattr(result, "success", False):
+                    await interaction.edit_original_response(
+                        content=getattr(result, "error", "Sabotage failed."),
+                        embed=None, view=None,
+                    )
+                    return
                 result_embed = discord.Embed(color=0x2C2F33)
                 if getattr(result, "trap_triggered", False):
+                    trap = getattr(result, "trap_detail", None)
+                    trap_msg = getattr(trap, "message", "") if trap else ""
                     result_embed.title = "Trap Triggered!"
                     result_embed.description = (
-                        f"Your sabotage attempt backfired! "
-                        f"You took **{getattr(result, 'trap_damage', '?')}** damage."
+                        f"Your sabotage attempt backfired!\n{trap_msg}"
                     )
                     result_embed.color = 0xFF0000
                 else:
+                    damage = getattr(result, "damage", 0)
                     result_embed.title = "Sabotage Successful"
                     result_embed.description = (
                         f"You sabotaged **{user.display_name}**'s tunnel!\n"
-                        f"Damage dealt: **{getattr(result, 'damage', '?')}** blocks"
+                        f"Damage dealt: **{damage}** blocks"
                     )
                 await interaction.edit_original_response(embed=result_embed, view=None)
             except ValueError as e:
@@ -863,10 +954,10 @@ class DigCommands(commands.Cog):
             await interaction.edit_original_response(content="Sabotage cancelled.", embed=None, view=None)
 
     # ------------------------------------------------------------------
-    # 4. /dig_info — View tunnel info
+    # 4. /dig info — View tunnel info
     # ------------------------------------------------------------------
 
-    @app_commands.command(name="dig_info", description="View tunnel information")
+    @dig.command(name="info", description="View tunnel information")
     @app_commands.describe(user="View another player's tunnel (optional)")
     async def dig_info(self, interaction: discord.Interaction, user: discord.Member | None = None):
         if not await require_gamba_channel(interaction):
@@ -903,81 +994,121 @@ class DigCommands(commands.Cog):
             )
             return
 
-        layer = getattr(info, "layer", "Dirt")
+        # Service returns a raw dict — don't wrap, use .get() directly
+        layer_info = info.get("layer", {}) if isinstance(info, dict) else {}
+        layer_name = layer_info.get("name", "Dirt") if isinstance(layer_info, dict) else "Dirt"
+        tunnel = info.get("tunnel", {}) if isinstance(info, dict) else {}
+
         display_user = user or interaction.user
         embed = discord.Embed(
             title=f"{display_user.display_name}'s Tunnel",
-            color=_layer_color(layer),
+            color=_layer_color(layer_name),
         )
 
         # Core stats
-        depth = getattr(info, "depth", 0)
-        prestige = getattr(info, "prestige_level", 0)
-        pickaxe = getattr(info, "pickaxe_tier", "Wooden")
+        depth = info.get("depth", 0) if isinstance(info, dict) else 0
+        prestige = info.get("prestige_level", 0) if isinstance(info, dict) else 0
+        pickaxe_idx = tunnel.get("pickaxe_tier", 0) or 0
+        pickaxe_name = PICKAXE_TIERS[pickaxe_idx]["name"] if pickaxe_idx < len(PICKAXE_TIERS) else "Wooden"
         prestige_text = f" (Prestige {prestige})" if prestige else ""
         embed.add_field(
             name="Depth",
-            value=f"**{depth}** blocks — {layer}{prestige_text}",
+            value=f"**{depth}** blocks — {layer_name}{prestige_text}",
             inline=True,
         )
-        embed.add_field(name="Pickaxe", value=pickaxe, inline=True)
-
-        # Balance
-        balance = getattr(info, "balance", None)
-        if balance is not None:
-            embed.add_field(name="Balance", value=f"{balance} {JOPACOIN_EMOTE}", inline=True)
+        embed.add_field(name="Pickaxe", value=pickaxe_name, inline=True)
 
         # Equipped relics
-        relics = getattr(info, "relics", None)
+        relics = info.get("relics", []) if isinstance(info, dict) else []
         if relics:
-            relic_text = ", ".join(r.get("name", "?") for r in relics)
+            relic_text = ", ".join(r.get("name", "?") if isinstance(r, dict) else str(r) for r in relics)
             embed.add_field(name="Relics", value=relic_text, inline=False)
 
         # Queued items
-        queued = getattr(info, "queued_items", None)
+        queued = info.get("queued_items", []) if isinstance(info, dict) else []
         if queued:
-            item_text = ", ".join(i.get("name", "?") for i in queued)
+            item_text = ", ".join(i.get("name", "?") if isinstance(i, dict) else str(i) for i in queued)
             embed.add_field(name="Queued Items", value=item_text, inline=False)
 
         # Boss status
-        boss = getattr(info, "boss_status", None)
-        if boss:
-            embed.add_field(name="Boss", value=str(boss), inline=True)
+        at_boss = info.get("at_boss", False) if isinstance(info, dict) else False
+        next_boss = info.get("next_boss", None) if isinstance(info, dict) else None
+        if at_boss:
+            embed.add_field(name="Boss", value="A boss blocks your path!", inline=True)
+        elif next_boss:
+            embed.add_field(name="Next Boss", value=f"Depth {next_boss}", inline=True)
 
         # Insurance / reinforcement
-        insurance = getattr(info, "insurance_active", False)
-        reinforcement = getattr(info, "reinforcement_active", False)
+        now = int(time.time())
+        insured_until = tunnel.get("insured_until", 0) or 0
+        reinforced_until = tunnel.get("reinforced_until", 0) or 0
         status_parts = []
-        if insurance:
+        if now < insured_until:
             status_parts.append("Insured")
-        if reinforcement:
+        if now < reinforced_until:
             status_parts.append("Reinforced")
         if status_parts:
             embed.add_field(name="Protection", value=", ".join(status_parts), inline=True)
 
         # Trap status
-        trap = getattr(info, "trap_set", False)
+        trap = tunnel.get("trap_active", False)
         if is_own and trap:
             embed.add_field(name="Trap", value="Armed", inline=True)
         elif not is_own and trap:
             embed.add_field(name="Trap", value="Something feels off...", inline=True)
 
-        # Recent helpers
-        helpers = getattr(info, "recent_helpers", None)
-        if helpers:
-            helper_text = ", ".join(str(h) for h in helpers[:5])
-            embed.add_field(name="Recent Helpers", value=helper_text, inline=False)
-
         # Streak
-        streak = getattr(info, "streak", 0)
+        streak = info.get("streak", 0) if isinstance(info, dict) else 0
         if streak:
-            embed.add_field(name="Streak", value=f"{streak} digs", inline=True)
+            embed.add_field(name="Streak", value=f"{streak} days", inline=True)
 
-        # Recent events
-        events = getattr(info, "recent_events", None)
+        # Cooldown
+        cooldown = info.get("cooldown_remaining", 0) if isinstance(info, dict) else 0
+        if cooldown and cooldown > 0:
+            embed.add_field(name="Cooldown", value=_fmt_duration(cooldown), inline=True)
+
+        # Next milestone
+        milestone = info.get("next_milestone", None) if isinstance(info, dict) else None
+        if milestone and isinstance(milestone, dict):
+            embed.add_field(
+                name="Next Milestone",
+                value=f"Depth {milestone.get('depth', '?')} (+{milestone.get('reward', '?')} JC)",
+                inline=True,
+            )
+
+        # Recent events — parse the JSON detail for a readable summary
+        events = info.get("recent_events", []) if isinstance(info, dict) else []
         if events:
-            event_text = "\n".join(str(e) for e in events[:5])
-            embed.add_field(name="Recent Events", value=event_text, inline=False)
+            event_lines = []
+            for ev in events[:5]:
+                if not isinstance(ev, dict):
+                    continue
+                action = ev.get("action_type", "?")
+                detail_raw = ev.get("detail") or ev.get("details") or "{}"
+                try:
+                    detail = json.loads(detail_raw) if isinstance(detail_raw, str) else detail_raw
+                except (json.JSONDecodeError, TypeError):
+                    detail = {}
+                if action == "dig":
+                    adv = detail.get("advance", 0)
+                    jc = detail.get("jc", 0)
+                    if detail.get("cave_in"):
+                        event_lines.append(f"Cave-in! Lost {detail.get('block_loss', '?')} blocks")
+                    else:
+                        event_lines.append(f"Dug +{adv} blocks, +{jc} JC")
+                elif action == "sabotage":
+                    dmg = detail.get("damage", "?")
+                    if detail.get("trap_triggered"):
+                        event_lines.append(f"Sabotage attempt — trap triggered!")
+                    else:
+                        event_lines.append(f"Sabotaged — lost {dmg} blocks")
+                elif action == "help":
+                    adv = detail.get("advance", "?")
+                    event_lines.append(f"Helped — +{adv} blocks")
+                else:
+                    event_lines.append(action.replace("_", " ").title())
+            if event_lines:
+                embed.add_field(name="Recent Events", value="\n".join(event_lines), inline=False)
 
         # Stats
         stats = getattr(info, "stats", None)
@@ -998,7 +1129,7 @@ class DigCommands(commands.Cog):
     # 5. /dig_leaderboard — Top tunnels
     # ------------------------------------------------------------------
 
-    @app_commands.command(name="dig_leaderboard", description="View top tunnels")
+    @dig.command(name="leaderboard", description="View top tunnels")
     async def dig_leaderboard(self, interaction: discord.Interaction):
         if not await require_gamba_channel(interaction):
             return
@@ -1011,26 +1142,29 @@ class DigCommands(commands.Cog):
 
         guild_id = interaction.guild.id if interaction.guild else None
         try:
-            lb = await asyncio.to_thread(
+            lb = _wrap(await asyncio.to_thread(
                 self.dig_service.get_leaderboard, guild_id
-            )
+            ))
         except Exception as e:
             logger.error("Leaderboard error: %s", e)
             await safe_followup(interaction, content="Leaderboard unavailable.", ephemeral=True)
             return
 
-        entries = getattr(lb, "entries", lb) if lb else []
+        entries = getattr(lb, "tunnels", []) or []
         if not entries:
             await safe_followup(interaction, content="No tunnels yet! Use `/dig` to start.", ephemeral=True)
             return
 
         # Build leaderboard text
         lines = []
-        max_depth = max(getattr(e, "depth", 0) for e in entries[:10]) or 1
+        def _get(obj, key, default=None):
+            return obj.get(key, default) if isinstance(obj, dict) else getattr(obj, key, default)
+
+        max_depth = max(_get(e, "depth", 0) for e in entries[:10]) or 1
         for i, entry in enumerate(entries[:10], 1):
-            name = getattr(entry, "name", f"Player {getattr(entry, 'user_id', '?')}")
-            depth = getattr(entry, "depth", 0)
-            layer = getattr(entry, "layer", "Dirt")
+            name = _get(entry, "name", f"Player {_get(entry, 'user_id', '?')}")
+            depth = _get(entry, "depth", 0)
+            layer = _get(entry, "layer", "Dirt")
             bar_len = max(1, int(20 * depth / max_depth))
             bar = "\u2588" * bar_len
             medal = {1: "\U0001f947", 2: "\U0001f948", 3: "\U0001f949"}.get(i, f"`{i}.`")
@@ -1050,10 +1184,10 @@ class DigCommands(commands.Cog):
         await safe_followup(interaction, embed=embed)
 
     # ------------------------------------------------------------------
-    # 6. /dig_use — Queue consumable
+    # 6. /dig use — Queue consumable
     # ------------------------------------------------------------------
 
-    @app_commands.command(name="dig_use", description="Queue a consumable for your next dig")
+    @dig.command(name="use", description="Queue a consumable for your next dig")
     @app_commands.describe(item="The item to use")
     @app_commands.autocomplete(item=item_autocomplete)
     async def dig_use(self, interaction: discord.Interaction, item: str):
@@ -1068,9 +1202,9 @@ class DigCommands(commands.Cog):
 
         guild_id = interaction.guild.id if interaction.guild else None
         try:
-            result = await asyncio.to_thread(
+            result = _wrap(await asyncio.to_thread(
                 self.dig_service.use_item, interaction.user.id, guild_id, item
-            )
+            ))
             await safe_followup(
                 interaction,
                 content=f"**{item}** queued for your next dig. {getattr(result, 'message', '')}",
@@ -1082,10 +1216,10 @@ class DigCommands(commands.Cog):
             await safe_followup(interaction, content="Failed to queue item.", ephemeral=True)
 
     # ------------------------------------------------------------------
-    # 7. /dig_gift — Gift a relic
+    # 7. /dig gift — Gift a relic
     # ------------------------------------------------------------------
 
-    @app_commands.command(name="dig_gift", description="Gift a relic to another player")
+    @dig.command(name="gift", description="Gift a relic to another player")
     @app_commands.describe(user="The player to gift to", artifact="The relic to gift")
     @app_commands.autocomplete(artifact=relic_autocomplete)
     async def dig_gift(self, interaction: discord.Interaction, user: discord.Member, artifact: str):
@@ -1100,13 +1234,13 @@ class DigCommands(commands.Cog):
 
         guild_id = interaction.guild.id if interaction.guild else None
         try:
-            result = await asyncio.to_thread(
+            result = _wrap(await asyncio.to_thread(
                 self.dig_service.gift_relic,
                 interaction.user.id,
                 user.id,
                 guild_id,
                 artifact,
-            )
+            ))
             await safe_followup(
                 interaction,
                 content=(
@@ -1121,10 +1255,10 @@ class DigCommands(commands.Cog):
             await safe_followup(interaction, content="Gift failed.", ephemeral=True)
 
     # ------------------------------------------------------------------
-    # 8. /dig_shop — Show dig-specific items
+    # 8. /dig shop — Show dig-specific items
     # ------------------------------------------------------------------
 
-    @app_commands.command(name="dig_shop", description="Browse the mining shop")
+    @dig.command(name="shop", description="Browse the mining shop")
     async def dig_shop(self, interaction: discord.Interaction):
         if not await require_gamba_channel(interaction):
             return
@@ -1137,9 +1271,9 @@ class DigCommands(commands.Cog):
 
         guild_id = interaction.guild.id if interaction.guild else None
         try:
-            shop = await asyncio.to_thread(
+            shop = _wrap(await asyncio.to_thread(
                 self.dig_service.get_shop, interaction.user.id, guild_id
-            )
+            ))
         except Exception as e:
             logger.error("Dig shop error: %s", e)
             await safe_followup(interaction, content="Shop unavailable.", ephemeral=True)
@@ -1168,15 +1302,67 @@ class DigCommands(commands.Cog):
 
         # Inventory count
         inv_count = getattr(shop, "inventory_count", 0)
-        embed.set_footer(text=f"Your inventory: {inv_count}/5 items | Use /dig_use <item> to queue")
+        embed.set_footer(text=f"Your inventory: {inv_count}/5 items | /dig buy <item> to purchase, /dig use <item> to queue")
 
         await safe_followup(interaction, embed=embed)
 
     # ------------------------------------------------------------------
-    # 9. /dig_museum — Guild artifact museum
+    # 8b. /dig buy — Buy an item from the shop
     # ------------------------------------------------------------------
 
-    @app_commands.command(name="dig_museum", description="View the guild artifact museum")
+    @dig.command(name="buy", description="Buy an item from the mining shop")
+    @app_commands.describe(item="Item to buy (dynamite, hard_hat, lantern, reinforcement)")
+    @app_commands.choices(item=[
+        app_commands.Choice(name="Dynamite", value="dynamite"),
+        app_commands.Choice(name="Hard Hat", value="hard_hat"),
+        app_commands.Choice(name="Lantern", value="lantern"),
+        app_commands.Choice(name="Reinforcement", value="reinforcement"),
+    ])
+    async def dig_buy(self, interaction: discord.Interaction, item: str):
+        if not await require_gamba_channel(interaction):
+            return
+
+        player = await _check_registered(interaction, self.bot)
+        if not player:
+            return
+
+        await safe_defer(interaction)
+
+        guild_id = interaction.guild.id if interaction.guild else None
+        try:
+            result = _wrap(await asyncio.to_thread(
+                self.dig_service.buy_item, interaction.user.id, guild_id, item
+            ))
+        except Exception as e:
+            logger.error("Dig buy error: %s", e)
+            await safe_followup(interaction, content="Purchase failed.", ephemeral=True)
+            return
+
+        if not getattr(result, "success", False):
+            await safe_followup(
+                interaction,
+                content=getattr(result, "error", "Purchase failed."),
+                ephemeral=True,
+            )
+            return
+
+        item_name = getattr(result, "item", item)
+        cost = getattr(result, "cost", 0)
+        balance_after = getattr(result, "balance_after", "?")
+        await safe_followup(
+            interaction,
+            content=(
+                f"Purchased **{item_name}** for **{cost}** {JOPACOIN_EMOTE}! "
+                f"Balance: **{balance_after}** {JOPACOIN_EMOTE}\n"
+                f"Use `/dig use {item}` to queue it for your next dig."
+            ),
+        )
+
+    # ------------------------------------------------------------------
+    # 9. /dig museum — Guild artifact museum
+    # ------------------------------------------------------------------
+
+    @dig.command(name="museum", description="View the guild artifact museum")
     async def dig_museum(self, interaction: discord.Interaction):
         if not await require_gamba_channel(interaction):
             return
@@ -1200,7 +1386,7 @@ class DigCommands(commands.Cog):
         # Build pages by layer
         layer_order = ["Dirt", "Stone", "Crystal", "Magma", "Abyss"]
         pages = []
-        artifacts_by_layer = getattr(museum, "artifacts_by_layer", {})
+        artifacts_by_layer = museum.get("by_layer", {}) if isinstance(museum, dict) else {}
 
         for layer_name in layer_order:
             artifacts = artifacts_by_layer.get(layer_name, [])
@@ -1236,7 +1422,7 @@ class DigCommands(commands.Cog):
     # 10. /dig_flex — Show stats and titles
     # ------------------------------------------------------------------
 
-    @app_commands.command(name="dig_flex", description="Show off your mining achievements")
+    @dig.command(name="flex", description="Show off your mining achievements")
     async def dig_flex(self, interaction: discord.Interaction):
         if not await require_gamba_channel(interaction):
             return
@@ -1249,48 +1435,74 @@ class DigCommands(commands.Cog):
 
         guild_id = interaction.guild.id if interaction.guild else None
         try:
-            flex = await asyncio.to_thread(
+            flex = _wrap(await asyncio.to_thread(
                 self.dig_service.get_flex_data, interaction.user.id, guild_id
-            )
+            ))
         except Exception as e:
             logger.error("Flex error: %s", e)
             await safe_followup(interaction, content="Flex unavailable.", ephemeral=True)
             return
+
+        if not getattr(flex, "success", False):
+            await safe_followup(
+                interaction,
+                content="You don't have a tunnel yet. Use `/dig go` to start!",
+                ephemeral=True,
+            )
+            return
+
+        depth = getattr(flex, "depth", 0)
+        total_digs = getattr(flex, "total_digs", 0)
+        total_jc = getattr(flex, "total_jc_earned", 0)
+        prestige = getattr(flex, "prestige_level", 0)
+        streak = getattr(flex, "streak", 0)
+        tunnel_name = getattr(flex, "tunnel_name", "Unknown")
+        layer = getattr(flex, "layer", "Dirt")
+        titles = getattr(flex, "titles", [])
+        achievement_count = getattr(flex, "achievement_count", 0)
+        prestige_emoji = getattr(flex, "prestige_emoji", "")
+
+        has_anything = depth > 0 or total_digs > 1
 
         embed = discord.Embed(
             title=f"{interaction.user.display_name}'s Mining Profile",
             color=0xFFD700,
         )
 
-        # Title
-        title = getattr(flex, "title", None)
-        if title:
-            embed.description = f"*\"{title}\"*"
+        if not has_anything:
+            sad_lines = [
+                "Dug once, found nothing but regret.",
+                "The tunnel is so shallow a worm filed a noise complaint.",
+                "Achievement unlocked: Owning a shovel.",
+                "Your tunnel has more cobwebs than depth.",
+                "Even the dirt feels sorry for you.",
+                "Depth: yes. Impressive: no.",
+                "The mine safety inspector gave you a participation trophy.",
+                "Your pickaxe is still in the shrinkwrap.",
+            ]
+            embed.description = f"*{random.choice(sad_lines)}*"
+            embed.set_thumbnail(url=interaction.user.display_avatar.url)
+            await safe_followup(interaction, embed=embed)
+            return
 
-        # Prestige
-        prestige = getattr(flex, "prestige_level", 0)
-        if prestige:
-            embed.add_field(name="Prestige Level", value=str(prestige), inline=True)
+        # Title(s)
+        if titles:
+            embed.description = f"*\"{' | '.join(titles)}\"*"
+        if prestige_emoji:
+            embed.description = (embed.description or "") + f"  {prestige_emoji}"
 
         # Stats
-        stats = getattr(flex, "stats", {})
-        if stats:
-            stats_text = (
-                f"Total digs: {stats.get('total_digs', 0)}\n"
-                f"Max depth: {stats.get('max_depth', 0)}\n"
-                f"Total JC earned: {stats.get('total_jc_earned', 0)}\n"
-                f"Cave-ins survived: {stats.get('cave_ins_survived', 0)}\n"
-                f"Bosses defeated: {stats.get('bosses_defeated', 0)}\n"
-                f"Sabotages dealt: {stats.get('sabotages_dealt', 0)}\n"
-                f"Sabotages received: {stats.get('sabotages_received', 0)}"
-            )
-            embed.add_field(name="Stats", value=stats_text, inline=False)
-
-        # Achievements
-        achievements = getattr(flex, "achievements", [])
-        if achievements:
-            ach_text = "\n".join(f"- {a}" for a in achievements[:10])
-            embed.add_field(name="Achievements", value=ach_text, inline=False)
+        stats_text = (
+            f"Tunnel: **{tunnel_name}**\n"
+            f"Depth: **{depth}** ({layer})\n"
+            f"Total digs: **{total_digs}**\n"
+            f"Total JC earned: **{total_jc}**\n"
+            f"Streak: **{streak}** days\n"
+            f"Achievements: **{achievement_count}**"
+        )
+        if prestige:
+            stats_text += f"\nPrestige: **{prestige}**"
+        embed.add_field(name="Stats", value=stats_text, inline=False)
 
         embed.set_thumbnail(url=interaction.user.display_avatar.url)
         await safe_followup(interaction, embed=embed)
@@ -1299,7 +1511,7 @@ class DigCommands(commands.Cog):
     # 11. /dig_abandon — Abandon tunnel
     # ------------------------------------------------------------------
 
-    @app_commands.command(name="dig_abandon", description="Abandon your tunnel (partial refund)")
+    @dig.command(name="abandon", description="Abandon your tunnel (partial refund)")
     async def dig_abandon(self, interaction: discord.Interaction):
         if not await require_gamba_channel(interaction):
             return
@@ -1311,9 +1523,9 @@ class DigCommands(commands.Cog):
         guild_id = interaction.guild.id if interaction.guild else None
 
         try:
-            preview = await asyncio.to_thread(
+            preview = _wrap(await asyncio.to_thread(
                 self.dig_service.preview_abandon, interaction.user.id, guild_id
-            )
+            ))
         except ValueError as e:
             await interaction.response.send_message(str(e), ephemeral=True)
             return
@@ -1338,9 +1550,9 @@ class DigCommands(commands.Cog):
 
         if view.value:
             try:
-                result = await asyncio.to_thread(
+                result = _wrap(await asyncio.to_thread(
                     self.dig_service.abandon_tunnel, interaction.user.id, guild_id
-                )
+                ))
                 actual_refund = getattr(result, "refund", refund)
                 await interaction.edit_original_response(
                     content=f"Tunnel abandoned. You received **{actual_refund}** {JOPACOIN_EMOTE}.",
@@ -1358,10 +1570,10 @@ class DigCommands(commands.Cog):
             )
 
     # ------------------------------------------------------------------
-    # 12. /dig_upgrade — View/buy pickaxe upgrades
+    # 12. /dig upgrade — View/buy pickaxe upgrades
     # ------------------------------------------------------------------
 
-    @app_commands.command(name="dig_upgrade", description="View or buy pickaxe upgrades")
+    @dig.command(name="upgrade", description="View or buy pickaxe upgrades")
     async def dig_upgrade(self, interaction: discord.Interaction):
         if not await require_gamba_channel(interaction):
             return
@@ -1374,9 +1586,9 @@ class DigCommands(commands.Cog):
 
         guild_id = interaction.guild.id if interaction.guild else None
         try:
-            info = await asyncio.to_thread(
+            info = _wrap(await asyncio.to_thread(
                 self.dig_service.get_upgrade_info, interaction.user.id, guild_id
-            )
+            ))
         except Exception as e:
             logger.error("Upgrade info error: %s", e)
             await safe_followup(interaction, content="Upgrade info unavailable.", ephemeral=True)
@@ -1423,7 +1635,7 @@ class DigCommands(commands.Cog):
     # 13. /dig_trap — Set a trap
     # ------------------------------------------------------------------
 
-    @app_commands.command(name="dig_trap", description="Set a trap in your tunnel")
+    @dig.command(name="trap", description="Set a trap in your tunnel")
     async def dig_trap(self, interaction: discord.Interaction):
         if not await require_gamba_channel(interaction):
             return
@@ -1436,9 +1648,9 @@ class DigCommands(commands.Cog):
 
         guild_id = interaction.guild.id if interaction.guild else None
         try:
-            result = await asyncio.to_thread(
+            result = _wrap(await asyncio.to_thread(
                 self.dig_service.set_trap, interaction.user.id, guild_id
-            )
+            ))
             cost = getattr(result, "cost", 0)
             msg = "Trap set!"
             if cost:
@@ -1454,7 +1666,7 @@ class DigCommands(commands.Cog):
     # 14. /dig_insure — Buy insurance
     # ------------------------------------------------------------------
 
-    @app_commands.command(name="dig_insure", description="Buy cave-in insurance")
+    @dig.command(name="insure", description="Buy cave-in insurance")
     async def dig_insure(self, interaction: discord.Interaction):
         if not await require_gamba_channel(interaction):
             return
@@ -1467,29 +1679,39 @@ class DigCommands(commands.Cog):
 
         guild_id = interaction.guild.id if interaction.guild else None
         try:
-            result = await asyncio.to_thread(
+            result = _wrap(await asyncio.to_thread(
                 self.dig_service.buy_insurance, interaction.user.id, guild_id
-            )
-            cost = getattr(result, "cost", 0)
-            duration = getattr(result, "duration", "?")
-            await safe_followup(
-                interaction,
-                content=(
-                    f"Insurance purchased for **{cost}** {JOPACOIN_EMOTE}! "
-                    f"Duration: {duration}."
-                ),
-            )
+            ))
         except ValueError as e:
             await safe_followup(interaction, content=str(e), ephemeral=True)
+            return
         except Exception as e:
             logger.error("Insurance error: %s", e)
             await safe_followup(interaction, content="Failed to buy insurance.", ephemeral=True)
+            return
+
+        if not getattr(result, "success", False):
+            await safe_followup(
+                interaction,
+                content=getattr(result, "error", "Failed to buy insurance."),
+                ephemeral=True,
+            )
+            return
+
+        cost = getattr(result, "cost", 0)
+        await safe_followup(
+            interaction,
+            content=(
+                f"Insurance purchased for **{cost}** {JOPACOIN_EMOTE}! "
+                f"Duration: 24 hours."
+            ),
+        )
 
     # ------------------------------------------------------------------
     # 15. /dig_inventory — View items
     # ------------------------------------------------------------------
 
-    @app_commands.command(name="dig_inventory", description="View your mining inventory")
+    @dig.command(name="inventory", description="View your mining inventory")
     async def dig_inventory(self, interaction: discord.Interaction):
         if not await require_gamba_channel(interaction):
             return
@@ -1524,16 +1746,16 @@ class DigCommands(commands.Cog):
                 )
             embed.set_footer(text=f"{len(items)}/5 slots used")
         else:
-            embed.description = "Your inventory is empty. Visit `/dig_shop` to buy items."
+            embed.description = "Your inventory is empty. Visit `/dig shop` to buy items."
             embed.set_footer(text="0/5 slots used")
 
         await safe_followup(interaction, embed=embed)
 
     # ------------------------------------------------------------------
-    # 16. /dig_guide — Paginated help
+    # 16. /dig guide — Paginated help
     # ------------------------------------------------------------------
 
-    @app_commands.command(name="dig_guide", description="Learn how to dig")
+    @dig.command(name="guide", description="Learn how to dig")
     async def dig_guide(self, interaction: discord.Interaction):
         if not await require_gamba_channel(interaction):
             return
@@ -1552,8 +1774,7 @@ class DigCommands(commands.Cog):
 
 def _build_dig_embed(result: object, user: discord.User | discord.Member) -> discord.Embed:
     """Build a rich embed for a normal dig result."""
-    layer = getattr(result, "layer", "Dirt")
-    depth = getattr(result, "depth", 0)
+    depth = getattr(result, "depth", 0) or getattr(result, "depth_after", 0)
     tunnel_name = getattr(result, "tunnel_name", "Tunnel")
 
     # ~20% chance of a "Dig Dug" themed title
@@ -1564,11 +1785,11 @@ def _build_dig_embed(result: object, user: discord.User | discord.Member) -> dis
 
     embed = discord.Embed(
         title=title,
-        color=_layer_color(layer),
+        color=_layer_color(None),
     )
 
     # Blocks gained and JC earned
-    blocks = getattr(result, "blocks_gained", 0)
+    blocks = getattr(result, "advance", 0)
     jc = getattr(result, "jc_earned", 0)
     embed.add_field(
         name="Progress",
@@ -1577,62 +1798,67 @@ def _build_dig_embed(result: object, user: discord.User | discord.Member) -> dis
     )
 
     # Cave-in
-    cave_in = getattr(result, "cave_in", None)
-    if cave_in:
+    cave_in = getattr(result, "cave_in", False)
+    cave_in_detail = getattr(result, "cave_in_detail", None)
+    if cave_in and cave_in_detail:
+        block_loss = getattr(cave_in_detail, "block_loss", "?")
+        message = getattr(cave_in_detail, "message", "")
         embed.add_field(
             name="Cave-in!",
-            value=f"Lost **{getattr(cave_in, 'blocks_lost', '?')}** blocks. {getattr(cave_in, 'message', '')}",
+            value=f"Lost **{block_loss}** blocks. {message}",
             inline=False,
         )
 
     # Milestone bonus
-    milestone = getattr(result, "milestone_bonus", None)
+    milestone = getattr(result, "milestone_bonus", 0)
     if milestone:
         embed.add_field(
             name="DIG DUG! Milestone!",
-            value=f"+{getattr(milestone, 'bonus_jc', '?')} {JOPACOIN_EMOTE} — {getattr(milestone, 'description', '')}",
+            value=f"+{milestone} {JOPACOIN_EMOTE}",
             inline=False,
         )
 
     # Streak bonus
-    streak = getattr(result, "streak_bonus", None)
-    if streak:
+    streak_bonus = getattr(result, "streak_bonus", 0)
+    if streak_bonus:
         embed.add_field(
             name="Streak Bonus",
-            value=f"+{getattr(streak, 'bonus_jc', '?')} {JOPACOIN_EMOTE} (x{getattr(streak, 'streak', '?')})",
+            value=f"+{streak_bonus} {JOPACOIN_EMOTE}",
             inline=True,
         )
 
     # Artifact found
     artifact = getattr(result, "artifact", None)
     if artifact:
+        a_name = getattr(artifact, "name", "?") if not isinstance(artifact, str) else artifact
+        a_desc = getattr(artifact, "description", "") if not isinstance(artifact, str) else ""
         embed.add_field(
             name="Artifact Found!",
-            value=f"**{getattr(artifact, 'name', '?')}** — {getattr(artifact, 'description', '')}",
+            value=f"**{a_name}**" + (f" — {a_desc}" if a_desc else ""),
             inline=False,
         )
 
     # Event
     event = getattr(result, "event", None)
     if event:
+        e_desc = getattr(event, "description", str(event)) if not isinstance(event, str) else event
         embed.add_field(
             name="Event",
-            value=getattr(event, "description", str(event)),
+            value=e_desc,
             inline=False,
         )
 
     # Items used
     items_used = getattr(result, "items_used", None)
     if items_used:
-        item_names = ", ".join(getattr(i, "name", str(i)) for i in items_used)
+        item_names = ", ".join(str(i) for i in items_used)
         embed.add_field(name="Items Used", value=item_names, inline=True)
 
     # Footer tip — ~25% chance of a Dig Dug footer instead
-    dig_count = getattr(result, "total_digs", 0)
     if random.random() < 0.25:
         embed.set_footer(text=random.choice(DIG_DUG_FOOTERS))
     else:
-        embed.set_footer(text=_tip(dig_count))
+        embed.set_footer(text=getattr(result, "tip", "") or _tip(0))
     embed.set_author(name=user.display_name, icon_url=user.display_avatar.url)
 
     return embed

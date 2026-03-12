@@ -1589,7 +1589,7 @@ class ShopCommands(commands.Cog):
                 f"Bought **{result.get('item', item_type)}** for "
                 f"**{result.get('cost', 0)}** {JOPACOIN_EMOTE}\n"
                 f"Balance: **{result.get('balance_after', '?')}** {JOPACOIN_EMOTE}\n\n"
-                f"Use `/dig_use {item_type}` to queue it for your next dig."
+                f"Use `/dig use {item_type}` to queue it for your next dig."
             ),
             color=0xD4AF37,
         )

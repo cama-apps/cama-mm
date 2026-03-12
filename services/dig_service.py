@@ -715,6 +715,120 @@ class DigService:
         result = self._apply_lazy_decay(tunnel, guild_id)
         return result.get("amount", 0)
 
+    def get_shop(self, discord_id: int, guild_id) -> dict:
+        """Return shop data: consumables, pickaxe upgrades, and inventory count."""
+        inventory = self.dig_repo.get_inventory(discord_id, guild_id)
+        inv_count = len(inventory) if inventory else 0
+
+        consumables = [
+            {"name": v["name"], "price": v["cost"], "description": v["description"]}
+            for v in CONSUMABLE_ITEMS.values()
+        ]
+
+        # Show next available pickaxe upgrades
+        tunnel = self.dig_repo.get_tunnel(discord_id, guild_id)
+        current_tier = 0
+        if tunnel:
+            current_tier = dict(tunnel).get("pickaxe_tier", 0)
+
+        pickaxe_upgrades = []
+        for i in range(current_tier + 1, len(PICKAXE_TIERS)):
+            t = PICKAXE_TIERS[i]
+            pickaxe_upgrades.append({
+                "name": t["name"],
+                "price": t["jc_cost"],
+                "depth_req": t["depth_required"],
+                "prestige_req": t.get("prestige_required", 0),
+            })
+
+        return self._ok(
+            consumables=consumables,
+            pickaxe_upgrades=pickaxe_upgrades,
+            inventory_count=inv_count,
+        )
+
+    def get_upgrade_info(self, discord_id: int, guild_id) -> dict:
+        """Return info about current and next pickaxe tier."""
+        tunnel = self.dig_repo.get_tunnel(discord_id, guild_id)
+        if tunnel is None:
+            return self._ok(current_tier="Wooden", next_tier=None, eligible=False)
+
+        tunnel = dict(tunnel)
+        current_idx = tunnel.get("pickaxe_tier", 0)
+        current_name = PICKAXE_TIERS[current_idx]["name"] if current_idx < len(PICKAXE_TIERS) else "Unknown"
+
+        if current_idx >= len(PICKAXE_TIERS) - 1:
+            return self._ok(current_tier=current_name, next_tier=None, eligible=False)
+
+        next_tier = PICKAXE_TIERS[current_idx + 1]
+        depth = tunnel.get("depth", 0)
+        prestige = tunnel.get("prestige_level", 0)
+        balance = self.player_repo.get_balance(discord_id, guild_id)
+
+        missing = []
+        if depth < next_tier["depth_required"]:
+            missing.append(f"Depth {next_tier['depth_required']} (have {depth})")
+        if prestige < next_tier.get("prestige_required", 0):
+            missing.append(f"Prestige {next_tier['prestige_required']} (have {prestige})")
+        if balance < next_tier["jc_cost"]:
+            missing.append(f"{next_tier['jc_cost']} JC (have {balance})")
+
+        return self._ok(
+            current_tier=current_name,
+            next_tier=next_tier["name"],
+            cost=next_tier["jc_cost"],
+            depth_required=next_tier["depth_required"],
+            prestige_required=next_tier.get("prestige_required", 0),
+            eligible=len(missing) == 0,
+            missing_requirements=missing,
+        )
+
+    def preview_sabotage(self, actor_id: int, target_id: int, guild_id) -> dict:
+        """Preview sabotage cost and damage range without executing."""
+        if actor_id == target_id:
+            return self._error("You can't sabotage yourself.")
+
+        target_tunnel = self.dig_repo.get_tunnel(target_id, guild_id)
+        if target_tunnel is None:
+            return self._error("That player doesn't have a tunnel.")
+
+        target_depth = dict(target_tunnel).get("depth", 0)
+        cost = max(5, target_depth // 5)
+
+        return self._ok(cost=cost, damage_range="3-8", target_depth=target_depth)
+
+    def preview_abandon(self, discord_id: int, guild_id) -> dict:
+        """Preview abandon refund without executing."""
+        tunnel = self.dig_repo.get_tunnel(discord_id, guild_id)
+        if tunnel is None:
+            return self._error("You don't have a tunnel.")
+
+        tunnel = dict(tunnel)
+        depth = tunnel.get("depth", 0)
+
+        if depth < 10:
+            return self._error("Tunnel must be at least 10 blocks deep to abandon.")
+
+        refund = int(depth * 0.1)
+        return self._ok(refund=refund, current_depth=depth)
+
+    def get_owned_relics(self, discord_id: int, guild_id) -> list[dict]:
+        """Return list of relics owned by the player."""
+        artifacts = self.dig_repo.get_artifacts(discord_id, guild_id)
+        relics = []
+        for a in (artifacts or []):
+            a = dict(a)
+            if a.get("is_relic"):
+                artifact_id = a.get("artifact_id", "")
+                # Look up name from pool
+                name = artifact_id
+                for pool_item in ARTIFACT_POOL:
+                    if pool_item["id"] == artifact_id:
+                        name = pool_item["name"]
+                        break
+                relics.append({"id": artifact_id, "name": name, "equipped": a.get("equipped", 0)})
+        return relics
+
     def upgrade_pickaxe(self, discord_id: int, guild_id) -> dict:
         """Upgrade pickaxe to next tier if requirements met."""
         tunnel = self.dig_repo.get_tunnel(discord_id, guild_id)
@@ -1837,7 +1951,7 @@ class DigService:
 
     def get_museum(self, guild_id) -> dict:
         """Return guild artifact registry with first finders and counts."""
-        entries = self.dig_repo.get_museum(guild_id)
+        entries = self.dig_repo.get_registry(guild_id)
         entries = [dict(e) for e in entries]
 
         # Group by layer
