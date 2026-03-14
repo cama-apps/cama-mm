@@ -138,6 +138,7 @@ def sample_players():
 - Use `repo_db_path` fixture (not `temp_db_path`) for repository tests
 - Use `guild_id=None` or `guild_id=0` for single-guild tests
 - Mock external APIs (OpenDota, Discord) in integration tests
+- **Do not write tests that skip.** Tests should pass or fail, not be conditionally skipped. If a test depends on external state or randomness, use mocks, fixtures, or seeded randomness to make it deterministic.
 
 ## Configuration
 See `config.py` for the full list (50+ options). See `README.md` for high level info.
@@ -145,11 +146,15 @@ See `config.py` for the full list (50+ options). See `README.md` for high level 
 ## Common Modification Patterns
 
 ### Adding a New Slash Command
-1. Create or edit file in `commands/`
-2. Use `@app_commands.command()` decorator
-3. Inject services via `interaction.client.<service>`
-4. Add rate limiting: `@app_commands.checks.cooldown(rate, per)`
-5. Add tests in `tests/test_<feature>_commands.py`
+
+**WARNING: We are approaching the Discord maximum of 100 slash commands. Use subcommands for new functionality instead of top-level commands.**
+
+1. Prefer adding subcommands to existing command groups (e.g., `/shop buy`, `/stats player`)
+2. If a new top-level command is truly needed, check the current count first
+3. Use `@app_commands.command()` decorator
+4. Inject services via `interaction.client.<service>`
+5. Add rate limiting: `@app_commands.checks.cooldown(rate, per)`
+6. Add tests in `tests/test_<feature>_commands.py`
 
 ### Adding a New Service
 1. Create `services/<name>_service.py`

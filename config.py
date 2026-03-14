@@ -80,7 +80,7 @@ SHUFFLER_SETTINGS: dict[str, Any] = {
     "off_role_multiplier": _parse_float("OFF_ROLE_MULTIPLIER", 0.95),
     "off_role_flat_penalty": _parse_float("OFF_ROLE_FLAT_PENALTY", 380.0),
     "role_matchup_delta_weight": _parse_float("ROLE_MATCHUP_DELTA_WEIGHT", 0.19),
-    "exclusion_penalty_weight": _parse_float("EXCLUSION_PENALTY_WEIGHT", 55.0),
+    "exclusion_penalty_weight": _parse_float("EXCLUSION_PENALTY_WEIGHT", 60.0),
     # Recent match penalty: players who participated in the most recent match
     # get this penalty added to goodness score (making them more likely to sit out)
     # Hardcoded default - not configurable via env var (silent operation)
@@ -151,8 +151,9 @@ SOFT_AVOID_PENALTY = _parse_float("SOFT_AVOID_PENALTY", 200.0)  # Penalty added 
 SHOP_PACKAGE_DEAL_BASE_COST = _parse_int("SHOP_PACKAGE_DEAL_BASE_COST", 500)  # Base cost for package deal
 SHOP_PACKAGE_DEAL_RATING_DIVISOR = _parse_float("SHOP_PACKAGE_DEAL_RATING_DIVISOR", 10.0)  # Divide sum of ratings by this
 PACKAGE_DEAL_GAMES_DURATION = _parse_int("PACKAGE_DEAL_GAMES_DURATION", 10)  # Number of games deal lasts
-PACKAGE_DEAL_PENALTY = _parse_float("PACKAGE_DEAL_PENALTY", 120.0)  # Penalty when pair on DIFFERENT teams
-PACKAGE_DEAL_SPLIT_PENALTY = _parse_float("PACKAGE_DEAL_SPLIT_PENALTY", 120.0)  # Penalty when one selected, one excluded
+PACKAGE_DEAL_PENALTY = _parse_float("PACKAGE_DEAL_PENALTY", 110.0)  # Penalty when pair on DIFFERENT teams
+PACKAGE_DEAL_SPLIT_PENALTY = _parse_float("PACKAGE_DEAL_SPLIT_PENALTY", 110.0)  # Penalty when one selected, one excluded
+RATING_SPREAD_DIVISOR = _parse_float("RATING_SPREAD_DIVISOR", 10.0)  # Divisor for (max_rating - min_rating) pool spread penalty
 
 # Recalibrate shop item
 SHOP_RECALIBRATE_COST = _parse_int("SHOP_RECALIBRATE_COST", 300)
@@ -285,9 +286,6 @@ TRIVIA_COOLDOWN_SECONDS = _parse_int("TRIVIA_COOLDOWN_SECONDS", 21600)  # 6 hour
 TRIVIA_ANSWER_TIMEOUT_SECONDS = _parse_int("TRIVIA_ANSWER_TIMEOUT_SECONDS", 15)
 TRIVIA_REWARD_PER_QUESTION = _parse_int("TRIVIA_REWARD_PER_QUESTION", 1)
 
-# Solo grinder detection
-SOLO_GRINDER_MIX_PENALTY = _parse_float("SOLO_GRINDER_MIX_PENALTY", 110.0)
-SOLO_GRINDER_CACHE_TTL_SECONDS = _parse_int("SOLO_GRINDER_CACHE_TTL_SECONDS", 604800)  # 7 days
 
 # Neon Degen Terminal Easter Egg configuration
 NEON_DEGEN_ENABLED = _parse_bool("NEON_DEGEN_ENABLED", True)
