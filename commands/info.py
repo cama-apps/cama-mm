@@ -966,12 +966,14 @@ class InfoCommands(commands.Cog):
 
         # Registration & Profile
         embed.add_field(
-            name="👤 Registration & Profile",
+            name="👤 Registration & Profile (`/player`)",
             value=(
-                "`/register` - Register yourself as a player\n"
-                "`/setroles` - Set your preferred roles (1-5)\n"
-                "`/profile` - View unified profile (stats, rating, economy, gambling, predictions, Dota, teammates)\n"
-                "`/matchup` - Head-to-head comparison between two players"
+                "`/player register` - Register yourself as a player\n"
+                "`/player roles` - Set your preferred roles (1-5)\n"
+                "`/player link` / `unlink` / `steamids` - Manage Steam accounts\n"
+                "`/player exclusion` - Check your exclusion factor\n"
+                "`/profile` - View unified profile\n"
+                "`/matchup` - Head-to-head comparison"
             ),
             inline=False,
         )
@@ -990,10 +992,10 @@ class InfoCommands(commands.Cog):
 
         # Dota 2 Reference
         embed.add_field(
-            name="📖 Dota 2 Reference",
+            name="📖 Dota 2 Reference (`/dota`)",
             value=(
-                "`/hero` - Look up hero stats, abilities, talents\n"
-                "`/ability` - Look up ability details"
+                "`/dota hero` - Look up hero stats, abilities, talents\n"
+                "`/dota ability` - Look up ability details"
             ),
             inline=False,
         )
@@ -1016,7 +1018,10 @@ class InfoCommands(commands.Cog):
             name="⚔️ Match Management",
             value=(
                 "`/shuffle` - Create balanced teams from lobby (pool betting)\n"
-                "`/record` - Record a match result"
+                "`/record` - Record a match result\n"
+                "`/draft start` - Start Immortal Draft (captain mode)\n"
+                "`/draft captain` - Set captain eligibility\n"
+                "`/draft restart` - Restart active draft"
             ),
             inline=False,
         )
@@ -1033,6 +1038,19 @@ class InfoCommands(commands.Cog):
                 "`/balance` - Check your jopacoin balance and debt\n"
                 "`/paydebt` - Help another player pay off their debt (be a philanthropist!)\n"
                 "`/bankruptcy` - Declare bankruptcy (clears debt, 1 week cooldown, 5 game penalty)"
+            ),
+            inline=False,
+        )
+
+        # Prediction Markets
+        embed.add_field(
+            name="🔮 Prediction Markets (`/predict`)",
+            value=(
+                "`/predict create` - Create a new prediction market\n"
+                "`/predict list` - List active predictions\n"
+                "`/predict mine` - View your prediction positions\n"
+                "`/predict resolve` - Vote to resolve a prediction\n"
+                "`/predict close` / `cancel` - Admin: close or cancel"
             ),
             inline=False,
         )
@@ -1058,13 +1076,14 @@ class InfoCommands(commands.Cog):
             embed.add_field(
                 name="🔧 Admin Commands",
                 value=(
-                    "`/addfake` - Add fake users to lobby for testing\n"
-                    "`/resetuser` - Reset a specific user's account\n"
-                    "`/setleague` - Set Valve league ID for this server\n"
-                    "`/enrichmatch` - Enrich match with Valve API data\n"
-                    "`/backfillsteamid` - Backfill steam IDs from Dotabuff URLs\n"
-                    "`/showconfig` - View server configuration\n"
-                    "`/rebuildpairings` - Rebuild pairwise stats from match history"
+                    "`/admin addfake` - Add fake users to lobby for testing\n"
+                    "`/admin sync` - Force sync commands\n"
+                    "`/admin givecoin` - Give jopacoin to a user\n"
+                    "`/admin setrating` - Set initial rating for a player\n"
+                    "`/enrich match` - Enrich match with Valve API data\n"
+                    "`/enrich discover` - Auto-discover Dota match IDs\n"
+                    "`/enrich config` - View server configuration\n"
+                    "`/enrich rebuildpairings` - Rebuild pairwise stats"
                 ),
                 inline=False,
             )

@@ -1815,7 +1815,7 @@ class BettingCommands(commands.Cog):
         player = await asyncio.to_thread(self.player_service.get_player, user_id, guild_id)
         if not player:
             await interaction.response.send_message(
-                "You need to `/register` before you can spin the wheel.",
+                "You need to `/player register` before you can spin the wheel.",
                 ephemeral=True,
             )
             return
@@ -2983,7 +2983,7 @@ class BettingCommands(commands.Cog):
         player = await asyncio.to_thread(self.player_service.get_player, user_id, guild_id)
         if not player:
             await interaction.response.send_message(
-                "You need to `/register` before you can test the wheel.",
+                "You need to `/player register` before you can test the wheel.",
                 ephemeral=True,
             )
             return
@@ -3099,7 +3099,7 @@ class BettingCommands(commands.Cog):
         player = await asyncio.to_thread(self.player_service.get_player, user_id, guild_id)
         if not player:
             await interaction.response.send_message(
-                "You need to `/register` before you can test the wheel.",
+                "You need to `/player register` before you can test the wheel.",
                 ephemeral=True,
             )
             return
@@ -3261,7 +3261,7 @@ class BettingCommands(commands.Cog):
 
         if not sender:
             await interaction.followup.send(
-                "You need to `/register` before you can tip.",
+                "You need to `/player register` before you can tip.",
                 ephemeral=True,
             )
             return
@@ -3504,7 +3504,7 @@ class BettingCommands(commands.Cog):
         player = await asyncio.to_thread(self.player_service.get_player, user_id, guild_id)
         if not player:
             await interaction.followup.send(
-                "You need to `/register` before you can declare bankruptcy. "
+                "You need to `/player register` before you can declare bankruptcy. "
                 "Though maybe that's a good sign you shouldn't gamble.",
                 ephemeral=True,
             )
@@ -3667,7 +3667,7 @@ class BettingCommands(commands.Cog):
         # Check if registered
         if not await asyncio.to_thread(self.player_service.get_player, user_id, guild_id):
             await interaction.response.send_message(
-                "You need to `/register` before taking loans.", ephemeral=True
+                "You need to `/player register` before taking loans.", ephemeral=True
             )
             return
 
@@ -4811,7 +4811,7 @@ class DisburseVoteView(discord.ui.View):
         player = await asyncio.to_thread(self.cog.player_service.get_player, interaction.user.id, guild_id)
         if not player:
             await interaction.response.send_message(
-                "You must be registered to vote. Use `/register` first.",
+                "You must be registered to vote. Use `/player register` first.",
                 ephemeral=True,
             )
             return

@@ -262,7 +262,7 @@ class LobbyCommands(commands.Cog):
         # Check if player has roles set
         player = await asyncio.to_thread(self.player_service.get_player, user_id, guild_id)
         if not player or not player.preferred_roles:
-            return False, "⚠️ Set your preferred roles with `/setroles` to auto-join."
+            return False, "⚠️ Set your preferred roles with `/player roles` to auto-join."
 
         # Attempt to join (pending match check now inside LobbyService)
         success, reason, pending_info = await asyncio.to_thread(
@@ -316,7 +316,7 @@ class LobbyCommands(commands.Cog):
         player = await asyncio.to_thread(self.player_service.get_player, interaction.user.id, guild_id)
         if not player:
             await safe_followup(
-                interaction, content="❌ You're not registered! Use `/register` first.", ephemeral=True
+                interaction, content="❌ You're not registered! Use `/player register` first.", ephemeral=True
             )
             return
 
@@ -534,14 +534,14 @@ class LobbyCommands(commands.Cog):
         player = await asyncio.to_thread(self.player_service.get_player, interaction.user.id, guild_id)
         if not player:
             await safe_followup(
-                interaction, content="❌ You're not registered! Use `/register` first.", ephemeral=True
+                interaction, content="❌ You're not registered! Use `/player register` first.", ephemeral=True
             )
             return
 
         # Check roles set
         if not player.preferred_roles:
             await safe_followup(
-                interaction, content="❌ Set your preferred roles first! Use `/setroles`.", ephemeral=True
+                interaction, content="❌ Set your preferred roles first! Use `/player roles`.", ephemeral=True
             )
             return
 
@@ -709,7 +709,7 @@ class LobbyCommands(commands.Cog):
             if can_respond:
                 await safe_followup(
                     interaction, content="❌ There's an active draft in progress. "
-                    "Use `/restartdraft` first to clear the draft.",
+                    "Use `/draft restart` first to clear the draft.",
                     ephemeral=True,
                 )
             return

@@ -129,6 +129,8 @@ def _format_ability_values(ability: Ability) -> str:
 class DotaInfoCommands(commands.Cog):
     """Commands for Dota 2 hero and ability information."""
 
+    dota = app_commands.Group(name="dota", description="Dota 2 hero and ability reference")
+
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
@@ -156,7 +158,7 @@ class DotaInfoCommands(commands.Cog):
         ]
         return matches[:25]  # Discord limit
 
-    @app_commands.command(name="hero", description="Get information about a Dota 2 hero")
+    @dota.command(name="hero", description="Get information about a Dota 2 hero")
     @app_commands.describe(hero_name="The hero name (e.g., Anti-Mage, Pudge)")
     @app_commands.autocomplete(hero_name=hero_autocomplete)
     async def hero(self, interaction: discord.Interaction, hero_name: str):
@@ -275,7 +277,7 @@ class DotaInfoCommands(commands.Cog):
 
         await safe_followup(interaction, embed=embed)
 
-    @app_commands.command(name="ability", description="Get information about a Dota 2 ability")
+    @dota.command(name="ability", description="Get information about a Dota 2 ability")
     @app_commands.describe(ability_name="The ability name (e.g., Blink, Mana Break)")
     @app_commands.autocomplete(ability_name=ability_autocomplete)
     async def ability(self, interaction: discord.Interaction, ability_name: str):

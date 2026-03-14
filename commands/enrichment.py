@@ -1,6 +1,7 @@
 """
-Match enrichment commands: /setleague, /enrichmatch, /backfillsteamid, /matchhistory,
-/dotastats, /viewmatch, /recent, /rolesgraph, /lanegraph
+Match enrichment commands: /enrich setleague, /enrich match, /enrich discover,
+/enrich backfill, /enrich config, /enrich wipeall, /enrich wipematch,
+/enrich rebuildpairings, /matchhistory, /viewmatch, /recent
 """
 
 import asyncio
@@ -25,6 +26,8 @@ logger = logging.getLogger("cama_bot.commands.enrichment")
 class EnrichmentCommands(commands.Cog):
     """Commands for match enrichment and configuration."""
 
+    enrich = app_commands.Group(name="enrich", description="Match enrichment and discovery (Admin)")
+
     def __init__(
         self,
         bot: commands.Bot,
@@ -35,6 +38,7 @@ class EnrichmentCommands(commands.Cog):
         opendota_player_service: OpenDotaPlayerService,
         discovery_service=None,
         bankruptcy_repo=None,
+        pairings_service=None,
     ):
         self.bot = bot
         self.match_service = match_service
@@ -44,8 +48,9 @@ class EnrichmentCommands(commands.Cog):
         self.opendota_player_service = opendota_player_service
         self.discovery_service = discovery_service
         self.bankruptcy_repo = bankruptcy_repo
+        self.pairings_service = pairings_service
 
-    @app_commands.command(
+    @enrich.command(
         name="setleague", description="Set the Valve league ID for this server (Admin)"
     )
     @app_commands.describe(league_id="The Valve/Dota 2 league ID")
@@ -77,8 +82,8 @@ class EnrichmentCommands(commands.Cog):
         )
         logger.info(f"League ID set to {league_id} for guild {guild_id}")
 
-    @app_commands.command(
-        name="enrichmatch",
+    @enrich.command(
+        name="match",
         description="Enrich a match with Valve API data (Admin)",
     )
     @app_commands.describe(
@@ -143,7 +148,7 @@ class EnrichmentCommands(commands.Cog):
                     interaction,
                     content=(
                         f"Match #{internal_match_id} needs a Dota 2 match ID to enrich.\n"
-                        f"Use: `/enrichmatch valve_match_id:<DOTA_MATCH_ID>`\n\n"
+                        f"Use: `/enrich match valve_match_id:<DOTA_MATCH_ID>`\n\n"
                         f"You can find the match ID on Dotabuff or in the Dota 2 client."
                     ),
                     ephemeral=True,
@@ -213,8 +218,8 @@ class EnrichmentCommands(commands.Cog):
 
         logger.info(f"Match {internal_match_id} enriched: {result['players_enriched']} players")
 
-    @app_commands.command(
-        name="backfillsteamid",
+    @enrich.command(
+        name="backfill",
         description="Backfill steam_id from dotabuff URLs for all players (Admin)",
     )
     async def backfillsteamid(self, interaction: discord.Interaction):
@@ -245,7 +250,7 @@ class EnrichmentCommands(commands.Cog):
             f"{len(result['players_failed'])} failed"
         )
 
-    @app_commands.command(name="showconfig", description="Show current server configuration")
+    @enrich.command(name="config", description="Show current server configuration")
     async def showconfig(self, interaction: discord.Interaction):
         """Show the current configuration for this server."""
         logger.info(f"Showconfig command: User {interaction.user.id}")
@@ -590,14 +595,14 @@ class EnrichmentCommands(commands.Cog):
                 lobby_type=match_data.get("lobby_type", "shuffle"),
             )
             note = (
-                "ℹ️ This match has not been enriched yet. Use `/enrichmatch` to add detailed stats."
+                "ℹ️ This match has not been enriched yet. Use `/enrich match` to add detailed stats."
             )
             await safe_followup(interaction, content=note, embed=embed)
 
     # ==================== Admin Discovery Commands ====================
 
-    @app_commands.command(
-        name="autodiscover",
+    @enrich.command(
+        name="discover",
         description="[Admin] Auto-discover Dota match IDs for unenriched matches",
     )
     @app_commands.describe(
@@ -698,7 +703,7 @@ class EnrichmentCommands(commands.Cog):
                 )
             if len(low_confidence) > 5:
                 lines.append(f"  ... and {len(low_confidence) - 5} more")
-            lines.append("*Use `/enrichmatch` to manually enrich these matches*")
+            lines.append("*Use `/enrich match` to manually enrich these matches*")
 
         # Show validation failures
         validation_failed = [
@@ -790,8 +795,8 @@ class EnrichmentCommands(commands.Cog):
 
         await interaction.edit_original_response(content="\n".join(lines))
 
-    @app_commands.command(
-        name="wipediscovered",
+    @enrich.command(
+        name="wipeall",
         description="[Admin] Wipe all match enrichments",
     )
     async def wipediscovered(self, interaction: discord.Interaction):
@@ -824,11 +829,11 @@ class EnrichmentCommands(commands.Cog):
 
         await safe_followup(
             interaction,
-            content=f"Wiped {wiped} enrichments. Run `/autodiscover` to re-enrich.",
+            content=f"Wiped {wiped} enrichments. Run `/enrich discover` to re-enrich.",
             ephemeral=True,
         )
 
-    @app_commands.command(
+    @enrich.command(
         name="wipematch",
         description="[Admin] Wipe enrichment data for a specific match",
     )
@@ -899,7 +904,7 @@ class EnrichmentCommands(commands.Cog):
         if not matches:
             await safe_followup(
                 interaction,
-                content=f"{target_name} hasn't linked their Steam account. Use `/linksteam` first.",
+                content=f"{target_name} hasn't linked their Steam account. Use `/player link` first.",
             )
             return
 
@@ -924,6 +929,45 @@ class EnrichmentCommands(commands.Cog):
             )
 
 
+    @enrich.command(
+        name="rebuildpairings", description="Rebuild pairwise stats from match history (Admin only)"
+    )
+    async def rebuildpairings(self, interaction: discord.Interaction):
+        """Admin command to rebuild all pairwise statistics from match history."""
+        logger.info(
+            "Rebuildpairings command: User %s (%s)",
+            interaction.user.id,
+            interaction.user,
+        )
+
+        if not has_admin_permission(interaction):
+            await interaction.response.send_message("This command is admin-only.", ephemeral=True)
+            return
+
+        if not self.pairings_service:
+            await interaction.response.send_message("Pairings service not available.", ephemeral=True)
+            return
+
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+
+        try:
+            count = await asyncio.to_thread(self.pairings_service.rebuild_all_pairings)
+            await safe_followup(
+                interaction,
+                content=f"Rebuilt pairwise statistics. {count} pairings calculated from match history.",
+                ephemeral=True,
+            )
+            logger.info(f"Rebuildpairings: rebuilt {count} pairings")
+        except Exception as e:
+            logger.error(f"Error rebuilding pairings: {e}", exc_info=True)
+            await safe_followup(
+                interaction,
+                content=f"Error rebuilding pairings: {e}",
+                ephemeral=True,
+            )
+
+
 async def setup(bot: commands.Bot):
     """Setup function called when loading the cog."""
     match_service = getattr(bot, "match_service", None)
@@ -933,6 +977,7 @@ async def setup(bot: commands.Bot):
     opendota_player_service = getattr(bot, "opendota_player_service", None)
     discovery_service = getattr(bot, "match_discovery_service", None)
     bankruptcy_repo = getattr(bot, "bankruptcy_repo", None)
+    pairings_service = getattr(bot, "pairings_service", None)
 
     if not all([match_service, player_service, guild_config_service]):
         logger.warning("enrichment cog: required services not available, skipping")
@@ -948,5 +993,6 @@ async def setup(bot: commands.Bot):
             opendota_player_service,
             discovery_service,
             bankruptcy_repo,
+            pairings_service,
         )
     )

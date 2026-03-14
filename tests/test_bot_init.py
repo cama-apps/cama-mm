@@ -45,10 +45,14 @@ def test_bot_commands_registered():
     commands = bot.bot.tree.get_commands()
     command_names = [cmd.name for cmd in commands]
 
-    # Verify key commands exist
+    # Verify key commands exist (groups register as top-level command names)
     expected_commands = [
-        "register",
-        "setroles",
+        "player",  # Group: /player register, /player roles, etc.
+        "draft",  # Group: /draft start, /draft captain, etc.
+        "predict",  # Group: /predict create, /predict list, etc.
+        "admin",  # Group: /admin addfake, /admin sync, etc.
+        "enrich",  # Group: /enrich match, /enrich discover, etc.
+        "dota",  # Group: /dota hero, /dota ability
         "lobby",
         "shuffle",
         "record",

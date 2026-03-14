@@ -277,7 +277,7 @@ class ScoutCommands(commands.Cog):
             await safe_followup(
                 interaction,
                 content="No enriched match data found for these players. "
-                "Matches need to be enriched with `/enrichmatch` or `/autodiscover` first.",
+                "Matches need to be enriched with `/enrich match` or `/enrich discover` first.",
             )
             return
 

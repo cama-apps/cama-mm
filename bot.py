@@ -547,7 +547,7 @@ async def on_raw_reaction_add(payload):
                 pass
             try:
                 await channel.send(
-                    f"{user.mention} ❌ You're not registered! Use `/register` first to join the lobby.",
+                    f"{user.mention} ❌ You're not registered! Use `/player register` first to join the lobby.",
                     delete_after=10,
                 )
             except Exception:
@@ -561,7 +561,7 @@ async def on_raw_reaction_add(payload):
                 pass
             try:
                 await channel.send(
-                    f"{user.mention} ❌ Set your preferred roles first! Use `/setroles` (e.g., `/setroles 123`).",
+                    f"{user.mention} ❌ Set your preferred roles first! Use `/player roles` (e.g., `/player roles 123`).",
                     delete_after=10,
                 )
             except Exception:

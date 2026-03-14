@@ -389,7 +389,7 @@ class MatchCommands(commands.Cog):
             if is_captain or is_admin:
                 msg = (
                     "❌ There's an active Immortal Draft in progress! "
-                    "Use `/restartdraft` to restart it or complete the draft first."
+                    "Use `/draft restart` to restart it or complete the draft first."
                 )
             else:
                 msg = (

@@ -237,7 +237,7 @@ class PersistentPredictionView(discord.ui.View):
         )
         if not player:
             await interaction.response.send_message(
-                "You must be registered to bet. Use `/register` first.",
+                "You must be registered to bet. Use `/player register` first.",
                 ephemeral=True,
             )
             return
@@ -305,6 +305,8 @@ class PersistentPredictionView(discord.ui.View):
 
 class PredictionCommands(commands.Cog):
     """Commands for prediction markets."""
+
+    predict = app_commands.Group(name="predict", description="Prediction markets")
 
     def __init__(
         self,
@@ -411,7 +413,7 @@ class PredictionCommands(commands.Cog):
                     name="🗳️ Resolution Votes",
                     value=(
                         f"YES: {yes_votes}/{needed} | NO: {no_votes}/{needed}\n"
-                        f"Use `/predictionresolve {pred['prediction_id']} <YES|NO>` to vote"
+                        f"Use `/predict resolve {pred['prediction_id']} <YES|NO>` to vote"
                     ),
                     inline=False,
                 )
@@ -470,7 +472,7 @@ class PredictionCommands(commands.Cog):
         except Exception as e:
             logger.warning(f"Failed to update prediction embed: {e}")
 
-    @app_commands.command(name="prediction", description="Create a new prediction market")
+    @predict.command(name="create", description="Create a new prediction market")
     @app_commands.describe(
         question="The question to predict on",
         closes_in="When betting closes (e.g., 1h, 3d, 1w, 1mo)",
@@ -491,7 +493,7 @@ class PredictionCommands(commands.Cog):
         if not player:
             await safe_followup(
                 interaction,
-                content="You must be registered to create predictions. Use `/register` first.",
+                content="You must be registered to create predictions. Use `/player register` first.",
             )
             return
 
@@ -574,7 +576,7 @@ class PredictionCommands(commands.Cog):
         except Exception as e:
             logger.exception(f"Error creating prediction thread: {e}")
 
-    @app_commands.command(name="predictionresolve", description="Vote to resolve a prediction")
+    @predict.command(name="resolve", description="Vote to resolve a prediction")
     @app_commands.describe(
         prediction_id="The prediction ID to resolve",
         outcome="The outcome (YES or NO)",
@@ -787,7 +789,7 @@ class PredictionCommands(commands.Cog):
                     prediction_id=prediction_id,
                 )
 
-    @app_commands.command(name="predictioncancel", description="Cancel a prediction (admin only)")
+    @predict.command(name="cancel", description="Cancel a prediction (admin only)")
     @app_commands.describe(prediction_id="The prediction ID to cancel")
     async def cancel(self, interaction: discord.Interaction, prediction_id: int):
         """Cancel a prediction and refund all bets (admin only)."""
@@ -856,7 +858,7 @@ class PredictionCommands(commands.Cog):
             except Exception as e:
                 logger.warning(f"Failed to post cancellation to thread: {e}")
 
-    @app_commands.command(name="predictionclose", description="Close betting early (admin only)")
+    @predict.command(name="close", description="Close betting early (admin only)")
     @app_commands.describe(prediction_id="The prediction ID to close")
     async def closebet(self, interaction: discord.Interaction, prediction_id: int):
         """Close betting on a prediction early (admin only)."""
@@ -882,7 +884,7 @@ class PredictionCommands(commands.Cog):
             interaction,
             content=f"🔒 **Betting closed** on prediction #{prediction_id}\n"
             f"Resolution voting is now open ({votes_needed} votes or 1 admin to resolve).\n"
-            f"Use `/predictionresolve {prediction_id} <YES|NO>` to vote.",
+            f"Use `/predict resolve {prediction_id} <YES|NO>` to vote.",
         )
 
         # Post to thread and update thread name
@@ -896,7 +898,7 @@ class PredictionCommands(commands.Cog):
                     close_msg = await thread.send(
                         f"🔒 **Betting closed early** by <@{interaction.user.id}>\n"
                         f"Vote to resolve ({votes_needed} votes or 1 admin needed):\n"
-                        f"`/predictionresolve {prediction_id} YES` or `/predictionresolve {prediction_id} NO`"
+                        f"`/predict resolve {prediction_id} YES` or `/predict resolve {prediction_id} NO`"
                     )
                     # Save the close message ID so we can edit it when resolved
                     await asyncio.to_thread(
@@ -932,7 +934,7 @@ class PredictionCommands(commands.Cog):
             except Exception as e:
                 logger.warning(f"Failed to post close message to thread: {e}")
 
-    @app_commands.command(name="predictions", description="List predictions")
+    @predict.command(name="list", description="List predictions")
     @app_commands.describe(
         show_all="Show all predictions including resolved/cancelled",
         limit="Number of predictions to show (default 10)",
@@ -1088,7 +1090,7 @@ class PredictionCommands(commands.Cog):
 
         await safe_followup(interaction, embed=embed)
 
-    @app_commands.command(name="mypredictions", description="View your prediction positions")
+    @predict.command(name="mine", description="View your prediction positions")
     @app_commands.describe(history="Show resolved predictions instead of active ones")
     async def mypredictions(
         self,

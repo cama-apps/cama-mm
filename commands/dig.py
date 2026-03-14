@@ -207,7 +207,7 @@ async def _check_registered(interaction: discord.Interaction, bot: commands.Bot)
     player = await asyncio.to_thread(bot.player_service.get_player, interaction.user.id, guild_id)
     if not player:
         await interaction.response.send_message(
-            "You must be registered first. Use `/register`.", ephemeral=True
+            "You must be registered first. Use `/player register`.", ephemeral=True
         )
     return player
 

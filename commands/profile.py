@@ -295,7 +295,7 @@ class ProfileCommands(commands.Cog):
         except ValueError:
             return discord.Embed(
                 title="Not Registered",
-                description=f"{target_user.display_name} is not registered.\nUse `/register` to get started.",
+                description=f"{target_user.display_name} is not registered.\nUse `/player register` to get started.",
                 color=COLOR_RED,
             ), None
 
@@ -1185,7 +1185,7 @@ class ProfileCommands(commands.Cog):
         if not steam_id:
             return discord.Embed(
                 title=f"Profile: {target_user.display_name} > Dota Stats",
-                description="No Steam account linked.\n\nUse `/linksteam` to link your Steam ID, or `/register` if you're new.",
+                description="No Steam account linked.\n\nUse `/player link` to link your Steam ID, or `/player register` if you're new.",
                 color=COLOR_ORANGE,
             ), []
 
@@ -1559,7 +1559,7 @@ class ProfileCommands(commands.Cog):
                 description=(
                     "No enriched match data available.\n\n"
                     "Hero stats require matches to be enriched with Dota 2 data.\n"
-                    "Ask an admin to run `/enrichmatch` or `/autodiscover` to add match data."
+                    "Ask an admin to run `/enrich match` or `/enrich discover` to add match data."
                 ),
                 color=COLOR_ORANGE,
             ), []
@@ -1806,7 +1806,7 @@ class ProfileCommands(commands.Cog):
                 )
 
         # Footer
-        embed.set_footer(text=f"Based on {enriched_count} enriched matches | Use /enrichmatch to add more")
+        embed.set_footer(text=f"Based on {enriched_count} enriched matches | Use /enrich match to add more")
 
         return embed, files
 
@@ -1863,7 +1863,7 @@ class ProfileCommands(commands.Cog):
             if not player:
                 await safe_followup(
                     interaction,
-                    content=f"❌ {target_user.display_name} is not registered. Use `/register` to get started.",
+                    content=f"❌ {target_user.display_name} is not registered. Use `/player register` to get started.",
                 )
                 return
 

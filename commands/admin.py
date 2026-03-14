@@ -21,12 +21,15 @@ from utils.rate_limiter import GLOBAL_RATE_LIMITER
 logger = logging.getLogger("cama_bot.commands.admin")
 
 # Module-level tracking: shared across all AdminCommands instances
-# This prevents duplicate responses even if the command is registered multiple times
-_processed_interactions = set()
+# Uses dict with timestamps for TTL-based cleanup (5 minute TTL)
+_processed_interactions: dict[str, float] = {}
+_INTERACTION_TTL = 300.0  # 5 minutes
 
 
 class AdminCommands(commands.Cog):
     """Admin-only slash commands."""
+
+    admin = app_commands.Group(name="admin", description="Admin maintenance commands")
 
     def __init__(
         self,
@@ -46,7 +49,7 @@ class AdminCommands(commands.Cog):
         self.recalibration_service = recalibration_service
         self.match_service = match_service
 
-    @app_commands.command(
+    @admin.command(
         name="addfake", description="Add fake users to lobby for testing (Admin only)"
     )
     @app_commands.describe(
@@ -70,7 +73,7 @@ class AdminCommands(commands.Cog):
         )
         if not rl.allowed:
             await interaction.response.send_message(
-                f"⏳ Please wait {rl.retry_after_seconds}s before using `/addfake` again.",
+                f"⏳ Please wait {rl.retry_after_seconds}s before using `/admin addfake` again.",
                 ephemeral=True,
             )
             return
@@ -85,15 +88,14 @@ class AdminCommands(commands.Cog):
             return
 
         # Mark interaction as being processed
-        _processed_interactions.add(interaction_key)
+        _processed_interactions[interaction_key] = time.time()
 
-        # Clean up old entries (keep only newest 500 to prevent memory leak)
-        if len(_processed_interactions) > 1000:
-            # Interaction keys are "{id}_{user_id}" where id increases over time.
-            # Sort lexicographically and keep the newest 500.
-            sorted_keys = sorted(_processed_interactions)
-            keep = set(sorted_keys[-500:])
-            _processed_interactions.intersection_update(keep)
+        # Clean up expired entries lazily when size > 100
+        if len(_processed_interactions) > 100:
+            now = time.time()
+            expired = [k for k, t in _processed_interactions.items() if now - t > _INTERACTION_TTL]
+            for k in expired:
+                del _processed_interactions[k]
 
         logger.info(
             f"addfake command invoked by user {interaction.user.id} ({interaction.user}) "
@@ -383,7 +385,7 @@ class AdminCommands(commands.Cog):
             )
             try:
                 await user.send(
-                    f"Your account was reset by an administrator ({interaction.user.mention}). You can register again with `/register`."
+                    f"Your account was reset by an administrator ({interaction.user.mention}). You can register again with `/player register`."
                 )
             except Exception as e:
                 logger.debug("Failed to DM user about account reset: %s", e)
@@ -472,7 +474,7 @@ class AdminCommands(commands.Cog):
                 content=(
                     f"✅ Registered {user.mention}!\n"
                     f"Cama Rating: {result['cama_rating']} ({result['uncertainty']:.0f}% uncertainty)\n"
-                    f"They can use `/setroles` to set their preferred roles."
+                    f"They can use `/player roles` to set their preferred roles."
                 ),
                 ephemeral=True,
             )
@@ -492,7 +494,7 @@ class AdminCommands(commands.Cog):
                 ephemeral=True,
             )
 
-    @app_commands.command(name="sync", description="Force sync commands (Admin only)")
+    @admin.command(name="sync", description="Force sync commands (Admin only)")
     async def sync(self, interaction: discord.Interaction):
         guild = interaction.guild if interaction.guild else None
         rl_gid = guild.id if guild else 0
@@ -538,7 +540,7 @@ class AdminCommands(commands.Cog):
                 ephemeral=True,
             )
 
-    @app_commands.command(name="givecoin", description="Give jopacoin to a user or nonprofit (Admin only)")
+    @admin.command(name="givecoin", description="Give jopacoin to a user or nonprofit (Admin only)")
     @app_commands.describe(
         user="The user to give coins to (leave empty if targeting nonprofit)",
         amount="Amount to give (can be negative to take)",
@@ -750,7 +752,7 @@ class AdminCommands(commands.Cog):
             f"{user.id} ({user})"
         )
 
-    @app_commands.command(name="setinitialrating", description="Set initial rating for a player")
+    @admin.command(name="setrating", description="Set initial rating for a player")
     @app_commands.describe(
         user="Player to adjust (must have few games)",
         rating="Initial rating (0-3000)",
@@ -1550,6 +1552,7 @@ async def setup(bot: commands.Bot):
         for cmd in bot.tree.walk_commands()
         if cmd.name
         in [
+            "admin",
             "addfake",
             "resetuser",
             "registeruser",
@@ -1557,7 +1560,7 @@ async def setup(bot: commands.Bot):
             "givecoin",
             "resetloancooldown",
             "resetbankruptcycooldown",
-            "setinitialrating",
+            "setrating",
             "extendbetting",
             "recalibrate",
             "resetrecalibrationcooldown",

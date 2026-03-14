@@ -89,7 +89,7 @@ class RollCommands(commands.Cog):
         player = await asyncio.to_thread(self.player_service.get_player, user_id, guild_id)
         if not player:
             await interaction.response.send_message(
-                "You need to `/register` before rolling. The dice don't know who you are yet.",
+                "You need to `/player register` before rolling. The dice don't know who you are yet.",
                 ephemeral=True,
             )
             return

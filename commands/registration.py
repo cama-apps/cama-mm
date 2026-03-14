@@ -1,5 +1,5 @@
 """
-Registration commands for the bot: /register, /setroles, /stats
+Registration commands for the bot: /player register, /player roles, etc.
 """
 
 import asyncio
@@ -24,6 +24,8 @@ logger = logging.getLogger("cama_bot.commands.registration")
 class RegistrationCommands(commands.Cog):
     """Commands for player registration and profile management."""
 
+    player = app_commands.Group(name="player", description="Player registration and profile management")
+
     def __init__(
         self,
         bot: commands.Bot,
@@ -38,7 +40,7 @@ class RegistrationCommands(commands.Cog):
         self.role_emojis = role_emojis
         self.role_names = role_names
 
-    @app_commands.command(name="register", description="Register yourself as a player")
+    @player.command(name="register", description="Register yourself as a player")
     @app_commands.describe(steam_id="Steam32 ID (found in your Dotabuff URL)")
     async def register(self, interaction: discord.Interaction, steam_id: int):
         """Register a new player."""
@@ -66,7 +68,7 @@ class RegistrationCommands(commands.Cog):
             await interaction.followup.send(
                 f"✅ Registered {interaction.user.mention}!\n"
                 f"Cama Rating: {result['cama_rating']} ({result['uncertainty']:.0f}% uncertainty)\n"
-                f"Use `/setroles` to set your preferred roles."
+                f"Use `/player roles` to set your preferred roles."
             )
 
             # Neon Degen Terminal hook (registration)
@@ -189,7 +191,7 @@ class RegistrationCommands(commands.Cog):
         )
         return
 
-    @app_commands.command(name="linksteam", description="Link an additional Steam account")
+    @player.command(name="link", description="Link an additional Steam account")
     @app_commands.describe(
         steam_id="Steam32 ID (found in your Dotabuff URL)",
         set_primary="Set as your primary Steam account (default: False)",
@@ -219,7 +221,7 @@ class RegistrationCommands(commands.Cog):
         player = await asyncio.to_thread(self.player_service.get_player, interaction.user.id, guild_id)
         if not player:
             await interaction.followup.send(
-                "❌ You are not registered. Use `/register` first.",
+                "❌ You are not registered. Use `/player register` first.",
                 ephemeral=True,
             )
             return
@@ -282,11 +284,11 @@ class RegistrationCommands(commands.Cog):
             await interaction.followup.send(
                 f"✅ Steam ID `{steam_id}` added to your account{primary_note}!\n"
                 f"You now have {len(new_steam_ids)} linked accounts. "
-                "Use `/mysteamids` to view all linked accounts.",
+                "Use `/player steamids` to view all linked accounts.",
                 ephemeral=True,
             )
 
-    @app_commands.command(name="unlinksteam", description="Remove a linked Steam account")
+    @player.command(name="unlink", description="Remove a linked Steam account")
     @app_commands.describe(steam_id="Steam32 ID to remove")
     async def unlinksteam(self, interaction: discord.Interaction, steam_id: int):
         """Remove a linked Steam ID from your account."""
@@ -308,7 +310,7 @@ class RegistrationCommands(commands.Cog):
         player = await asyncio.to_thread(self.player_service.get_player, interaction.user.id, guild_id)
         if not player:
             await interaction.followup.send(
-                "❌ You are not registered. Use `/register` first.",
+                "❌ You are not registered. Use `/player register` first.",
                 ephemeral=True,
             )
             return
@@ -358,7 +360,7 @@ class RegistrationCommands(commands.Cog):
                 ephemeral=True,
             )
 
-    @app_commands.command(name="mysteamids", description="View your linked Steam accounts")
+    @player.command(name="steamids", description="View your linked Steam accounts")
     async def mysteamids(self, interaction: discord.Interaction):
         """View all Steam IDs linked to your account."""
         logger.info(f"MySteamIds command: User {interaction.user.id} ({interaction.user})")
@@ -376,7 +378,7 @@ class RegistrationCommands(commands.Cog):
         player = await asyncio.to_thread(self.player_service.get_player, interaction.user.id, guild_id)
         if not player:
             await interaction.followup.send(
-                "❌ You are not registered. Use `/register` first.",
+                "❌ You are not registered. Use `/player register` first.",
                 ephemeral=True,
             )
             return
@@ -387,7 +389,7 @@ class RegistrationCommands(commands.Cog):
         if not steam_ids:
             await interaction.followup.send(
                 "ℹ️ You don't have any Steam accounts linked.\n"
-                "Use `/linksteam` to link your Steam account.",
+                "Use `/player link` to link your Steam account.",
                 ephemeral=True,
             )
             return
@@ -402,13 +404,13 @@ class RegistrationCommands(commands.Cog):
                 lines.append(f"• `{sid}` - [Dotabuff]({dotabuff_url})")
 
         lines.append(
-            "\n*Use `/linksteam` to add more accounts or "
-            "`/unlinksteam` to remove one.*"
+            "\n*Use `/player link` to add more accounts or"
+            "`/player unlink` to remove one.*"
         )
 
         await interaction.followup.send("\n".join(lines), ephemeral=True)
 
-    @app_commands.command(name="setroles", description="Set your preferred roles")
+    @player.command(name="roles", description="Set your preferred roles")
     @app_commands.describe(roles="Roles (1-5, e.g., '123' or '1,2,3' for carry, mid, offlane)")
     async def set_roles(self, interaction: discord.Interaction, roles: str):
         """Set player's preferred roles."""
@@ -458,7 +460,7 @@ class RegistrationCommands(commands.Cog):
                 ephemeral=True,
             )
 
-    @app_commands.command(name="exclusion", description="Check your exclusion factor")
+    @player.command(name="exclusion", description="Check your exclusion factor")
     async def exclusion(self, interaction: discord.Interaction):
         """Show the player's current exclusion count."""
         if not await safe_defer(interaction, ephemeral=True):
@@ -471,7 +473,7 @@ class RegistrationCommands(commands.Cog):
         )
         if not player:
             await interaction.followup.send(
-                "You are not registered. Use `/register` first.",
+                "You are not registered. Use `/player register` first.",
                 ephemeral=True,
             )
             return

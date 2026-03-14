@@ -43,7 +43,6 @@ class MatchService:
         soft_avoid_repo=None,
         package_deal_repo=None,
         state_service: MatchStateService | None = None,
-        opendota_player_service=None,
     ):
         """
         Initialize MatchService with required repository dependencies.
@@ -58,7 +57,6 @@ class MatchService:
             soft_avoid_repo: Optional repository for soft avoid feature
             package_deal_repo: Optional repository for package deal feature
             state_service: Optional state service (created if not provided)
-            opendota_player_service: Optional (deprecated, unused)
         """
         self.player_repo = player_repo
         self.match_repo = match_repo

@@ -357,7 +357,7 @@ class TriviaCog(commands.Cog):
         player = await asyncio.to_thread(player_service.get_player, user_id, guild_id)
         if not player:
             await interaction.response.send_message(
-                "You must be registered to play trivia. Use `/register` first.", ephemeral=True
+                "You must be registered to play trivia. Use `/player register` first.", ephemeral=True
             )
             return
 

@@ -1,5 +1,5 @@
 """
-Pairwise statistics commands: /matchup, /rebuildpairings
+Pairwise statistics commands: /matchup
 """
 
 import asyncio
@@ -139,40 +139,6 @@ class AdvancedStatsCommands(commands.Cog):
         # AI insight for matchup - disabled
 
         await interaction.followup.send(embed=embed)
-
-    @app_commands.command(
-        name="rebuildpairings", description="Rebuild pairwise stats from match history (Admin only)"
-    )
-    async def rebuildpairings(self, interaction: discord.Interaction):
-        """Admin command to rebuild all pairwise statistics from match history."""
-        logger.info(
-            "Rebuildpairings command: User %s (%s)",
-            interaction.user.id,
-            interaction.user,
-        )
-
-        if not has_admin_permission(interaction):
-            await interaction.response.send_message("This command is admin-only.", ephemeral=True)
-            return
-
-        if not await safe_defer(interaction, ephemeral=True):
-            return
-
-        try:
-            count = await asyncio.to_thread(self.pairings_service.rebuild_all_pairings)
-            await safe_followup(
-                interaction,
-                content=f"Rebuilt pairwise statistics. {count} pairings calculated from match history.",
-                ephemeral=True,
-            )
-            logger.info(f"Rebuildpairings: rebuilt {count} pairings")
-        except Exception as e:
-            logger.error(f"Error rebuilding pairings: {e}", exc_info=True)
-            await safe_followup(
-                interaction,
-                content=f"Error rebuilding pairings: {e}",
-                ephemeral=True,
-            )
 
 
 async def setup(bot: commands.Bot):

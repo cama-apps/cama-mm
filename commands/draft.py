@@ -1,5 +1,5 @@
 """
-Draft commands for Immortal Draft mode: /setcaptain, /startdraft, /restartdraft
+Draft commands for Immortal Draft mode: /draft captain, /draft start, /draft restart
 """
 
 import asyncio
@@ -327,6 +327,8 @@ class DraftingView(discord.ui.View):
 class DraftCommands(commands.Cog):
     """Commands for Immortal Draft captain-based team selection."""
 
+    draft = app_commands.Group(name="draft", description="Immortal Draft captain mode")
+
     def __init__(
         self,
         bot: commands.Bot,
@@ -363,8 +365,8 @@ class DraftCommands(commands.Cog):
     # /setcaptain command
     # ========================================================================
 
-    @app_commands.command(
-        name="setcaptain",
+    @draft.command(
+        name="captain",
         description="Set yourself as eligible (or ineligible) to be a captain in Immortal Draft",
     )
     @app_commands.describe(
@@ -393,7 +395,7 @@ class DraftCommands(commands.Cog):
         player = await asyncio.to_thread(self.player_repo.get_by_id, interaction.user.id, guild_id)
         if not player:
             await interaction.response.send_message(
-                "❌ You must be registered first. Use `/register` to sign up.",
+                "❌ You must be registered first. Use `/player register` to sign up.",
                 ephemeral=True,
             )
             return
@@ -404,7 +406,7 @@ class DraftCommands(commands.Cog):
         if is_eligible:
             await interaction.response.send_message(
                 "✅ You are now **captain-eligible** for Immortal Draft!\n"
-                "You may be selected as a captain when `/startdraft` is used.",
+                "You may be selected as a captain when `/draft start` is used.",
                 ephemeral=True,
             )
         else:
@@ -417,8 +419,8 @@ class DraftCommands(commands.Cog):
     # /restartdraft command
     # ========================================================================
 
-    @app_commands.command(
-        name="restartdraft",
+    @draft.command(
+        name="restart",
         description="Restart the current Immortal Draft (preserves lobby)",
     )
     async def restartdraft(
@@ -466,7 +468,7 @@ class DraftCommands(commands.Cog):
 
         await interaction.response.send_message(
             f"🔄 **Draft Restarted** by {user_name}\n\n"
-            "The lobby has been preserved. Use `/startdraft` to start a new draft.",
+            "The lobby has been preserved. Use `/draft start` to start a new draft.",
         )
 
         logger.info(
@@ -478,8 +480,8 @@ class DraftCommands(commands.Cog):
     # Sample/Debug Commands (Admin only)
     # ========================================================================
 
-    @app_commands.command(
-        name="sampledraftinprogress",
+    @draft.command(
+        name="sampleinprogress",
         description="[Admin] Show sample draft UI mid-draft for testing",
     )
     async def sampledraftinprogress(self, interaction: discord.Interaction):
@@ -542,8 +544,8 @@ class DraftCommands(commands.Cog):
             view=view,
         )
 
-    @app_commands.command(
-        name="sampledraftcomplete",
+    @draft.command(
+        name="samplecomplete",
         description="[Admin] Show sample draft complete UI for testing",
     )
     async def sampledraftcomplete(self, interaction: discord.Interaction):
@@ -703,7 +705,7 @@ class DraftCommands(commands.Cog):
             cap1_name = await self._get_member_name(interaction.guild, specified_captain1_id)
             await interaction.followup.send(
                 f"❌ **{cap1_name}** has not opted in as captain. "
-                f"They must use `/setcaptain yes` first.",
+                f"They must use `/draft captain yes` first.",
                 ephemeral=True,
             )
             return False
@@ -711,7 +713,7 @@ class DraftCommands(commands.Cog):
             cap2_name = await self._get_member_name(interaction.guild, specified_captain2_id)
             await interaction.followup.send(
                 f"❌ **{cap2_name}** has not opted in as captain. "
-                f"They must use `/setcaptain yes` first.",
+                f"They must use `/draft captain yes` first.",
                 ephemeral=True,
             )
             return False
@@ -719,7 +721,7 @@ class DraftCommands(commands.Cog):
         if len(eligible_captain_ids) < 2:
             await interaction.followup.send(
                 "❌ Not enough captain-eligible players. "
-                "At least 2 players must use `/setcaptain yes`.",
+                "At least 2 players must use `/draft captain yes`.",
                 ephemeral=True,
             )
             return False
@@ -980,8 +982,8 @@ class DraftCommands(commands.Cog):
     # /startdraft command
     # ========================================================================
 
-    @app_commands.command(
-        name="startdraft",
+    @draft.command(
+        name="start",
         description="Start an Immortal Draft with captain-based player selection",
     )
     @app_commands.describe(
@@ -1042,7 +1044,7 @@ class DraftCommands(commands.Cog):
         # Check for existing draft
         if self.draft_state_manager.has_active_draft(guild_id):
             await interaction.followup.send(
-                "❌ A draft is already in progress. Use `/restartdraft` to restart it first.",
+                "❌ A draft is already in progress. Use `/draft restart` to restart it first.",
                 ephemeral=True,
             )
             return
@@ -2301,7 +2303,7 @@ class DraftCommands(commands.Cog):
                     title="⏰ Draft Timed Out",
                     description=(
                         "The draft was automatically cancelled due to inactivity.\n\n"
-                        "The lobby has been preserved. Use `/startdraft` to begin a new draft."
+                        "The lobby has been preserved. Use `/draft start` to begin a new draft."
                     ),
                     color=discord.Color.orange(),
                 )

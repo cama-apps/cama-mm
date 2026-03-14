@@ -52,7 +52,7 @@ async def test_handle_announce_requires_registration():
 
     interaction.response.send_message.assert_awaited_once()
     message = interaction.response.send_message.call_args.args[0]
-    assert "need to `/register`" in message
+    assert "need to `/player register`" in message
 
 
 @pytest.mark.asyncio
@@ -117,7 +117,7 @@ async def test_handle_mystery_gift_requires_registration():
 
     interaction.response.send_message.assert_awaited_once()
     message = interaction.response.send_message.call_args.args[0]
-    assert "need to `/register`" in message
+    assert "need to `/player register`" in message
 
 
 @pytest.mark.asyncio
@@ -185,7 +185,7 @@ async def test_shop_mystery_gift_routes_to_handler(monkeypatch):
     # Should have called the handler which checks registration
     interaction.response.send_message.assert_awaited_once()
     message = interaction.response.send_message.call_args.args[0]
-    assert "need to `/register`" in message
+    assert "need to `/player register`" in message
 
 
 # --- Recalibrate tests ---

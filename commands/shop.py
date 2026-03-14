@@ -304,7 +304,7 @@ class ShopCommands(commands.Cog):
         if not check["allowed"]:
             reason = check["reason"]
             if reason == "not_registered":
-                msg = "You need to `/register` before you can recalibrate."
+                msg = "You need to `/player register` before you can recalibrate."
             elif reason == "no_rating":
                 msg = "You don't have a rating yet. Play some games first!"
             elif reason == "insufficient_games":
@@ -401,7 +401,7 @@ class ShopCommands(commands.Cog):
         player = await asyncio.to_thread(self.player_service.get_player, user_id, guild_id)
         if not player:
             await interaction.response.send_message(
-                "You need to `/register` before you can shop. "
+                "You need to `/player register` before you can shop. "
                 "Hard to flex wealth you don't have.",
                 ephemeral=True,
             )
@@ -666,7 +666,7 @@ class ShopCommands(commands.Cog):
         player = await asyncio.to_thread(self.player_service.get_player, user_id, guild_id)
         if not player:
             await interaction.response.send_message(
-                "You need to `/register` before you can shop.",
+                "You need to `/player register` before you can shop.",
                 ephemeral=True,
             )
             return
@@ -788,7 +788,7 @@ class ShopCommands(commands.Cog):
         player = await asyncio.to_thread(self.player_service.get_player, user_id, guild_id)
         if not player:
             await interaction.response.send_message(
-                "You need to `/register` before you can shop.",
+                "You need to `/player register` before you can shop.",
                 ephemeral=True,
             )
             return
@@ -829,7 +829,7 @@ class ShopCommands(commands.Cog):
         player = await asyncio.to_thread(self.player_service.get_player, user_id, guild_id)
         if not player:
             await interaction.response.send_message(
-                "You need to `/register` before you can gamble. "
+                "You need to `/player register` before you can gamble. "
                 "Can't double nothing if you have nothing.",
                 ephemeral=True,
             )
@@ -1070,7 +1070,7 @@ class ShopCommands(commands.Cog):
         player = await asyncio.to_thread(self.player_service.get_player, user_id, guild_id)
         if not player:
             await interaction.response.send_message(
-                "You need to `/register` before you can shop.",
+                "You need to `/player register` before you can shop.",
                 ephemeral=True,
             )
             return
@@ -1180,7 +1180,7 @@ class ShopCommands(commands.Cog):
         player = await asyncio.to_thread(self.player_service.get_player, user_id, guild_id)
         if not player:
             await interaction.response.send_message(
-                "You need to `/register` before you can shop.",
+                "You need to `/player register` before you can shop.",
                 ephemeral=True,
             )
             return
@@ -1372,7 +1372,7 @@ class ShopCommands(commands.Cog):
         # Check registration
         player = await asyncio.to_thread(self.player_service.get_player, user_id, guild_id)
         if not player:
-            await interaction.followup.send("You need to `/register` first.", ephemeral=True)
+            await interaction.followup.send("You need to `/player register` first.", ephemeral=True)
             return
 
         # Get mana effects
@@ -1553,7 +1553,7 @@ class ShopCommands(commands.Cog):
         player = await asyncio.to_thread(self.player_service.get_player, user_id, guild_id)
         if not player:
             await interaction.response.send_message(
-                "You need to `/register` before you can buy dig items.", ephemeral=True
+                "You need to `/player register` before you can buy dig items.", ephemeral=True
             )
             return
 
