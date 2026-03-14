@@ -10,7 +10,7 @@ import random
 from collections.abc import Iterable
 from dataclasses import dataclass
 
-from config import PACKAGE_DEAL_PENALTY, PACKAGE_DEAL_SPLIT_PENALTY, RD_PRIORITY_WEIGHT, SHUFFLER_SETTINGS, SOFT_AVOID_PENALTY, SOLO_GRINDER_MIX_PENALTY
+from config import PACKAGE_DEAL_PENALTY, PACKAGE_DEAL_SPLIT_PENALTY, RATING_SPREAD_DIVISOR, RD_PRIORITY_WEIGHT, SHUFFLER_SETTINGS, SOFT_AVOID_PENALTY
 from domain.models.player import Player
 from domain.models.team import Team
 from utils.role_assignment_cache import get_cached_role_assignments
@@ -49,7 +49,7 @@ class BalancedShuffler:
         soft_avoid_penalty: float | None = None,
         package_deal_penalty: float | None = None,
         package_deal_split_penalty: float | None = None,
-        solo_grinder_mix_penalty: float | None = None,
+        rating_spread_divisor: float | None = None,
     ):
         """
         Initialize the shuffler.
@@ -67,7 +67,7 @@ class BalancedShuffler:
             soft_avoid_penalty: Penalty added when avoider/avoided pair are on same team (default 500.0)
             package_deal_penalty: Penalty added when buyer/partner pair are on DIFFERENT teams (default 100.0)
             package_deal_split_penalty: Penalty added when one of the pair is excluded from the match (default 100.0)
-            solo_grinder_mix_penalty: Penalty per mixed team (has both grinders and casuals) (default 100.0)
+            rating_spread_divisor: Divisor for (max_rating - min_rating) pool spread penalty (default 10.0)
         """
         self.use_glicko = use_glicko
         self.consider_roles = consider_roles
@@ -119,42 +119,27 @@ class BalancedShuffler:
             if package_deal_split_penalty is not None
             else PACKAGE_DEAL_SPLIT_PENALTY
         )
-        self.solo_grinder_mix_penalty = (
-            solo_grinder_mix_penalty
-            if solo_grinder_mix_penalty is not None
-            else SOLO_GRINDER_MIX_PENALTY
+        self.rating_spread_divisor = (
+            rating_spread_divisor
+            if rating_spread_divisor is not None
+            else RATING_SPREAD_DIVISOR
         )
 
-    def _calculate_solo_grinder_penalty(
-        self,
-        team1_ids: set[int],
-        team2_ids: set[int],
-        grinder_ids: set[int] | None,
-    ) -> float:
+    def _calculate_rating_spread_penalty(self, player_values: list[float]) -> float:
         """
-        Calculate penalty for teams that mix grinders and casuals.
+        Calculate penalty for rating spread among selected players.
 
-        Pure teams (all grinders or all casuals) get 0 penalty.
-        Mixed teams get solo_grinder_mix_penalty each (max 2x penalty).
+        Penalizes wide skill gaps in pool shuffles to incentivize closer matches.
 
         Args:
-            team1_ids: Set of discord IDs on team 1
-            team2_ids: Set of discord IDs on team 2
-            grinder_ids: Set of discord IDs of solo grinders (None = no grinders)
+            player_values: List of player rating values
 
         Returns:
-            Total penalty for mixed teams
+            (max_value - min_value) / rating_spread_divisor
         """
-        if not grinder_ids:
+        if len(player_values) < 2:
             return 0.0
-
-        penalty = 0.0
-        for team_ids in (team1_ids, team2_ids):
-            t_grinders = len(grinder_ids & team_ids)
-            t_casuals = len(team_ids) - t_grinders
-            if t_grinders > 0 and t_casuals > 0:
-                penalty += self.solo_grinder_mix_penalty
-        return penalty
+        return (max(player_values) - min(player_values)) / self.rating_spread_divisor
 
     def _calculate_role_matchup_delta(self, team1: Team, team2: Team) -> float:
         """
@@ -341,7 +326,7 @@ class BalancedShuffler:
         recent_match_names: set[str] | None = None,
         avoids: list | None = None,
         deals: list | None = None,
-        grinder_ids: set[int] | None = None,
+
     ) -> tuple[Team, Team, list[Player], float]:
         """
         Greedy snake-draft shuffle for initial upper bound in branch and bound.
@@ -354,7 +339,7 @@ class BalancedShuffler:
             recent_match_names: Optional set of player names who participated in the most recent match
             avoids: Optional list of SoftAvoid objects to apply same-team penalties
             deals: Optional list of PackageDeal objects to apply different-team penalties
-            grinder_ids: Optional set of discord IDs of solo grinders
+
 
         Returns:
             Tuple of (team1, team2, excluded_players, score)
@@ -418,8 +403,7 @@ class BalancedShuffler:
 
         # Optimize role assignments for the greedy teams
         team1, team2, base_score = self._optimize_role_assignments_for_matchup(
-            team1_players, team2_players, max_assignments_per_team=3, avoids=avoids, deals=deals, grinder_ids=grinder_ids
-        )
+            team1_players, team2_players, max_assignments_per_team=3, avoids=avoids, deals=deals        )
 
         # Add exclusion penalty
         exclusion_penalty = (
@@ -441,7 +425,14 @@ class BalancedShuffler:
             selected_discord_ids, excluded_discord_ids, deals
         )
 
-        total_score = base_score + exclusion_penalty + recent_penalty + deal_split_penalty
+        # Rating spread penalty: incentivize selecting players of closer skill
+        selected_values = [
+            p.get_value(self.use_glicko, use_openskill=self.use_openskill, use_jopacoin=self.use_jopacoin)
+            for p in team1.players + team2.players
+        ]
+        rating_spread_penalty = self._calculate_rating_spread_penalty(selected_values)
+
+        total_score = base_score + exclusion_penalty + recent_penalty + deal_split_penalty + rating_spread_penalty
 
         return team1, team2, excluded, total_score
 
@@ -518,7 +509,7 @@ class BalancedShuffler:
         max_assignments_per_team: int = 20,
         avoids: list | None = None,
         deals: list | None = None,
-        grinder_ids: set[int] | None = None,
+
     ) -> tuple[Team, Team, float]:
         """
         Find optimal role assignments for two teams that minimize total score.
@@ -532,7 +523,7 @@ class BalancedShuffler:
             max_assignments_per_team: Maximum number of role assignments to try per team
             avoids: Optional list of SoftAvoid objects to apply same-team penalties
             deals: Optional list of PackageDeal objects to apply different-team penalties
-            grinder_ids: Optional set of discord IDs of solo grinders
+
 
         Returns:
             Tuple of (best_team1, best_team2, best_score)
@@ -550,7 +541,6 @@ class BalancedShuffler:
         team2_ids = {p.discord_id for p in team2_players if p.discord_id is not None}
         avoid_penalty = self._calculate_soft_avoid_penalty(team1_ids, team2_ids, avoids)
         deal_penalty = self._calculate_package_deal_penalty(team1_ids, team2_ids, deals)
-        grinder_penalty = self._calculate_solo_grinder_penalty(team1_ids, team2_ids, grinder_ids)
 
         # Try all combinations of valid role assignments
         for t1_roles in team1_assignments:
@@ -574,7 +564,7 @@ class BalancedShuffler:
 
                 weighted_role_delta = role_matchup_delta * self.role_matchup_delta_weight
                 rd_priority = self._calculate_rd_priority(team1_players + team2_players)
-                total_score = value_diff + off_role_penalty + weighted_role_delta - rd_priority + avoid_penalty + deal_penalty + grinder_penalty
+                total_score = value_diff + off_role_penalty + weighted_role_delta - rd_priority + avoid_penalty + deal_penalty
 
                 if total_score < best_score:
                     best_score = total_score
@@ -589,7 +579,7 @@ class BalancedShuffler:
 
         return best_team1, best_team2, best_score
 
-    def shuffle(self, players: list[Player], avoids: list | None = None, deals: list | None = None, grinder_ids: set[int] | None = None) -> tuple[Team, Team]:
+    def shuffle(self, players: list[Player], avoids: list | None = None, deals: list | None = None) -> tuple[Team, Team]:
         """
         Shuffle players into two balanced teams.
 
@@ -597,7 +587,7 @@ class BalancedShuffler:
             players: List of exactly 10 players
             avoids: Optional list of SoftAvoid objects to apply same-team penalties
             deals: Optional list of PackageDeal objects to apply different-team penalties
-            grinder_ids: Optional set of discord IDs of solo grinders
+
 
         Returns:
             Tuple of (Team1, Team2)
@@ -633,8 +623,7 @@ class BalancedShuffler:
 
             # Optimize role assignments for this matchup
             team1, team2, total_score = self._optimize_role_assignments_for_matchup(
-                team1_players, team2_players, avoids=avoids, deals=deals, grinder_ids=grinder_ids
-            )
+                team1_players, team2_players, avoids=avoids, deals=deals            )
 
             team1_value = team1.get_team_value(
                 self.use_glicko, self.off_role_multiplier, use_openskill=self.use_openskill, use_jopacoin=self.use_jopacoin
@@ -726,7 +715,7 @@ class BalancedShuffler:
         recent_match_names: set[str] | None = None,
         avoids: list | None = None,
         deals: list | None = None,
-        grinder_ids: set[int] | None = None,
+
     ) -> tuple[Team, Team, list[Player]]:
         """
         Shuffle players into two balanced teams when there are more than 10 players.
@@ -743,7 +732,7 @@ class BalancedShuffler:
                                to sit out.
             avoids: Optional list of SoftAvoid objects to apply same-team penalties
             deals: Optional list of PackageDeal objects to apply different-team penalties
-            grinder_ids: Optional set of discord IDs of solo grinders
+
 
         Returns:
             Tuple of (Team1, Team2, excluded_players)
@@ -762,12 +751,12 @@ class BalancedShuffler:
 
         if len(players) == 10:
             # Just use the regular shuffle
-            team1, team2 = self.shuffle(players, avoids=avoids, deals=deals, grinder_ids=grinder_ids)
+            team1, team2 = self.shuffle(players, avoids=avoids, deals=deals)
             return team1, team2, []
 
         if len(players) == 14:
             # Use branch and bound for 14 players (optimized pruning)
-            return self.shuffle_branch_bound(players, exclusion_counts, recent_match_names, avoids=avoids, deals=deals, grinder_ids=grinder_ids)
+            return self.shuffle_branch_bound(players, exclusion_counts, recent_match_names, avoids=avoids, deals=deals)
 
         # ---- Performance knobs (kept internal to preserve current public API) ----
         # Pool shuffles are far more expensive than 10-player shuffles. We therefore
@@ -862,6 +851,13 @@ class BalancedShuffler:
                 selected_discord_ids, excluded_discord_ids, deals
             )
 
+            # Rating spread penalty: incentivize selecting players of closer skill
+            selected_values = [
+                p.get_value(self.use_glicko, use_openskill=self.use_openskill, use_jopacoin=self.use_jopacoin)
+                for p in selected_players
+            ]
+            rating_spread_penalty = self._calculate_rating_spread_penalty(selected_values)
+
             # For this combination of 10, try all ways to split into teams
             for team1_indices in itertools.combinations(range(10), 5):
                 team1_players = [selected_players[i] for i in team1_indices]
@@ -884,18 +880,17 @@ class BalancedShuffler:
                     max_assignments_per_team=pool_max_assignments_per_team,
                     avoids=avoids,
                     deals=deals,
-                    grinder_ids=grinder_ids,
                 )
 
-                # base_score includes: value_diff + off_role_penalty + role_matchup_delta - rd_priority + avoid_penalty + deal_penalty + grinder_penalty
-                # We need to add exclusion_penalty, recent_match_penalty, and deal_split_penalty
+                # base_score includes: value_diff + off_role_penalty + role_matchup_delta - rd_priority + avoid_penalty + deal_penalty
+                # We need to add exclusion_penalty, recent_match_penalty, deal_split_penalty, and rating_spread_penalty
 
                 # Add recent match penalty for selected players
                 selected_player_names = {p.name for p in team1_players + team2_players}
                 recent_in_match = len(selected_player_names & recent_match_names)
                 recent_penalty = recent_in_match * self.recent_match_penalty_weight
 
-                total_score = base_score + exclusion_penalty + recent_penalty + deal_split_penalty
+                total_score = base_score + exclusion_penalty + recent_penalty + deal_split_penalty + rating_spread_penalty
 
                 # Extract components for logging
                 team1_value = team1.get_team_value(
@@ -1038,7 +1033,7 @@ class BalancedShuffler:
         recent_match_names: set[str] | None = None,
         avoids: list | None = None,
         deals: list | None = None,
-        grinder_ids: set[int] | None = None,
+
     ) -> tuple[Team, Team, list[Player]]:
         """
         Branch and bound shuffle optimized for 14 players.
@@ -1052,7 +1047,7 @@ class BalancedShuffler:
             recent_match_names: Optional set of player names who participated in the most recent match
             avoids: Optional list of SoftAvoid objects to apply same-team penalties
             deals: Optional list of PackageDeal objects to apply different-team penalties
-            grinder_ids: Optional set of discord IDs of solo grinders
+
 
         Returns:
             Tuple of (Team1, Team2, excluded_players)
@@ -1065,8 +1060,7 @@ class BalancedShuffler:
 
         # Step 1: Get greedy initial upper bound
         greedy_t1, greedy_t2, greedy_excluded, best_score = self._greedy_shuffle(
-            players, exclusion_counts, recent_match_names, avoids=avoids, deals=deals, grinder_ids=grinder_ids
-        )
+            players, exclusion_counts, recent_match_names, avoids=avoids, deals=deals        )
         best_result: tuple[Team, Team, list[Player]] = (greedy_t1, greedy_t2, greedy_excluded)
 
         logger.info(f"Branch & bound: greedy upper bound = {best_score:.1f}")
@@ -1102,15 +1096,17 @@ class BalancedShuffler:
                 selected_discord_ids, excluded_discord_ids, deals
             )
 
-            # Quick pruning: if exclusion + split penalty exceeds best score, skip
-            if exclusion_penalty + deal_split_penalty >= best_score:
+            # Rating spread penalty: incentivize selecting players of closer skill
+            selected_value_list = [player_values[p.name] for p in selected_players]
+            rating_spread_penalty = self._calculate_rating_spread_penalty(selected_value_list)
+
+            # Quick pruning: if exclusion + split + spread penalty exceeds best score, skip
+            if exclusion_penalty + deal_split_penalty + rating_spread_penalty >= best_score:
                 pruned_player_selections += 1
                 continue
 
             # Precompute selected player values (sorted descending for lower bound calc)
-            selected_values = sorted(
-                [player_values[p.name] for p in selected_players], reverse=True
-            )
+            selected_values = sorted(selected_value_list, reverse=True)
 
             # Step 3: Iterate through team splits with pruning
             # We use combinations to avoid duplicates (T1={A,B,C,D,E} vs T2={F,G,H,I,J}
@@ -1140,8 +1136,8 @@ class BalancedShuffler:
                 recent_in_match = len(selected_player_names & recent_match_names)
                 recent_penalty = recent_in_match * self.recent_match_penalty_weight
 
-                # Quick lower bound: value_diff + exclusion_penalty + recent_penalty + deal_split_penalty
-                lower_bound = value_diff_lb + exclusion_penalty + recent_penalty + deal_split_penalty
+                # Quick lower bound: value_diff + exclusion_penalty + recent_penalty + deal_split_penalty + rating_spread_penalty
+                lower_bound = value_diff_lb + exclusion_penalty + recent_penalty + deal_split_penalty + rating_spread_penalty
 
                 # Prune if lower bound >= best score
                 if lower_bound >= best_score:
@@ -1151,10 +1147,9 @@ class BalancedShuffler:
                 # Step 4: Full role optimization (only for promising splits)
                 evaluated_matchups += 1
                 team1, team2, base_score = self._optimize_role_assignments_for_matchup(
-                    team1_players, team2_players, max_assignments_per_team=3, avoids=avoids, deals=deals, grinder_ids=grinder_ids
-                )
+                    team1_players, team2_players, max_assignments_per_team=3, avoids=avoids, deals=deals                )
 
-                total_score = base_score + exclusion_penalty + recent_penalty + deal_split_penalty
+                total_score = base_score + exclusion_penalty + recent_penalty + deal_split_penalty + rating_spread_penalty
 
                 if total_score < best_score:
                     best_score = total_score

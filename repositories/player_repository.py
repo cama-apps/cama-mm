@@ -2603,23 +2603,6 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             solo_grinder_checked_at=solo_grinder_checked_at,
         )
 
-    # --- Solo grinder detection ---
-
-    def update_solo_grinder_status(
-        self, discord_id: int, guild_id: int, is_grinder: bool, checked_at: str
-    ) -> None:
-        """Update a player's solo grinder status and check timestamp."""
-        with self.connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                UPDATE players
-                SET is_solo_grinder = ?, solo_grinder_checked_at = ?, updated_at = CURRENT_TIMESTAMP
-                WHERE discord_id = ? AND guild_id = ?
-                """,
-                (int(is_grinder), checked_at, discord_id, self.normalize_guild_id(guild_id)),
-            )
-
     # --- Trivia cooldown ---
 
     def get_last_trivia_session(self, discord_id: int, guild_id: int) -> int | None:

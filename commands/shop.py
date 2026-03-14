@@ -143,7 +143,7 @@ class ShopCommands(commands.Cog):
                 value="soft_avoid",
             ),
             app_commands.Choice(
-                name=f"Package Deal ({SHOP_PACKAGE_DEAL_BASE_COST}+ jopacoin for {PACKAGE_DEAL_GAMES_DURATION} games)",
+                name=f"Package Deal (FREE first, {SHOP_PACKAGE_DEAL_BASE_COST}+ after for {PACKAGE_DEAL_GAMES_DURATION} games)",
                 value="package_deal",
             ),
         ]
@@ -1203,25 +1203,32 @@ class ShopCommands(commands.Cog):
             )
             return
 
-        # Calculate dynamic cost: base + (sum of ratings / divisor)
-        buyer_rating = player.glicko_rating or 1500
-        partner_rating = target_player.glicko_rating or 1500
-        cost = SHOP_PACKAGE_DEAL_BASE_COST + int(
-            (buyer_rating + partner_rating) / SHOP_PACKAGE_DEAL_RATING_DIVISOR
-        )
+        # Check active deals to determine pricing
+        active_deals = await asyncio.to_thread(package_deal_service.get_user_deals, guild_id, user_id)
+        is_extend = any(d.partner_discord_id == target.id for d in active_deals)
 
-        # Check balance
-        balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
-        if balance < cost:
-            await interaction.response.send_message(
-                f"You need {cost} {JOPACOIN_EMOTE} for this, but you only have {balance}.\n"
-                f"*(Base: {SHOP_PACKAGE_DEAL_BASE_COST} + Rating bonus: {cost - SHOP_PACKAGE_DEAL_BASE_COST})*",
-                ephemeral=True,
+        # First deal is free (no active deals and not extending an existing one)
+        if len(active_deals) == 0 and not is_extend:
+            cost = 0
+        else:
+            # Calculate dynamic cost: base + (sum of ratings / divisor)
+            buyer_rating = player.glicko_rating or 1500
+            partner_rating = target_player.glicko_rating or 1500
+            cost = SHOP_PACKAGE_DEAL_BASE_COST + int(
+                (buyer_rating + partner_rating) / SHOP_PACKAGE_DEAL_RATING_DIVISOR
             )
-            return
 
-        # Deduct cost
-        await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, -cost)
+        # Check balance and deduct cost (skip for free deals)
+        if cost > 0:
+            balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
+            if balance < cost:
+                await interaction.response.send_message(
+                    f"You need {cost} {JOPACOIN_EMOTE} for this, but you only have {balance}.\n"
+                    f"*(Base: {SHOP_PACKAGE_DEAL_BASE_COST} + Rating bonus: {cost - SHOP_PACKAGE_DEAL_BASE_COST})*",
+                    ephemeral=True,
+                )
+                return
+            await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, -cost)
 
         # Create or extend deal
         deal = await asyncio.to_thread(
@@ -1236,21 +1243,25 @@ class ShopCommands(commands.Cog):
         )
 
         # Build confirmation embed (ephemeral)
+        cost_display = f"FREE (first deal!)" if cost == 0 else f"{cost} {JOPACOIN_EMOTE}"
         embed = discord.Embed(
             title="Package Deal Active",
             description=(
                 f"You have a Package Deal with **{target.display_name}**.\n\n"
                 f"**Games remaining:** {deal.games_remaining}\n"
-                f"**Cost:** {cost} {JOPACOIN_EMOTE}\n\n"
+                f"**Cost:** {cost_display}\n\n"
                 f"When shuffling, the system will try to place you on the **same team**. "
                 f"The deal count decreases each game where you're both playing "
                 f"and successfully placed on the same team."
             ),
             color=0x2ECC71,  # Green for partnership
         )
-        embed.set_footer(
-            text=f"Base cost: {SHOP_PACKAGE_DEAL_BASE_COST} + Rating bonus: {cost - SHOP_PACKAGE_DEAL_BASE_COST}"
-        )
+        if cost == 0:
+            embed.set_footer(text="Your first package deal is free!")
+        else:
+            embed.set_footer(
+                text=f"Base cost: {SHOP_PACKAGE_DEAL_BASE_COST} + Rating bonus: {cost - SHOP_PACKAGE_DEAL_BASE_COST}"
+            )
 
         # Ephemeral response (private - target not notified)
         await interaction.response.send_message(embed=embed, ephemeral=True)
