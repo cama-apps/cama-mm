@@ -507,7 +507,7 @@ class AdminCommands(commands.Cog):
         )
         if not rl.allowed:
             await interaction.response.send_message(
-                f"⏳ Please wait {rl.retry_after_seconds}s before using `/sync` again.",
+                f"⏳ Please wait {rl.retry_after_seconds}s before using `/admin sync` again.",
                 ephemeral=True,
             )
             return

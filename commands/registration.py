@@ -404,7 +404,7 @@ class RegistrationCommands(commands.Cog):
                 lines.append(f"• `{sid}` - [Dotabuff]({dotabuff_url})")
 
         lines.append(
-            "\n*Use `/player link` to add more accounts or"
+            "\n*Use `/player link` to add more accounts or "
             "`/player unlink` to remove one.*"
         )
 

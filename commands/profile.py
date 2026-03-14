@@ -1048,7 +1048,7 @@ class ProfileCommands(commands.Cog):
         if not stats:
             return discord.Embed(
                 title=f"Profile: {target_user.display_name} > Predictions",
-                description="No prediction bets yet.\n\nUse `/predictions` to find active markets!",
+                description="No prediction bets yet.\n\nUse `/predict list` to find active markets!",
                 color=COLOR_BLUE,
             ), None
 
@@ -1153,7 +1153,7 @@ class ProfileCommands(commands.Cog):
                 inline=False,
             )
 
-        embed.set_footer(text="Tip: Use /mypredictions for all positions")
+        embed.set_footer(text="Tip: Use /predict mine for all positions")
 
         return embed, None
 

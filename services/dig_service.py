@@ -286,7 +286,7 @@ class DigService:
         """
         # 0. Check player is registered
         if not self.player_repo.exists(discord_id, guild_id):
-            return self._error("You need to register first. Use /register.")
+            return self._error("You need to register first. Use /player register.")
 
         now = int(time.time())
         today = self._get_game_date()
