@@ -910,6 +910,51 @@ class AdminCommands(commands.Cog):
             f"{user.id} ({user}): rating={rating:.0f}, RD {old_rd:.1f} -> {new_rd:.0f}"
         )
 
+    @admin.command(
+        name="bumprd", description="Increase Glicko RD for all players in this guild (Admin only)"
+    )
+    @app_commands.describe(
+        amount="RD increase amount (default 100, max 350)"
+    )
+    async def bumprd(
+        self, interaction: discord.Interaction, amount: int = 100
+    ):
+        """Admin command to globally increase Glicko RD after a big patch."""
+        if not has_admin_permission(interaction):
+            await interaction.response.send_message(
+                "❌ Admin only! You need Administrator or Manage Server permissions.",
+                ephemeral=True,
+            )
+            return
+
+        if amount < 1 or amount > 350:
+            await interaction.response.send_message(
+                "❌ Amount must be between 1 and 350.",
+                ephemeral=True,
+            )
+            return
+
+        await safe_defer(interaction, ephemeral=True)
+        guild_id = interaction.guild.id if interaction.guild else None
+
+        result = await asyncio.to_thread(self.player_service.bump_glicko_rds, guild_id, amount)
+        if result is None:
+            await safe_followup(interaction, content="❌ No rated players found.", ephemeral=True)
+            return
+
+        await safe_followup(
+            interaction,
+            content=(
+                f"✅ Bumped RD for **{result['count']}** players by **+{amount}** (capped at 350)\n"
+                f"• Avg RD: {result['avg_before']:.0f} → **{result['avg_after']:.0f}**"
+            ),
+            ephemeral=True,
+        )
+        logger.info(
+            f"Admin {interaction.user.id} ({interaction.user}) bumped RD by {amount} for "
+            f"{result['count']} players in guild {guild_id}: avg RD {result['avg_before']:.0f} -> {result['avg_after']:.0f}"
+        )
+
     @app_commands.command(
         name="resetrecalibrationcooldown", description="Reset a user's recalibration cooldown (Admin only)"
     )
@@ -1564,6 +1609,7 @@ async def setup(bot: commands.Bot):
             "extendbetting",
             "recalibrate",
             "resetrecalibrationcooldown",
+            "bumprd",
             "correctmatch",
         ]
     ]

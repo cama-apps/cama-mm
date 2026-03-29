@@ -1205,6 +1205,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         updates: List of (discord_id, rating, rd, volatility)
         Returns number of rows updated.
         """
+        guild_id = self.normalize_guild_id(guild_id)
         if not updates:
             return 0
         with self.connection() as conn:
