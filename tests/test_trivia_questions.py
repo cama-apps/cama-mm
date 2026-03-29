@@ -164,7 +164,7 @@ class TestMediumGenerators:
                 _validate_question(q)
                 assert q.difficulty == "medium"
                 return
-        pytest.skip("gen_hero_by_hype returned None after 10 tries")
+        pytest.fail("gen_hero_by_hype returned None after 10 tries")
 
     def test_innate_ability(self):
         q = gen_innate_ability()
@@ -220,7 +220,7 @@ class TestHardGenerators:
                 _validate_question(q)
                 assert q.difficulty == "hard"
                 return
-        pytest.skip("gen_move_speed returned None")
+        pytest.fail("gen_move_speed returned None")
 
     def test_ability_cooldown(self):
         for _ in range(10):
@@ -229,7 +229,7 @@ class TestHardGenerators:
                 _validate_question(q)
                 assert q.difficulty == "hard"
                 return
-        pytest.skip("gen_ability_cooldown returned None")
+        pytest.fail("gen_ability_cooldown returned None")
 
     def test_facet_name(self):
         q = gen_facet_name()
@@ -243,7 +243,7 @@ class TestHardGenerators:
                 _validate_question(q)
                 assert q.difficulty == "hard"
                 return
-        pytest.skip("gen_base_armor_compare returned None")
+        pytest.fail("gen_base_armor_compare returned None")
 
 
 class TestChallengingGenerators:
@@ -254,7 +254,7 @@ class TestChallengingGenerators:
                 _validate_question(q)
                 assert q.difficulty == "challenging"
                 return
-        pytest.skip("gen_voiceline returned None")
+        pytest.fail("gen_voiceline returned None")
 
     def test_base_attack_time(self):
         for _ in range(20):
@@ -265,7 +265,7 @@ class TestChallengingGenerators:
                 assert q.category == "base_attack_time"
                 assert "BAT" in q.text
                 return
-        pytest.skip("gen_base_attack_time returned None")
+        pytest.fail("gen_base_attack_time returned None")
 
     def test_attribute_gain(self):
         for _ in range(20):
@@ -276,7 +276,7 @@ class TestChallengingGenerators:
                 assert q.category == "attribute_gain"
                 assert "gain per level" in q.text
                 return
-        pytest.skip("gen_attribute_gain returned None")
+        pytest.fail("gen_attribute_gain returned None")
 
 
 class TestAnswerLeaks:

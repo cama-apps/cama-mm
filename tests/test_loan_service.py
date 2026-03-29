@@ -8,6 +8,7 @@ Loans work as follows:
 """
 
 import time
+from unittest.mock import patch
 
 import pytest
 
@@ -166,14 +167,15 @@ class TestLoanCooldown:
         pid = create_test_player(player_repo, 2002, balance=200)
 
         # Take first loan and repay
-        loan_service.execute_loan(pid, 20, TEST_GUILD_ID)
-        loan_service.execute_repayment(pid, TEST_GUILD_ID)
+        now = time.time()
+        with patch("services.loan_service.time") as mock_time:
+            mock_time.time.return_value = now
+            loan_service.execute_loan(pid, 20, TEST_GUILD_ID)
+            loan_service.execute_repayment(pid, TEST_GUILD_ID)
 
-        # Wait for cooldown to expire
-        time.sleep(1.1)
-
-        # Should be able to take another loan
-        result = loan_service.validate_loan(pid, 20, TEST_GUILD_ID)
+            # Simulate cooldown expiration (advance 2 seconds past 1-second cooldown)
+            mock_time.time.return_value = now + 2
+            result = loan_service.validate_loan(pid, 20, TEST_GUILD_ID)
         assert result.success
 
 

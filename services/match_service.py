@@ -225,8 +225,9 @@ class MatchService:
                 f"Could not load all players: expected {len(player_ids)}, got {len(players)}"
             )
 
-        # Apply RD decay for shuffle priority calculation (not persisted)
-        # This ensures returning players get appropriate priority boost
+        # Apply RD decay for shuffle priority calculation (not persisted).
+        # This ensures returning players get appropriate priority boost.
+        # Safe to mutate: players are fetched fresh via get_by_ids() each call.
         last_match_dates = self.player_repo.get_last_match_dates(player_ids, guild_id)
         now = datetime.now(timezone.utc)
         for player in players:
@@ -585,19 +586,15 @@ class MatchService:
         """
         normalized_gid = normalize_guild_id(guild_id)
 
-        # Get state first to determine the actual pending_match_id
-        last_shuffle = self.get_last_shuffle(guild_id, pending_match_id)
-        if not last_shuffle:
-            raise ValueError("No recent shuffle found.")
-        # Get the actual pending_match_id from the state (in case it wasn't provided)
-        pending_match_id = last_shuffle.get("pending_match_id")
-
-        # Create lock key as (guild_id, pending_match_id) tuple
-        # This allows concurrent recording of different matches in the same guild
-        lock_key = (normalized_gid, pending_match_id)
-
-        # Acquire exclusive recording right for this specific match
+        # Acquire lock BEFORE reading shuffle state to prevent TOCTOU race:
+        # Without this, two threads could both read the same shuffle state
+        # before either acquires the lock, causing double-recording.
         with self._recording_lock:
+            last_shuffle = self.get_last_shuffle(guild_id, pending_match_id)
+            if not last_shuffle:
+                raise ValueError("No recent shuffle found.")
+            pending_match_id = last_shuffle.get("pending_match_id")
+            lock_key = (normalized_gid, pending_match_id)
             if lock_key in self._recording_in_progress:
                 match_note = f" (Match #{pending_match_id})" if pending_match_id else ""
                 raise ValueError(f"Match recording already in progress{match_note}.")
@@ -769,6 +766,11 @@ class MatchService:
                 for pid, rating, rd, vol in updates:
                     self.player_repo.update_glicko_rating(pid, guild_id, rating, rd, vol)
                     updated_count += 1
+            if updated_count != len(updates):
+                logger.warning(
+                    f"Glicko update mismatch for match {match_id}: expected {len(updates)} "
+                    f"updates, got {updated_count}. Some rating updates may be missing."
+                )
 
             # Update last_match_date for participants
             now_iso = datetime.now(timezone.utc).isoformat()
