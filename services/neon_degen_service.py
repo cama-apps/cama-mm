@@ -21,6 +21,7 @@ from config import (
     NEON_LAYER1_CHANCE,
     NEON_LAYER2_CHANCE,
     NEON_LLM_CHANCE,
+    NEON_MVP_CHANCE,
 )
 from utils.neon_terminal import (
     render_balance_check,
@@ -1456,3 +1457,104 @@ class NeonDegenService:
         except Exception as e:
             logger.debug(f"neon on_unanimous_wrong error: {e}")
             return None
+
+    async def on_match_enriched(
+        self,
+        guild_id: int | None,
+        winners: list[dict[str, Any]],
+    ) -> list[NeonResult]:
+        """Generate MVP compliments for winning players after match enrichment.
+
+        Each winner has an independent 10% chance of receiving a JOPA-T compliment
+        based on their enriched match stats (hero, KDA, GPM, fantasy points, etc.).
+        """
+        results: list[NeonResult] = []
+        if not getattr(_config, "NEON_DEGEN_ENABLED", False):
+            return results
+
+        from utils.hero_lookup import get_hero_name
+        from utils.neon_terminal import ansi_block
+
+        for winner in winners:
+            if not self._roll(NEON_MVP_CHANCE):
+                continue
+
+            try:
+                hero_id = winner.get("hero_id")
+                hero_name = get_hero_name(hero_id) if hero_id else "Unknown Hero"
+                kills = winner.get("kills", 0)
+                deaths = winner.get("deaths", 0)
+                assists = winner.get("assists", 0)
+                gpm = winner.get("gpm", 0)
+                xpm = winner.get("xpm", 0)
+                fantasy = winner.get("fantasy_points")
+                discord_id = winner.get("discord_id")
+                player_name = self._get_player_name(discord_id, guild_id) if discord_id else "Unknown"
+
+                # Build context from enriched match data
+                player_context: dict[str, Any] = {
+                    "player": player_name,
+                    "hero": hero_name,
+                    "kda": f"{kills}/{deaths}/{assists}",
+                    "gpm": gpm,
+                    "xpm": xpm,
+                    "fantasy_points": f"{fantasy:.1f}" if fantasy is not None else "N/A",
+                    "hero_damage": winner.get("hero_damage", 0),
+                    "tower_damage": winner.get("tower_damage", 0),
+                    "last_hits": winner.get("last_hits", 0),
+                    "denies": winner.get("denies", 0),
+                    "net_worth": winner.get("net_worth", 0),
+                    "lane_role": winner.get("lane_role"),
+                    "lane_efficiency": winner.get("lane_efficiency"),
+                    "teamfight_participation": winner.get("teamfight_participation"),
+                    "towers_killed": winner.get("towers_killed", 0),
+                    "roshans_killed": winner.get("roshans_killed", 0),
+                    "obs_placed": winner.get("obs_placed", 0),
+                    "sen_placed": winner.get("sen_placed", 0),
+                    "camps_stacked": winner.get("camps_stacked", 0),
+                    "stuns": winner.get("stuns", 0),
+                    "hero_healing": winner.get("hero_healing", 0),
+                }
+
+                # Merge historical player stats (rating, balance, gambling history)
+                if discord_id:
+                    historical = self._build_player_context(discord_id, guild_id)
+                    # Add historical stats that aren't already in context
+                    for key in ("balance", "lowest_balance", "win_rate", "bankruptcy_count", "degen_score"):
+                        if key in historical:
+                            player_context[key] = historical[key]
+                    # Add rating info from player repo
+                    if self.player_repo:
+                        try:
+                            player = self.player_repo.get_by_id(discord_id, guild_id)
+                            if player:
+                                if player.glicko_rating is not None:
+                                    player_context["rating"] = f"{player.glicko_rating:.0f}"
+                                    player_context["rating_uncertainty"] = f"{player.glicko_rd:.0f}"
+                                player_context["total_games"] = (player.wins or 0) + (player.losses or 0)
+                                player_context["record"] = f"{player.wins or 0}W-{player.losses or 0}L"
+                        except Exception:
+                            pass
+
+                fallback = ansi_block(
+                    f"[PERFORMANCE REVIEW] Subject: {player_name}\n"
+                    f"  Hero: {hero_name} | KDA: {kills}/{deaths}/{assists} | GPM: {gpm}\n"
+                    f"  STATUS: ADEQUATE. The system notes this performance for the record."
+                )
+
+                text = await self._generate_text(
+                    event_description=(
+                        f"A player just WON a match. Give them a backhanded compliment "
+                        f"or reluctant acknowledgment of their performance. "
+                        f"Reference specific stats that stand out. "
+                        f"They played {hero_name} and went {kills}/{deaths}/{assists} with {gpm} GPM."
+                    ),
+                    player_context=player_context,
+                    fallback_text=fallback,
+                )
+                results.append(NeonResult(layer=2, text_block=text))
+            except Exception as e:
+                logger.debug(f"neon on_match_enriched error for winner: {e}")
+                continue
+
+        return results

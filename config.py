@@ -209,7 +209,7 @@ STEAM_API_KEY = os.getenv("STEAM_API_KEY")
 
 # AI/LLM Configuration (Cerebras via LiteLLM)
 CEREBRAS_API_KEY = os.getenv("CEREBRAS_API_KEY")
-AI_MODEL = os.getenv("AI_MODEL", "cerebras/zai-glm-4.7")
+AI_MODEL = os.getenv("AI_MODEL", "cerebras/llama3.1-8b")
 AI_TIMEOUT_SECONDS = _parse_float("AI_TIMEOUT_SECONDS", 15.0)
 AI_MAX_TOKENS = _parse_int("AI_MAX_TOKENS", 500)
 AI_RATE_LIMIT_REQUESTS = _parse_int("AI_RATE_LIMIT_REQUESTS", 10)  # Requests per window
@@ -293,3 +293,4 @@ NEON_LAYER1_CHANCE = _parse_float("NEON_LAYER1_CHANCE", 0.35)  # Subtle text tri
 NEON_LAYER2_CHANCE = _parse_float("NEON_LAYER2_CHANCE", 0.70)  # Medium ASCII art triggers
 NEON_LLM_CHANCE = _parse_float("NEON_LLM_CHANCE", 0.60)  # Chance of LLM commentary on Layer 2+
 NEON_COOLDOWN_SECONDS = _parse_int("NEON_COOLDOWN_SECONDS", 60)  # Per-user cooldown
+NEON_MVP_CHANCE = _parse_float("NEON_MVP_CHANCE", 0.10)  # 10% per winning player after enrichment

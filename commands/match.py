@@ -29,7 +29,7 @@ from utils.formatting import (
     get_player_display_name,
 )
 from utils.interaction_safety import safe_defer, update_lobby_message_closed
-from utils.neon_helpers import get_neon_service, send_neon_result
+from utils.neon_helpers import get_neon_service, send_neon_result, _delete_after as _neon_delete_after
 from utils.pin_helpers import safe_unpin_all_bot_messages
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
 from utils.guild import normalize_guild_id
@@ -1537,6 +1537,21 @@ class MatchCommands(commands.Cog):
                     f"📊 Match #{match_id} auto-enriched! "
                     f"(Dota Match ID: {valve_match_id}, {confidence:.0%} confidence)"
                 )
+            # Trigger MVP compliments for winners
+            if match_data and participants:
+                try:
+                    neon = get_neon_service(self.bot)
+                    if neon:
+                        winning_team = match_data.get("winning_team", 1)
+                        winning_side = "radiant" if winning_team == 1 else "dire"
+                        winners = [p for p in participants if p.get("side") == winning_side]
+                        mvp_results = await neon.on_match_enriched(guild_id, winners)
+                        for neon_result in mvp_results:
+                            if neon_result and neon_result.text_block:
+                                mvp_msg = await channel.send(neon_result.text_block)
+                                asyncio.create_task(_neon_delete_after(mvp_msg, 60))
+                except Exception as exc:
+                    logger.debug(f"MVP compliment failed: {exc}")
         except Exception as exc:
             logger.warning(f"Failed to send enrichment result: {exc}")
 

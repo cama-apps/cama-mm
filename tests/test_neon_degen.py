@@ -813,3 +813,85 @@ class TestNeonDegenPrivacy:
 
         # No anonymity instruction
         assert "ANONYMOUS" not in system_sent
+
+
+# ---------------------------------------------------------------------------
+# on_match_enriched tests
+# ---------------------------------------------------------------------------
+
+
+class TestOnMatchEnriched:
+    """Tests for NeonDegenService.on_match_enriched MVP compliments."""
+
+    def _make_winner(self, discord_id=123, hero_id=1, kills=10, deaths=2, assists=15, gpm=600, fantasy=25.5):
+        return {
+            "discord_id": discord_id,
+            "hero_id": hero_id,
+            "kills": kills,
+            "deaths": deaths,
+            "assists": assists,
+            "gpm": gpm,
+            "fantasy_points": fantasy,
+            "tower_damage": 5000,
+            "hero_damage": 30000,
+        }
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_when_disabled(self, monkeypatch):
+        import config
+        monkeypatch.setattr(config, "NEON_DEGEN_ENABLED", False)
+        service = NeonDegenService()
+        results = await service.on_match_enriched(0, [self._make_winner()])
+        assert results == []
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_when_no_winners(self):
+        service = NeonDegenService()
+        results = await service.on_match_enriched(0, [])
+        assert results == []
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_when_all_rolls_fail(self, monkeypatch):
+        import config
+        import services.neon_degen_service as neon_mod
+        monkeypatch.setattr(config, "NEON_DEGEN_ENABLED", True)
+        monkeypatch.setattr(neon_mod, "NEON_MVP_CHANCE", 0.0)
+        service = NeonDegenService()
+        results = await service.on_match_enriched(0, [self._make_winner()])
+        assert results == []
+
+    @pytest.mark.asyncio
+    async def test_returns_result_when_roll_succeeds(self, monkeypatch):
+        import config
+        import services.neon_degen_service as neon_mod
+        monkeypatch.setattr(config, "NEON_DEGEN_ENABLED", True)
+        monkeypatch.setattr(neon_mod, "NEON_MVP_CHANCE", 1.0)
+        service = NeonDegenService()
+        results = await service.on_match_enriched(0, [self._make_winner()])
+        assert len(results) == 1
+        assert results[0].layer == 2
+        assert results[0].text_block is not None
+        assert "```ansi" in results[0].text_block
+
+    @pytest.mark.asyncio
+    async def test_handles_missing_fields_gracefully(self, monkeypatch):
+        import config
+        import services.neon_degen_service as neon_mod
+        monkeypatch.setattr(config, "NEON_DEGEN_ENABLED", True)
+        monkeypatch.setattr(neon_mod, "NEON_MVP_CHANCE", 1.0)
+        service = NeonDegenService()
+        sparse_winner = {"discord_id": 999}
+        results = await service.on_match_enriched(0, [sparse_winner])
+        assert len(results) == 1
+        assert results[0].text_block is not None
+
+    @pytest.mark.asyncio
+    async def test_multiple_winners_independent_rolls(self, monkeypatch):
+        import config
+        import services.neon_degen_service as neon_mod
+        monkeypatch.setattr(config, "NEON_DEGEN_ENABLED", True)
+        monkeypatch.setattr(neon_mod, "NEON_MVP_CHANCE", 1.0)
+        service = NeonDegenService()
+        winners = [self._make_winner(discord_id=i) for i in range(5)]
+        results = await service.on_match_enriched(0, winners)
+        assert len(results) == 5

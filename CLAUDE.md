@@ -137,6 +137,7 @@ def sample_players():
 ### Conventions
 - Use `repo_db_path` fixture (not `temp_db_path`) for repository tests
 - Use `guild_id=None` or `guild_id=0` for single-guild tests
+- Import `TEST_GUILD_ID` as `from tests.conftest import TEST_GUILD_ID` (not `from conftest`)
 - Mock external APIs (OpenDota, Discord) in integration tests
 - **Do not write tests that skip.** Tests should pass or fail, not be conditionally skipped. If a test depends on external state or randomness, use mocks, fixtures, or seeded randomness to make it deterministic.
 

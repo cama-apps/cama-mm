@@ -44,7 +44,7 @@ class ServiceContainer:
         loan_fee_rate: float = 0.20,
         # AI (optional)
         cerebras_api_key: str | None = None,
-        ai_model: str = "cerebras/llama-4-scout-17b-16e-instruct",
+        ai_model: str = "cerebras/llama3.1-8b",
         ai_timeout_seconds: int = 30,
         ai_max_tokens: int = 4096,
     ):
