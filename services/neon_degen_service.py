@@ -1542,17 +1542,32 @@ class NeonDegenService:
                     f"  STATUS: ADEQUATE. The system notes this performance for the record."
                 )
 
-                text = await self._generate_text(
-                    event_description=(
-                        f"A player just WON a match. Give them a backhanded compliment "
-                        f"or reluctant acknowledgment of their performance. "
-                        f"Reference specific stats that stand out. "
-                        f"They played {hero_name} and went {kills}/{deaths}/{assists} with {gpm} GPM."
-                    ),
-                    player_context=player_context,
-                    fallback_text=fallback,
-                )
-                results.append(NeonResult(layer=2, text_block=text))
+                text = None
+                if self.flavor_text_service and discord_id:
+                    from services.flavor_text_service import FlavorEvent
+
+                    event_details = {
+                        "hero": hero_name,
+                        "kills": kills,
+                        "deaths": deaths,
+                        "assists": assists,
+                        "gpm": gpm,
+                        "xpm": xpm,
+                        "fantasy_points": fantasy,
+                        "hero_damage": winner.get("hero_damage", 0),
+                        "tower_damage": winner.get("tower_damage", 0),
+                        "net_worth": winner.get("net_worth", 0),
+                    }
+                    text = await self.flavor_text_service.generate_event_flavor(
+                        guild_id=guild_id,
+                        event=FlavorEvent.MVP_CALLOUT,
+                        discord_id=discord_id,
+                        event_details=event_details,
+                    )
+                if text:
+                    results.append(NeonResult(layer=2, text_block=f"<@{discord_id}> {text}"))
+                else:
+                    results.append(NeonResult(layer=2, text_block=fallback))
             except Exception as e:
                 logger.debug(f"neon on_match_enriched error for winner: {e}")
                 continue

@@ -439,6 +439,45 @@ Example tone:
 Narrative: {narrative}
 
 Write one sentence that acknowledges their specific accomplishment."""
+        elif event_type == "mvp_callout":
+            # MVP_CALLOUT: backhanded compliment using enriched match stats
+            hero = event_details.get("hero", "Unknown Hero")
+            kills = event_details.get("kills", 0)
+            deaths = event_details.get("deaths", 0)
+            assists = event_details.get("assists", 0)
+            gpm = event_details.get("gpm", 0)
+            xpm = event_details.get("xpm", 0)
+            hero_damage = event_details.get("hero_damage", 0)
+            tower_damage = event_details.get("tower_damage", 0)
+            net_worth = event_details.get("net_worth", 0)
+            fantasy = event_details.get("fantasy_points")
+            fantasy_str = f"{fantasy:.1f}" if fantasy is not None else "N/A"
+
+            system_prompt = f"""You are a snarky, backhanded commentator for a Dota 2 inhouse league.
+A player just WON a match. Give them a backhanded compliment or reluctant acknowledgment.
+
+RULES:
+- 1-2 sentences max. Terse and deadpan.
+- Reference specific stats that stand out (good OR bad).
+- If their deaths are high, mock the feeding. If GPM is low, question their farming.
+- If stats are actually impressive, give credit grudgingly.
+- Be darkly funny. The humor comes from reluctant praise or finding the flaw in a win.
+- No emojis. No exclamation marks.
+
+Example tone:
+{examples_text}"""
+            user_prompt = f"""Player: {player_context.get('username', 'Unknown')}
+Hero: {hero} | KDA: {kills}/{deaths}/{assists} | GPM: {gpm} | XPM: {xpm}
+Hero Damage: {hero_damage} | Tower Damage: {tower_damage} | Net Worth: {net_worth}
+Fantasy Points: {fantasy_str}
+
+GAMBLING HISTORY:
+- Balance: {player_context.get('balance', 0)} jopacoin
+- Degen Score: {player_context.get('degen_score') or 'Unknown'}/100
+- Bankruptcies: {player_context.get('bankruptcy_count', 0)}
+- Bet Win Rate: {player_context.get('bet_win_rate') or 'Unknown'}
+
+Generate a backhanded compliment about their match performance."""
         else:
             # Regular roast events
             system_prompt = f"""You are a snarky commentator for a Dota 2 gambling Discord.

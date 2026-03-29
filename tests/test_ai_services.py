@@ -382,6 +382,7 @@ class TestFlavorEvents:
             "LEVERAGE_LOSS",
             "MATCH_WIN",
             "MATCH_LOSS",
+            "MVP_CALLOUT",
         ]
 
         for event_name in expected_events:

@@ -45,6 +45,7 @@ class FlavorEvent(Enum):
     DOUBLE_OR_NOTHING_WIN = "double_or_nothing_win"  # Won the 50/50 gamble
     DOUBLE_OR_NOTHING_LOSE = "double_or_nothing_lose"  # Lost everything
     DOUBLE_OR_NOTHING_ZERO = "double_or_nothing_zero"  # Had exactly 25 JC, doubled nothing
+    MVP_CALLOUT = "mvp_callout"  # Post-enrichment backhanded compliment for a winner
 
 
 # Example messages for each event type (used as few-shot examples and fallbacks)
@@ -167,6 +168,12 @@ EVENT_EXAMPLES: dict[FlavorEvent, list[str]] = {
         "Victory! Your vast fortune of 0 has been doubled to... 0.",
         "You won the gamble but lost the war. Classic.",
         "Technically a win. Spiritually, a disaster.",
+    ],
+    FlavorEvent.MVP_CALLOUT: [
+        "The system notes this performance for the record. STATUS: ADEQUATE.",
+        "Congrats on winning a game of Dota. The bar was on the floor and you barely cleared it.",
+        "We ran the numbers. You were the least embarrassing player on your team. Well done.",
+        "Performance review complete. Verdict: could have been worse. Barely.",
     ],
 }
 
