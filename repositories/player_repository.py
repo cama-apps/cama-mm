@@ -174,6 +174,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         Returns:
             List of dicts containing discord_id and discord_username for each match.
         """
+        guild_id = self.normalize_guild_id(guild_id)
         if not username:
             return []
 
@@ -217,6 +218,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         Returns:
             List of Player objects sorted by jopacoin_balance DESC, wins DESC, glicko_rating DESC
         """
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -249,6 +251,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         Returns:
             List of Player objects sorted by glicko_rating DESC (NULLs last)
         """
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             if min_games > 0:
@@ -295,6 +298,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         Returns:
             List of Player objects sorted by os_mu DESC (NULLs last)
         """
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             if min_games > 0:
@@ -337,6 +341,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         Returns:
             Count of players with non-null ratings
         """
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             if rating_type == "openskill":
@@ -354,6 +359,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
 
     def get_player_count(self, guild_id: int) -> int:
         """Get total number of players in a guild."""
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT COUNT(*) as count FROM players WHERE guild_id = ?", (guild_id,))
@@ -373,6 +379,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
 
     def update_roles(self, discord_id: int, guild_id: int, roles: list[str]) -> None:
         """Update player's preferred roles."""
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -388,6 +395,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         self, discord_id: int, guild_id: int, rating: float, rd: float, volatility: float
     ) -> None:
         """Update player's Glicko-2 rating."""
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -407,6 +415,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         Returns:
             Tuple of (rating, rd, volatility) or None if not found
         """
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -429,6 +438,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         Returns:
             Tuple (last_match_date, created_at) or None if player not found.
         """
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -455,6 +465,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         Returns:
             Dict mapping discord_id to last_match_date (ISO string or None)
         """
+        guild_id = self.normalize_guild_id(guild_id)
         if not discord_ids:
             return {}
 
@@ -474,6 +485,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
 
     def get_game_count(self, discord_id: int, guild_id: int) -> int:
         """Return total games played (wins + losses)."""
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -500,6 +512,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             guild_id: Guild ID
             timestamp: ISO timestamp string; if None, uses CURRENT_TIMESTAMP.
         """
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             if timestamp is None:
@@ -524,6 +537,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
 
     def update_mmr(self, discord_id: int, guild_id: int, new_mmr: float) -> None:
         """Update player's current MMR."""
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -600,6 +614,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         """
         Apply multiple balance deltas in a single transaction.
         """
+        guild_id = self.normalize_guild_id(guild_id)
         if not deltas_by_discord_id:
             return
         with self.connection() as conn:
@@ -642,6 +657,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             - garnished: Amount that went toward debt repayment
             - net: Amount the player "feels" they received (gross - garnished)
         """
+        guild_id = self.normalize_guild_id(guild_id)
         if amount <= 0:
             return {"gross": amount, "garnished": 0, "net": amount}
 
@@ -704,6 +720,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         Raises:
             ValueError if insufficient funds, player not found, or recipient has no debt
         """
+        guild_id = self.normalize_guild_id(guild_id)
         if amount <= 0:
             raise ValueError("Amount must be positive.")
 
@@ -793,6 +810,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         Raises:
             ValueError if insufficient funds or player not found
         """
+        guild_id = self.normalize_guild_id(guild_id)
         total_cost = amount + fee
 
         if amount <= 0:
@@ -898,6 +916,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         Raises:
             ValueError if amount <= 0 or player not found
         """
+        guild_id = self.normalize_guild_id(guild_id)
         if amount <= 0:
             raise ValueError("Amount must be positive.")
 
@@ -970,6 +989,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             List of dicts with 'discord_id', 'balance', and 'username' for each debtor,
             sorted by balance ascending (most debt first).
         """
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -995,6 +1015,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         Returns:
             List of dicts with 'discord_id' and 'balance' for eligible players.
         """
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             # Get all players with non-negative balance, ordered by balance DESC
@@ -1024,6 +1045,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         Returns:
             List of dicts with 'discord_id' for eligible players.
         """
+        guild_id = self.normalize_guild_id(guild_id)
         from datetime import datetime, timedelta, timezone
 
         cutoff = (datetime.now(timezone.utc) - timedelta(days=activity_days)).isoformat()
@@ -1051,6 +1073,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         Returns:
             List of dicts with 'discord_id' and 'games_played', sorted by games DESC.
         """
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -1083,6 +1106,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         Returns:
             Dict with 'discord_id' and 'jopacoin_balance', or None if no players exist.
         """
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -1111,6 +1135,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         Returns:
             Number of rows updated.
         """
+        guild_id = self.normalize_guild_id(guild_id)
         if not updates:
             return 0
         with self.connection() as conn:
@@ -1127,6 +1152,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
 
     def increment_wins(self, discord_id: int, guild_id: int) -> None:
         """Increment player's win count."""
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -1139,6 +1165,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
 
     def increment_losses(self, discord_id: int, guild_id: int) -> None:
         """Increment player's loss count."""
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -1177,6 +1204,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         """
         Apply win/loss increments for a match in a single transaction.
         """
+        guild_id = self.normalize_guild_id(guild_id)
         if not winning_ids and not losing_ids:
             return
         with self.connection() as conn:
@@ -1222,6 +1250,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
 
     def get_exclusion_counts(self, discord_ids: list[int], guild_id: int) -> dict[int, int]:
         """Get exclusion counts for multiple players."""
+        guild_id = self.normalize_guild_id(guild_id)
         if not discord_ids:
             return {}
 
@@ -1238,6 +1267,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
 
     def increment_exclusion_count(self, discord_id: int, guild_id: int) -> None:
         """Increment player's exclusion count by 6."""
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -1255,6 +1285,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
 
         Used for conditional players who weren't picked.
         """
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -1269,6 +1300,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
 
     def decay_exclusion_count(self, discord_id: int, guild_id: int) -> None:
         """Decay player's exclusion count by halving it."""
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -1288,6 +1320,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         Returns:
             True if deleted, False if player didn't exist
         """
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
 
@@ -1320,6 +1353,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         Returns:
             Number of players deleted
         """
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
 
@@ -1346,6 +1380,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         Returns:
             Player object or None if not found
         """
+        guild_id = self.normalize_guild_id(guild_id)
         # First, try the junction table
         player = self.get_player_by_any_steam_id(steam_id, guild_id)
         if player:
@@ -1511,6 +1546,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         Returns:
             Number of fake users deleted.
         """
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
 
@@ -1544,6 +1580,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
 
     def get_lowest_balance(self, discord_id: int, guild_id: int) -> int | None:
         """Get a player's lowest balance ever recorded."""
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -1576,6 +1613,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
 
         Returns True if the record was updated, False otherwise.
         """
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -1602,6 +1640,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
 
         Returns True if the record was updated, False otherwise.
         """
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -1618,6 +1657,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
 
     def get_personal_best_win_streak(self, discord_id: int, guild_id: int) -> int:
         """Get player's personal best win streak."""
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -1631,6 +1671,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         """
         Increment total_bets_placed by 1 and return the new count.
         """
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -1652,6 +1693,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
 
     def get_total_bets_placed(self, discord_id: int, guild_id: int) -> int:
         """Get player's total bets placed."""
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -1667,6 +1709,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
 
         Returns True if this was the first time (record updated), False if already marked.
         """
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -1683,6 +1726,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
 
     def has_used_first_leverage(self, discord_id: int, guild_id: int) -> bool:
         """Check if player has already used their first leverage bet."""
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -1699,6 +1743,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         Returns:
             Unix timestamp or None if never calibrated
         """
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -1719,6 +1764,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             guild_id: Guild ID
             timestamp: Unix timestamp when player first became calibrated
         """
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -1736,6 +1782,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
 
         Used for quorum calculation in disbursement voting.
         """
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT COUNT(*) as count FROM players WHERE guild_id = ?", (guild_id,))
@@ -1756,6 +1803,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         Returns:
             True if player was found and updated, False if player not found
         """
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -1780,6 +1828,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         Returns:
             True if player is captain-eligible, False otherwise (including if not found)
         """
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -1802,6 +1851,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         Returns:
             List of Discord IDs that are captain-eligible
         """
+        guild_id = self.normalize_guild_id(guild_id)
         if not discord_ids:
             return []
 
@@ -1828,6 +1878,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         Returns:
             Tuple of (mu, sigma) or None if not found or not set
         """
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -1841,6 +1892,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
 
     def update_openskill_rating(self, discord_id: int, guild_id: int, mu: float, sigma: float) -> None:
         """Update player's OpenSkill rating."""
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -1865,6 +1917,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         Returns:
             Number of rows updated
         """
+        guild_id = self.normalize_guild_id(guild_id)
         if not updates:
             return 0
         with self.connection() as conn:
@@ -1892,6 +1945,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         Returns:
             Dict mapping discord_id to (mu, sigma) tuple (values may be None)
         """
+        guild_id = self.normalize_guild_id(guild_id)
         if not discord_ids:
             return {}
         with self.connection() as conn:
@@ -1921,6 +1975,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         Returns:
             Unix timestamp of last spin, or None if never spun
         """
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -1941,6 +1996,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             guild_id: Guild ID
             timestamp: Unix timestamp of the spin
         """
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -1954,6 +2010,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
 
     def get_wheel_pardon(self, discord_id: int, guild_id: int) -> bool:
         """Get whether a player has an active COMEBACK wheel pardon token."""
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -1965,6 +2022,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
 
     def set_wheel_pardon(self, discord_id: int, guild_id: int, value: int) -> None:
         """Set a player's COMEBACK wheel pardon token (1=active, 0=inactive)."""
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -1992,6 +2050,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         Returns:
             True if spin was claimed (cooldown passed), False if still on cooldown
         """
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             # Atomic check-and-set: only update if cooldown has passed
@@ -2025,7 +2084,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         Returns:
             The spin_id of the created record
         """
-        normalized_guild_id = guild_id if guild_id is not None else 0
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -2033,7 +2092,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 INSERT INTO wheel_spins (guild_id, discord_id, result, spin_time, is_bankrupt, is_golden)
                 VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (normalized_guild_id, discord_id, result, spin_time, 1 if is_bankrupt else 0, 1 if is_golden else 0),
+                (guild_id, discord_id, result, spin_time, 1 if is_bankrupt else 0, 1 if is_golden else 0),
             )
             return cursor.lastrowid
 
@@ -2049,7 +2108,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         Returns:
             Dict with 'result' (int) and 'discord_id' (int), or None if no spin found
         """
-        normalized_guild_id = guild_id if guild_id is not None else 0
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -2060,7 +2119,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 ORDER BY spin_time DESC
                 LIMIT 1
                 """,
-                (normalized_guild_id,),
+                (guild_id,),
             )
             row = cursor.fetchone()
             if row:
@@ -2078,7 +2137,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         Returns:
             List of dicts with 'result' and 'spin_time' keys, sorted by spin_time
         """
-        normalized_guild_id = guild_id if guild_id is not None else 0
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -2088,7 +2147,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 WHERE discord_id = ? AND guild_id = ?
                 ORDER BY spin_time ASC
                 """,
-                (discord_id, normalized_guild_id),
+                (discord_id, guild_id),
             )
             return [
                 {"result": row["result"], "spin_time": row["spin_time"]}
@@ -2331,6 +2390,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         Returns:
             Player object or None if not found
         """
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -2361,6 +2421,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         Returns:
             Unix timestamp of last spin, or None if never played
         """
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -2394,6 +2455,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             won: Whether the player won
             spin_time: Unix timestamp of the spin
         """
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             # Log the spin
@@ -2432,6 +2494,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         Returns:
             List of dicts with spin details, sorted by spin_time
         """
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -2467,6 +2530,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         Returns:
             Player object of the player ranked above, or None if user is #1 or not found
         """
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
 
@@ -2519,7 +2583,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         Returns:
             List of Player objects sorted by balance ascending
         """
-        normalized_guild_id = guild_id if guild_id is not None else 0
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -2529,7 +2593,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 ORDER BY COALESCE(jopacoin_balance, 0) ASC
                 LIMIT ?
                 """,
-                (normalized_guild_id, min_balance, limit),
+                (guild_id, min_balance, limit),
             )
             rows = cursor.fetchall()
             return [self._row_to_player(row) for row in rows]
@@ -2546,7 +2610,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         Returns:
             Total positive balance across all guild members (0 if none)
         """
-        normalized_guild_id = guild_id if guild_id is not None else 0
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -2555,7 +2619,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 FROM players
                 WHERE guild_id = ? AND COALESCE(jopacoin_balance, 0) > 0
                 """,
-                (normalized_guild_id,),
+                (guild_id,),
             )
             row = cursor.fetchone()
             return int(row["total"]) if row else 0
@@ -2608,6 +2672,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
 
     def get_last_trivia_session(self, discord_id: int, guild_id: int) -> int | None:
         """Get the timestamp of a player's last trivia session."""
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -2621,6 +2686,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
 
     def try_claim_trivia_session(self, discord_id: int, guild_id: int, now: int, cooldown_seconds: int) -> bool:
         """Atomically check cooldown and claim a trivia session."""
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -2636,6 +2702,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
 
     def reset_trivia_cooldown(self, discord_id: int, guild_id: int) -> bool:
         """Reset a player's trivia cooldown by clearing last_trivia_session."""
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -2648,6 +2715,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         self, discord_id: int, guild_id: int, streak: int, jc_earned: int, played_at: int
     ) -> None:
         """Record a completed trivia session for leaderboard tracking."""
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -2662,6 +2730,7 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         self, guild_id: int, since_timestamp: int, limit: int = 3
     ) -> list[dict]:
         """Get top trivia players by best streak in time window."""
+        guild_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(

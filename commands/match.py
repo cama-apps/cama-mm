@@ -325,13 +325,6 @@ class MatchCommands(commands.Cog):
         lobby_manager._check_stale_lock(guild_id)
 
         shuffle_lock = lobby_manager.get_shuffle_lock(guild_id)
-        if shuffle_lock.locked():
-            await interaction.followup.send(
-                "A shuffle is already in progress. Please wait for it to complete.",
-                ephemeral=True,
-            )
-            return
-
         try:
             await asyncio.wait_for(shuffle_lock.acquire(), timeout=0.5)
         except asyncio.TimeoutError:
