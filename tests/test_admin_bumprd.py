@@ -2,7 +2,7 @@
 
 import pytest
 
-from conftest import TEST_GUILD_ID
+from tests.conftest import TEST_GUILD_ID
 from repositories.player_repository import PlayerRepository
 from services.player_service import PlayerService
 
