@@ -689,6 +689,28 @@ class PlayerService:
         """Get all players in a guild."""
         return self.player_repo.get_all(guild_id)
 
+    def bump_glicko_rds(self, guild_id: int, amount: int) -> dict | None:
+        """Increase Glicko RD for all rated players in a guild, capped at 350.
+
+        Returns a summary dict with count, avg_before, avg_after, or None if no rated players.
+        """
+        players = self.player_repo.get_all(guild_id)
+        rated = [p for p in players if p.glicko_rating is not None]
+        if not rated:
+            return None
+        old_rds = [p.glicko_rd for p in rated]
+        updates = [
+            (p.discord_id, p.glicko_rating, min(350.0, p.glicko_rd + amount), p.glicko_volatility)
+            for p in rated
+        ]
+        count = self.player_repo.update_glicko_ratings_bulk(updates, guild_id)
+        new_rds = [min(350.0, rd + amount) for rd in old_rds]
+        return {
+            "count": count,
+            "avg_before": sum(old_rds) / len(old_rds),
+            "avg_after": sum(new_rds) / len(new_rds),
+        }
+
     def get_by_ids(self, discord_ids: list[int], guild_id: int | None) -> list:
         """
         Get multiple players by their Discord IDs.
