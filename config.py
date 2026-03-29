@@ -74,7 +74,7 @@ if _lobby_channel_raw:
     except ValueError:
         LOBBY_CHANNEL_ID = None
 USE_GLICKO = _parse_bool("USE_GLICKO", True)
-OPENSKILL_SHUFFLE_CHANCE = _parse_float("OPENSKILL_SHUFFLE_CHANCE", 0.05)  # 5% chance per shuffle
+OPENSKILL_SHUFFLE_CHANCE = _parse_float("OPENSKILL_SHUFFLE_CHANCE", 0.01)  # 1% chance per shuffle
 
 SHUFFLER_SETTINGS: dict[str, Any] = {
     "off_role_multiplier": _parse_float("OFF_ROLE_MULTIPLIER", 0.95),
@@ -143,16 +143,16 @@ SHOP_DOUBLE_OR_NOTHING_COST = _parse_int("SHOP_DOUBLE_OR_NOTHING_COST", 50)
 DOUBLE_OR_NOTHING_COOLDOWN_SECONDS = _parse_int("DOUBLE_OR_NOTHING_COOLDOWN_SECONDS", 2592000)  # 30 days
 
 # Soft Avoid configuration
-SHOP_SOFT_AVOID_COST = _parse_int("SHOP_SOFT_AVOID_COST", 600)  # Cost to soft avoid a player
+SHOP_SOFT_AVOID_COST = _parse_int("SHOP_SOFT_AVOID_COST", 700)  # Cost to soft avoid a player
 SOFT_AVOID_GAMES_DURATION = _parse_int("SOFT_AVOID_GAMES_DURATION", 10)  # Number of games avoid lasts
-SOFT_AVOID_PENALTY = _parse_float("SOFT_AVOID_PENALTY", 200.0)  # Penalty added to shuffler when pair on same team
+SOFT_AVOID_PENALTY = _parse_float("SOFT_AVOID_PENALTY", 180.0)  # Penalty added to shuffler when pair on same team
 
 # Package Deal configuration
 SHOP_PACKAGE_DEAL_BASE_COST = _parse_int("SHOP_PACKAGE_DEAL_BASE_COST", 500)  # Base cost for package deal
 SHOP_PACKAGE_DEAL_RATING_DIVISOR = _parse_float("SHOP_PACKAGE_DEAL_RATING_DIVISOR", 10.0)  # Divide sum of ratings by this
 PACKAGE_DEAL_GAMES_DURATION = _parse_int("PACKAGE_DEAL_GAMES_DURATION", 10)  # Number of games deal lasts
-PACKAGE_DEAL_PENALTY = _parse_float("PACKAGE_DEAL_PENALTY", 110.0)  # Penalty when pair on DIFFERENT teams
-PACKAGE_DEAL_SPLIT_PENALTY = _parse_float("PACKAGE_DEAL_SPLIT_PENALTY", 110.0)  # Penalty when one selected, one excluded
+PACKAGE_DEAL_PENALTY = _parse_float("PACKAGE_DEAL_PENALTY", 100.0)  # Penalty when pair on DIFFERENT teams
+PACKAGE_DEAL_SPLIT_PENALTY = _parse_float("PACKAGE_DEAL_SPLIT_PENALTY", 100.0)  # Penalty when one selected, one excluded
 RATING_SPREAD_DIVISOR = _parse_float("RATING_SPREAD_DIVISOR", 10.0)  # Divisor for (max_rating - min_rating) pool spread penalty
 
 # Recalibrate shop item
