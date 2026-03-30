@@ -523,33 +523,10 @@ Event Details: {json.dumps(event_details)}
 
 Generate a PERSONALIZED roast referencing their specific history."""
 
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ]
-
-        # Try tool calling first
-        result = await self.call_with_tools(
-            messages=messages,
-            tools=[FLAVOR_TOOL],
-            tool_choice="auto",  # Use auto instead of required - more compatible
+        # Use plain completion instead of tool calling — llama3.1-8b and other
+        # small models dump raw JSON instead of executing tool calls properly.
+        return await self.complete(
+            prompt=user_prompt,
+            system_prompt=system_prompt + "\n\nRespond with just the message, nothing else.",
+            temperature=0.9,
         )
-
-        if result.tool_name == "generate_flavor_text":
-            return result.tool_args.get("comment")
-
-        # Fallback: if tool calling failed, try direct completion
-        if result.content:
-            return result.content
-
-        # Last resort: try a simple completion without tools
-        try:
-            fallback_result = await self.complete(
-                prompt=messages[1]["content"],
-                system_prompt=messages[0]["content"]
-                + "\n\nRespond with just the roast, nothing else.",
-                temperature=0.9,
-            )
-            return fallback_result
-        except Exception:
-            return None
