@@ -50,11 +50,16 @@ class DraftStateManager:
             New DraftState
 
         Raises:
-            ValueError: If a draft already exists for this guild
+            ValueError: If an active (non-COMPLETE) draft already exists for this guild
         """
         normalized = normalize_guild_id(guild_id)
-        if normalized in self._states:
-            raise ValueError("A draft is already in progress for this server.")
+        existing = self._states.get(normalized)
+        if existing is not None:
+            if existing.phase == DraftPhase.COMPLETE:
+                logger.info(f"Clearing stale COMPLETE draft state for guild {normalized}")
+                del self._states[normalized]
+            else:
+                raise ValueError("A draft is already in progress for this server.")
 
         state = DraftState(guild_id=normalized)
         self._states[normalized] = state

@@ -277,6 +277,27 @@ class TestDraftStateManager:
 
         assert manager.has_active_draft(123) is False
 
+    def test_create_draft_clears_stale_complete_state(self):
+        """create_draft succeeds when a stale COMPLETE state exists."""
+        manager = DraftStateManager()
+        old_state = manager.create_draft(guild_id=123)
+        old_state.phase = DraftPhase.COMPLETE
+
+        # Should NOT raise — clears the stale COMPLETE state and creates a new one
+        new_state = manager.create_draft(guild_id=123)
+        assert new_state is not old_state
+        assert new_state.phase == DraftPhase.COINFLIP
+        assert manager.get_state(123) is new_state
+
+    def test_create_draft_rejects_active_state(self):
+        """create_draft raises when a non-COMPLETE state exists."""
+        manager = DraftStateManager()
+        state = manager.create_draft(guild_id=123)
+        state.phase = DraftPhase.DRAFTING
+
+        with pytest.raises(ValueError, match="already in progress"):
+            manager.create_draft(guild_id=123)
+
     def test_advance_phase(self):
         """Can advance draft phase."""
         manager = DraftStateManager()
