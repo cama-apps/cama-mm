@@ -414,19 +414,27 @@ class MatchCommands(commands.Cog):
 
         # 15 or more regular (non-conditional) players → force Immortal Draft
         if regular_count >= 15:
-            await interaction.followup.send(
-                f"⚔️ **{regular_count} regular players signed up** — starting Immortal Draft!\n"
-                f"_(Shuffle limited to 14 players)_"
-            )
             draft_cog = self.bot.get_cog("DraftCommands")
-            if draft_cog:
-                await draft_cog._execute_draft(
-                    interaction, guild_id, lobby
-                )
-            else:
+            if not draft_cog:
                 await interaction.followup.send(
                     "❌ Draft system not available. Please contact an admin.",
-                    ephemeral=True,
+                )
+                return
+
+            try:
+                success = await draft_cog._execute_draft(
+                    interaction, guild_id, lobby
+                )
+                if not success:
+                    await interaction.followup.send(
+                        f"❌ Immortal Draft could not start with {regular_count} players. "
+                        f"Check that at least 2 players have used `/draft captain yes`."
+                    )
+            except Exception as e:
+                logger.error(f"Draft auto-redirect failed: {e}", exc_info=True)
+                await interaction.followup.send(
+                    "❌ Immortal Draft failed to start. Error has been logged. "
+                    "Try `/draft restart` then `/shuffle` again."
                 )
             return
 
