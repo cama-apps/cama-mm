@@ -47,6 +47,9 @@ from services.dig_constants import (
     DECAY_FLOOR_DEPTHS,
     HARD_HAT_USES,
     TRAP_BASE_COST,
+    DIG_TIPS,
+    BOSS_BOUNDARIES,
+    CONSUMABLE_ITEMS,
 )
 
 
@@ -1295,3 +1298,212 @@ class TestPickaxe:
         assert stone_bonus == 1
         # The result should include the bonus in total advance
         assert result["advance"] >= 1 + stone_bonus
+
+
+# =============================================================================
+# Bug Fix Regression Tests
+# =============================================================================
+
+
+class TestTunnelNameKey:
+    """Verify tunnel_name (not 'name') is used for tunnel display names."""
+
+    def test_help_returns_tunnel_name(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+        """help_tunnel result should contain the actual tunnel name."""
+        _register_player(player_repository, discord_id=10001)
+        _register_player(player_repository, discord_id=10002)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)  # no cave-in
+        # Create target tunnel
+        dig_service.dig(10002, guild_id)
+        tunnel = dig_repo.get_tunnel(10002, guild_id)
+        actual_name = dict(tunnel).get("tunnel_name")
+        assert actual_name  # tunnel has a name
+
+        # Help the target
+        monkeypatch.setattr(time, "time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1)
+        result = dig_service.help_tunnel(10001, 10002, guild_id)
+        assert result["success"]
+        assert result["target_tunnel"] == actual_name
+
+    def test_sabotage_returns_tunnel_name(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+        """sabotage_tunnel result should contain the actual tunnel name."""
+        _register_player(player_repository, discord_id=10001, balance=200)
+        _register_player(player_repository, discord_id=10002)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)  # no cave-in
+        dig_service.dig(10002, guild_id)
+        # Set target depth high enough for sabotage cost
+        dig_repo.update_tunnel(10002, guild_id, depth=30)
+        tunnel = dig_repo.get_tunnel(10002, guild_id)
+        actual_name = dict(tunnel).get("tunnel_name")
+
+        result = dig_service.sabotage_tunnel(10001, 10002, guild_id)
+        assert result["success"]
+        assert result["target_tunnel"] == actual_name
+
+    def test_get_flex_data_returns_tunnel_name(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+        """get_flex_data should return the actual tunnel name."""
+        _register_player(player_repository)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+        tunnel = dig_repo.get_tunnel(10001, guild_id)
+        actual_name = dict(tunnel).get("tunnel_name")
+
+        result = dig_service.get_flex_data(10001, guild_id)
+        assert result["success"]
+        assert result["tunnel_name"] == actual_name
+
+    def test_generate_clue_first_letter_uses_tunnel_name(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+        """_generate_clue should use tunnel_name for the first-letter clue."""
+        _register_player(player_repository)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+        tunnel = dig_repo.get_tunnel(10001, guild_id)
+        actual_name = dict(tunnel).get("tunnel_name")
+        first_letter = actual_name[0]
+
+        clue = dig_service._generate_clue(10001, guild_id, "first_letter")
+        assert first_letter in clue["hint"]
+
+
+class TestHasLanternInResult:
+    """Verify has_lantern is included in dig results for boss encounters."""
+
+    def test_dig_result_includes_has_lantern(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+        """Normal dig result should include has_lantern field."""
+        _register_player(player_repository, balance=200)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)  # no cave-in
+        dig_service.dig(10001, guild_id)
+
+        # Queue a lantern
+        dig_repo.add_inventory_item(10001, guild_id, "lantern")
+        items = dig_repo.get_inventory(10001, guild_id)
+        for item in items:
+            if dict(item).get("item_type") == "lantern":
+                dig_repo.queue_item(dict(item)["id"])
+
+        # Set depth near boss boundary so advance doesn't skip it
+        dig_repo.update_tunnel(10001, guild_id, depth=23)
+
+        # Force advance to hit boss boundary at 25
+        monkeypatch.setattr(time, "time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1)
+        monkeypatch.setattr(random, "randint", lambda a, b: 3)  # advance 3 would reach 26 > 25
+        result = dig_service.dig(10001, guild_id)
+        assert result["success"]
+        # has_lantern should be in the result
+        assert "has_lantern" in result
+
+
+class TestPickTipMaxDepth:
+    """Verify _pick_tip filters tips by max_depth."""
+
+    def test_shallow_tips_excluded_at_deep_depth(self, dig_service):
+        """Tips with max_depth=10 should not appear when depth is 50."""
+        # DIG_TIPS entries with max_depth should be filtered
+        shallow_tips = [t for t in DIG_TIPS if t.get("max_depth") is not None and t["max_depth"] < 50]
+        assert shallow_tips, "Expected DIG_TIPS to contain tips with max_depth < 50"
+        # Run _pick_tip many times at depth 50 to ensure shallow tips never appear
+        shallow_texts = {t["text"] for t in shallow_tips}
+        random.seed(42)
+        for _ in range(100):
+            tip = dig_service._pick_tip(50)
+            assert tip not in shallow_texts, f"Shallow tip showed at depth 50: {tip}"
+
+    def test_tips_match_at_correct_depth(self, dig_service):
+        """Tips with min_depth=0, max_depth=10 should appear at depth 5."""
+        shallow_tips = [t for t in DIG_TIPS if t.get("min_depth", 0) <= 5 and (t.get("max_depth") is None or t["max_depth"] >= 5)]
+        assert len(shallow_tips) > 0, "Expected at least one tip eligible at depth 5"
+        random.seed(42)
+        tip = dig_service._pick_tip(5)
+        eligible_texts = {t["text"] for t in shallow_tips}
+        assert tip in eligible_texts
+
+
+class TestUseItemValidation:
+    """Verify use_item returns errors for invalid item types."""
+
+    def test_use_item_unknown_type_returns_error(self, dig_service, player_repository, guild_id, monkeypatch):
+        """use_item with a display name (e.g. 'Dynamite') instead of type key ('dynamite') should fail."""
+        _register_player(player_repository)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+
+        result = dig_service.use_item(10001, guild_id, "Dynamite")
+        assert result["success"] is False
+        assert "Unknown" in result["error"]
+
+    def test_use_item_valid_type_succeeds(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+        """use_item with correct type key ('dynamite') should succeed when item is in inventory."""
+        _register_player(player_repository, balance=200)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+
+        # Buy dynamite
+        buy_result = dig_service.buy_item(10001, guild_id, "dynamite")
+        assert buy_result["success"]
+
+        # Use dynamite with lowercase type key
+        result = dig_service.use_item(10001, guild_id, "dynamite")
+        assert result["success"]
+
+
+class TestBossOdds:
+    """Verify boss fight odds use configured values, not defaults."""
+
+    def test_scout_boss_shows_configured_odds(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+        """scout_boss should return odds based on BOSS_WIN_ODDS config, not hardcoded defaults."""
+        from services.dig_constants import BOSS_WIN_ODDS, BOSS_PAYOUTS
+        _register_player(player_repository, balance=200)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+
+        # Place at boss boundary (depth 24, boss at 25)
+        dig_repo.update_tunnel(10001, guild_id, depth=24)
+        # Add lantern for scouting
+        dig_repo.add_inventory_item(10001, guild_id, "lantern")
+
+        result = dig_service.scout_boss(10001, guild_id)
+        assert result["success"]
+
+        # Cautious should reflect the configured 0.75 base odds (not default 0.50)
+        cautious_pct = result["odds"]["cautious"]["win_pct"]
+        # At depth 25, penalty = (25/100)*0.05 = 0.0125, so ~0.74
+        assert cautious_pct > 0.70, f"Cautious odds {cautious_pct} should reflect 0.75 base, not 0.50 default"
+
+        # Multiplier should come from BOSS_PAYOUTS[25], not default 2.0
+        cautious_mult = result["odds"]["cautious"]["multiplier"]
+        expected_mult = BOSS_PAYOUTS[25][0]
+        assert cautious_mult == expected_mult, f"Expected multiplier {expected_mult}, got {cautious_mult}"
+
+    def test_fight_boss_reckless_high_roll_loses(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+        """Reckless fight with high roll (0.99 > 0.20 base odds) should lose."""
+        _register_player(player_repository, balance=200)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+        dig_repo.update_tunnel(10001, guild_id, depth=24)
+
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        result = dig_service.fight_boss(10001, guild_id, "reckless", wager=0)
+        assert result["success"]
+        assert result["won"] is False
+
+    def test_fight_boss_cautious_low_roll_wins(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+        """Cautious fight with low roll (0.01 < 0.75 base odds) should win."""
+        _register_player(player_repository, balance=200)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+        dig_repo.update_tunnel(10001, guild_id, depth=24)
+
+        monkeypatch.setattr(random, "random", lambda: 0.01)
+        result = dig_service.fight_boss(10001, guild_id, "cautious", wager=0)
+        assert result["success"]
+        assert result["won"] is True

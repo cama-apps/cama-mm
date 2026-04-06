@@ -869,114 +869,122 @@ class DraftCommands(commands.Cog):
             await interaction.followup.send(f"❌ {e}", ephemeral=True)
             return False
 
-        # Initialize state
-        state.player_pool_ids = pool_result.selected_ids
-        state.excluded_player_ids = pool_result.excluded_ids
-        state.captain1_id = captain_pair.captain1_id
-        state.captain2_id = captain_pair.captain2_id
-        state.captain1_rating = captain_pair.captain1_rating
-        state.captain2_rating = captain_pair.captain2_rating
-        state.draft_channel_id = interaction.channel_id
+        # Wrap post-creation in try/except so draft state is cleaned up on failure.
+        # Without this, a Discord API error (e.g. followup.send fails) leaves a
+        # zombie draft state that blocks future shuffles and drafts.
+        try:
+            # Initialize state
+            state.player_pool_ids = pool_result.selected_ids
+            state.excluded_player_ids = pool_result.excluded_ids
+            state.captain1_id = captain_pair.captain1_id
+            state.captain2_id = captain_pair.captain2_id
+            state.captain1_rating = captain_pair.captain1_rating
+            state.captain2_rating = captain_pair.captain2_rating
+            state.draft_channel_id = interaction.channel_id
 
-        # Cache player data for the pool (avoids repeated DB queries during pre-draft phases)
-        # Use get_player_display_name to resolve server nicknames at cache time
-        state.player_pool_data = {
-            p.discord_id: {
-                "name": get_player_display_name(p, discord_id=p.discord_id, guild=interaction.guild),
-                "rating": p.glicko_rating or 1500.0,
-                "roles": p.preferred_roles or [],
+            # Cache player data for the pool (avoids repeated DB queries during pre-draft phases)
+            # Use get_player_display_name to resolve server nicknames at cache time
+            state.player_pool_data = {
+                p.discord_id: {
+                    "name": get_player_display_name(p, discord_id=p.discord_id, guild=interaction.guild),
+                    "rating": p.glicko_rating or 1500.0,
+                    "roles": p.preferred_roles or [],
+                }
+                for p in players
+                if p.discord_id in pool_result.selected_ids
             }
-            for p in players
-            if p.discord_id in pool_result.selected_ids
-        }
 
-        # Perform coinflip
-        coinflip_winner_id = self.draft_service.coinflip(
-            captain_pair.captain1_id, captain_pair.captain2_id
-        )
-        state.coinflip_winner_id = coinflip_winner_id
-        state.phase = DraftPhase.WINNER_CHOICE
+            # Perform coinflip
+            coinflip_winner_id = self.draft_service.coinflip(
+                captain_pair.captain1_id, captain_pair.captain2_id
+            )
+            state.coinflip_winner_id = coinflip_winner_id
+            state.phase = DraftPhase.WINNER_CHOICE
 
-        # Get captain names for display
-        captain1_name = await self._get_member_name(interaction.guild, captain_pair.captain1_id)
-        captain2_name = await self._get_member_name(interaction.guild, captain_pair.captain2_id)
-        winner_name = (
-            captain1_name if coinflip_winner_id == captain_pair.captain1_id else captain2_name
-        )
+            # Get captain names for display
+            captain1_name = await self._get_member_name(interaction.guild, captain_pair.captain1_id)
+            captain2_name = await self._get_member_name(interaction.guild, captain_pair.captain2_id)
+            winner_name = (
+                captain1_name if coinflip_winner_id == captain_pair.captain1_id else captain2_name
+            )
 
-        # Build coinflip result embed
-        embed = discord.Embed(
-            title="🎲 IMMORTAL DRAFT",
-            color=discord.Color.gold(),
-        )
+            # Build coinflip result embed
+            embed = discord.Embed(
+                title="🎲 IMMORTAL DRAFT",
+                color=discord.Color.gold(),
+            )
 
-        embed.add_field(
-            name="👑 Captains",
-            value=(
-                f"**{captain1_name}** ({captain_pair.captain1_rating:.0f})\n"
-                f"**{captain2_name}** ({captain_pair.captain2_rating:.0f})"
-            ),
-            inline=False,
-        )
-
-        embed.add_field(
-            name="🎰 Coinflip Result",
-            value=f"**{winner_name}** won the coinflip!",
-            inline=False,
-        )
-
-        embed.add_field(
-            name="Next Step",
-            value=f"{winner_name}, choose whether to pick **Side** or **Hero Pick Order**.",
-            inline=False,
-        )
-
-        # Show player pool (8 available players)
-        player_pool_display = self._build_player_pool_field(state)
-        embed.add_field(
-            name="📋 Player Pool",
-            value=player_pool_display,
-            inline=False,
-        )
-
-        if pool_result.excluded_ids:
-            excluded_names = []
-            for eid in pool_result.excluded_ids:
-                name = await self._get_member_name(interaction.guild, eid)
-                excluded_names.append(name)
             embed.add_field(
-                name="📤 Excluded Players",
-                value=", ".join(excluded_names),
+                name="👑 Captains",
+                value=(
+                    f"**{captain1_name}** ({captain_pair.captain1_rating:.0f})\n"
+                    f"**{captain2_name}** ({captain_pair.captain2_rating:.0f})"
+                ),
                 inline=False,
             )
 
-        # Send with winner choice buttons
-        view = WinnerChoiceView(self, guild_id, coinflip_winner_id)
-        message = await interaction.followup.send(embed=embed, view=view)
-
-        # Store message ID for later updates
-        state.draft_message_id = message.id
-
-        # Ping both captains once (will be deleted when first choice is made)
-        try:
-            ping_msg = await interaction.channel.send(
-                f"<@{captain_pair.captain1_id}> <@{captain_pair.captain2_id}> Draft starting!"
+            embed.add_field(
+                name="🎰 Coinflip Result",
+                value=f"**{winner_name}** won the coinflip!",
+                inline=False,
             )
-            state.captain_ping_message_id = ping_msg.id
-        except Exception as e:
-            logger.debug("Failed to send captain ping message: %s", e)
 
-        # Neon Degen Terminal hook (draft coinflip)
-        try:
-            neon = get_neon_service(self.bot)
-            if neon:
-                loser_id = captain_pair.captain2_id if coinflip_winner_id == captain_pair.captain1_id else captain_pair.captain1_id
-                neon_result = await neon.on_draft_coinflip(guild_id, coinflip_winner_id, loser_id)
-                await send_neon_result(interaction, neon_result)
-        except Exception as e:
-            logger.debug("Failed to send draft coinflip neon result: %s", e)
+            embed.add_field(
+                name="Next Step",
+                value=f"{winner_name}, choose whether to pick **Side** or **Hero Pick Order**.",
+                inline=False,
+            )
 
-        return True
+            # Show player pool (8 available players)
+            player_pool_display = self._build_player_pool_field(state)
+            embed.add_field(
+                name="📋 Player Pool",
+                value=player_pool_display,
+                inline=False,
+            )
+
+            if pool_result.excluded_ids:
+                excluded_names = []
+                for eid in pool_result.excluded_ids:
+                    name = await self._get_member_name(interaction.guild, eid)
+                    excluded_names.append(name)
+                embed.add_field(
+                    name="📤 Excluded Players",
+                    value=", ".join(excluded_names),
+                    inline=False,
+                )
+
+            # Send with winner choice buttons
+            view = WinnerChoiceView(self, guild_id, coinflip_winner_id)
+            message = await interaction.followup.send(embed=embed, view=view)
+
+            # Store message ID for later updates
+            state.draft_message_id = message.id
+
+            # Ping both captains once (will be deleted when first choice is made)
+            try:
+                ping_msg = await interaction.channel.send(
+                    f"<@{captain_pair.captain1_id}> <@{captain_pair.captain2_id}> Draft starting!"
+                )
+                state.captain_ping_message_id = ping_msg.id
+            except Exception as e:
+                logger.debug("Failed to send captain ping message: %s", e)
+
+            # Neon Degen Terminal hook (draft coinflip)
+            try:
+                neon = get_neon_service(self.bot)
+                if neon:
+                    loser_id = captain_pair.captain2_id if coinflip_winner_id == captain_pair.captain1_id else captain_pair.captain1_id
+                    neon_result = await neon.on_draft_coinflip(guild_id, coinflip_winner_id, loser_id)
+                    await send_neon_result(interaction, neon_result)
+            except Exception as e:
+                logger.debug("Failed to send draft coinflip neon result: %s", e)
+
+            return True
+        except Exception:
+            logger.error("Draft setup failed after state creation, cleaning up", exc_info=True)
+            self.draft_state_manager.clear_state(guild_id)
+            raise
 
     # ========================================================================
     # /startdraft command

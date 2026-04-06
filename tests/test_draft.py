@@ -298,6 +298,21 @@ class TestDraftStateManager:
         with pytest.raises(ValueError, match="already in progress"):
             manager.create_draft(guild_id=123)
 
+    def test_clear_after_create_allows_new_draft(self):
+        """Simulates _execute_draft cleanup: create then clear on failure allows retry."""
+        manager = DraftStateManager()
+        state = manager.create_draft(guild_id=123)
+        state.phase = DraftPhase.WINNER_CHOICE
+
+        # Simulate failure cleanup (what _execute_draft now does)
+        manager.clear_state(123)
+        assert manager.has_active_draft(123) is False
+
+        # Should be able to create a new draft
+        new_state = manager.create_draft(guild_id=123)
+        assert new_state is not state
+        assert new_state.phase == DraftPhase.COINFLIP
+
     def test_advance_phase(self):
         """Can advance draft phase."""
         manager = DraftStateManager()

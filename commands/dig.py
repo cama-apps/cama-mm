@@ -19,7 +19,7 @@ from commands.checks import require_gamba_channel
 from utils.formatting import JOPACOIN_EMOTE
 from utils.interaction_safety import safe_defer, safe_followup
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
-from services.dig_constants import PICKAXE_TIERS
+from services.dig_constants import PICKAXE_TIERS, get_layer as get_layer_def
 
 if TYPE_CHECKING:
     from services.dig_service import DigService
@@ -648,7 +648,7 @@ class DigCommands(commands.Cog):
                 self.dig_service.get_inventory, interaction.user.id, guild_id
             )
             choices = [
-                app_commands.Choice(name=item.get("name", str(item)), value=item.get("name", str(item)))
+                app_commands.Choice(name=item.get("name", str(item)), value=item.get("type", item.get("name", str(item))))
                 for item in (items or [])
                 if current.lower() in item.get("name", "").lower()
             ]
@@ -1205,9 +1205,17 @@ class DigCommands(commands.Cog):
             result = _wrap(await asyncio.to_thread(
                 self.dig_service.use_item, interaction.user.id, guild_id, item
             ))
+            if not getattr(result, "success", False):
+                await safe_followup(
+                    interaction,
+                    content=getattr(result, "error", "Failed to queue item."),
+                    ephemeral=True,
+                )
+                return
+            item_name = getattr(result, "item", item)
             await safe_followup(
                 interaction,
-                content=f"**{item}** queued for your next dig. {getattr(result, 'message', '')}",
+                content=f"**{item_name}** queued for your next dig.",
             )
         except ValueError as e:
             await safe_followup(interaction, content=str(e), ephemeral=True)
@@ -1777,6 +1785,10 @@ def _build_dig_embed(result: object, user: discord.User | discord.Member) -> dis
     depth = getattr(result, "depth", 0) or getattr(result, "depth_after", 0)
     tunnel_name = getattr(result, "tunnel_name", "Tunnel")
 
+    # Determine layer for embed color
+    layer_def = get_layer_def(depth)
+    layer_name = layer_def.name if layer_def else None
+
     # ~20% chance of a "Dig Dug" themed title
     if random.random() < 0.20:
         title = f"\u26cf\ufe0f {random.choice(DIG_DUG_TITLES)} \u2014 Depth {depth}"
@@ -1785,20 +1797,21 @@ def _build_dig_embed(result: object, user: discord.User | discord.Member) -> dis
 
     embed = discord.Embed(
         title=title,
-        color=_layer_color(None),
+        color=_layer_color(layer_name),
     )
 
-    # Blocks gained and JC earned
+    # Blocks gained and JC earned (skip misleading "+0" during cave-ins)
+    cave_in = getattr(result, "cave_in", False)
     blocks = getattr(result, "advance", 0)
     jc = getattr(result, "jc_earned", 0)
-    embed.add_field(
-        name="Progress",
-        value=f"+{blocks} blocks | +{jc} {JOPACOIN_EMOTE}",
-        inline=False,
-    )
+    if not cave_in or blocks > 0 or jc > 0:
+        embed.add_field(
+            name="Progress",
+            value=f"+{blocks} blocks | +{jc} {JOPACOIN_EMOTE}",
+            inline=False,
+        )
 
     # Cave-in
-    cave_in = getattr(result, "cave_in", False)
     cave_in_detail = getattr(result, "cave_in_detail", None)
     if cave_in and cave_in_detail:
         block_loss = getattr(cave_in_detail, "block_loss", "?")
