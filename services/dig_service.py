@@ -22,6 +22,7 @@ from services.dig_constants import (
     BOSS_DIALOGUE,
     BOSS_NAMES,
     BOSS_ODDS,
+    BOSS_PAYOUTS,
     CONSUMABLE_ITEMS,
     DIG_TIPS,
     EVENT_POOL,
@@ -149,7 +150,11 @@ class DigService:
 
     def _pick_tip(self, depth: int) -> str:
         """Pick a progressive tip based on current depth."""
-        eligible = [t for t in DIG_TIPS if depth >= t.get("min_depth", 0)]
+        eligible = [
+            t for t in DIG_TIPS
+            if depth >= t.get("min_depth", 0)
+            and (t.get("max_depth") is None or depth <= t["max_depth"])
+        ]
         if not eligible:
             return "Keep digging!"
         return random.choice(eligible)["text"]
@@ -389,6 +394,7 @@ class DigService:
                 cave_in_detail=None,
                 boss_encounter=False,
                 boss_info=None,
+                has_lantern=False,
                 event=None,
                 artifact=None,
                 achievements=[],
@@ -559,6 +565,7 @@ class DigService:
                 cave_in_detail=cave_in_detail,
                 boss_encounter=False,
                 boss_info=None,
+                has_lantern=has_lantern,
                 event=None,
                 artifact=None,
                 achievements=achievements,
@@ -692,6 +699,7 @@ class DigService:
             cave_in_detail=None,
             boss_encounter=boss_encounter,
             boss_info=boss_info,
+            has_lantern=has_lantern,
             event=event,
             artifact=artifact,
             achievements=achievements,
@@ -950,7 +958,7 @@ class DigService:
 
         return self._ok(
             advance=advance,
-            target_tunnel=target_tunnel.get("name", "Unknown Tunnel"),
+            target_tunnel=target_tunnel.get("tunnel_name", "Unknown Tunnel"),
             target_depth_after=new_depth,
             helper_cooldown_until=now + FREE_DIG_COOLDOWN,
         )
@@ -1028,7 +1036,7 @@ class DigService:
             return self._ok(
                 cost=trap_steal,
                 damage=0,
-                target_tunnel=target_tunnel.get("name", "Unknown Tunnel"),
+                target_tunnel=target_tunnel.get("tunnel_name", "Unknown Tunnel"),
                 trap_triggered=True,
                 trapped=True,
                 trap_detail={
@@ -1120,7 +1128,7 @@ class DigService:
         return self._ok(
             cost=cost,
             damage=damage,
-            target_tunnel=target_tunnel.get("name", "Unknown Tunnel"),
+            target_tunnel=target_tunnel.get("tunnel_name", "Unknown Tunnel"),
             trap_triggered=False,
             trap_detail=None,
             clue=clue,
@@ -1134,7 +1142,7 @@ class DigService:
         actor_tunnel = self.dig_repo.get_tunnel(actor_id, guild_id)
         if clue_type == "first_letter":
             # Use tunnel name first letter
-            name = actor_tunnel.get("name", "?") if actor_tunnel else "?"
+            name = actor_tunnel.get("tunnel_name", "?") if actor_tunnel else "?"
             return {"type": "first_letter", "hint": f"Saboteur's tunnel starts with '{name[0]}'"}
         elif clue_type == "depth_range":
             depth = actor_tunnel.get("depth", 0) if actor_tunnel else 0
@@ -1230,7 +1238,7 @@ class DigService:
             depth = t.get("depth", 0)
             bar_len = max(1, int(40 * depth / max_depth))
             bar = "█" * bar_len
-            name = t.get("name", "???")[:15]
+            name = t.get("tunnel_name", "???")[:15]
             lines.append(f"{i:>2}. {name:<15} {bar} {depth}m")
 
         ascii_art = "\n".join(lines)
@@ -1306,10 +1314,14 @@ class DigService:
             if balance < wager:
                 return self._error(f"You only have {balance} JC (wager: {wager}).")
 
-        # Calculate odds
+        # Calculate odds using configured values
         odds_config = BOSS_ODDS.get(risk_tier, {})
-        base_odds = odds_config.get("win_pct", 0.50)
-        multiplier = odds_config.get("multiplier", 2.0)
+        base_odds = odds_config.get("base", 0.50)
+
+        # Get depth-specific payout multiplier from BOSS_PAYOUTS
+        tier_index = {"cautious": 0, "bold": 1, "reckless": 2}.get(risk_tier, 1)
+        payouts = BOSS_PAYOUTS.get(at_boss, (2.0, 3.0, 6.0))
+        multiplier = payouts[tier_index] if tier_index < len(payouts) else 2.0
 
         # Depth scaling: harder bosses are deeper
         depth_penalty = (at_boss / 100) * 0.05
@@ -1325,9 +1337,14 @@ class DigService:
         win_chance = base_odds - depth_penalty - prestige_penalty + cheer_bonus
         win_chance = max(0.05, min(0.95, win_chance))
 
-        # Free fight odds are slightly lower
+        # Free fights use separate (lower) odds from the config
         if wager == 0:
-            win_chance *= 0.85
+            free_odds = odds_config.get("free")
+            if free_odds is not None:
+                win_chance = free_odds - depth_penalty - prestige_penalty + cheer_bonus
+                win_chance = max(0.05, min(0.95, win_chance))
+            else:
+                win_chance *= 0.85
 
         # Roll fight
         won = random.random() < win_chance
@@ -1483,16 +1500,21 @@ class DigService:
         active_cheers = [c for c in cheers if c.get("expires_at", 0) > now]
         cheer_bonus = min(0.15, len(active_cheers) * 0.05)
 
+        payouts = BOSS_PAYOUTS.get(at_boss, (2.0, 3.0, 6.0))
+
         odds = {}
-        for tier in ("cautious", "bold", "reckless"):
+        for i, tier in enumerate(("cautious", "bold", "reckless")):
             cfg = BOSS_ODDS.get(tier, {})
-            base = cfg.get("win_pct", 0.50)
+            base = cfg.get("base", 0.50)
             chance = base - depth_penalty - prestige_penalty + cheer_bonus
             chance = max(0.05, min(0.95, chance))
+            free_base = cfg.get("free", base * 0.85)
+            free_chance = free_base - depth_penalty - prestige_penalty + cheer_bonus
+            free_chance = max(0.05, min(0.95, free_chance))
             odds[tier] = {
                 "win_pct": round(chance, 2),
-                "free_fight_pct": round(chance * 0.85, 2),
-                "multiplier": cfg.get("multiplier", 2.0),
+                "free_fight_pct": round(free_chance, 2),
+                "multiplier": payouts[i] if i < len(payouts) else 2.0,
             }
 
         return self._ok(
@@ -1564,7 +1586,7 @@ class DigService:
 
         return self._ok(
             cost=cost,
-            target_tunnel=target_tunnel.get("name", "Unknown Tunnel"),
+            target_tunnel=target_tunnel.get("tunnel_name", "Unknown Tunnel"),
             total_boost=boost,
             cheer_count=len(active_cheers),
         )
@@ -2207,7 +2229,7 @@ class DigService:
         p_emoji = prestige_emoji[min(prestige_level, len(prestige_emoji) - 1)]
 
         return self._ok(
-            tunnel_name=tunnel.get("name", "Unknown"),
+            tunnel_name=tunnel.get("tunnel_name", "Unknown"),
             depth=tunnel.get("depth", 0),
             total_digs=tunnel.get("total_digs", 0),
             total_jc_earned=tunnel.get("total_jc_earned", 0),
@@ -2247,12 +2269,12 @@ class DigService:
             total_jc_earned=total_jc,
             most_active={
                 "discord_id": most_active.get("discord_id"),
-                "name": most_active.get("name"),
+                "name": most_active.get("tunnel_name"),
                 "total_digs": most_active.get("total_digs", 0),
             },
             deepest={
                 "discord_id": deepest.get("discord_id"),
-                "name": deepest.get("name"),
+                "name": deepest.get("tunnel_name"),
                 "depth": deepest.get("depth", 0),
             },
             tunnel_count=len(tunnels),

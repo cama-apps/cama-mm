@@ -432,9 +432,14 @@ class MatchCommands(commands.Cog):
                     )
             except Exception as e:
                 logger.error(f"Draft auto-redirect failed: {e}", exc_info=True)
+                # Clean up any partially-created draft state so it doesn't block
+                # future shuffles/drafts. _execute_draft already clears on failure,
+                # but guard here too in case the raise path changes.
+                if hasattr(draft_cog, "draft_state_manager"):
+                    draft_cog.draft_state_manager.clear_state(guild_id)
                 await interaction.followup.send(
                     "❌ Immortal Draft failed to start. Error has been logged. "
-                    "Try `/draft restart` then `/shuffle` again."
+                    "Use `/shuffle` or `/draft start` to try again."
                 )
             return
 
