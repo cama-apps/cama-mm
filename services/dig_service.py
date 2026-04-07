@@ -30,6 +30,19 @@ from services.dig_constants import (
     INJURY_SLOW_COOLDOWN,
     ITEM_PRICES,
     LAYERS,
+    LUMINOSITY_BRIGHT,
+    LUMINOSITY_DARK,
+    LUMINOSITY_DARK_CAVE_IN_BONUS,
+    LUMINOSITY_DARK_JC_MULTIPLIER,
+    LUMINOSITY_DARK_RISKY_PENALTY,
+    LUMINOSITY_DIM,
+    LUMINOSITY_DIM_CAVE_IN_BONUS,
+    LUMINOSITY_DIM_EVENT_MULTIPLIER,
+    LUMINOSITY_DRAIN_PER_DIG,
+    LUMINOSITY_MAX,
+    LUMINOSITY_PITCH_BLACK,
+    LUMINOSITY_PITCH_CAVE_IN_BONUS,
+    LUMINOSITY_PITCH_JC_MULTIPLIER,
     MAX_INVENTORY_SIZE,
     MAX_PRESTIGE,
     MILESTONES,
@@ -115,14 +128,22 @@ class DigService:
         return [{"type": i.get("item_type"), "id": i.get("id")} for i in items]
 
     def _get_boss_progress(self, tunnel: dict) -> dict:
-        """Get boss defeat state."""
+        """Get boss defeat state, merged with canonical boss list.
+
+        Ensures all bosses from BOSS_BOUNDARIES are present — any missing
+        keys are treated as "active" (prevents prestige with only old bosses).
+        """
+        canonical = {str(b): "active" for b in BOSS_BOUNDARIES}
         raw = tunnel.get("boss_progress")
         if not raw:
-            return {str(b): "active" for b in BOSS_BOUNDARIES}
+            return canonical
         try:
-            return json.loads(raw)
+            stored = json.loads(raw)
         except (json.JSONDecodeError, TypeError):
-            return {str(b): "active" for b in BOSS_BOUNDARIES}
+            return canonical
+        # Merge: stored values override, but missing bosses stay "active"
+        canonical.update(stored)
+        return canonical
 
     def _get_cheers(self, tunnel: dict) -> list[dict]:
         """Get boss fight cheer data."""
@@ -158,6 +179,119 @@ class DigService:
         if not eligible:
             return "Keep digging!"
         return random.choice(eligible)["text"]
+
+    # ------------------------------------------------------------------
+    # Luminosity
+    # ------------------------------------------------------------------
+
+    def _get_luminosity(self, tunnel: dict) -> int:
+        """Get current luminosity, applying daily reset if game date changed."""
+        lum = tunnel.get("luminosity")
+        if lum is None:
+            return LUMINOSITY_MAX
+        return max(0, min(LUMINOSITY_MAX, lum))
+
+    def _get_luminosity_level(self, luminosity: int) -> str:
+        """Return the luminosity threshold name."""
+        if luminosity >= LUMINOSITY_BRIGHT:
+            return "bright"
+        if luminosity >= LUMINOSITY_DIM:
+            return "dim"
+        if luminosity >= LUMINOSITY_DARK:
+            return "dark"
+        return "pitch_black"
+
+    def _apply_luminosity_drain(self, discord_id: int, guild_id, tunnel: dict, layer_name: str) -> dict:
+        """
+        Drain luminosity for this dig. Resets to 100 on new game day.
+
+        Returns dict with luminosity_before, luminosity_after, level, drained.
+        """
+        today = self._get_game_date()
+        last_lum_date = tunnel.get("streak_last_date")  # reuse game-date tracking
+        luminosity = self._get_luminosity(tunnel)
+
+        # Daily reset: if this is a new game day, restore to max
+        if last_lum_date != today:
+            luminosity = LUMINOSITY_MAX
+
+        before = luminosity
+        drain = LUMINOSITY_DRAIN_PER_DIG.get(layer_name, 0)
+        luminosity = max(0, luminosity - drain)
+
+        # Persist
+        self.dig_repo.update_tunnel(discord_id, guild_id, luminosity=luminosity)
+        tunnel["luminosity"] = luminosity
+
+        return {
+            "luminosity_before": before,
+            "luminosity_after": luminosity,
+            "level": self._get_luminosity_level(luminosity),
+            "drained": drain,
+        }
+
+    def _luminosity_cave_in_bonus(self, luminosity: int) -> float:
+        """Extra cave-in chance from low luminosity."""
+        if luminosity >= LUMINOSITY_BRIGHT:
+            return 0.0
+        if luminosity >= LUMINOSITY_DIM:
+            return LUMINOSITY_DIM_CAVE_IN_BONUS
+        if luminosity >= LUMINOSITY_DARK:
+            return LUMINOSITY_DARK_CAVE_IN_BONUS
+        return LUMINOSITY_PITCH_CAVE_IN_BONUS
+
+    def _luminosity_jc_multiplier(self, luminosity: int) -> float:
+        """JC reward multiplier from low luminosity (risk = reward)."""
+        if luminosity >= LUMINOSITY_DIM:
+            return 1.0
+        if luminosity >= LUMINOSITY_DARK:
+            return LUMINOSITY_DARK_JC_MULTIPLIER
+        return LUMINOSITY_PITCH_JC_MULTIPLIER
+
+    # ------------------------------------------------------------------
+    # Temp Buffs
+    # ------------------------------------------------------------------
+
+    def _get_active_buff(self, tunnel: dict) -> dict | None:
+        """Get the active temp buff, or None if expired/absent."""
+        raw = tunnel.get("temp_buffs")
+        if not raw:
+            return None
+        try:
+            buff = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return None
+        if buff.get("digs_remaining", 0) <= 0:
+            return None
+        return buff
+
+    def _apply_buff_effects(self, buff: dict | None) -> dict:
+        """Extract numeric effects from an active buff. Returns effect dict."""
+        if not buff:
+            return {}
+        return buff.get("effect", {})
+
+    def _decrement_buff(self, discord_id: int, guild_id, tunnel: dict) -> None:
+        """Decrement active buff duration by 1 dig. Clear if expired."""
+        buff = self._get_active_buff(tunnel)
+        if not buff:
+            return
+        remaining = buff.get("digs_remaining", 0) - 1
+        if remaining <= 0:
+            self.dig_repo.update_tunnel(discord_id, guild_id, temp_buffs=None)
+        else:
+            buff["digs_remaining"] = remaining
+            self.dig_repo.update_tunnel(discord_id, guild_id, temp_buffs=json.dumps(buff))
+
+    def set_temp_buff(self, discord_id: int, guild_id, buff_data: dict) -> None:
+        """Set a temp buff on the tunnel (replaces any existing buff)."""
+        payload = {
+            "id": buff_data.get("id", "unknown"),
+            "name": buff_data.get("name", "Unknown Buff"),
+            "digs_remaining": buff_data.get("duration_digs", 1),
+            "effect": buff_data.get("effect", {}),
+        }
+        self.dig_repo.update_tunnel(discord_id, guild_id, temp_buffs=json.dumps(payload))
 
     def _error(self, msg: str) -> dict:
         """Return a standard error result."""
@@ -235,8 +369,12 @@ class DigService:
         if now < reinforced_until:
             return result  # Skip decay entirely
 
-        # Check Root Network relic
-        relic_multiplier = 0.75 if self._has_relic(tunnel["discord_id"], guild_id, "root_network") else 1.0
+        # Check Root Network relic (-25% decay) and Frozen Clock relic (-50% decay)
+        relic_multiplier = 1.0
+        if self._has_relic(tunnel["discord_id"], guild_id, "root_network"):
+            relic_multiplier *= 0.75
+        if self._has_relic(tunnel["discord_id"], guild_id, "frozen_clock"):
+            relic_multiplier *= 0.50
 
         total_decay = int(base_rate * days_elapsed * helper_multiplier * relic_multiplier)
 
@@ -430,6 +568,9 @@ class DigService:
         has_dynamite = False
         has_hard_hat = False
         has_lantern = False
+        has_torch = False
+        has_grappling_hook = False
+        has_depth_charge = False
 
         for item in queued:
             itype = item.get("type")
@@ -442,6 +583,15 @@ class DigService:
             elif itype == "lantern":
                 has_lantern = True
                 items_used.append("Lantern")
+            elif itype == "torch":
+                has_torch = True
+                items_used.append("Torch")
+            elif itype == "grappling_hook":
+                has_grappling_hook = True
+                items_used.append("Grappling Hook")
+            elif itype == "depth_charge":
+                has_depth_charge = True
+                items_used.append("Depth Charge")
 
         # Consume queued items from inventory
         if queued:
@@ -453,6 +603,32 @@ class DigService:
 
         # 7. Get layer info
         layer = self._get_layer(depth_before)
+
+        # 7b. Apply luminosity drain
+        layer_name = layer.get("name", "Dirt")
+        lum_info = self._apply_luminosity_drain(discord_id, guild_id, tunnel, layer_name)
+        luminosity = lum_info["luminosity_after"]
+
+        # Torch restores +50 luminosity
+        if has_torch:
+            luminosity = min(LUMINOSITY_MAX, luminosity + 50)
+            self.dig_repo.update_tunnel(discord_id, guild_id, luminosity=luminosity)
+            lum_info["luminosity_after"] = luminosity
+
+        # Spore Cloak relic: -50% luminosity drain
+        if self._has_relic(discord_id, guild_id, "spore_cloak") and lum_info["drained"] > 0:
+            restored = lum_info["drained"] // 2
+            luminosity = min(LUMINOSITY_MAX, luminosity + restored)
+            lum_info["drained"] -= restored
+            lum_info["luminosity_after"] = luminosity
+            self.dig_repo.update_tunnel(discord_id, guild_id, luminosity=luminosity)
+
+        # 7c. Get and apply active temp buff
+        active_buff = self._get_active_buff(tunnel)
+        buff_effects = self._apply_buff_effects(active_buff)
+        buff_advance_bonus = buff_effects.get("advance_bonus", 0)
+        buff_cavein_reduction = buff_effects.get("cave_in_reduction", 0.0)
+        self._decrement_buff(discord_id, guild_id, tunnel)
 
         # 8. Prestige perks and relics
         perks = self._get_prestige_perks(tunnel)
@@ -467,6 +643,15 @@ class DigService:
         perk_advance_bonus = 0.1 if "efficient_digging" in perks else 0.0
         perk_loot_bonus = 0.15 if "keen_eye" in perks else 0.0
 
+        # New expansion perks
+        if "deep_sight" in perks and lum_info.get("drained", 0) > 0:
+            # Restore 25% of what was drained (stacks with torch/spore_cloak)
+            restored = max(1, lum_info["drained"] // 4)
+            luminosity = min(LUMINOSITY_MAX, luminosity + restored)
+            lum_info["luminosity_after"] = luminosity
+            self.dig_repo.update_tunnel(discord_id, guild_id, luminosity=luminosity)
+            tunnel["luminosity"] = luminosity
+
         relic_cavein_mod = 0.97 if self._has_relic(discord_id, guild_id, "crystal_compass") else 1.0
         relic_advance_mod = 1 if not self._has_relic(discord_id, guild_id, "mole_claws") else 1  # +1 advance handled below
         mole_claws_bonus = 1 if self._has_relic(discord_id, guild_id, "mole_claws") else 0
@@ -476,8 +661,14 @@ class DigService:
         # 9. Cave-in check
         hard_hat_charges = tunnel.get("hard_hat_charges", 0) or 0
         cave_in_chance = layer.get("cave_in_pct", 0.10)
+        # dark_adaptation perk: dim luminosity has no cave-in penalty
+        lum_cave_bonus = self._luminosity_cave_in_bonus(luminosity)
+        if "dark_adaptation" in perks and luminosity >= LUMINOSITY_DIM and luminosity < LUMINOSITY_BRIGHT:
+            lum_cave_bonus = 0.0
+        cave_in_chance += lum_cave_bonus
         cave_in_chance -= perk_cavein_reduction
         cave_in_chance -= pickaxe_cavein_reduction
+        cave_in_chance -= buff_cavein_reduction
         cave_in_chance *= relic_cavein_mod
         if has_hard_hat:
             cave_in_chance *= 0.5
@@ -494,6 +685,9 @@ class DigService:
         if cave_in:
             # 10. Cave-in consequences
             block_loss = random.randint(3, 8)
+            # Grappling hook prevents block loss
+            if has_grappling_hook:
+                block_loss = 0
             new_depth = max(0, depth_before - block_loss)
 
             # Random additional consequence
@@ -573,21 +767,32 @@ class DigService:
                 items_used=items_used,
                 tip=self._pick_tip(new_depth),
                 decay_info=decay_info,
+                luminosity_info=lum_info,
             )
 
         # 11. Roll advance (no cave-in)
         base_min = layer.get("advance_min", 1)
         base_max = layer.get("advance_max", 5)
+        # the_endless perk: The Hollow advance becomes 1-2 instead of 1-1
+        if "the_endless" in perks and layer_name == "The Hollow" and base_max <= 1:
+            base_max = 2
         advance = random.randint(base_min, base_max)
 
         # Apply modifiers
-        advance += pickaxe_advance_bonus + mole_claws_bonus
+        advance += pickaxe_advance_bonus + mole_claws_bonus + buff_advance_bonus
         dynamite_bonus = 0
         if has_dynamite:
             dynamite_bonus = 5
             advance += dynamite_bonus
+        depth_charge_bonus = 0
+        if has_depth_charge:
+            depth_charge_bonus = 8
+            advance += depth_charge_bonus
         advance = int(advance * injury_advance_mod)
         advance = max(1, advance)
+        # Depth charge triggers mini cave-in penalty after advance
+        if has_depth_charge:
+            advance = max(1, advance - 3)
 
         # 12. Check boss boundary
         boss_progress = self._get_boss_progress(tunnel)
@@ -610,7 +815,7 @@ class DigService:
         jc_min = layer.get("jc_min", 1)
         jc_max = layer.get("jc_max", 3)
         jc_earned = random.randint(jc_min, jc_max)
-        jc_earned = int(jc_earned * (1.0 + perk_loot_bonus) * relic_loot_mod)
+        jc_earned = int(jc_earned * (1.0 + perk_loot_bonus) * relic_loot_mod * self._luminosity_jc_multiplier(luminosity))
         jc_earned = max(1, jc_earned)
 
         # 14. Check milestones
@@ -647,10 +852,18 @@ class DigService:
         # 16. Roll for artifact
         artifact = self.roll_artifact(discord_id, guild_id, new_depth)
 
-        # 17. Roll for random event
+        # 17. Roll for random event (layer-specific rates, luminosity boosts)
+        event_rates = {
+            "Dirt": 0.08, "Stone": 0.08, "Crystal": 0.10, "Magma": 0.10,
+            "Abyss": 0.12, "Fungal Depths": 0.15, "Frozen Core": 0.12, "The Hollow": 0.18,
+        }
+        event_chance = event_rates.get(layer_name, 0.10)
+        # Dim luminosity increases event chance
+        if luminosity < LUMINOSITY_BRIGHT:
+            event_chance *= LUMINOSITY_DIM_EVENT_MULTIPLIER
         event = None
-        if random.random() < 0.10:
-            event = self.roll_event(new_depth)
+        if random.random() < event_chance:
+            event = self.roll_event(new_depth, luminosity=luminosity)
 
         # 18. Check achievements
         total_digs = (tunnel.get("total_digs", 0) or 0) + 1
@@ -707,6 +920,7 @@ class DigService:
             items_used=items_used,
             tip=self._pick_tip(new_depth),
             decay_info=decay_info,
+            luminosity_info=lum_info,
             paid_cost=paid_dig_cost if paid_dig_cost > 0 else 0,
             dynamite_bonus=dynamite_bonus,
         )
@@ -2004,31 +2218,49 @@ class DigService:
     # Events
     # ------------------------------------------------------------------
 
-    def roll_event(self, depth: int) -> dict | None:
+    def roll_event(self, depth: int, luminosity: int = 100) -> dict | None:
         """
-        Roll for a random event. 10% chance (called externally).
+        Roll for a random event with layer-specific rates and rarity.
 
-        Returns event info with binary choice, or None.
+        Returns event info dict, or None if no event triggers.
         """
         layer = self._get_layer(depth)
-        layer_name = layer.get("name", "dirt")
+        layer_name = layer.get("name", "Dirt")
+        is_pitch_black = luminosity <= 0
 
+        # Filter eligible events by depth, layer, and darkness requirement
         eligible = [
             e for e in EVENT_POOL
             if depth >= (e.get("min_depth") or 0)
-            and (not e.get("layers") or layer_name in e["layers"])
+            and (e.get("max_depth") is None or depth <= e["max_depth"])
+            and (e.get("layer") is None or e["layer"] == layer_name)
+            and (not e.get("requires_dark") or is_pitch_black)
         ]
+
+        # Non-darkness events are excluded at pitch black if darkness events exist
+        if is_pitch_black:
+            dark_events = [e for e in eligible if e.get("requires_dark")]
+            if dark_events:
+                eligible = dark_events + [e for e in eligible if not e.get("requires_dark")]
 
         if not eligible:
             return None
 
-        event = random.choice(eligible)
+        # Rarity-weighted selection
+        weights = {"common": 70, "uncommon": 20, "rare": 8, "legendary": 2}
+        weighted = [(e, weights.get(e.get("rarity", "common"), 70)) for e in eligible]
+        events, w = zip(*weighted)
+        event = random.choices(events, weights=w, k=1)[0]
+
         return {
             "id": event["id"],
             "name": event["name"],
             "description": event["description"],
-            "choices": event.get("choices", ["safe", "risky"]),
-            "choice_labels": event.get("choice_labels", {"safe": "Play it safe", "risky": "Take the risk"}),
+            "complexity": event.get("complexity", "choice"),
+            "safe_option": event.get("safe_option"),
+            "risky_option": event.get("risky_option"),
+            "buff_on_success": event.get("buff_on_success"),
+            "rarity": event.get("rarity", "common"),
         }
 
     def resolve_event(self, discord_id: int, guild_id, event_id: str, choice: str) -> dict:

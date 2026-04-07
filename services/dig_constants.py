@@ -30,14 +30,17 @@ class LayerDef:
 
 
 _LAYERS_DEF: list[LayerDef] = [
-    LayerDef("Dirt",    0,   25,  0.05, 0, 1, 1, 3, "\U0001f7eb"),   # brown square
-    LayerDef("Stone",   26,  50,  0.10, 0, 2, 1, 3, "\u2b1c"),       # gray (white square)
-    LayerDef("Crystal", 51,  75,  0.18, 1, 3, 1, 2, "\U0001f48e"),   # diamond
-    LayerDef("Magma",   76,  100, 0.25, 1, 5, 1, 2, "\U0001f525"),   # fire
-    LayerDef("Abyss",   101, None, 0.35, 2, 8, 1, 2, "\U0001f573\ufe0f"),  # hole
+    LayerDef("Dirt",          0,   25,  0.05, 0,  1,  1, 3, "\U0001f7eb"),        # brown square
+    LayerDef("Stone",         26,  50,  0.10, 0,  2,  1, 3, "\u2b1c"),            # gray (white square)
+    LayerDef("Crystal",       51,  75,  0.18, 1,  3,  1, 2, "\U0001f48e"),        # diamond
+    LayerDef("Magma",         76,  100, 0.25, 1,  5,  1, 2, "\U0001f525"),        # fire
+    LayerDef("Abyss",         101, 150, 0.35, 2,  8,  1, 2, "\U0001f573\ufe0f"),  # hole
+    LayerDef("Fungal Depths", 151, 200, 0.40, 3,  10, 1, 2, "\U0001f344"),        # mushroom
+    LayerDef("Frozen Core",   201, 275, 0.45, 4,  12, 1, 2, "\u2744\ufe0f"),      # snowflake
+    LayerDef("The Hollow",    276, None, 0.50, 5,  15, 1, 1, "\u26ab"),            # black circle
 ]
 
-LAYER_BOUNDARIES: list[int] = [25, 50, 75, 100]
+LAYER_BOUNDARIES: list[int] = [25, 50, 75, 100, 150, 200, 275]
 
 
 def get_layer(depth: int) -> LayerDef:
@@ -70,6 +73,11 @@ MILESTONES: dict[int, int] = {
     50: 10,
     75: 20,
     100: 50,
+    150: 75,
+    200: 150,
+    275: 300,
+    300: 500,
+    400: 1000,
 }
 
 # Streak rewards: consecutive-day count -> JC bonus
@@ -99,10 +107,13 @@ class PickaxeTier:
 
 
 _PICKAXE_TIERS_DEF: list[PickaxeTier] = [
-    PickaxeTier("Wooden",  0, 0.0,  0, depth_required=0,  jc_cost=0,   prestige_required=0),
-    PickaxeTier("Stone",   1, 0.0,  0, depth_required=25, jc_cost=15,  prestige_required=0),
-    PickaxeTier("Iron",    0, 0.05, 0, depth_required=50, jc_cost=50,  prestige_required=1),
-    PickaxeTier("Diamond", 0, 0.0,  2, depth_required=75, jc_cost=150, prestige_required=2),
+    PickaxeTier("Wooden",       0, 0.0,  0, depth_required=0,   jc_cost=0,    prestige_required=0),
+    PickaxeTier("Stone",        1, 0.0,  0, depth_required=25,  jc_cost=15,   prestige_required=0),
+    PickaxeTier("Iron",         0, 0.05, 0, depth_required=50,  jc_cost=50,   prestige_required=1),
+    PickaxeTier("Diamond",      0, 0.0,  2, depth_required=75,  jc_cost=150,  prestige_required=2),
+    PickaxeTier("Obsidian",     1, 0.05, 0, depth_required=100, jc_cost=300,  prestige_required=3),
+    PickaxeTier("Frostforged",  2, 0.0,  1, depth_required=200, jc_cost=600,  prestige_required=5),
+    PickaxeTier("Void-Touched", 2, 0.10, 2, depth_required=275, jc_cost=1200, prestige_required=8),
 ]
 
 PICKAXE_TIERS: list[dict] = [
@@ -159,6 +170,41 @@ CONSUMABLES: dict[str, Consumable] = {
         cost=6,
         description="Prevent decay 48h + 25% sabotage reduction",
         params={"decay_prevent_hours": 48, "sabotage_reduction": 0.25},
+    ),
+    "torch": Consumable(
+        id="torch",
+        name="Torch",
+        cost=6,
+        description="+50 luminosity. Light the way.",
+        params={"luminosity_restore": 50},
+    ),
+    "grappling_hook": Consumable(
+        id="grappling_hook",
+        name="Grappling Hook",
+        cost=10,
+        description="Prevents block loss on next cave-in",
+        params={"prevent_cave_in_loss": 1},
+    ),
+    "sonar_pulse": Consumable(
+        id="sonar_pulse",
+        name="Sonar Pulse",
+        cost=8,
+        description="Reveals next event before it triggers",
+        params={"event_preview": 1},
+    ),
+    "depth_charge": Consumable(
+        id="depth_charge",
+        name="Depth Charge",
+        cost=15,
+        description="+8 advance but triggers mini cave-in (-3). Net +5.",
+        params={"bonus_blocks": 8, "mini_cave_in_loss": 3},
+    ),
+    "void_bait": Consumable(
+        id="void_bait",
+        name="Void Bait",
+        cost=20,
+        description="Doubles event chance for 3 digs",
+        params={"event_multiplier": 2.0, "duration_digs": 3},
     ),
 }
 
@@ -256,6 +302,63 @@ BOSSES: dict[int, BossDef] = {
             "You know what? Take the void. I'm going to go find myself.",
         ],
     ),
+    150: BossDef(
+        depth=150,
+        name="Sporeling Sovereign",
+        title="The One Who Grows",
+        ascii_art=(
+            "  .oO@Oo.\n"
+            " /  we   \\\n"
+            "( are one )\n"
+            " \\  all  /\n"
+            "  'oO@Oo'"
+        ),
+        dialogue=[
+            "We are the soil and the soil is us. You trespass on ourselves.",
+            "You return. We have grown since last you came. We remember your footsteps.",
+            "We considered offering you tea. Then we remembered we are mushrooms.",
+            "YOU AGAIN. We were in the middle of photosynthesis. ...Wait. We don't do that.",
+            "Fine. We yield. Would you like a mushroom recipe? We have thousands.",
+        ],
+    ),
+    200: BossDef(
+        depth=200,
+        name="Chronofrost",
+        title="The Still Moment",
+        ascii_art=(
+            "  *  . *  .\n"
+            " / frozen  \\\n"
+            "| t i m e  |\n"
+            " \\ stands /\n"
+            "  *  . *  ."
+        ),
+        dialogue=[
+            "You arrive exactly when I expected. I've been waiting since before you were born.",
+            "We've done this before. You just don't remember yet. I envy that.",
+            "I could tell you how this ends but you wouldn't believe me. I barely do.",
+            "YOU AGAIN. Or is it still? Time is a suggestion down here.",
+            "Go. I've seen every possible outcome and in most of them you win anyway.",
+        ],
+    ),
+    275: BossDef(
+        depth=275,
+        name="The Nameless Depth",
+        title="[REDACTED]",
+        ascii_art=(
+            "  . . . . .\n"
+            " .         .\n"
+            " .  ?   ?  .\n"
+            " .    _    .\n"
+            "  . . . . ."
+        ),
+        dialogue=[
+            "I was you, once. Before the digging consumed me.",
+            "Your tunnel. I know its name. I know all the names.",
+            "You dig to find something. I dug to forget something. We are the same.",
+            "YOU AGAIN. Or am I you again? The distinction stopped mattering at depth 250.",
+            "Take the hollow. It was always yours. I was just keeping it warm.",
+        ],
+    ),
 }
 
 # Boss fight odds ────────────────────────────────────────────────
@@ -281,6 +384,9 @@ BOSS_PAYOUTS: dict[int, tuple[float, float, float]] = {
     50: (2.0, 4.0, 8.0),
     75: (2.5, 5.0, 10.0),
     100: (3.0, 6.0, 12.0),
+    150: (3.5, 7.0, 14.0),
+    200: (4.0, 8.0, 16.0),
+    275: (5.0, 10.0, 20.0),
 }
 
 
@@ -362,6 +468,42 @@ RELICS: list[ArtifactDef] = [
         lore_text="This stone whispers the locations of hidden things. Collectors would kill for it—some have.",
         is_relic=True,
         effect="+10% artifact find chance permanently",
+    ),
+    ArtifactDef(
+        id="spore_cloak",
+        name="Spore Cloak",
+        layer="Fungal Depths",
+        rarity="Rare",
+        lore_text="Woven from living mycelium, this cloak feeds on darkness and gives back light.",
+        is_relic=True,
+        effect="-50% luminosity drain permanently",
+    ),
+    ArtifactDef(
+        id="frozen_clock",
+        name="Frozen Clock",
+        layer="Frozen Core",
+        rarity="Rare",
+        lore_text="The hands haven't moved in millennia. Time itself seems embarrassed by this.",
+        is_relic=True,
+        effect="Decay halved permanently",
+    ),
+    ArtifactDef(
+        id="hollow_eye",
+        name="Hollow Eye",
+        layer="The Hollow",
+        rarity="Legendary",
+        lore_text="It sees everything. Every path, every choice, every consequence. It blinks when you're not looking.",
+        is_relic=True,
+        effect="Complex events reveal all paths",
+    ),
+    ArtifactDef(
+        id="mycelium_link",
+        name="Mycelium Link",
+        layer="Fungal Depths",
+        rarity="Rare",
+        lore_text="A living thread connecting you to the fungal network. When you help someone, the network amplifies it.",
+        is_relic=True,
+        effect="+5% help bonus when helping others",
     ),
 ]
 
@@ -479,6 +621,100 @@ COLLECTIBLE_ARTIFACTS: list[ArtifactDef] = [
         lore_text="Contains a miniature universe in its final moments. Beautiful and deeply unsettling.",
         is_relic=False, effect=None,
     ),
+    # Fungal Depths collectibles
+    ArtifactDef(
+        id="glowing_spore",
+        name="Glowing Spore",
+        layer="Fungal Depths",
+        rarity="Common",
+        lore_text="It pulses like a heartbeat. Don't name it. You'll get attached.",
+        is_relic=False, effect=None,
+    ),
+    ArtifactDef(
+        id="fungal_scripture",
+        name="Fungal Scripture",
+        layer="Fungal Depths",
+        rarity="Uncommon",
+        lore_text="Written in spore patterns. Roughly translates to: 'We were here before the stone.'",
+        is_relic=False, effect=None,
+    ),
+    ArtifactDef(
+        id="sovereign_cap",
+        name="Sovereign's Cap",
+        layer="Fungal Depths",
+        rarity="Rare",
+        lore_text="A mushroom cap the size of a dinner plate, still warm from the Sporeling Sovereign's head.",
+        is_relic=False, effect=None,
+    ),
+    # Frozen Core collectibles
+    ArtifactDef(
+        id="ice_memory",
+        name="Ice Memory",
+        layer="Frozen Core",
+        rarity="Common",
+        lore_text="A crystal of frozen time. Inside, a snowflake falls forever.",
+        is_relic=False, effect=None,
+    ),
+    ArtifactDef(
+        id="paradox_coin",
+        name="Paradox Coin",
+        layer="Frozen Core",
+        rarity="Uncommon",
+        lore_text="Both heads and tails simultaneously. Useless for coin flips. Priceless for philosophers.",
+        is_relic=False, effect=None,
+    ),
+    ArtifactDef(
+        id="chrono_shard",
+        name="Chrono Shard",
+        layer="Frozen Core",
+        rarity="Rare",
+        lore_text="It shows you what this cave looked like a million years ago: exactly the same.",
+        is_relic=False, effect=None,
+    ),
+    # The Hollow collectibles
+    ArtifactDef(
+        id="hollow_whisper",
+        name="Hollow Whisper",
+        layer="The Hollow",
+        rarity="Uncommon",
+        lore_text="A captured whisper from The Hollow. It says your name sometimes.",
+        is_relic=False, effect=None,
+    ),
+    ArtifactDef(
+        id="depth_record",
+        name="Depth Record",
+        layer="The Hollow",
+        rarity="Legendary",
+        lore_text="A stone tablet recording the deepest dig ever attempted. The last entry is dated tomorrow.",
+        is_relic=False, effect=None,
+    ),
+    # Special — Roshan drop
+    ArtifactDef(
+        id="aegis_fragment",
+        name="Aegis Fragment",
+        layer="The Hollow",
+        rarity="Legendary",
+        lore_text="A shard of immortality, cracked but not broken. It pulses with defiant energy.",
+        is_relic=True,
+        effect="Revives from next cave-in (consumed on use)",
+    ),
+    ArtifactDef(
+        id="cheese",
+        name="Cheese",
+        layer="The Hollow",
+        rarity="Legendary",
+        lore_text="Aged in the deepest pit of the world. The smell alone could wake an ancient.",
+        is_relic=False, effect=None,
+    ),
+    # PoE nod
+    ArtifactDef(
+        id="frozen_azurite",
+        name="Frozen Azurite",
+        layer="Frozen Core",
+        rarity="Uncommon",
+        lore_text="A deep blue crystal that hums with stored energy. Cartographers prize these above gold.",
+        is_relic=False, effect=None,
+    ),
 ]
 
 ALL_ARTIFACTS: list[ArtifactDef] = RELICS + COLLECTIBLE_ARTIFACTS
@@ -509,6 +745,22 @@ class EventChoice:
 
 
 @dataclass(frozen=True)
+class TempBuff:
+    """Temporary modifier applied by an event outcome."""
+    id: str
+    name: str
+    duration_digs: int
+    effect: dict = field(default_factory=dict)  # {"cave_in_reduction": 0.10} or {"advance_bonus": 2}
+
+
+@dataclass(frozen=True)
+class EventStep:
+    """One step in a multi-step complex encounter."""
+    description: str
+    choices: list[EventChoice] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
 class RandomEvent:
     """Immutable definition for a random tunnel event."""
     id: str
@@ -518,6 +770,14 @@ class RandomEvent:
     max_depth: int | None           # None = any depth
     safe_option: EventChoice
     risky_option: EventChoice
+    # Expansion fields (defaults for backward compatibility with existing events)
+    complexity: str = "choice"      # "simple" | "choice" | "complex"
+    layer: str | None = None        # restrict to specific layer name, None = any
+    rarity: str = "common"          # "common" | "uncommon" | "rare" | "legendary"
+    steps: tuple[EventStep, ...] | None = None  # for complex multi-step events
+    buff_on_success: TempBuff | None = None      # temp buff granted on risky success
+    requires_dark: bool = False     # only triggers at Pitch Black luminosity
+    social: bool = False            # references other players
 
 
 RANDOM_EVENTS: list[RandomEvent] = [
@@ -725,6 +985,900 @@ RANDOM_EVENTS: list[RandomEvent] = [
             success_chance=0.55,
         ),
     ),
+
+    # ===================================================================
+    # EXPANSION EVENTS — Dirt Layer (0-25)
+    # ===================================================================
+
+    RandomEvent(
+        id="worm_council",
+        name="Worm Council",
+        description="A circle of earthworms convenes before you. They appear to be voting on something important.",
+        min_depth=None, max_depth=25,
+        safe_option=EventChoice(
+            "Observe respectfully",
+            success=EventOutcome("The motion passes. You are declared an honorary annelid.", 0, 1, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Cast a vote",
+            success=EventOutcome("Your vote tips the balance. The worms are grateful.", 1, 2, False),
+            failure=EventOutcome("You voted wrong. The worms are displeased.", -1, 0, False),
+            success_chance=0.65,
+        ),
+        complexity="simple", layer="Dirt",
+    ),
+    RandomEvent(
+        id="buried_lunch_box",
+        name="Buried Lunch Box",
+        description="A perfectly preserved lunch box from the surface. The sandwich inside is... questionable.",
+        min_depth=None, max_depth=25,
+        safe_option=EventChoice(
+            "Sell the vintage box",
+            success=EventOutcome("A collector would pay good money for this.", 0, 1, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Eat the ancient sandwich",
+            success=EventOutcome("Aged like fine wine. You feel invigorated.", 1, 3, False),
+            failure=EventOutcome("Food poisoning. Your ancestors are disappointed.", 0, -1, False),
+            success_chance=0.60,
+        ),
+        layer="Dirt",
+    ),
+    RandomEvent(
+        id="dig_dog",
+        name="The Dig Dog",
+        description="A dog is digging enthusiastically nearby. It is objectively better at this than you.",
+        min_depth=None, max_depth=25,
+        safe_option=EventChoice(
+            "Watch and learn",
+            success=EventOutcome("The dog teaches you a new technique. Good boy.", 2, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Race the dog",
+            success=EventOutcome("You win! The dog doesn't care. It's just happy to dig.", 3, 1, False),
+            failure=EventOutcome("The dog laps you twice. Humbling.", 0, 0, False),
+            success_chance=0.40,
+        ),
+        complexity="simple", layer="Dirt",
+    ),
+    RandomEvent(
+        id="root_maze",
+        name="Root Maze",
+        description="A tangle of ancient roots blocks the path. Something metallic glints deep inside.",
+        min_depth=5, max_depth=25,
+        safe_option=EventChoice(
+            "Hack a narrow path",
+            success=EventOutcome("Slow but steady. You squeeze through.", 1, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Reach for the glint",
+            success=EventOutcome("A handful of buried coins! Worth the scratches.", 3, 2, False),
+            failure=EventOutcome("Tangled. It takes an hour to free yourself.", -2, 0, False),
+            success_chance=0.50,
+        ),
+        layer="Dirt",
+    ),
+    RandomEvent(
+        id="pickaxe_head_flies_off",
+        name="Pickaxe Head Flies Off",
+        description="Your pickaxe head detaches mid-swing and sails into the darkness. You hear it land... somewhere.",
+        min_depth=None, max_depth=30,
+        safe_option=EventChoice(
+            "Go find it",
+            success=EventOutcome("Found it! And some coins along the way.", -1, 2, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Dig with your hands",
+            success=EventOutcome("Surprisingly effective. You find the head AND a geode.", 1, 3, False),
+            failure=EventOutcome("Your hands disagree with this approach.", -2, 0, False),
+            success_chance=0.45,
+        ),
+        complexity="simple", layer="Dirt",
+    ),
+
+    # ===================================================================
+    # EXPANSION EVENTS — Stone Layer (26-50)
+    # ===================================================================
+
+    RandomEvent(
+        id="toll_keeper",
+        name="The Toll Keeper",
+        description="A spectral figure blocks the path. It holds out one translucent hand. 'Toll or riddle. Your choice.'",
+        min_depth=26, max_depth=55,
+        safe_option=EventChoice(
+            "Pay the toll (3 JC)",
+            success=EventOutcome("The ghost pockets the coins somehow and steps aside.", 2, -3, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Answer the riddle",
+            success=EventOutcome("'Correct,' it says, sounding disappointed. It drops its own toll.", 3, 5, False),
+            failure=EventOutcome("Wrong. 'Everyone says fire,' it sighs. It takes your coins anyway.", 0, -2, False),
+            success_chance=0.50,
+        ),
+        complexity="complex", layer="Stone",
+    ),
+    RandomEvent(
+        id="gravity_pocket",
+        name="Gravity Pocket",
+        description="An area where gravity is... optional. Your tools float. You float. Everything floats down here.",
+        min_depth=26, max_depth=55,
+        safe_option=EventChoice(
+            "Wait for gravity to return",
+            success=EventOutcome("It does. Eventually. You feel vaguely insulted.", 0, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Swim downward through the void",
+            success=EventOutcome("You swim through solid rock. Best not to think about it.", 4, 0, False),
+            failure=EventOutcome("You float up instead. Ceiling is farther than you thought.", -3, 0, False),
+            success_chance=0.55,
+        ),
+        layer="Stone",
+    ),
+    RandomEvent(
+        id="fossil_argument",
+        name="Fossil Argument",
+        description="Two fossils embedded in the wall face each other. They look like they were fighting when they died.",
+        min_depth=26, max_depth=55,
+        safe_option=EventChoice(
+            "Leave them to their eternal dispute",
+            success=EventOutcome("Some arguments aren't worth getting between.", 0, 1, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Extract both fossils",
+            success=EventOutcome("Museum quality! Separate display cases, obviously.", 0, 4, False),
+            failure=EventOutcome("They crumble to dust the moment you touch them. Of course.", -3, 0, False),
+            success_chance=0.45,
+        ),
+        layer="Stone",
+    ),
+    RandomEvent(
+        id="sandwich_lady",
+        name="The Sandwich Lady",
+        description="A woman appears from behind a stalagmite carrying a tray of baguettes. 'I didn't ask for this,' you think.",
+        min_depth=26, max_depth=55,
+        safe_option=EventChoice(
+            "Accept the baguette",
+            success=EventOutcome("The baguette is surprisingly good. She vanishes.", 0, 2, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Decline politely",
+            success=EventOutcome("She shrugs and leaves a tip jar. It has coins in it.", 0, 3, False),
+            failure=EventOutcome("She doesn't take rejection well. Baguette to the face.", -1, 0, False),
+            success_chance=0.70,
+        ),
+        complexity="simple", layer="Stone",
+    ),
+    RandomEvent(
+        id="echo_chamber",
+        name="Echo Chamber",
+        description="Your footsteps echo in impossibly complex patterns. For a moment, you hear the steps of every miner who has ever been here.",
+        min_depth=26, max_depth=55,
+        safe_option=EventChoice(
+            "Listen",
+            success=EventOutcome("The echoes fade. You feel less alone. Somehow that's worse.", 0, 1, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Shout into the chamber",
+            success=EventOutcome("Your echo comes back with directions. And coins.", 2, 2, False),
+            failure=EventOutcome("Your echo comes back louder. Much louder. Cave-in.", -3, 0, True),
+            success_chance=0.55,
+        ),
+        complexity="simple", layer="Stone", social=True,
+    ),
+
+    # ===================================================================
+    # EXPANSION EVENTS — Crystal Layer (51-75)
+    # ===================================================================
+
+    RandomEvent(
+        id="mirror_tunnel",
+        name="Mirror Tunnel",
+        description="Crystal walls reflect infinite copies of you. One of the reflections waves. You didn't wave.",
+        min_depth=51, max_depth=80,
+        safe_option=EventChoice(
+            "Ignore it and move on",
+            success=EventOutcome("Smart. The reflection looks disappointed.", 0, 1, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Wave back",
+            success=EventOutcome("The reflection smiles and points to a hidden cache.", 2, 4, False),
+            failure=EventOutcome("It grabs your hand and tries to pull you through. You wrench free.", -3, -1, False),
+            success_chance=0.50,
+        ),
+        complexity="complex", layer="Crystal",
+    ),
+    RandomEvent(
+        id="resonance_cascade",
+        name="Resonance Cascade",
+        description="Crystals vibrate at increasing frequency. They're about to shatter. The air tastes like ozone.",
+        min_depth=51, max_depth=80,
+        safe_option=EventChoice(
+            "Run",
+            success=EventOutcome("You make it out just as the cascade peaks. Glass everywhere.", 0, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Stand your ground",
+            success=EventOutcome("The shatter opens a massive cavern. You're the first one here.", 5, 4, False),
+            failure=EventOutcome("The shatter opens nothing. Except your skin. Medical bill incoming.", -5, -2, True),
+            success_chance=0.35,
+        ),
+        layer="Crystal",
+    ),
+    RandomEvent(
+        id="crystal_garden",
+        name="Crystal Garden",
+        description="Someone has been cultivating crystals here. Tiny signs read 'do not touch' and 'water weekly.'",
+        min_depth=51, max_depth=80,
+        safe_option=EventChoice(
+            "Admire the garden",
+            success=EventOutcome("You find a donation jar. It's been a while since anyone else visited.", 0, 2, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Harvest a crystal",
+            success=EventOutcome("The gardener isn't coming back. These are yours now.", 0, 5, False),
+            failure=EventOutcome("The crystals fight back. They're pricklier than they look.", -2, -1, False),
+            success_chance=0.45,
+        ),
+        complexity="simple", layer="Crystal",
+    ),
+    RandomEvent(
+        id="gem_rock",
+        name="Gem Rock",
+        description="A rock glitters with embedded gems. Mining it is risky — these rocks are known to fight back.",
+        min_depth=51, max_depth=80,
+        safe_option=EventChoice(
+            "Chip carefully at the edges",
+            success=EventOutcome("A modest haul. Patience rewarded.", 0, 2, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Swing hard",
+            success=EventOutcome("Uncut diamond! ...wait, wrong game. Still valuable though.", 0, 6, False),
+            failure=EventOutcome("The rock was a mimic. Why is everything down here a mimic.", -2, -2, False),
+            success_chance=0.40,
+        ),
+        layer="Crystal",
+    ),
+    RandomEvent(
+        id="prism_trap",
+        name="Prism Trap",
+        description="Light bends through crystal prisms creating a dazzling but disorienting maze of rainbows.",
+        min_depth=51, max_depth=80,
+        safe_option=EventChoice(
+            "Close your eyes and feel the walls",
+            success=EventOutcome("Slow but effective. You emerge on the other side.", 1, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Follow the brightest beam",
+            success=EventOutcome("The light leads you true. A shortcut reveals itself.", 3, 2, False),
+            failure=EventOutcome("You walk in circles for an hour. The prisms mock you.", -3, 0, False),
+            success_chance=0.50,
+        ),
+        layer="Crystal",
+    ),
+
+    # ===================================================================
+    # EXPANSION EVENTS — Magma Layer (76-100)
+    # ===================================================================
+
+    RandomEvent(
+        id="lava_surfer",
+        name="Lava Surfer",
+        description="A chunk of obsidian floats on a lava river. It's just barely big enough to stand on.",
+        min_depth=76, max_depth=105,
+        safe_option=EventChoice(
+            "Go around",
+            success=EventOutcome("The long way. Safe, boring, and slightly damp.", 1, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Surf the lava",
+            success=EventOutcome("You ride the rapids like a champion. The lava respects you.", 6, 2, False),
+            failure=EventOutcome("You fall in. It's exactly as hot as you'd expect.", -4, -3, True),
+            success_chance=0.40,
+        ),
+        layer="Magma",
+    ),
+    RandomEvent(
+        id="forge_spirit",
+        name="Forge Spirit",
+        description="A fire elemental hammers at an anvil. It notices you. 'Trade or fight. I don't do small talk.'",
+        min_depth=76, max_depth=105,
+        safe_option=EventChoice(
+            "Trade (5 JC)",
+            success=EventOutcome("It hands you something warm. Your next digs feel... enhanced.", 0, -5, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Fight it",
+            success=EventOutcome("You shatter the elemental. Its core is worth a fortune.", 0, 8, False),
+            failure=EventOutcome("Fire hurts. Who knew.", -4, -2, True),
+            success_chance=0.40,
+        ),
+        complexity="complex", layer="Magma",
+        buff_on_success=TempBuff("forged", "Forge-Tempered", 3, {"advance_bonus": 2}),
+    ),
+    RandomEvent(
+        id="volcanic_vent_gambit",
+        name="Volcanic Vent Gambit",
+        description="A volcanic vent cycles between eruptions. The gap between bursts is exactly three heartbeats.",
+        min_depth=76, max_depth=None,
+        safe_option=EventChoice(
+            "Wait for it to subside",
+            success=EventOutcome("Patience. The vent cools after an hour.", 0, 1, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Sprint through between eruptions",
+            success=EventOutcome("Three heartbeats. You made it in two.", 8, 3, False),
+            failure=EventOutcome("Terrible timing. Cooked.", -6, -3, True),
+            success_chance=0.30,
+        ),
+        layer="Magma",
+    ),
+    RandomEvent(
+        id="heat_mirage",
+        name="Heat Mirage",
+        description="You see an oasis ahead. With a swimming pool. And a bartender. It's 100% not real.",
+        min_depth=76, max_depth=105,
+        safe_option=EventChoice(
+            "Keep walking",
+            success=EventOutcome("You knew it wasn't real but you're still disappointed.", 0, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Walk toward it anyway",
+            success=EventOutcome("Wait. The bartender WAS real? Free drinks.", 0, 5, False),
+            failure=EventOutcome("It was never real. You wasted an hour.", -2, 0, False),
+            success_chance=0.25,
+        ),
+        complexity="simple", layer="Magma",
+    ),
+    RandomEvent(
+        id="shooting_star",
+        name="Shooting Star",
+        description="A blazing rock tears through the cavern wall and embeds itself in the floor. It radiates warmth and value.",
+        min_depth=76, max_depth=None,
+        safe_option=EventChoice(
+            "Mine the star",
+            success=EventOutcome("Star fragments. Warm to the touch and surprisingly dense.", 0, 4, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Crack it open",
+            success=EventOutcome("The core is pure stardust. Priceless.", 0, 8, False),
+            failure=EventOutcome("It explodes. Stars do that sometimes.", -3, -1, True),
+            success_chance=0.35,
+        ),
+        complexity="simple", layer="Magma", rarity="uncommon",
+    ),
+
+    # ===================================================================
+    # EXPANSION EVENTS — Dota Hero Encounters
+    # ===================================================================
+
+    RandomEvent(
+        id="pudge_fishing",
+        name="Pudge's Fishing Hole",
+        description="A butcher on the far side of a chasm is fishing with a meat hook. 'Fresh meat delivery service!' he calls. 'First ride's free.'",
+        min_depth=26, max_depth=None,
+        safe_option=EventChoice(
+            "Climb around the chasm",
+            success=EventOutcome("The long way. You find coins in the crevices.", 0, 2, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Grab the hook",
+            success=EventOutcome("WHEEE! You arrive covered in something but 6 blocks deeper.", 6, 0, False),
+            failure=EventOutcome("The hook misses. You fall. Pudge waves sadly from above.", -4, -2, True),
+            success_chance=0.50,
+        ),
+        rarity="uncommon",
+    ),
+    RandomEvent(
+        id="tinker_workshop",
+        name="Tinker's Abandoned Workshop",
+        description="A cluttered workshop full of half-finished gadgets. A sign reads: 'Gone to rearm. Back in 5 minutes.' The sign is 400 years old.",
+        min_depth=51, max_depth=None,
+        safe_option=EventChoice(
+            "Scavenge for parts",
+            success=EventOutcome("Spare parts. Not glamorous, but sellable.", 0, 3, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Repair a gadget",
+            success=EventOutcome("It works! A drill that practically digs itself.", 0, 0, False),
+            failure=EventOutcome("It doesn't work. It also sparks. And now your eyebrows are gone.", -2, -1, False),
+            success_chance=0.45,
+        ),
+        complexity="complex", layer="Crystal", rarity="uncommon",
+        buff_on_success=TempBuff("tinker_drill", "Rearm Protocol", 3, {"advance_bonus": 2}),
+    ),
+    RandomEvent(
+        id="the_burrow",
+        name="The Burrow",
+        description="The ground cracks beneath you. Something chitinous scuttles below. It's been waiting.",
+        min_depth=101, max_depth=None,
+        safe_option=EventChoice(
+            "Retreat slowly",
+            success=EventOutcome("It lets you go. This time.", 0, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Investigate the cracks",
+            success=EventOutcome("An ancient intelligence offers knowledge. Your depth for its wisdom.", 0, 8, False),
+            failure=EventOutcome("It didn't want to talk. It wanted lunch.", -5, -3, True),
+            success_chance=0.35,
+        ),
+        complexity="complex", rarity="uncommon",
+        buff_on_success=TempBuff("nyx_insight", "Vendetta's Whisper", 2, {"cave_in_reduction": 0.10}),
+    ),
+    RandomEvent(
+        id="arcanist_library",
+        name="The Arcanist's Library",
+        description="A chamber lined with tomes. An impossibly old man surrounded by floating orbs doesn't look up. 'I know why you're here,' he says. He sounds bored.",
+        min_depth=201, max_depth=None,
+        safe_option=EventChoice(
+            "Browse the shelves",
+            success=EventOutcome("You find a primer on geological theory. +30 luminosity restored.", 0, 2, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Ask about the orbs",
+            success=EventOutcome("He almost smiles. 'Choose: cold, energy, or fire.' Cold restores your light. The others... well.", 3, 8, False),
+            failure=EventOutcome("He waves his hand. You're outside. You don't remember leaving.", -4, 0, False),
+            success_chance=0.40,
+        ),
+        complexity="complex", layer="Frozen Core", rarity="rare",
+    ),
+    RandomEvent(
+        id="the_dark_rift",
+        name="The Dark Rift",
+        description="The tunnel opens into a vast underground kingdom. A horned figure on a throne of basalt offers passage. 'Everything has a price,' it says. 'Even the ground you stand on.'",
+        min_depth=101, max_depth=155,
+        safe_option=EventChoice(
+            "Bow and withdraw",
+            success=EventOutcome("It nods. Respect costs nothing. You find coins by the exit.", 0, 3, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Challenge for passage",
+            success=EventOutcome("You win the challenge. The throne room collapses into a shortcut.", 8, 5, False),
+            failure=EventOutcome("It wasn't really a challenge. More of a demonstration.", -6, -4, True),
+            success_chance=0.35,
+        ),
+        complexity="complex", layer="Abyss", rarity="uncommon",
+    ),
+
+    # ===================================================================
+    # EXPANSION EVENTS — Abyss Layer (101-150)
+    # ===================================================================
+
+    RandomEvent(
+        id="void_market",
+        name="Void Market",
+        description="Shadowy merchants materialize from nothing. They trade in concepts. 'Depth for wealth? Wealth for depth? Information for blocks?'",
+        min_depth=101, max_depth=155,
+        safe_option=EventChoice(
+            "Trade depth for wealth (3 blocks for 6 JC)",
+            success=EventOutcome("Fair trade. Your tunnel shortens. Your wallet fattens.", -3, 6, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Trade wealth for depth (6 JC for 5 blocks)",
+            success=EventOutcome("The shadows accept. You feel your tunnel extend.", 5, -6, False),
+            failure=EventOutcome("The shadows take your coins and vanish. No refunds in the void.", 0, -6, False),
+            success_chance=0.75,
+        ),
+        complexity="complex", layer="Abyss", rarity="uncommon",
+    ),
+    RandomEvent(
+        id="abyssal_fishing",
+        name="Abyssal Fishing",
+        description="A luminous pool of liquid void. Something moves beneath the surface. It might be valuable. It might be alive.",
+        min_depth=101, max_depth=155,
+        safe_option=EventChoice(
+            "Peer into the depths",
+            success=EventOutcome("You see your reflection. It winks. You earn 2 JC for your trouble.", 0, 2, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Reach in",
+            success=EventOutcome("Your hand closes around something cold and heavy. Treasure.", 0, 8, False),
+            failure=EventOutcome("Whatever it was, it pulled your coin purse in. And your glove.", 0, -4, False),
+            success_chance=0.50,
+        ),
+        layer="Abyss", rarity="uncommon",
+    ),
+    RandomEvent(
+        id="gravity_inversion",
+        name="Gravity Inversion",
+        description="You are suddenly falling upward. Then sideways. Then in a direction that doesn't have a name.",
+        min_depth=101, max_depth=None,
+        safe_option=EventChoice(
+            "Grab hold of something",
+            success=EventOutcome("You cling to a stalactite until reality sorts itself out.", 1, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Fall sideways on purpose",
+            success=EventOutcome("You fall through solid rock. The physics down here are generous.", 5, 2, False),
+            failure=EventOutcome("You fall up, then down, then up again. Nauseating.", -4, -1, False),
+            success_chance=0.45,
+        ),
+        layer="Abyss",
+    ),
+    RandomEvent(
+        id="whispering_walls_extended",
+        name="Whispering Walls",
+        description="The void's whispers form coherent sentences. 'We remember when this stone was sky.'",
+        min_depth=101, max_depth=155,
+        safe_option=EventChoice(
+            "Cover your ears",
+            success=EventOutcome("The whispers fade. Some things are better left unheard.", 0, 2, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Listen carefully",
+            success=EventOutcome("'...and the hero bought a clarity and walked into the trees.' Wait, what? Still, the void pays well for listeners.", 2, 10, False),
+            failure=EventOutcome("The whispers get inside your head. They rearrange things.", -6, -4, True),
+            success_chance=0.30,
+        ),
+        complexity="complex", layer="Abyss", rarity="rare",
+    ),
+
+    # ===================================================================
+    # EXPANSION EVENTS — Fungal Depths (151-200)
+    # ===================================================================
+
+    RandomEvent(
+        id="spore_storm",
+        name="Spore Storm",
+        description="A cloud of bioluminescent spores erupts from the fungal walls. Beautiful. Also, you're inhaling them.",
+        min_depth=151, max_depth=205,
+        safe_option=EventChoice(
+            "Retreat and breathe",
+            success=EventOutcome("Fresh air. Relatively speaking. Everything down here is questionable.", 1, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Breathe deep",
+            success=EventOutcome("The spores are... enhancing? You can see further and dig faster.", 4, 3, False),
+            failure=EventOutcome("Spore cough. Your lungs file a formal complaint.", -3, -1, False),
+            success_chance=0.45,
+        ),
+        layer="Fungal Depths",
+        buff_on_success=TempBuff("spore_enhanced", "Spore-Enhanced", 2, {"advance_bonus": 1}),
+    ),
+    RandomEvent(
+        id="mycelium_network",
+        name="Mycelium Network",
+        description="The fungal root network pulses with light. Data flows through it — the locations of other tunnels.",
+        min_depth=151, max_depth=205,
+        safe_option=EventChoice(
+            "Just watch",
+            success=EventOutcome("The network hums. You feel connected to something vast.", 0, 3, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Tap in",
+            success=EventOutcome("You see the depths of other miners. Knowledge is power.", 0, 5, False),
+            failure=EventOutcome("The network rejects you. A psychic headache.", -2, 0, False),
+            success_chance=0.55,
+        ),
+        complexity="complex", layer="Fungal Depths", rarity="uncommon", social=True,
+    ),
+    RandomEvent(
+        id="sporewalker",
+        name="The Sporewalker",
+        description="A humanoid made entirely of mushrooms waves at you. It offers a glowing fungal cap with the enthusiasm of someone who has never been told 'no.'",
+        min_depth=151, max_depth=205,
+        safe_option=EventChoice(
+            "Accept the cap",
+            success=EventOutcome("It tastes like earth and starlight. Your tunnel walls feel more solid.", 0, 3, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Ask for the premium cap",
+            success=EventOutcome("The Sporewalker beams. The premium cap glows brighter.", 2, 5, False),
+            failure=EventOutcome("There is no premium cap. The Sporewalker is confused. And hurt.", 0, 1, False),
+            success_chance=0.50,
+        ),
+        complexity="simple", layer="Fungal Depths",
+        buff_on_success=TempBuff("spore_shield", "Fungal Fortitude", 3, {"cave_in_reduction": 0.05}),
+    ),
+    RandomEvent(
+        id="bioluminescent_cathedral",
+        name="Bioluminescent Cathedral",
+        description="You emerge into a cavern so vast your lantern is unnecessary. The ceiling is a galaxy of living light.",
+        min_depth=151, max_depth=205,
+        safe_option=EventChoice(
+            "Sit and watch",
+            success=EventOutcome("For a moment, the weight of all that stone above you doesn't matter.", 0, 5, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Climb toward the lights",
+            success=EventOutcome("You reach the bioluminescent canopy. Up close, it's even more beautiful.", 3, 8, False),
+            failure=EventOutcome("You slip. The fall is long but the mushrooms are soft.", -4, 0, False),
+            success_chance=0.40,
+        ),
+        complexity="simple", layer="Fungal Depths", rarity="rare",
+    ),
+
+    # ===================================================================
+    # EXPANSION EVENTS — Frozen Core (201-275)
+    # ===================================================================
+
+    RandomEvent(
+        id="time_eddy",
+        name="Time Eddy",
+        description="A pocket where time runs differently. You can see your past digs playing out like ghosts ahead of you.",
+        min_depth=201, max_depth=280,
+        safe_option=EventChoice(
+            "Observe from outside",
+            success=EventOutcome("You learn from watching your past mistakes. The future feels clearer.", 0, 2, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Step inside",
+            success=EventOutcome("Time bends around you. For a moment you exist in two places at once. Both of them dig.", 4, 4, False),
+            failure=EventOutcome("You step out and three hours have passed. Time is cruel.", -3, -2, False),
+            success_chance=0.45,
+        ),
+        complexity="complex", layer="Frozen Core",
+    ),
+    RandomEvent(
+        id="frozen_ancient",
+        name="Frozen Ancient",
+        description="Something enormous is frozen in the ice. It has too many limbs. Most of them are wrong.",
+        min_depth=201, max_depth=280,
+        safe_option=EventChoice(
+            "Photograph it",
+            success=EventOutcome("For posterity. And selling to tabloids.", 0, 3, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Chip a piece free",
+            success=EventOutcome("It's warm. Organic. Worth a fortune to the right buyer.", 0, 10, False),
+            failure=EventOutcome("It moved. IT MOVED.", -6, -3, True),
+            success_chance=0.35,
+        ),
+        layer="Frozen Core", rarity="uncommon",
+    ),
+    RandomEvent(
+        id="the_still_point",
+        name="The Still Point",
+        description="Absolute silence. Absolute cold. Absolute peace. For one perfect moment, nothing decays.",
+        min_depth=201, max_depth=280,
+        safe_option=EventChoice(
+            "Be still",
+            success=EventOutcome("The moment passes. But something lingers — your tunnel feels more permanent.", 0, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Try to hold the moment",
+            success=EventOutcome("You can't. But trying earned you something.", 0, 5, False),
+            failure=EventOutcome("The moment shatters. Cold rushes in.", -2, 0, False),
+            success_chance=0.50,
+        ),
+        complexity="simple", layer="Frozen Core", rarity="rare",
+        buff_on_success=TempBuff("still_point", "Temporal Anchor", 5, {"cave_in_reduction": 0.08}),
+    ),
+    RandomEvent(
+        id="paradox_loop",
+        name="Paradox Loop",
+        description="You meet yourself coming the other direction. You both stop. Neither of you seems surprised.",
+        min_depth=201, max_depth=None,
+        safe_option=EventChoice(
+            "Offer yourself a coin",
+            success=EventOutcome("Your other self accepts. You feel generous and broke simultaneously.", 3, -1, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Fight yourself",
+            success=EventOutcome("You win. Or you lost. The distinction is academic at this depth.", 5, 3, False),
+            failure=EventOutcome("You lose to yourself. The humiliation is paradoxically doubled.", -5, -2, False),
+            success_chance=0.50,
+        ),
+        complexity="complex", layer="Frozen Core", rarity="rare",
+    ),
+
+    # ===================================================================
+    # EXPANSION EVENTS — The Hollow (276+)
+    # ===================================================================
+
+    RandomEvent(
+        id="the_cartographer",
+        name="The Cartographer",
+        description="A figure with no face draws maps on the walls. The maps are of places that shouldn't exist. Some of them are accurate.",
+        min_depth=276, max_depth=None,
+        safe_option=EventChoice(
+            "Help draw",
+            success=EventOutcome("Your contribution is... noted. The Cartographer pays in concepts that translate to coins.", 2, 5, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Buy a map (10 JC)",
+            success=EventOutcome("The map shows paths that shouldn't exist. They do anyway.", 5, -10, False),
+            failure=EventOutcome("The map is blank. 'That IS The Hollow,' the Cartographer explains.", 0, -10, False),
+            success_chance=0.60,
+        ),
+        complexity="complex", layer="The Hollow", rarity="rare",
+    ),
+    RandomEvent(
+        id="the_final_merchant",
+        name="The Final Merchant",
+        description="A merchant who sells only one thing, and it changes every time you meet them. They seem tired of existing.",
+        min_depth=276, max_depth=None,
+        safe_option=EventChoice(
+            "Browse and leave",
+            success=EventOutcome("'Everyone browses. Nobody buys,' the merchant says. 'Story of my life.'", 0, 2, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Haggle",
+            success=EventOutcome("'Fine. Half price. Just take it.' The merchant looks relieved.", 3, 8, False),
+            failure=EventOutcome("The price doubles. 'That's what you get for haggling with the void.'", 0, -5, False),
+            success_chance=0.40,
+        ),
+        complexity="complex", layer="The Hollow", rarity="legendary",
+    ),
+    RandomEvent(
+        id="memory_of_the_surface",
+        name="Memory of the Surface",
+        description="For a moment, you remember what sunlight feels like. The warmth. The color. It hurts more than you expected.",
+        min_depth=276, max_depth=None,
+        safe_option=EventChoice(
+            "Let it pass",
+            success=EventOutcome("You dig with renewed purpose. Or possibly spite. Hard to tell the difference down here.", 0, 5, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Hold onto the memory",
+            success=EventOutcome("The light stays a little longer. Your pickaxe feels lighter.", 3, 8, False),
+            failure=EventOutcome("The memory dissolves. You feel emptier than before.", -3, 0, False),
+            success_chance=0.45,
+        ),
+        complexity="simple", layer="The Hollow", rarity="uncommon",
+    ),
+
+    # ===================================================================
+    # EXPANSION EVENTS — Darkness-Only (require Pitch Black luminosity)
+    # ===================================================================
+
+    RandomEvent(
+        id="things_in_the_dark",
+        name="Things in the Dark",
+        description="You can't see what's touching your shoulder. It's warm. It might be friendly. It might not.",
+        min_depth=76, max_depth=None,
+        safe_option=EventChoice(
+            "Stand very still",
+            success=EventOutcome("It leaves. You'll never know what it was. Maybe that's better.", 0, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Reach out",
+            success=EventOutcome("It was trying to give you something. In the dark. Normally, somehow.", 0, 10, False),
+            failure=EventOutcome("It wasn't friendly.", -5, -3, True),
+            success_chance=0.50,
+        ),
+        requires_dark=True,
+    ),
+    RandomEvent(
+        id="the_lightless_path",
+        name="The Lightless Path",
+        description="In total darkness, your other senses sharpen. You can hear a path the light would never reveal.",
+        min_depth=76, max_depth=None,
+        safe_option=EventChoice(
+            "Stay put",
+            success=EventOutcome("The sound fades. You wait for the light to return.", 0, 1, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Follow the sound",
+            success=EventOutcome("The path opens into a chamber. You don't need light to feel the treasure.", 5, 5, False),
+            failure=EventOutcome("You followed the wrong sound. Deeper darkness.", -4, -2, False),
+            success_chance=0.45,
+        ),
+        complexity="complex", requires_dark=True,
+    ),
+    RandomEvent(
+        id="phosphor_vein",
+        name="Phosphor Vein",
+        description="Your pickaxe strikes something that glows. A vein of phosphorescent mineral splits the darkness.",
+        min_depth=76, max_depth=None,
+        safe_option=EventChoice(
+            "Mine the vein",
+            success=EventOutcome("Light floods back. The darkness retreats. Luminosity restored.", 0, 3, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Follow the vein deeper",
+            success=EventOutcome("It leads to a mother lode. Light AND wealth.", 3, 6, False),
+            failure=EventOutcome("The vein dead-ends. But at least you can see again.", 0, 1, False),
+            success_chance=0.55,
+        ),
+        complexity="simple", requires_dark=True, rarity="uncommon",
+    ),
+
+    # ===================================================================
+    # EXPANSION EVENTS — Roshan Superboss
+    # ===================================================================
+
+    RandomEvent(
+        id="roshan_lair",
+        name="Roshan's Lair",
+        description="An ancient pit radiates power that makes your bones vibrate. Something immense stirs in the darkness. It has been here since before the stone was stone.",
+        min_depth=276, max_depth=None,
+        safe_option=EventChoice(
+            "Flee",
+            success=EventOutcome("Discretion is the better part of valor. The pit remembers you left.", 0, 5, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Challenge the ancient",
+            success=EventOutcome("Against all odds, the ancient falls. An aegis shard clatters to the ground. The pit is silent.", 10, 25, False),
+            failure=EventOutcome("The ancient demonstrates why it has survived since the world was young.", -10, -8, True),
+            success_chance=0.20,
+        ),
+        complexity="complex", layer="The Hollow", rarity="legendary", social=True,
+    ),
+
+    # ===================================================================
+    # EXPANSION EVENTS — OSRS / General Easter Eggs
+    # ===================================================================
+
+    RandomEvent(
+        id="buying_gf",
+        name="The Persistent Miner",
+        description="A miner is shouting into the void with impressive conviction. 'Buying GF 10k!' The void does not respond.",
+        min_depth=101, max_depth=None,
+        safe_option=EventChoice(
+            "Walk away slowly",
+            success=EventOutcome("The shouting fades behind you. Some battles are unwinnable.", 0, 1, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Offer business advice",
+            success=EventOutcome("They diversify into gem trading. You get a referral bonus.", 0, 4, False),
+            failure=EventOutcome("They counter-offer. You are now somehow the one buying the GF.", 0, -3, False),
+            success_chance=0.50,
+        ),
+        complexity="simple", rarity="uncommon",
+    ),
+    RandomEvent(
+        id="rock_golem_encounter",
+        name="Rock Golem",
+        description="A tiny golem made of living rock follows you. It seems to have chosen you specifically. It cannot be discouraged.",
+        min_depth=50, max_depth=None,
+        safe_option=EventChoice(
+            "Accept your new companion",
+            success=EventOutcome("It settles on your shoulder. It's heavier than it looks.", 0, 2, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Try to feed it",
+            success=EventOutcome("It eats a rock and purrs. You didn't know rocks could purr.", 1, 3, False),
+            failure=EventOutcome("It bites your hand. Rock teeth. Actual rock teeth.", -1, 0, False),
+            success_chance=0.65,
+        ),
+        complexity="simple", rarity="rare",
+    ),
 ]
 
 
@@ -778,6 +1932,25 @@ VISIBLE_ACHIEVEMENTS: list[AchievementDef] = [
     ]),
     AchievementDef("prestige_level", "Prestigious", "Prestige level reached", [
         AchievementTier("Bronze", 1), AchievementTier("Silver", 3), AchievementTier("Gold", 5),
+    ]),
+    # Expansion achievements
+    AchievementDef("depth_deep", "Depth Explorer", "Reach extreme depths", [
+        AchievementTier("Bronze", 150), AchievementTier("Silver", 200), AchievementTier("Gold", 300),
+    ]),
+    AchievementDef("events_survived", "Event Survivor", "Survive risky event outcomes", [
+        AchievementTier("Bronze", 5), AchievementTier("Silver", 20), AchievementTier("Gold", 50),
+    ]),
+    AchievementDef("darkness_walker", "Shadow Walker", "Digs completed in Dark/Pitch Black luminosity", [
+        AchievementTier("Bronze", 10), AchievementTier("Silver", 50), AchievementTier("Gold", 100),
+    ]),
+    AchievementDef("dota_scholar", "Dota Scholar", "Encounter Dota hero events", [
+        AchievementTier("Bronze", 3), AchievementTier("Silver", 5), AchievementTier("Gold", 8),
+    ]),
+    AchievementDef("items_used", "Tool Master", "Unique items used", [
+        AchievementTier("Bronze", 5), AchievementTier("Silver", 15), AchievementTier("Gold", 30),
+    ]),
+    AchievementDef("guild_worthy", "Guild-Worthy", "Reach depth 200", [
+        AchievementTier("Bronze", 200), AchievementTier("Silver", 275), AchievementTier("Gold", 400),
     ]),
 ]
 
@@ -841,6 +2014,37 @@ HIDDEN_ACHIEVEMENTS: list[HiddenAchievementDef] = [
         "insurance_fraud", "Suspicious Timing",
         "Get sabotaged within 1 hour of insurance expiring",
         "The universe has a cruel sense of humor.",
+    ),
+    # Expansion hidden achievements
+    HiddenAchievementDef(
+        "identity_crisis", "Identity Crisis",
+        "Encounter The Nameless Depth when your tunnel is named 'The Nameless Depth'",
+        "What's in a name? Everything, apparently.",
+    ),
+    HiddenAchievementDef(
+        "paradox_resolved", "Paradox Resolved",
+        "Win the Paradox Loop fight against yourself",
+        "Can you beat someone who knows all your moves?",
+    ),
+    HiddenAchievementDef(
+        "blind_faith", "Blind Faith",
+        "Defeat a boss at Pitch Black luminosity",
+        "Who needs eyes in the dark?",
+    ),
+    HiddenAchievementDef(
+        "aegis_claimed", "Aegis Claimed",
+        "Defeat Roshan's Lair encounter",
+        "The ancient falls. The aegis endures.",
+    ),
+    HiddenAchievementDef(
+        "full_museum", "Curator",
+        "Be the first to discover 10+ artifacts in the guild museum",
+        "A life's work, preserved underground.",
+    ),
+    HiddenAchievementDef(
+        "art_of_the_deal", "The Art of the Deal",
+        "Fail to haggle with The Final Merchant 3 times",
+        "Negotiation is not your strong suit.",
     ),
 ]
 
@@ -951,14 +2155,81 @@ ASCII_ART: dict[str, str] = {
         "      ⛏️ YOU ARE HERE\n"
         "  .                  ."
     ),
+    "Fungal Depths": (
+        "  --- abyss above ----\n"
+        "  ~~~~~~~~~~~~~~~~~~~~\n"
+        "  ~ FUNGAL  DEPTHS  ~\n"
+        "  ~ 🍄 .  🍄 .  🍄 ~\n"
+        "  ~  . glow .  glow ~\n"
+        "  ~ 🍄 .  🍄 .  🍄 ~\n"
+        "  ~  spores  drift  ~\n"
+        "  ~ 🍄 .  🍄 .  🍄 ~\n"
+        "      ⛏️ YOU ARE HERE\n"
+        "  ~~~~~~~~~~~~~~~~~~~~"
+    ),
+    "Frozen Core": (
+        "  --- fungal above ---\n"
+        "  ********************\n"
+        "  *  FROZEN   CORE  *\n"
+        "  * ❄️  .  ❄️  .  ❄️ *\n"
+        "  *  time  slows    *\n"
+        "  * ❄️  .  ❄️  .  ❄️ *\n"
+        "  *  frost  creeps  *\n"
+        "  * ❄️  .  ❄️  .  ❄️ *\n"
+        "      ⛏️ YOU ARE HERE\n"
+        "  ********************"
+    ),
+    "The Hollow": (
+        "  --- frozen above ---\n"
+        "                      \n"
+        "                      \n"
+        "     T H E            \n"
+        "       H O L L O W    \n"
+        "                      \n"
+        "    the mine           \n"
+        "      remembers you   \n"
+        "      ⛏️ YOU ARE HERE\n"
+        "                      "
+    ),
 }
+
+
+# ---------------------------------------------------------------------------
+# Luminosity Constants
+# ---------------------------------------------------------------------------
+
+LUMINOSITY_MAX: int = 100
+
+# Luminosity drain per dig, by layer name. Layers not listed have 0 drain.
+LUMINOSITY_DRAIN_PER_DIG: dict[str, int] = {
+    "Crystal": 0,
+    "Magma": 3,
+    "Abyss": 5,
+    "Fungal Depths": 2,
+    "Frozen Core": 7,
+    "The Hollow": 10,
+}
+
+# Thresholds and their gameplay effects
+LUMINOSITY_BRIGHT: int = 76       # 76-100: normal
+LUMINOSITY_DIM: int = 26          # 26-75: +5% cave-in, 1.5x event chance
+LUMINOSITY_DARK: int = 1          # 1-25: +15% cave-in, forced events, risky -10%, JC +25%
+LUMINOSITY_PITCH_BLACK: int = 0   # 0: +25% cave-in, forced risky, JC +50%, darkness events
+
+LUMINOSITY_DIM_CAVE_IN_BONUS: float = 0.05
+LUMINOSITY_DIM_EVENT_MULTIPLIER: float = 1.5
+LUMINOSITY_DARK_CAVE_IN_BONUS: float = 0.15
+LUMINOSITY_DARK_RISKY_PENALTY: float = 0.10   # subtracted from risky success chance
+LUMINOSITY_DARK_JC_MULTIPLIER: float = 1.25
+LUMINOSITY_PITCH_CAVE_IN_BONUS: float = 0.25
+LUMINOSITY_PITCH_JC_MULTIPLIER: float = 1.50
 
 
 # ---------------------------------------------------------------------------
 # Prestige Constants
 # ---------------------------------------------------------------------------
 
-MAX_PRESTIGE: int = 5
+MAX_PRESTIGE: int = 10
 
 PRESTIGE_CROWNS: dict[int, str] = {
     0: "",
@@ -967,6 +2238,11 @@ PRESTIGE_CROWNS: dict[int, str] = {
     3: "\U0001f451",         # crown
     4: "\U0001f4a0",         # diamond with dot
     5: "\u2b50",             # star
+    6: "\U0001f531",         # trident
+    7: "\u267e\ufe0f",       # infinity
+    8: "\U0001f525",         # fire
+    9: "\U0001f30c",         # milky way
+    10: "\U0001f5a4",        # black heart
 }
 
 RELIC_SLOTS_BASE: int = 1  # relic_slots = prestige_level + RELIC_SLOTS_BASE
@@ -976,6 +2252,11 @@ PRESTIGE_PERKS: list[str] = [
     "cave_in_resistance",
     "loot_multiplier",
     "mixed_bonus",
+    "deep_sight",
+    "veteran_miner",
+    "tunnel_mastery",
+    "dark_adaptation",
+    "the_endless",
 ]
 
 # Per-prestige-level bonuses for each perk
@@ -984,6 +2265,11 @@ PRESTIGE_PERK_VALUES: dict[str, dict[str, float]] = {
     "cave_in_resistance": {"cave_in_reduction": 0.05},
     "loot_multiplier": {"jc_bonus": 1.0},
     "mixed_bonus": {"advance_min_bonus": 0.5, "cave_in_reduction": 0.02, "jc_bonus": 0.5},
+    "deep_sight": {"luminosity_drain_reduction": 0.25},
+    "veteran_miner": {"risky_success_bonus": 0.05},
+    "tunnel_mastery": {"expedition_reward_bonus": 0.50},
+    "dark_adaptation": {"dim_cave_in_immunity": 1.0},
+    "the_endless": {"hollow_advance_bonus": 1.0},  # The Hollow advance becomes 1-2
 }
 
 
@@ -998,12 +2284,15 @@ DECAY_RATE_PER_DAY: dict[str, int] = {
     "Crystal": 3,
     "Magma": 4,
     "Abyss": 5,
+    "Fungal Depths": 6,
+    "Frozen Core": 7,
+    "The Hollow": 8,
 }
 
 DECAY_START_HOURS: int = 24                        # decay begins after this
 DECAY_ACCELERATED_HOURS: int = 72                  # 2x rate after this
 DECAY_ACCELERATED_MULTIPLIER: float = 2.0
-DECAY_FLOOR_DEPTHS: list[int] = [25, 50, 75]       # decay cannot cross these
+DECAY_FLOOR_DEPTHS: list[int] = [25, 50, 75, 100, 150, 200]  # decay cannot cross these
 DECAY_HELPER_REDUCTION: float = 0.5                 # per helper in last 24h
 DECAY_HELPER_MIN_MULTIPLIER: float = 0.25           # floor on helper reduction
 
@@ -1061,7 +2350,7 @@ INJURY_DURATIONS: dict[str, dict[str, int]] = {
 # Miscellaneous
 # ---------------------------------------------------------------------------
 
-MAX_INVENTORY_SLOTS: int = 5
+MAX_INVENTORY_SLOTS: int = 8
 ABANDON_COOLDOWN_SECONDS: int = 86_400     # 24 hours
 ABANDON_MIN_DEPTH: int = 10
 ABANDON_REFUND_PCT: float = 0.10           # 10% of depth in JC
@@ -1110,7 +2399,7 @@ PAID_DIG_COSTS: list[int] = PAID_DIG_COSTS_PER_DAY
 MAX_INVENTORY_SIZE: int = MAX_INVENTORY_SLOTS
 INJURY_SLOW_COOLDOWN: int = 6 * 3600  # 6 hours in seconds (injury slower cooldown)
 
-BOSS_BOUNDARIES: list[int] = LAYER_BOUNDARIES  # [25, 50, 75, 100]
+BOSS_BOUNDARIES: list[int] = LAYER_BOUNDARIES  # [25, 50, 75, 100, 150, 200, 275]
 BOSS_DEPTHS: list[int] = LAYER_BOUNDARIES
 
 BOSS_NAMES: dict[int, str] = {d: b.name for d, b in BOSSES.items()}
@@ -1138,22 +2427,33 @@ ARTIFACT_POOL: list[dict] = [
 ]
 
 # Events as dicts
+def _choice_to_dict(c: EventChoice) -> dict:
+    """Convert an EventChoice to a dict for service-layer access."""
+    return {
+        "label": c.label,
+        "success": {"description": c.success.description, "advance": c.success.advance, "jc": c.success.jc, "cave_in": c.success.cave_in},
+        "failure": {"description": c.failure.description, "advance": c.failure.advance, "jc": c.failure.jc, "cave_in": c.failure.cave_in} if c.failure else None,
+        "success_chance": c.success_chance,
+    }
+
+
 EVENT_POOL: list[dict] = [
     {
         "id": e.id, "name": e.name, "description": e.description,
         "min_depth": e.min_depth, "max_depth": e.max_depth,
-        "safe_option": {
-            "label": e.safe_option.label,
-            "success": {"description": e.safe_option.success.description, "advance": e.safe_option.success.advance, "jc": e.safe_option.success.jc, "cave_in": e.safe_option.success.cave_in},
-            "failure": {"description": e.safe_option.failure.description, "advance": e.safe_option.failure.advance, "jc": e.safe_option.failure.jc, "cave_in": e.safe_option.failure.cave_in} if e.safe_option.failure else None,
-            "success_chance": e.safe_option.success_chance,
-        },
-        "risky_option": {
-            "label": e.risky_option.label,
-            "success": {"description": e.risky_option.success.description, "advance": e.risky_option.success.advance, "jc": e.risky_option.success.jc, "cave_in": e.risky_option.success.cave_in},
-            "failure": {"description": e.risky_option.failure.description, "advance": e.risky_option.failure.advance, "jc": e.risky_option.failure.jc, "cave_in": e.risky_option.failure.cave_in} if e.risky_option.failure else None,
-            "success_chance": e.risky_option.success_chance,
-        },
+        "safe_option": _choice_to_dict(e.safe_option),
+        "risky_option": _choice_to_dict(e.risky_option),
+        "complexity": e.complexity,
+        "layer": e.layer,
+        "rarity": e.rarity,
+        "requires_dark": e.requires_dark,
+        "social": e.social,
+        "buff_on_success": {
+            "id": e.buff_on_success.id,
+            "name": e.buff_on_success.name,
+            "duration_digs": e.buff_on_success.duration_digs,
+            "effect": dict(e.buff_on_success.effect),
+        } if e.buff_on_success else None,
     }
     for e in RANDOM_EVENTS
 ]

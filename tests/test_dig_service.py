@@ -866,14 +866,17 @@ class TestBoss:
         monkeypatch.setattr(random, "random", lambda: 0.99)
         dig_service.dig(10001, guild_id)
 
-        # Set depth past all bosses but boss_progress incomplete
-        dig_repo.update_tunnel(10001, guild_id, depth=105, boss_progress=json.dumps({"25": "defeated", "50": "defeated", "75": "defeated", "100": "active"}))  # 3 of 4 bosses
+        # Set depth past all bosses but boss_progress incomplete (missing 150, 200, 275)
+        partial = {str(b): "defeated" for b in BOSS_BOUNDARIES[:3]}
+        partial[str(BOSS_BOUNDARIES[3])] = "active"  # 100 still active
+        dig_repo.update_tunnel(10001, guild_id, depth=280, boss_progress=json.dumps(partial))
 
         result = dig_service.prestige(10001, guild_id, "advance_boost")
         assert not result["success"]
 
-        # Now mark all bosses defeated
-        dig_repo.update_tunnel(10001, guild_id, boss_progress=json.dumps({"25": "defeated", "50": "defeated", "75": "defeated", "100": "defeated"}))
+        # Now mark ALL bosses defeated
+        all_defeated = {str(b): "defeated" for b in BOSS_BOUNDARIES}
+        dig_repo.update_tunnel(10001, guild_id, boss_progress=json.dumps(all_defeated))
         result = dig_service.prestige(10001, guild_id, "advance_boost")
         assert result["success"]
 
@@ -887,12 +890,13 @@ class TestPrestige:
     """Tests for prestige system."""
 
     def _setup_prestige_ready(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """Helper to set up a player ready for prestige."""
+        """Helper to set up a player ready for prestige (all 7 bosses defeated)."""
         _register_player(player_repository, balance=500)
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
         monkeypatch.setattr(random, "random", lambda: 0.99)
         dig_service.dig(10001, guild_id)
-        dig_repo.update_tunnel(10001, guild_id, depth=105, boss_progress=json.dumps({"25": "defeated", "50": "defeated", "75": "defeated", "100": "defeated"}))
+        all_bosses_defeated = {str(b): "defeated" for b in BOSS_BOUNDARIES}
+        dig_repo.update_tunnel(10001, guild_id, depth=280, boss_progress=json.dumps(all_bosses_defeated))
 
     def test_prestige_resets_depth(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
         """Depth resets to 0."""
@@ -920,8 +924,8 @@ class TestPrestige:
         perks = json.loads(tunnel["prestige_perks"]) if tunnel["prestige_perks"] else []
         assert "advance_boost" in perks
 
-    def test_prestige_max_5(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """Can't prestige past level 5."""
+    def test_prestige_max(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+        """Can't prestige past MAX_PRESTIGE."""
         self._setup_prestige_ready(dig_service, dig_repo, player_repository, guild_id, monkeypatch)
         dig_repo.update_tunnel(10001, guild_id, prestige_level=MAX_PRESTIGE)
         result = dig_service.prestige(10001, guild_id, "advance_boost")
@@ -958,8 +962,8 @@ class TestItems:
         balance_after = player_repository.get_balance(10001, guild_id)
         assert balance_before - balance_after == CONSUMABLES["dynamite"].cost
 
-    def test_inventory_max_5(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """Can't exceed 5 items."""
+    def test_inventory_max(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+        """Can't exceed MAX_INVENTORY_SLOTS items."""
         _register_player(player_repository, balance=500)
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
         monkeypatch.setattr(random, "random", lambda: 0.99)
@@ -1507,3 +1511,270 @@ class TestBossOdds:
         result = dig_service.fight_boss(10001, guild_id, "cautious", wager=0)
         assert result["success"]
         assert result["won"] is True
+
+
+# =============================================================================
+# Expansion System Tests
+# =============================================================================
+
+
+class TestNewLayers:
+    """Verify new layers are defined and accessible."""
+
+    def test_eight_layers_exist(self):
+        """Should have 8 layers after expansion."""
+        from services.dig_constants import _LAYERS_DEF
+        assert len(_LAYERS_DEF) == 8
+        names = [l.name for l in _LAYERS_DEF]
+        assert "Fungal Depths" in names
+        assert "Frozen Core" in names
+        assert "The Hollow" in names
+
+    def test_abyss_now_capped(self):
+        """Abyss should have depth_max=150 (no longer unbounded)."""
+        from services.dig_constants import _LAYERS_DEF
+        abyss = next(l for l in _LAYERS_DEF if l.name == "Abyss")
+        assert abyss.depth_max == 150
+
+    def test_hollow_is_unbounded(self):
+        """The Hollow should be unbounded (depth_max=None)."""
+        from services.dig_constants import _LAYERS_DEF
+        hollow = next(l for l in _LAYERS_DEF if l.name == "The Hollow")
+        assert hollow.depth_max is None
+
+    def test_get_layer_returns_new_layers(self, dig_service):
+        """Service should return new layers for deep depths."""
+        layer_160 = dig_service._get_layer(160)
+        assert layer_160.get("name") == "Fungal Depths"
+        layer_250 = dig_service._get_layer(250)
+        assert layer_250.get("name") == "Frozen Core"
+        layer_300 = dig_service._get_layer(300)
+        assert layer_300.get("name") == "The Hollow"
+
+    def test_new_bosses_exist(self):
+        """Should have 7 bosses (4 original + 3 new)."""
+        from services.dig_constants import BOSSES
+        assert len(BOSSES) == 7
+        assert 150 in BOSSES
+        assert 200 in BOSSES
+        assert 275 in BOSSES
+
+    def test_new_milestones(self):
+        """Should have milestones for depths 150, 200, 275."""
+        from services.dig_constants import MILESTONES
+        assert 150 in MILESTONES
+        assert 200 in MILESTONES
+        assert 275 in MILESTONES
+
+
+class TestLuminosity:
+    """Verify luminosity mechanic."""
+
+    def test_luminosity_starts_at_100(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+        """New tunnels should have luminosity 100."""
+        _register_player(player_repository)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        # First dig creates tunnel; second dig hits luminosity code path
+        dig_service.dig(10001, guild_id)
+
+        monkeypatch.setattr(time, "time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1)
+        result = dig_service.dig(10001, guild_id)
+        assert result["success"]
+        lum = result.get("luminosity_info")
+        assert lum is not None
+        # Dirt has 0 drain so luminosity stays at 100
+        assert lum["luminosity_after"] == 100
+
+    def test_luminosity_drains_in_magma(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+        """Digging in Magma should drain luminosity by 3."""
+        _register_player(player_repository, balance=200)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+        dig_repo.update_tunnel(10001, guild_id, depth=80)
+
+        monkeypatch.setattr(time, "time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1)
+        result = dig_service.dig(10001, guild_id)
+        assert result["success"]
+        lum = result.get("luminosity_info")
+        assert lum is not None
+        assert lum["drained"] == 3
+        assert lum["luminosity_after"] == 97
+
+    def test_luminosity_level_thresholds(self, dig_service):
+        """Verify luminosity level names at different values."""
+        assert dig_service._get_luminosity_level(100) == "bright"
+        assert dig_service._get_luminosity_level(76) == "bright"
+        assert dig_service._get_luminosity_level(75) == "dim"
+        assert dig_service._get_luminosity_level(26) == "dim"
+        assert dig_service._get_luminosity_level(25) == "dark"
+        assert dig_service._get_luminosity_level(1) == "dark"
+        assert dig_service._get_luminosity_level(0) == "pitch_black"
+
+    def test_luminosity_cave_in_bonus(self, dig_service):
+        """Low luminosity should increase cave-in chance."""
+        assert dig_service._luminosity_cave_in_bonus(100) == 0.0
+        assert dig_service._luminosity_cave_in_bonus(50) > 0.0  # dim
+        assert dig_service._luminosity_cave_in_bonus(10) > dig_service._luminosity_cave_in_bonus(50)  # dark > dim
+        assert dig_service._luminosity_cave_in_bonus(0) > dig_service._luminosity_cave_in_bonus(10)  # pitch > dark
+
+
+class TestTempBuffs:
+    """Verify temp buff system."""
+
+    def test_set_and_get_buff(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+        """Can set and retrieve a temp buff."""
+        _register_player(player_repository)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+
+        dig_service.set_temp_buff(10001, guild_id, {
+            "id": "test_buff", "name": "Test", "duration_digs": 3,
+            "effect": {"advance_bonus": 2},
+        })
+
+        tunnel = dig_repo.get_tunnel(10001, guild_id)
+        buff = dig_service._get_active_buff(dict(tunnel))
+        assert buff is not None
+        assert buff["id"] == "test_buff"
+        assert buff["digs_remaining"] == 3
+
+    def test_buff_applies_advance_bonus(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+        """Active buff with advance_bonus should increase advance."""
+        _register_player(player_repository, balance=200)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+        dig_repo.update_tunnel(10001, guild_id, depth=10)
+
+        # Set a buff with +5 advance
+        dig_service.set_temp_buff(10001, guild_id, {
+            "id": "power", "name": "Power", "duration_digs": 2,
+            "effect": {"advance_bonus": 5},
+        })
+
+        monkeypatch.setattr(time, "time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1)
+        monkeypatch.setattr(random, "randint", lambda a, b: a)  # min advance
+        result = dig_service.dig(10001, guild_id)
+        assert result["success"]
+        # Advance should be at least 1 (base min) + 5 (buff) = 6
+        assert result["advance"] >= 6
+
+    def test_buff_decrements(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+        """Buff should decrement each dig and expire."""
+        _register_player(player_repository, balance=200)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+        dig_repo.update_tunnel(10001, guild_id, depth=5)
+
+        dig_service.set_temp_buff(10001, guild_id, {
+            "id": "short", "name": "Short", "duration_digs": 1,
+            "effect": {"advance_bonus": 1},
+        })
+
+        monkeypatch.setattr(time, "time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1)
+        dig_service.dig(10001, guild_id)
+
+        # Buff should be gone after 1 dig
+        tunnel = dig_repo.get_tunnel(10001, guild_id)
+        buff = dig_service._get_active_buff(dict(tunnel))
+        assert buff is None
+
+
+class TestExpandedEvents:
+    """Verify expanded event system."""
+
+    def test_event_pool_has_58_events(self):
+        """Event pool should have 58 events after expansion."""
+        from services.dig_constants import EVENT_POOL
+        assert len(EVENT_POOL) == 58
+
+    def test_new_events_have_complexity_field(self):
+        """All events should have a complexity field."""
+        from services.dig_constants import EVENT_POOL
+        for e in EVENT_POOL:
+            assert "complexity" in e, f"Event {e['id']} missing complexity"
+
+    def test_darkness_events_exist(self):
+        """Should have events that require pitch black luminosity."""
+        from services.dig_constants import EVENT_POOL
+        dark_events = [e for e in EVENT_POOL if e.get("requires_dark")]
+        assert len(dark_events) >= 3
+
+    def test_roll_event_filters_by_layer(self, dig_service):
+        """roll_event should filter events by depth/layer."""
+        random.seed(42)
+        # Roll 100 events at shallow depth — should never get deep events
+        for _ in range(100):
+            event = dig_service.roll_event(5, luminosity=100)
+            if event:
+                assert event.get("rarity") in ("common", "uncommon", "rare", "legendary")
+
+    def test_dota_hero_events_exist(self):
+        """Should have Dota hero encounter events."""
+        from services.dig_constants import EVENT_POOL
+        dota_ids = {"pudge_fishing", "tinker_workshop", "the_burrow", "arcanist_library", "the_dark_rift", "roshan_lair"}
+        event_ids = {e["id"] for e in EVENT_POOL}
+        assert dota_ids.issubset(event_ids), f"Missing Dota events: {dota_ids - event_ids}"
+
+
+class TestExpandedPrestige:
+    """Verify extended prestige and pickaxes."""
+
+    def test_max_prestige_is_10(self):
+        from services.dig_constants import MAX_PRESTIGE
+        assert MAX_PRESTIGE == 10
+
+    def test_seven_pickaxe_tiers(self):
+        from services.dig_constants import _PICKAXE_TIERS_DEF
+        assert len(_PICKAXE_TIERS_DEF) == 7
+        assert _PICKAXE_TIERS_DEF[-1].name == "Void-Touched"
+
+    def test_nine_prestige_perks(self):
+        from services.dig_constants import PRESTIGE_PERKS
+        assert len(PRESTIGE_PERKS) == 9
+        assert "deep_sight" in PRESTIGE_PERKS
+        assert "the_endless" in PRESTIGE_PERKS
+
+    def test_crowns_for_all_levels(self):
+        from services.dig_constants import PRESTIGE_CROWNS, MAX_PRESTIGE
+        for i in range(MAX_PRESTIGE + 1):
+            assert i in PRESTIGE_CROWNS, f"Missing crown for prestige {i}"
+
+
+class TestNewItemsAndArtifacts:
+    """Verify new consumables and artifacts."""
+
+    def test_nine_consumables(self):
+        from services.dig_constants import CONSUMABLES
+        assert len(CONSUMABLES) == 9
+        assert "torch" in CONSUMABLES
+        assert "void_bait" in CONSUMABLES
+
+    def test_35_artifacts(self):
+        from services.dig_constants import ALL_ARTIFACTS
+        assert len(ALL_ARTIFACTS) == 35
+
+    def test_fungal_artifacts_exist(self):
+        from services.dig_constants import ALL_ARTIFACTS
+        fungal = [a for a in ALL_ARTIFACTS if a.layer == "Fungal Depths"]
+        assert len(fungal) >= 4  # 1 relic + 3 collectibles
+
+    def test_aegis_fragment_exists(self):
+        from services.dig_constants import ARTIFACT_BY_ID
+        assert "aegis_fragment" in ARTIFACT_BY_ID
+        assert ARTIFACT_BY_ID["aegis_fragment"].is_relic is True
+
+    def test_buy_item_torch(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+        """Should be able to buy a torch."""
+        _register_player(player_repository, balance=200)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+
+        result = dig_service.buy_item(10001, guild_id, "torch")
+        assert result["success"]
+        assert result["cost"] == 6
