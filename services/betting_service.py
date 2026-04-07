@@ -437,6 +437,11 @@ class BettingService:
         # Choose percentage based on mode
         blind_percentage = BOMB_POT_BLIND_PERCENTAGE if is_bomb_pot else AUTO_BLIND_PERCENTAGE
 
+        # Fetch bet totals once before the loop (avoid N+1 queries)
+        cached_totals = self.bet_repo.get_total_bets_by_guild(
+            guild_id, since_ts=shuffle_timestamp, pending_match_id=pending_match_id
+        )
+
         # Process each team
         for team, player_ids in [("radiant", radiant_ids), ("dire", dire_ids)]:
             for discord_id in player_ids:
@@ -474,12 +479,9 @@ class BettingService:
                             })
                             continue
 
-                    # Calculate current odds for this team before placing bet
-                    current_totals = self.bet_repo.get_total_bets_by_guild(
-                        guild_id, since_ts=shuffle_timestamp, pending_match_id=pending_match_id
-                    )
-                    total_pool = current_totals["radiant"] + current_totals["dire"]
-                    team_total = current_totals[team]
+                    # Calculate current odds using cached totals (updated after each bet)
+                    total_pool = cached_totals["radiant"] + cached_totals["dire"]
+                    team_total = cached_totals[team]
 
                     # Odds at placement: what multiplier you'd get if you win
                     # If no bets yet, odds are undefined (will be calculated when more bets come in)
@@ -513,6 +515,8 @@ class BettingService:
                         "team": team,
                         "amount": blind_amount,
                     })
+                    # Update cached totals so next iteration has accurate odds
+                    cached_totals[team] += blind_amount
                     if team == "radiant":
                         result["total_radiant"] += blind_amount
                     else:

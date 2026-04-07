@@ -62,22 +62,10 @@ class ManaEffectsService:
             "anonymous": bool,  # True ~60% of time (dark message), False ~40% (mana hint)
         }
         """
-        from repositories.base_repository import BaseRepository
-        gid = BaseRepository.normalize_guild_id(guild_id)
-
-        # Get all players with positive balance, excluding the siphoner
-        all_players = self.player_repo.get_all(gid)
-        eligible = [
-            p for p in all_players
-            if p.discord_id is not None
-            and p.discord_id != discord_id
-            and p.jopacoin_balance > 0
-        ]
-
-        if not eligible:
+        # Pick a random victim with positive balance (SQL-level, no full table scan)
+        victim = self.player_repo.get_random_eligible_target(guild_id, exclude_id=discord_id)
+        if not victim:
             return None
-
-        victim = random.choice(eligible)
         amount = random.randint(1, 3)
         # Don't steal more than they have
         amount = min(amount, victim.jopacoin_balance)

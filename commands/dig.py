@@ -19,7 +19,7 @@ from commands.checks import require_gamba_channel
 from utils.formatting import JOPACOIN_EMOTE
 from utils.interaction_safety import safe_defer, safe_followup
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
-from services.dig_constants import PICKAXE_TIERS, get_layer as get_layer_def
+from services.dig_constants import MAX_INVENTORY_SLOTS, PICKAXE_TIERS, get_layer as get_layer_def
 
 if TYPE_CHECKING:
     from services.dig_service import DigService
@@ -1448,7 +1448,7 @@ class DigCommands(commands.Cog):
 
         # Inventory count
         inv_count = getattr(shop, "inventory_count", 0)
-        embed.set_footer(text=f"Your inventory: {inv_count}/5 items | /dig buy <item> to purchase, /dig use <item> to queue")
+        embed.set_footer(text=f"Your inventory: {inv_count}/{MAX_INVENTORY_SLOTS} items | Use /dig buy <item> to purchase, /dig use <item> to queue")
 
         await safe_followup(interaction, embed=embed)
 
@@ -1895,10 +1895,10 @@ class DigCommands(commands.Cog):
                     value=desc or "No description",
                     inline=False,
                 )
-            embed.set_footer(text=f"{len(items)}/5 slots used")
+            embed.set_footer(text=f"{len(items)}/{MAX_INVENTORY_SLOTS} slots used")
         else:
             embed.description = "Your inventory is empty. Visit `/dig shop` to buy items."
-            embed.set_footer(text="0/5 slots used")
+            embed.set_footer(text="0/{MAX_INVENTORY_SLOTS} slots used")
 
         await safe_followup(interaction, embed=embed)
 

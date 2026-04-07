@@ -62,13 +62,18 @@ class LobbyManagerService:
         return self._shuffle_locks[normalized]
 
     def _check_stale_lock(self, guild_id: int | None) -> bool:
-        """Check if lock is stale and release if so. Returns True if was stale."""
+        """Check if lock is stale and reset if so. Returns True if was stale.
+
+        Cannot call lock.release() from a different context than the one that
+        acquired it (raises RuntimeError). Instead, replace with a fresh lock.
+        """
         normalized = guild_id if guild_id is not None else 0
         lock = self._shuffle_locks.get(normalized)
         if lock and lock.locked():
             acquired_at = self._shuffle_lock_times.get(normalized, 0)
             if time.time() - acquired_at > self.SHUFFLE_LOCK_TIMEOUT:
-                lock.release()
+                self._shuffle_locks[normalized] = asyncio.Lock()
+                self._shuffle_lock_times.pop(normalized, None)
                 return True
         return False
 

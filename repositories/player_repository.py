@@ -204,6 +204,22 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             rows = cursor.fetchall()
             return [self._row_to_player(row) for row in rows]
 
+    def get_random_eligible_target(self, guild_id: int, exclude_id: int, min_balance: int = 1) -> "Player | None":
+        """Get a random player with positive balance, excluding one player. SQL-level random."""
+        guild_id = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT * FROM players
+                WHERE guild_id = ? AND discord_id != ? AND jopacoin_balance >= ?
+                ORDER BY RANDOM() LIMIT 1
+                """,
+                (guild_id, exclude_id, min_balance),
+            )
+            row = cursor.fetchone()
+            return self._row_to_player(row) if row else None
+
     def get_leaderboard(self, guild_id: int, limit: int = 20, offset: int = 0) -> list[Player]:
         """
         Get players for leaderboard, sorted by jopacoin balance descending.

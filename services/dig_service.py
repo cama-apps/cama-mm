@@ -653,9 +653,7 @@ class DigService:
             tunnel["luminosity"] = luminosity
 
         relic_cavein_mod = 0.97 if self._has_relic(discord_id, guild_id, "crystal_compass") else 1.0
-        relic_advance_mod = 1 if not self._has_relic(discord_id, guild_id, "mole_claws") else 1  # +1 advance handled below
         mole_claws_bonus = 1 if self._has_relic(discord_id, guild_id, "mole_claws") else 0
-        relic_loot_mod = 1 if not self._has_relic(discord_id, guild_id, "magma_heart") else 1  # +1 JC handled below
         magma_heart_bonus = 1 if self._has_relic(discord_id, guild_id, "magma_heart") else 0
 
         # 9. Cave-in check
@@ -715,9 +713,12 @@ class DigService:
                     discord_id, guild_id, injury_state=json.dumps(injury)
                 )
             else:
-                # Medical bill
+                # Medical bill (capped at current balance to prevent negative)
                 med_cost = random.randint(2, 6)
-                self.player_repo.add_balance(discord_id, guild_id, -med_cost)
+                balance = self.player_repo.get_balance(discord_id, guild_id)
+                med_cost = min(med_cost, max(0, balance))
+                if med_cost > 0:
+                    self.player_repo.add_balance(discord_id, guild_id, -med_cost)
                 cave_in_detail = {
                     "type": "medical_bill",
                     "block_loss": block_loss,
@@ -788,7 +789,7 @@ class DigService:
         if has_depth_charge:
             depth_charge_bonus = 8
             advance += depth_charge_bonus
-        advance = int(advance * injury_advance_mod)
+        advance = int(advance * (1.0 + perk_advance_bonus) * injury_advance_mod)
         advance = max(1, advance)
         # Depth charge triggers mini cave-in penalty after advance
         if has_depth_charge:
@@ -815,7 +816,7 @@ class DigService:
         jc_min = layer.get("jc_min", 1)
         jc_max = layer.get("jc_max", 3)
         jc_earned = random.randint(jc_min, jc_max)
-        jc_earned = int(jc_earned * (1.0 + perk_loot_bonus) * relic_loot_mod * self._luminosity_jc_multiplier(luminosity))
+        jc_earned = int(jc_earned * (1.0 + perk_loot_bonus) * self._luminosity_jc_multiplier(luminosity)) + magma_heart_bonus
         jc_earned = max(1, jc_earned)
 
         # 14. Check milestones
