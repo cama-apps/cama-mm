@@ -36,6 +36,9 @@ LAYER_COLORS = {
     "Crystal": 0x00CED1,
     "Magma": 0xFF4500,
     "Abyss": 0x2F0047,
+    "Fungal Depths": 0x7CFC00,
+    "Frozen Core": 0x87CEEB,
+    "The Hollow": 0x0D0D0D,
 }
 
 PROGRESSIVE_TIPS = [
@@ -79,8 +82,9 @@ GUIDE_PAGES = [
             "you a number of blocks based on your pickaxe tier, active items, "
             "and a bit of luck.\n\n"
             "**Layers**\n"
-            "The mine has five layers: **Dirt**, **Stone**, **Crystal**, **Magma**, "
-            "and **Abyss**. Each layer is harder but more rewarding.\n\n"
+            "The mine has eight layers: **Dirt**, **Stone**, **Crystal**, **Magma**, "
+            "**Abyss**, **Fungal Depths**, **Frozen Core**, and **The Hollow**. "
+            "Each layer is harder but more rewarding.\n\n"
             "**Cave-ins**\n"
             "Random cave-ins can collapse part of your tunnel, costing you depth. "
             "Insurance and reinforcements reduce the damage.\n\n"
@@ -95,7 +99,7 @@ GUIDE_PAGES = [
         description=(
             "**Consumables**\n"
             "Buy consumables from `/dig shop` and queue them with `/dig use`. "
-            "You can hold up to 5 items at a time. Queued items are used on "
+            "You can hold up to 8 items at a time. Queued items are used on "
             "your next dig.\n\n"
             "**Pickaxes**\n"
             "Upgrade your pickaxe with `/dig upgrade`. Higher tiers require depth "
@@ -360,6 +364,119 @@ class BossWagerModal(discord.ui.Modal):
         except Exception as e:
             logger.error("Boss fight error: %s", e)
             await interaction.followup.send("Boss fight failed. Try again.", ephemeral=True)
+
+
+class EventEncounterView(discord.ui.View):
+    """Interactive view for choice/complex events with safe and risky buttons."""
+
+    def __init__(
+        self,
+        dig_service: "DigService",
+        user_id: int,
+        guild_id: int | None,
+        event_data: dict,
+    ):
+        super().__init__(timeout=60)
+        self.dig_service = dig_service
+        self.user_id = user_id
+        self.guild_id = guild_id
+        self.event_data = event_data
+        safe_label = "Play it safe"
+        risky_label = "Take the risk"
+        if isinstance(event_data, dict):
+            safe_opt = event_data.get("safe_option")
+            risky_opt = event_data.get("risky_option")
+            if isinstance(safe_opt, dict):
+                safe_label = safe_opt.get("label", safe_label)
+            if isinstance(risky_opt, dict):
+                risky_label = risky_opt.get("label", risky_label)
+        self.safe_btn.label = safe_label[:80]
+        self.risky_btn.label = risky_label[:80]
+
+    @discord.ui.button(label="Safe", style=discord.ButtonStyle.secondary, emoji="\U0001f6e1\ufe0f")
+    async def safe_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("This isn't your event.", ephemeral=True)
+            return
+        await interaction.response.defer()
+        result = await self._resolve("safe")
+        await interaction.followup.send(embed=result)
+        self.stop()
+
+    @discord.ui.button(label="Risky", style=discord.ButtonStyle.danger, emoji="\u2694\ufe0f")
+    async def risky_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("This isn't your event.", ephemeral=True)
+            return
+        await interaction.response.defer()
+        result = await self._resolve("risky")
+        await interaction.followup.send(embed=result)
+        self.stop()
+
+    async def _resolve(self, choice: str) -> discord.Embed:
+        """Resolve the event choice and return an embed with the outcome."""
+        event = self.event_data
+        option = event.get(f"{choice}_option", {}) if isinstance(event, dict) else {}
+        success_chance = option.get("success_chance", 1.0) if isinstance(option, dict) else 1.0
+
+        won = random.random() < success_chance
+        outcome = option.get("success") if won else option.get("failure")
+        if outcome is None:
+            outcome = option.get("success", {})
+            won = True
+
+        desc = outcome.get("description", "Nothing happened.") if isinstance(outcome, dict) else "Nothing happened."
+        advance = outcome.get("advance", 0) if isinstance(outcome, dict) else 0
+        jc = outcome.get("jc", 0) if isinstance(outcome, dict) else 0
+        cave_in = outcome.get("cave_in", False) if isinstance(outcome, dict) else False
+
+        # Apply effects
+        if jc != 0:
+            await asyncio.to_thread(
+                self.dig_service.player_repo.add_balance, self.user_id, self.guild_id, jc
+            )
+        if advance != 0:
+            tunnel = await asyncio.to_thread(self.dig_service.dig_repo.get_tunnel, self.user_id, self.guild_id)
+            if tunnel:
+                depth = dict(tunnel).get("depth", 0)
+                new_depth = max(0, depth + advance)
+                await asyncio.to_thread(
+                    self.dig_service.dig_repo.update_tunnel, self.user_id, self.guild_id, depth=new_depth
+                )
+
+        # Apply temp buff if risky success
+        if won and choice == "risky" and isinstance(event, dict) and event.get("buff_on_success"):
+            await asyncio.to_thread(
+                self.dig_service.set_temp_buff, self.user_id, self.guild_id, event["buff_on_success"]
+            )
+
+        # Build result embed
+        color = 0x00FF00 if won else 0xFF4444
+        embed = discord.Embed(
+            title=event.get("name", "Event") if isinstance(event, dict) else "Event",
+            description=desc,
+            color=color,
+        )
+        parts = []
+        if advance != 0:
+            parts.append(f"{'+'if advance > 0 else ''}{advance} blocks")
+        if jc != 0:
+            parts.append(f"{'+'if jc > 0 else ''}{jc} {JOPACOIN_EMOTE}")
+        if cave_in:
+            parts.append("Cave-in triggered!")
+        if parts:
+            embed.add_field(name="Outcome", value=" | ".join(parts), inline=False)
+
+        # Show buff if granted
+        if won and choice == "risky" and isinstance(event, dict) and event.get("buff_on_success"):
+            buff = event["buff_on_success"]
+            embed.add_field(
+                name=f"Buff: {buff.get('name', '?')}",
+                value=f"Active for {buff.get('duration_digs', 0)} digs",
+                inline=True,
+            )
+
+        return embed
 
 
 class BossEncounterView(discord.ui.View):
@@ -782,6 +899,27 @@ class DigCommands(commands.Cog):
                 else:
                     await msg.edit(content="Dig cancelled.", embed=None, view=None)
             return
+
+        # Complex event encounter — show interactive buttons
+        event = getattr(result, "event", None)
+        if event:
+            event_data = event if isinstance(event, dict) else (event._d if hasattr(event, "_d") else None)
+            complexity = event_data.get("complexity", "choice") if isinstance(event_data, dict) else "choice"
+            if complexity in ("complex", "choice") and isinstance(event_data, dict) and event_data.get("safe_option"):
+                # Show dig result first, then event view
+                embed = _build_dig_embed(result, interaction.user)
+                event_embed = discord.Embed(
+                    title=event_data.get("name", "Event"),
+                    description=event_data.get("description", "Something happens..."),
+                    color=0xDAA520,
+                )
+                rarity = event_data.get("rarity", "common")
+                if rarity != "common":
+                    event_embed.set_footer(text=f"{rarity.title()} encounter")
+                view = EventEncounterView(self.dig_service, interaction.user.id, guild_id, event_data)
+                await safe_followup(interaction, embed=embed)
+                await safe_followup(interaction, embed=event_embed, view=view)
+                return
 
         # Normal dig result
         embed = _build_dig_embed(result, interaction.user)
@@ -1319,12 +1457,17 @@ class DigCommands(commands.Cog):
     # ------------------------------------------------------------------
 
     @dig.command(name="buy", description="Buy an item from the mining shop")
-    @app_commands.describe(item="Item to buy (dynamite, hard_hat, lantern, reinforcement)")
+    @app_commands.describe(item="Item to buy")
     @app_commands.choices(item=[
-        app_commands.Choice(name="Dynamite", value="dynamite"),
-        app_commands.Choice(name="Hard Hat", value="hard_hat"),
-        app_commands.Choice(name="Lantern", value="lantern"),
-        app_commands.Choice(name="Reinforcement", value="reinforcement"),
+        app_commands.Choice(name="Dynamite (5 JC)", value="dynamite"),
+        app_commands.Choice(name="Hard Hat (8 JC)", value="hard_hat"),
+        app_commands.Choice(name="Lantern (4 JC)", value="lantern"),
+        app_commands.Choice(name="Reinforcement (6 JC)", value="reinforcement"),
+        app_commands.Choice(name="Torch (6 JC)", value="torch"),
+        app_commands.Choice(name="Grappling Hook (10 JC)", value="grappling_hook"),
+        app_commands.Choice(name="Sonar Pulse (8 JC)", value="sonar_pulse"),
+        app_commands.Choice(name="Depth Charge (15 JC)", value="depth_charge"),
+        app_commands.Choice(name="Void Bait (20 JC)", value="void_bait"),
     ])
     async def dig_buy(self, interaction: discord.Interaction, item: str):
         if not await require_gamba_channel(interaction):
@@ -1867,8 +2010,26 @@ def _build_dig_embed(result: object, user: discord.User | discord.Member) -> dis
         item_names = ", ".join(str(i) for i in items_used)
         embed.add_field(name="Items Used", value=item_names, inline=True)
 
+    # Luminosity bar (only shown when draining / below max)
+    lum_info = getattr(result, "luminosity_info", None)
+    if lum_info:
+        lum_after = lum_info.get("luminosity_after", 100) if isinstance(lum_info, dict) else getattr(lum_info, "luminosity_after", 100)
+        lum_drained = lum_info.get("drained", 0) if isinstance(lum_info, dict) else getattr(lum_info, "drained", 0)
+        if lum_drained > 0 or lum_after < 100:
+            filled = max(0, lum_after // 10)
+            empty = 10 - filled
+            bar = "\u2588" * filled + "\u2591" * empty
+            level_name = lum_info.get("level", "bright") if isinstance(lum_info, dict) else getattr(lum_info, "level", "bright")
+            level_label = {"bright": "Bright", "dim": "Dim", "dark": "Dark", "pitch_black": "Pitch Black"}.get(level_name, "")
+            lum_text = f"`[{bar}]` {lum_after}% — {level_label}"
+            if lum_drained > 0:
+                lum_text += f" (-{lum_drained})"
+            embed.add_field(name="Luminosity", value=lum_text, inline=False)
+
     # Footer tip — ~25% chance of a Dig Dug footer instead
-    if random.random() < 0.25:
+    if depth == 69:
+        embed.set_footer(text="Nice.")
+    elif random.random() < 0.25:
         embed.set_footer(text=random.choice(DIG_DUG_FOOTERS))
     else:
         embed.set_footer(text=getattr(result, "tip", "") or _tip(0))

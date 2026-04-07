@@ -260,6 +260,7 @@ class SchemaManager:
             ("create_mana_daily_losses_table", self._migration_create_mana_daily_losses_table),
             ("add_solo_grinder_columns", self._migration_add_solo_grinder_columns),
             ("create_dig_system_tables", self._migration_create_dig_system_tables),
+            ("dig_expansion_luminosity_and_buffs", self._migration_dig_expansion),
         ]
 
     # --- Migrations ---
@@ -1912,3 +1913,8 @@ class SchemaManager:
             )
             """
         )
+
+    def _migration_dig_expansion(self, cursor) -> None:
+        """Add luminosity and temp buff columns for the dig expansion."""
+        self._add_column_if_not_exists(cursor, "tunnels", "luminosity", "INTEGER NOT NULL DEFAULT 100")
+        self._add_column_if_not_exists(cursor, "tunnels", "temp_buffs", "TEXT")
