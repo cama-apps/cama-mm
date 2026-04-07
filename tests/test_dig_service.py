@@ -333,16 +333,16 @@ class TestMilestones:
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
         monkeypatch.setattr(random, "random", lambda: 0.99)
         dig_service.dig(10001, guild_id)
-        # Set depth just below milestone
-        dig_repo.update_tunnel(10001, guild_id, depth=23)
+        # Defeat boss at 25 so advance isn't capped, then set depth just below
+        boss_defeated = json.dumps({"25": "defeated"})
+        dig_repo.update_tunnel(10001, guild_id, depth=23, boss_progress=boss_defeated)
 
-        # Dig to cross 25
         monkeypatch.setattr(time, "time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1)
-        # Force advance of 3+ to cross 25
         monkeypatch.setattr(random, "randint", lambda a, b: 3)
         result = dig_service.dig(10001, guild_id)
-        if result["success"] and result["depth"] >= 25:
-            assert result.get("milestone_bonus", 0) == MILESTONES[25]
+        assert result["success"]
+        assert result["depth"] >= 25
+        assert result["milestone_bonus"] == MILESTONES[25]
 
     def test_milestone_50_bonus(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
         """+10 JC at depth 50."""
@@ -350,13 +350,15 @@ class TestMilestones:
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
         monkeypatch.setattr(random, "random", lambda: 0.99)
         dig_service.dig(10001, guild_id)
-        dig_repo.update_tunnel(10001, guild_id, depth=48)
+        boss_defeated = json.dumps({"25": "defeated", "50": "defeated"})
+        dig_repo.update_tunnel(10001, guild_id, depth=48, boss_progress=boss_defeated)
 
         monkeypatch.setattr(time, "time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1)
         monkeypatch.setattr(random, "randint", lambda a, b: 3)
         result = dig_service.dig(10001, guild_id)
-        if result["success"] and result["depth"] >= 50:
-            assert result.get("milestone_bonus", 0) == MILESTONES[50]
+        assert result["success"]
+        assert result["depth"] >= 50
+        assert result["milestone_bonus"] == MILESTONES[50]
 
     def test_milestone_100_bonus(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
         """+50 JC at depth 100."""
@@ -364,13 +366,15 @@ class TestMilestones:
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
         monkeypatch.setattr(random, "random", lambda: 0.99)
         dig_service.dig(10001, guild_id)
-        dig_repo.update_tunnel(10001, guild_id, depth=98)
+        boss_defeated = json.dumps({"25": "defeated", "50": "defeated", "75": "defeated", "100": "defeated"})
+        dig_repo.update_tunnel(10001, guild_id, depth=98, boss_progress=boss_defeated)
 
         monkeypatch.setattr(time, "time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1)
         monkeypatch.setattr(random, "randint", lambda a, b: 3)
         result = dig_service.dig(10001, guild_id)
-        if result["success"] and result["depth"] >= 100:
-            assert result.get("milestone_bonus", 0) == MILESTONES[100]
+        assert result["success"]
+        assert result["depth"] >= 100
+        assert result["milestone_bonus"] == MILESTONES[100]
 
 
 # =============================================================================
@@ -746,9 +750,9 @@ class TestInsurance:
         # Fixed damage seed for consistency
         random.seed(99)
         result = dig_service.sabotage_tunnel(10002, 10001, guild_id)
-        if result["success"]:
-            # With insurance, damage should be reduced
-            assert result.get("insurance_applied") or result.get("damage_reduced")
+        assert result["success"]
+        # With insurance, damage should be reduced
+        assert result.get("insurance_applied") or result.get("damage_reduced")
 
     def test_insurance_cost_scales_with_depth(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
         """Cost = 5 + depth/25."""
@@ -803,11 +807,10 @@ class TestBoss:
 
         monkeypatch.setattr(time, "time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1)
         result = dig_service.dig(10001, guild_id)
-        # Should be capped at boss boundary or signal boss encounter
-        if result["success"]:
-            tunnel = dig_repo.get_tunnel(10001, guild_id)
-            # Either depth is capped at 25 or a boss encounter is signaled
-            assert tunnel["depth"] <= 25 or result.get("boss_encounter")
+        assert result["success"]
+        tunnel = dig_repo.get_tunnel(10001, guild_id)
+        # Either depth is capped at boundary-1 or a boss encounter is signaled
+        assert tunnel["depth"] <= 25 or result.get("boss_encounter")
 
     def test_boss_fight_win(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
         """Win advances past boundary, awards payout."""
@@ -1277,12 +1280,12 @@ class TestPickaxe:
         result = dig_service.upgrade_pickaxe(10001, guild_id)
         assert not result["success"]
 
-        # Enough depth but check cost
+        # Enough depth and balance — should succeed
         dig_repo.update_tunnel(10001, guild_id, depth=stone_tier["depth_required"])
         result = dig_service.upgrade_pickaxe(10001, guild_id)
-        if result["success"]:
-            tunnel = dig_repo.get_tunnel(10001, guild_id)
-            assert tunnel["pickaxe_tier"] == 1
+        assert result["success"]
+        tunnel = dig_repo.get_tunnel(10001, guild_id)
+        assert tunnel["pickaxe_tier"] == 1
 
     def test_pickaxe_advance_bonus(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
         """Stone pickaxe gives +1 advance."""

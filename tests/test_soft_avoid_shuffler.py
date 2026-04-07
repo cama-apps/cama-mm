@@ -2,6 +2,8 @@
 Tests for soft avoid penalty calculation in the shuffler.
 """
 
+import random
+
 import pytest
 
 from domain.models.player import Player
@@ -161,6 +163,7 @@ class TestShuffleWithAvoids:
 
     def test_avoid_influences_team_selection(self):
         """Test that avoids influence which team split is chosen."""
+        random.seed(42)
         # Create shuffler with high avoid penalty
         shuffler = BalancedShuffler(soft_avoid_penalty=10000.0)
 
@@ -195,7 +198,6 @@ class TestShuffleWithAvoids:
         same_team = (1000 in team1_ids and 1001 in team1_ids) or \
                     (1000 in team2_ids and 1001 in team2_ids)
 
-        # With 10000 penalty, shuffler should strongly prefer splitting them
-        # This test documents expected behavior; may need relaxation if algorithm changes
-        if same_team:
-            pytest.skip("Algorithm placed avoided pair on same team (acceptable but suboptimal)")
+        # With 10000 penalty and identical ratings, the shuffler should split them.
+        # Seed randomness to make this deterministic.
+        assert not same_team, "With 10000 penalty and equal ratings, avoided pair should be on opposite teams"

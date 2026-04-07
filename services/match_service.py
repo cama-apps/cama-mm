@@ -928,15 +928,14 @@ class MatchService:
 
             # Check for games milestones (10, 50, 100, 200, 500)
             milestone_values = {10, 50, 100, 200, 500}
-            for pid in expected_ids:
-                player = self.player_repo.get_by_id(pid, guild_id)
-                if player:
-                    total_games = player.wins + player.losses
-                    if total_games in milestone_values:
-                        easter_egg_data["games_milestones"].append({
-                            "discord_id": pid,
-                            "total_games": total_games,
-                        })
+            milestone_players = self.player_repo.get_by_ids(list(expected_ids), guild_id)
+            for player in milestone_players:
+                total_games = player.wins + player.losses
+                if total_games in milestone_values:
+                    easter_egg_data["games_milestones"].append({
+                        "discord_id": player.discord_id,
+                        "total_games": total_games,
+                    })
 
             # Check for personal best win streak records (for winners only)
             for pid in winning_ids:

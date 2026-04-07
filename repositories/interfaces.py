@@ -39,6 +39,9 @@ class IPlayerRepository(ABC):
     def get_all(self, guild_id: int): ...
 
     @abstractmethod
+    def get_random_eligible_target(self, guild_id: int, exclude_id: int, min_balance: int = 1): ...
+
+    @abstractmethod
     def exists(self, discord_id: int, guild_id: int) -> bool: ...
 
     @abstractmethod

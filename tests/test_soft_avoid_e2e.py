@@ -2,6 +2,8 @@
 End-to-end tests for soft avoid feature.
 """
 
+import random
+
 import pytest
 
 from repositories.match_repository import MatchRepository
@@ -126,8 +128,10 @@ class TestSoftAvoidE2E:
             games=10,
         )
 
-        # Keep shuffling until the pair is on opposite teams
+        # Seed randomness to get deterministic shuffle with opposite teams
+        random.seed(42)
         max_attempts = 50
+        found = False
         for _ in range(max_attempts):
             result = match_service.shuffle_players(
                 player_ids=discord_ids,
@@ -152,12 +156,13 @@ class TestSoftAvoidE2E:
                 )
                 if len(avoids) == 1:
                     assert avoids[0].games_remaining == 9
-                    return  # Test passed
+                    found = True
+                    break
 
             # Clear shuffle state for next attempt (don't record)
             match_service.clear_last_shuffle(guild_id)
 
-        pytest.skip("Could not get opposite teams after max attempts")
+        assert found, "Could not get opposite teams after max attempts (seed=42)"
 
     def test_bidirectional_avoids_work(self, match_service, soft_avoid_repo, player_repo):
         """Test that bidirectional avoids work correctly."""
@@ -228,8 +233,10 @@ class TestSoftAvoidE2E:
             games=10,
         )
 
-        # Keep shuffling until the pair is on opposite teams
+        # Seed randomness for deterministic opposite-team placement
+        random.seed(42)
         max_attempts = 50
+        found = False
         for _ in range(max_attempts):
             result = match_service.shuffle_players(
                 player_ids=discord_ids,
@@ -249,9 +256,10 @@ class TestSoftAvoidE2E:
                 assert state is not None
                 assert "effective_avoid_ids" in state
                 assert avoid.id in state["effective_avoid_ids"]
-                return  # Test passed
+                found = True
+                break
 
             # Clear shuffle state for next attempt
             match_service.clear_last_shuffle(guild_id)
 
-        pytest.skip("Could not get opposite teams after max attempts")
+        assert found, "Could not get opposite teams after max attempts (seed=42)"

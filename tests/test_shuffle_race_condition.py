@@ -120,7 +120,7 @@ class TestShuffleLockPreventsRace:
 
     @pytest.mark.asyncio
     async def test_stale_lock_auto_releases(self, lobby_manager):
-        """Verify that stale locks (>60s) are automatically released."""
+        """Verify that stale locks (>60s) are automatically replaced."""
         guild_id = 44444
         lock = lobby_manager.get_shuffle_lock(guild_id)
 
@@ -131,14 +131,16 @@ class TestShuffleLockPreventsRace:
         normalized = guild_id if guild_id is not None else 0
         lobby_manager._shuffle_lock_times[normalized] = time.time() - 70  # 70 seconds ago
 
-        # Check for stale lock should release it
+        # Check for stale lock should replace it with a fresh one
         was_stale = lobby_manager._check_stale_lock(guild_id)
         assert was_stale is True
-        assert lock.locked() is False
 
-        # Should be able to acquire again
-        await asyncio.wait_for(lock.acquire(), timeout=0.1)
-        lock.release()
+        # New lock should be acquirable (old lock is orphaned)
+        new_lock = lobby_manager.get_shuffle_lock(guild_id)
+        assert new_lock is not lock  # replaced
+        assert new_lock.locked() is False
+        await asyncio.wait_for(new_lock.acquire(), timeout=0.1)
+        new_lock.release()
 
     @pytest.mark.asyncio
     async def test_non_stale_lock_not_released(self, lobby_manager):
