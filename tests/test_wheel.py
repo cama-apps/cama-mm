@@ -2,11 +2,9 @@
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import discord
 import pytest
 
 from commands.betting import BettingCommands
-from utils.wheel_drawing import BANKRUPT_WHEEL_WEDGES, WHEEL_WEDGES
 from config import (
     WHEEL_BLUE_SHELL_EST_EV,
     WHEEL_COOLDOWN_SECONDS,
@@ -14,6 +12,8 @@ from config import (
     WHEEL_RED_SHELL_EST_EV,
     WHEEL_TARGET_EV,
 )
+from domain.models.mana_effects import ManaEffects
+from utils.wheel_drawing import BANKRUPT_WHEEL_WEDGES, WHEEL_WEDGES
 
 
 @pytest.mark.asyncio
@@ -196,6 +196,111 @@ async def test_wheel_positive_no_debt_adds_directly():
 
     # Should add balance directly (user_id, guild_id, amount)
     player_service.adjust_balance.assert_called_once_with(1003, 123, 5)
+
+
+@pytest.mark.asyncio
+async def test_wheel_white_mana_animation_uses_capped_wedges():
+    """Verify the wheel GIF uses the same capped wedges White mana rolls against."""
+    bot = MagicMock()
+    bot.bankruptcy_service = None
+    bot.garnishment_service = None
+    bot.mana_effects_service = MagicMock()
+    bot.mana_effects_service.get_effects.return_value = ManaEffects(
+        color="White",
+        land="Plains",
+        plains_max_wheel_win=50,
+    )
+    betting_service = MagicMock()
+    match_service = MagicMock()
+    player_service = MagicMock()
+
+    player_service.get_player.return_value = MagicMock(name="TestPlayer")
+    player_service.get_balance.return_value = 50
+    player_service.get_leaderboard.return_value = []
+    player_service.get_last_wheel_spin = MagicMock(return_value=None)
+    player_service.set_last_wheel_spin = MagicMock()
+    player_service.try_claim_wheel_spin = MagicMock(return_value=True)
+    player_service.log_wheel_spin = MagicMock(return_value=1)
+    player_service.adjust_balance = MagicMock()
+
+    message = MagicMock()
+    message.edit = AsyncMock()
+
+    interaction = MagicMock()
+    interaction.channel.name = "gamba"
+    interaction.guild = MagicMock()
+    interaction.guild.id = 123
+    interaction.user.id = 1010
+    interaction.user.name = "Spinner"
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock(return_value=message)
+
+    commands = BettingCommands(bot, betting_service, match_service, player_service)
+    target_idx = next(i for i, wedge in enumerate(WHEEL_WEDGES) if wedge[1] == 80)
+
+    with patch.object(commands, "_create_wheel_gif_file", return_value=MagicMock()) as mock_gif:
+        with patch("commands.betting.random.randint", return_value=target_idx):
+            with patch("commands.betting.random.random", return_value=1.0):
+                with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
+                    await commands.gamba.callback(commands, interaction)
+
+    player_service.adjust_balance.assert_called_once_with(1010, 123, 50)
+    used_wedges = mock_gif.call_args.kwargs["wedges"]
+    assert used_wedges[target_idx][0] == "50"
+    assert used_wedges[target_idx][1] == 50
+
+
+@pytest.mark.asyncio
+async def test_wheel_blue_mana_embed_uses_reduced_numeric_payout():
+    """Verify Blue mana shows the reduced payout, not the pre-tax wedge value."""
+    bot = MagicMock()
+    bot.bankruptcy_service = None
+    bot.garnishment_service = None
+    bot.mana_effects_service = MagicMock()
+    bot.mana_effects_service.get_effects.return_value = ManaEffects(
+        color="Blue",
+        land="Island",
+        blue_gamba_reduction=0.25,
+    )
+    betting_service = MagicMock()
+    match_service = MagicMock()
+    player_service = MagicMock()
+
+    player_service.get_player.return_value = MagicMock(name="TestPlayer")
+    player_service.get_balance.return_value = 50
+    player_service.get_leaderboard.return_value = []
+    player_service.get_last_wheel_spin = MagicMock(return_value=None)
+    player_service.set_last_wheel_spin = MagicMock()
+    player_service.try_claim_wheel_spin = MagicMock(return_value=True)
+    player_service.log_wheel_spin = MagicMock(return_value=1)
+    player_service.adjust_balance = MagicMock()
+
+    message = MagicMock()
+    message.edit = AsyncMock()
+
+    interaction = MagicMock()
+    interaction.channel.name = "gamba"
+    interaction.guild = MagicMock()
+    interaction.guild.id = 123
+    interaction.user.id = 1011
+    interaction.user.name = "Spinner"
+    interaction.response.defer = AsyncMock()
+    interaction.followup.send = AsyncMock(return_value=message)
+
+    commands = BettingCommands(bot, betting_service, match_service, player_service)
+    target_idx = next(i for i, wedge in enumerate(WHEEL_WEDGES) if wedge[1] == 100)
+
+    with patch.object(commands, "_create_wheel_gif_file", return_value=MagicMock()):
+        with patch("commands.betting.random.randint", return_value=target_idx):
+            with patch("commands.betting.random.random", return_value=1.0):
+                with patch("commands.betting.asyncio.sleep", new_callable=AsyncMock):
+                    await commands.gamba.callback(commands, interaction)
+
+    player_service.adjust_balance.assert_called_once_with(1011, 123, 75)
+    embed = message.edit.call_args.kwargs["embed"]
+    assert embed.title == "🎉 Winner!"
+    assert "won **75**" in embed.description
+    assert any(field.name == "🏝️ Blue Mana Tax" for field in embed.fields)
 
 
 @pytest.mark.asyncio
