@@ -822,7 +822,12 @@ def _get_wheel_face(size: int, is_bankrupt: bool = False, is_golden: bool = Fals
         return _CACHED_WHEEL_FACE[size]
 
 
-def _create_wheel_face(size: int, is_bankrupt: bool = False, is_golden: bool = False) -> Image.Image:
+def _create_wheel_face(
+    size: int,
+    is_bankrupt: bool = False,
+    is_golden: bool = False,
+    wedges: list[tuple[str, int | str, str]] | None = None,
+) -> Image.Image:
     """
     Create the wheel face sprite once: glow ring and colored wedge pieslices.
 
@@ -835,7 +840,7 @@ def _create_wheel_face(size: int, is_bankrupt: bool = False, is_golden: bool = F
     center = size // 2
     radius = size // 2 - 30
 
-    wedges = get_wheel_wedges(is_bankrupt, is_golden)
+    wedges = wedges if wedges is not None else get_wheel_wedges(is_bankrupt, is_golden)
     num_wedges = len(wedges)
     angle_per_wedge = 360 / num_wedges
 
@@ -1062,8 +1067,13 @@ def _draw_shell_icon(shell_type: str, s: int) -> Image.Image:
 
 
 def _draw_wedge_labels(
-    img: Image.Image, draw: ImageDraw.Draw, size: int, rotation: float,
-    is_bankrupt: bool = False, is_golden: bool = False
+    img: Image.Image,
+    draw: ImageDraw.Draw,
+    size: int,
+    rotation: float,
+    is_bankrupt: bool = False,
+    is_golden: bool = False,
+    wedges: list[tuple[str, int | str, str]] | None = None,
 ) -> None:
     """Draw horizontal text labels on each wedge after rotation.
 
@@ -1072,7 +1082,7 @@ def _draw_wedge_labels(
     """
     center = size // 2
     radius = size // 2 - 30
-    wedges = get_wheel_wedges(is_bankrupt, is_golden)
+    wedges = wedges if wedges is not None else get_wheel_wedges(is_bankrupt, is_golden)
     num_wedges = len(wedges)
     angle_per_wedge = 360 / num_wedges
 
@@ -1224,6 +1234,8 @@ def create_wheel_frame_for_gif(
     size: int, rotation: float, selected_idx: int | None = None,
     display_name: str | None = None, frame_idx: int = 0,
     is_bankrupt: bool = False, is_golden: bool = False,
+    wedges: list[tuple[str, int | str, str]] | None = None,
+    wheel_face: Image.Image | None = None,
 ) -> Image.Image:
     """
     Create a single wheel frame optimized for GIF animation.
@@ -1234,15 +1246,24 @@ def create_wheel_frame_for_gif(
     Args:
         is_bankrupt: If True, uses the reduced bankrupt wheel with extension slices.
         is_golden: If True, uses the golden wheel for top-N jopacoin holders.
+        wedges: Optional override for the exact wheel wedges used by the spin.
+        wheel_face: Optional pre-rendered wheel face matching `wedges`.
     """
     img = Image.new("RGBA", (size, size), (30, 30, 35, 255))
 
     center = size // 2
     radius = size // 2 - 30
+    base_wedges = get_wheel_wedges(is_bankrupt, is_golden)
+    wedges = wedges if wedges is not None else base_wedges
 
     # Get cached wheel face (pieslices only) and rotate it
     # Use BILINEAR for faster rotation with minimal quality loss
-    face = _get_wheel_face(size, is_bankrupt, is_golden)
+    if wheel_face is not None:
+        face = wheel_face
+    elif wedges != base_wedges:
+        face = _create_wheel_face(size, is_bankrupt, is_golden, wedges=wedges)
+    else:
+        face = _get_wheel_face(size, is_bankrupt, is_golden)
     rotated_face = face.rotate(-rotation, center=(center, center), resample=Image.BILINEAR)
 
     # Composite rotated face onto background
@@ -1250,7 +1271,6 @@ def create_wheel_frame_for_gif(
 
     # Draw winner highlight on top of rotated face (if selected)
     draw = ImageDraw.Draw(img)
-    wedges = get_wheel_wedges(is_bankrupt, is_golden)
     if selected_idx is not None:
         num_wedges = len(wedges)
         angle_per_wedge = 360 / num_wedges
@@ -1287,7 +1307,7 @@ def create_wheel_frame_for_gif(
         _draw_matrix_rain(draw, size, frame_idx, phase)
 
     # Draw horizontal text labels on each wedge (after rotation so they stay readable)
-    _draw_wedge_labels(img, draw, size, rotation, is_bankrupt, is_golden)
+    _draw_wedge_labels(img, draw, size, rotation, is_bankrupt, is_golden, wedges=wedges)
 
     # Composite cached static overlay (center circle, text, pointer)
     static_overlay = _get_static_overlay(size, is_golden=is_golden)
@@ -1310,6 +1330,7 @@ def create_wheel_frame_for_gif(
 def create_wheel_gif(
     target_idx: int, size: int = 500, display_name: str | None = None,
     is_bankrupt: bool = False, is_golden: bool = False,
+    wedges: list[tuple[str, int | str, str]] | None = None,
 ) -> io.BytesIO:
     """
     Create an animated GIF of the wheel spinning and landing on target_idx.
@@ -1325,6 +1346,7 @@ def create_wheel_gif(
         display_name: User's Discord display name for JOPA-T terminal prompt
         is_bankrupt: If True, uses the reduced bankrupt wheel with extension slices.
         is_golden: If True, uses the golden wheel for top-N jopacoin holders.
+        wedges: Optional override for the exact wheel wedges used by the spin.
 
     Returns:
         BytesIO buffer containing the GIF data
@@ -1334,9 +1356,13 @@ def create_wheel_gif(
     frames = []
     durations = []
 
-    wedges = get_wheel_wedges(is_bankrupt, is_golden)
+    base_wedges = get_wheel_wedges(is_bankrupt, is_golden)
+    wedges = wedges if wedges is not None else base_wedges
     num_wedges = len(wedges)
     angle_per_wedge = 360 / num_wedges
+    wheel_face = None
+    if wedges != base_wedges:
+        wheel_face = _create_wheel_face(size, is_bankrupt, is_golden, wedges=wedges)
 
     # Calculate final rotation to land on target wedge
     final_rotation = -(target_idx * angle_per_wedge + angle_per_wedge / 2)
@@ -1436,7 +1462,8 @@ def create_wheel_gif(
     # Pre-render first frame to establish shared palette
     first_frame_rgba = create_wheel_frame_for_gif(
         size, 0, selected_idx=None, display_name=display_name, frame_idx=0,
-        is_bankrupt=is_bankrupt, is_golden=is_golden
+        is_bankrupt=is_bankrupt, is_golden=is_golden,
+        wedges=wedges, wheel_face=wheel_face,
     )
     first_frame_rgb = first_frame_rgba.convert("RGB")
     palette_image = first_frame_rgb.convert("P", palette=Image.ADAPTIVE, colors=256)
@@ -1488,6 +1515,7 @@ def create_wheel_gif(
         frame = create_wheel_frame_for_gif(
             size, rotation, selected_idx=target_idx if is_final else None,
             display_name=display_name, frame_idx=i, is_bankrupt=is_bankrupt, is_golden=is_golden,
+            wedges=wedges, wheel_face=wheel_face,
         )
 
         # Quantize against shared palette for consistent colors across frames

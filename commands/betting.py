@@ -701,12 +701,13 @@ class BettingCommands(commands.Cog):
 
     def _create_wheel_gif_file(
         self, target_idx: int, display_name: str | None = None,
-        is_bankrupt: bool = False, is_golden: bool = False
+        is_bankrupt: bool = False, is_golden: bool = False,
+        wedges: list[tuple[str, int | str, str]] | None = None,
     ) -> discord.File:
         """Create a wheel animation and return as discord.File."""
         buffer = create_wheel_gif(
             target_idx=target_idx, size=500, display_name=display_name,
-            is_bankrupt=is_bankrupt, is_golden=is_golden
+            is_bankrupt=is_bankrupt, is_golden=is_golden, wedges=wedges,
         )
         return discord.File(buffer, filename="wheel.gif")
 
@@ -2139,7 +2140,12 @@ class BettingCommands(commands.Cog):
         # Generate the complete animation GIF (plays once, ~20 seconds)
         user_display = interaction.user.name
         gif_file = await asyncio.to_thread(
-            self._create_wheel_gif_file, result_idx, user_display, is_eligible_for_bad_gamba, is_golden
+            self._create_wheel_gif_file,
+            result_idx,
+            user_display,
+            is_eligible_for_bad_gamba,
+            is_golden,
+            wedges=wedges,
         )
 
         # Send via followup (since we deferred)
@@ -2773,6 +2779,7 @@ class BettingCommands(commands.Cog):
             if effects and effects.blue_gamba_reduction > 0 and result_value > 0:
                 reduction = int(result_value * effects.blue_gamba_reduction)
                 result_value = result_value - reduction
+                result_wedge = (str(result_value), result_value, result_wedge[2])
 
             # Positive result: use garnishment service if available
             garnishment_service = getattr(self.bot, "garnishment_service", None)
