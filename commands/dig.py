@@ -349,14 +349,16 @@ class BossWagerModal(discord.ui.Modal):
                 color=0x00FF00 if getattr(self.result, "won", False) else 0xFF0000,
             )
             if getattr(self.result, "won", False):
+                payout = getattr(self.result, "payout", 0) or getattr(self.result, "jc_delta", 0)
                 embed.description = (
                     f"Victory! You defeated the boss and earned "
-                    f"**{getattr(self.result, 'reward', 0)}** {JOPACOIN_EMOTE}!"
+                    f"**{payout}** {JOPACOIN_EMOTE}!"
                 )
             else:
+                loss = abs(getattr(self.result, "jc_delta", 0)) or amount
                 embed.description = (
                     f"Defeat! The boss overpowered you. "
-                    f"You lost **{getattr(self.result, 'loss', amount)}** {JOPACOIN_EMOTE}."
+                    f"You lost **{loss}** {JOPACOIN_EMOTE}."
                 )
             await interaction.followup.send(embed=embed)
         except ValueError as e:
@@ -900,25 +902,46 @@ class DigCommands(commands.Cog):
                     await msg.edit(content="Dig cancelled.", embed=None, view=None)
             return
 
-        # Complex event encounter — show interactive buttons
+        # Complex event encounter — show interactive buttons with visuals
         event = getattr(result, "event", None)
         if event:
             event_data = event if isinstance(event, dict) else (event._d if hasattr(event, "_d") else None)
             complexity = event_data.get("complexity", "choice") if isinstance(event_data, dict) else "choice"
             if complexity in ("complex", "choice") and isinstance(event_data, dict) and event_data.get("safe_option"):
-                # Show dig result first, then event view
                 embed = _build_dig_embed(result, interaction.user)
                 event_embed = discord.Embed(
                     title=event_data.get("name", "Event"),
                     description=event_data.get("description", "Something happens..."),
                     color=0xDAA520,
                 )
+                # ASCII art in code block
+                ascii_art = event_data.get("ascii_art") if isinstance(event_data, dict) else None
+                if ascii_art:
+                    event_embed.add_field(name="\u200b", value=f"```\n{ascii_art}\n```", inline=False)
                 rarity = event_data.get("rarity", "common")
                 if rarity != "common":
                     event_embed.set_footer(text=f"{rarity.title()} encounter")
+                # Pixel art scene for complex events
+                event_file = None
+                event_id = event_data.get("id", "") if isinstance(event_data, dict) else ""
+                if complexity == "complex":
+                    try:
+                        from utils.dig_drawing import draw_event_scene, has_event_scene
+                        if has_event_scene(event_id):
+                            depth = getattr(result, "depth", 0) or getattr(result, "depth_after", 0)
+                            layer_def = get_layer_def(depth)
+                            layer_name = layer_def.name if layer_def else "Dirt"
+                            scene_buf = await asyncio.to_thread(draw_event_scene, layer_name, event_id)
+                            event_file = discord.File(scene_buf, filename="event_scene.png")
+                            event_embed.set_image(url="attachment://event_scene.png")
+                    except Exception as e:
+                        logger.debug(f"Event scene generation failed: {e}")
                 view = EventEncounterView(self.dig_service, interaction.user.id, guild_id, event_data)
                 await safe_followup(interaction, embed=embed)
-                await safe_followup(interaction, embed=event_embed, view=view)
+                if event_file:
+                    await safe_followup(interaction, embed=event_embed, view=view, file=event_file)
+                else:
+                    await safe_followup(interaction, embed=event_embed, view=view)
                 return
 
         # Normal dig result
@@ -1994,13 +2017,23 @@ def _build_dig_embed(result: object, user: discord.User | discord.Member) -> dis
             inline=False,
         )
 
-    # Event
+    # Event (with ASCII art for simple events)
     event = getattr(result, "event", None)
     if event:
         e_desc = getattr(event, "description", str(event)) if not isinstance(event, str) else event
+        e_name = getattr(event, "name", "Event") if not isinstance(event, str) else "Event"
+        # Check for ASCII art
+        e_art = None
+        if isinstance(event, dict):
+            e_art = event.get("ascii_art")
+        elif hasattr(event, "_d") and isinstance(event._d, dict):
+            e_art = event._d.get("ascii_art")
+        event_text = e_desc
+        if e_art:
+            event_text = f"```\n{e_art}\n```\n{e_desc}"
         embed.add_field(
-            name="Event",
-            value=e_desc,
+            name=e_name,
+            value=event_text,
             inline=False,
         )
 
