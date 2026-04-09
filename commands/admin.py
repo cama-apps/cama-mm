@@ -1454,7 +1454,7 @@ class AdminCommands(commands.Cog):
             )
         else:
             await interaction.response.send_message(
-                f"❌ Failed to set primary Steam ID.",
+                "❌ Failed to set primary Steam ID.",
                 ephemeral=True,
             )
 

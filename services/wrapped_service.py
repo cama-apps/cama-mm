@@ -8,18 +8,18 @@ import json
 import logging
 import random
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 from config import WRAPPED_MIN_BETS, WRAPPED_MIN_GAMES
 from utils.hero_lookup import get_hero_name
 
 if TYPE_CHECKING:
-    from repositories.player_repository import PlayerRepository
-    from repositories.match_repository import MatchRepository
     from repositories.bet_repository import BetRepository
-    from repositories.wrapped_repository import WrappedRepository
+    from repositories.match_repository import MatchRepository
     from repositories.pairings_repository import PairingsRepository
+    from repositories.player_repository import PlayerRepository
+    from repositories.wrapped_repository import WrappedRepository
     from services.gambling_stats_service import GamblingStatsService
     from services.package_deal_service import PackageDealService
 
@@ -686,8 +686,8 @@ class WrappedService:
         Returns:
             (start_timestamp, end_timestamp) as Unix timestamps
         """
-        start = datetime(year, 1, 1, tzinfo=timezone.utc)
-        end = datetime(year, 12, 31, 23, 59, 59, tzinfo=timezone.utc)
+        start = datetime(year, 1, 1, tzinfo=UTC)
+        end = datetime(year, 12, 31, 23, 59, 59, tzinfo=UTC)
         return int(start.timestamp()), int(end.timestamp()) + 1
 
     def get_server_wrapped(

@@ -93,7 +93,7 @@ class ScoutView(discord.ui.View):
         if self.message:
             try:
                 await self.message.delete()
-                logger.info(f"Scout message deleted on timeout")
+                logger.info("Scout message deleted on timeout")
             except discord.NotFound:
                 logger.debug("Scout message was already deleted")
             except discord.HTTPException as e:

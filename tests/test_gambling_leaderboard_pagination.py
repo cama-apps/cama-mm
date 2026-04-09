@@ -1,8 +1,9 @@
 """Tests for gambling leaderboard tab pagination in UnifiedLeaderboardView."""
 
-import pytest
 from dataclasses import dataclass
-from unittest.mock import MagicMock, AsyncMock
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 
 @dataclass
@@ -82,7 +83,7 @@ class TestGamblingTabPagination:
 
     def _create_view_with_gambling_data(self, mock_cog, mock_interaction, leaderboard):
         """Helper to create a UnifiedLeaderboardView with gambling data loaded."""
-        from commands.info import UnifiedLeaderboardView, LeaderboardTab
+        from commands.info import LeaderboardTab, UnifiedLeaderboardView
 
         mock_cog.gambling_stats_service.get_leaderboard.return_value = leaderboard
 
@@ -239,8 +240,6 @@ class TestGamblingTabPagination:
     @pytest.mark.asyncio
     async def test_down_bad_filters_negative_only(self, mock_cog, mock_interaction):
         """Down bad section only shows players with negative P&L."""
-        from commands.info import LeaderboardTab
-
         # Mix of positive and negative P&L in down_bad
         down_bad_entries = [
             MockLeaderboardEntry(1, 100, 0.6, 1000),   # Positive
@@ -253,7 +252,6 @@ class TestGamblingTabPagination:
         leaderboard = MockLeaderboard(top_earners, down_bad_entries, [], [])
 
         view = self._create_view_with_gambling_data(mock_cog, mock_interaction, leaderboard)
-        state = view._tab_states[LeaderboardTab.GAMBLING]
 
         # Add mock guild members
         view._guild_members_cache = {i: MagicMock(display_name=f"User{i}") for i in range(1, 5)}

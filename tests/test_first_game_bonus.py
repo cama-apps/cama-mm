@@ -1,10 +1,8 @@
 """Tests for the first game of the night bonus feature."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
-
-import pytest
 
 from config import FIRST_GAME_BONUS, FIRST_GAME_RESET_HOUR
 from tests.conftest import TEST_GUILD_ID
@@ -125,7 +123,7 @@ class TestIsFirstGameOfNight:
 
             # The boundary should be March 14 at 5pm LA time
             expected_boundary_la = datetime(2026, 3, 14, FIRST_GAME_RESET_HOUR, 0, 0, tzinfo=la_tz)
-            expected_boundary_utc = expected_boundary_la.astimezone(timezone.utc)
+            expected_boundary_utc = expected_boundary_la.astimezone(UTC)
             expected_iso = expected_boundary_utc.strftime("%Y-%m-%d %H:%M:%S")
 
             # Patch the repo to capture the argument
@@ -157,7 +155,7 @@ class TestIsFirstGameOfNight:
             mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
 
             expected_boundary_la = datetime(2026, 3, 15, FIRST_GAME_RESET_HOUR, 0, 0, tzinfo=la_tz)
-            expected_boundary_utc = expected_boundary_la.astimezone(timezone.utc)
+            expected_boundary_utc = expected_boundary_la.astimezone(UTC)
             expected_iso = expected_boundary_utc.strftime("%Y-%m-%d %H:%M:%S")
 
             captured_args = []
@@ -188,7 +186,7 @@ class TestIsFirstGameOfNight:
 
             # 5pm PDT on March 8 = midnight UTC on March 9
             expected_boundary_la = datetime(2026, 3, 8, FIRST_GAME_RESET_HOUR, 0, 0, tzinfo=la_tz)
-            expected_boundary_utc = expected_boundary_la.astimezone(timezone.utc)
+            expected_boundary_utc = expected_boundary_la.astimezone(UTC)
             expected_iso = expected_boundary_utc.strftime("%Y-%m-%d %H:%M:%S")
 
             captured_args = []

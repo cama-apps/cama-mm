@@ -1,8 +1,9 @@
 """Tests for utils/pin_helpers.py - safe unpin all bot messages."""
 
-import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
+
 import discord
+import pytest
 
 
 class TestSafeUnpinAllBotMessages:

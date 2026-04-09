@@ -1,6 +1,5 @@
 """Tests for ServiceContainer."""
 
-import pytest
 
 from infrastructure.service_container import ServiceContainer
 

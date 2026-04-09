@@ -7,9 +7,9 @@ import json
 import pytest
 
 from database import Database
-from services.lobby_manager_service import LobbyManagerService as LobbyManager
 from rating_system import CamaRatingSystem
 from repositories.lobby_repository import LobbyRepository
+from services.lobby_manager_service import LobbyManagerService as LobbyManager
 from shuffler import BalancedShuffler
 
 

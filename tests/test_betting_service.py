@@ -1577,8 +1577,6 @@ class TestBlindBets:
 
         # Record initial balances (after blind bets)
         radiant_player = pending["radiant_team_ids"][0]
-        dire_player = pending["dire_team_ids"][0]
-        initial_radiant_balance = player_repo.get_balance(radiant_player, TEST_GUILD_ID)
 
         # Create blind bets (5 jopacoin each, 25 per team)
         blind_result = betting_service.create_auto_blind_bets(
@@ -1749,7 +1747,7 @@ class TestBlindBets:
         mode = "pool"
 
         # Step 1: Shuffle (like commands/match.py line 168)
-        result = match_service.shuffle_players(player_ids, guild_id=guild_id, betting_mode=mode)
+        match_service.shuffle_players(player_ids, guild_id=guild_id, betting_mode=mode)
 
         # Step 2: Get pending state for blind bets (like commands/match.py line 205)
         # This is the CORRECT way - must use get_last_shuffle, not result

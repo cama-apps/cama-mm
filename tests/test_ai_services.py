@@ -3,13 +3,15 @@ Tests for AI services: AIService, SQLQueryService, FlavorTextService, AIQueryRep
 """
 
 import json
-import pytest
+import sqlite3
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from services.ai_service import AIService, SQL_TOOL, FLAVOR_TOOL
-from services.sql_query_service import SQLQueryService, BLOCKED_TABLES, BLOCKED_COLUMNS
-from services.flavor_text_service import FlavorTextService, FlavorEvent, PlayerContext
+import pytest
+
 from repositories.ai_query_repository import AIQueryRepository
+from services.ai_service import SQL_TOOL, AIService
+from services.flavor_text_service import FlavorEvent, FlavorTextService, PlayerContext
+from services.sql_query_service import BLOCKED_COLUMNS, BLOCKED_TABLES, SQLQueryService
 
 
 class TestAIService:
@@ -353,7 +355,7 @@ class TestAIQueryRepository:
 
     def test_execute_readonly_rejects_writes(self, ai_query_repo):
         """Test that write operations are blocked."""
-        with pytest.raises(Exception):
+        with pytest.raises(sqlite3.Error):
             ai_query_repo.execute_readonly(
                 "INSERT INTO players (discord_id, discord_username) VALUES (999, 'Hacker')"
             )

@@ -13,11 +13,10 @@ from unittest.mock import patch
 import pytest
 
 from database import Database
-from repositories.player_repository import PlayerRepository
 from repositories.loan_repository import LoanRepository
-from services.loan_service import LoanService, LoanApproval, LoanResult, RepaymentResult
-from services.result import Result
+from repositories.player_repository import PlayerRepository
 from services import error_codes
+from services.loan_service import LoanApproval, LoanResult, LoanService, RepaymentResult
 from tests.conftest import TEST_GUILD_ID
 
 

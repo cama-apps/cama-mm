@@ -183,7 +183,6 @@ class PredictionService:
 
         predictions = self.prediction_repo.get_active_predictions(guild_id)
         result = []
-        now = int(time.time())
         for pred in predictions:
             # Skip cancelled predictions (shouldn't happen but be safe)
             if pred["status"] == "cancelled":
@@ -354,7 +353,6 @@ class PredictionService:
         total_pool = yes_total + no_total
         consensus_data = None
         if total_pool > 0:
-            winning_total = yes_total if outcome == "yes" else no_total
             losing_total = no_total if outcome == "yes" else yes_total
             losing_pct = (losing_total / total_pool) * 100
             # If 90%+ bet on the losing side, flag as unanimous wrong

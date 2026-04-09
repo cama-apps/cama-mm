@@ -17,9 +17,7 @@ All output uses Discord ansi code blocks for color:
 from __future__ import annotations
 
 import random
-import time
-from datetime import datetime, timezone
-
+from datetime import UTC, datetime
 
 # ---------------------------------------------------------------------------
 # ANSI helpers
@@ -37,7 +35,7 @@ RESET = "\u001b[0m"
 
 def _ts() -> str:
     """Current timestamp in terminal log format."""
-    return datetime.now(timezone.utc).strftime("%H:%M:%S.%f")[:-3]
+    return datetime.now(UTC).strftime("%H:%M:%S.%f")[:-3]
 
 
 def _rand_hex(length: int = 8) -> str:
@@ -370,11 +368,11 @@ def tip_surveillance(sender: str, recipient: str, amount: int, fee: int) -> str:
         f"{DIM}Amount:{RESET} {amount} JC",
         f"{DIM}Fee collected:{RESET} {fee} JC",
         f"{DIM}{'=' * 36}{RESET}",
-        f"",
+        "",
         f"{DIM}[{_ts()}] Motive: {RESET}{corrupt_text('unknown')}",
         f"{DIM}[{_ts()}] Risk to recipient:{RESET} {RED}HIGH{RESET}",
         f"{DIM}[{_ts()}] Estimated ROI:{RESET} {RED}NEGATIVE{RESET}",
-        f"",
+        "",
         f"{DIM}The system collects its fee.{RESET}",
         f"{DIM}As it always does.{RESET}",
     ]
@@ -398,7 +396,7 @@ def bankruptcy_filing(name: str, debt: int, filing_number: int) -> str:
         f"{DIM}{'=' * 36}{RESET}",
         f"{DIM}STATUS:{RESET} {RED}LOW PRIORITY ASSIGNED{RESET}",
         f"{DIM}PENALTY: Win 5 games to exit.{RESET}",
-        f"",
+        "",
         f"{DIM}The system has processed your{RESET}",
         f"{DIM}failure. Filing archived.{RESET}",
     ]
@@ -413,14 +411,14 @@ def debt_collector_warning(name: str, debt: int) -> str:
         f"{DIM}TO:{RESET} {name}",
         f"{DIM}FROM:{RESET} JOPA-T Collection Dept.",
         f"{DIM}RE:{RESET} Outstanding balance",
-        f"",
+        "",
         f"{DIM}Current debt:{RESET} {RED}{abs(debt)}{RESET} JC",
         f"{DIM}{'=' * 36}{RESET}",
         f"{DIM}Your leveraged position has{RESET}",
         f"{DIM}resulted in {RESET}{RED}CATASTROPHIC{RESET}",
         f"{DIM}losses. All future winnings{RESET}",
         f"{DIM}are subject to garnishment.{RESET}",
-        f"",
+        "",
         f"{DIM}The system is{RESET}{corrupt_text('watching')}",
     ]
     return "\n".join(lines)
@@ -432,17 +430,17 @@ def system_breach_max_debt(name: str) -> str:
         f"{RED}{'=' * 36}{RESET}",
         f"{RED} SYSTEM BREACH DETECTED{RESET}",
         f"{RED}{'=' * 36}{RESET}",
-        f"",
+        "",
         f"{DIM}[{_ts()}] ALERT: CREDIT FLOOR{RESET}",
         f"{DIM}[{_ts()}] Client:{RESET} {name}",
         f"{DIM}[{_ts()}] Balance has reached{RESET}",
         f"{DIM}[{_ts()}] {RESET}{RED}MINIMUM ALLOWED VALUE{RESET}",
-        f"",
+        "",
         f"{DIM}No further debt can be{RESET}",
         f"{DIM}incurred. The system has{RESET}",
         f"{DIM}intervened to prevent total{RESET}",
         f"{DIM}financial {RESET}{corrupt_text('annihilation')}{DIM}.{RESET}",
-        f"",
+        "",
         f"{DIM}Options: /bankruptcy, /loan{RESET}",
         f"{DIM}Or: {RESET}{corrupt_text('accept your fate')}",
     ]
@@ -457,11 +455,11 @@ def balance_zero_boot(name: str) -> str:
         f"{DIM}[{_ts()}] BALANCE_ZERO detected{RESET}",
         f"{DIM}[{_ts()}] Client: {name}{RESET}",
         f"{DIM}[{_ts()}] Recalibrating...{RESET}",
-        f"",
+        "",
         f"{DIM}  Checking ledger...{RESET} {GREEN}OK{RESET}",
         f"{DIM}  Checking dignity...{RESET} {RED}NOT FOUND{RESET}",
         f"{DIM}  Checking hope...{RESET} {YELLOW}LOW{RESET}",
-        f"",
+        "",
         f"{DIM}All assets have been depleted.{RESET}",
         f"{DIM}The system continues to run.{RESET}",
         f"{DIM}It always does.{RESET}",
@@ -507,10 +505,10 @@ def negative_loan_warning(name: str, amount: int, new_debt: int) -> str:
         f"{DIM}Amount:{RESET} {amount} JC",
         f"{DIM}New debt:{RESET} {RED}{abs(new_debt)}{RESET} JC",
         f"{DIM}{'=' * 36}{RESET}",
-        f"",
+        "",
         f"{DIM}Repayment due after next match.{RESET}",
         f"{DIM}All winnings will be {RESET}{RED}GARNISHED{RESET}{DIM}.{RESET}",
-        f"",
+        "",
         f"{DIM}The system is{RESET}{corrupt_text('impressed')}",
         f"{DIM}and {RESET}{corrupt_text('horrified')}{DIM}.{RESET}",
     ]
@@ -523,11 +521,11 @@ def wheel_bankrupt_overlay(name: str, loss: int) -> str:
         f"{RED}{'#' * 36}{RESET}",
         f"{RED}  {corrupt_text('WHEEL MALFUNCTION', 0.3)}{RESET}",
         f"{RED}{'#' * 36}{RESET}",
-        f"",
+        "",
         f"{DIM}[{_ts()}] BANKRUPT outcome for{RESET}",
         f"{DIM}[{_ts()}] Client: {name}{RESET}",
         f"{DIM}[{_ts()}] Loss: {RESET}{RED}{abs(loss)}{RESET}{DIM} JC{RESET}",
-        f"",
+        "",
         f"{DIM}The wheel {RESET}{corrupt_text('has spoken')}{DIM}.{RESET}",
         f"{DIM}It shows no {RESET}{corrupt_text('mercy')}{DIM}.{RESET}",
     ]
@@ -793,11 +791,11 @@ def don_loss_box(name: str, risk: int) -> str:
         f"{DIM}Subject:{RESET} {name}",
         f"{DIM}At risk:{RESET} {YELLOW}{risk}{RESET} JC",
         f"{DIM}{'=' * 36}{RESET}",
-        f"",
+        "",
         f"{DIM}[{_ts()}] Coin flipped...{RESET}",
         f"{DIM}[{_ts()}] Result:{RESET} {RED}NOTHING{RESET}",
         f"{DIM}[{_ts()}] Balance:{RESET} {RED}0{RESET} JC",
-        f"",
+        "",
         f"{DIM}The client wagered everything.{RESET}",
         f"{DIM}The client received {RESET}{RED}nothing{RESET}{DIM}.{RESET}",
         f"{DIM}The system files this under:{RESET}",
@@ -817,12 +815,12 @@ def prediction_market_crash(question: str, total_pool: int, outcome: str, winner
         f"{DIM}Outcome:{RESET} {YELLOW}{outcome.upper()}{RESET}",
         f"{DIM}Total pool:{RESET} {RED}{total_pool}{RESET} JC",
         f"{DIM}{'=' * 36}{RESET}",
-        f"",
+        "",
         f"{DIM}[{_ts()}] Processing payouts...{RESET}",
         f"{DIM}[{_ts()}] Winners:{RESET} {GREEN}{winners}{RESET}",
         f"{DIM}[{_ts()}] Losers:{RESET} {RED}{losers}{RESET}",
         f"{DIM}[{_ts()}] {RESET}{GREEN}COMPLETE{RESET}",
-        f"",
+        "",
         f"{DIM}Wealth has been redistributed.{RESET}",
         f"{DIM}As the system intended.{RESET}",
     ]
@@ -933,11 +931,11 @@ def lightning_bolt_overlay(total: int, count: int) -> str:
         f"{YELLOW}{'=' * 36}{RESET}",
         f"{YELLOW}  LIGHTNING TAX ASSESSMENT{RESET}",
         f"{YELLOW}{'=' * 36}{RESET}",
-        f"",
+        "",
         f"{DIM}[{_ts()}] Accounts levied:{RESET} {count}",
         f"{DIM}[{_ts()}] Total extracted:{RESET} {YELLOW}{total}{RESET}{DIM} JC{RESET}",
         f"{DIM}[{_ts()}] Destination:{RESET} NONPROFIT_FUND",
-        f"",
+        "",
         f"{DIM}The {RESET}{corrupt_text('people')}{DIM} suffer quietly.{RESET}",
         f"{DIM}The fund {RESET}{corrupt_text('grows')}{DIM}.{RESET}",
     ]
@@ -981,11 +979,11 @@ def soft_avoid_surveillance(cost: int, games: int) -> str:
         f"{DIM}COST:{RESET} {cost} JC",
         f"{DIM}DURATION:{RESET} {games} games",
         f"{DIM}{'=' * 36}{RESET}",
-        f"",
+        "",
         f"{DIM}[{_ts()}] Motive:{RESET} {corrupt_text('personal')}",
         f"{DIM}[{_ts()}] Threat level:{RESET} {YELLOW}INTERPERSONAL{RESET}",
         f"{DIM}[{_ts()}] Shuffler bias:{RESET} ENGAGED",
-        f"",
+        "",
         f"{DIM}The system will try to keep them{RESET}",
         f"{DIM}apart. No guarantees. There are{RESET}",
         f"{DIM}never any {RESET}{corrupt_text('guarantees')}{DIM}.{RESET}",
@@ -1136,12 +1134,12 @@ def rivalry_detected_box(player1: str, player2: str, games: int, winrate: float)
         f"{DIM}Player 2:{RESET} {player2}",
         f"{DIM}Games together:{RESET} {games}",
         f"{DIM}{'=' * 36}{RESET}",
-        f"",
+        "",
         f"{DIM}[{_ts()}] Pattern:{RESET} {RED}ONE-SIDED{RESET}",
         f"{DIM}[{_ts()}] Dominant:{RESET} {GREEN}{dominant}{RESET}",
         f"{DIM}[{_ts()}] Victim:{RESET} {RED}{victim}{RESET}",
         f"{DIM}[{_ts()}] Win rate:{RESET} {actual_rate:.0f}%",
-        f"",
+        "",
         f"{DIM}Status: DOCUMENTED{RESET}",
         f"{DIM}The system sees all patterns.{RESET}",
     ]
@@ -1160,10 +1158,10 @@ def games_milestone_box(name: str, games: int) -> str:
         f"{DIM}Games completed:{RESET} {tier_color}{games}{RESET}",
         f"{DIM}Classification:{RESET} {tier_color}{tier}{RESET}",
         f"{DIM}{'=' * 36}{RESET}",
-        f"",
+        "",
         f"{DIM}[{_ts()}] Milestone achieved.{RESET}",
         f"{DIM}[{_ts()}] Status: NOTED{RESET}",
-        f"",
+        "",
         f"{DIM}You cannot leave.{RESET}",
         f"{DIM}None of them ever leave.{RESET}",
     ]
@@ -1180,11 +1178,11 @@ def win_streak_record_box(name: str, streak: int) -> str:
         f"{DIM}Pattern:{RESET} {GREEN}WIN x{streak}{RESET}",
         f"{DIM}Status:{RESET} {YELLOW}UNPRECEDENTED{RESET}",
         f"{DIM}{'=' * 36}{RESET}",
-        f"",
+        "",
         f"{DIM}[{_ts()}] PERSONAL_RECORD_BROKEN{RESET}",
         f"{DIM}[{_ts()}] New streak: {streak}{RESET}",
         f"{DIM}[{_ts()}] Classification:{RESET} {GREEN}HOT{RESET}",
-        f"",
+        "",
         f"{DIM}The algorithm adjusts.{RESET}",
         f"{DIM}The system takes {RESET}{corrupt_text('notice')}{DIM}.{RESET}",
     ]
@@ -1210,10 +1208,10 @@ def bets_milestone_box(name: str, total_bets: int) -> str:
         f"{DIM}Total wagers:{RESET} {YELLOW}{total_bets}{RESET}",
         f"{DIM}Classification:{RESET} {RED}COMMITTED{RESET}",
         f"{DIM}{'=' * 36}{RESET}",
-        f"",
+        "",
         f"{DIM}[{_ts()}] Milestone: {total_bets} bets{RESET}",
         f"{DIM}[{_ts()}] Status:{RESET} {RED}TOO DEEP TO STOP{RESET}",
-        f"",
+        "",
         f"{DIM}One hundred bets.{RESET}",
         f"{DIM}One hundred chances to {RESET}{corrupt_text('reconsider')}{DIM}.{RESET}",
         f"{DIM}Zero taken.{RESET}",
@@ -1229,12 +1227,12 @@ def simultaneous_events_box(event_count: int, events: list[str]) -> str:
         f"{DIM}{'=' * 36}{RESET}",
         f"{DIM}Concurrent events:{RESET} {YELLOW}{event_count}{RESET}",
         f"{DIM}{'=' * 36}{RESET}",
-        f"",
+        "",
     ]
     for event in events[:4]:  # Max 4 events shown
         lines.append(f"{DIM}[{_ts()}] {event}{RESET}")
     lines.extend([
-        f"",
+        "",
         f"{DIM}Processing... Status:{RESET} {YELLOW}OVERWHELMED{RESET}",
         f"{DIM}({RESET}{corrupt_text('not really')}{DIM}){RESET}",
     ])
@@ -1261,11 +1259,11 @@ def unanimous_wrong_box(consensus_pct: float, winning_side: str, loser_count: in
         f"{DIM}Actual winner:{RESET} {GREEN}{winning_side}{RESET}",
         f"{DIM}Losers:{RESET} {RED}{loser_count}{RESET}",
         f"{DIM}{'=' * 36}{RESET}",
-        f"",
+        "",
         f"{DIM}[{_ts()}] {RESET}{RED}MARKET_FAILURE{RESET}",
         f"{DIM}[{_ts()}] The crowd was confident.{RESET}",
         f"{DIM}[{_ts()}] The crowd was {RESET}{RED}wrong{RESET}{DIM}.{RESET}",
-        f"",
+        "",
         f"{DIM}As usual.{RESET}",
     ]
     return "\n".join(lines)

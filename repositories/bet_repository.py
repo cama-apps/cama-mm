@@ -1350,7 +1350,7 @@ class BetRepository(BaseRepository, IBetRepository):
             )
             rows = cursor.fetchall()
 
-        result = {did: 0 for did in discord_ids}
+        result = dict.fromkeys(discord_ids, 0)
         for row in rows:
             result[row["discord_id"]] = row["count"]
 
@@ -1471,8 +1471,6 @@ class BetRepository(BaseRepository, IBetRepository):
                 # Edge case: no bets on winning side - this shouldn't happen
                 # but if it does, no payouts
                 return balance_deltas
-
-            multiplier = total_pool / winner_pool
 
             # Group winners by user
             winners_by_user: dict[int, list[dict]] = {}

@@ -722,7 +722,6 @@ class TestShuffler14Players:
 
         # Get names of included players
         included_names = {p.name for p in team1.players + team2.players}
-        excluded_names = {p.name for p in excluded}
 
         # High-exclusion players should be included (not excluded)
         high_exclusion_names = {players[i].name for i in range(4)}
@@ -730,7 +729,6 @@ class TestShuffler14Players:
         # With penalty weight 75 and count 10, excluding costs 750 points each
         # Algorithm should strongly prefer including them
         included_high_exclusion = high_exclusion_names & included_names
-        excluded_high_exclusion = high_exclusion_names & excluded_names
 
         # At least 3 of the 4 high-exclusion players should be included
         assert len(included_high_exclusion) >= 3, (

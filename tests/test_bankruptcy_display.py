@@ -10,12 +10,12 @@ with active bankruptcy penalties in:
 
 import pytest
 
-from services.lobby_manager_service import LobbyManagerService as LobbyManager
+from repositories.bankruptcy_repository import BankruptcyRepository
 from repositories.lobby_repository import LobbyRepository
 from repositories.match_repository import MatchRepository
 from repositories.player_repository import PlayerRepository
-from repositories.bankruptcy_repository import BankruptcyRepository
 from services.bankruptcy_service import BankruptcyService
+from services.lobby_manager_service import LobbyManagerService as LobbyManager
 from services.lobby_service import LobbyService
 from utils.embeds import create_lobby_embed, format_player_list
 from utils.formatting import TOMBSTONE_EMOJI, get_player_display_name

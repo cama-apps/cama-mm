@@ -3,10 +3,10 @@ Spotify Wrapped style image generation for Cama yearly summaries.
 """
 
 import io
+from typing import TYPE_CHECKING
+
 from PIL import Image, ImageDraw, ImageFont
 from pilmoji import Pilmoji
-
-from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from services.wrapped_service import Award, PersonalRecord, PlayerWrapped, ServerWrapped
@@ -92,7 +92,7 @@ def draw_wrapped_summary(wrapped: "ServerWrapped", hero_names: dict[int, str] | 
     small_font = _get_font(16)
 
     # Header
-    header_text = f"CAMA WRAPPED"
+    header_text = "CAMA WRAPPED"
     bbox = draw.textbbox((0, 0), header_text, font=title_font)
     text_w = bbox[2] - bbox[0]
     draw.text(((width - text_w) // 2, 30), header_text, fill=ACCENT_GOLD, font=title_font)
@@ -271,7 +271,6 @@ def draw_wrapped_personal(
 
     # Fonts
     title_font = _get_font(32, bold=True)
-    name_font = _get_font(24, bold=True)
     large_font = _get_font(28, bold=True)
     medium_font = _get_font(18)
     small_font = _get_font(14)
@@ -569,7 +568,6 @@ def draw_records_slide(
     label_font = _get_font(16)
     value_font = _get_font(20, bold=True)
     info_font = _get_font(12)
-    footer_font = _get_font(14)
 
     # Header
     draw.text((30, 20), f"{username}'s Records", fill=TEXT_WHITE, font=header_font)
@@ -793,7 +791,6 @@ def draw_summary_stats_slide(
     quip_font = _get_font(12)
 
     cols = 2
-    rows = 3
     cell_w = (width - 80) // cols
     cell_h = 150
     start_y = 100
@@ -880,7 +877,7 @@ def draw_pairwise_slide(
     draw.line([(50, 100), (width - 50, 100)], fill=(*accent, 128), width=1)
 
     # Build set of entry indices that start a section
-    section_map = {idx: label for idx, label in (section_labels or [])}
+    section_map = dict(section_labels or [])
 
     y_pos = 115
     row_height = 75
@@ -1166,7 +1163,7 @@ def draw_package_deal_slide(
     draw.text((70, card_y + 10), str(times_bought_on_you), fill=accent, font=big_font)
 
     # Label
-    buyer_label = f"person bought a deal on you" if unique_buyers == 1 else f"people bought deals on you"
+    buyer_label = "person bought a deal on you" if unique_buyers == 1 else "people bought deals on you"
     draw.text((70, card_y + 55), f"{unique_buyers} {buyer_label}", fill=TEXT_WHITE, font=label_font)
     draw.text((70, card_y + 75), f"{jc_spent_on_you} JC spent on you", fill=TEXT_GREY, font=detail_font)
 

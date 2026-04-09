@@ -20,26 +20,26 @@ from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from domain.models.player import Player
     from domain.models.lobby import Lobby
-    from services.result import Result
-    from services.loan_service import (
-        LoanState,
-        LoanApproval,
-        LoanResult,
-        RepaymentResult,
-    )
+    from domain.models.player import Player
     from services.bankruptcy_service import (
-        BankruptcyState,
         BankruptcyDeclaration,
+        BankruptcyState,
         PenaltyApplication,
     )
     from services.gambling_stats_service import (
-        GambaStats,
-        DegenScoreBreakdown,
-        Leaderboard,
         BettingImpactStats,
+        DegenScoreBreakdown,
+        GambaStats,
+        Leaderboard,
     )
+    from services.loan_service import (
+        LoanApproval,
+        LoanResult,
+        LoanState,
+        RepaymentResult,
+    )
+    from services.result import Result
 
 
 class IPlayerService(ABC):

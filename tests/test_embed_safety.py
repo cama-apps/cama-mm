@@ -1,8 +1,7 @@
 """Tests for Discord embed safety utilities."""
 
-import pytest
 
-from utils.embed_safety import truncate_field, validate_embed, EMBED_LIMITS
+from utils.embed_safety import EMBED_LIMITS, truncate_field, validate_embed
 
 
 class TestTruncateField:

@@ -465,7 +465,7 @@ class TestPredictionCornerCases:
 
         assert len(result["winners"]) == 0
         assert len(result["losers"]) == 2
-        assert all(l.get("refunded") for l in result["losers"])
+        assert all(loser.get("refunded") for loser in result["losers"])
 
         # Balances should be restored
         assert player_repo.get_balance(1, TEST_GUILD_ID) == 100  # 70 + 30 refund
@@ -536,7 +536,7 @@ class TestPredictionCornerCases:
         closes_at = int(time.time()) + 3600
         pred1 = prediction_repo.create_prediction(TEST_GUILD_ID, 999, "Question 1?", closes_at)
         pred2 = prediction_repo.create_prediction(TEST_GUILD_ID, 999, "Question 2?", closes_at)
-        pred3 = prediction_repo.create_prediction(TEST_GUILD_ID, 999, "Question 3?", closes_at)
+        prediction_repo.create_prediction(TEST_GUILD_ID, 999, "Question 3?", closes_at)
 
         prediction_repo.place_bet_atomic(pred1, 123, "yes", 10)
         prediction_repo.place_bet_atomic(pred2, 123, "no", 20)
@@ -1087,8 +1087,8 @@ class TestPredictionCornerCases:
     def test_multiple_guilds_isolation(self, prediction_service):
         """Test that predictions are isolated by guild."""
         closes_at = int(time.time()) + 3600
-        pred1 = prediction_service.create_prediction(TEST_GUILD_ID, 999, "Guild 1 Q?", closes_at)
-        pred2 = prediction_service.create_prediction(2, 999, "Guild 2 Q?", closes_at)
+        prediction_service.create_prediction(TEST_GUILD_ID, 999, "Guild 1 Q?", closes_at)
+        prediction_service.create_prediction(2, 999, "Guild 2 Q?", closes_at)
 
         guild1_active = prediction_service.get_active_predictions(TEST_GUILD_ID)
         guild2_active = prediction_service.get_active_predictions(2)

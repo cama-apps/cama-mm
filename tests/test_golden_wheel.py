@@ -17,7 +17,6 @@ import pytest
 
 from tests.conftest import TEST_GUILD_ID
 
-
 # ---------------------------------------------------------------------------
 # Wheel drawing unit tests
 # ---------------------------------------------------------------------------
@@ -63,8 +62,8 @@ class TestGoldenWheelWedges:
         server state. Verify with representative inputs by recomputing the full EV
         (int wedges + estimated special-wedge EVs) the same way the function calibrates.
         """
-        from utils.wheel_drawing import compute_live_golden_wedges
         import config
+        from utils.wheel_drawing import compute_live_golden_wedges
 
         # Representative server state: top players ~2k, server total ~25k
         spinner_balance = 2500
@@ -108,14 +107,19 @@ class TestGoldenWheelWedges:
         assert ev < 0, f"Golden wheel EV should be negative, got {ev:.2f}"
 
     def test_get_wheel_wedges_returns_golden_when_flag_set(self):
-        from utils.wheel_drawing import get_wheel_wedges, GOLDEN_WHEEL_WEDGES, WHEEL_WEDGES, BANKRUPT_WHEEL_WEDGES
+        from utils.wheel_drawing import (
+            BANKRUPT_WHEEL_WEDGES,
+            GOLDEN_WHEEL_WEDGES,
+            WHEEL_WEDGES,
+            get_wheel_wedges,
+        )
         assert get_wheel_wedges(is_golden=True) is GOLDEN_WHEEL_WEDGES
         assert get_wheel_wedges(is_bankrupt=True) is BANKRUPT_WHEEL_WEDGES
         assert get_wheel_wedges() is WHEEL_WEDGES
 
     def test_bankrupt_takes_priority_over_golden(self):
         """is_bankrupt=True always overrides is_golden=True in get_wheel_wedges."""
-        from utils.wheel_drawing import get_wheel_wedges, BANKRUPT_WHEEL_WEDGES
+        from utils.wheel_drawing import BANKRUPT_WHEEL_WEDGES, get_wheel_wedges
         # When both flags set, bankrupt wheel takes priority (golden=True is ignored if bankrupt=True)
         # Based on implementation: is_golden checked first, so if both True, golden wins.
         # The business logic (bankrupt > golden) is enforced in commands/betting.py, not wheel_drawing.py.
@@ -123,7 +127,7 @@ class TestGoldenWheelWedges:
         assert result is BANKRUPT_WHEEL_WEDGES
 
     def test_get_wedge_at_index_for_player_golden(self):
-        from utils.wheel_drawing import get_wedge_at_index_for_player, GOLDEN_WHEEL_WEDGES
+        from utils.wheel_drawing import GOLDEN_WHEEL_WEDGES, get_wedge_at_index_for_player
         wedge = get_wedge_at_index_for_player(0, is_golden=True)
         assert wedge == GOLDEN_WHEEL_WEDGES[0]
 
@@ -312,7 +316,8 @@ class TestGoldenWheelSchemaMigration:
 
     def test_is_golden_column_defaults_to_zero(self, repo_db_path):
         """Verify is_golden defaults to 0."""
-        import sqlite3, time
+        import sqlite3
+        import time
         conn = sqlite3.connect(repo_db_path)
         # Insert a spin without specifying is_golden
         conn.execute(

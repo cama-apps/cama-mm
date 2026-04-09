@@ -8,7 +8,6 @@ items, artifacts, sabotage, traps, and achievements.
 import datetime
 import json
 import logging
-import math
 import random
 import time
 
@@ -34,13 +33,11 @@ from services.dig_constants import (
     LUMINOSITY_DARK,
     LUMINOSITY_DARK_CAVE_IN_BONUS,
     LUMINOSITY_DARK_JC_MULTIPLIER,
-    LUMINOSITY_DARK_RISKY_PENALTY,
     LUMINOSITY_DIM,
     LUMINOSITY_DIM_CAVE_IN_BONUS,
     LUMINOSITY_DIM_EVENT_MULTIPLIER,
     LUMINOSITY_DRAIN_PER_DIG,
     LUMINOSITY_MAX,
-    LUMINOSITY_PITCH_BLACK,
     LUMINOSITY_PITCH_CAVE_IN_BONUS,
     LUMINOSITY_PITCH_JC_MULTIPLIER,
     MAX_INVENTORY_SIZE,
@@ -72,7 +69,7 @@ class DigService:
 
     def _get_game_date(self) -> str:
         """Get current game date (resets at 4 AM PST). Uses time.time() so tests can mock it."""
-        now_utc = datetime.datetime.fromtimestamp(time.time(), tz=datetime.timezone.utc)
+        now_utc = datetime.datetime.fromtimestamp(time.time(), tz=datetime.UTC)
         pst = datetime.timezone(datetime.timedelta(hours=-8))
         now_pst = now_utc.astimezone(pst)
         # Subtract 4 hours so the "day" starts at 4 AM PST
@@ -361,7 +358,7 @@ class DigService:
         recent_helpers = self.dig_repo.get_recent_actions(
             tunnel["discord_id"], guild_id, action_type="help", hours=24
         )
-        helper_count = len(set(a.get("actor_id") for a in recent_helpers if a.get("actor_id")))
+        helper_count = len({a.get("actor_id") for a in recent_helpers if a.get("actor_id")})
         helper_multiplier = max(0.25, 1.0 - 0.5 * helper_count)
 
         # Check reinforcement item
@@ -672,7 +669,6 @@ class DigService:
 
         # 8. Prestige perks and relics
         perks = self._get_prestige_perks(tunnel)
-        prestige_level = tunnel.get("prestige_level", 0) or 0
 
         pickaxe_tier = tunnel.get("pickaxe_tier", 0) or 0
         pickaxe_data = PICKAXE_TIERS[pickaxe_tier] if pickaxe_tier < len(PICKAXE_TIERS) else {}
@@ -2410,9 +2406,8 @@ class DigService:
             elif ctype == "prestige":
                 if tunnel.get("prestige_level", 0) >= condition.get("value", 0):
                     unlocked = True
-            elif ctype == "cave_in":
-                if context.get("action") == "cave_in":
-                    unlocked = True
+            elif ctype == "cave_in" and context.get("action") == "cave_in":
+                unlocked = True
 
             if unlocked:
                 self.dig_repo.add_achievement(
@@ -2495,7 +2490,6 @@ class DigService:
 
         tunnel = dict(tunnel)
         achievements = self.dig_repo.get_achievements(discord_id, guild_id)
-        achievement_ids = {a.get("achievement_id") for a in achievements}
 
         boss_progress = self._get_boss_progress(tunnel)
         all_bosses_beaten = all(v == "defeated" for v in boss_progress.values())

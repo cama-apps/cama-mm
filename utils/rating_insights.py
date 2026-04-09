@@ -5,7 +5,7 @@ Helpers for computing rating system insights.
 from __future__ import annotations
 
 import statistics
-from typing import Iterable
+from collections.abc import Iterable
 
 from domain.models.player import Player
 from rating_system import CamaRatingSystem

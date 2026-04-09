@@ -5,7 +5,7 @@ Cached data loading from dotabase for trivia questions.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from functools import lru_cache
 
 from dotabase import Ability, Hero, Item, Response, dotabase_session

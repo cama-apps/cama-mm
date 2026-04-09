@@ -11,7 +11,7 @@ import io
 import logging
 import random
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import config as _config
@@ -19,52 +19,51 @@ from config import (
     MAX_DEBT,
     NEON_COOLDOWN_SECONDS,
     NEON_LAYER1_CHANCE,
-    NEON_LAYER2_CHANCE,
     NEON_LLM_CHANCE,
     NEON_MVP_CHANCE,
 )
 from utils.neon_terminal import (
+    # New event templates (Easter Egg Expansion)
+    render_all_in_bet,
     render_balance_check,
     render_balance_zero,
     render_bankruptcy_filing,
     render_bet_placed,
+    render_bets_milestone,
+    render_bomb_pot,
+    render_captain_symmetry,
     render_coinflip,
     render_cooldown_hit,
     render_debt_collector,
     render_don_lose,
     render_don_loss_box,
     render_don_win,
+    render_first_leverage,
+    render_games_milestone,
+    render_last_second_bet,
+    render_lightning_bolt,
+    render_lightning_bolt_overlay,
     render_loan_taken,
+    render_lobby_join,
     render_match_recorded,
     render_negative_loan,
     render_prediction_market_crash,
     render_prediction_resolved,
     render_registration,
+    render_rivalry_detected,
+    render_simultaneous_events,
     render_soft_avoid,
     render_soft_avoid_surveillance,
     render_streak,
     render_system_breach,
-    render_wheel_bankrupt,
-    render_lightning_bolt,
-    render_lightning_bolt_overlay,
-    # New event templates (Easter Egg Expansion)
-    render_all_in_bet,
-    render_last_second_bet,
-    render_bomb_pot,
-    render_lobby_join,
-    render_rivalry_detected,
-    render_games_milestone,
-    render_win_streak_record,
-    render_first_leverage,
-    render_bets_milestone,
-    render_simultaneous_events,
-    render_captain_symmetry,
     render_unanimous_wrong,
+    render_wheel_bankrupt,
+    render_win_streak_record,
 )
 
 if TYPE_CHECKING:
-    from repositories.interfaces import IPlayerRepository
     from repositories.bet_repository import BetRepository
+    from repositories.interfaces import IPlayerRepository
     from repositories.neon_event_repository import NeonEventRepository
     from services.ai_service import AIService
     from services.bankruptcy_service import BankruptcyService
@@ -144,9 +143,7 @@ class NeonDegenService:
         key = (discord_id, guild_id or 0)
         now = time.time()
         last = self._cooldowns.get(key, 0)
-        if now - last < NEON_COOLDOWN_SECONDS:
-            return False
-        return True
+        return now - last >= NEON_COOLDOWN_SECONDS
 
     def _set_cooldown(self, discord_id: int, guild_id: int | None) -> None:
         """Set cooldown for a user."""
@@ -444,26 +441,24 @@ class NeonDegenService:
             ctx = self._build_player_context(discord_id, guild_id)
 
             # Layer 2: Hit MAX_DEBT
-            if new_balance <= -MAX_DEBT:
-                if self._roll(0.90):
-                    text = render_system_breach(name)
-                    text = await self._generate_text(
-                        f"Client hit MAX_DEBT floor of {-MAX_DEBT} JC",
-                        ctx, text,
-                    )
-                    self._set_cooldown(discord_id, guild_id)
-                    return NeonResult(layer=2, text_block=text)
+            if new_balance <= -MAX_DEBT and self._roll(0.90):
+                text = render_system_breach(name)
+                text = await self._generate_text(
+                    f"Client hit MAX_DEBT floor of {-MAX_DEBT} JC",
+                    ctx, text,
+                )
+                self._set_cooldown(discord_id, guild_id)
+                return NeonResult(layer=2, text_block=text)
 
             # Layer 2: Hit zero
-            if new_balance == 0 and not won:
-                if self._roll(0.70):
-                    text = render_balance_zero(name)
-                    text = await self._generate_text(
-                        f"Client's balance hit exactly 0 JC after a lost bet",
-                        ctx, text,
-                    )
-                    self._set_cooldown(discord_id, guild_id)
-                    return NeonResult(layer=2, text_block=text)
+            if new_balance == 0 and not won and self._roll(0.70):
+                text = render_balance_zero(name)
+                text = await self._generate_text(
+                    "Client's balance hit exactly 0 JC after a lost bet",
+                    ctx, text,
+                )
+                self._set_cooldown(discord_id, guild_id)
+                return NeonResult(layer=2, text_block=text)
 
             return None
         except Exception as e:
@@ -586,28 +581,26 @@ class NeonDegenService:
             ctx = self._build_player_context(discord_id, guild_id)
 
             # Layer 2: Wheel BANKRUPT
-            if result_value < 0:
-                if self._roll(0.30):
-                    text = render_wheel_bankrupt(name, result_value)
-                    text = await self._generate_text(
-                        f"Client hit BANKRUPT on the wheel. Lost {abs(result_value)} JC",
-                        ctx, text,
-                    )
-                    self._set_cooldown(discord_id, guild_id)
-                    return NeonResult(layer=2, text_block=text)
+            if result_value < 0 and self._roll(0.30):
+                text = render_wheel_bankrupt(name, result_value)
+                text = await self._generate_text(
+                    f"Client hit BANKRUPT on the wheel. Lost {abs(result_value)} JC",
+                    ctx, text,
+                )
+                self._set_cooldown(discord_id, guild_id)
+                return NeonResult(layer=2, text_block=text)
 
             # Layer 3: Freefall - went from 100+ to 0 in one spin
             if result_value < 0 and new_balance <= 0:
                 prior_balance = new_balance - result_value  # result_value is negative
-                if prior_balance >= 100:
-                    if self._roll(0.50):
-                        try:
-                            from utils.neon_drawing import create_freefall_gif
-                            gif = create_freefall_gif(name, prior_balance, new_balance)
-                            self._set_cooldown(discord_id, guild_id)
-                            return NeonResult(layer=3, gif_file=gif)
-                        except Exception as e:
-                            logger.debug(f"Freefall GIF failed: {e}")
+                if prior_balance >= 100 and self._roll(0.50):
+                    try:
+                        from utils.neon_drawing import create_freefall_gif
+                        gif = create_freefall_gif(name, prior_balance, new_balance)
+                        self._set_cooldown(discord_id, guild_id)
+                        return NeonResult(layer=3, gif_file=gif)
+                    except Exception as e:
+                        logger.debug(f"Freefall GIF failed: {e}")
 
             return None
         except Exception as e:
@@ -668,16 +661,15 @@ class NeonDegenService:
                 player_id = streak_data.get("discord_id")
                 streak = streak_data.get("streak", 0)
                 is_win = streak_data.get("is_win", False)
-                if abs(streak) >= 5 and player_id:
-                    if self._roll(0.60):
-                        name = self._get_player_name(player_id, guild_id)
-                        text = render_streak(name, abs(streak), is_win)
-                        ctx = self._build_player_context(player_id, guild_id)
-                        text = await self._generate_text(
-                            f"Client {name} is on a {abs(streak)}-game {'win' if is_win else 'loss'} streak",
-                            ctx, text,
-                        )
-                        return NeonResult(layer=2, text_block=text)
+                if abs(streak) >= 5 and player_id and self._roll(0.60):
+                    name = self._get_player_name(player_id, guild_id)
+                    text = render_streak(name, abs(streak), is_win)
+                    ctx = self._build_player_context(player_id, guild_id)
+                    text = await self._generate_text(
+                        f"Client {name} is on a {abs(streak)}-game {'win' if is_win else 'loss'} streak",
+                        ctx, text,
+                    )
+                    return NeonResult(layer=2, text_block=text)
 
             # Layer 1: Simple match footer
             if self._roll(0.20):
@@ -776,7 +768,7 @@ class NeonDegenService:
             try:
                 from utils.neon_drawing import create_degen_certificate_gif
                 gif = create_degen_certificate_gif(name, degen_score)
-                from utils.neon_terminal import ansi_block, RED, DIM, RESET, YELLOW
+                from utils.neon_terminal import DIM, RED, RESET, YELLOW, ansi_block
                 text = ansi_block(
                     f"{RED} ACHIEVEMENT UNLOCKED{RESET}\n"
                     f"{DIM}{'=' * 36}{RESET}\n"

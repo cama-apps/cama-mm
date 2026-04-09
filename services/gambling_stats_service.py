@@ -329,7 +329,7 @@ class GamblingStatsService:
             flavor_texts.append(f"{bankruptcy_count} bankruptcy")
 
         # 5. Bet frequency (0-10) - % of matches bet on
-        matches_bet_on = len(set(b["match_id"] for b in history))
+        matches_bet_on = len({b["match_id"] for b in history})
         total_matches = self.bet_repo.get_total_settled_matches(guild_id)
 
         if total_matches > 0:
@@ -693,7 +693,7 @@ class GamblingStatsService:
         hater_win_rate = hater_wins / hater_bets_count if hater_bets_count > 0 else 0
 
         # Count unique matches with bets
-        matches_with_bets = len(set(bet["match_id"] for bet in bets))
+        matches_with_bets = len({bet["match_id"] for bet in bets})
         total_bets = len(bets)
 
         # Find single bet extremes

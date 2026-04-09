@@ -19,15 +19,14 @@ Consolidates tests from:
 import pytest
 
 from database import Database
-from services.lobby_manager_service import LobbyManagerService as LobbyManager
 from rating_system import CamaRatingSystem
 from repositories.lobby_repository import LobbyRepository
 from repositories.match_repository import MatchRepository
 from repositories.player_repository import PlayerRepository
+from services.lobby_manager_service import LobbyManagerService as LobbyManager
 from services.lobby_service import LobbyService
 from services.match_service import MatchService
 from tests.conftest import TEST_GUILD_ID
-
 
 # =============================================================================
 # FIXTURES
@@ -397,7 +396,6 @@ class TestRadiantDireBugFix:
         2. Recording match with "Dire won"
         3. Verifying leaderboard shows correct wins/losses
         """
-        rating_system = CamaRatingSystem()
 
         # Create players with exact names from bug report
         player_names_and_ratings = [

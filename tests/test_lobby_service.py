@@ -1,12 +1,13 @@
 """Tests for LobbyService with pending match check."""
 
-import pytest
+from datetime import datetime
 from unittest.mock import MagicMock
 
-from services.lobby_service import LobbyService
-from services.lobby_manager_service import LobbyManagerService
+import pytest
+
 from domain.models.lobby import Lobby
-from datetime import datetime
+from services.lobby_manager_service import LobbyManagerService
+from services.lobby_service import LobbyService
 
 
 class TestLobbyServicePendingMatchCheck:

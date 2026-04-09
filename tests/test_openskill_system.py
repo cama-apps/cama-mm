@@ -8,7 +8,6 @@ Tests cover:
 - Mu floor enforcement (minimum 25)
 """
 
-import pytest
 
 from openskill_rating_system import CamaOpenSkillSystem
 

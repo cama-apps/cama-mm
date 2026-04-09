@@ -340,8 +340,8 @@ async def test_loan_checks_eligibility_for_registered_user():
     player_service.get_player.return_value = MagicMock(name="TestPlayer")
 
     # Loan is allowed - mock Result objects for validate_loan and execute_loan
-    from services.result import Result
     from services.loan_service import LoanApproval, LoanResult
+    from services.result import Result
     loan_service.validate_loan.return_value = Result.ok(
         LoanApproval(amount=50, fee=10, total_owed=60, new_balance=40)
     )

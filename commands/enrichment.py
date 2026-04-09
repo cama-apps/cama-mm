@@ -16,9 +16,9 @@ from services.match_enrichment_service import MatchEnrichmentService
 from services.opendota_player_service import OpenDotaPlayerService
 from services.permissions import has_admin_permission
 from utils.drawing import draw_matches_table
-from utils.match_views import EnrichedMatchView
 from utils.embeds import _determine_lane_outcomes, create_enriched_match_embed
 from utils.interaction_safety import safe_defer, safe_followup
+from utils.match_views import EnrichedMatchView
 
 logger = logging.getLogger("cama_bot.commands.enrichment")
 

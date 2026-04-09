@@ -176,7 +176,7 @@ def create_terminal_crash_gif(name: str, filing_number: int) -> io.BytesIO:
         _draw_text_centered(draw, "JOPA-T/v3.7 TERMINAL", 20, NEON_GREEN, font_md)
         _draw_text_left(draw, f"> Processing filing #{filing_number}...", 20, 60, DIM_GREEN, font_sm)
         _draw_text_left(draw, f"> Debtor: {name}", 20, 80, DIM_GREEN, font_sm)
-        _draw_text_left(draw, f"> Status: PROCESSING", 20, 100, NEON_YELLOW, font_sm)
+        _draw_text_left(draw, "> Status: PROCESSING", 20, 100, NEON_YELLOW, font_sm)
         # Blinking cursor
         if i % 2 == 0:
             _draw_text_left(draw, "> _", 20, 120, NEON_GREEN, font_sm)
@@ -333,10 +333,6 @@ def create_void_welcome_gif(name: str) -> io.BytesIO:
     for i in range(15):
         img = Image.new("RGBA", (WIDTH, HEIGHT), CRT_BLACK)
         draw = ImageDraw.Draw(img)
-
-        # Pulsing glow
-        alpha = int(128 + 127 * math.sin(i * 0.5))
-        glow_color = (NEON_GREEN[0], NEON_GREEN[1], NEON_GREEN[2], alpha)
 
         # Draw all the typed text dimmed
         y = 30
@@ -620,7 +616,7 @@ def create_market_crash_gif(total_pool: int, outcome: str, winners: int, losers:
 
         # Pool stats below graph
         _draw_text_left(draw, f"  Participants: {winners + losers}", 20, 215, DIM_GREEN, font_sm)
-        _draw_text_left(draw, f"  Status: ACTIVE", 20, 233, NEON_GREEN, font_sm)
+        _draw_text_left(draw, "  Status: ACTIVE", 20, 233, NEON_GREEN, font_sm)
 
         frames.append(_make_frame(img))
         durations.append(100)
@@ -666,7 +662,7 @@ def create_market_crash_gif(total_pool: int, outcome: str, winners: int, losers:
         if i % 2 == 0 or i > 10:
             _draw_text_centered(draw, "MARKET CRASH", HEIGHT // 2 + 20, NEON_RED, font_lg)
 
-        _draw_text_left(draw, f"  Status: SETTLING", 20, 233, NEON_YELLOW, font_sm)
+        _draw_text_left(draw, "  Status: SETTLING", 20, 233, NEON_YELLOW, font_sm)
 
         frames.append(_make_frame(img, glitch=i > 5))
         durations.append(80)
@@ -823,7 +819,6 @@ def create_bomb_pot_gif(pool: int, contributors: int) -> io.BytesIO:
         draw = ImageDraw.Draw(img)
 
         # Shaking text effect
-        offset_x = random.randint(-10, 10) if i < 5 else 0
         offset_y = random.randint(-5, 5) if i < 5 else 0
 
         text = _corrupt_text("DETONATED", 0.3 if i < 5 else 0)

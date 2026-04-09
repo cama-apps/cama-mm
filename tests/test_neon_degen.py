@@ -5,8 +5,10 @@ Tests ASCII generation, GIF size limits, and orchestrator logic.
 """
 
 import io
+
 import pytest
 
+from services.neon_degen_service import NeonDegenService, NeonResult
 from utils.neon_terminal import (
     ansi_block,
     ascii_box,
@@ -33,8 +35,6 @@ from utils.neon_terminal import (
     render_system_breach,
     render_wheel_bankrupt,
 )
-from services.neon_degen_service import NeonDegenService, NeonResult
-
 
 # ---------------------------------------------------------------------------
 # ASCII template tests
@@ -358,7 +358,7 @@ class TestNeonDegenService:
     async def test_on_degen_milestone_one_time(self):
         """Degen milestone should only fire once per user."""
         service = self._make_service()
-        result1 = await service.on_degen_milestone(123, 456, 95)
+        await service.on_degen_milestone(123, 456, 95)
         # First time may or may not generate GIF depending on PIL
         # But the one-time flag should be set
         result2 = await service.on_degen_milestone(123, 456, 95)
@@ -619,8 +619,8 @@ class TestNeonDegenPersistence:
     @pytest.mark.asyncio
     async def test_degen_milestone_persists_across_instances(self, repo_db_path):
         """One-time trigger should persist in DB and block re-fire on new instance."""
-        from repositories.player_repository import PlayerRepository
         from repositories.neon_event_repository import NeonEventRepository
+        from repositories.player_repository import PlayerRepository
 
         player_repo = PlayerRepository(repo_db_path)
         neon_event_repo = NeonEventRepository(repo_db_path)
@@ -705,7 +705,7 @@ class TestNeonDegenPrivacy:
     @pytest.mark.asyncio
     async def test_on_soft_avoid_does_not_call_build_player_context(self):
         """on_soft_avoid must NOT call _build_player_context at all."""
-        from unittest.mock import AsyncMock, patch, MagicMock
+        from unittest.mock import MagicMock
 
         service = NeonDegenService()
         service._build_player_context = MagicMock(
@@ -726,6 +726,7 @@ class TestNeonDegenPrivacy:
         buyer_balance = 99999
 
         from unittest.mock import MagicMock
+
         from domain.models.player import Player
 
         fake_player = Player(

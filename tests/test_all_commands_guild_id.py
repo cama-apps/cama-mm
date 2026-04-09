@@ -13,10 +13,8 @@ is used before being defined.
 import ast
 import re
 from pathlib import Path
-from typing import List, Tuple
 
 import pytest
-
 
 COMMANDS_DIR = Path(__file__).parent.parent / "commands"
 
@@ -87,12 +85,12 @@ METHODS_REQUIRING_GUILD_ID = [
 ]
 
 
-def get_python_files() -> List[Path]:
+def get_python_files() -> list[Path]:
     """Get all Python files in the commands directory."""
     return list(COMMANDS_DIR.glob("*.py"))
 
 
-def find_guild_id_issues_in_file(filepath: Path) -> List[Tuple[int, str]]:
+def find_guild_id_issues_in_file(filepath: Path) -> list[tuple[int, str]]:
     """
     Analyze a file for potential guild_id issues.
 
@@ -118,7 +116,7 @@ def find_guild_id_issues_in_file(filepath: Path) -> List[Tuple[int, str]]:
     return issues
 
 
-def _check_function_for_guild_id_issues(func: ast.FunctionDef, filename: str) -> List[Tuple[int, str]]:
+def _check_function_for_guild_id_issues(func: ast.FunctionDef, filename: str) -> list[tuple[int, str]]:
     """Check a single function for guild_id usage issues."""
     issues = []
 
@@ -141,9 +139,12 @@ def _check_function_for_guild_id_issues(func: ast.FunctionDef, filename: str) ->
                     guild_id_uses.append(node.lineno)
 
             for keyword in node.keywords:
-                if keyword.arg == "guild_id" and isinstance(keyword.value, ast.Name):
-                    if keyword.value.id == "guild_id":
-                        guild_id_uses.append(node.lineno)
+                if (
+                    keyword.arg == "guild_id"
+                    and isinstance(keyword.value, ast.Name)
+                    and keyword.value.id == "guild_id"
+                ):
+                    guild_id_uses.append(node.lineno)
 
     # Check if guild_id is used before defined
     if guild_id_uses and guild_id_definitions:
@@ -197,7 +198,6 @@ class TestNoMissingGuildIdParams:
         """
         content = filepath.read_text(encoding='utf-8')
         lines = content.split('\n')
-        issues = []
 
         for method_name in METHODS_REQUIRING_GUILD_ID:
             # Find calls to this method
@@ -210,7 +210,6 @@ class TestNoMissingGuildIdParams:
                     # after the method name on the same line or continued lines
 
                     # Get the full call (might span multiple lines)
-                    call_text = line
 
                     # Simple check: if 'guild_id' is not in the call, it might be missing
                     # But we need to be careful about false positives
@@ -253,7 +252,21 @@ class TestCommandFilesExist:
         import commands.wrapped
 
         # If we get here, all imports succeeded
-        assert True
+        assert commands.admin is not None
+        assert commands.advstats is not None
+        assert commands.betting is not None
+        assert commands.draft is not None
+        assert commands.enrichment is not None
+        assert commands.herogrid is not None
+        assert commands.info is not None
+        assert commands.lobby is not None
+        assert commands.match is not None
+        assert commands.predictions is not None
+        assert commands.profile is not None
+        assert commands.rating_analysis is not None
+        assert commands.registration is not None
+        assert commands.shop is not None
+        assert commands.wrapped is not None
 
 
 class TestGuildIdPatternConsistency:

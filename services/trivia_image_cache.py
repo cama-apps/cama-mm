@@ -83,8 +83,7 @@ def warm_cache() -> int:
     newly_cached = 0
     for url in urls:
         path = _url_to_path(url)
-        if not path.exists():
-            if ensure_cached(url):
-                newly_cached += 1
+        if not path.exists() and ensure_cached(url):
+            newly_cached += 1
     logger.info("Trivia image cache warm: %d new, %d total", newly_cached, len(urls))
     return newly_cached

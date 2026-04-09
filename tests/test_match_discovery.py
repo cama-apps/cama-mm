@@ -689,11 +689,9 @@ class TestEnrichmentValidation:
 
     def test_validation_winning_team_mismatch(self, mock_repos, mock_opendota_api, monkeypatch):
         """Test validation fails when winning team doesn't match."""
-        from services.match_enrichment_service import MatchEnrichmentService
-
         # Temporarily lower the min player match requirement for this test
         import services.match_enrichment_service as mes
-        original_min = mes.ENRICHMENT_MIN_PLAYER_MATCH
+        from services.match_enrichment_service import MatchEnrichmentService
         monkeypatch.setattr(mes, "ENRICHMENT_MIN_PLAYER_MATCH", 0)
 
         match_repo, player_repo = mock_repos
@@ -723,10 +721,9 @@ class TestEnrichmentValidation:
 
     def test_validation_player_side_mismatch(self, mock_repos, mock_opendota_api, monkeypatch):
         """Test validation fails when player is on wrong team."""
-        from services.match_enrichment_service import MatchEnrichmentService
-
         # Temporarily lower the min player match requirement for this test
         import services.match_enrichment_service as mes
+        from services.match_enrichment_service import MatchEnrichmentService
         monkeypatch.setattr(mes, "ENRICHMENT_MIN_PLAYER_MATCH", 1)
 
         match_repo, player_repo = mock_repos

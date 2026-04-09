@@ -9,7 +9,6 @@ These tests verify that the layered architecture is maintained:
 """
 
 import ast
-import os
 from pathlib import Path
 
 
@@ -23,16 +22,15 @@ def get_imports_from_file(file_path: Path) -> set[str]:
     """Extract all import statements from a Python file."""
     imports = set()
     try:
-        with open(file_path, "r", encoding="utf-8") as f:
+        with open(file_path, encoding="utf-8") as f:
             tree = ast.parse(f.read(), filename=str(file_path))
 
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 for alias in node.names:
                     imports.add(alias.name)
-            elif isinstance(node, ast.ImportFrom):
-                if node.module:
-                    imports.add(node.module)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                imports.add(node.module)
     except SyntaxError:
         # Skip files with syntax errors
         pass
@@ -142,7 +140,7 @@ class TestCommandLayerConstraints:
             # Parse the file to check for runtime repository imports
             # (TYPE_CHECKING-guarded imports are fine)
             try:
-                with open(file_path, "r", encoding="utf-8") as f:
+                with open(file_path, encoding="utf-8") as f:
                     tree = ast.parse(f.read(), filename=str(file_path))
             except SyntaxError:
                 continue
@@ -186,11 +184,13 @@ class TestCommandLayerConstraints:
                         continue
                     # Non-TYPE_CHECKING if blocks: check their body for imports
                     for child in ast.walk(node):
-                        if isinstance(child, ast.ImportFrom) and child.module:
-                            if child.module.startswith("repositories") and not any(
-                                p in child.module for p in allowed_patterns
-                            ):
-                                runtime_repo_imports.append(child.module)
+                        if (
+                            isinstance(child, ast.ImportFrom)
+                            and child.module
+                            and child.module.startswith("repositories")
+                            and not any(p in child.module for p in allowed_patterns)
+                        ):
+                            runtime_repo_imports.append(child.module)
 
             assert not runtime_repo_imports, (
                 f"{file_path.name} imports repositories at runtime: {runtime_repo_imports}. "
@@ -214,7 +214,7 @@ class TestRepositoryLayerConstraints:
             if file_path.name in ("__init__.py", "base_repository.py", "interfaces.py"):
                 continue
 
-            with open(file_path, "r", encoding="utf-8") as f:
+            with open(file_path, encoding="utf-8") as f:
                 content = f.read()
 
             # Check if it defines a class that extends BaseRepository
@@ -244,7 +244,7 @@ class TestRepositoryLayerConstraints:
             if file_path.name == "base_repository.py":
                 continue
 
-            with open(file_path, "r", encoding="utf-8") as f:
+            with open(file_path, encoding="utf-8") as f:
                 content = f.read()
 
             # Check for local _normalize_guild_id definitions
@@ -265,7 +265,7 @@ class TestRepositoryLayerConstraints:
             if file_path.name == "base_repository.py":
                 continue
 
-            with open(file_path, "r", encoding="utf-8") as f:
+            with open(file_path, encoding="utf-8") as f:
                 content = f.read()
 
             # Check for manual BEGIN IMMEDIATE calls
@@ -308,10 +308,10 @@ class TestNoCircularImports:
         # imports work in the normal pytest environment.
 
         # Just verify basic imports work
-        from repositories.base_repository import BaseRepository
+        from domain.models.lobby import Lobby
         from domain.models.player import Player
         from domain.models.team import Team
-        from domain.models.lobby import Lobby
+        from repositories.base_repository import BaseRepository
 
         assert BaseRepository is not None
         assert Player is not None

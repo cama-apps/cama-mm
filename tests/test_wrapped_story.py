@@ -18,7 +18,6 @@ import io
 import json
 from unittest.mock import MagicMock, patch
 
-import pytest
 from PIL import Image
 
 from services.wrapped_service import (
@@ -32,7 +31,6 @@ from services.wrapped_service import (
     WrappedService,
     get_random_flavor,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -380,7 +378,7 @@ class TestGetPairwiseWrapped:
         player_mock.name = "Teammate"
         player_repo.get_by_id.return_value = player_mock
 
-        result = svc.get_pairwise_wrapped(111, guild_id=None)
+        svc.get_pairwise_wrapped(111, guild_id=None)
 
         # guild_id=None is passed through; repos handle normalization internally
         pairings_repo.get_best_teammates.assert_called_once_with(111, None, min_games=3, limit=3)
@@ -853,8 +851,9 @@ class TestDrawLaneBreakdownSlide:
 
 class TestWordWrap:
     def test_empty_string(self):
-        from utils.wrapped_drawing import _word_wrap
         from PIL import Image, ImageDraw, ImageFont
+
+        from utils.wrapped_drawing import _word_wrap
 
         img = Image.new("RGBA", (100, 100))
         draw = ImageDraw.Draw(img)
@@ -862,8 +861,9 @@ class TestWordWrap:
         assert _word_wrap("", font, 200, draw) == []
 
     def test_single_word(self):
-        from utils.wrapped_drawing import _word_wrap
         from PIL import Image, ImageDraw, ImageFont
+
+        from utils.wrapped_drawing import _word_wrap
 
         img = Image.new("RGBA", (100, 100))
         draw = ImageDraw.Draw(img)
@@ -871,8 +871,9 @@ class TestWordWrap:
         assert _word_wrap("hello", font, 200, draw) == ["hello"]
 
     def test_fits_one_line(self):
-        from utils.wrapped_drawing import _word_wrap
         from PIL import Image, ImageDraw, ImageFont
+
+        from utils.wrapped_drawing import _word_wrap
 
         img = Image.new("RGBA", (100, 100))
         draw = ImageDraw.Draw(img)
@@ -881,8 +882,9 @@ class TestWordWrap:
         assert result == ["short text"]
 
     def test_wraps_long_text(self):
-        from utils.wrapped_drawing import _word_wrap
         from PIL import Image, ImageDraw, ImageFont
+
+        from utils.wrapped_drawing import _word_wrap
 
         img = Image.new("RGBA", (100, 100))
         draw = ImageDraw.Draw(img)
@@ -893,8 +895,9 @@ class TestWordWrap:
         assert " ".join(result) == "this is a longer piece of text that should wrap"
 
     def test_truncates_oversized_word(self):
-        from utils.wrapped_drawing import _word_wrap
         from PIL import Image, ImageDraw, ImageFont
+
+        from utils.wrapped_drawing import _word_wrap
 
         img = Image.new("RGBA", (100, 100))
         draw = ImageDraw.Draw(img)

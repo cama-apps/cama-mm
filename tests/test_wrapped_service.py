@@ -3,10 +3,8 @@ Tests for Cama Wrapped yearly summary feature.
 """
 
 import time
-from datetime import datetime
+from datetime import UTC, datetime
 from unittest.mock import MagicMock
-
-import pytest
 
 from repositories.wrapped_repository import WrappedRepository
 from services.wrapped_service import Award, WrappedService
@@ -43,9 +41,8 @@ class TestWrappedService:
 
         start_ts, end_ts = service._get_year_timestamps(2026)
 
-        from datetime import timezone
-        start_dt = datetime.fromtimestamp(start_ts, tz=timezone.utc)
-        end_dt = datetime.fromtimestamp(end_ts - 1, tz=timezone.utc)
+        start_dt = datetime.fromtimestamp(start_ts, tz=UTC)
+        end_dt = datetime.fromtimestamp(end_ts - 1, tz=UTC)
 
         assert start_dt.year == 2026
         assert start_dt.month == 1
@@ -178,9 +175,9 @@ class TestWrappedServiceIntegration:
 
     def test_get_server_wrapped_no_data(self, repo_db_path):
         """Test getting server wrapped with no match data."""
-        from repositories.player_repository import PlayerRepository
-        from repositories.match_repository import MatchRepository
         from repositories.bet_repository import BetRepository
+        from repositories.match_repository import MatchRepository
+        from repositories.player_repository import PlayerRepository
 
         wrapped_repo = WrappedRepository(repo_db_path)
         player_repo = PlayerRepository(repo_db_path)
@@ -200,9 +197,9 @@ class TestWrappedServiceIntegration:
 
     def test_get_player_wrapped_not_registered(self, repo_db_path):
         """Test getting player wrapped for non-existent player."""
-        from repositories.player_repository import PlayerRepository
-        from repositories.match_repository import MatchRepository
         from repositories.bet_repository import BetRepository
+        from repositories.match_repository import MatchRepository
+        from repositories.player_repository import PlayerRepository
 
         wrapped_repo = WrappedRepository(repo_db_path)
         player_repo = PlayerRepository(repo_db_path)

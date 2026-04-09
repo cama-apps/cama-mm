@@ -5,19 +5,17 @@ Regression tests for bug fixes:
 - Issue 1: Profile embed spacer for proper layout
 """
 
-import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from infrastructure.schema_manager import SchemaManager
+from repositories.bankruptcy_repository import BankruptcyRepository
 from repositories.bet_repository import BetRepository
 from repositories.match_repository import MatchRepository
-from repositories.player_repository import PlayerRepository
 from repositories.pairings_repository import PairingsRepository
-from repositories.bankruptcy_repository import BankruptcyRepository
-from services.bankruptcy_service import BankruptcyService
-from services.gambling_stats_service import GamblingStatsService, Leaderboard, LeaderboardEntry
+from repositories.player_repository import PlayerRepository
+from services.gambling_stats_service import Leaderboard, LeaderboardEntry
 from tests.conftest import TEST_GUILD_ID
 
 
@@ -109,6 +107,7 @@ class TestAbortLobbySleepRemoved:
     async def test_abort_completes_quickly(self):
         """Verify abort operation completes in under 1 second (not 15+ seconds)."""
         import time
+
         from commands.match import MatchCommands
 
         # Create mock bot and services
@@ -161,7 +160,7 @@ class TestGamblingLeaderboardNoFetchUser:
     @pytest.mark.asyncio
     async def test_gambling_leaderboard_uses_guild_members_cache(self):
         """Verify UnifiedLeaderboardView's gambling tab uses pre-fetched guild members."""
-        from commands.info import UnifiedLeaderboardView, LeaderboardTab
+        from commands.info import LeaderboardTab, UnifiedLeaderboardView
 
         # Create mock cog
         mock_cog = MagicMock()
@@ -245,7 +244,7 @@ class TestGamblingLeaderboardNoFetchUser:
     @pytest.mark.asyncio
     async def test_gambling_leaderboard_handles_missing_guild(self):
         """Verify UnifiedLeaderboardView handles DM context (no guild) gracefully."""
-        from commands.info import UnifiedLeaderboardView, LeaderboardTab
+        from commands.info import LeaderboardTab, UnifiedLeaderboardView
 
         # Create mock cog
         mock_cog = MagicMock()
@@ -316,8 +315,8 @@ class TestProfileTeammatesSpacerPresent:
     @pytest.mark.asyncio
     async def test_teammates_tab_has_spacer_after_most_played_against(self, repositories):
         """Verify the teammates tab includes spacer for proper row layout."""
+
         from commands.profile import ProfileCommands
-        import discord
 
         # Create mock bot with services attached
         mock_bot = MagicMock()
@@ -427,6 +426,7 @@ class TestGetNameFunctionSync:
     def test_get_name_is_sync_in_gambling_leaderboard(self):
         """Verify _get_name_for_gambling in UnifiedLeaderboardView is a sync function."""
         import inspect
+
         from commands.info import UnifiedLeaderboardView
 
         # Get the source code of _get_name_for_gambling
@@ -502,8 +502,9 @@ class TestCriticalCommandsAlwaysLoaded:
 
     def test_info_cog_has_help_command(self):
         """Verify InfoCommands cog has the /help command."""
-        from commands.info import InfoCommands
         from discord.app_commands import Command
+
+        from commands.info import InfoCommands
 
         # Check that help_command method exists and is decorated as app_command
         assert hasattr(InfoCommands, "help_command"), (
@@ -511,7 +512,7 @@ class TestCriticalCommandsAlwaysLoaded:
         )
 
         # Decorated methods become Command objects
-        cmd = getattr(InfoCommands, "help_command")
+        cmd = InfoCommands.help_command
         assert isinstance(cmd, Command), (
             "help_command should be a discord.app_commands.Command"
         )
@@ -519,13 +520,14 @@ class TestCriticalCommandsAlwaysLoaded:
 
     def test_info_cog_has_leaderboard_command(self):
         """Verify InfoCommands cog has the /leaderboard command."""
-        from commands.info import InfoCommands
         from discord.app_commands import Command
+
+        from commands.info import InfoCommands
 
         assert hasattr(InfoCommands, "leaderboard"), (
             "InfoCommands should have a leaderboard method"
         )
-        cmd = getattr(InfoCommands, "leaderboard")
+        cmd = InfoCommands.leaderboard
         assert isinstance(cmd, Command), (
             "leaderboard should be a discord.app_commands.Command"
         )
@@ -533,13 +535,14 @@ class TestCriticalCommandsAlwaysLoaded:
 
     def test_profile_cog_has_profile_command(self):
         """Verify ProfileCommands cog has the /profile command."""
-        from commands.profile import ProfileCommands
         from discord.app_commands import Command
+
+        from commands.profile import ProfileCommands
 
         assert hasattr(ProfileCommands, "profile"), (
             "ProfileCommands should have a profile method"
         )
-        cmd = getattr(ProfileCommands, "profile")
+        cmd = ProfileCommands.profile
         assert isinstance(cmd, Command), (
             "profile should be a discord.app_commands.Command"
         )
@@ -547,20 +550,21 @@ class TestCriticalCommandsAlwaysLoaded:
 
     def test_dota_info_cog_has_hero_and_ability_commands(self):
         """Verify DotaInfoCommands cog has /hero and /ability commands."""
-        from commands.dota_info import DotaInfoCommands
         from discord.app_commands import Command
+
+        from commands.dota_info import DotaInfoCommands
 
         assert hasattr(DotaInfoCommands, "hero"), (
             "DotaInfoCommands should have a hero method"
         )
-        hero_cmd = getattr(DotaInfoCommands, "hero")
+        hero_cmd = DotaInfoCommands.hero
         assert isinstance(hero_cmd, Command), "hero should be a Command"
         assert hero_cmd.name == "hero", "Command name should be 'hero'"
 
         assert hasattr(DotaInfoCommands, "ability"), (
             "DotaInfoCommands should have an ability method"
         )
-        ability_cmd = getattr(DotaInfoCommands, "ability")
+        ability_cmd = DotaInfoCommands.ability
         assert isinstance(ability_cmd, Command), "ability should be a Command"
         assert ability_cmd.name == "ability", "Command name should be 'ability'"
 
@@ -594,8 +598,9 @@ class TestCriticalCommandsAlwaysLoaded:
 
     def test_all_extensions_importable(self):
         """Verify all extensions in EXTENSIONS list can be imported."""
-        from bot import EXTENSIONS
         import importlib
+
+        from bot import EXTENSIONS
 
         failed_imports = []
         for ext in EXTENSIONS:

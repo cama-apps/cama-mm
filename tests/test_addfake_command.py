@@ -12,7 +12,6 @@ from commands import admin as admin_module
 from commands.admin import AdminCommands
 from database import Database
 from services.lobby_manager_service import LobbyManagerService as LobbyManager
-from repositories.player_repository import PlayerRepository
 from services.lobby_service import LobbyService
 
 

@@ -649,8 +649,8 @@ class PredictionCommands(commands.Cog):
 
                 if losers:
                     result_lines.append("\n**Losers:**")
-                    for l in losers[:10]:
-                        result_lines.append(f"• <@{l['discord_id']}>: -{l['amount']}")
+                    for loser in losers[:10]:
+                        result_lines.append(f"• <@{loser['discord_id']}>: -{loser['amount']}")
                     if len(losers) > 10:
                         result_lines.append(f"...and {len(losers) - 10} more")
 
@@ -872,7 +872,7 @@ class PredictionCommands(commands.Cog):
             return
 
         try:
-            result = await asyncio.to_thread(
+            await asyncio.to_thread(
                 self.prediction_service.close_betting_early, prediction_id
             )
         except ValueError as e:
@@ -1024,7 +1024,7 @@ class PredictionCommands(commands.Cog):
                     winner_text = "none"
 
                 if losers:
-                    loser_parts = [f"<@{l['discord_id']}> -{l['bet']}" for l in losers[:5]]
+                    loser_parts = [f"<@{loser['discord_id']}> -{loser['bet']}" for loser in losers[:5]]
                     if len(losers) > 5:
                         loser_parts.append(f"+{len(losers) - 5} more")
                     loser_text = ", ".join(loser_parts)
@@ -1043,7 +1043,7 @@ class PredictionCommands(commands.Cog):
                 )
             elif pred["status"] == "cancelled":
                 # Cancelled - show refund info
-                value = f"🚫 **Cancelled** | Bets refunded"
+                value = "🚫 **Cancelled** | Bets refunded"
 
                 embed.add_field(
                     name=f"🚫 #{pred['prediction_id']}: {pred['question'][:50]}",

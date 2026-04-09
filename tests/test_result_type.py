@@ -1,9 +1,11 @@
 """Tests for the Result type and error codes."""
 
+from dataclasses import FrozenInstanceError
+
 import pytest
 
-from services.result import Result
 from services import error_codes
+from services.result import Result
 
 
 class TestResultOk:
@@ -150,7 +152,7 @@ class TestResultImmutability:
     def test_result_is_frozen(self):
         """Result is immutable (frozen dataclass)."""
         result = Result.ok(42)
-        with pytest.raises(Exception):  # FrozenInstanceError
+        with pytest.raises(FrozenInstanceError):
             result.value = 100
 
 

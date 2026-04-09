@@ -12,14 +12,20 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from config import BOMB_POT_CHANCE, ENRICHMENT_RETRY_DELAYS, FIRST_GAME_BONUS, JOPACOIN_MIN_BET, OPENSKILL_SHUFFLE_CHANCE, STREAMING_BONUS
+from config import (
+    BOMB_POT_CHANCE,
+    ENRICHMENT_RETRY_DELAYS,
+    FIRST_GAME_BONUS,
+    JOPACOIN_MIN_BET,
+    OPENSKILL_SHUFFLE_CHANCE,
+    STREAMING_BONUS,
+)
 from services.flavor_text_service import FlavorEvent
 from services.lobby_service import LobbyService
 from services.match_discovery_service import MatchDiscoveryService
 from services.match_service import MatchService
 from services.permissions import has_admin_permission
 from utils.embeds import create_enriched_match_embed
-from utils.match_views import EnrichedMatchView
 from utils.formatting import (
     FROGLING_EMOTE,
     JOPACOIN_EMOTE,
@@ -28,11 +34,13 @@ from utils.formatting import (
     format_betting_display,
     get_player_display_name,
 )
+from utils.guild import normalize_guild_id
 from utils.interaction_safety import safe_defer, update_lobby_message_closed
-from utils.neon_helpers import get_neon_service, send_neon_result, _delete_after as _neon_delete_after
+from utils.match_views import EnrichedMatchView
+from utils.neon_helpers import _delete_after as _neon_delete_after
+from utils.neon_helpers import get_neon_service, send_neon_result
 from utils.pin_helpers import safe_unpin_all_bot_messages
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
-from utils.guild import normalize_guild_id
 from utils.streaming import get_streaming_dota_player_ids
 
 logger = logging.getLogger("cama_bot.commands.match")
@@ -327,7 +335,7 @@ class MatchCommands(commands.Cog):
         shuffle_lock = lobby_manager.get_shuffle_lock(guild_id)
         try:
             await asyncio.wait_for(shuffle_lock.acquire(), timeout=0.5)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             await interaction.followup.send(
                 "A shuffle is already in progress. Please wait for it to complete.",
                 ephemeral=True,

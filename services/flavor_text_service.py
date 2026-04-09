@@ -421,9 +421,8 @@ class FlavorTextService:
             Generated insight string or None on error/disabled
         """
         # Check if AI is enabled
-        if guild_id is not None and self.guild_config_repo:
-            if not self.guild_config_repo.get_ai_enabled(guild_id):
-                return None
+        if guild_id is not None and self.guild_config_repo and not self.guild_config_repo.get_ai_enabled(guild_id):
+            return None
 
         # Build prompt based on data type
         prompts = {

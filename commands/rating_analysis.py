@@ -230,9 +230,7 @@ class RatingAnalysisCommands(commands.Cog):
 
         # Generate chart
         try:
-            chart = await loop.run_in_executor(
-                None, lambda: draw_rating_comparison_chart(comparison_data)
-            )
+            chart = await asyncio.to_thread(draw_rating_comparison_chart, comparison_data)
             file = discord.File(chart, filename="comparison.png")
             embed.set_image(url="attachment://comparison.png")
             await safe_followup(interaction, embed=embed, file=file)
@@ -282,9 +280,10 @@ class RatingAnalysisCommands(commands.Cog):
 
         # Generate calibration curve chart
         try:
-            chart = await loop.run_in_executor(
-                None,
-                lambda: draw_calibration_curve(curve_data["glicko"], curve_data["openskill"]),
+            chart = await asyncio.to_thread(
+                draw_calibration_curve,
+                curve_data["glicko"],
+                curve_data["openskill"],
             )
             file = discord.File(chart, filename="calibration.png")
             embed.set_image(url="attachment://calibration.png")
@@ -346,9 +345,7 @@ class RatingAnalysisCommands(commands.Cog):
 
         # Generate trend chart
         try:
-            chart = await loop.run_in_executor(
-                None, lambda: draw_prediction_over_time(match_data, window=20)
-            )
+            chart = await asyncio.to_thread(draw_prediction_over_time, match_data, window=20)
             file = discord.File(chart, filename="trend.png")
             embed.set_image(url="attachment://trend.png")
             await safe_followup(interaction, embed=embed, file=file)
@@ -414,7 +411,7 @@ class RatingAnalysisCommands(commands.Cog):
 
             embed.add_field(
                 name="Calibrated",
-                value="✓ Yes" if is_calibrated else f"No (need σ ≤ 4.0)",
+                value="✓ Yes" if is_calibrated else "No (need σ ≤ 4.0)",
                 inline=True,
             )
 

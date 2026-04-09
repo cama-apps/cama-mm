@@ -11,12 +11,12 @@ import time
 
 import pytest
 
-from services.lobby_manager_service import LobbyManagerService as LobbyManager
 from repositories.bet_repository import BetRepository
 from repositories.lobby_repository import LobbyRepository
 from repositories.match_repository import MatchRepository
 from repositories.player_repository import PlayerRepository
 from services.betting_service import BettingService
+from services.lobby_manager_service import LobbyManagerService as LobbyManager
 from services.match_service import MatchService
 from tests.conftest import TEST_GUILD_ID
 

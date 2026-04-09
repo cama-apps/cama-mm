@@ -7,17 +7,17 @@ import time
 import pytest
 
 from infrastructure.schema_manager import SchemaManager
+from repositories.bankruptcy_repository import BankruptcyRepository
 from repositories.bet_repository import BetRepository
+from repositories.loan_repository import LoanRepository
 from repositories.match_repository import MatchRepository
 from repositories.player_repository import PlayerRepository
-from repositories.bankruptcy_repository import BankruptcyRepository
 from services.bankruptcy_service import BankruptcyService
 from services.gambling_stats_service import (
     DegenScoreBreakdown,
     GamblingStatsService,
     Leaderboard,
 )
-from repositories.loan_repository import LoanRepository
 
 
 @pytest.fixture
@@ -481,7 +481,7 @@ class TestPaperHands:
         discord_id = _setup_player(player_repo, balance=100)
 
         # Record a match where player was on radiant (team 1)
-        match_id = match_repo.record_match(
+        match_repo.record_match(
             team1_ids=[discord_id],
             team2_ids=[999],
             winning_team=1,

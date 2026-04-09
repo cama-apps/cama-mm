@@ -1,10 +1,9 @@
 """Tests for RD decay application when loading Glicko players in MatchService."""
 
 import math
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from services.match_service import MatchService
-from tests.conftest import TEST_GUILD_ID
 
 
 class FakePlayerRepo:
@@ -32,7 +31,7 @@ class FakeMatchRepo:
 
 
 def _iso_days_ago(days: int) -> str:
-    dt = datetime.now(timezone.utc) - timedelta(days=days)
+    dt = datetime.now(UTC) - timedelta(days=days)
     return dt.isoformat()
 
 

@@ -2,9 +2,9 @@
 
 import pytest
 
-from tests.conftest import TEST_GUILD_ID
 from repositories.player_repository import PlayerRepository
 from services.player_service import PlayerService
+from tests.conftest import TEST_GUILD_ID
 
 
 def _make_player(repo, discord_id, rating, rd, volatility=0.06, guild_id=TEST_GUILD_ID):

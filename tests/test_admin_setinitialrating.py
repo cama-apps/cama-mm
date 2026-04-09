@@ -1,6 +1,5 @@
 """Tests for admin /setinitialrating command."""
 
-import asyncio
 import types
 
 import pytest

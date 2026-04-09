@@ -9,8 +9,6 @@ from repositories.match_repository import MatchRepository
 from repositories.player_repository import PlayerRepository
 from services.betting_service import BettingService
 from services.gambling_stats_service import (
-    BettingImpactStats,
-    BettorProfile,
     GamblingStatsService,
 )
 from services.match_service import MatchService
@@ -556,7 +554,6 @@ class TestGamblingStatsServiceBettingImpact:
 
         # Find which team target is on, then bet FOR them (they will lose)
         target_team2 = "radiant" if target_player in pending2["radiant_team_ids"] else "dire"
-        losing_team = target_team2
         winning_team = "dire" if target_team2 == "radiant" else "radiant"
 
         betting_service.place_bet(TEST_GUILD_ID, 2001, target_team2, 10, pending2)  # Loses 10 (betting FOR target)

@@ -2,13 +2,15 @@
 Tests for DisburseService - nonprofit fund distribution voting and distribution.
 """
 
-import pytest
 import time
+from datetime import UTC
 
-from services.disburse_service import DisburseService
-from repositories.loan_repository import LoanRepository
+import pytest
+
 from repositories.disburse_repository import DisburseRepository
+from repositories.loan_repository import LoanRepository
 from repositories.player_repository import PlayerRepository
+from services.disburse_service import DisburseService
 from tests.conftest import TEST_GUILD_ID
 
 
@@ -494,7 +496,7 @@ class TestLotteryEligibility:
 
     def test_lottery_excludes_player_with_old_last_match_date(self, player_repo):
         """Test that players inactive for more than 14 days are excluded."""
-        from datetime import datetime, timedelta, timezone
+        from datetime import datetime, timedelta
 
         player_repo.add(discord_id=1, discord_username="Active", guild_id=TEST_GUILD_ID, initial_mmr=3000)
         player_repo.add(discord_id=2, discord_username="Inactive", guild_id=TEST_GUILD_ID, initial_mmr=3000)
@@ -502,7 +504,7 @@ class TestLotteryEligibility:
         # Player 1 played recently
         player_repo.update_last_match_date(1, TEST_GUILD_ID)
         # Player 2 played 30 days ago
-        old_date = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+        old_date = (datetime.now(UTC) - timedelta(days=30)).isoformat()
         player_repo.update_last_match_date(2, TEST_GUILD_ID, timestamp=old_date)
 
         eligible = player_repo.get_all_registered_players_for_lottery(TEST_GUILD_ID)
@@ -513,12 +515,12 @@ class TestLotteryEligibility:
 
     def test_lottery_includes_player_within_activity_window(self, player_repo):
         """Test that players who played within 14 days are included."""
-        from datetime import datetime, timedelta, timezone
+        from datetime import datetime, timedelta
 
         player_repo.add(discord_id=1, discord_username="Recent", guild_id=TEST_GUILD_ID, initial_mmr=3000)
 
         # Player played 10 days ago (within 14-day window)
-        recent_date = (datetime.now(timezone.utc) - timedelta(days=10)).isoformat()
+        recent_date = (datetime.now(UTC) - timedelta(days=10)).isoformat()
         player_repo.update_last_match_date(1, TEST_GUILD_ID, timestamp=recent_date)
 
         eligible = player_repo.get_all_registered_players_for_lottery(TEST_GUILD_ID)
@@ -1232,7 +1234,7 @@ class TestGetIndividualVotes:
     ):
         """Test retrieving individual vote records."""
         # Create proposal
-        proposal = disburse_service.create_proposal(guild_id=TEST_GUILD_ID)
+        disburse_service.create_proposal(guild_id=TEST_GUILD_ID)
 
         # Add votes
         disburse_service.add_vote(TEST_GUILD_ID, 1003, "even")

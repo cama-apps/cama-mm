@@ -3,7 +3,6 @@
 from unittest.mock import MagicMock
 
 import discord
-import pytest
 
 from utils.streaming import get_streaming_dota_player_ids
 

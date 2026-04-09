@@ -4,7 +4,7 @@ Tests for SoftAvoidRepository.
 
 import pytest
 
-from repositories.soft_avoid_repository import SoftAvoid, SoftAvoidRepository
+from repositories.soft_avoid_repository import SoftAvoidRepository
 
 
 @pytest.fixture

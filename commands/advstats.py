@@ -10,7 +10,6 @@ from discord import app_commands
 from discord.ext import commands
 
 from services.pairings_service import PairingsService
-from services.permissions import has_admin_permission
 from utils.interaction_safety import safe_defer, safe_followup
 
 logger = logging.getLogger("cama_bot.commands.advstats")

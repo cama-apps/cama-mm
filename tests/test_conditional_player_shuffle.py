@@ -8,7 +8,6 @@ Verifies that:
 - Extra conditional players are excluded, not regular players
 """
 
-import pytest
 
 from domain.models.player import Player
 

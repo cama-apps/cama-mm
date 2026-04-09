@@ -285,11 +285,8 @@ def is_core_hero(hero_id: int) -> bool:
         return True
 
     # If hero has Support, not core
-    if "Support" in roles:
-        return False
-
     # Otherwise (Initiator, Durable, etc. without Support) = core
-    return True
+    return "Support" not in roles
 
 
 def classify_hero_role(hero_id: int) -> str:

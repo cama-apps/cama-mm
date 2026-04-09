@@ -3,7 +3,6 @@
 Ensures Glicko and OpenSkill leaderboard embeds stay within Discord's 1024-char field limit.
 """
 
-import pytest
 
 from commands.info import SINGLE_SECTION_PAGE_SIZE
 from utils.embed_safety import EMBED_LIMITS

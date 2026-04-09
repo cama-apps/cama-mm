@@ -431,8 +431,9 @@ class TestGetLobbyTargetChannelHelper:
     @pytest.mark.asyncio
     async def test_falls_back_on_channel_not_found(self):
         """Test fallback when dedicated channel doesn't exist."""
-        from commands.lobby import LobbyCommands
         import discord
+
+        from commands.lobby import LobbyCommands
 
         bot = MagicMock()
         bot.get_channel.return_value = None
@@ -503,7 +504,7 @@ class TestDedicatedLobbyChannelE2E:
             service = LobbyService(manager, player_repo)
 
             # Simulate /lobby command
-            lobby = service.get_or_create_lobby(creator_id=12345)
+            service.get_or_create_lobby(creator_id=12345)
 
             # Store channel IDs (dedicated channel = 100, origin = 200)
             service.set_lobby_message_id(
@@ -533,7 +534,6 @@ class TestDedicatedLobbyChannelE2E:
     def test_reset_clears_all_channel_ids(self):
         """Test that reset_lobby clears both channel_id and origin_channel_id."""
         db = Database(db_path=":memory:")
-        repo = LobbyRepository(":memory:")
         # Use the database's connection for the repo
         manager = LobbyManager(db)
         player_repo = MagicMock()
@@ -762,8 +762,9 @@ class TestGetLobbyTargetChannelEdgeCases:
     @pytest.mark.asyncio
     async def test_falls_back_on_forbidden_exception(self):
         """Test fallback when fetch_channel raises Forbidden."""
-        from commands.lobby import LobbyCommands
         import discord
+
+        from commands.lobby import LobbyCommands
 
         bot = MagicMock()
         bot.get_channel.return_value = None
@@ -791,8 +792,8 @@ class TestNotifyLobbyRally:
     @pytest.mark.asyncio
     async def test_rally_uses_origin_channel_when_different(self):
         """Test that rally notification goes to origin channel, not reaction channel."""
-        from bot import notify_lobby_rally
         import bot as bot_module
+        from bot import notify_lobby_rally
 
         # Create mock lobby
         lobby = MagicMock()
@@ -833,8 +834,8 @@ class TestNotifyLobbyRally:
     @pytest.mark.asyncio
     async def test_rally_falls_back_to_reaction_channel(self):
         """Test rally falls back to reaction channel when origin_channel_id is None."""
-        from bot import notify_lobby_rally
         import bot as bot_module
+        from bot import notify_lobby_rally
 
         lobby = MagicMock()
         lobby.get_total_count.return_value = 9  # 1 more needed
@@ -864,8 +865,8 @@ class TestNotifyLobbyRally:
     @pytest.mark.asyncio
     async def test_rally_falls_back_when_origin_channel_fetch_fails(self):
         """Test rally falls back when origin channel cannot be fetched."""
-        from bot import notify_lobby_rally
         import bot as bot_module
+        from bot import notify_lobby_rally
 
         lobby = MagicMock()
         lobby.get_total_count.return_value = 8
@@ -897,8 +898,8 @@ class TestNotifyLobbyRally:
     @pytest.mark.asyncio
     async def test_rally_same_channel_no_duplicate(self):
         """Test no duplicate when origin_channel_id equals reaction channel."""
-        from bot import notify_lobby_rally
         import bot as bot_module
+        from bot import notify_lobby_rally
 
         lobby = MagicMock()
         lobby.get_total_count.return_value = 8
@@ -932,7 +933,6 @@ class TestShuffleDedicatedChannel:
     @pytest.mark.asyncio
     async def test_shuffle_posts_to_dedicated_channel(self):
         """Test that shuffle posts embed to the dedicated lobby channel."""
-        from commands.match import MatchCommands
 
         # Create mock bot
         bot = MagicMock()
@@ -948,11 +948,6 @@ class TestShuffleDedicatedChannel:
         lobby_service.get_lobby_message_id.return_value = 111
         lobby_service.get_lobby_thread_id.return_value = 222
 
-        match_service = MagicMock()
-        player_service = MagicMock()
-
-        cog = MatchCommands(bot, lobby_service, match_service, player_service)
-
         # Test the channel resolution logic directly (lines 596-605 in match.py)
         lobby_channel_id = lobby_service.get_lobby_channel_id()
         assert lobby_channel_id == 100
@@ -966,7 +961,6 @@ class TestShuffleDedicatedChannel:
     @pytest.mark.asyncio
     async def test_shuffle_no_double_post_when_run_from_dedicated_channel(self):
         """Test that shuffle doesn't double-post when run from the dedicated lobby channel."""
-        from commands.match import MatchCommands
 
         bot = MagicMock()
         dedicated_channel = MagicMock()
@@ -999,7 +993,6 @@ class TestShuffleDedicatedChannel:
     @pytest.mark.asyncio
     async def test_shuffle_posts_to_both_channels_when_different(self):
         """Test that shuffle posts to both channels when they differ."""
-        from commands.match import MatchCommands
 
         bot = MagicMock()
         dedicated_channel = MagicMock()
@@ -1036,7 +1029,6 @@ class TestResetLobbyDedicatedChannel:
     @pytest.mark.asyncio
     async def test_resetlobby_unpins_from_dedicated_channel(self):
         """Test that resetlobby unpins from the dedicated lobby channel, not interaction channel."""
-        from commands.lobby import LobbyCommands
 
         bot = MagicMock()
         dedicated_channel = MagicMock()
@@ -1057,10 +1049,6 @@ class TestResetLobbyDedicatedChannel:
             players=set()
         )
 
-        player_service = MagicMock()
-
-        cog = LobbyCommands(bot, lobby_service, player_service)
-
         # Simulate the channel resolution logic from resetlobby (lines 639-650)
         lobby_channel_id = lobby_service.get_lobby_channel_id()
         lobby_channel = None
@@ -1075,7 +1063,6 @@ class TestResetLobbyDedicatedChannel:
     @pytest.mark.asyncio
     async def test_resetlobby_falls_back_to_interaction_channel(self):
         """Test that resetlobby falls back to interaction channel when dedicated channel unavailable."""
-        from commands.lobby import LobbyCommands
 
         bot = MagicMock()
         bot.get_channel.return_value = None  # Dedicated channel not found
@@ -1108,7 +1095,6 @@ class TestResetLobbyDedicatedChannel:
     @pytest.mark.asyncio
     async def test_resetlobby_uses_interaction_channel_when_no_dedicated(self):
         """Test that resetlobby uses interaction channel when no dedicated channel configured."""
-        from commands.lobby import LobbyCommands
 
         bot = MagicMock()
 
@@ -1137,6 +1123,7 @@ class TestSchemaMigration:
     def test_migration_adds_origin_channel_id_column(self):
         """Test that the migration adds origin_channel_id column to lobby_state."""
         import sqlite3
+
         from infrastructure.schema_manager import SchemaManager
 
         # Use temp file since :memory: creates new DB per connection
@@ -1161,6 +1148,7 @@ class TestSchemaMigration:
     def test_migration_allows_null_origin_channel_id(self):
         """Test that origin_channel_id can be NULL (for backward compatibility)."""
         import sqlite3
+
         from infrastructure.schema_manager import SchemaManager
 
         with tempfile.NamedTemporaryFile(delete=False, suffix=".db") as f:
@@ -1192,6 +1180,7 @@ class TestSchemaMigration:
     def test_migration_stores_origin_channel_id(self):
         """Test that origin_channel_id can be stored and retrieved."""
         import sqlite3
+
         from infrastructure.schema_manager import SchemaManager
 
         with tempfile.NamedTemporaryFile(delete=False, suffix=".db") as f:

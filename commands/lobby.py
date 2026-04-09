@@ -8,7 +8,6 @@ import asyncio
 import functools
 import logging
 import time
-from typing import TYPE_CHECKING
 
 import discord
 from discord import app_commands
@@ -17,14 +16,16 @@ from discord.ext import commands
 from config import LOBBY_CHANNEL_ID
 from services.lobby_service import LobbyService
 from services.permissions import has_admin_permission
-from utils.formatting import FROGLING_EMOJI_ID, FROGLING_EMOTE, JOPACOIN_EMOJI_ID, format_duration_short
-from utils.neon_helpers import get_neon_service
+from utils.formatting import (
+    FROGLING_EMOJI_ID,
+    FROGLING_EMOTE,
+    JOPACOIN_EMOJI_ID,
+    format_duration_short,
+)
 from utils.interaction_safety import safe_defer, safe_followup, update_lobby_message_closed
+from utils.neon_helpers import get_neon_service
 from utils.pin_helpers import safe_unpin_all_bot_messages
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
-
-if TYPE_CHECKING:
-    from services.player_service import PlayerService
 
 logger = logging.getLogger("cama_bot.commands.lobby")
 

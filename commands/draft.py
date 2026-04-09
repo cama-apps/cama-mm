@@ -13,23 +13,20 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-import math
-
 from config import BET_LOCK_SECONDS, BOMB_POT_CHANCE, JOPACOIN_MIN_BET, LOBBY_READY_THRESHOLD
 from domain.models.draft import SNAKE_DRAFT_ORDER, DraftPhase, DraftState
-from rating_system import CamaRatingSystem
 from domain.services.draft_service import DraftService
 from services.draft_state_manager import DraftStateManager
-from shuffler import BalancedShuffler
 from services.permissions import has_admin_permission
-from utils.draft_embeds import MAX_NAME_LEN, format_player_row, format_roles
+from shuffler import BalancedShuffler
+from utils.draft_embeds import format_player_row, format_roles
 from utils.formatting import JOPACOIN_EMOTE, format_betting_display, get_player_display_name
-from utils.neon_helpers import get_neon_service, send_neon_result
 from utils.interaction_safety import safe_defer
+from utils.neon_helpers import get_neon_service, send_neon_result
 
 if TYPE_CHECKING:
-    from services.lobby_manager_service import LobbyManagerService as LobbyManager
     from repositories.player_repository import PlayerRepository
+    from services.lobby_manager_service import LobbyManagerService as LobbyManager
     from services.match_service import MatchService
 
 logger = logging.getLogger("cama_bot.commands.draft")
@@ -1027,7 +1024,7 @@ class DraftCommands(commands.Cog):
 
         try:
             await asyncio.wait_for(shuffle_lock.acquire(), timeout=0.5)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             await interaction.followup.send(
                 "A shuffle or draft is already being processed. Please wait.",
                 ephemeral=True,
@@ -1846,7 +1843,7 @@ class DraftCommands(commands.Cog):
                 await asyncio.to_thread(self.lobby_manager.reset_lobby)
 
                 embed = await self._build_draft_complete_embed(interaction.guild, state, pending_state)
-                message = await interaction.response.edit_message(embed=embed, view=None)
+                await interaction.response.edit_message(embed=embed, view=None)
 
                 # === NEW: Store message info for odds updates ===
                 try:
@@ -1987,21 +1984,6 @@ class DraftCommands(commands.Cog):
         radiant_value = sum(p.glicko_rating or 1500.0 for p in radiant_players)
         dire_value = sum(p.glicko_rating or 1500.0 for p in dire_players)
         value_diff = abs(radiant_value - dire_value)
-
-        # Calculate win probability for stake pool using Glicko-2 expected outcome
-        radiant_mean = radiant_value / len(radiant_players) if radiant_players else 1500.0
-        dire_mean = dire_value / len(dire_players) if dire_players else 1500.0
-
-        # Calculate RMS RD for each team
-        radiant_rds = [p.glicko_rd or 350.0 for p in radiant_players]
-        dire_rds = [p.glicko_rd or 350.0 for p in dire_players]
-        radiant_rms_rd = math.sqrt(sum(rd**2 for rd in radiant_rds) / len(radiant_rds)) if radiant_rds else 350.0
-        dire_rms_rd = math.sqrt(sum(rd**2 for rd in dire_rds) / len(dire_rds)) if dire_rds else 350.0
-
-        # Calculate expected win probability
-        radiant_win_prob = CamaRatingSystem.expected_outcome(
-            radiant_mean, radiant_rms_rd, dire_mean, dire_rms_rd
-        )
 
         # Determine if this is a bomb pot match (~10% chance)
         is_bomb_pot = random.random() < BOMB_POT_CHANCE

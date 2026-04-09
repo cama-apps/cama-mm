@@ -3,7 +3,7 @@ Service for fetching player profile statistics from OpenDota API.
 """
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 from opendota_integration import OpenDotaAPI
 from utils.hero_lookup import get_hero_name

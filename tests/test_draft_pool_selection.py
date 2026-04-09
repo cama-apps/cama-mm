@@ -84,7 +84,7 @@ class TestSelectDraftPool:
 
         assert len(result.selected_players) == 8
         assert len(result.excluded_players) == 0
-        assert set(p.name for p in result.selected_players) == set(p.name for p in candidates)
+        assert {p.name for p in result.selected_players} == {p.name for p in candidates}
 
     def test_fewer_than_8_raises_valueerror(self):
         """Should raise ValueError with fewer than 8 candidates."""

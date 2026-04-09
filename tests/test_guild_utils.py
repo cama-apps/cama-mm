@@ -1,6 +1,6 @@
 """Tests for guild utility functions."""
 
-from utils.guild import normalize_guild_id, is_dm_context
+from utils.guild import is_dm_context, normalize_guild_id
 
 
 class TestNormalizeGuildId:

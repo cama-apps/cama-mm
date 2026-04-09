@@ -1,28 +1,24 @@
 """Tests for dig minigame asset loading and pixel art generation."""
 
 import io
-import tempfile
-from pathlib import Path
-from unittest.mock import patch
 
 from PIL import Image
 
+from utils.dig_assets import (
+    _MAX_FILE_SIZE,
+    _find_asset,
+    _load_cached_bytes,
+    get_boss_art,
+    get_layer_thumbnail,
+)
 from utils.dig_drawing import (
+    LAYER_PALETTES,
     draw_boss_result_scene,
     draw_boss_scene,
     draw_event_scene,
     draw_layer_thumbnail,
     has_event_scene,
-    LAYER_PALETTES,
 )
-from utils.dig_assets import (
-    _find_asset,
-    _load_cached_bytes,
-    _MAX_FILE_SIZE,
-    get_boss_art,
-    get_layer_thumbnail,
-)
-
 
 # =============================================================================
 # dig_drawing tests

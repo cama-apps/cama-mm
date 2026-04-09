@@ -4,8 +4,6 @@ Tests for the Double or Nothing shop item.
 
 import time
 
-import pytest
-
 from config import DOUBLE_OR_NOTHING_COOLDOWN_SECONDS, SHOP_DOUBLE_OR_NOTHING_COST
 from tests.conftest import TEST_GUILD_ID
 

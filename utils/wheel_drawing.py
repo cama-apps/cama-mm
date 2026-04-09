@@ -3,9 +3,10 @@
 import io
 import math
 import random
+
 from PIL import Image, ImageDraw, ImageFont
 
-from config import WHEEL_TARGET_EV, WHEEL_GOLDEN_TARGET_EV
+from config import WHEEL_GOLDEN_TARGET_EV, WHEEL_TARGET_EV
 
 # Cached fonts for performance (loaded once, not per frame)
 _CACHED_FONTS: dict[str, ImageFont.FreeTypeFont | ImageFont.ImageFont] = {}
@@ -506,14 +507,14 @@ def _load_golden_special_wedge_evs() -> None:
     if _GOLDEN_SPECIAL_WEDGE_EST_EVS:
         return
     from config import (
-        WHEEL_RED_SHELL_EST_EV,
         WHEEL_BLUE_SHELL_EST_EV,
-        WHEEL_GOLDEN_HEIST_EST_EV,
-        WHEEL_GOLDEN_MARKET_CRASH_EST_EV,
         WHEEL_GOLDEN_COMPOUND_EST_EV,
-        WHEEL_GOLDEN_TRICKLE_DOWN_EST_EV,
         WHEEL_GOLDEN_DIVIDEND_EST_EV,
+        WHEEL_GOLDEN_HEIST_EST_EV,
         WHEEL_GOLDEN_HOSTILE_TAKEOVER_EST_EV,
+        WHEEL_GOLDEN_MARKET_CRASH_EST_EV,
+        WHEEL_GOLDEN_TRICKLE_DOWN_EST_EV,
+        WHEEL_RED_SHELL_EST_EV,
     )
     _GOLDEN_SPECIAL_WEDGE_EST_EVS.update({
         "RED_SHELL": WHEEL_RED_SHELL_EST_EV,
@@ -594,11 +595,11 @@ def compute_live_golden_wedges(
         target_ev: Target EV per spin. Defaults to config.WHEEL_GOLDEN_TARGET_EV.
     """
     from config import (
-        WHEEL_GOLDEN_TARGET_EV,
-        LIGHTNING_BOLT_PCT_MIN,
         LIGHTNING_BOLT_PCT_MAX,
-        WHEEL_RED_SHELL_EST_EV,
+        LIGHTNING_BOLT_PCT_MIN,
         WHEEL_BLUE_SHELL_EST_EV,
+        WHEEL_GOLDEN_TARGET_EV,
+        WHEEL_RED_SHELL_EST_EV,
     )
 
     if target_ev is None:
@@ -710,7 +711,6 @@ def apply_war_effects(
     from config import (
         REBELLION_BANKRUPT_STRENGTHEN_RATE,
         REBELLION_BANKRUPT_WEAKEN_RATE,
-        REBELLION_RETRIBUTION_STEAL,
         REBELLION_WAR_TROPHY_VALUE,
     )
 
@@ -1582,7 +1582,6 @@ def create_explosion_gif(size: int = 500, display_name: str | None = None) -> io
     durations = []
 
     center = size // 2
-    radius = size // 2 - 30
     scale = size / 400.0  # Scale factor for pixel values calibrated at 400px
 
     # Phase 1: Normal spin for ~0.7 second (builds tension)

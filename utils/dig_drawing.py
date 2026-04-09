@@ -309,7 +309,6 @@ def _get_layer_background(layer_name: str, width: int, height: int) -> Image.Ima
 
     palette = LAYER_PALETTES.get(layer_name, LAYER_PALETTES["Dirt"])
     img = Image.new("RGB", (width, height), palette[0])
-    draw = ImageDraw.Draw(img)
 
     # Fill with floor tiles (local RNG to avoid corrupting global state)
     _rng = random.Random(hash(layer_name))

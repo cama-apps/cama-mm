@@ -4,7 +4,7 @@ Tests for Immortal Draft functionality.
 
 import pytest
 
-from domain.models.draft import DraftPhase, DraftState, SNAKE_DRAFT_ORDER
+from domain.models.draft import SNAKE_DRAFT_ORDER, DraftPhase, DraftState
 from domain.services.draft_service import DraftService
 from repositories.player_repository import PlayerRepository
 from services.draft_state_manager import DraftStateManager
@@ -568,6 +568,7 @@ class TestForceRandomCaptains:
         This test verifies the count methods work correctly.
         """
         from datetime import datetime
+
         from domain.models.lobby import Lobby
 
         lobby = Lobby(lobby_id=1, created_by=999, created_at=datetime.now())
@@ -907,6 +908,7 @@ class TestConditionalPlayerPromotion:
     def test_enough_regular_players_excludes_conditional(self):
         """When >= 10 regular players, conditional players are excluded."""
         from datetime import datetime
+
         from domain.models.lobby import Lobby
 
         lobby = Lobby(lobby_id=1, created_by=999, created_at=datetime.now())
@@ -938,9 +940,10 @@ class TestConditionalPlayerPromotion:
 
     def test_promotes_conditional_when_not_enough_regular(self):
         """When < 10 regular players, promotes random conditional players."""
-        from datetime import datetime
-        from domain.models.lobby import Lobby
         import random
+        from datetime import datetime
+
+        from domain.models.lobby import Lobby
 
         lobby = Lobby(lobby_id=1, created_by=999, created_at=datetime.now())
         # Add 8 regular players
@@ -976,9 +979,10 @@ class TestConditionalPlayerPromotion:
 
     def test_promotes_all_conditional_if_needed(self):
         """When regular + conditional < 10, promotes all conditional."""
-        from datetime import datetime
-        from domain.models.lobby import Lobby
         import random
+        from datetime import datetime
+
+        from domain.models.lobby import Lobby
 
         lobby = Lobby(lobby_id=1, created_by=999, created_at=datetime.now())
         # Add 7 regular players
@@ -1014,9 +1018,10 @@ class TestConditionalPlayerPromotion:
 
     def test_conditional_promotion_is_random(self):
         """Conditional player promotion uses random selection, not rating."""
-        from datetime import datetime
-        from domain.models.lobby import Lobby
         import random
+        from datetime import datetime
+
+        from domain.models.lobby import Lobby
 
         lobby = Lobby(lobby_id=1, created_by=999, created_at=datetime.now())
         # Add 8 regular players
@@ -1046,9 +1051,10 @@ class TestConditionalPlayerPromotion:
 
     def test_exactly_ten_regular_no_conditional_needed(self):
         """Exactly 10 regular players means no conditional promotion."""
-        from datetime import datetime
-        from domain.models.lobby import Lobby
         import random
+        from datetime import datetime
+
+        from domain.models.lobby import Lobby
 
         lobby = Lobby(lobby_id=1, created_by=999, created_at=datetime.now())
         # Add exactly 10 regular players
@@ -1188,7 +1194,6 @@ class TestCandidatePrePruning:
             return (0 if is_regular else 1, -exc_count, -rating)
 
         sorted_candidates = sorted(players, key=prune_priority)
-        kept = sorted_candidates[:MAX_CANDIDATES]
         pruned = sorted_candidates[MAX_CANDIDATES:]
 
         # Highest rated players (ID 3-16 with ratings 1300-2600) should be kept

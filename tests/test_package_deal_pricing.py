@@ -3,9 +3,10 @@ Tests for package deal scalar pricing: first deal free, subsequent deals paid.
 """
 
 import pytest
+
+from config import SHOP_PACKAGE_DEAL_BASE_COST, SHOP_PACKAGE_DEAL_RATING_DIVISOR
 from repositories.package_deal_repository import PackageDealRepository
 from services.package_deal_service import PackageDealService
-from config import SHOP_PACKAGE_DEAL_BASE_COST, SHOP_PACKAGE_DEAL_RATING_DIVISOR
 
 
 class TestPackageDealPricing:

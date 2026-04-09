@@ -22,13 +22,13 @@ Usage:
 """
 
 from dataclasses import dataclass
-from typing import Generic, TypeVar
+from typing import TypeVar
 
 T = TypeVar("T")
 
 
 @dataclass(frozen=True)
-class Result(Generic[T]):
+class Result[T]:
     """
     A simple result type for service method return values.
 

@@ -254,12 +254,11 @@ class SQLQueryService:
             QueryResult with success status, SQL, and results
         """
         # 1. Check if AI features are enabled for this guild
-        if guild_id is not None and self.guild_config_repo:
-            if not self.guild_config_repo.get_ai_enabled(guild_id):
-                return QueryResult(
-                    success=False,
-                    error="AI features are not enabled for this server. An admin can enable them.",
-                )
+        if guild_id is not None and self.guild_config_repo and not self.guild_config_repo.get_ai_enabled(guild_id):
+            return QueryResult(
+                success=False,
+                error="AI features are not enabled for this server. An admin can enable them.",
+            )
 
         # 2. Build schema context for the AI
         schema_ctx = self._build_schema_context()

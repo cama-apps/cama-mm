@@ -1,7 +1,5 @@
 import time
 
-import pytest
-
 from config import HOUSE_PAYOUT_MULTIPLIER, JOPACOIN_WIN_REWARD
 from repositories.bet_repository import BetRepository
 from repositories.match_repository import MatchRepository

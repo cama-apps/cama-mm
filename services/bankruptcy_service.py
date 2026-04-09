@@ -16,10 +16,10 @@ from config import (
 )
 from repositories.bankruptcy_repository import BankruptcyRepository
 from repositories.player_repository import PlayerRepository
-from utils.guild import normalize_guild_id
-from services.result import Result
 from services import error_codes
 from services.interfaces import IBankruptcyService
+from services.result import Result
+from utils.guild import normalize_guild_id
 
 
 @dataclass

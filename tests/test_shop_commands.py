@@ -7,7 +7,13 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from commands.shop import ShopCommands, SHOP_ANNOUNCE_COST, SHOP_ANNOUNCE_TARGET_COST, SHOP_MYSTERY_GIFT_COST, SHOP_RECALIBRATE_COST
+from commands.shop import (
+    SHOP_ANNOUNCE_COST,
+    SHOP_ANNOUNCE_TARGET_COST,
+    SHOP_MYSTERY_GIFT_COST,
+    SHOP_RECALIBRATE_COST,
+    ShopCommands,
+)
 
 
 def _make_interaction(user_id: int = 1001):

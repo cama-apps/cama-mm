@@ -124,7 +124,6 @@ class TestTriviaResetCooldown:
 
 class TestTriviaSessionRecording:
     def test_record_and_leaderboard(self, player_service, registered_player):
-        now = int(time.time())
         # Record a few sessions
         player_service.record_trivia_session(registered_player, TEST_GUILD_ID, streak=5, jc_earned=5)
 

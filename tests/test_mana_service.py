@@ -11,7 +11,7 @@ Covers:
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -23,7 +23,6 @@ from services.mana_service import (
     get_today_pst,
 )
 from tests.conftest import TEST_GUILD_ID
-
 
 # =============================================================================
 # Fixtures

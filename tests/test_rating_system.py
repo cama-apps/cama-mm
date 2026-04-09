@@ -2,13 +2,17 @@
 Tests for rating system edge cases and error handling.
 """
 
-import math
 
 import pytest
 from glicko2 import Player
 
+from config import (
+    CALIBRATION_RD_THRESHOLD,
+    MAX_RATING_SWING_PER_GAME,
+    RD_DECAY_CONSTANT,
+    RD_DECAY_GRACE_PERIOD_WEEKS,
+)
 from rating_system import CamaRatingSystem
-from config import CALIBRATION_RD_THRESHOLD, MAX_RATING_SWING_PER_GAME, RD_DECAY_CONSTANT, RD_DECAY_GRACE_PERIOD_WEEKS
 
 
 class TestRatingSystemEdgeCases:
@@ -424,7 +428,6 @@ class TestRatingSystemEdgeCases:
         )
 
         # Extract deltas and RDs
-        t1_rds = [80.0, 250.0, 120.0, 90.0, 180.0]
         t1_deltas = [
             t1_updated[i][0] - [1600.0, 1400.0, 1500.0, 1550.0, 1450.0][i]
             for i in range(5)

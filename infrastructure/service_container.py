@@ -101,25 +101,25 @@ class ServiceContainer:
         self._components["db"] = Database(db_path=self.db_path)
 
     def _init_repositories(self) -> None:
-        from repositories.player_repository import PlayerRepository
-        from repositories.match_repository import MatchRepository
-        from repositories.bet_repository import BetRepository
-        from repositories.lobby_repository import LobbyRepository
-        from repositories.pairings_repository import PairingsRepository
-        from repositories.guild_config_repository import GuildConfigRepository
-        from repositories.prediction_repository import PredictionRepository
-        from repositories.disburse_repository import DisburseRepository
         from repositories.bankruptcy_repository import BankruptcyRepository
+        from repositories.bet_repository import BetRepository
+        from repositories.dig_repository import DigRepository
+        from repositories.disburse_repository import DisburseRepository
+        from repositories.guild_config_repository import GuildConfigRepository
         from repositories.loan_repository import LoanRepository
+        from repositories.lobby_repository import LobbyRepository
+        from repositories.mana_repository import ManaRepository
+        from repositories.match_repository import MatchRepository
+        from repositories.neon_event_repository import NeonEventRepository
+        from repositories.package_deal_repository import PackageDealRepository
+        from repositories.pairings_repository import PairingsRepository
+        from repositories.player_repository import PlayerRepository
+        from repositories.prediction_repository import PredictionRepository
+        from repositories.rebellion_repository import RebellionRepository
         from repositories.recalibration_repository import RecalibrationRepository
         from repositories.soft_avoid_repository import SoftAvoidRepository
-        from repositories.package_deal_repository import PackageDealRepository
         from repositories.tip_repository import TipRepository
-        from repositories.neon_event_repository import NeonEventRepository
         from repositories.wrapped_repository import WrappedRepository
-        from repositories.rebellion_repository import RebellionRepository
-        from repositories.mana_repository import ManaRepository
-        from repositories.dig_repository import DigRepository
 
         p = self.db_path
         self._components.update({
@@ -146,17 +146,17 @@ class ServiceContainer:
 
     def _init_core_services(self) -> None:
         """Services with no dependencies on other services."""
-        from services.guild_config_service import GuildConfigService
-        from services.garnishment_service import GarnishmentService
         from services.bankruptcy_service import BankruptcyService
+        from services.garnishment_service import GarnishmentService
+        from services.guild_config_service import GuildConfigService
         from services.loan_service import LoanService
-        from services.recalibration_service import RecalibrationService
-        from services.pairings_service import PairingsService
-        from services.soft_avoid_service import SoftAvoidService
-        from services.package_deal_service import PackageDealService
-        from services.tip_service import TipService
-        from services.opendota_player_service import OpenDotaPlayerService
         from services.match_state_service import MatchStateService
+        from services.opendota_player_service import OpenDotaPlayerService
+        from services.package_deal_service import PackageDealService
+        from services.pairings_service import PairingsService
+        from services.recalibration_service import RecalibrationService
+        from services.soft_avoid_service import SoftAvoidService
+        from services.tip_service import TipService
 
         c = self._components
         c["guild_config_service"] = GuildConfigService(c["guild_config_repo"])
@@ -212,10 +212,10 @@ class ServiceContainer:
 
     def _init_match_services(self) -> None:
         """Player, lobby, and match services."""
-        from services.player_service import PlayerService
         from services.lobby_manager_service import LobbyManagerService
         from services.lobby_service import LobbyService
         from services.match_service import MatchService
+        from services.player_service import PlayerService
 
         c = self._components
         c["player_service"] = PlayerService(c["player_repo"])
@@ -242,9 +242,9 @@ class ServiceContainer:
 
     def _init_advanced_services(self) -> None:
         """Services that depend on match_service."""
-        from services.rating_comparison_service import RatingComparisonService
-        from services.match_enrichment_service import MatchEnrichmentService
         from services.match_discovery_service import MatchDiscoveryService
+        from services.match_enrichment_service import MatchEnrichmentService
+        from services.rating_comparison_service import RatingComparisonService
 
         c = self._components
         c["rating_comparison_service"] = RatingComparisonService(
@@ -272,10 +272,10 @@ class ServiceContainer:
 
         if self.cerebras_api_key:
             try:
-                from services.ai_service import AIService
-                from services.sql_query_service import SQLQueryService
-                from services.flavor_text_service import FlavorTextService
                 from repositories.ai_query_repository import AIQueryRepository
+                from services.ai_service import AIService
+                from services.flavor_text_service import FlavorTextService
+                from services.sql_query_service import SQLQueryService
 
                 ai_service = AIService(
                     model=self.ai_model,
@@ -322,8 +322,8 @@ class ServiceContainer:
         )
 
     def _init_mana_service(self) -> None:
-        from services.mana_service import ManaService
         from services.mana_effects_service import ManaEffectsService
+        from services.mana_service import ManaService
 
         c = self._components
         c["mana_service"] = ManaService(

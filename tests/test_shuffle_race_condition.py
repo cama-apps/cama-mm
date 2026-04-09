@@ -83,7 +83,7 @@ class TestShuffleLockPreventsRace:
             await asyncio.wait_for(lock_2.acquire(), timeout=0.1)
             acquired = True
             lock_2.release()
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
 
         assert acquired is True, "Guild 2 should acquire lock while guild 1 holds its lock"
@@ -231,7 +231,7 @@ class TestConcurrentShuffleScenario:
 
             try:
                 await asyncio.wait_for(lock.acquire(), timeout=0.5)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 results.append(f"shuffle_{shuffle_id}_timeout")
                 return
 

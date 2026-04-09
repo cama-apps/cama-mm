@@ -8,8 +8,6 @@ No side effects or external dependencies.
 import random
 from dataclasses import dataclass
 
-from domain.models.player import Player
-
 
 @dataclass
 class CaptainPair:
@@ -88,15 +86,13 @@ class DraftService:
             )
 
         # Build pool of available captains
-        available = [pid for pid in eligible_ids]
+        available = list(eligible_ids)
 
         # Remove specified captains from available pool
-        if specified_captain1 is not None:
-            if specified_captain1 in available:
-                available.remove(specified_captain1)
-        if specified_captain2 is not None:
-            if specified_captain2 in available:
-                available.remove(specified_captain2)
+        if specified_captain1 is not None and specified_captain1 in available:
+            available.remove(specified_captain1)
+        if specified_captain2 is not None and specified_captain2 in available:
+            available.remove(specified_captain2)
 
         # Determine how many captains we need to select
         captain1 = specified_captain1

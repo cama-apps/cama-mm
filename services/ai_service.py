@@ -158,7 +158,7 @@ class AIService:
             message = response.choices[0].message
             # Only use content field - never use reasoning_content (thinking chain)
             return message.content
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning(f"AI hard timeout after {self.timeout}s (failing fast)")
             return None
         except litellm.RateLimitError as e:
@@ -228,7 +228,7 @@ class AIService:
                 raw_response=response,
             )
 
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning(f"AI tool call hard timeout after {self.timeout}s (failing fast)")
             return ToolCallResult(
                 tool_name=None,

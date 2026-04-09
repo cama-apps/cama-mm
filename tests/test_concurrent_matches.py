@@ -5,7 +5,6 @@ Validates that multiple pending matches can exist in the same guild
 with proper isolation of state, betting, and recording.
 """
 
-import time
 
 import pytest
 

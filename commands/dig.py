@@ -16,10 +16,11 @@ from discord import app_commands
 from discord.ext import commands
 
 from commands.checks import require_gamba_channel
+from services.dig_constants import MAX_INVENTORY_SLOTS, PICKAXE_TIERS
+from services.dig_constants import get_layer as get_layer_def
 from utils.formatting import JOPACOIN_EMOTE
 from utils.interaction_safety import safe_defer, safe_followup
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
-from services.dig_constants import MAX_INVENTORY_SLOTS, PICKAXE_TIERS, get_layer as get_layer_def
 
 if TYPE_CHECKING:
     from services.dig_service import DigService
@@ -166,8 +167,8 @@ class _DictObj:
         try:
             v = self._d[name]
             return _DictObj(v) if isinstance(v, dict) else v
-        except KeyError:
-            raise AttributeError(name)
+        except KeyError as err:
+            raise AttributeError(name) from err
     def __repr__(self):
         return repr(self._d)
 
@@ -225,7 +226,7 @@ async def _check_registered(interaction: discord.Interaction, bot: commands.Bot)
 class PaidDigView(discord.ui.View):
     """Simple confirm/cancel for paid digs."""
 
-    def __init__(self, dig_service: "DigService", user_id: int, guild_id: int | None, cost: int):
+    def __init__(self, dig_service: DigService, user_id: int, guild_id: int | None, cost: int):
         super().__init__(timeout=60)
         self.dig_service = dig_service
         self.user_id = user_id
@@ -314,7 +315,7 @@ class BossWagerModal(discord.ui.Modal):
         required=True,
     )
 
-    def __init__(self, dig_service: "DigService", user_id: int, guild_id: int | None):
+    def __init__(self, dig_service: DigService, user_id: int, guild_id: int | None):
         super().__init__(title="Boss Fight Wager")
         self.dig_service = dig_service
         self.user_id = user_id
@@ -419,7 +420,7 @@ class EventEncounterView(discord.ui.View):
 
     def __init__(
         self,
-        dig_service: "DigService",
+        dig_service: DigService,
         user_id: int,
         guild_id: int | None,
         event_data: dict,
@@ -532,7 +533,7 @@ class BossEncounterView(discord.ui.View):
 
     def __init__(
         self,
-        dig_service: "DigService",
+        dig_service: DigService,
         user_id: int,
         guild_id: int | None,
         boss_info: object,
@@ -659,7 +660,7 @@ class PrestigePerksView(discord.ui.View):
 
     def __init__(
         self,
-        dig_service: "DigService",
+        dig_service: DigService,
         user_id: int,
         guild_id: int | None,
         perks: list[dict],
@@ -792,7 +793,7 @@ class ConfirmAbandonView(discord.ui.View):
 class UpgradeView(discord.ui.View):
     """View for purchasing pickaxe upgrades."""
 
-    def __init__(self, dig_service: "DigService", user_id: int, guild_id: int | None, upgrade_info: dict):
+    def __init__(self, dig_service: DigService, user_id: int, guild_id: int | None, upgrade_info: dict):
         super().__init__(timeout=60)
         self.dig_service = dig_service
         self.user_id = user_id
@@ -832,7 +833,7 @@ class UpgradeView(discord.ui.View):
 class DigCommands(commands.Cog):
     dig = app_commands.Group(name="dig", description="Tunnel digging minigame")
 
-    def __init__(self, bot: commands.Bot, dig_service: "DigService"):
+    def __init__(self, bot: commands.Bot, dig_service: DigService):
         self.bot = bot
         self.dig_service = dig_service
 
@@ -1366,7 +1367,7 @@ class DigCommands(commands.Cog):
                 elif action == "sabotage":
                     dmg = detail.get("damage", "?")
                     if detail.get("trap_triggered"):
-                        event_lines.append(f"Sabotage attempt — trap triggered!")
+                        event_lines.append("Sabotage attempt — trap triggered!")
                     else:
                         event_lines.append(f"Sabotaged — lost {dmg} blocks")
                 elif action == "help":

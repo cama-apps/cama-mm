@@ -5,8 +5,9 @@ Provides utilities for handling service Results in command handlers,
 reducing boilerplate and ensuring consistent error reporting.
 """
 
-import discord
 from typing import TYPE_CHECKING
+
+import discord
 
 from utils.interaction_safety import safe_followup
 

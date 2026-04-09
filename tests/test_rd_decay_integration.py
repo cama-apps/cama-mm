@@ -8,12 +8,11 @@ These tests verify:
 
 import math
 import tempfile
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from database import Database
-from rating_system import CamaRatingSystem
 from repositories.match_repository import MatchRepository
 from repositories.player_repository import PlayerRepository
 from services.match_service import MatchService
@@ -51,10 +50,6 @@ def test_last_match_date_updated_after_record(test_db):
 
     player_ids = list(range(100, 110))
 
-    # Check last_match_date is initially NULL or created_at
-    before_dates = player_repo.get_last_match_date(100, TEST_GUILD_ID)
-    initial_last_match = before_dates[0] if before_dates else None
-
     # Shuffle and record match
     match_service.shuffle_players(player_ids, guild_id=TEST_GUILD_ID)
     result = match_service.record_match("radiant", guild_id=TEST_GUILD_ID)
@@ -70,8 +65,8 @@ def test_last_match_date_updated_after_record(test_db):
         # Verify it's recent (within last minute)
         last_match_dt = datetime.fromisoformat(last_match)
         if last_match_dt.tzinfo is None:
-            last_match_dt = last_match_dt.replace(tzinfo=timezone.utc)
-        now = datetime.now(timezone.utc)
+            last_match_dt = last_match_dt.replace(tzinfo=UTC)
+        now = datetime.now(UTC)
         assert (now - last_match_dt).total_seconds() < 60, "last_match_date should be recent"
 
 
@@ -130,7 +125,7 @@ def test_rd_decay_applied_for_inactive_player(test_db):
     )
 
     # Manually set last_match_date to 4 weeks ago (beyond grace period)
-    four_weeks_ago = (datetime.now(timezone.utc) - timedelta(weeks=4)).isoformat()
+    four_weeks_ago = (datetime.now(UTC) - timedelta(weeks=4)).isoformat()
     player_repo.update_last_match_date(pid, TEST_GUILD_ID, four_weeks_ago)
 
     # Load the player - RD should have decayed
@@ -164,7 +159,7 @@ def test_rd_decay_respects_grace_period(test_db):
     )
 
     # Set last_match_date to 1 week ago (within 2-week grace period)
-    one_week_ago = (datetime.now(timezone.utc) - timedelta(weeks=1)).isoformat()
+    one_week_ago = (datetime.now(UTC) - timedelta(weeks=1)).isoformat()
     player_repo.update_last_match_date(pid, TEST_GUILD_ID, one_week_ago)
 
     # Load the player - RD should NOT have decayed

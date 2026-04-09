@@ -6,6 +6,7 @@ incentivizes pool shuffles to exclude outlier-rated players.
 """
 
 import pytest
+
 from domain.models.player import Player
 from shuffler import BalancedShuffler
 

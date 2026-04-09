@@ -1376,7 +1376,7 @@ def test_bankrupt_wheel_extension_slices_have_dark_red_colors():
 
 def test_get_wheel_wedges_returns_correct_wheel():
     """get_wheel_wedges() should return correct wheel based on is_bankrupt flag."""
-    from utils.wheel_drawing import WHEEL_WEDGES, BANKRUPT_WHEEL_WEDGES, get_wheel_wedges
+    from utils.wheel_drawing import BANKRUPT_WHEEL_WEDGES, WHEEL_WEDGES, get_wheel_wedges
 
     normal = get_wheel_wedges(is_bankrupt=False)
     bankrupt = get_wheel_wedges(is_bankrupt=True)
@@ -1390,8 +1390,9 @@ def test_get_wheel_wedges_returns_correct_wheel():
 def test_get_wedge_at_index_for_player_returns_correct_wedge():
     """get_wedge_at_index_for_player() should return wedge from correct wheel."""
     from utils.wheel_drawing import (
-        WHEEL_WEDGES, BANKRUPT_WHEEL_WEDGES,
-        get_wedge_at_index_for_player
+        BANKRUPT_WHEEL_WEDGES,
+        WHEEL_WEDGES,
+        get_wedge_at_index_for_player,
     )
 
     # Index 0 on normal wheel
@@ -1413,7 +1414,7 @@ def test_get_wedge_at_index_for_player_returns_correct_wedge():
 
 def test_bankrupt_wheel_bankrupt_value_recalculated():
     """BANKRUPT wedges should have recalculated value on the bankrupt wheel."""
-    from utils.wheel_drawing import WHEEL_WEDGES, BANKRUPT_WHEEL_WEDGES
+    from utils.wheel_drawing import BANKRUPT_WHEEL_WEDGES, WHEEL_WEDGES
 
     normal_bankrupt_values = [w[1] for w in WHEEL_WEDGES if isinstance(w[1], int) and w[1] < 0]
     bankrupt_bankrupt_values = [w[1] for w in BANKRUPT_WHEEL_WEDGES if isinstance(w[1], int) and w[1] < 0]
@@ -1454,8 +1455,11 @@ def test_bankrupt_wheel_has_micro_win_slices():
 
 def test_bankrupt_wheel_ev_maintained():
     """Bankrupt wheel expected value should match WHEEL_TARGET_EV."""
-    from utils.wheel_drawing import BANKRUPT_WHEEL_WEDGES
-    from utils.wheel_drawing import _SPECIAL_WEDGE_EST_EVS, _load_special_wedge_evs
+    from utils.wheel_drawing import (
+        _SPECIAL_WEDGE_EST_EVS,
+        BANKRUPT_WHEEL_WEDGES,
+        _load_special_wedge_evs,
+    )
 
     _load_special_wedge_evs()
 

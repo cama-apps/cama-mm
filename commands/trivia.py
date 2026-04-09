@@ -13,11 +13,11 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from commands.checks import require_gamba_channel
 from config import TRIVIA_ANSWER_TIMEOUT_SECONDS, TRIVIA_COOLDOWN_SECONDS
 from services.permissions import has_admin_permission
 from services.trivia_image_cache import get_trivia_image
-from services.trivia_questions import TriviaQuestion, generate_question, get_difficulty_tier
-from commands.checks import require_gamba_channel
+from services.trivia_questions import TriviaQuestion, generate_question
 from utils.formatting import JOPACOIN_EMOTE
 from utils.interaction_safety import safe_defer, safe_followup
 

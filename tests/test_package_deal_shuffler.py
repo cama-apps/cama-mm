@@ -2,8 +2,10 @@
 Tests for package deal integration with the shuffler.
 """
 
-import pytest
 from dataclasses import dataclass
+
+import pytest
+
 from domain.models.player import Player
 from shuffler import BalancedShuffler
 
@@ -180,7 +182,6 @@ class TestPackageDealWithPoolShuffle:
 
         # If both are included, they should be together
         included_ids = {p.discord_id for p in team1.players} | {p.discord_id for p in team2.players}
-        excluded_ids = {p.discord_id for p in excluded}
 
         if 100 in included_ids and 105 in included_ids:
             team1_ids = {p.discord_id for p in team1.players}

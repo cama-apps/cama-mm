@@ -4,8 +4,6 @@ Tests for soft avoid penalty calculation in the shuffler.
 
 import random
 
-import pytest
-
 from domain.models.player import Player
 from shuffler import BalancedShuffler
 

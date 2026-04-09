@@ -3,9 +3,9 @@ Tests for the recalibration service.
 """
 
 import time
+
 import pytest
 
-from database import Database
 from repositories.player_repository import PlayerRepository
 from repositories.recalibration_repository import RecalibrationRepository
 from services.recalibration_service import RecalibrationService

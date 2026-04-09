@@ -7,8 +7,8 @@ Centralizes balance checking logic that's used across multiple services.
 from typing import TYPE_CHECKING
 
 from config import MAX_DEBT
-from services.result import Result
 from services import error_codes
+from services.result import Result
 
 if TYPE_CHECKING:
     from repositories.interfaces import IPlayerRepository

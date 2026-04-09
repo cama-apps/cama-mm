@@ -19,10 +19,10 @@ from discord.ext import commands
 if TYPE_CHECKING:
     from services.flavor_text_service import FlavorTextService
 
-from services.flavor_text_service import FlavorEvent
-
+from commands.checks import require_gamba_channel
 from config import (
     BANKRUPTCY_PENALTY_RATE,
+    DISBURSE_MIN_FUND,
     GARNISHMENT_PERCENTAGE,
     JOPACOIN_MIN_BET,
     LIGHTNING_BOLT_MIN_TAX,
@@ -30,45 +30,40 @@ from config import (
     LIGHTNING_BOLT_PCT_MIN,
     LOAN_FEE_RATE,
     MAX_DEBT,
+    REBELLION_DEFENDER_STAKE,
+    REBELLION_FIZZLE_SPIN_MAX_WIN,
+    REBELLION_GAMBA_COOLDOWN_PENALTY,
+    REBELLION_META_BET_MAX,
+    REBELLION_META_BET_WINDOW_SECONDS,
+    REBELLION_RETRIBUTION_STEAL,
+    REBELLION_VOTE_WINDOW_SECONDS,
     TIP_FEE_RATE,
-    WHEEL_BANKRUPT_PENALTY,
     WHEEL_COOLDOWN_SECONDS,
     WHEEL_GOLDEN_TOP_N,
     WHEEL_LOSE_PENALTY_COOLDOWN,
-    REBELLION_DEFENDER_STAKE,
-    REBELLION_VOTE_WINDOW_SECONDS,
-    REBELLION_META_BET_WINDOW_SECONDS,
-    REBELLION_META_BET_MAX,
-    REBELLION_RETRIBUTION_STEAL,
-    REBELLION_GAMBA_COOLDOWN_PENALTY,
-    REBELLION_FIZZLE_SPIN_MAX_WIN,
 )
-from config import DISBURSE_MIN_FUND
 from services.bankruptcy_service import BankruptcyService
 from services.betting_service import BettingService
 from services.disburse_service import DisburseService
+from services.flavor_text_service import FlavorEvent
 from services.gambling_stats_service import GamblingStatsService
 from services.loan_service import LoanService
 from services.match_service import MatchService
 from services.permissions import has_admin_permission
 from services.player_service import PlayerService
 from services.tip_service import TipService
-from commands.checks import require_gamba_channel
-from utils.formatting import JOPACOIN_EMOTE, TOMBSTONE_EMOJI, format_betting_display
+from utils.formatting import JOPACOIN_EMOTE, format_betting_display
 from utils.interaction_safety import safe_defer
 from utils.neon_helpers import get_neon_service, send_neon_result
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
 from utils.wheel_drawing import (
-    WHEEL_WEDGES,
-    GOLDEN_WHEEL_WEDGES,
-    create_wheel_gif,
-    create_explosion_gif,
-    get_wedge_at_index,
-    get_wheel_wedges,
-    get_wedge_at_index_for_player,
-    compute_live_golden_wedges,
-    apply_war_effects,
     apply_mana_wedge,
+    apply_war_effects,
+    compute_live_golden_wedges,
+    create_explosion_gif,
+    create_wheel_gif,
+    get_wedge_at_index_for_player,
+    get_wheel_wedges,
 )
 
 # 1% chance for the wheel to explode
@@ -638,7 +633,6 @@ class BettingCommands(commands.Cog):
         message_info = await asyncio.to_thread(
             self.match_service.get_shuffle_message_info, guild_id, pending_match_id=pending_match_id
         )
-        message_id = message_info.get("message_id") if message_info else None
         channel_id = message_info.get("channel_id") if message_info else None
         thread_message_id = message_info.get("thread_message_id") if message_info else None
         thread_id = message_info.get("thread_id") if message_info else None
@@ -773,9 +767,9 @@ class BettingCommands(commands.Cog):
             color = discord.Color.from_str("#1a1a3a")
             if chain_value is None:
                 description = (
-                    f"**CHAIN**\n\n"
-                    f"⛓️ The chain reaches back... but finds nothing.\n\n"
-                    f"*No prior normal wheel spin found. Fallback: nothing happens.*"
+                    "**CHAIN**\n\n"
+                    "⛓️ The chain reaches back... but finds nothing.\n\n"
+                    "*No prior normal wheel spin found. Fallback: nothing happens.*"
                 )
             elif chain_value > 0:
                 description = (
@@ -821,9 +815,9 @@ class BettingCommands(commands.Cog):
             title = "🃏 CLUTCH SAVE! 🃏"
             color = discord.Color.from_str("#0a1a2a")
             description = (
-                f"**CLUTCH**\n\n"
-                f"Fortune smiles — once. Your next BANKRUPT will be converted to a LOSE instead. "
-                f"*Don't waste it.*"
+                "**CLUTCH**\n\n"
+                "Fortune smiles — once. Your next BANKRUPT will be converted to a LOSE instead. "
+                "*Don't waste it.*"
             )
 
         elif value in ("EXTEND_1", "EXTEND_2"):
@@ -963,9 +957,9 @@ class BettingCommands(commands.Cog):
             color = discord.Color.from_str("#5c7a00")
             if trickle_count == 0:
                 description = (
-                    f"**TRICKLE**\n\n"
-                    f"Trickle down economics... but there's no one else to tax.\n\n"
-                    f"*Nothing happens. As usual.*"
+                    "**TRICKLE**\n\n"
+                    "Trickle down economics... but there's no one else to tax.\n\n"
+                    "*Nothing happens. As usual.*"
                 )
             else:
                 description = (
@@ -1007,48 +1001,48 @@ class BettingCommands(commands.Cog):
             title = "⛰️🔥 ERUPTION!"
             color = discord.Color.from_str("#ff4500")
             description = (
-                f"**ERUPTION**\n\n"
-                f"The Mountain erupts! You gain **2x** the last spinner's result.\n\n"
-                f"*Red mana burns bright.*"
+                "**ERUPTION**\n\n"
+                "The Mountain erupts! You gain **2x** the last spinner's result.\n\n"
+                "*Red mana burns bright.*"
             )
 
         elif value == "FROZEN_ASSETS":
             title = "🏝️❄️ FROZEN ASSETS"
             color = discord.Color.from_str("#1e90ff")
             description = (
-                f"**FROZEN**\n\n"
-                f"Your assets are frozen. Win 0 now, but your next gamba "
-                f"is guaranteed to land on a 50+ JC wedge.\n\n"
-                f"*The Island remembers.*"
+                "**FROZEN**\n\n"
+                "Your assets are frozen. Win 0 now, but your next gamba "
+                "is guaranteed to land on a 50+ JC wedge.\n\n"
+                "*The Island remembers.*"
             )
 
         elif value == "OVERGROWTH":
             title = "🌲🌿 OVERGROWTH!"
             color = discord.Color.from_str("#228b22")
             description = (
-                f"**OVERGROWTH**\n\n"
-                f"The Forest rewards consistency. You earn 10 JC per game played this week.\n\n"
-                f"*Slow and steady wins the race.*"
+                "**OVERGROWTH**\n\n"
+                "The Forest rewards consistency. You earn 10 JC per game played this week.\n\n"
+                "*Slow and steady wins the race.*"
             )
 
         elif value == "SANCTUARY":
             title = "🌾✨ SANCTUARY"
             color = discord.Color.from_str("#f5f5dc")
             description = (
-                f"**SANCTUARY**\n\n"
-                f"A blessing radiates outward. Win 0, but all players who spin "
-                f"the wheel in the next 24 hours get +5 JC added to their result.\n\n"
-                f"*The Plains protect all.*"
+                "**SANCTUARY**\n\n"
+                "A blessing radiates outward. Win 0, but all players who spin "
+                "the wheel in the next 24 hours get +5 JC added to their result.\n\n"
+                "*The Plains protect all.*"
             )
 
         elif value == "DECAY":
             title = "🌿💀 DECAY!"
             color = discord.Color.from_str("#4b0082")
             description = (
-                f"**DECAY**\n\n"
-                f"Rot spreads to the wealthy. The top 3 wealthiest lose 40 JC each, "
-                f"rank #4 loses 50 JC. You consume the remains.\n\n"
-                f"*The Swamp claims what it is owed.*"
+                "**DECAY**\n\n"
+                "Rot spreads to the wealthy. The top 3 wealthiest lose 40 JC each, "
+                "rank #4 loses 50 JC. You consume the remains.\n\n"
+                "*The Swamp claims what it is owed.*"
             )
 
         elif isinstance(value, int) and value > 0:
@@ -1056,11 +1050,11 @@ class BettingCommands(commands.Cog):
             if is_bankrupt and value == 1:
                 title = "🪙 One Coin. One."
                 color = discord.Color.from_str("#3a3a1a")
-                description = f"**1**\n\nThe wheel took pity on you. One coin.\n\n*It's still technically a win.*"
+                description = "**1**\n\nThe wheel took pity on you. One coin.\n\n*It's still technically a win.*"
             elif is_bankrupt and value == 2:
                 title = "🪙 Two Coins."
                 color = discord.Color.from_str("#3a3500")
-                description = f"**2**\n\nEven charity has standards. Here's 2.\n\n*Don't spend it all in one place.*"
+                description = "**2**\n\nEven charity has standards. Here's 2.\n\n*Don't spend it all in one place.*"
             elif is_golden and value == 250:
                 title = "👑 CROWN JEWEL! 👑"
                 color = discord.Color.from_str("#ffd700")
@@ -1111,8 +1105,8 @@ class BettingCommands(commands.Cog):
             title = "🃏 CLUTCH ACTIVATED! — BANKRUPT SAVED 🃏"
             color = discord.Color.from_str("#0a1a2a")
             description = (
-                f"**CLUTCH**\n\n"
-                f"You were about to go BANKRUPT... but your CLUTCH token saved you. Treated as LOSE."
+                "**CLUTCH**\n\n"
+                "You were about to go BANKRUPT... but your CLUTCH token saved you. Treated as LOSE."
             )
         else:
             # Lose a Turn (0) - 5 day penalty cooldown
@@ -2846,11 +2840,7 @@ class BettingCommands(commands.Cog):
                 log_result = -shell_amount
             else:
                 log_result = shell_amount
-        elif result_value == "LIGHTNING_BOLT":
-            log_result = 0
-        elif result_value in ("EXTEND_1", "EXTEND_2"):
-            log_result = 0
-        elif result_value in ("JAILBREAK", "CHAIN_REACTION", "TOWN_TRIAL", "DISCOVER",
+        elif result_value == "LIGHTNING_BOLT" or result_value in ("EXTEND_1", "EXTEND_2") or result_value in ("JAILBREAK", "CHAIN_REACTION", "TOWN_TRIAL", "DISCOVER",
                               "EMERGENCY", "COMEBACK"):
             log_result = 0
         elif result_value == "COMMUNE":
@@ -3070,10 +3060,10 @@ class BettingCommands(commands.Cog):
         elif isinstance(result_value, int) and result_value > 0:
             if result_value == 1:
                 title = "🪙 [TEST] One Coin."
-                description = f"**1**\n\nThe wheel took pity on you. One coin.\n\n*This is a test spin - no changes applied.*"
+                description = "**1**\n\nThe wheel took pity on you. One coin.\n\n*This is a test spin - no changes applied.*"
             elif result_value == 2:
                 title = "🪙 [TEST] Two Coins."
-                description = f"**2**\n\nEven charity has standards. Here's 2.\n\n*This is a test spin - no changes applied.*"
+                description = "**2**\n\nEven charity has standards. Here's 2.\n\n*This is a test spin - no changes applied.*"
             else:
                 title = "🎉 [TEST] Winner!"
                 description = f"**+{result_value} JC**\n\n*This is a test spin - no changes applied.*"
@@ -3191,7 +3181,7 @@ class BettingCommands(commands.Cog):
             color = discord.Color.from_str("#4080c0")
         elif result_value == 250:
             title = "👑 [TEST] CROWN JEWEL! 👑"
-            description = f"**+250 JC**\n\nThe ultimate golden prize.\n\n*This is a test spin - no changes applied.*"
+            description = "**+250 JC**\n\nThe ultimate golden prize.\n\n*This is a test spin - no changes applied.*"
             color = discord.Color.from_str("#fffacd")
         elif isinstance(result_value, int) and result_value > 0:
             title = f"✨ [TEST] +{result_value} JC ✨"
@@ -3323,7 +3313,7 @@ class BettingCommands(commands.Cog):
 
         # Perform atomic transfer (fee goes to nonprofit)
         try:
-            result = await asyncio.to_thread(
+            await asyncio.to_thread(
                 functools.partial(
                     self.player_service.tip_atomic,
                     from_discord_id=interaction.user.id,
@@ -3805,9 +3795,7 @@ class BettingCommands(commands.Cog):
                 inline=False,
             )
             embed.set_footer(
-                text="Loan #{} | Go bet it all, you beautiful degen".format(
-                    result.total_loans_taken
-                )
+                text=f"Loan #{result.total_loans_taken} | Go bet it all, you beautiful degen"
             )
         else:
             # Use AI flavor as main message if available, otherwise fallback to static
@@ -3957,11 +3945,6 @@ class BettingCommands(commands.Cog):
         if self.disburse_service:
             last_disburse = await asyncio.to_thread(self.disburse_service.get_last_disbursement, guild_id)
             if last_disburse:
-                import datetime
-
-                dt = datetime.datetime.fromtimestamp(
-                    last_disburse["disbursed_at"], tz=datetime.timezone.utc
-                )
                 time_str = f"<t:{last_disburse['disbursed_at']}:R>"
 
                 # Format recipients
@@ -4464,7 +4447,6 @@ class BettingCommands(commands.Cog):
             rebellion_service.create_rebellion, user_id, guild_id
         )
         war_id = war_info["war_id"]
-        vote_closes_at = war_info["vote_closes_at"]
         bankruptcy_count = war_info["bankruptcy_count"]
         is_veteran = bankruptcy_count >= 2
 
@@ -4503,11 +4485,10 @@ class BettingCommands(commands.Cog):
         # FIZZLE PATH
         # ----------------------------------------------------------------
         if vote_result["outcome"] == "fizzled":
-            fizzle_info = await asyncio.to_thread(
+            await asyncio.to_thread(
                 rebellion_service.resolve_fizzle, war_id, guild_id
             )
 
-            import json
             war = await asyncio.to_thread(rebellion_service.rebellion_repo.get_war, war_id)
             eff_atk = war["effective_attack_count"] if war else vote_result.get("effective_attack_count", 0)
             eff_def = war["effective_defend_count"] if war else vote_result.get("effective_defend_count", 0)
@@ -4539,7 +4520,6 @@ class BettingCommands(commands.Cog):
         eff_atk = vote_result["effective_attack_count"]
         eff_def = vote_result["effective_defend_count"]
         attack_ids = [v["discord_id"] for v in vote_result["attack_voter_ids"]]
-        defend_ids = list(vote_result["defend_voter_ids"])
 
         victory_threshold = rebellion_service.calculate_threshold(eff_atk, eff_def)
 
@@ -4803,7 +4783,7 @@ class BettingCommands(commands.Cog):
 class DisburseVoteView(discord.ui.View):
     """Persistent view for disbursement voting."""
 
-    def __init__(self, disburse_service: DisburseService, cog: "BettingCommands"):
+    def __init__(self, disburse_service: DisburseService, cog: BettingCommands):
         super().__init__(timeout=None)  # Persistent - no timeout
         self.disburse_service = disburse_service
         self.cog = cog

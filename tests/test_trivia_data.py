@@ -1,6 +1,5 @@
 """Tests for services/trivia_data.py — data loading and CDN URL builders."""
 
-import pytest
 
 from services.trivia_data import (
     ability_icon_url,

@@ -1,8 +1,7 @@
-import pytest
 
-from services.lobby_manager_service import LobbyManagerService as LobbyManager
 from repositories.lobby_repository import LobbyRepository
 from repositories.player_repository import PlayerRepository
+from services.lobby_manager_service import LobbyManagerService as LobbyManager
 from services.lobby_service import LobbyService
 
 

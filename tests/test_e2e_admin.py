@@ -2,9 +2,6 @@
 End-to-end tests for admin commands and permission checks.
 """
 
-import os
-import tempfile
-import time
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
@@ -12,10 +9,10 @@ from discord import app_commands
 
 from commands.match import MatchCommands
 from database import Database
-from services.lobby_manager_service import LobbyManagerService as LobbyManager
 from repositories.lobby_repository import LobbyRepository
 from repositories.match_repository import MatchRepository
 from repositories.player_repository import PlayerRepository
+from services.lobby_manager_service import LobbyManagerService as LobbyManager
 from services.lobby_service import LobbyService
 from services.match_service import MatchService
 from services.player_service import PlayerService

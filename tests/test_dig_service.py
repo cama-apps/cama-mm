@@ -7,50 +7,38 @@ import time
 import pytest
 
 from repositories.dig_repository import DigRepository
-from repositories.player_repository import PlayerRepository
-from services.dig_service import DigService
 from services.dig_constants import (
-    FREE_DIG_COOLDOWN_SECONDS,
-    PAID_DIG_COSTS_PER_DAY,
-    LAYERS,
-    MILESTONES,
-    STREAKS,
-    PICKAXE_TIERS,
-    CONSUMABLES,
-    BOSSES,
-    MAX_PRESTIGE,
-    PRESTIGE_PERKS,
-    MAX_INVENTORY_SLOTS,
-    SABOTAGE_COOLDOWN_SECONDS,
-    CAVE_IN_BLOCK_LOSS_MIN,
-    CAVE_IN_BLOCK_LOSS_MAX,
-    ALL_ARTIFACTS,
-    VISIBLE_ACHIEVEMENTS,
-    ABANDON_MIN_DEPTH,
-    ABANDON_COOLDOWN_SECONDS,
     ABANDON_REFUND_PCT,
-    FIRST_DIG_ADVANCE_MIN,
+    ALL_ARTIFACTS,
+    BOSS_BOUNDARIES,
+    BOSSES,
+    CAVE_IN_BLOCK_LOSS_MAX,
+    CAVE_IN_BLOCK_LOSS_MIN,
+    CONSUMABLES,
+    DIG_TIPS,
     FIRST_DIG_ADVANCE_MAX,
-    FIRST_DIG_JC_MIN,
+    FIRST_DIG_ADVANCE_MIN,
     FIRST_DIG_JC_MAX,
-    SABOTAGE_BASE_COST,
-    SABOTAGE_COST_DIVISOR,
-    SABOTAGE_DAMAGE_MIN,
-    SABOTAGE_DAMAGE_MAX,
+    FIRST_DIG_JC_MIN,
+    FREE_DIG_COOLDOWN_SECONDS,
+    HARD_HAT_USES,
     INSURANCE_BASE_COST,
     INSURANCE_COST_DEPTH_DIVISOR,
     INSURANCE_DURATION_SECONDS,
-    INSURANCE_REDUCTION,
-    DECAY_START_HOURS,
-    DECAY_ACCELERATED_HOURS,
-    DECAY_ACCELERATED_MULTIPLIER,
-    DECAY_FLOOR_DEPTHS,
-    HARD_HAT_USES,
-    TRAP_BASE_COST,
-    DIG_TIPS,
-    BOSS_BOUNDARIES,
-    CONSUMABLE_ITEMS,
+    MAX_INVENTORY_SLOTS,
+    MAX_PRESTIGE,
+    MILESTONES,
+    PAID_DIG_COSTS_PER_DAY,
+    PICKAXE_TIERS,
+    PRESTIGE_PERKS,
+    SABOTAGE_BASE_COST,
+    SABOTAGE_COOLDOWN_SECONDS,
+    SABOTAGE_COST_DIVISOR,
+    SABOTAGE_DAMAGE_MAX,
+    SABOTAGE_DAMAGE_MIN,
+    STREAKS,
 )
+from services.dig_service import DigService
 
 
 @pytest.fixture
@@ -205,7 +193,7 @@ class TestCooldown:
 
         expected_costs = PAID_DIG_COSTS_PER_DAY  # [3, 6, 12, 24, 48]
         for i, expected_cost in enumerate(expected_costs):
-            monkeypatch.setattr(time, "time", lambda: base_time + 60 * (i + 1))
+            monkeypatch.setattr(time, "time", lambda i=i: base_time + 60 * (i + 1))
             result = dig_service.dig(10001, guild_id, paid=True)
             assert result["success"], f"Paid dig #{i+1} should succeed"
             assert result["paid_cost"] == expected_cost, f"Paid dig #{i+1} cost should be {expected_cost}"
@@ -282,7 +270,7 @@ class TestCaveIn:
 
         monkeypatch.setattr(time, "time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1)
         monkeypatch.setattr(random, "random", lambda: 0.001)  # force cave-in
-        result = dig_service.dig(10001, guild_id)
+        dig_service.dig(10001, guild_id)
         tunnel = dig_repo.get_tunnel(10001, guild_id)
         assert tunnel["depth"] >= 0
 
@@ -422,7 +410,7 @@ class TestDecay:
 
         # Long inactivity to trigger lots of decay
         monkeypatch.setattr(time, "time", lambda: 1_000_000 + 7 * 86400)  # 7 days
-        decay = dig_service.calculate_decay(10001, guild_id)
+        dig_service.calculate_decay(10001, guild_id)
         tunnel = dig_repo.get_tunnel(10001, guild_id)
         assert tunnel["depth"] >= 25, "Decay should not cross layer boundary at 25"
 
@@ -455,7 +443,6 @@ class TestDecay:
         dig_repo.update_tunnel(10001, guild_id, depth=40, last_dig_at=1_000_000)
 
         # Log a help action recently
-        help_time = 1_000_000 + 47 * 3600  # within last 24h of check time
         dig_repo.log_action(guild_id, 10002, 10001, "help", 40, 42, jc_delta=1)
 
         monkeypatch.setattr(time, "time", lambda: 1_000_000 + 48 * 3600)
@@ -1465,7 +1452,7 @@ class TestBossOdds:
 
     def test_scout_boss_shows_configured_odds(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
         """scout_boss should return odds based on BOSS_WIN_ODDS config, not hardcoded defaults."""
-        from services.dig_constants import BOSS_WIN_ODDS, BOSS_PAYOUTS
+        from services.dig_constants import BOSS_PAYOUTS
         _register_player(player_repository, balance=200)
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
         monkeypatch.setattr(random, "random", lambda: 0.99)
@@ -1528,7 +1515,7 @@ class TestNewLayers:
         """Should have 8 layers after expansion."""
         from services.dig_constants import _LAYERS_DEF
         assert len(_LAYERS_DEF) == 8
-        names = [l.name for l in _LAYERS_DEF]
+        names = [layer.name for layer in _LAYERS_DEF]
         assert "Fungal Depths" in names
         assert "Frozen Core" in names
         assert "The Hollow" in names
@@ -1536,13 +1523,13 @@ class TestNewLayers:
     def test_abyss_now_capped(self):
         """Abyss should have depth_max=150 (no longer unbounded)."""
         from services.dig_constants import _LAYERS_DEF
-        abyss = next(l for l in _LAYERS_DEF if l.name == "Abyss")
+        abyss = next(layer for layer in _LAYERS_DEF if layer.name == "Abyss")
         assert abyss.depth_max == 150
 
     def test_hollow_is_unbounded(self):
         """The Hollow should be unbounded (depth_max=None)."""
         from services.dig_constants import _LAYERS_DEF
-        hollow = next(l for l in _LAYERS_DEF if l.name == "The Hollow")
+        hollow = next(layer for layer in _LAYERS_DEF if layer.name == "The Hollow")
         assert hollow.depth_max is None
 
     def test_get_layer_returns_new_layers(self, dig_service):
@@ -1556,7 +1543,6 @@ class TestNewLayers:
 
     def test_new_bosses_exist(self):
         """Should have 7 bosses (4 original + 3 new)."""
-        from services.dig_constants import BOSSES
         assert len(BOSSES) == 7
         assert 150 in BOSSES
         assert 200 in BOSSES
@@ -1737,13 +1723,12 @@ class TestExpandedPrestige:
         assert _PICKAXE_TIERS_DEF[-1].name == "Void-Touched"
 
     def test_nine_prestige_perks(self):
-        from services.dig_constants import PRESTIGE_PERKS
         assert len(PRESTIGE_PERKS) == 9
         assert "deep_sight" in PRESTIGE_PERKS
         assert "the_endless" in PRESTIGE_PERKS
 
     def test_crowns_for_all_levels(self):
-        from services.dig_constants import PRESTIGE_CROWNS, MAX_PRESTIGE
+        from services.dig_constants import MAX_PRESTIGE, PRESTIGE_CROWNS
         for i in range(MAX_PRESTIGE + 1):
             assert i in PRESTIGE_CROWNS, f"Missing crown for prestige {i}"
 

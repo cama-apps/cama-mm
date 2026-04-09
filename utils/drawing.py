@@ -887,7 +887,6 @@ def draw_gamba_chart(
     stat_font = _get_font(15)
 
     net_pnl = stats.get("net_pnl", 0)
-    pnl_color = DISCORD_GREEN if net_pnl >= 0 else DISCORD_RED
     pnl_text = f"{net_pnl:+d}" if net_pnl != 0 else "0"
 
     footer_parts = [
@@ -1168,7 +1167,7 @@ def draw_rating_distribution(
             # Use D'Agostino-Pearson for larger samples
             shapiro_stat, shapiro_p = stats.normaltest(ratings_arr)
     else:
-        shapiro_stat, shapiro_p = None, None
+        _shapiro_stat, shapiro_p = None, None
 
     # Create figure with Discord-like dark theme
     fig, ax = plt.subplots(figsize=(6.5, 4), facecolor="#36393F")
@@ -1241,7 +1240,7 @@ def draw_rating_distribution(
         verticalalignment="top",
         color="#B9BBBE",
         family="monospace",
-        bbox=dict(boxstyle="round,pad=0.3", facecolor="#2F3136", edgecolor="#4F545C", alpha=0.9),
+        bbox={"boxstyle": "round,pad=0.3", "facecolor": "#2F3136", "edgecolor": "#4F545C", "alpha": 0.9},
     )
 
     plt.tight_layout()
@@ -2039,6 +2038,7 @@ def _fetch_hero_image(hero_id: int, size: tuple[int, int] = (48, 27)) -> Image.I
         PIL Image resized to specified dimensions, or None if fetch fails
     """
     import requests
+
     from utils.hero_lookup import get_hero_image_url
 
     # Check cache first

@@ -15,7 +15,6 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from utils.neon_helpers import get_neon_service
 from config import (
     DOUBLE_OR_NOTHING_COOLDOWN_SECONDS,
     PACKAGE_DEAL_GAMES_DURATION,
@@ -36,14 +35,15 @@ from services.player_service import PlayerService
 from utils.formatting import JOPACOIN_EMOTE
 from utils.hero_lookup import get_all_heroes, get_hero_color, get_hero_image_url, get_hero_name
 from utils.interaction_safety import safe_defer, safe_followup
+from utils.neon_helpers import get_neon_service
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
 
 if TYPE_CHECKING:
-    from services.match_service import MatchService
+    from services.dig_service import DigService
     from services.flavor_text_service import FlavorTextService
     from services.gambling_stats_service import GamblingStatsService
+    from services.match_service import MatchService
     from services.recalibration_service import RecalibrationService
-    from services.dig_service import DigService
 
 logger = logging.getLogger("cama_bot.commands.shop")
 
@@ -530,7 +530,7 @@ class ShopCommands(commands.Cog):
             if buyer["win_rate"] > target["win_rate"]:
                 comparison["buyer_wins"].append(f"{buyer['win_rate']:.0f}% vs {target['win_rate']:.0f}% win rate")
             elif target["win_rate"] > buyer["win_rate"]:
-                comparison["target_wins"].append(f"better win rate")
+                comparison["target_wins"].append("better win rate")
 
         # Rating comparison
         if buyer["rating"] and target["rating"]:
@@ -538,7 +538,7 @@ class ShopCommands(commands.Cog):
                 diff = int(buyer["rating"] - target["rating"])
                 comparison["buyer_wins"].append(f"{diff} higher rating")
             elif target["rating"] > buyer["rating"]:
-                comparison["target_wins"].append(f"higher rating")
+                comparison["target_wins"].append("higher rating")
 
         # P&L comparison
         if buyer["net_pnl"] > target["net_pnl"]:
@@ -548,7 +548,7 @@ class ShopCommands(commands.Cog):
         if buyer["bankruptcies"] < target["bankruptcies"]:
             comparison["buyer_wins"].append(f"fewer bankruptcies ({buyer['bankruptcies']} vs {target['bankruptcies']})")
         elif target["bankruptcies"] < buyer["bankruptcies"]:
-            comparison["target_wins"].append(f"fewer bankruptcies")
+            comparison["target_wins"].append("fewer bankruptcies")
 
         return comparison
 
@@ -1243,7 +1243,7 @@ class ShopCommands(commands.Cog):
         )
 
         # Build confirmation embed (ephemeral)
-        cost_display = f"FREE (first deal!)" if cost == 0 else f"{cost} {JOPACOIN_EMOTE}"
+        cost_display = "FREE (first deal!)" if cost == 0 else f"{cost} {JOPACOIN_EMOTE}"
         embed = discord.Embed(
             title="Package Deal Active",
             description=(
@@ -1449,6 +1449,7 @@ class ShopCommands(commands.Cog):
         elif item_key == "mana_shield":
             # Store shield state (expires at 4 AM PST)
             import time as _time
+
             from services.mana_service import get_today_pst
             # Shield persists until next reset (4 AM PST)
             # For simplicity, store in mana_shop_items table

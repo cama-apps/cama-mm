@@ -2,9 +2,6 @@
 Tests for registration command logic.
 """
 
-import os
-import tempfile
-import time
 
 import pytest
 
@@ -174,7 +171,6 @@ class TestMMRPromptViewSignature:
         This test verifies that all button callbacks in the codebase follow the
         correct pattern by checking against a known working example.
         """
-        import ast
         import re
         from pathlib import Path
 

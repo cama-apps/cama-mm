@@ -15,7 +15,7 @@ Multiplier formula: 1.0 + 0.20 * max(0, streak_length - 2)
 
 import pytest
 
-from config import STREAK_THRESHOLD, STREAK_MULTIPLIER_PER_GAME
+from config import STREAK_MULTIPLIER_PER_GAME, STREAK_THRESHOLD
 from rating_system import CamaRatingSystem
 from tests.conftest import TEST_GUILD_ID
 
@@ -153,7 +153,7 @@ class TestStreakMultiplierCalculation:
     def test_config_constants_have_expected_values(self):
         """Verify config constants are set correctly."""
         assert STREAK_THRESHOLD == 3
-        assert STREAK_MULTIPLIER_PER_GAME == pytest.approx(0.20)
+        assert pytest.approx(0.20) == STREAK_MULTIPLIER_PER_GAME
 
 
 class TestStreakInRatingUpdate:

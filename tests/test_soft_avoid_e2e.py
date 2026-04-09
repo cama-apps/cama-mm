@@ -70,7 +70,7 @@ class TestSoftAvoidE2E:
         discord_ids = register_test_players(player_repo, guild_id=guild_id, count=10)
 
         # Create an avoid
-        avoid = soft_avoid_repo.create_or_extend_avoid(
+        soft_avoid_repo.create_or_extend_avoid(
             guild_id=guild_id,
             avoider_id=discord_ids[0],
             avoided_id=discord_ids[1],
@@ -93,7 +93,7 @@ class TestSoftAvoidE2E:
         discord_ids = register_test_players(player_repo, guild_id=guild_id, count=10)
 
         # Create an avoid
-        avoid = soft_avoid_repo.create_or_extend_avoid(
+        soft_avoid_repo.create_or_extend_avoid(
             guild_id=guild_id,
             avoider_id=discord_ids[0],
             avoided_id=discord_ids[1],
@@ -102,7 +102,7 @@ class TestSoftAvoidE2E:
 
         # Shuffle multiple times without recording
         for _ in range(5):
-            result = match_service.shuffle_players(
+            match_service.shuffle_players(
                 player_ids=discord_ids,
                 guild_id=guild_id,
             )
@@ -121,7 +121,7 @@ class TestSoftAvoidE2E:
         discord_ids = register_test_players(player_repo, guild_id=guild_id, count=10)
 
         # Create an avoid
-        avoid = soft_avoid_repo.create_or_extend_avoid(
+        soft_avoid_repo.create_or_extend_avoid(
             guild_id=guild_id,
             avoider_id=discord_ids[0],
             avoided_id=discord_ids[1],
@@ -138,8 +138,7 @@ class TestSoftAvoidE2E:
                 guild_id=guild_id,
             )
 
-            radiant_ids = set(result["radiant_team"].players[i].discord_id for i in range(5))
-            dire_ids = set(result["dire_team"].players[i].discord_id for i in range(5))
+            radiant_ids = {result["radiant_team"].players[i].discord_id for i in range(5)}
 
             # Check if they're on opposite teams
             avoider_on_radiant = discord_ids[0] in radiant_ids
@@ -243,8 +242,7 @@ class TestSoftAvoidE2E:
                 guild_id=guild_id,
             )
 
-            radiant_ids = set(result["radiant_team"].players[i].discord_id for i in range(5))
-            dire_ids = set(result["dire_team"].players[i].discord_id for i in range(5))
+            radiant_ids = {result["radiant_team"].players[i].discord_id for i in range(5)}
 
             # Check if they're on opposite teams
             avoider_on_radiant = discord_ids[0] in radiant_ids

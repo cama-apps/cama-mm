@@ -26,10 +26,8 @@ import pytest
 from repositories.bankruptcy_repository import BankruptcyRepository
 from repositories.player_repository import PlayerRepository
 from repositories.rebellion_repository import RebellionRepository
-from services.bankruptcy_service import BankruptcyService
 from services.rebellion_service import RebellionService
 from tests.conftest import TEST_GUILD_ID
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -404,7 +402,11 @@ class TestWarFlow:
 
         assert result["outcome"] == "attackers_win"
 
-        from config import REBELLION_ATTACKER_FLAT_REWARD, REBELLION_INCITER_FLAT_REWARD, REBELLION_DEFENDER_STAKE
+        from config import (
+            REBELLION_ATTACKER_FLAT_REWARD,
+            REBELLION_DEFENDER_STAKE,
+            REBELLION_INCITER_FLAT_REWARD,
+        )
         inciter_bal_after = player_repo.get_balance(inciter_id, guild_id)
         assert inciter_bal_after >= inciter_bal_before + REBELLION_INCITER_FLAT_REWARD
 
@@ -454,7 +456,11 @@ class TestWarFlow:
         result = rebellion_service.resolve_battle(war_id, guild_id, battle_roll=90, victory_threshold=25)
         assert result["outcome"] == "defenders_win"
 
-        from config import REBELLION_DEFENDER_WIN_REWARD, REBELLION_DEFENDER_STAKE, REBELLION_FIRST_DEFENDER_BONUS
+        from config import (
+            REBELLION_DEFENDER_STAKE,
+            REBELLION_DEFENDER_WIN_REWARD,
+            REBELLION_FIRST_DEFENDER_BONUS,
+        )
         for i, did in enumerate(defend_voters):
             bal_after = player_repo.get_balance(did, guild_id)
             expected = bal_before[did] + REBELLION_DEFENDER_STAKE + REBELLION_DEFENDER_WIN_REWARD
@@ -719,15 +725,15 @@ class TestApplyWarEffects:
         assert scar_wedges[0][1] == 0
 
     def test_attacker_win_weakens_bankrupt(self):
-        from utils.wheel_drawing import apply_war_effects
         from config import REBELLION_BANKRUPT_WEAKEN_RATE
+        from utils.wheel_drawing import apply_war_effects
         war_state = {"outcome": "attackers_win", "war_scar_wedge_label": "50"}
         wedges = self._get_normal_wedges()
 
         # Find BANKRUPT value before
-        bankrupt_before = next((v for l, v, c in wedges if l == "BANKRUPT"), None)
+        bankrupt_before = next((value for label, value, _color in wedges if label == "BANKRUPT"), None)
         modified = apply_war_effects(wedges, war_state)
-        bankrupt_after = next((v for l, v, c in modified if l == "BANKRUPT"), None)
+        bankrupt_after = next((value for label, value, _color in modified if label == "BANKRUPT"), None)
 
         if bankrupt_before is not None and isinstance(bankrupt_before, int):
             expected = max(-1, int(bankrupt_before * (1.0 - REBELLION_BANKRUPT_WEAKEN_RATE)))
@@ -744,14 +750,14 @@ class TestApplyWarEffects:
         assert "RETRIBUTION ⚔️" in labels
 
     def test_defender_win_strengthens_bankrupt(self):
-        from utils.wheel_drawing import apply_war_effects
         from config import REBELLION_BANKRUPT_STRENGTHEN_RATE
+        from utils.wheel_drawing import apply_war_effects
         war_state = {"outcome": "defenders_win"}
         wedges = self._get_normal_wedges()
 
-        bankrupt_before = next((v for l, v, c in wedges if l == "BANKRUPT"), None)
+        bankrupt_before = next((value for label, value, _color in wedges if label == "BANKRUPT"), None)
         modified = apply_war_effects(wedges, war_state)
-        bankrupt_after = next((v for l, v, c in modified if l == "BANKRUPT"), None)
+        bankrupt_after = next((value for label, value, _color in modified if label == "BANKRUPT"), None)
 
         if bankrupt_before is not None and isinstance(bankrupt_before, int):
             expected = int(bankrupt_before * (1.0 + REBELLION_BANKRUPT_STRENGTHEN_RATE))

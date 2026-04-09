@@ -11,9 +11,9 @@ from dataclasses import dataclass
 from config import LOAN_COOLDOWN_SECONDS, LOAN_FEE_RATE, LOAN_MAX_AMOUNT, MAX_DEBT
 from repositories.loan_repository import LoanRepository
 from repositories.player_repository import PlayerRepository
-from services.result import Result
 from services import error_codes
 from services.interfaces import ILoanService
+from services.result import Result
 
 
 @dataclass

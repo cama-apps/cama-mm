@@ -10,10 +10,9 @@ import random
 import time
 
 from config import (
+    BANKRUPTCY_COOLDOWN_SECONDS,
     REBELLION_ATTACK_QUORUM,
     REBELLION_ATTACKER_FLAT_REWARD,
-    REBELLION_BANKRUPT_STRENGTHEN_RATE,
-    REBELLION_BANKRUPT_WEAKEN_RATE,
     REBELLION_BASE_THRESHOLD,
     REBELLION_CELEBRATION_SPIN_WINDOW,
     REBELLION_DEFENDER_STAKE,
@@ -28,11 +27,10 @@ from config import (
     REBELLION_VETERAN_REBEL_VOTE_WEIGHT,
     REBELLION_VOTE_WINDOW_SECONDS,
     REBELLION_WHEEL_EFFECT_SPINS,
-    BANKRUPTCY_COOLDOWN_SECONDS,
 )
-from repositories.rebellion_repository import RebellionRepository
 from repositories.bankruptcy_repository import BankruptcyRepository
 from repositories.player_repository import PlayerRepository
+from repositories.rebellion_repository import RebellionRepository
 
 
 class RebellionService:
@@ -149,9 +147,7 @@ class RebellionService:
 
         # Update inciter's vote weight if veteran
         if bankruptcy_count >= REBELLION_VETERAN_REBEL_MIN_BANKRUPTCIES:
-            # create_war adds 1.0 weight; adjust to veteran weight
-            extra = REBELLION_VETERAN_REBEL_VOTE_WEIGHT - 1.0
-            # Fetch the war to update attack_voter_ids with proper bankruptcy_count
+            # Update stored voter metadata and effective count to veteran weight.
             import json
             war = self.rebellion_repo.get_war(war_id)
             voters = json.loads(war["attack_voter_ids"])

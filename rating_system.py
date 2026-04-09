@@ -3,16 +3,17 @@ Glicko-2 rating system implementation for Cama matchmaking.
 """
 
 import math
+
+from glicko2 import Player
+
 from config import (
     CALIBRATION_RD_THRESHOLD,
     MAX_RATING_SWING_PER_GAME,
     RD_DECAY_CONSTANT,
     RD_DECAY_GRACE_PERIOD_WEEKS,
-    STREAK_THRESHOLD,
     STREAK_MULTIPLIER_PER_GAME,
+    STREAK_THRESHOLD,
 )
-
-from glicko2 import Player
 
 
 class CamaRatingSystem:

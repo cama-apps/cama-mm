@@ -2,13 +2,12 @@
 Match orchestration: shuffling and recording.
 """
 
+import logging
 import random
 import threading
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
-
-import logging
 
 from config import BET_LOCK_SECONDS, CALIBRATION_RD_THRESHOLD, FIRST_GAME_RESET_HOUR
 from domain.models.player import Player
@@ -229,7 +228,7 @@ class MatchService:
         # This ensures returning players get appropriate priority boost.
         # Safe to mutate: players are fetched fresh via get_by_ids() each call.
         last_match_dates = self.player_repo.get_last_match_dates(player_ids, guild_id)
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         for player in players:
             if player.discord_id and player.glicko_rd is not None:
                 last_match_str = last_match_dates.get(player.discord_id)
@@ -560,9 +559,9 @@ class MatchService:
         # Apply RD decay if applicable
         reference_dt = last_match_dt or created_at_dt
         if reference_dt:
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             if reference_dt.tzinfo is None:
-                reference_dt = reference_dt.replace(tzinfo=timezone.utc)
+                reference_dt = reference_dt.replace(tzinfo=UTC)
             days_since = (now - reference_dt).days
             base_player.rd = self.rating_system.apply_rd_decay(base_player.rd, days_since)
 
@@ -773,19 +772,18 @@ class MatchService:
                 )
 
             # Update last_match_date for participants
-            now_iso = datetime.now(timezone.utc).isoformat()
+            now_iso = datetime.now(UTC).isoformat()
             for pid in expected_ids:
                 self.player_repo.update_last_match_date(pid, guild_id, now_iso)
 
             # Track first calibration for players who just became calibrated
             now_unix = int(time.time())
             for pid, rating, rd, vol in updates:
-                if rd <= CALIBRATION_RD_THRESHOLD:
+                if rd <= CALIBRATION_RD_THRESHOLD and hasattr(self.player_repo, "get_first_calibrated_at"):
                     # Check if player doesn't have first_calibrated_at set yet
-                    if hasattr(self.player_repo, "get_first_calibrated_at"):
-                        first_cal = self.player_repo.get_first_calibrated_at(pid, guild_id)
-                        if first_cal is None:
-                            self.player_repo.set_first_calibrated_at(pid, guild_id, now_unix)
+                    first_cal = self.player_repo.get_first_calibrated_at(pid, guild_id)
+                    if first_cal is None:
+                        self.player_repo.set_first_calibrated_at(pid, guild_id, now_unix)
 
             # Store match prediction snapshot (pre-match)
             if hasattr(self.match_repo, "add_match_prediction"):
@@ -886,15 +884,16 @@ class MatchService:
             # Find the most notable streak (longest, >=5 games) for neon hooks
             notable_streak = None
             for pid, (slen, _smult) in streak_data.items():
-                if slen >= 5:
-                    if notable_streak is None or slen > notable_streak["streak"]:
-                        won = (pid in radiant_team_ids and winning_team == "radiant") or \
-                              (pid in dire_team_ids and winning_team == "dire")
-                        notable_streak = {
-                            "discord_id": pid,
-                            "streak": slen,
-                            "is_win": won,
-                        }
+                if slen >= 5 and (notable_streak is None or slen > notable_streak["streak"]):
+                    won = (
+                        (pid in radiant_team_ids and winning_team == "radiant")
+                        or (pid in dire_team_ids and winning_team == "dire")
+                    )
+                    notable_streak = {
+                        "discord_id": pid,
+                        "streak": slen,
+                        "is_win": won,
+                    }
 
             # --- Easter Egg Data Collection ---
             easter_egg_data = {
@@ -940,18 +939,17 @@ class MatchService:
             # Check for personal best win streak records (for winners only)
             for pid in winning_ids:
                 slen, _ = streak_data.get(pid, (1, 1.0))
-                if slen >= 5:
+                if slen >= 5 and hasattr(self.player_repo, "get_personal_best_win_streak"):
                     # Get player's personal best
-                    if hasattr(self.player_repo, "get_personal_best_win_streak"):
-                        prev_best = self.player_repo.get_personal_best_win_streak(pid, guild_id)
-                        if slen > prev_best:
-                            # Update the record
-                            self.player_repo.update_personal_best_win_streak(pid, guild_id, slen)
-                            easter_egg_data["win_streak_records"].append({
-                                "discord_id": pid,
-                                "current_streak": slen,
-                                "previous_best": prev_best,
-                            })
+                    prev_best = self.player_repo.get_personal_best_win_streak(pid, guild_id)
+                    if slen > prev_best:
+                        # Update the record
+                        self.player_repo.update_personal_best_win_streak(pid, guild_id, slen)
+                        easter_egg_data["win_streak_records"].append({
+                            "discord_id": pid,
+                            "current_streak": slen,
+                            "previous_best": prev_best,
+                        })
 
             # Clear state after successful record (only this specific match)
             self.clear_last_shuffle(guild_id, pending_match_id)
@@ -1394,7 +1392,6 @@ class MatchService:
         Returns:
             Dict with team1_win_prob, team1_ordinal, team2_ordinal
         """
-        from openskill.models import PlackettLuce
 
         # Get current ratings
         all_ids = team1_ids + team2_ids
@@ -1906,7 +1903,7 @@ class MatchService:
                 hour=FIRST_GAME_RESET_HOUR, minute=0, second=0, microsecond=0
             )
 
-        boundary_utc = boundary_la.astimezone(timezone.utc)
+        boundary_utc = boundary_la.astimezone(UTC)
         boundary_iso = boundary_utc.strftime("%Y-%m-%d %H:%M:%S")
 
         normalized_gid = normalize_guild_id(guild_id)

@@ -4,10 +4,9 @@ Tests beam search quality and performance compared to exhaustive search.
 """
 
 import time
-import pytest
 
 from domain.models.player import Player
-from shuffler import BalancedShuffler, DraftPoolResult
+from shuffler import BalancedShuffler
 
 
 def _make_player(

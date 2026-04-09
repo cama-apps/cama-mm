@@ -7,9 +7,9 @@ Provides /wrapped command with a unified Spotify Wrapped-style story experience.
 import asyncio
 import io
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Callable
+from datetime import UTC, datetime
 
 import discord
 from discord import app_commands
@@ -22,10 +22,10 @@ from utils.wrapped_drawing import (
     SLIDE_COLORS,
     draw_awards_grid,
     draw_hero_spotlight_slide,
+    draw_lane_breakdown_slide,
     draw_package_deal_slide,
     draw_pairwise_slide,
     draw_records_slide,
-    draw_lane_breakdown_slide,
     draw_story_slide,
     draw_summary_stats_slide,
     draw_wrapped_summary,
@@ -460,7 +460,7 @@ class WrappedCog(commands.Cog):
         if not await safe_defer(interaction):
             return
 
-        year = datetime.now(timezone.utc).year
+        year = datetime.now(UTC).year
         guild_id = interaction.guild.id if interaction.guild else None
         target_user = user or interaction.user
 

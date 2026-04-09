@@ -202,7 +202,6 @@ class TestMatchCorrection:
         pending = match_service.get_last_shuffle(TEST_GUILD_ID)
 
         radiant_ids = pending["radiant_team_ids"]
-        dire_ids = pending["dire_team_ids"]
 
         # Ensure betting is open
         pending["bet_lock_until"] = int(time.time()) + 600
@@ -212,9 +211,6 @@ class TestMatchCorrection:
 
         # A radiant player bets on their own team
         betting_service.place_bet(TEST_GUILD_ID, radiant_ids[0], "radiant", 20, pending)
-
-        # Record spectator balance before recording
-        spectator_balance_before = player_repo.get_balance(spectator_id, TEST_GUILD_ID)
 
         # Record with Radiant winning (spectator loses their bet)
         match_service.add_record_submission(TEST_GUILD_ID, 99999, "radiant", is_admin=True)

@@ -305,11 +305,9 @@ class MatchEnrichmentService:
 
             # Try all steam_ids for this player to find a match in OpenDota data
             player_data = None
-            matched_steam_id = None
             for sid in player_steam_ids:
                 if sid in opendota_players:
                     player_data = opendota_players[sid]
-                    matched_steam_id = sid
                     break
 
             if not player_data:

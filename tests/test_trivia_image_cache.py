@@ -1,12 +1,8 @@
 """Tests for services/trivia_image_cache.py — disk cache for trivia images."""
 
-import os
-import tempfile
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import discord
-import pytest
 
 from services.trivia_image_cache import _url_to_path, ensure_cached, get_trivia_image
 
@@ -42,7 +38,6 @@ class TestEnsureCached:
         url = "https://cdn.cloudflare.steamstatic.com/apps/dota2/images/dota_react/heroes/test_hero.png"
         with patch("services.trivia_image_cache.CACHE_DIR", tmp_path / "cache"):
             # Pre-create the file
-            path = _url_to_path(url)
             # _url_to_path uses CACHE_DIR which is now patched
             with patch("services.trivia_image_cache._url_to_path") as mock_utp:
                 cached_path = tmp_path / "cache" / "heroes" / "test_hero.png"

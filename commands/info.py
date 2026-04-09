@@ -20,10 +20,10 @@ from rating_system import CamaRatingSystem
 from services.permissions import has_admin_permission
 from utils.debug_logging import debug_log as _dbg_log
 from utils.drawing import draw_rating_distribution
-from utils.formatting import JOPACOIN_EMOTE, TOMBSTONE_EMOJI
-from utils.hero_lookup import get_hero_short_name, classify_hero_role
-from utils.interaction_safety import safe_defer, safe_followup
 from utils.embed_safety import truncate_field
+from utils.formatting import JOPACOIN_EMOTE, TOMBSTONE_EMOJI
+from utils.hero_lookup import classify_hero_role, get_hero_short_name
+from utils.interaction_safety import safe_defer, safe_followup
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
 from utils.rating_insights import compute_calibration_stats, rd_to_certainty
 
@@ -1945,7 +1945,6 @@ class InfoCommands(commands.Cog):
             hero_breakdown = await asyncio.to_thread(self.match_service.get_player_hero_role_breakdown, user.id, guild_id) if self.match_service else []
             total_hero_games = sum(h["games"] for h in hero_breakdown)
             core_games = sum(h["games"] for h in hero_breakdown if classify_hero_role(h["hero_id"]) == "Core")
-            support_games = total_hero_games - core_games
 
             # Check for role mismatch
             preferred_roles = player.preferred_roles or []

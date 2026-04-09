@@ -2,9 +2,10 @@
 Tests for PackageDealRepository.
 """
 
+
 import pytest
-import time
-from repositories.package_deal_repository import PackageDealRepository, PackageDeal
+
+from repositories.package_deal_repository import PackageDealRepository
 
 
 class TestPackageDealRepository:
@@ -138,7 +139,7 @@ class TestPackageDealRepository:
     def test_delete_expired_deals(self, repo):
         """Test deleting expired deals."""
         deal1 = repo.create_or_extend_deal(guild_id=123, buyer_id=100, partner_id=200, games=1)
-        deal2 = repo.create_or_extend_deal(guild_id=123, buyer_id=100, partner_id=300, games=5)
+        repo.create_or_extend_deal(guild_id=123, buyer_id=100, partner_id=300, games=5)
 
         # Decrement deal1 to 0
         repo.decrement_deals(123, [deal1.id])

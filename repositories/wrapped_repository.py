@@ -3,7 +3,7 @@ Repository for Cama Wrapped yearly summary data access.
 """
 
 import logging
-from typing import Any
+from datetime import UTC
 
 from repositories.base_repository import BaseRepository
 from repositories.interfaces import IWrappedRepository
@@ -334,8 +334,8 @@ class WrappedRepository(BaseRepository, IWrappedRepository):
         """
         guild_id = self.normalize_guild_id(guild_id)
         # Jan 1 of year at 00:00 UTC
-        from datetime import datetime, timezone
-        start_ts = int(datetime(year, 1, 1, tzinfo=timezone.utc).timestamp())
+        from datetime import datetime
+        start_ts = int(datetime(year, 1, 1, tzinfo=UTC).timestamp())
         with self.cursor() as cursor:
             cursor.execute(
                 """

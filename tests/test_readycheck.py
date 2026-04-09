@@ -8,10 +8,8 @@ from datetime import datetime
 from unittest.mock import MagicMock
 
 import discord
-import pytest
 
 from domain.models.lobby import Lobby
-
 
 # ---------------------------------------------------------------------------
 # Lobby model: join timestamp tracking

@@ -1,14 +1,13 @@
 """Tests for team composition winrate analysis in rating_insights."""
 
-import pytest
 
+from domain.models.player import Player
 from utils.rating_insights import (
+    _compute_team_composition_stats,
     _gini_coefficient,
     _pearson_r,
-    _compute_team_composition_stats,
     compute_calibration_stats,
 )
-from domain.models.player import Player
 
 
 class TestGiniCoefficient:

@@ -4,6 +4,7 @@ Repository for player data access.
 
 import json
 import logging
+from datetime import UTC
 
 from config import NEW_PLAYER_EXCLUSION_BOOST
 from domain.models.player import Player
@@ -1062,9 +1063,9 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             List of dicts with 'discord_id' for eligible players.
         """
         guild_id = self.normalize_guild_id(guild_id)
-        from datetime import datetime, timedelta, timezone
+        from datetime import datetime, timedelta
 
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=activity_days)).isoformat()
+        cutoff = (datetime.now(UTC) - timedelta(days=activity_days)).isoformat()
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(

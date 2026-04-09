@@ -6,16 +6,12 @@ Each generator returns a TriviaQuestion or None (if insufficient data).
 
 from __future__ import annotations
 
+import json
 import random
 from dataclasses import dataclass
 
-import json
-
 from services.trivia_data import (
-    AbilityData,
-    FacetData,
     HeroData,
-    ItemData,
     get_hero_by_id,
     load_abilities,
     load_facets,
@@ -43,10 +39,7 @@ class TriviaQuestion:
 
 def _hero_name_leaks(entity_name: str, hero_name: str) -> bool:
     """Return True if any word (>2 chars) from the hero name appears in the entity name."""
-    for word in hero_name.split():
-        if len(word) > 2 and word.lower() in entity_name.lower():
-            return True
-    return False
+    return any(len(word) > 2 and word.lower() in entity_name.lower() for word in hero_name.split())
 
 
 def _pick_distractors(correct: str, pool: list[str], n: int = 3) -> list[str] | None:

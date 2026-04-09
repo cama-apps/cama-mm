@@ -126,10 +126,6 @@ class TestRecentMatchPenaltyInExclusion:
             sample_players, exclusion_counts, recent_names
         )
 
-        # Check that at least one recent player is excluded
-        excluded_names = {p.name for p in excluded}
-        recent_excluded = excluded_names.intersection(recent_names)
-
         # With high penalty, recent players should be more likely to be excluded
         # This is probabilistic, but with 100.0 weight vs 45.0 exclusion weight,
         # recent players should often be excluded

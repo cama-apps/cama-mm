@@ -7,8 +7,9 @@ Tests that the type parameter correctly routes to:
 - predictions
 """
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 from database import Database
 from repositories.player_repository import PlayerRepository
@@ -453,9 +454,9 @@ class TestGamblingLeaderboardIntegration:
     @pytest.fixture
     def gambling_repos(self, gambling_db_path):
         """Create all repositories needed for gambling stats service."""
-        from repositories.player_repository import PlayerRepository
         from repositories.bet_repository import BetRepository
         from repositories.match_repository import MatchRepository
+        from repositories.player_repository import PlayerRepository
 
         return {
             "player_repo": PlayerRepository(gambling_db_path),

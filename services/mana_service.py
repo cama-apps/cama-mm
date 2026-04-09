@@ -16,8 +16,8 @@ if TYPE_CHECKING:
     from repositories.mana_repository import ManaRepository
     from repositories.player_repository import PlayerRepository
     from repositories.tip_repository import TipRepository
-    from services.gambling_stats_service import GamblingStatsService
     from services.bankruptcy_service import BankruptcyService
+    from services.gambling_stats_service import GamblingStatsService
 
 # Reset boundary: 4 AM Pacific
 RESET_HOUR = 4

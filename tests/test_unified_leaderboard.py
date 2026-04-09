@@ -9,17 +9,17 @@ Tests cover:
 - Deep-linking via type parameter works
 """
 
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
-from dataclasses import dataclass
 
 # Import the classes we're testing
 from commands.info import (
+    MULTI_SECTION_PAGE_SIZE,
+    SINGLE_SECTION_PAGE_SIZE,
     LeaderboardTab,
     TabState,
     UnifiedLeaderboardView,
-    SINGLE_SECTION_PAGE_SIZE,
-    MULTI_SECTION_PAGE_SIZE,
 )
 
 

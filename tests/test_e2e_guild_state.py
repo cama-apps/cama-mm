@@ -8,7 +8,6 @@ from database import Database
 from repositories.match_repository import MatchRepository
 from repositories.player_repository import PlayerRepository
 from services.match_service import MatchService
-from tests.conftest import TEST_GUILD_ID
 
 
 @pytest.fixture

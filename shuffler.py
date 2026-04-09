@@ -10,7 +10,14 @@ import random
 from collections.abc import Iterable
 from dataclasses import dataclass
 
-from config import PACKAGE_DEAL_PENALTY, PACKAGE_DEAL_SPLIT_PENALTY, RATING_SPREAD_DIVISOR, RD_PRIORITY_WEIGHT, SHUFFLER_SETTINGS, SOFT_AVOID_PENALTY
+from config import (
+    PACKAGE_DEAL_PENALTY,
+    PACKAGE_DEAL_SPLIT_PENALTY,
+    RATING_SPREAD_DIVISOR,
+    RD_PRIORITY_WEIGHT,
+    SHUFFLER_SETTINGS,
+    SOFT_AVOID_PENALTY,
+)
 from domain.models.player import Player
 from domain.models.team import Team
 from utils.role_assignment_cache import get_cached_role_assignments
@@ -471,10 +478,7 @@ class BalancedShuffler:
             if n1 == 0:
                 t2 += val
                 n2 -= 1
-            elif n2 == 0:
-                t1 += val
-                n1 -= 1
-            elif t1 <= t2:
+            elif n2 == 0 or t1 <= t2:
                 t1 += val
                 n1 -= 1
             else:
@@ -1104,9 +1108,6 @@ class BalancedShuffler:
             if exclusion_penalty + deal_split_penalty + rating_spread_penalty >= best_score:
                 pruned_player_selections += 1
                 continue
-
-            # Precompute selected player values (sorted descending for lower bound calc)
-            selected_values = sorted(selected_value_list, reverse=True)
 
             # Step 3: Iterate through team splits with pruning
             # We use combinations to avoid duplicates (T1={A,B,C,D,E} vs T2={F,G,H,I,J}

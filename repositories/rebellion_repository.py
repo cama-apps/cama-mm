@@ -5,7 +5,6 @@ Handles CRUD for wheel_wars and war_bets tables.
 """
 
 import json
-import time
 
 from repositories.base_repository import BaseRepository
 from repositories.interfaces import IRebellionRepository

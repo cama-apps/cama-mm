@@ -31,7 +31,7 @@ from utils.drawing import (
 from utils.formatting import JOPACOIN_EMOTE, TOMBSTONE_EMOJI, format_role_display
 from utils.interaction_safety import safe_defer, safe_followup
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
-from utils.rating_insights import rd_to_certainty, get_rd_tier_name
+from utils.rating_insights import get_rd_tier_name, rd_to_certainty
 
 logger = logging.getLogger("cama_bot.commands.profile")
 
@@ -283,7 +283,6 @@ class ProfileCommands(commands.Cog):
         """Build the Overview tab embed."""
         player_service = self._get_player_service()
         bankruptcy_service = self._get_bankruptcy_service()
-        player_repo = self._get_player_repo()
 
         if not player_service:
             return discord.Embed(
@@ -682,16 +681,16 @@ class ProfileCommands(commands.Cog):
                 loan_lines.append(f"🔥 **Borrowed While Broke:** {loan_state.negative_loans_taken}x")
 
             if loan_state.has_outstanding_loan:
-                loan_lines.append(f"\n⚠️ **Outstanding Loan:**")
+                loan_lines.append("\n⚠️ **Outstanding Loan:**")
                 loan_lines.append(f"  Principal: {loan_state.outstanding_principal} {JOPACOIN_EMOTE}")
                 loan_lines.append(f"  Fee: {loan_state.outstanding_fee} {JOPACOIN_EMOTE}")
                 loan_lines.append(f"  **Total Owed:** {loan_state.outstanding_total} {JOPACOIN_EMOTE}")
-                loan_lines.append(f"  *(Repaid on next match)*")
+                loan_lines.append("  *(Repaid on next match)*")
 
             if loan_state.is_on_cooldown and loan_state.cooldown_ends_at:
                 loan_lines.append(f"\n⏳ **Cooldown:** <t:{loan_state.cooldown_ends_at}:R>")
             elif not loan_state.has_outstanding_loan:
-                loan_lines.append(f"\n✅ **Loan Available**")
+                loan_lines.append("\n✅ **Loan Available**")
 
             embed.add_field(
                 name="🏦 Loans",
@@ -718,7 +717,7 @@ class ProfileCommands(commands.Cog):
             if bankruptcy_state.is_on_cooldown and bankruptcy_state.cooldown_ends_at:
                 bankruptcy_lines.append(f"\n⏳ **Cooldown:** <t:{bankruptcy_state.cooldown_ends_at}:R>")
             elif balance < 0:
-                bankruptcy_lines.append(f"\n⚠️ **Bankruptcy Available**")
+                bankruptcy_lines.append("\n⚠️ **Bankruptcy Available**")
 
             embed.add_field(
                 name=f"{TOMBSTONE_EMOJI} Bankruptcy",
@@ -773,8 +772,6 @@ class ProfileCommands(commands.Cog):
         """Build the Gambling tab embed with degen score, stats, and P&L chart."""
         gambling_stats_service = self._get_gambling_stats_service()
         player_service = self._get_player_service()
-        loan_service = self._get_loan_service()
-        bankruptcy_service = self._get_bankruptcy_service()
 
         if not gambling_stats_service:
             return discord.Embed(

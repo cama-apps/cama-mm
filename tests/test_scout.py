@@ -4,8 +4,6 @@ Tests for the /scout command functionality.
 
 import json
 
-import pytest
-
 from tests.conftest import TEST_GUILD_ID
 
 

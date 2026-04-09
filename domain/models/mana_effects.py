@@ -5,8 +5,7 @@ Each of the 5 MTG colors has specific effects that modify economy behavior.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Optional
+from dataclasses import dataclass
 
 
 @dataclass
@@ -18,8 +17,8 @@ class ManaEffects:
     """
 
     # Identity
-    color: Optional[str] = None
-    land: Optional[str] = None
+    color: str | None = None
+    land: str | None = None
 
     # RED (Mountain) - High risk, high reward gambling
     red_10x_leverage: bool = False
@@ -35,15 +34,15 @@ class ManaEffects:
 
     # GREEN (Forest) - Steady growth with caps
     green_steady_bonus: int = 0
-    green_gain_cap: Optional[int] = None
+    green_gain_cap: int | None = None
     green_bankrupt_penalty: int = -100
     green_max_wheel_win: int = 100
 
     # WHITE (Plains) - Protection and community
     plains_guardian_aura: bool = False
     plains_guardian_cooldown_key: str = "plains_guardian"
-    plains_max_wheel_win: Optional[int] = None
-    plains_tip_fee_rate: Optional[float] = None
+    plains_max_wheel_win: int | None = None
+    plains_tip_fee_rate: float | None = None
     plains_tithe_rate: float = 0.0
 
     # BLACK (Swamp) - Parasitic with reduced penalties
@@ -52,7 +51,7 @@ class ManaEffects:
     swamp_bankruptcy_games: int = 5
 
     @classmethod
-    def for_color(cls, color: Optional[str], land: Optional[str]) -> ManaEffects:
+    def for_color(cls, color: str | None, land: str | None) -> ManaEffects:
         """Return a ManaEffects instance with values set for the given color.
 
         Args:

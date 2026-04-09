@@ -5,26 +5,21 @@ Tests service logic (records extraction, streaks, KDA, enrichment parsing, slide
 and drawing smoke tests (basic render, worst records styling, N/A values).
 """
 
-import io
 import json
-from datetime import datetime
+from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
-import pytest
 from PIL import Image
-from tests.conftest import TEST_GUILD_ID
 
 from services.wrapped_service import (
     PersonalRecord,
-    PersonalRecordsWrapped,
     WrappedService,
 )
+from tests.conftest import TEST_GUILD_ID
 from utils.wrapped_drawing import (
     SLIDE_COLORS,
-    WORST_LABEL_COLOR,
     draw_records_slide,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -461,9 +456,8 @@ class TestGetPlayerYearMatchesRepo:
                 net_worth=15000,
             )
 
-        from datetime import datetime, timezone
         # Year start to end of Dec 2026 (matches have match_date=now)
-        end_ts = int(datetime(2026, 12, 31, 23, 59, 59, tzinfo=timezone.utc).timestamp()) + 1
+        end_ts = int(datetime(2026, 12, 31, 23, 59, 59, tzinfo=UTC).timestamp()) + 1
 
         rows = wrapped_repo.get_player_year_matches(100, TEST_GUILD_ID, 2026, end_ts)
         assert len(rows) == 3

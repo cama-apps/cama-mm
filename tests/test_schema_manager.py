@@ -1,7 +1,5 @@
 import sqlite3
 
-import pytest
-
 from infrastructure.schema_manager import SchemaManager
 
 
