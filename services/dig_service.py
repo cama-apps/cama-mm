@@ -449,6 +449,48 @@ class DigService:
         # 2. Apply lazy decay
         decay_info = self._apply_lazy_decay(tunnel, guild_id)
 
+        depth_before = tunnel.get("depth", 0)
+
+        # 2b. If already at a boss boundary, return boss encounter without
+        #     consuming cooldown or charging for paid dig.
+        if not is_first_dig:
+            boss_progress_early = self._get_boss_progress(tunnel)
+            at_boss_early = self._at_boss_boundary(depth_before, boss_progress_early)
+            if at_boss_early is not None:
+                inv = self.dig_repo.get_inventory(discord_id, guild_id)
+                has_lantern_early = any(i.get("item_type") == "lantern" for i in inv)
+                boss_name = BOSS_NAMES.get(at_boss_early, "Unknown Boss")
+                attempts = tunnel.get("boss_attempts", 0) or 0
+                dialogue_list = BOSS_DIALOGUE.get(at_boss_early, ["..."])
+                dialogue = dialogue_list[min(attempts, len(dialogue_list) - 1)]
+                return self._ok(
+                    tunnel_name=tunnel.get("tunnel_name") or "Unknown Tunnel",
+                    depth_before=depth_before,
+                    depth_after=depth_before,
+                    advance=0,
+                    jc_earned=0,
+                    milestone_bonus=0,
+                    streak_bonus=0,
+                    cave_in=False,
+                    cave_in_detail=None,
+                    boss_encounter=True,
+                    boss_info={
+                        "boundary": at_boss_early,
+                        "name": boss_name,
+                        "dialogue": dialogue,
+                        "ascii_art": BOSS_ASCII.get(at_boss_early, ""),
+                    },
+                    has_lantern=has_lantern_early,
+                    event=None,
+                    artifact=None,
+                    achievements=[],
+                    is_first_dig=False,
+                    items_used=[],
+                    tip="A boss blocks your path!",
+                    decay_info=decay_info,
+                    luminosity_info=None,
+                )
+
         # 3. Cooldown / paid dig check
         paid_dig_cost = 0
         if not is_first_dig:
@@ -492,8 +534,6 @@ class DigService:
                     paid_dig_date=today,
                     paid_digs_today=paid_count + 1,
                 )
-
-        depth_before = tunnel.get("depth", 0)
 
         # 4. First dig ever: guaranteed safe, welcome info
         if is_first_dig:
@@ -805,9 +845,14 @@ class DigService:
             # Cap advance to boundary - 1
             advance = max(0, next_boss - 1 - depth_before)
             boss_encounter = True
+            boss_name = BOSS_NAMES.get(next_boss, "Unknown Boss")
+            attempts = tunnel.get("boss_attempts", 0) or 0
+            dialogue_list = BOSS_DIALOGUE.get(next_boss, ["..."])
             boss_info = {
                 "boundary": next_boss,
-                "name": BOSS_NAMES.get(next_boss, "Unknown Boss"),
+                "name": boss_name,
+                "dialogue": dialogue_list[min(attempts, len(dialogue_list) - 1)],
+                "ascii_art": BOSS_ASCII.get(next_boss, ""),
             }
 
         new_depth = depth_before + advance
@@ -1794,7 +1839,7 @@ class DigService:
         })
         self.dig_repo.update_tunnel(
             target_id, guild_id,
-            cheers=json.dumps(active_cheers),
+            cheer_data=json.dumps(active_cheers),
         )
 
         boost = min(0.15, len(active_cheers) * 0.05)

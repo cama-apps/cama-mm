@@ -82,10 +82,10 @@ MILESTONES: dict[int, int] = {
 
 # Streak rewards: consecutive-day count -> JC bonus
 STREAKS: dict[int, int] = {
-    3: 1,
-    7: 3,
-    14: 5,
-    30: 10,
+    3: 2,
+    7: 5,
+    14: 10,
+    30: 20,
 }
 
 

@@ -1781,3 +1781,239 @@ class TestNewItemsAndArtifacts:
         result = dig_service.buy_item(10001, guild_id, "torch")
         assert result["success"]
         assert result["cost"] == 6
+
+
+# =============================================================================
+# Cheer Tests
+# =============================================================================
+
+
+class TestCheer:
+    """Tests for boss fight cheer mechanics."""
+
+    def test_cheer_saves_cheer_data(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+        """cheer_boss writes to cheer_data column and data persists."""
+        _register_player(player_repository, discord_id=10001, balance=200)
+        _register_player(player_repository, discord_id=10002, balance=200)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+        dig_service.dig(10002, guild_id)
+        dig_repo.update_tunnel(10001, guild_id, depth=24)
+
+        monkeypatch.setattr(time, "time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1)
+        result = dig_service.cheer_boss(10002, 10001, guild_id)
+        assert result["success"]
+
+        tunnel = dig_repo.get_tunnel(10001, guild_id)
+        assert tunnel["cheer_data"] is not None
+        cheers = json.loads(tunnel["cheer_data"])
+        assert len(cheers) == 1
+        assert cheers[0]["cheerer_id"] == 10002
+
+    def test_cheer_charges_cheerer_not_target(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+        """Cheer costs 3 JC from the cheerer, not the target."""
+        _register_player(player_repository, discord_id=10001, balance=200)
+        _register_player(player_repository, discord_id=10002, balance=200)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+        dig_service.dig(10002, guild_id)
+        dig_repo.update_tunnel(10001, guild_id, depth=24)
+
+        monkeypatch.setattr(time, "time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1)
+        balance_cheerer_before = player_repository.get_balance(10002, guild_id)
+        balance_target_before = player_repository.get_balance(10001, guild_id)
+
+        dig_service.cheer_boss(10002, 10001, guild_id)
+
+        assert player_repository.get_balance(10002, guild_id) == balance_cheerer_before - 3
+        assert player_repository.get_balance(10001, guild_id) == balance_target_before
+
+    def test_cheer_increases_boss_win_chance(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+        """Cheer bonus should increase fight_boss win chance (wagered fight)."""
+        _register_player(player_repository, discord_id=10001, balance=200)
+        _register_player(player_repository, discord_id=10002, balance=200)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+        dig_service.dig(10002, guild_id)
+        dig_repo.update_tunnel(10001, guild_id, depth=24)
+
+        # Add a cheer
+        monkeypatch.setattr(time, "time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1)
+        cheer_result = dig_service.cheer_boss(10002, 10001, guild_id)
+        assert cheer_result["success"]
+
+        # Wagered cautious base = 0.75, depth penalty ~0.0125, cheer bonus +0.05
+        # => win_chance ~0.7875.  Random 0.76 < 0.7875 => wins WITH cheer.
+        # Without cheer, 0.75 - 0.0125 = 0.7375, so 0.76 > 0.7375 => would lose.
+        monkeypatch.setattr(random, "random", lambda: 0.76)
+        fight_result = dig_service.fight_boss(10001, guild_id, "cautious", wager=10)
+        assert fight_result["success"]
+        assert fight_result.get("won") is True
+
+    def test_cheer_max_three(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+        """Cannot add more than 3 cheers."""
+        _register_player(player_repository, discord_id=10001, balance=200)
+        cheerer_ids = [10002, 10003, 10004, 10005]
+        for cid in cheerer_ids:
+            _register_player(player_repository, discord_id=cid, balance=200)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+
+        dig_service.dig(10001, guild_id)
+        for cid in cheerer_ids:
+            dig_service.dig(cid, guild_id)
+        dig_repo.update_tunnel(10001, guild_id, depth=24)
+
+        # All cheers at same time (different cheerers = independent cooldowns).
+        # Cheers expire after 3600s so they must all happen close together.
+        t = 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1
+        monkeypatch.setattr(time, "time", lambda: t)
+        for i, cid in enumerate(cheerer_ids[:3]):
+            result = dig_service.cheer_boss(cid, 10001, guild_id)
+            assert result["success"], f"Cheer {i+1} from {cid} should succeed"
+
+        result = dig_service.cheer_boss(10005, 10001, guild_id)
+        assert not result["success"]
+        assert "maximum" in result.get("error", "").lower()
+
+    def test_cheer_slots_free_after_expiry(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+        """After cheers expire, new cheers can be added past the old max."""
+        _register_player(player_repository, discord_id=10001, balance=200)
+        cheerer_ids = [10002, 10003, 10004, 10005]
+        for cid in cheerer_ids:
+            _register_player(player_repository, discord_id=cid, balance=200)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+        for cid in cheerer_ids:
+            dig_service.dig(cid, guild_id)
+        dig_repo.update_tunnel(10001, guild_id, depth=24)
+
+        # Add 3 cheers
+        t = 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1
+        monkeypatch.setattr(time, "time", lambda: t)
+        for cid in cheerer_ids[:3]:
+            result = dig_service.cheer_boss(cid, 10001, guild_id)
+            assert result["success"]
+
+        # 4th cheer fails (max 3)
+        result = dig_service.cheer_boss(10005, 10001, guild_id)
+        assert not result["success"]
+
+        # Advance past cheer expiry (3600s) and cheerer cooldown
+        t2 = t + FREE_DIG_COOLDOWN_SECONDS + 3601
+        monkeypatch.setattr(time, "time", lambda: t2)
+        result = dig_service.cheer_boss(10005, 10001, guild_id)
+        assert result["success"]  # succeeds because old cheers expired
+
+    def test_cheer_self_rejected(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+        """Cannot cheer for yourself."""
+        _register_player(player_repository, discord_id=10001, balance=200)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+        dig_repo.update_tunnel(10001, guild_id, depth=24)
+
+        result = dig_service.cheer_boss(10001, 10001, guild_id)
+        assert not result["success"]
+
+
+# =============================================================================
+# Boss Error / Boundary Tests
+# =============================================================================
+
+
+class TestBossErrors:
+    """Tests for boss fight error handling and boundary behavior."""
+
+    def test_fight_boss_error_has_no_won_key(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+        """Error results from fight_boss must not contain 'won' key."""
+        _register_player(player_repository, balance=200)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+        # Player NOT at boss boundary (depth 10)
+        dig_repo.update_tunnel(10001, guild_id, depth=10)
+
+        result = dig_service.fight_boss(10001, guild_id, "bold", wager=0)
+        assert result["success"] is False
+        assert "won" not in result
+
+    def test_fight_boss_insufficient_balance_error(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+        """Wager exceeding balance returns error, not a fight result."""
+        _register_player(player_repository, balance=10)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+        dig_repo.update_tunnel(10001, guild_id, depth=24)
+
+        # Wager far exceeds balance
+        result = dig_service.fight_boss(10001, guild_id, "bold", wager=999)
+        assert result["success"] is False
+        assert "error" in result
+        assert "won" not in result
+        # Balance unchanged (minus whatever JC was earned from initial dig)
+        balance = player_repository.get_balance(10001, guild_id)
+        assert balance <= 10 + 10  # initial 10 + at most some JC from first dig
+
+    def test_boss_boundary_skips_cooldown(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+        """Digging at boss boundary doesn't consume cooldown."""
+        _register_player(player_repository, balance=200)
+        first_dig_time = 1_000_000
+        monkeypatch.setattr(time, "time", lambda: first_dig_time)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+
+        # Place at boss boundary
+        dig_repo.update_tunnel(10001, guild_id, depth=24)
+
+        # Dig again after cooldown
+        dig_time = first_dig_time + FREE_DIG_COOLDOWN_SECONDS + 1
+        monkeypatch.setattr(time, "time", lambda: dig_time)
+        result = dig_service.dig(10001, guild_id)
+        assert result["success"]
+        assert result.get("boss_encounter") is True
+
+        # last_dig_at should NOT have been updated
+        tunnel = dig_repo.get_tunnel(10001, guild_id)
+        assert tunnel["last_dig_at"] == first_dig_time
+
+    def test_boss_boundary_returns_full_info(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+        """Boss encounter from dig includes dialogue and ascii_art."""
+        _register_player(player_repository, balance=200)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+        dig_repo.update_tunnel(10001, guild_id, depth=24)
+
+        monkeypatch.setattr(time, "time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1)
+        result = dig_service.dig(10001, guild_id)
+        assert result["success"]
+        assert result.get("boss_encounter") is True
+
+        boss_info = result.get("boss_info")
+        assert boss_info is not None
+        assert "dialogue" in boss_info
+        assert "ascii_art" in boss_info
+        assert "name" in boss_info
+        assert boss_info["boundary"] == 25
+
+    def test_paid_dig_at_boss_boundary_not_charged(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+        """Paid dig at boss boundary should not charge the player."""
+        _register_player(player_repository, balance=200)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+        dig_repo.update_tunnel(10001, guild_id, depth=24)
+
+        balance_before = player_repository.get_balance(10001, guild_id)
+        # Still on cooldown, request paid dig
+        monkeypatch.setattr(time, "time", lambda: 1_000_000 + 10)
+        result = dig_service.dig(10001, guild_id, paid=True)
+        assert result["success"]
+        assert result.get("boss_encounter") is True
+        # Balance unchanged — boss boundary bypasses paid dig
+        assert player_repository.get_balance(10001, guild_id) == balance_before

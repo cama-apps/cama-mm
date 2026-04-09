@@ -168,6 +168,8 @@ class _DictObj:
             return _DictObj(v) if isinstance(v, dict) else v
         except KeyError:
             raise AttributeError(name)
+    def __repr__(self):
+        return repr(self._d)
 
 
 def _wrap(result):
@@ -335,6 +337,12 @@ class BossWagerModal(discord.ui.Modal):
             )
             return
 
+        if amount < 0:
+            await interaction.response.send_message(
+                "Wager must be non-negative.", ephemeral=True
+            )
+            return
+
         await interaction.response.defer()
         try:
             self.result = _wrap(await asyncio.to_thread(
@@ -344,25 +352,43 @@ class BossWagerModal(discord.ui.Modal):
                 tier,
                 amount,
             ))
+
+            if not getattr(self.result, "success", True):
+                error_msg = getattr(self.result, "error", "Boss fight failed.")
+                embed = discord.Embed(
+                    title="Boss Fight Error",
+                    description=error_msg,
+                    color=0xFFA500,
+                )
+                await interaction.followup.send(embed=embed, ephemeral=True)
+                return
+
             embed = discord.Embed(
                 title="Boss Fight Result",
                 color=0x00FF00 if getattr(self.result, "won", False) else 0xFF0000,
             )
+            boss_name = getattr(self.result, "boss_name", "the boss")
+            win_chance = getattr(self.result, "win_chance", 0)
             if getattr(self.result, "won", False):
                 payout = getattr(self.result, "payout", 0) or getattr(self.result, "jc_delta", 0)
                 embed.description = (
-                    f"Victory! You defeated the boss and earned "
+                    f"Victory! You defeated **{boss_name}** and earned "
                     f"**{payout}** {JOPACOIN_EMOTE}!"
                 )
             else:
                 loss = abs(getattr(self.result, "jc_delta", 0)) or amount
+                knockback = getattr(self.result, "knockback", 0)
                 embed.description = (
-                    f"Defeat! The boss overpowered you. "
-                    f"You lost **{loss}** {JOPACOIN_EMOTE}."
+                    f"Defeat! **{boss_name}** overpowered you. "
+                    f"You lost **{loss}** {JOPACOIN_EMOTE}"
+                    f" and were knocked back {knockback} blocks."
                 )
+            embed.add_field(
+                name="Details",
+                value=f"Risk: {tier.title()} | Win chance: {int(win_chance * 100)}%",
+                inline=False,
+            )
             await interaction.followup.send(embed=embed)
-        except ValueError as e:
-            await interaction.followup.send(str(e), ephemeral=True)
         except Exception as e:
             logger.error("Boss fight error: %s", e)
             await interaction.followup.send("Boss fight failed. Try again.", ephemeral=True)
@@ -521,9 +547,16 @@ class BossEncounterView(discord.ui.View):
             result = _wrap(await asyncio.to_thread(
                 self.dig_service.retreat_boss, self.user_id, self.guild_id
             ))
-            await interaction.followup.send(
-                f"You retreated safely. {getattr(result, 'message', 'The boss waits...')}"
-            )
+            if not getattr(result, "success", True):
+                await interaction.followup.send(
+                    getattr(result, "error", "Retreat failed."), ephemeral=True
+                )
+            else:
+                loss = getattr(result, "loss", 0)
+                new_depth = getattr(result, "new_depth", 0)
+                await interaction.followup.send(
+                    f"You retreated safely, losing {loss} blocks. Now at depth {new_depth}."
+                )
         except Exception as e:
             logger.error("Boss retreat error: %s", e)
             await interaction.followup.send("Retreat failed.", ephemeral=True)
@@ -539,9 +572,33 @@ class BossEncounterView(discord.ui.View):
             info = _wrap(await asyncio.to_thread(
                 self.dig_service.scout_boss, self.user_id, self.guild_id
             ))
+            if not getattr(info, "success", True):
+                await interaction.followup.send(
+                    getattr(info, "error", "Scouting failed."), ephemeral=True
+                )
+                return
+            boss_name = getattr(info, "boss_name", "Unknown Boss")
+            odds = getattr(info, "odds", None)
+            if odds and hasattr(odds, "_d"):
+                odds = odds._d
+            lines = [f"**{boss_name}** — Intel Report\n"]
+            if isinstance(odds, dict):
+                for tier in ("cautious", "bold", "reckless"):
+                    t = odds.get(tier)
+                    if not t:
+                        continue
+                    win = int(t.get("win_pct", 0) * 100)
+                    free = int(t.get("free_fight_pct", 0) * 100)
+                    mult = t.get("multiplier", 1)
+                    lines.append(
+                        f"**{tier.title()}** — {win}% win"
+                        f" ({free}% free) | {mult}x payout"
+                    )
+            else:
+                lines.append("Could not read odds data.")
             embed = discord.Embed(
                 title="Boss Scouted",
-                description=getattr(info, "description", str(info)),
+                description="\n".join(lines),
                 color=0xFFD700,
             )
             await interaction.followup.send(embed=embed, ephemeral=True)
@@ -558,13 +615,19 @@ class BossEncounterView(discord.ui.View):
         try:
             result = _wrap(await asyncio.to_thread(
                 self.dig_service.cheer_boss,
-                self.user_id,
                 interaction.user.id,
+                self.user_id,
                 self.guild_id,
             ))
+            if not getattr(result, "success", True):
+                error_msg = getattr(result, "error", "Cheer failed.")
+                await interaction.followup.send(error_msg, ephemeral=True)
+                return
+            boost_pct = int(getattr(result, "total_boost", 0) * 100)
+            cheer_count = getattr(result, "cheer_count", 0)
             await interaction.followup.send(
                 f"{interaction.user.display_name} cheers for the fighter! "
-                f"{getattr(result, 'message', 'Morale boosted!')}"
+                f"Boss odds boosted by +{boost_pct}% ({cheer_count}/3 cheers)"
             )
         except Exception as e:
             logger.error("Boss cheer error: %s", e)
@@ -857,7 +920,7 @@ class DigCommands(commands.Cog):
             boss_info = getattr(result, "boss_info", None)
             has_lantern = getattr(result, "has_lantern", False)
             embed = discord.Embed(
-                title=f"Boss Encountered!",
+                title=f"Boss Encountered: {getattr(boss_info, 'name', 'Unknown Boss')}!",
                 description=getattr(boss_info, "dialogue", "A fearsome guardian blocks your path!"),
                 color=0xFF0000,
             )
