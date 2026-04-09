@@ -2052,8 +2052,8 @@ class DigCommands(commands.Cog):
 # Embed builder for normal dig results
 # ---------------------------------------------------------------------------
 
-def _build_dig_embed(result: object, user: discord.User | discord.Member) -> tuple[discord.Embed, discord.File | None]:
-    """Build a rich embed for a normal dig result, plus an optional layer thumbnail."""
+def _build_dig_embed(result: object, user: discord.User | discord.Member) -> tuple[discord.Embed, str | None]:
+    """Build a rich embed for a normal dig result. Returns (embed, layer_name)."""
     depth = getattr(result, "depth", 0) or getattr(result, "depth_after", 0)
     tunnel_name = getattr(result, "tunnel_name", "Tunnel")
 
