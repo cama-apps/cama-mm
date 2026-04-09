@@ -12,6 +12,25 @@ from repositories.interfaces import IDigRepository
 class DigRepository(BaseRepository, IDigRepository):
     """Data access for dig tunnels, actions, inventory, artifacts, and achievements."""
 
+    # Integer columns in the tunnels table — ensure these are always int
+    # even if SQLite returns them as strings (e.g., after ALTER TABLE migrations).
+    _TUNNEL_INT_COLS = frozenset({
+        "discord_id", "guild_id", "depth", "max_depth", "total_digs",
+        "total_jc_earned", "last_dig_at", "streak_days", "pickaxe_tier",
+        "prestige_level", "trap_active", "trap_free_today", "insured_until",
+        "reinforced_until", "paid_digs_today", "revenge_target", "revenge_until",
+        "hard_hat_charges", "luminosity",
+    })
+
+    @staticmethod
+    def _normalize_tunnel(row: dict) -> dict:
+        """Cast integer columns to int to guard against SQLite type drift."""
+        for col in DigRepository._TUNNEL_INT_COLS:
+            val = row.get(col)
+            if val is not None and not isinstance(val, int):
+                row[col] = int(val)
+        return row
+
     # ── Tunnel CRUD ──────────────────────────────────────────────────────
 
     def get_tunnel(self, discord_id: int, guild_id: int) -> dict | None:
@@ -24,7 +43,9 @@ class DigRepository(BaseRepository, IDigRepository):
                 (discord_id, gid),
             )
             row = cursor.fetchone()
-            return dict(row) if row else None
+            if row is None:
+                return None
+            return self._normalize_tunnel(dict(row))
 
     def create_tunnel(self, discord_id: int, guild_id: int, tunnel_name: str = None, *, name: str = None) -> dict:
         """Create a new tunnel and return it."""
@@ -52,7 +73,7 @@ class DigRepository(BaseRepository, IDigRepository):
                 "SELECT * FROM tunnels WHERE discord_id = ? AND guild_id = ?",
                 (discord_id, gid),
             )
-            return dict(cursor.fetchone())
+            return self._normalize_tunnel(dict(cursor.fetchone()))
 
     def update_tunnel(self, discord_id: int, guild_id: int, **kwargs) -> None:
         """Update arbitrary tunnel columns."""
@@ -83,7 +104,7 @@ class DigRepository(BaseRepository, IDigRepository):
                 """,
                 (gid, limit),
             )
-            return [dict(row) for row in cursor.fetchall()]
+            return [self._normalize_tunnel(dict(row)) for row in cursor.fetchall()]
 
     def get_player_rank(self, discord_id: int, guild_id: int) -> int:
         """Get player's rank by depth (1-indexed). Returns 0 if not found."""
@@ -120,7 +141,7 @@ class DigRepository(BaseRepository, IDigRepository):
                 "SELECT * FROM tunnels WHERE guild_id = ?",
                 (gid,),
             )
-            return [dict(row) for row in cursor.fetchall()]
+            return [self._normalize_tunnel(dict(row)) for row in cursor.fetchall()]
 
     # ── Action Logging ───────────────────────────────────────────────────
 
