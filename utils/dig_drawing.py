@@ -446,6 +446,110 @@ def draw_boss_scene(layer_name: str, boss_name: str) -> io.BytesIO:
     return buf
 
 
+def draw_boss_result_scene(layer_name: str, boss_name: str, won: bool) -> io.BytesIO:
+    """Generate a pixel art scene for a boss fight result (victory or defeat)."""
+    width, height = SCENE_WIDTH, SCENE_HEIGHT
+    img = _get_layer_background(layer_name, width, height)
+
+    boss = _draw_creature_sprite("boss")
+    player = _draw_player_sprite()
+
+    if won:
+        # Victory: faded boss, large player, gold sparkles
+        boss_big = boss.resize((TILE_SIZE * 2, TILE_SIZE * 2), Image.Resampling.NEAREST)
+        faded = boss_big.copy()
+        faded.putalpha(faded.getchannel("A").point(lambda a: a // 2))
+        boss_x = width // 2 - TILE_SIZE
+        boss_y = height // 3
+        img.paste(faded, (boss_x, boss_y), faded)
+
+        # Player 2x, center-right
+        player_big = player.resize((TILE_SIZE * 2, TILE_SIZE * 2), Image.Resampling.NEAREST)
+        img.paste(player_big, (width // 3 - TILE_SIZE, height // 2 - TILE_SIZE), player_big)
+
+        # Gold sparkle overlay
+        sparkle = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        sparkle_draw = ImageDraw.Draw(sparkle)
+        rng = random.Random(42)
+        for _ in range(20):
+            sx, sy = rng.randint(40, width - 40), rng.randint(20, height - 20)
+            sparkle_draw.ellipse([sx - 2, sy - 2, sx + 2, sy + 2], fill=(255, 215, 0, 160))
+        img = Image.alpha_composite(img.convert("RGBA"), sparkle).convert("RGB")
+    else:
+        # Defeat: huge boss, small knocked-back player, red tint
+        boss_huge = boss.resize((TILE_SIZE * 3, TILE_SIZE * 3), Image.Resampling.NEAREST)
+        boss_x = width // 2 - (TILE_SIZE * 3) // 2
+        boss_y = height // 4
+        img.paste(boss_huge, (boss_x, boss_y), boss_huge)
+
+        # Player small, bottom-left
+        img.paste(player, (width // 6, height * 3 // 4), player)
+
+        # Red tint overlay
+        red_tint = Image.new("RGBA", (width, height), (180, 0, 0, 35))
+        img = Image.alpha_composite(img.convert("RGBA"), red_tint).convert("RGB")
+
+    img = _apply_retro_overlay(img)
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG", optimize=True)
+    buf.seek(0)
+    return buf
+
+
+def draw_layer_thumbnail(layer_name: str) -> io.BytesIO:
+    """Generate a 128x128 pixel art thumbnail for a layer."""
+    key = f"layer_thumb_{layer_name}"
+    if key in _cache:
+        buf = io.BytesIO()
+        _cache[key].save(buf, format="PNG", optimize=True)
+        buf.seek(0)
+        return buf
+
+    size = 128
+    palette = LAYER_PALETTES.get(layer_name, LAYER_PALETTES["Dirt"])
+    img = Image.new("RGB", (size, size), palette[0])
+
+    rng = random.Random(hash(layer_name))
+    floor_tile = _draw_tile(palette, "floor", rng)
+    wall_tile = _draw_tile(palette, "wall")
+
+    # Fill with floor tiles
+    for tx in range(0, size, TILE_SIZE):
+        for ty in range(0, size, TILE_SIZE):
+            img.paste(floor_tile, (tx, ty))
+
+    # Wall border (top, bottom, left, right)
+    for tx in range(0, size, TILE_SIZE):
+        img.paste(wall_tile, (tx, 0))
+        img.paste(wall_tile, (tx, size - TILE_SIZE))
+    for ty in range(0, size, TILE_SIZE):
+        img.paste(wall_tile, (0, ty))
+        img.paste(wall_tile, (size - TILE_SIZE, ty))
+
+    # Torch in center-top
+    torch_tile = _draw_tile(palette, "torch")
+    img.paste(torch_tile, (size // 2 - TILE_SIZE // 2, TILE_SIZE))
+
+    # Torch glow
+    glow = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    glow_draw = ImageDraw.Draw(glow)
+    cx, cy = size // 2, TILE_SIZE + TILE_SIZE // 2
+    for r in range(40, 10, -5):
+        alpha = max(5, 25 - r // 2)
+        glow_draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=(255, 180, 50, alpha))
+    img = Image.alpha_composite(img.convert("RGBA"), glow).convert("RGB")
+
+    img = _apply_retro_overlay(img)
+
+    _cache[key] = img
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG", optimize=True)
+    buf.seek(0)
+    return buf
+
+
 def has_event_scene(event_id: str) -> bool:
     """Check if an event has a registered pixel art scene."""
     return event_id in EVENT_SCENES
