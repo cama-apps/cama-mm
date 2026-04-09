@@ -388,7 +388,27 @@ class BossWagerModal(discord.ui.Modal):
                 value=f"Risk: {tier.title()} | Win chance: {int(win_chance * 100)}%",
                 inline=False,
             )
-            await interaction.followup.send(embed=embed)
+
+            # Try to load boss fight result art
+            boss_file = None
+            boundary = getattr(self.result, "boundary", None)
+            won = getattr(self.result, "won", False)
+            if boundary:
+                try:
+                    from utils.dig_assets import get_boss_art
+                    new_depth = getattr(self.result, "new_depth", 0)
+                    ld = get_layer_def(new_depth or boundary)
+                    ln = ld.name if ld else "Dirt"
+                    scene = "victory" if won else "defeat"
+                    boss_file = await asyncio.to_thread(get_boss_art, boundary, scene, ln)
+                except Exception as e:
+                    logger.debug("Boss fight art failed: %s", e)
+
+            if boss_file:
+                embed.set_image(url=f"attachment://{boss_file.filename}")
+                await interaction.followup.send(embed=embed, file=boss_file)
+            else:
+                await interaction.followup.send(embed=embed)
         except Exception as e:
             logger.error("Boss fight error: %s", e)
             await interaction.followup.send("Boss fight failed. Try again.", ephemeral=True)
@@ -924,10 +944,27 @@ class DigCommands(commands.Cog):
                 description=getattr(boss_info, "dialogue", "A fearsome guardian blocks your path!"),
                 color=0xFF0000,
             )
-            if hasattr(boss_info, "ascii_art"):
+
+            # Try to load boss encounter art (custom file → PIL → ASCII fallback)
+            boss_file = None
+            boundary = getattr(boss_info, "boundary", None)
+            if boundary:
+                try:
+                    from utils.dig_assets import get_boss_art
+                    depth = getattr(result, "depth", 0) or getattr(result, "depth_after", 0)
+                    ld = get_layer_def(depth or boundary)
+                    ln = ld.name if ld else "Dirt"
+                    boss_file = await asyncio.to_thread(get_boss_art, boundary, "encounter", ln)
+                except Exception as e:
+                    logger.debug("Boss encounter art failed: %s", e)
+
+            if boss_file:
+                embed.set_image(url=f"attachment://{boss_file.filename}")
+            elif hasattr(boss_info, "ascii_art"):
                 embed.add_field(name="\u200b", value=f"```\n{boss_info.ascii_art}\n```", inline=False)
+
             view = BossEncounterView(self.dig_service, interaction.user.id, guild_id, boss_info, has_lantern)
-            msg = await safe_followup(interaction, embed=embed, view=view)
+            msg = await safe_followup(interaction, embed=embed, view=view, file=boss_file)
             if msg:
                 try:
                     await msg.add_reaction("\U0001f480")
@@ -956,8 +993,11 @@ class DigCommands(commands.Cog):
                             err = getattr(paid_result, "error", "Paid dig failed.")
                             await msg.edit(content=err, embed=None, view=None)
                         else:
-                            paid_embed = _build_dig_embed(paid_result, interaction.user)
-                            await msg.edit(embed=paid_embed, view=None)
+                            paid_embed, paid_layer_file = _build_dig_embed(paid_result, interaction.user)
+                            if paid_layer_file:
+                                await msg.edit(embed=paid_embed, view=None, attachments=[paid_layer_file])
+                            else:
+                                await msg.edit(embed=paid_embed, view=None)
                     except Exception as e:
                         logger.error("Paid dig error: %s", e)
                         await msg.edit(content="Paid dig failed.", embed=None, view=None)
@@ -971,7 +1011,7 @@ class DigCommands(commands.Cog):
             event_data = event if isinstance(event, dict) else (event._d if hasattr(event, "_d") else None)
             complexity = event_data.get("complexity", "choice") if isinstance(event_data, dict) else "choice"
             if complexity in ("complex", "choice") and isinstance(event_data, dict) and event_data.get("safe_option"):
-                embed = _build_dig_embed(result, interaction.user)
+                embed, layer_file = _build_dig_embed(result, interaction.user)
                 event_embed = discord.Embed(
                     title=event_data.get("name", "Event"),
                     description=event_data.get("description", "Something happens..."),
@@ -1000,7 +1040,7 @@ class DigCommands(commands.Cog):
                     except Exception as e:
                         logger.debug(f"Event scene generation failed: {e}")
                 view = EventEncounterView(self.dig_service, interaction.user.id, guild_id, event_data)
-                await safe_followup(interaction, embed=embed)
+                await safe_followup(interaction, embed=embed, file=layer_file)
                 if event_file:
                     await safe_followup(interaction, embed=event_embed, view=view, file=event_file)
                 else:
@@ -1008,8 +1048,8 @@ class DigCommands(commands.Cog):
                 return
 
         # Normal dig result
-        embed = _build_dig_embed(result, interaction.user)
-        msg = await safe_followup(interaction, embed=embed)
+        embed, layer_file = _build_dig_embed(result, interaction.user)
+        msg = await safe_followup(interaction, embed=embed, file=layer_file)
 
         # Add reactions
         if msg:
@@ -2009,8 +2049,8 @@ class DigCommands(commands.Cog):
 # Embed builder for normal dig results
 # ---------------------------------------------------------------------------
 
-def _build_dig_embed(result: object, user: discord.User | discord.Member) -> discord.Embed:
-    """Build a rich embed for a normal dig result."""
+def _build_dig_embed(result: object, user: discord.User | discord.Member) -> tuple[discord.Embed, discord.File | None]:
+    """Build a rich embed for a normal dig result, plus an optional layer thumbnail."""
     depth = getattr(result, "depth", 0) or getattr(result, "depth_after", 0)
     tunnel_name = getattr(result, "tunnel_name", "Tunnel")
 
@@ -2131,7 +2171,18 @@ def _build_dig_embed(result: object, user: discord.User | discord.Member) -> dis
         embed.set_footer(text=getattr(result, "tip", "") or _tip(0))
     embed.set_author(name=user.display_name, icon_url=user.display_avatar.url)
 
-    return embed
+    # Layer thumbnail
+    layer_file = None
+    if layer_name:
+        try:
+            from utils.dig_assets import get_layer_thumbnail
+            layer_file = get_layer_thumbnail(layer_name)
+            if layer_file:
+                embed.set_thumbnail(url=f"attachment://{layer_file.filename}")
+        except Exception:
+            pass
+
+    return embed, layer_file
 
 
 # ---------------------------------------------------------------------------

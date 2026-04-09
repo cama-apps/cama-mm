@@ -2410,6 +2410,10 @@ BOSS_DEPTHS: list[int] = LAYER_BOUNDARIES
 BOSS_NAMES: dict[int, str] = {d: b.name for d, b in BOSSES.items()}
 BOSS_DIALOGUE: dict[int, list[str]] = {d: b.dialogue for d, b in BOSSES.items()}
 BOSS_ASCII: dict[int, str] = {d: b.ascii_art for d, b in BOSSES.items()}
+BOSS_SLUGS: dict[int, str] = {
+    25: "grothak", 50: "crystalia", 75: "magmus",
+    100: "void_warden", 150: "sporeling", 200: "chronofrost", 275: "nameless",
+}
 BOSS_ODDS: dict[str, dict] = {
     tier: {"base": odds, "free": BOSS_FREE_FIGHT_ODDS[tier]}
     for tier, odds in BOSS_WIN_ODDS.items()

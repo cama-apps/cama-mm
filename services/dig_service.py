@@ -1652,6 +1652,7 @@ class DigService:
             return self._ok(
                 won=True,
                 boss_name=boss_name,
+                boundary=at_boss,
                 risk_tier=risk_tier,
                 win_chance=round(win_chance, 2),
                 jc_delta=jc_delta,
@@ -1687,6 +1688,7 @@ class DigService:
             return self._ok(
                 won=False,
                 boss_name=boss_name,
+                boundary=at_boss,
                 risk_tier=risk_tier,
                 win_chance=round(win_chance, 2),
                 jc_delta=jc_delta,

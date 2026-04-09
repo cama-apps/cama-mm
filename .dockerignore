@@ -13,6 +13,7 @@ test_*.py
 
 # Documentation
 README.md
+prompts.md
 CLAUDE.md
 AGENTS.md
 CONTRIBUTING.md
