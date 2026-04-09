@@ -410,7 +410,7 @@ class BossWagerModal(discord.ui.Modal):
             else:
                 await interaction.followup.send(embed=embed)
         except Exception as e:
-            logger.error("Boss fight error: %s", e)
+            logger.error("Boss fight error: %s", e, exc_info=True)
             await interaction.followup.send("Boss fight failed. Try again.", ephemeral=True)
 
 
@@ -578,7 +578,7 @@ class BossEncounterView(discord.ui.View):
                     f"You retreated safely, losing {loss} blocks. Now at depth {new_depth}."
                 )
         except Exception as e:
-            logger.error("Boss retreat error: %s", e)
+            logger.error("Boss retreat error: %s", e, exc_info=True)
             await interaction.followup.send("Retreat failed.", ephemeral=True)
         self.stop()
 
@@ -623,7 +623,7 @@ class BossEncounterView(discord.ui.View):
             )
             await interaction.followup.send(embed=embed, ephemeral=True)
         except Exception as e:
-            logger.error("Boss scout error: %s", e)
+            logger.error("Boss scout error: %s", e, exc_info=True)
             await interaction.followup.send("Scouting failed.", ephemeral=True)
 
     @discord.ui.button(label="Cheer", style=discord.ButtonStyle.success, emoji="\U0001f4e3")
@@ -650,7 +650,7 @@ class BossEncounterView(discord.ui.View):
                 f"Boss odds boosted by +{boost_pct}% ({cheer_count}/3 cheers)"
             )
         except Exception as e:
-            logger.error("Boss cheer error: %s", e)
+            logger.error("Boss cheer error: %s", e, exc_info=True)
             await interaction.followup.send("Cheer failed.", ephemeral=True)
 
 
@@ -907,7 +907,7 @@ class DigCommands(commands.Cog):
                 self.dig_service.dig, interaction.user.id, guild_id
             ))
         except Exception as e:
-            logger.error("Dig error: %s", e)
+            logger.error("Dig error: %s", e, exc_info=True)
             await safe_followup(interaction, content="Dig failed. Try again later.", ephemeral=True)
             return
 

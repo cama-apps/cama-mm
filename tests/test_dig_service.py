@@ -1867,8 +1867,6 @@ class TestCheer:
             dig_service.dig(cid, guild_id)
         dig_repo.update_tunnel(10001, guild_id, depth=24)
 
-        # All cheers at same time (different cheerers = independent cooldowns).
-        # Cheers expire after 3600s so they must all happen close together.
         t = 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1
         monkeypatch.setattr(time, "time", lambda: t)
         for i, cid in enumerate(cheerer_ids[:3]):
@@ -2017,3 +2015,53 @@ class TestBossErrors:
         assert result.get("boss_encounter") is True
         # Balance unchanged — boss boundary bypasses paid dig
         assert player_repository.get_balance(10001, guild_id) == balance_before
+
+
+# =============================================================================
+# Tunnel Normalization Tests
+# =============================================================================
+
+
+class TestTunnelNormalization:
+    """Tests for integer type coercion in tunnel data."""
+
+    def test_normalize_tunnel_casts_string_ints(self, dig_repo):
+        """_normalize_tunnel converts string values to int for known columns."""
+        raw = {
+            "depth": "49",
+            "luminosity": "100",
+            "last_dig_at": "1000000",
+            "boss_attempts": "3",
+            "tunnel_name": "Test Tunnel",
+            "boss_progress": '{"50": "active"}',
+        }
+        normalized = DigRepository._normalize_tunnel(raw)
+        assert normalized["depth"] == 49
+        assert isinstance(normalized["depth"], int)
+        assert normalized["luminosity"] == 100
+        assert isinstance(normalized["luminosity"], int)
+        assert normalized["last_dig_at"] == 1000000
+        assert normalized["boss_attempts"] == 3
+        # Non-int columns left alone
+        assert normalized["tunnel_name"] == "Test Tunnel"
+        assert normalized["boss_progress"] == '{"50": "active"}'
+
+    def test_normalize_tunnel_handles_none_values(self, dig_repo):
+        """_normalize_tunnel leaves None values as None."""
+        raw = {"depth": 10, "last_dig_at": None, "luminosity": None}
+        normalized = DigRepository._normalize_tunnel(raw)
+        assert normalized["depth"] == 10
+        assert normalized["last_dig_at"] is None
+        assert normalized["luminosity"] is None
+
+    def test_get_tunnel_returns_int_types(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+        """get_tunnel returns integer types for numeric columns."""
+        _register_player(player_repository, balance=200)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+
+        tunnel = dig_repo.get_tunnel(10001, guild_id)
+        assert isinstance(tunnel["depth"], int)
+        assert isinstance(tunnel["luminosity"], int)
+        assert isinstance(tunnel["last_dig_at"], int)
