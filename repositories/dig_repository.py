@@ -19,7 +19,7 @@ class DigRepository(BaseRepository, IDigRepository):
         "total_jc_earned", "last_dig_at", "streak_days", "pickaxe_tier",
         "prestige_level", "trap_active", "trap_free_today", "insured_until",
         "reinforced_until", "paid_digs_today", "revenge_target", "revenge_until",
-        "hard_hat_charges", "luminosity",
+        "hard_hat_charges", "luminosity", "boss_attempts",
     })
 
     @staticmethod
@@ -609,7 +609,7 @@ class DigRepository(BaseRepository, IDigRepository):
                 "SELECT * FROM tunnels WHERE discord_id = ? AND guild_id = ?",
                 (discord_id, gid),
             )
-            return dict(cursor.fetchone())
+            return self._normalize_tunnel(dict(cursor.fetchone()))
 
     def atomic_sabotage(
         self,
@@ -646,7 +646,7 @@ class DigRepository(BaseRepository, IDigRepository):
                 "SELECT * FROM tunnels WHERE discord_id = ? AND guild_id = ?",
                 (target_id, gid),
             )
-            return dict(cursor.fetchone())
+            return self._normalize_tunnel(dict(cursor.fetchone()))
 
     # ── Aliases ───────────────────────────────────────────────────────
 
