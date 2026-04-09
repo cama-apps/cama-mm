@@ -8,8 +8,7 @@ creatures, items, and effects on the dungeon background.
 
 import io
 import random
-from dataclasses import dataclass, field
-from typing import Any
+from dataclasses import dataclass
 
 from PIL import Image, ImageDraw
 
@@ -43,11 +42,16 @@ PLAYER_COLOR = (255, 255, 100)  # Bright yellow @
 # Sprite Drawing Helpers
 # ---------------------------------------------------------------------------
 
+# PIL Image cache — bounded by the finite set of layers/sprites (~30 entries, ~10 MB).
 _cache: dict[str, Image.Image] = {}
 
 
 def _draw_tile(palette: tuple, variant: str = "wall", rng: random.Random | None = None) -> Image.Image:
-    """Draw a single 16x16 tile with the given palette."""
+    """Draw a single 16x16 tile with the given palette.
+
+    Cache key ignores *rng* — safe because each palette maps to exactly one
+    layer, so the seeded RNG always produces the same result per palette.
+    """
     key = f"tile_{palette}_{variant}"
     if key in _cache:
         return _cache[key]

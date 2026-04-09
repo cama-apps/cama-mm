@@ -38,6 +38,7 @@ LAYER_SLUGS: dict[str, str] = {
 }
 
 # Module-level byte cache:  path-string -> bytes
+# Bounded by the finite asset set (~29 entries: 21 boss + 8 layer images).
 _bytes_cache: dict[str, bytes] = {}
 
 

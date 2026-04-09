@@ -993,7 +993,8 @@ class DigCommands(commands.Cog):
                             err = getattr(paid_result, "error", "Paid dig failed.")
                             await msg.edit(content=err, embed=None, view=None)
                         else:
-                            paid_embed, paid_layer_file = _build_dig_embed(paid_result, interaction.user)
+                            paid_embed, paid_layer_name = _build_dig_embed(paid_result, interaction.user)
+                            paid_layer_file = await _attach_layer_thumbnail(paid_embed, paid_layer_name)
                             if paid_layer_file:
                                 await msg.edit(embed=paid_embed, view=None, attachments=[paid_layer_file])
                             else:
@@ -1011,7 +1012,8 @@ class DigCommands(commands.Cog):
             event_data = event if isinstance(event, dict) else (event._d if hasattr(event, "_d") else None)
             complexity = event_data.get("complexity", "choice") if isinstance(event_data, dict) else "choice"
             if complexity in ("complex", "choice") and isinstance(event_data, dict) and event_data.get("safe_option"):
-                embed, layer_file = _build_dig_embed(result, interaction.user)
+                embed, _layer_name = _build_dig_embed(result, interaction.user)
+                layer_file = await _attach_layer_thumbnail(embed, _layer_name)
                 event_embed = discord.Embed(
                     title=event_data.get("name", "Event"),
                     description=event_data.get("description", "Something happens..."),
@@ -1038,7 +1040,7 @@ class DigCommands(commands.Cog):
                             event_file = discord.File(scene_buf, filename="event_scene.png")
                             event_embed.set_image(url="attachment://event_scene.png")
                     except Exception as e:
-                        logger.debug(f"Event scene generation failed: {e}")
+                        logger.debug("Event scene generation failed: %s", e)
                 view = EventEncounterView(self.dig_service, interaction.user.id, guild_id, event_data)
                 await safe_followup(interaction, embed=embed, file=layer_file)
                 if event_file:
@@ -1048,7 +1050,8 @@ class DigCommands(commands.Cog):
                 return
 
         # Normal dig result
-        embed, layer_file = _build_dig_embed(result, interaction.user)
+        embed, layer_name = _build_dig_embed(result, interaction.user)
+        layer_file = await _attach_layer_thumbnail(embed, layer_name)
         msg = await safe_followup(interaction, embed=embed, file=layer_file)
 
         # Add reactions
@@ -2171,18 +2174,22 @@ def _build_dig_embed(result: object, user: discord.User | discord.Member) -> tup
         embed.set_footer(text=getattr(result, "tip", "") or _tip(0))
     embed.set_author(name=user.display_name, icon_url=user.display_avatar.url)
 
-    # Layer thumbnail
-    layer_file = None
-    if layer_name:
-        try:
-            from utils.dig_assets import get_layer_thumbnail
-            layer_file = get_layer_thumbnail(layer_name)
-            if layer_file:
-                embed.set_thumbnail(url=f"attachment://{layer_file.filename}")
-        except Exception:
-            pass
+    return embed, layer_name
 
-    return embed, layer_file
+
+async def _attach_layer_thumbnail(embed: discord.Embed, layer_name: str | None) -> discord.File | None:
+    """Fetch layer thumbnail in a thread and attach to embed."""
+    if not layer_name:
+        return None
+    try:
+        from utils.dig_assets import get_layer_thumbnail
+        layer_file = await asyncio.to_thread(get_layer_thumbnail, layer_name)
+        if layer_file:
+            embed.set_thumbnail(url=f"attachment://{layer_file.filename}")
+            return layer_file
+    except Exception:
+        logger.debug("Layer thumbnail failed for %s", layer_name)
+    return None
 
 
 # ---------------------------------------------------------------------------
