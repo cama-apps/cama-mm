@@ -18,7 +18,9 @@ from pathlib import Path
 
 import discord
 
-from services.dig_constants import BOSS_SLUGS
+from PIL import Image
+
+from services.dig_constants import BOSS_SLUGS, PICKAXE_SLUGS
 
 logger = logging.getLogger(__name__)
 
@@ -146,3 +148,104 @@ def get_layer_thumbnail(layer_name: str) -> discord.File | None:
     except Exception as e:
         logger.debug("PIL layer thumbnail fallback failed: %s", e)
         return None
+
+
+def get_item_art(item_id: str) -> discord.File | None:
+    """Return a discord.File for an item icon. No PIL fallback."""
+    asset_path = _find_asset(ASSETS_DIR / "items", item_id)
+    if asset_path:
+        data = _load_cached_bytes(asset_path)
+        if data:
+            ext = asset_path.suffix
+            return _file_from_bytes(data, f"item_{item_id}{ext}")
+    return None
+
+
+def get_pickaxe_art(tier_index: int) -> discord.File | None:
+    """Return a discord.File for a pickaxe tier icon. No PIL fallback."""
+    if tier_index < 0 or tier_index >= len(PICKAXE_SLUGS):
+        return None
+    slug = PICKAXE_SLUGS[tier_index]
+    asset_path = _find_asset(ASSETS_DIR / "pickaxes", slug)
+    if asset_path:
+        data = _load_cached_bytes(asset_path)
+        if data:
+            ext = asset_path.suffix
+            return _file_from_bytes(data, f"pickaxe_{slug}{ext}")
+    return None
+
+
+def _load_icon_image(directory: Path, base_name: str) -> Image.Image | None:
+    """Load an icon as a PIL Image for composition, with byte caching."""
+    asset_path = _find_asset(directory, base_name)
+    if not asset_path:
+        return None
+    data = _load_cached_bytes(asset_path)
+    if not data:
+        return None
+    return Image.open(io.BytesIO(data)).convert("RGBA")
+
+
+def compose_items_used(item_ids: list[str]) -> discord.File | None:
+    """Compose consumed item icons into a compact horizontal strip for a thumbnail."""
+    if not item_ids:
+        return None
+
+    icon_size = 48
+    gap = 4
+    icons: list[Image.Image] = []
+    for item_id in item_ids:
+        img = _load_icon_image(ASSETS_DIR / "items", item_id)
+        if img:
+            icons.append(img.resize((icon_size, icon_size), Image.Resampling.LANCZOS))
+
+    if not icons:
+        return None
+
+    total_w = len(icons) * icon_size + (len(icons) - 1) * gap
+    strip = Image.new("RGBA", (total_w, icon_size), (0, 0, 0, 0))
+    x = 0
+    for ic in icons:
+        strip.paste(ic, (x, 0), ic)
+        x += ic.width + gap
+
+    buf = io.BytesIO()
+    strip.save(buf, format="PNG", optimize=True)
+    buf.seek(0)
+    return _file_from_buf(buf, "items_used.png")
+
+
+_SHOP_ITEM_IDS = [
+    "dynamite", "hard_hat", "lantern", "reinforcement", "torch",
+    "grappling_hook", "sonar_pulse", "depth_charge", "void_bait",
+]
+
+
+def compose_shop_grid() -> discord.File | None:
+    """Compose a 3x3 grid of all shop item icons for the shop embed."""
+    icon_size = 80
+    gap = 6
+    cols, rows = 3, 3
+    grid_w = cols * icon_size + (cols - 1) * gap
+    grid_h = rows * icon_size + (rows - 1) * gap
+    grid = Image.new("RGBA", (grid_w, grid_h), (0, 0, 0, 0))
+
+    placed = 0
+    for item_id in _SHOP_ITEM_IDS:
+        img = _load_icon_image(ASSETS_DIR / "items", item_id)
+        if not img:
+            continue
+        img = img.resize((icon_size, icon_size), Image.Resampling.LANCZOS)
+        row, col = divmod(placed, cols)
+        x = col * (icon_size + gap)
+        y = row * (icon_size + gap)
+        grid.paste(img, (x, y), img)
+        placed += 1
+
+    if not placed:
+        return None
+
+    buf = io.BytesIO()
+    grid.save(buf, format="PNG", optimize=True)
+    buf.seek(0)
+    return _file_from_buf(buf, "shop_grid.png")

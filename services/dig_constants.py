@@ -2414,6 +2414,9 @@ BOSS_SLUGS: dict[int, str] = {
     25: "grothak", 50: "crystalia", 75: "magmus",
     100: "void_warden", 150: "sporeling", 200: "chronofrost", 275: "nameless",
 }
+PICKAXE_SLUGS: list[str] = [
+    "wooden", "stone", "iron", "diamond", "obsidian", "frostforged", "void_touched",
+]
 BOSS_ODDS: dict[str, dict] = {
     tier: {"base": odds, "free": BOSS_FREE_FIGHT_ODDS[tier]}
     for tier, odds in BOSS_WIN_ODDS.items()

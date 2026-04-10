@@ -483,6 +483,8 @@ class DigService:
                     achievements=[],
                     is_first_dig=False,
                     items_used=[],
+                    items_used_ids=[],
+                    pickaxe_tier=tunnel.get("pickaxe_tier", 0) or 0,
                     tip="A boss blocks your path!",
                     decay_info=decay_info,
                     luminosity_info=None,
@@ -575,6 +577,8 @@ class DigService:
                 achievements=[],
                 is_first_dig=True,
                 items_used=[],
+                items_used_ids=[],
+                pickaxe_tier=0,
                 tip="Welcome to the mines! Use /dig again after the cooldown.",
                 decay_info=decay_info,
             )
@@ -602,6 +606,7 @@ class DigService:
         # 6. Get queued items and apply effects
         queued = self._get_queued_items_for_tunnel(discord_id, guild_id)
         items_used = []
+        items_used_ids = []
         has_dynamite = False
         has_hard_hat = False
         has_lantern = False
@@ -629,6 +634,14 @@ class DigService:
             elif itype == "depth_charge":
                 has_depth_charge = True
                 items_used.append("Depth Charge")
+            elif itype == "reinforcement":
+                items_used.append("Reinforcement")
+            elif itype == "sonar_pulse":
+                items_used.append("Sonar Pulse")
+            elif itype == "void_bait":
+                items_used.append("Void Bait")
+            if itype:
+                items_used_ids.append(itype)
 
         # Consume queued items from inventory
         if queued:
@@ -802,6 +815,8 @@ class DigService:
                 achievements=achievements,
                 is_first_dig=False,
                 items_used=items_used,
+                items_used_ids=items_used_ids,
+                pickaxe_tier=pickaxe_tier,
                 tip=self._pick_tip(new_depth),
                 decay_info=decay_info,
                 luminosity_info=lum_info,
@@ -960,6 +975,8 @@ class DigService:
             achievements=achievements,
             is_first_dig=False,
             items_used=items_used,
+            items_used_ids=items_used_ids,
+            pickaxe_tier=pickaxe_tier,
             tip=self._pick_tip(new_depth),
             decay_info=decay_info,
             luminosity_info=lum_info,
@@ -1015,14 +1032,14 @@ class DigService:
         """Return info about current and next pickaxe tier."""
         tunnel = self.dig_repo.get_tunnel(discord_id, guild_id)
         if tunnel is None:
-            return self._ok(current_tier="Wooden", next_tier=None, eligible=False)
+            return self._ok(current_tier="Wooden", current_tier_index=0, next_tier=None, eligible=False)
 
         tunnel = dict(tunnel)
         current_idx = tunnel.get("pickaxe_tier", 0)
         current_name = PICKAXE_TIERS[current_idx]["name"] if current_idx < len(PICKAXE_TIERS) else "Unknown"
 
         if current_idx >= len(PICKAXE_TIERS) - 1:
-            return self._ok(current_tier=current_name, next_tier=None, eligible=False)
+            return self._ok(current_tier=current_name, current_tier_index=current_idx, next_tier=None, eligible=False)
 
         next_tier = PICKAXE_TIERS[current_idx + 1]
         depth = tunnel.get("depth", 0)
@@ -1039,6 +1056,7 @@ class DigService:
 
         return self._ok(
             current_tier=current_name,
+            current_tier_index=current_idx,
             next_tier=next_tier["name"],
             cost=next_tier["jc_cost"],
             depth_required=next_tier["depth_required"],

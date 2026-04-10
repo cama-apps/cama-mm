@@ -817,7 +817,19 @@ class UpgradeView(discord.ui.View):
                 description=getattr(result, "message", "Your pickaxe has been upgraded!"),
                 color=0x00FF00,
             )
-            await interaction.followup.send(embed=embed)
+            pickaxe_file = None
+            try:
+                from utils.dig_assets import get_pickaxe_art
+                new_tier = getattr(result, "tier", 0)
+                pickaxe_file = get_pickaxe_art(new_tier)
+                if pickaxe_file:
+                    embed.set_thumbnail(url=f"attachment://{pickaxe_file.filename}")
+            except Exception:
+                pass
+            if pickaxe_file:
+                await interaction.followup.send(embed=embed, file=pickaxe_file)
+            else:
+                await interaction.followup.send(embed=embed)
         except ValueError as e:
             await interaction.followup.send(str(e), ephemeral=True)
         except Exception as e:
@@ -994,10 +1006,13 @@ class DigCommands(commands.Cog):
                             err = getattr(paid_result, "error", "Paid dig failed.")
                             await msg.edit(content=err, embed=None, view=None)
                         else:
-                            paid_embed, paid_layer_name = _build_dig_embed(paid_result, interaction.user)
+                            paid_embed, paid_layer_name, paid_pick_tier, paid_items_ids = _build_dig_embed(paid_result, interaction.user)
                             paid_layer_file = await _attach_layer_thumbnail(paid_embed, paid_layer_name)
-                            if paid_layer_file:
-                                await msg.edit(embed=paid_embed, view=None, attachments=[paid_layer_file])
+                            paid_pick_file = await _attach_pickaxe_footer(paid_embed, paid_pick_tier)
+                            paid_items_strip = await _attach_items_strip(paid_embed, paid_items_ids)
+                            paid_files = [f for f in (paid_layer_file, paid_pick_file, paid_items_strip) if f]
+                            if paid_files:
+                                await msg.edit(embed=paid_embed, view=None, attachments=paid_files)
                             else:
                                 await msg.edit(embed=paid_embed, view=None)
                     except Exception as e:
@@ -1013,7 +1028,7 @@ class DigCommands(commands.Cog):
             event_data = event if isinstance(event, dict) else (event._d if hasattr(event, "_d") else None)
             complexity = event_data.get("complexity", "choice") if isinstance(event_data, dict) else "choice"
             if complexity in ("complex", "choice") and isinstance(event_data, dict) and event_data.get("safe_option"):
-                embed, _layer_name = _build_dig_embed(result, interaction.user)
+                embed, _layer_name, _pickaxe_tier, _items_ids = _build_dig_embed(result, interaction.user)
                 layer_file = await _attach_layer_thumbnail(embed, _layer_name)
                 event_embed = discord.Embed(
                     title=event_data.get("name", "Event"),
@@ -1043,7 +1058,15 @@ class DigCommands(commands.Cog):
                     except Exception as e:
                         logger.debug("Event scene generation failed: %s", e)
                 view = EventEncounterView(self.dig_service, interaction.user.id, guild_id, event_data)
-                await safe_followup(interaction, embed=embed, file=layer_file)
+                pickaxe_file = await _attach_pickaxe_footer(embed, _pickaxe_tier)
+                items_strip = await _attach_items_strip(embed, _items_ids)
+                dig_files = [f for f in (layer_file, pickaxe_file, items_strip) if f]
+                if len(dig_files) > 1:
+                    await safe_followup(interaction, embed=embed, files=dig_files)
+                elif dig_files:
+                    await safe_followup(interaction, embed=embed, file=dig_files[0])
+                else:
+                    await safe_followup(interaction, embed=embed)
                 if event_file:
                     await safe_followup(interaction, embed=event_embed, view=view, file=event_file)
                 else:
@@ -1051,9 +1074,17 @@ class DigCommands(commands.Cog):
                 return
 
         # Normal dig result
-        embed, layer_name = _build_dig_embed(result, interaction.user)
+        embed, layer_name, pickaxe_tier, items_ids = _build_dig_embed(result, interaction.user)
         layer_file = await _attach_layer_thumbnail(embed, layer_name)
-        msg = await safe_followup(interaction, embed=embed, file=layer_file)
+        pickaxe_file = await _attach_pickaxe_footer(embed, pickaxe_tier)
+        items_strip = await _attach_items_strip(embed, items_ids)
+        dig_files = [f for f in (layer_file, pickaxe_file, items_strip) if f]
+        if len(dig_files) > 1:
+            msg = await safe_followup(interaction, embed=embed, files=dig_files)
+        elif dig_files:
+            msg = await safe_followup(interaction, embed=embed, file=dig_files[0])
+        else:
+            msg = await safe_followup(interaction, embed=embed)
 
         # Add reactions
         if msg:
@@ -1481,10 +1512,20 @@ class DigCommands(commands.Cog):
                 )
                 return
             item_name = getattr(result, "item", item)
-            await safe_followup(
-                interaction,
-                content=f"**{item_name}** queued for your next dig.",
+            use_embed = discord.Embed(
+                title=f"{item_name} Queued",
+                description="Ready for your next dig.",
+                color=0xD4AF37,
             )
+            item_file = None
+            try:
+                from utils.dig_assets import get_item_art
+                item_file = get_item_art(item)
+                if item_file:
+                    use_embed.set_thumbnail(url=f"attachment://{item_file.filename}")
+            except Exception:
+                pass
+            await safe_followup(interaction, embed=use_embed, file=item_file)
         except ValueError as e:
             await safe_followup(interaction, content=str(e), ephemeral=True)
         except Exception as e:
@@ -1580,7 +1621,15 @@ class DigCommands(commands.Cog):
         inv_count = getattr(shop, "inventory_count", 0)
         embed.set_footer(text=f"Your inventory: {inv_count}/{MAX_INVENTORY_SLOTS} items | Use /dig buy <item> to purchase, /dig use <item> to queue")
 
-        await safe_followup(interaction, embed=embed)
+        shop_file = None
+        try:
+            from utils.dig_assets import compose_shop_grid
+            shop_file = await asyncio.to_thread(compose_shop_grid)
+            if shop_file:
+                embed.set_image(url=f"attachment://{shop_file.filename}")
+        except Exception:
+            pass
+        await safe_followup(interaction, embed=embed, file=shop_file)
 
     # ------------------------------------------------------------------
     # 8b. /dig buy — Buy an item from the shop
@@ -1630,14 +1679,24 @@ class DigCommands(commands.Cog):
         item_name = getattr(result, "item", item)
         cost = getattr(result, "cost", 0)
         balance_after = getattr(result, "balance_after", "?")
-        await safe_followup(
-            interaction,
-            content=(
-                f"Purchased **{item_name}** for **{cost}** {JOPACOIN_EMOTE}! "
-                f"Balance: **{balance_after}** {JOPACOIN_EMOTE}\n"
-                f"Use `/dig use {item}` to queue it for your next dig."
+        buy_embed = discord.Embed(
+            title=f"Purchased: {item_name}",
+            description=(
+                f"Cost: **{cost}** {JOPACOIN_EMOTE}\n"
+                f"Balance: **{balance_after}** {JOPACOIN_EMOTE}\n\n"
+                f"Use `/dig use {item}` to queue it."
             ),
+            color=0xD4AF37,
         )
+        item_file = None
+        try:
+            from utils.dig_assets import get_item_art
+            item_file = get_item_art(item)
+            if item_file:
+                buy_embed.set_thumbnail(url=f"attachment://{item_file.filename}")
+        except Exception:
+            pass
+        await safe_followup(interaction, embed=buy_embed, file=item_file)
 
     # ------------------------------------------------------------------
     # 9. /dig museum — Guild artifact museum
@@ -1880,6 +1939,15 @@ class DigCommands(commands.Cog):
 
         embed = discord.Embed(title="Pickaxe Upgrades", color=0xB0BEC5)
         embed.add_field(name="Current Pickaxe", value=current, inline=True)
+        pickaxe_file = None
+        try:
+            from utils.dig_assets import get_pickaxe_art
+            tier_idx = getattr(info, "current_tier_index", 0)
+            pickaxe_file = get_pickaxe_art(tier_idx)
+            if pickaxe_file:
+                embed.set_thumbnail(url=f"attachment://{pickaxe_file.filename}")
+        except Exception:
+            pass
 
         if next_tier:
             reqs = []
@@ -1910,7 +1978,7 @@ class DigCommands(commands.Cog):
             "next_tier": next_tier,
         }
         view = UpgradeView(self.dig_service, interaction.user.id, guild_id, upgrade_info_dict)
-        await safe_followup(interaction, embed=embed, view=view)
+        await safe_followup(interaction, embed=embed, view=view, file=pickaxe_file)
 
     # ------------------------------------------------------------------
     # 13. /dig_trap — Set a trap
@@ -2014,6 +2082,19 @@ class DigCommands(commands.Cog):
             return
 
         embed = discord.Embed(title="Mining Inventory", color=0x8B4513)
+        # Pickaxe thumbnail
+        inv_pickaxe_file = None
+        try:
+            from utils.dig_assets import get_pickaxe_art
+            tunnel_info = await asyncio.to_thread(
+                self.dig_service.dig_repo.get_tunnel, interaction.user.id, guild_id
+            )
+            tier_idx = dict(tunnel_info).get("pickaxe_tier", 0) if tunnel_info else 0
+            inv_pickaxe_file = get_pickaxe_art(tier_idx)
+            if inv_pickaxe_file:
+                embed.set_thumbnail(url=f"attachment://{inv_pickaxe_file.filename}")
+        except Exception:
+            pass
         if items:
             for item in items[:5]:
                 name = item.get("name", "Unknown")
@@ -2030,7 +2111,7 @@ class DigCommands(commands.Cog):
             embed.description = "Your inventory is empty. Visit `/dig shop` to buy items."
             embed.set_footer(text="0/{MAX_INVENTORY_SLOTS} slots used")
 
-        await safe_followup(interaction, embed=embed)
+        await safe_followup(interaction, embed=embed, file=inv_pickaxe_file)
 
     # ------------------------------------------------------------------
     # 16. /dig guide — Paginated help
@@ -2053,10 +2134,11 @@ class DigCommands(commands.Cog):
 # Embed builder for normal dig results
 # ---------------------------------------------------------------------------
 
-def _build_dig_embed(result: object, user: discord.User | discord.Member) -> tuple[discord.Embed, str | None]:
-    """Build a rich embed for a normal dig result. Returns (embed, layer_name)."""
+def _build_dig_embed(result: object, user: discord.User | discord.Member) -> tuple[discord.Embed, str | None, int, list[str]]:
+    """Build a rich embed for a normal dig result. Returns (embed, layer_name, pickaxe_tier, items_used_ids)."""
     depth = getattr(result, "depth", 0) or getattr(result, "depth_after", 0)
     tunnel_name = getattr(result, "tunnel_name", "Tunnel")
+    pickaxe_tier = getattr(result, "pickaxe_tier", 0) or 0
 
     # Determine layer for embed color
     layer_def = get_layer_def(depth)
@@ -2064,9 +2146,9 @@ def _build_dig_embed(result: object, user: discord.User | discord.Member) -> tup
 
     # ~20% chance of a "Dig Dug" themed title
     if random.random() < 0.20:
-        title = f"\u26cf\ufe0f {random.choice(DIG_DUG_TITLES)} \u2014 Depth {depth}"
+        title = f"{random.choice(DIG_DUG_TITLES)} \u2014 Depth {depth}"
     else:
-        title = f"\u26cf\ufe0f {tunnel_name} \u2014 Depth {depth}"
+        title = f"{tunnel_name} \u2014 Depth {depth}"
 
     embed = discord.Embed(
         title=title,
@@ -2166,16 +2248,19 @@ def _build_dig_embed(result: object, user: discord.User | discord.Member) -> tup
                 lum_text += f" (-{lum_drained})"
             embed.add_field(name="Luminosity", value=lum_text, inline=False)
 
-    # Footer tip — ~25% chance of a Dig Dug footer instead
+    # Footer — user + tip
+    tip = ""
     if depth == 69:
-        embed.set_footer(text="Nice.")
+        tip = "Nice."
     elif random.random() < 0.25:
-        embed.set_footer(text=random.choice(DIG_DUG_FOOTERS))
+        tip = random.choice(DIG_DUG_FOOTERS)
     else:
-        embed.set_footer(text=getattr(result, "tip", "") or _tip(0))
+        tip = getattr(result, "tip", "") or _tip(0)
+    embed.set_footer(text=tip)
     embed.set_author(name=user.display_name, icon_url=user.display_avatar.url)
 
-    return embed, layer_name
+    items_ids = list(getattr(result, "items_used_ids", None) or [])
+    return embed, layer_name, pickaxe_tier, items_ids
 
 
 async def _attach_layer_thumbnail(embed: discord.Embed, layer_name: str | None) -> discord.File | None:
@@ -2191,6 +2276,70 @@ async def _attach_layer_thumbnail(embed: discord.Embed, layer_name: str | None) 
     except Exception:
         logger.debug("Layer thumbnail failed for %s", layer_name)
     return None
+
+
+async def _attach_pickaxe_footer(embed: discord.Embed, pickaxe_tier: int) -> discord.File | None:
+    """Add the pickaxe icon to the embed footer (preserving existing footer text)."""
+    try:
+        from utils.dig_assets import get_pickaxe_art
+        pickaxe_file = await asyncio.to_thread(get_pickaxe_art, pickaxe_tier)
+        if pickaxe_file:
+            footer_text = embed.footer.text if embed.footer else ""
+            embed.set_footer(text=footer_text, icon_url=f"attachment://{pickaxe_file.filename}")
+            return pickaxe_file
+    except Exception:
+        pass
+    return None
+
+
+async def _attach_items_strip(embed: discord.Embed, items_ids: list[str]) -> discord.File | None:
+    """Compose item icons into a strip and attach as embed image."""
+    if not items_ids:
+        return None
+    try:
+        from utils.dig_assets import compose_items_used
+        items_file = await asyncio.to_thread(compose_items_used, items_ids)
+        if items_file:
+            embed.set_image(url=f"attachment://{items_file.filename}")
+            return items_file
+    except Exception:
+        pass
+    return None
+
+
+async def _build_items_used_embed(result: object) -> tuple[discord.Embed, discord.File] | None:
+    """Build a tiny embed showing consumed item icons, or None if no items used."""
+    items_used_ids = getattr(result, "items_used_ids", None)
+    items_used = getattr(result, "items_used", None)
+    if not items_used_ids:
+        return None
+    try:
+        from utils.dig_assets import compose_items_used
+        from services.dig_constants import CONSUMABLE_ITEMS
+        items_file = await asyncio.to_thread(compose_items_used, list(items_used_ids))
+        if not items_file:
+            # No art files — fall back to text-only if we have display names
+            if not items_used:
+                return None
+            label = ", ".join(str(i) for i in items_used)
+            embed = discord.Embed(description=f"**Items Used:** {label}", color=0x2F3136)
+            return embed, None  # type: ignore[return-value]
+        # Derive label from display names or constants
+        if items_used:
+            label = ", ".join(str(i) for i in items_used)
+        else:
+            label = ", ".join(
+                CONSUMABLE_ITEMS.get(iid, {}).get("name", iid) for iid in items_used_ids
+            )
+        embed = discord.Embed(
+            description=f"**Items Used:** {label}",
+            color=0x2F3136,
+        )
+        embed.set_thumbnail(url=f"attachment://{items_file.filename}")
+        return embed, items_file
+    except Exception:
+        logger.debug("Items used embed failed")
+        return None
 
 
 # ---------------------------------------------------------------------------

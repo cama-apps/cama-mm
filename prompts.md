@@ -209,3 +209,121 @@ assets/dig/layers/crystal.png
 ### Image Dimensions:
 - Boss scenes: **512x288** (16:9 landscape, fits Discord embed main image)
 - Layer thumbnails: **128x128** (square, used as Discord embed thumbnail)
+- Item icons: **128x128** (square, used as Discord embed thumbnail)
+- Pickaxe icons: **128x128** (square, used as Discord embed thumbnail)
+
+---
+
+## Item Icons (128x128, square)
+
+Mining consumable items. Dark underground RPG style, iconic and readable at small sizes. Each should be a single centered object on a dark cave/stone background.
+
+### Dynamite
+```
+Bundle of three red dynamite sticks tied together with a lit sparking fuse, glowing orange spark, dark cave stone background, fantasy RPG item icon, square composition, bold and iconic, digital painting
+```
+
+### Hard Hat
+```
+Sturdy yellow mining hard hat with a headlamp glowing white, scratched and battle-worn, dark cave stone background, fantasy RPG item icon, square composition, bold and iconic, digital painting
+```
+
+### Lantern
+```
+Ornate handheld brass lantern with warm golden flame glowing inside, glass panels, hanging from a handle, dark cave stone background, fantasy RPG item icon, square composition, bold and iconic, digital painting
+```
+
+### Reinforcement
+```
+Wooden mining support beams forming a tunnel brace in an X pattern, sturdy timber with iron bolts, dark cave stone background, fantasy RPG item icon, square composition, bold and iconic, digital painting
+```
+
+### Torch
+```
+Flaming wall torch with bright orange fire and trailing embers, wrapped cloth on a wooden handle, dark cave stone background, fantasy RPG item icon, square composition, bold and iconic, digital painting
+```
+
+### Grappling Hook
+```
+Steel grappling hook with three prongs attached to coiled rope, metallic sheen, dark cave stone background, fantasy RPG item icon, square composition, bold and iconic, digital painting
+```
+
+### Sonar Pulse
+```
+Glowing cyan sonar pulse wave rings emanating outward from a small crystal device, concentric circles of light, dark cave stone background, fantasy RPG item icon, square composition, bold and iconic, digital painting
+```
+
+### Depth Charge
+```
+Cylindrical explosive mining charge with a pressure gauge and blinking red light, metallic casing with warning stripes, dark cave stone background, fantasy RPG item icon, square composition, bold and iconic, digital painting
+```
+
+### Void Bait
+```
+Glowing purple orb of swirling void energy floating above a small dark pedestal, tendrils of purple mist, dark cave stone background, fantasy RPG item icon, square composition, bold and iconic, digital painting
+```
+
+## Item File Naming:
+```
+assets/dig/items/dynamite.png
+assets/dig/items/hard_hat.png
+assets/dig/items/lantern.png
+assets/dig/items/reinforcement.png
+assets/dig/items/torch.png
+assets/dig/items/grappling_hook.png
+assets/dig/items/sonar_pulse.png
+assets/dig/items/depth_charge.png
+assets/dig/items/void_bait.png
+```
+
+---
+
+## Pickaxe Icons (128x128, square)
+
+Mining pickaxes at different upgrade tiers. Each progressively more impressive. Dark underground RPG style, iconic at small sizes. Single pickaxe centered on dark background.
+
+### Wooden
+```
+Simple crude wooden pickaxe with a rough wooden handle and head, basic and humble, splinters visible, dark cave stone background, fantasy RPG item icon, square composition, bold and iconic, digital painting
+```
+
+### Stone
+```
+Stone pickaxe with a chipped gray stone head bound to a wooden handle with leather straps, slightly better than wooden, dark cave stone background, fantasy RPG item icon, square composition, bold and iconic, digital painting
+```
+
+### Iron
+```
+Polished iron pickaxe with a gleaming silver metal head and reinforced wooden handle, professional mining tool, dark cave stone background, fantasy RPG item icon, square composition, bold and iconic, digital painting
+```
+
+### Diamond
+```
+Sparkling diamond pickaxe with a brilliant blue-white crystalline head that refracts light, ornate handle with gold trim, sparkles and light rays, dark cave stone background, fantasy RPG item icon, square composition, bold and iconic, digital painting
+```
+
+### Obsidian
+```
+Dark obsidian pickaxe with a jet-black volcanic glass head that has faint red-orange veins of inner fire, sleek and dangerous looking, faint ember glow, dark cave stone background, fantasy RPG item icon, square composition, bold and iconic, digital painting
+```
+
+### Frostforged
+```
+Icy blue frostforged pickaxe with a crystalline ice head covered in frost crystals, cold blue glow, frozen mist emanating from the blade, silver and blue handle, dark cave stone background, fantasy RPG item icon, square composition, bold and iconic, digital painting
+```
+
+### Void-Touched
+```
+Dark purple void-touched pickaxe with a head made of swirling void energy and shadow, purple tendrils of dark matter trailing from the blade, eldritch and otherworldly, faint purple glow, dark cave stone background, fantasy RPG item icon, square composition, bold and iconic, digital painting
+```
+
+## Pickaxe File Naming:
+```
+assets/dig/pickaxes/wooden.png
+assets/dig/pickaxes/stone.png
+assets/dig/pickaxes/iron.png
+assets/dig/pickaxes/diamond.png
+assets/dig/pickaxes/obsidian.png
+assets/dig/pickaxes/frostforged.png
+assets/dig/pickaxes/void_touched.png
+```
