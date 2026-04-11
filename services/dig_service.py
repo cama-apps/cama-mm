@@ -37,13 +37,18 @@ from services.dig_constants import (
     LUMINOSITY_BRIGHT,
     LUMINOSITY_DARK,
     LUMINOSITY_DARK_CAVE_IN_BONUS,
+    LUMINOSITY_DARK_EVENT_MULTIPLIER,
     LUMINOSITY_DARK_JC_MULTIPLIER,
+    LUMINOSITY_DARK_RISKY_PENALTY,
     LUMINOSITY_DIM,
     LUMINOSITY_DIM_CAVE_IN_BONUS,
     LUMINOSITY_DIM_EVENT_MULTIPLIER,
     LUMINOSITY_DRAIN_PER_DIG,
     LUMINOSITY_MAX,
+    LUMINOSITY_PITCH_BLACK,
     LUMINOSITY_PITCH_CAVE_IN_BONUS,
+    LUMINOSITY_PITCH_EVENT_MULTIPLIER,
+    LUMINOSITY_PITCH_FORCE_RISKY,
     LUMINOSITY_PITCH_JC_MULTIPLIER,
     MAX_INVENTORY_SIZE,
     MAX_PRESTIGE,
@@ -1165,17 +1170,22 @@ class DigService:
 
         # 17. Roll for random event (layer-specific rates, luminosity, ascension, mutations)
         event_rates = {
-            "Dirt": 0.08, "Stone": 0.08, "Crystal": 0.10, "Magma": 0.10,
-            "Abyss": 0.12, "Fungal Depths": 0.15, "Frozen Core": 0.12, "The Hollow": 0.18,
+            "Dirt": 0.16, "Stone": 0.16, "Crystal": 0.20, "Magma": 0.20,
+            "Abyss": 0.24, "Fungal Depths": 0.30, "Frozen Core": 0.24, "The Hollow": 0.36,
         }
-        event_chance = event_rates.get(layer_name, 0.10)
+        event_chance = event_rates.get(layer_name, 0.20)
         # Ascension event chance boost
         event_chance *= (1.0 + ascension.get("event_chance_multiplier", 0))
         # Mutation event_magnet boost
         event_chance *= (1.0 + mutation_fx.get("event_chance_bonus", 0))
-        # Dim luminosity increases event chance
-        if luminosity < LUMINOSITY_BRIGHT:
+        # Darkness increases event chance (tiered)
+        if luminosity <= LUMINOSITY_PITCH_BLACK:
+            event_chance *= LUMINOSITY_PITCH_EVENT_MULTIPLIER
+        elif luminosity < LUMINOSITY_DIM:
+            event_chance *= LUMINOSITY_DARK_EVENT_MULTIPLIER
+        elif luminosity < LUMINOSITY_BRIGHT:
             event_chance *= LUMINOSITY_DIM_EVENT_MULTIPLIER
+        event_chance = min(event_chance, 0.75)
         event = None
         if random.random() < event_chance:
             event = self.roll_event(new_depth, luminosity=luminosity,
@@ -2735,8 +2745,13 @@ class DigService:
 
         tunnel = dict(tunnel)
         depth = tunnel.get("depth", 0)
+        luminosity = tunnel.get("luminosity", LUMINOSITY_MAX)
         prestige_level = tunnel.get("prestige_level", 0) or 0
         ascension = self._get_ascension_effects(prestige_level)
+
+        # Pitch black: force risky (safe option removed)
+        if LUMINOSITY_PITCH_FORCE_RISKY and luminosity <= LUMINOSITY_PITCH_BLACK and choice == "safe" and event.get("risky_option"):
+            choice = "risky"
 
         # Handle boon choice — apply selected buff
         if choice.startswith("boon_") and event.get("boon_options"):
@@ -2800,6 +2815,10 @@ class DigService:
 
         # New-style EventChoice resolution
         success_chance = option.get("success_chance", 1.0)
+
+        # Dark luminosity: risky/desperate options are harder
+        if choice in ("risky", "desperate") and luminosity < LUMINOSITY_DIM:
+            success_chance = max(0.05, success_chance - LUMINOSITY_DARK_RISKY_PENALTY)
 
         # P9 Cruel Echoes: safe options now have 10% failure chance
         cruel_fail = ascension.get("cruel_safe_fail", 0)
