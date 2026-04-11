@@ -16,7 +16,12 @@ from discord import app_commands
 from discord.ext import commands
 
 from commands.checks import require_gamba_channel
-from services.dig_constants import ASCENSION_MODIFIERS, MAX_INVENTORY_SLOTS, PICKAXE_TIERS
+from services.dig_constants import (
+    ASCENSION_MODIFIERS,
+    LUMINOSITY_PITCH_BLACK,
+    MAX_INVENTORY_SLOTS,
+    PICKAXE_TIERS,
+)
 from services.dig_constants import get_layer as get_layer_def
 from utils.formatting import JOPACOIN_EMOTE
 from utils.interaction_safety import safe_defer, safe_followup
@@ -472,6 +477,7 @@ class EventEncounterView(discord.ui.View):
         user_id: int,
         guild_id: int | None,
         event_data: dict,
+        luminosity: int = 100,
     ):
         super().__init__(timeout=60)
         self.dig_service = dig_service
@@ -499,6 +505,11 @@ class EventEncounterView(discord.ui.View):
                 )
                 desperate_btn.callback = self._desperate_callback
                 self.add_item(desperate_btn)
+        # Pitch black: disable safe option, force risky
+        if luminosity <= LUMINOSITY_PITCH_BLACK:
+            safe_label = "Darkness consumes safety"
+            self.safe_btn.disabled = True
+            self.safe_btn.style = discord.ButtonStyle.secondary
         self.safe_btn.label = safe_label[:80]
         self.risky_btn.label = risky_label[:80]
 
@@ -1313,7 +1324,10 @@ class DigCommands(commands.Cog):
                         event_embed.set_image(url=f"attachment://{event_file.filename}")
                 except Exception as e:
                     logger.debug("Event art failed: %s", e)
-                view = EventEncounterView(self.dig_service, interaction.user.id, guild_id, event_data)
+                _lum_info = getattr(result, "luminosity_info", None)
+                _lum_val = (_lum_info.get("luminosity_after", 100) if isinstance(_lum_info, dict)
+                            else getattr(_lum_info, "luminosity_after", 100)) if _lum_info else 100
+                view = EventEncounterView(self.dig_service, interaction.user.id, guild_id, event_data, luminosity=_lum_val)
                 pickaxe_file = await _attach_pickaxe_footer(embed, _pickaxe_tier)
                 items_strip = await _attach_items_strip(embed, _items_ids)
                 dig_files = [f for f in (layer_file, pickaxe_file, items_strip) if f]
