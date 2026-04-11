@@ -109,8 +109,8 @@ class PickaxeTier:
 _PICKAXE_TIERS_DEF: list[PickaxeTier] = [
     PickaxeTier("Wooden",       0, 0.0,  0, depth_required=0,   jc_cost=0,    prestige_required=0),
     PickaxeTier("Stone",        1, 0.0,  0, depth_required=25,  jc_cost=15,   prestige_required=0),
-    PickaxeTier("Iron",         0, 0.05, 0, depth_required=50,  jc_cost=50,   prestige_required=1),
-    PickaxeTier("Diamond",      0, 0.0,  2, depth_required=75,  jc_cost=150,  prestige_required=2),
+    PickaxeTier("Iron",         0, 0.05, 0, depth_required=50,  jc_cost=50,   prestige_required=0),
+    PickaxeTier("Diamond",      0, 0.0,  2, depth_required=75,  jc_cost=150,  prestige_required=0),
     PickaxeTier("Obsidian",     1, 0.05, 0, depth_required=100, jc_cost=300,  prestige_required=3),
     PickaxeTier("Frostforged",  2, 0.0,  1, depth_required=200, jc_cost=600,  prestige_required=5),
     PickaxeTier("Void-Touched", 2, 0.10, 2, depth_required=275, jc_cost=1200, prestige_required=8),
