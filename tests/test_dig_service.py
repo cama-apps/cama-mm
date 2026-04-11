@@ -1676,10 +1676,10 @@ class TestTempBuffs:
 class TestExpandedEvents:
     """Verify expanded event system."""
 
-    def test_event_pool_has_58_events(self):
-        """Event pool should have 58 events after expansion."""
+    def test_event_pool_has_93_events(self):
+        """Event pool should have 93 events (58 original + 35 prestige expansion)."""
         from services.dig_constants import EVENT_POOL
-        assert len(EVENT_POOL) == 58
+        assert len(EVENT_POOL) == 93
 
     def test_new_events_have_complexity_field(self):
         """All events should have a complexity field."""
@@ -2050,3 +2050,469 @@ class TestTunnelNormalization:
         assert isinstance(tunnel["depth"], int)
         assert isinstance(tunnel["luminosity"], int)
         assert isinstance(tunnel["last_dig_at"], int)
+
+
+# =============================================================================
+# Ascension System Tests
+# =============================================================================
+
+
+class TestAscensionSystem:
+    """Test ascension modifier mechanics."""
+
+    def test_get_ascension_effects_level_0(self, dig_service):
+        """No effects at prestige 0."""
+        effects = dig_service._get_ascension_effects(0)
+        assert effects == {}
+
+    def test_get_ascension_effects_level_1(self, dig_service):
+        """Level 1 returns advance_penalty and jc_multiplier."""
+        effects = dig_service._get_ascension_effects(1)
+        assert "advance_penalty" in effects
+        assert effects["advance_penalty"] == 1
+        assert "jc_multiplier" in effects
+        assert effects["jc_multiplier"] == 0.15
+
+    def test_ascension_effects_cumulative(self, dig_service):
+        """Multiple levels stack their effects."""
+        effects = dig_service._get_ascension_effects(3)
+        # Level 1 advance_penalty=1
+        assert effects["advance_penalty"] == 1
+        # Level 1 jc_multiplier=0.15
+        assert effects["jc_multiplier"] == 0.15
+        # Level 2 cave_in_bonus=0.03
+        assert effects["cave_in_bonus"] == 0.03
+        # Level 2 event_chance_multiplier=0.20
+        assert effects["event_chance_multiplier"] == 0.20
+        # Level 3 luminosity_drain_multiplier=0.25
+        assert effects["luminosity_drain_multiplier"] == 0.25
+        # Level 3 rare_event_multiplier=0.50
+        assert effects["rare_event_multiplier"] == 0.50
+
+    def test_boss_phase2_at_prestige_4(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+        """Boss fight at P4+ returns phase2_incoming on first win."""
+        _register_player(player_repository, balance=500)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+        dig_repo.update_tunnel(10001, guild_id, depth=24, prestige_level=4)
+
+        # Force win
+        monkeypatch.setattr(random, "random", lambda: 0.01)
+        result = dig_service.fight_boss(10001, guild_id, "cautious", wager=0)
+        assert result["success"]
+        assert result.get("won") is True
+        # At P4, boss should enter phase 2 on first victory
+        assert result.get("phase2_incoming") is True
+        assert result.get("phase") == 1
+
+        # Boss progress should be "phase1_defeated"
+        tunnel = dig_repo.get_tunnel(10001, guild_id)
+        bp = json.loads(tunnel["boss_progress"])
+        assert bp["25"] == "phase1_defeated"
+
+    def test_boss_no_phase2_below_prestige_4(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+        """Boss fight below P4 goes straight to defeated."""
+        _register_player(player_repository, balance=500)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+        dig_repo.update_tunnel(10001, guild_id, depth=24, prestige_level=3)
+
+        # Force win
+        monkeypatch.setattr(random, "random", lambda: 0.01)
+        result = dig_service.fight_boss(10001, guild_id, "cautious", wager=0)
+        assert result["success"]
+        assert result.get("won") is True
+        # No phase 2 at P3
+        assert result.get("phase2_incoming") is not True
+
+        # Boss should go straight to defeated
+        tunnel = dig_repo.get_tunnel(10001, guild_id)
+        bp = json.loads(tunnel["boss_progress"])
+        assert bp["25"] == "defeated"
+
+
+# =============================================================================
+# Corruption System Tests
+# =============================================================================
+
+
+class TestCorruptionSystem:
+    """Test corruption roll mechanics."""
+
+    def test_no_corruption_below_p6(self, dig_service):
+        """_roll_corruption returns None at prestige < 6."""
+        for level in range(6):
+            result = dig_service._roll_corruption(level)
+            assert result is None, f"Expected None at prestige {level}"
+
+    def test_corruption_at_p6(self, dig_service):
+        """_roll_corruption returns an effect at prestige 6+."""
+        random.seed(42)
+        result = dig_service._roll_corruption(6)
+        assert result is not None
+        assert "id" in result
+        assert "description" in result
+        assert "effects" in result
+        assert isinstance(result["effects"], dict)
+
+    def test_corruption_effect_has_valid_fields(self, dig_service):
+        """Corruption effect dict has all expected fields."""
+        random.seed(0)
+        # Run multiple times to cover both bad and weird paths
+        found_any = False
+        for seed in range(50):
+            random.seed(seed)
+            result = dig_service._roll_corruption(8)
+            assert result is not None
+            assert "id" in result
+            assert "weird" in result
+            assert isinstance(result["weird"], bool)
+            found_any = True
+        assert found_any
+
+    def test_corruption_weird_ratio(self, dig_service):
+        """Corruption rolls are ~80% bad / ~20% weird over many trials."""
+        random.seed(12345)
+        weird_count = 0
+        total = 500
+        for _ in range(total):
+            result = dig_service._roll_corruption(6)
+            if result["weird"]:
+                weird_count += 1
+        # Should be roughly 20% weird (allow 10%-35% tolerance for randomness)
+        assert 50 <= weird_count <= 175, f"Weird ratio {weird_count}/{total} outside expected range"
+
+
+# =============================================================================
+# Mutation System Tests
+# =============================================================================
+
+
+class TestMutationSystem:
+    """Test mutation mechanics."""
+
+    def test_roll_mutations_returns_forced_and_choices(self, dig_service):
+        """_roll_mutations_for_prestige returns (forced, choices_list)."""
+        random.seed(42)
+        forced, choices = dig_service._roll_mutations_for_prestige()
+        # forced is a single dict
+        assert isinstance(forced, dict)
+        assert "id" in forced
+        assert "name" in forced
+        assert "description" in forced
+        assert "positive" in forced
+        # choices is a list of dicts
+        assert isinstance(choices, list)
+        assert len(choices) == 3
+        for c in choices:
+            assert "id" in c
+            assert "name" in c
+        # forced should not be in choices
+        choice_ids = {c["id"] for c in choices}
+        assert forced["id"] not in choice_ids
+
+    def test_apply_mutation_effects(self, dig_service):
+        """_apply_mutation_effects combines effect dicts."""
+        mutations = [
+            {"id": "cave_in_loot"},
+            {"id": "brittle_walls"},
+        ]
+        combined = dig_service._apply_mutation_effects(mutations)
+        # cave_in_loot has cave_in_loot_chance=0.30
+        assert combined.get("cave_in_loot_chance") == 0.30
+        # brittle_walls has cave_in_loss_bonus=2
+        assert combined.get("cave_in_loss_bonus") == 2
+
+    def test_apply_mutation_effects_stacks_numeric(self, dig_service):
+        """Numeric mutation effects from multiple mutations stack additively."""
+        # Two mutations with the same numeric key should add
+        mutations = [
+            {"id": "event_magnet"},     # event_chance_bonus=0.30
+            {"id": "treasure_sense"},   # artifact_chance_bonus=0.25
+        ]
+        combined = dig_service._apply_mutation_effects(mutations)
+        assert combined.get("event_chance_bonus") == 0.30
+        assert combined.get("artifact_chance_bonus") == 0.25
+
+    def test_get_mutations_empty(self, dig_service):
+        """_get_mutations returns empty list for tunnel with no mutations."""
+        tunnel = {"mutations": None}
+        assert dig_service._get_mutations(tunnel) == []
+        tunnel2 = {"mutations": ""}
+        assert dig_service._get_mutations(tunnel2) == []
+
+    def test_get_mutations_parses_json(self, dig_service):
+        """_get_mutations parses stored JSON correctly."""
+        data = [{"id": "cave_in_loot", "name": "Lucky Rubble"}]
+        tunnel = {"mutations": json.dumps(data)}
+        result = dig_service._get_mutations(tunnel)
+        assert len(result) == 1
+        assert result[0]["id"] == "cave_in_loot"
+
+    def test_mutations_stored_in_prestige(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+        """Prestige at P8+ stores mutations in tunnel."""
+        _register_player(player_repository, balance=500)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+        all_bosses_defeated = {str(b): "defeated" for b in BOSS_BOUNDARIES}
+        dig_repo.update_tunnel(
+            10001, guild_id, depth=280,
+            boss_progress=json.dumps(all_bosses_defeated),
+            prestige_level=7,  # After prestige will become P8
+        )
+
+        random.seed(42)
+        result = dig_service.prestige(10001, guild_id, "advance_boost")
+        assert result["success"]
+        assert result["prestige_level"] == 8
+
+        # Mutations should be stored
+        tunnel = dig_repo.get_tunnel(10001, guild_id)
+        mutations_raw = tunnel.get("mutations")
+        assert mutations_raw is not None
+        mutations = json.loads(mutations_raw)
+        assert len(mutations) >= 1  # At least the forced mutation
+        # Result should contain mutation info
+        assert result.get("mutations") is not None
+
+
+# =============================================================================
+# Run Scoring Tests
+# =============================================================================
+
+
+class TestRunScoring:
+    """Test run score calculation."""
+
+    def test_calculate_run_score_basic(self, dig_service):
+        """Score based on depth + bosses + JC + artifacts + events."""
+        tunnel = {
+            "depth": 100,
+            "boss_progress": json.dumps({"25": "defeated", "50": "defeated", "75": "active", "100": "active"}),
+            "current_run_jc": 40,
+            "current_run_artifacts": 2,
+            "current_run_events": 5,
+            "prestige_level": 0,
+        }
+        score = dig_service._calculate_run_score(tunnel)
+        # base = depth*1 + bosses_defeated*50 + int(jc*0.5) + artifacts*25 + events*10
+        # = 100 + 2*50 + int(40*0.5) + 2*25 + 5*10
+        # = 100 + 100 + 20 + 50 + 50 = 320
+        # multiplier = 1 + 0*0.1 = 1.0
+        expected = int(320 * 1.0)
+        assert score == expected
+
+    def test_score_multiplier_at_higher_prestige(self, dig_service):
+        """Higher prestige levels multiply the score."""
+        tunnel_base = {
+            "depth": 50,
+            "boss_progress": json.dumps({"25": "defeated", "50": "active"}),
+            "current_run_jc": 20,
+            "current_run_artifacts": 1,
+            "current_run_events": 3,
+            "prestige_level": 0,
+        }
+        score_p0 = dig_service._calculate_run_score(tunnel_base)
+
+        tunnel_p5 = dict(tunnel_base)
+        tunnel_p5["prestige_level"] = 5
+        score_p5 = dig_service._calculate_run_score(tunnel_p5)
+        # multiplier at P5 = 1 + 5*0.1 = 1.5
+        assert score_p5 > score_p0
+        assert score_p5 == int(score_p0 * 1.5)
+
+    def test_score_multiplier_p10_includes_ascension(self, dig_service):
+        """P10 'The Endless' adds score_multiplier=2.0 on top of base multiplier."""
+        tunnel = {
+            "depth": 100,
+            "boss_progress": json.dumps({}),
+            "current_run_jc": 0,
+            "current_run_artifacts": 0,
+            "current_run_events": 0,
+            "prestige_level": 10,
+        }
+        score = dig_service._calculate_run_score(tunnel)
+        # base = 100
+        # base multiplier = 1 + 10*0.1 = 2.0
+        # ascension score_multiplier at P10 = 2.0
+        # total multiplier = 2.0 + 2.0 = 4.0
+        expected = int(100 * 4.0)
+        assert score == expected
+
+    def test_prestige_stores_run_score(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+        """Prestige stores best_run_score and resets counters."""
+        _register_player(player_repository, balance=500)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+        all_bosses_defeated = {str(b): "defeated" for b in BOSS_BOUNDARIES}
+        dig_repo.update_tunnel(
+            10001, guild_id,
+            depth=280,
+            boss_progress=json.dumps(all_bosses_defeated),
+            current_run_jc=50,
+            current_run_artifacts=3,
+            current_run_events=10,
+        )
+
+        result = dig_service.prestige(10001, guild_id, "advance_boost")
+        assert result["success"]
+        assert result["run_score"] > 0
+        assert result["best_run_score"] > 0
+
+        # Counters should be reset
+        tunnel = dig_repo.get_tunnel(10001, guild_id)
+        assert tunnel.get("current_run_jc") == 0 or tunnel["current_run_jc"] == 0
+        assert tunnel.get("current_run_artifacts") == 0 or tunnel["current_run_artifacts"] == 0
+        assert tunnel.get("current_run_events") == 0 or tunnel["current_run_events"] == 0
+
+
+# =============================================================================
+# New Event Mechanics Tests
+# =============================================================================
+
+
+class TestNewEventMechanics:
+    """Test desperate and boon event mechanics."""
+
+    def test_event_pool_has_desperate_options(self):
+        """Some events in pool have desperate_option."""
+        from services.dig_constants import EVENT_POOL
+        desperate_events = [e for e in EVENT_POOL if e.get("desperate_option") is not None]
+        assert len(desperate_events) > 0, "Expected at least one event with desperate_option"
+
+    def test_event_pool_has_boon_options(self):
+        """Some events in pool have boon_options."""
+        from services.dig_constants import EVENT_POOL
+        boon_events = [e for e in EVENT_POOL if e.get("boon_options")]
+        assert len(boon_events) > 0, "Expected at least one event with boon_options"
+
+    def test_event_pool_has_prestige_gated_events(self):
+        """Some events require min_prestige > 0."""
+        from services.dig_constants import EVENT_POOL
+        gated = [e for e in EVENT_POOL if e.get("min_prestige", 0) > 0]
+        assert len(gated) > 0, "Expected at least one prestige-gated event"
+
+    def test_roll_event_filters_by_prestige(self, dig_service):
+        """roll_event excludes events above player's prestige level."""
+        from services.dig_constants import EVENT_POOL
+        gated_ids = {e["id"] for e in EVENT_POOL if e.get("min_prestige", 0) > 0}
+        # Roll many events at prestige 0 at deep depth (to maximize eligible pool)
+        random.seed(42)
+        found_gated = set()
+        for _ in range(500):
+            event = dig_service.roll_event(200, luminosity=100, prestige_level=0)
+            if event and event["id"] in gated_ids:
+                found_gated.add(event["id"])
+        assert len(found_gated) == 0, f"Prestige-gated events should not appear at P0: {found_gated}"
+
+    def test_all_new_events_have_valid_structure(self):
+        """All 93 events have required fields."""
+        from services.dig_constants import EVENT_POOL
+        assert len(EVENT_POOL) == 93
+        for e in EVENT_POOL:
+            assert "id" in e, "Event missing 'id'"
+            assert "name" in e, f"Event {e.get('id', '?')} missing 'name'"
+            assert "complexity" in e, f"Event {e['id']} missing 'complexity'"
+            assert "rarity" in e, f"Event {e['id']} missing 'rarity'"
+            assert e["rarity"] in ("common", "uncommon", "rare", "legendary"), (
+                f"Event {e['id']} has invalid rarity: {e['rarity']}"
+            )
+            # safe_option must exist for all events (primary resolution path)
+            assert e.get("safe_option") is not None or e.get("boon_options") is not None, (
+                f"Event {e['id']} has neither safe_option nor boon_options"
+            )
+
+    def test_resolve_event_desperate_choice(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+        """resolve_event handles desperate choice correctly."""
+        from services.dig_constants import EVENT_POOL
+        desperate_events = [e for e in EVENT_POOL if e.get("desperate_option") is not None]
+        event = desperate_events[0]
+
+        _register_player(player_repository, balance=500)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+        dig_repo.update_tunnel(10001, guild_id, depth=50)
+
+        random.seed(42)
+        result = dig_service.resolve_event(10001, guild_id, event["id"], "desperate")
+        assert result["success"]
+        assert result.get("choice") == "desperate"
+
+    def test_resolve_event_boon_choice(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+        """resolve_event handles boon choice correctly."""
+        from services.dig_constants import EVENT_POOL
+        boon_events = [e for e in EVENT_POOL if e.get("boon_options")]
+        event = boon_events[0]
+
+        _register_player(player_repository, balance=500)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+        dig_repo.update_tunnel(10001, guild_id, depth=50)
+
+        result = dig_service.resolve_event(10001, guild_id, event["id"], "boon_0")
+        assert result["success"]
+        assert result.get("choice") == "boon_0"
+        assert result.get("buff_applied") is not None
+
+    def test_resolve_event_boon_invalid_index(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+        """resolve_event rejects invalid boon index."""
+        from services.dig_constants import EVENT_POOL
+        boon_events = [e for e in EVENT_POOL if e.get("boon_options")]
+        event = boon_events[0]
+
+        _register_player(player_repository, balance=500)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+        dig_repo.update_tunnel(10001, guild_id, depth=50)
+
+        # Use an index beyond the number of boon options
+        num_boons = len(event["boon_options"])
+        result = dig_service.resolve_event(10001, guild_id, event["id"], f"boon_{num_boons + 10}")
+        assert not result["success"]
+
+
+# =============================================================================
+# Hall of Fame Tests
+# =============================================================================
+
+
+class TestHallOfFame:
+    """Test hall of fame leaderboard."""
+
+    def test_hall_of_fame_empty_guild(self, dig_service, guild_id):
+        """Hall of fame returns empty list for guild with no scores."""
+        result = dig_service.get_hall_of_fame(guild_id)
+        assert result["success"]
+        assert result["entries"] == []
+
+    def test_hall_of_fame_after_prestige(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+        """Hall of fame shows player after prestige with run score."""
+        _register_player(player_repository, balance=500)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+        all_bosses_defeated = {str(b): "defeated" for b in BOSS_BOUNDARIES}
+        dig_repo.update_tunnel(
+            10001, guild_id,
+            depth=280,
+            boss_progress=json.dumps(all_bosses_defeated),
+            current_run_jc=30,
+            current_run_artifacts=2,
+            current_run_events=5,
+        )
+
+        result = dig_service.prestige(10001, guild_id, "advance_boost")
+        assert result["success"]
+
+        hof = dig_service.get_hall_of_fame(guild_id)
+        assert hof["success"]
+        assert len(hof["entries"]) == 1
+        assert hof["entries"][0]["discord_id"] == 10001
+        assert hof["entries"][0]["best_run_score"] > 0

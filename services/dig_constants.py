@@ -783,6 +783,10 @@ class RandomEvent:
     requires_dark: bool = False     # only triggers at Pitch Black luminosity
     social: bool = False            # references other players
     ascii_art: str | None = None    # roguelike-style ASCII scene (5-7 lines)
+    # Prestige expansion fields
+    desperate_option: EventChoice | None = None   # third choice: very low odds, massive reward/fail
+    boon_options: tuple[TempBuff, ...] | None = None  # for complexity="boon" events
+    min_prestige: int = 0           # minimum prestige level required
 
 
 RANDOM_EVENTS: list[RandomEvent] = [
@@ -1884,6 +1888,781 @@ RANDOM_EVENTS: list[RandomEvent] = [
         ),
         complexity="simple", rarity="rare",
     ),
+
+    # ===================================================================
+    # PRESTIGE EXPANSION EVENTS
+    # ===================================================================
+
+    # --- Minecraft-themed — Dirt/Stone (depth 0-55) ---
+
+    RandomEvent(
+        id="creeper_ambush",
+        name="Creeper Ambush",
+        description="A familiar hissing sound. The walls flash green. You have seconds.",
+        min_depth=0, max_depth=55,
+        safe_option=EventChoice(
+            "Sprint back",
+            success=EventOutcome("You dive clear as the blast craters the tunnel behind you.", -1, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Shield with pickaxe",
+            success=EventOutcome("Your pickaxe absorbs the blast. The debris opens a new passage!", 2, 0, False),
+            failure=EventOutcome("The explosion sends you tumbling. Everything goes dark.", -4, 0, True),
+            success_chance=0.60,
+        ),
+        desperate_option=EventChoice(
+            "Punch the creeper",
+            success=EventOutcome("One punch. The creeper detonates harmlessly. Gunpowder everywhere — and coins!", 6, 4, False),
+            failure=EventOutcome("You punch it. It detonates. You are not Steve.", -8, 0, True),
+            success_chance=0.15,
+        ),
+        layer="Dirt",
+    ),
+    RandomEvent(
+        id="abandoned_minecart",
+        name="Abandoned Minecart",
+        description="A rusted minecart sits on ancient rails. Something rattles inside.",
+        min_depth=0, max_depth=55,
+        safe_option=EventChoice(
+            "Search the cart",
+            success=EventOutcome("A single coin wedged in the seat. Better than nothing.", 0, 1, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Ride the rails",
+            success=EventOutcome("WHOOSH! The cart rockets through the darkness and deposits you deeper!", 5, 0, False),
+            failure=EventOutcome("The rails end abruptly. You and the cart part ways.", -3, 0, False),
+            success_chance=0.50,
+        ),
+        layer="Dirt",
+    ),
+    RandomEvent(
+        id="enchanting_table",
+        name="Enchanting Table",
+        description="Purple particles drift from a floating book. Strange symbols orbit the air.",
+        min_depth=0, max_depth=55,
+        safe_option=EventChoice(
+            "Take nothing",
+            success=EventOutcome("You decline.", 0, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Take nothing",
+            success=EventOutcome("You decline.", 0, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        complexity="boon", layer="Stone", rarity="uncommon",
+        boon_options=(
+            TempBuff("efficiency", "Efficiency", 3, {"advance_bonus": 2}),
+            TempBuff("fortune", "Fortune", 3, {"jc_bonus": 3}),
+            TempBuff("unbreaking", "Unbreaking", 3, {"cave_in_reduction": 0.15}),
+        ),
+    ),
+    RandomEvent(
+        id="villager_trade",
+        name="Suspicious Villager",
+        description="Hmm. A villager in a brown robe offers emeralds for... dirt blocks?",
+        min_depth=0, max_depth=55,
+        safe_option=EventChoice(
+            "Trade politely",
+            success=EventOutcome("A fair deal. The villager nods approvingly. 'Hmm.'", 0, 2, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Haggle aggressively",
+            success=EventOutcome("The villager sweats. You drive a hard bargain. Emeralds rain.", 0, 5, False),
+            failure=EventOutcome("The villager slams the trading window shut. You lose your deposit.", 0, -2, False),
+            success_chance=0.45,
+        ),
+        layer="Dirt",
+    ),
+    RandomEvent(
+        id="enderman_stare",
+        name="The Staring Contest",
+        description="A tall dark figure stands motionless. Purple particles shimmer. It's watching.",
+        min_depth=0, max_depth=55,
+        safe_option=EventChoice(
+            "Look away slowly",
+            success=EventOutcome("It teleports away. You exhale.", 1, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Stare back",
+            success=EventOutcome("It flinches first. It drops something valuable before vanishing.", 0, 4, False),
+            failure=EventOutcome("It shrieks. Reality bends. You are somewhere else now.", -5, 0, False),
+            success_chance=0.40,
+        ),
+        desperate_option=EventChoice(
+            "Charge it",
+            success=EventOutcome("You tackle an Enderman. It drops a pearl and its dignity.", 3, 8, False),
+            failure=EventOutcome("It teleports behind you. 'Nothing personnel, kid.' Cave-in.", -6, 0, True),
+            success_chance=0.12,
+        ),
+        layer="Stone", rarity="uncommon",
+    ),
+    RandomEvent(
+        id="mob_spawner",
+        name="Mob Spawner",
+        description="A cage spins in the corner, spawning skeletal shapes. Treasure chests flank it.",
+        min_depth=0, max_depth=55,
+        safe_option=EventChoice(
+            "Sneak past",
+            success=EventOutcome("You slip through unnoticed. The skeletons argue among themselves.", 1, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Grab a chest and run",
+            success=EventOutcome("You snatch a chest. Arrows whiz past your ears. Worth it.", 0, 4, False),
+            failure=EventOutcome("An arrow finds your knee. The adventuring is over for today.", -3, 0, False),
+            success_chance=0.50,
+        ),
+        desperate_option=EventChoice(
+            "Destroy the spawner",
+            success=EventOutcome("The cage shatters! Both chests are yours. The skeletons dissolve.", 2, 6, False),
+            failure=EventOutcome("The spawner surges. More skeletons than you can count.", -6, 0, True),
+            success_chance=0.20,
+        ),
+        layer="Stone", rarity="uncommon",
+        buff_on_success=TempBuff("mob_farm", "Mob Farm", 2, {"jc_bonus": 2}),
+    ),
+    RandomEvent(
+        id="witch_cauldron",
+        name="Witch's Cauldron",
+        description="A bubbling cauldron sits unattended. Three potion bottles labeled in illegible handwriting.",
+        min_depth=0, max_depth=55,
+        safe_option=EventChoice(
+            "Take nothing",
+            success=EventOutcome("You decline.", 0, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Take nothing",
+            success=EventOutcome("You decline.", 0, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        complexity="boon", layer="Dirt",
+        boon_options=(
+            TempBuff("red_potion", "Red Potion", 1, {"advance_bonus": 3}),
+            TempBuff("blue_potion", "Blue Potion", 2, {"cave_in_reduction": 0.20}),
+            TempBuff("green_potion", "Green Potion", 1, {"jc_bonus": 5}),
+        ),
+    ),
+
+    # --- PoE Delve-themed — Crystal/Abyss (depth 51-150) ---
+
+    RandomEvent(
+        id="azurite_deposit",
+        name="Azurite Deposit",
+        description="A vein of deep blue crystal hums with stored energy. Cartographers would kill for this.",
+        min_depth=51, max_depth=100,
+        safe_option=EventChoice(
+            "Mine carefully",
+            success=EventOutcome("You chip out a few clean crystals. Respectable haul.", 0, 2, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Blast it open",
+            success=EventOutcome("The vein cracks wide. Azurite shards scatter like blue rain!", 0, 6, False),
+            failure=EventOutcome("The blast destabilizes the passage. Crystals shatter worthlessly.", -3, 0, False),
+            success_chance=0.45,
+        ),
+        layer="Crystal",
+    ),
+    RandomEvent(
+        id="crawler_breakdown",
+        name="Crawler Breakdown",
+        description="Your mining rig shudders and sparks. The darkness closes in around you.",
+        min_depth=51, max_depth=100,
+        safe_option=EventChoice(
+            "Repair with spare parts",
+            success=EventOutcome("A patch job. It'll hold. You lost some parts though.", 1, -2, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Hotwire it",
+            success=EventOutcome("Sparks fly — then the engine roars. It's running better than before!", 4, 0, False),
+            failure=EventOutcome("The rig catches fire. You abandon the burning wreck.", -4, 0, False),
+            success_chance=0.50,
+        ),
+        desperate_option=EventChoice(
+            "Abandon rig and sprint",
+            success=EventOutcome("You outrun the darkness. Barely. Your legs will remember this.", 7, 0, False),
+            failure=EventOutcome("The darkness catches you. Something in it has claws.", -6, 0, True),
+            success_chance=0.15,
+        ),
+        layer="Crystal", rarity="uncommon",
+    ),
+    RandomEvent(
+        id="fossil_cache",
+        name="Fossil Cache",
+        description="Fossilized remains embedded in crystal. They could be valuable... or fragile.",
+        min_depth=51, max_depth=100,
+        safe_option=EventChoice(
+            "Photograph and catalog",
+            success=EventOutcome("Careful documentation. A small finder's fee.", 1, 1, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Extract fossils",
+            success=EventOutcome("Pristine specimens! Collectors will pay handsomely.", 0, 4, False),
+            failure=EventOutcome("They crumble to dust the moment you touch them. Ancient and fragile.", -3, 0, False),
+            success_chance=0.55,
+        ),
+        layer="Crystal",
+    ),
+    RandomEvent(
+        id="breach_encounter",
+        name="Breach Encounter",
+        description="A hand-shaped tear in reality splits open. Things pour through. Purple. Endless. Hungry.",
+        min_depth=51, max_depth=150,
+        safe_option=EventChoice(
+            "Retreat and seal",
+            success=EventOutcome("You back away. The breach closes. Wise.", 0, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Hold the line",
+            success=EventOutcome("You stand your ground. The breach yields treasure as it closes.", 2, 5, False),
+            failure=EventOutcome("The breach consumes ground you'd already claimed.", -5, 0, False),
+            success_chance=0.40,
+        ),
+        desperate_option=EventChoice(
+            "Dive into the breach",
+            success=EventOutcome("You pass through and emerge deeper. Much deeper. With loot.", 5, 12, False),
+            failure=EventOutcome("The breach spits you out. Hard. Very, very hard.", -8, 0, True),
+            success_chance=0.10,
+        ),
+        rarity="rare",
+    ),
+    RandomEvent(
+        id="vaal_side_area",
+        name="Vaal Side Area",
+        description="A blood-red door pulses in the crystal. Corrupted inscriptions promise treasure and death.",
+        min_depth=51, max_depth=150,
+        safe_option=EventChoice(
+            "Walk past",
+            success=EventOutcome("Discretion. Valor. You keep walking.", 0, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Enter cautiously",
+            success=EventOutcome("The corruption parts for you. Ancient Vaal gold awaits.", 0, 6, False),
+            failure=EventOutcome("The corruption bites. Your coin pouch feels lighter.", 0, -4, False),
+            success_chance=0.40,
+        ),
+        desperate_option=EventChoice(
+            "Smash the corruption altar",
+            success=EventOutcome("The altar shatters! A flood of uncorrupted treasure!", 4, 10, False),
+            failure=EventOutcome("The altar explodes. Corruption everywhere. In you. On you.", -7, 0, True),
+            success_chance=0.15,
+        ),
+        rarity="rare",
+    ),
+    RandomEvent(
+        id="syndicate_ambush",
+        name="Syndicate Ambush",
+        description="Cloaked figures drop from the ceiling. 'Your tunnel or your coins.'",
+        min_depth=51, max_depth=150,
+        safe_option=EventChoice(
+            "Pay the toll",
+            success=EventOutcome("They take your coins and let you pass. Professional thieves.", 2, -3, False),
+            failure=EventOutcome("They take your coins AND push you back. Unprofessional thieves.", 0, -5, False),
+            success_chance=0.90,
+        ),
+        risky_option=EventChoice(
+            "Fight back",
+            success=EventOutcome("You scatter the syndicate. They drop their own loot!", 0, 5, False),
+            failure=EventOutcome("They outnumber you. The beating is educational.", -4, 0, False),
+            success_chance=0.45,
+        ),
+        rarity="uncommon",
+    ),
+    RandomEvent(
+        id="delve_smuggler",
+        name="Delve Smuggler",
+        description="A figure from a hidden passage. 'Psst. Got the good stuff. Fell off a crawler, innit.'",
+        min_depth=51, max_depth=150,
+        safe_option=EventChoice(
+            "Take nothing",
+            success=EventOutcome("You decline.", 0, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Take nothing",
+            success=EventOutcome("You decline.", 0, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        complexity="boon", rarity="uncommon",
+        boon_options=(
+            TempBuff("volatile_flare", "Volatile Flare", 1, {"advance_bonus": 4}),
+            TempBuff("azurite_tonic", "Azurite Tonic", 1, {"luminosity_restore": 30}),
+            TempBuff("smugglers_map", "Smuggler's Map", 2, {"advance_bonus": 2}),
+        ),
+    ),
+
+    # --- WoW Delves-themed — Fungal/Frozen (depth 151-275+) ---
+
+    RandomEvent(
+        id="brann_bronzebeard",
+        name="Brann Bronzebeard",
+        description="'Well met, adventurer! Brann Bronzebeard, at yer service. Been mapping these depths for decades.'",
+        min_depth=151, max_depth=275,
+        safe_option=EventChoice(
+            "Take nothing",
+            success=EventOutcome("You decline.", 0, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Take nothing",
+            success=EventOutcome("You decline.", 0, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        complexity="boon", rarity="uncommon",
+        boon_options=(
+            TempBuff("combat_buddy", "Combat Buddy", 3, {"advance_bonus": 2}),
+            TempBuff("treasure_finder", "Treasure Finder", 3, {"jc_bonus": 2}),
+            TempBuff("veteran_guidance", "Veteran Guidance", 3, {"cave_in_reduction": 0.10}),
+        ),
+    ),
+    RandomEvent(
+        id="earthen_cache",
+        name="Earthen Cache",
+        description="A stone chest sealed with dwarven runes. The lock is complex but cracked with age.",
+        min_depth=151, max_depth=275,
+        safe_option=EventChoice(
+            "Force open carefully",
+            success=EventOutcome("The lock gives way. Modest treasure inside.", 0, 2, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Smash it",
+            success=EventOutcome("The chest shatters. Dwarven gold scatters everywhere!", 0, 5, False),
+            failure=EventOutcome("The runes were a trap. The blast sends you reeling.", -3, 0, False),
+            success_chance=0.50,
+        ),
+        layer="Fungal Depths",
+    ),
+    RandomEvent(
+        id="campfire_rest",
+        name="Campfire Rest",
+        description="A warm campfire glows in an alcove. A bedroll and whetstone sit nearby.",
+        min_depth=151, max_depth=275,
+        safe_option=EventChoice(
+            "Rest by the fire",
+            success=EventOutcome("You sit. The warmth seeps into your bones. A moment of peace.", 0, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Sharpen your pickaxe",
+            success=EventOutcome("The whetstone sings. Your pickaxe has never been sharper.", 0, 0, False),
+            failure=EventOutcome("You slip. A cut on the hand. It'll heal.", 0, 0, False),
+            success_chance=0.65,
+        ),
+        layer="Frozen Core",
+        buff_on_success=TempBuff("honed_edge", "Honed Edge", 2, {"advance_bonus": 2}),
+    ),
+    RandomEvent(
+        id="zekvir_shadow",
+        name="Zekvir's Shadow",
+        description="A massive spider silhouette blocks the tunnel. Eight eyes gleam red.",
+        min_depth=151, max_depth=275,
+        safe_option=EventChoice(
+            "Find another way",
+            success=EventOutcome("A detour. Longer, but you keep your limbs.", -1, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Distract and sneak past",
+            success=EventOutcome("You toss a rock. It turns. You sprint. Heart hammering.", 3, 0, False),
+            failure=EventOutcome("Eight eyes. All looking at you. It pounces.", -5, 0, False),
+            success_chance=0.35,
+        ),
+        desperate_option=EventChoice(
+            "Fight Zekvir",
+            success=EventOutcome("Against all odds, you drive it back! Legendary loot drops!", 5, 10, False),
+            failure=EventOutcome("Zekvir wraps you in silk. The ceiling collapses.", -8, 0, True),
+            success_chance=0.12,
+        ),
+        rarity="rare",
+    ),
+    RandomEvent(
+        id="dark_rider",
+        name="The Dark Rider",
+        description="A cloaked rider on a skeletal mount emerges from fungal mist. It extends a gauntlet.",
+        min_depth=151, max_depth=275,
+        safe_option=EventChoice(
+            "Bow and let it pass",
+            success=EventOutcome("It drops a coin as tribute. Respect, it seems, has value.", 0, 1, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Accept the handshake",
+            success=EventOutcome("A cold grip. Knowledge flows into you. Secrets of the deep.", 0, 5, False),
+            failure=EventOutcome("The grip tightens. It takes something from you.", 0, -3, False),
+            success_chance=0.45,
+        ),
+        desperate_option=EventChoice(
+            "Challenge the rider",
+            success=EventOutcome("Your pickaxe meets spectral steel. You win. The mount is yours — briefly.", 3, 8, False),
+            failure=EventOutcome("The rider's lance finds its mark. You crumple.", -6, 0, False),
+            success_chance=0.18,
+        ),
+        rarity="uncommon",
+    ),
+    RandomEvent(
+        id="titan_relic",
+        name="Titan Relic",
+        description="An ancient device of impossible complexity. Three runes glow: red, blue, gold.",
+        min_depth=151, max_depth=275,
+        safe_option=EventChoice(
+            "Take nothing",
+            success=EventOutcome("You decline.", 0, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Take nothing",
+            success=EventOutcome("You decline.", 0, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        complexity="boon", rarity="rare",
+        boon_options=(
+            TempBuff("power_rune", "Power", 3, {"advance_bonus": 3}),
+            TempBuff("protection_rune", "Protection", 5, {"cave_in_reduction": 0.20}),
+            TempBuff("fortune_rune", "Fortune", 3, {"jc_bonus": 3}),
+        ),
+    ),
+    RandomEvent(
+        id="candle_glow",
+        name="The Candle",
+        description="A single candle burns impossibly in the frozen dark. Its light is warm. It shouldn't be here.",
+        min_depth=151, max_depth=275,
+        safe_option=EventChoice(
+            "Light your torch from it",
+            success=EventOutcome("The flame passes to your torch. The candle keeps burning.", 0, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Take the candle",
+            success=EventOutcome("It comes free. The warmth follows you. Two coins fall from the wax.", 0, 2, False),
+            failure=EventOutcome("It won't move. Wax drips on your hand. The flame flickers reproachfully.", 0, 0, False),
+            success_chance=0.55,
+        ),
+    ),
+
+    # --- Hades-themed — Deep (depth 100+) ---
+
+    RandomEvent(
+        id="olympian_boon",
+        name="Olympian Boon",
+        description="A divine light pierces the darkness. 'Choose wisely, mortal. My gift is not given lightly.'",
+        min_depth=100, max_depth=None,
+        safe_option=EventChoice(
+            "Take nothing",
+            success=EventOutcome("You decline.", 0, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Take nothing",
+            success=EventOutcome("You decline.", 0, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        complexity="boon", rarity="uncommon",
+        boon_options=(
+            TempBuff("zeus_fury", "Zeus's Fury", 2, {"advance_bonus": 4}),
+            TempBuff("athena_shield", "Athena's Shield", 1, {"cave_in_reduction": 1.0}),
+            TempBuff("hermes_speed", "Hermes's Speed", 1, {"cooldown_reduction": 0.50}),
+        ),
+    ),
+    RandomEvent(
+        id="charon_toll",
+        name="Charon's Toll",
+        description="A boat drifts on an underground river. The ferryman extends a bony hand.",
+        min_depth=100, max_depth=None,
+        safe_option=EventChoice(
+            "Pay the toll",
+            success=EventOutcome("Coins clink into skeletal fingers. The boat glides forward.", 3, -4, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Negotiate",
+            success=EventOutcome("The ferryman tilts his head. 'Amusing.' He lets you ride free.", 3, 0, False),
+            failure=EventOutcome("'No.' The boat drifts away. You wasted your time.", 0, -2, False),
+            success_chance=0.40,
+        ),
+        desperate_option=EventChoice(
+            "Steal the oar",
+            success=EventOutcome("You yank the oar and paddle furiously. Charon watches, impressed.", 5, 2, False),
+            failure=EventOutcome("Charon capsizes the boat. You sink. You surface somewhere worse.", -6, 0, True),
+            success_chance=0.15,
+        ),
+        rarity="uncommon",
+    ),
+    RandomEvent(
+        id="sisyphus_boulder",
+        name="Sisyphus's Request",
+        description="A man pushes an enormous boulder uphill. 'Help me,' he wheezes. 'Just one more push.'",
+        min_depth=100, max_depth=None,
+        safe_option=EventChoice(
+            "Help push",
+            success=EventOutcome("Together, you move it an inch. He smiles. 'That's enough.' He tips you.", 1, 1, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Loot his camp",
+            success=EventOutcome("While he pushes, you find his stash. He won't notice for eternity.", 0, 4, False),
+            failure=EventOutcome("The boulder rolls back — onto your foot.", -3, 0, False),
+            success_chance=0.55,
+        ),
+    ),
+    RandomEvent(
+        id="infernal_gate",
+        name="Infernal Gate",
+        description="A gate of black iron sealed with chains. Beyond: combat sounds and clinking gold.",
+        min_depth=100, max_depth=None,
+        safe_option=EventChoice(
+            "Leave it sealed",
+            success=EventOutcome("Some doors are best left closed.", 0, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Open carefully",
+            success=EventOutcome("The chains fall. Gold spills through the gap.", 0, 7, False),
+            failure=EventOutcome("Something reaches through the gap. It pulls you in.", -5, 0, True),
+            success_chance=0.30,
+        ),
+        desperate_option=EventChoice(
+            "Shatter the chains",
+            success=EventOutcome("The gate flies open. An arena of riches, and you've already won.", 4, 12, False),
+            failure=EventOutcome("The gate opens both ways. What was inside is now outside. With you.", -8, 0, True),
+            success_chance=0.12,
+        ),
+        rarity="rare", min_prestige=5,
+    ),
+
+    # --- Dota 2-themed — All depths ---
+
+    RandomEvent(
+        id="riki_ambush",
+        name="Riki's Ambush",
+        description="You feel watched. A shimmer in the air. Suddenly — a blade at your throat. 'Surprise.'",
+        min_depth=None, max_depth=None,
+        safe_option=EventChoice(
+            "Drop coins and run",
+            success=EventOutcome("He takes the coins and vanishes. At least you're alive.", 0, -2, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Throw dust to reveal him",
+            success=EventOutcome("Dust of Appearance! Riki panics. He drops his stash.", 0, 4, False),
+            failure=EventOutcome("He blinks behind you. Classic Riki.", -4, 0, False),
+            success_chance=0.50,
+        ),
+        desperate_option=EventChoice(
+            "Grab the blade barehanded",
+            success=EventOutcome("You catch the blade and twist. Riki squeaks and flees, leaving everything.", 2, 7, False),
+            failure=EventOutcome("Blades are sharp. This is not a revelation. It is a reminder.", -6, 0, False),
+            success_chance=0.15,
+        ),
+        rarity="uncommon",
+    ),
+    RandomEvent(
+        id="bounty_rune",
+        name="Bounty Rune",
+        description="A golden rune hovers in a side chamber, spinning gently. It pulses with energy.",
+        min_depth=None, max_depth=None,
+        safe_option=EventChoice(
+            "Grab it",
+            success=EventOutcome("Gold flows into your pockets. Easy money.", 0, 3, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Wait for it to multiply",
+            success=EventOutcome("It splits into three! Triple bounty!", 0, 8, False),
+            failure=EventOutcome("It fizzles. You get the scraps.", 0, 1, False),
+            success_chance=0.45,
+        ),
+    ),
+    RandomEvent(
+        id="aghanim_trial",
+        name="Aghanim's Trial",
+        description="Aghanim materializes in a flash of arcane energy. 'Another one. Let's see what you're made of.'",
+        min_depth=None, max_depth=None,
+        safe_option=EventChoice(
+            "Decline the trial",
+            success=EventOutcome("Aghanim shrugs. 'Your loss.' He vanishes in a puff of condescension.", 0, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Accept the trial",
+            success=EventOutcome("You survive the gauntlet. Aghanim slow-claps. 'Not bad.'", 3, 6, False),
+            failure=EventOutcome("The trial overwhelms you. Aghanim yawns.", -4, 0, False),
+            success_chance=0.35,
+        ),
+        desperate_option=EventChoice(
+            "Demand the scepter",
+            success=EventOutcome("'Bold.' He hands it over. Power surges through you.", 5, 10, False),
+            failure=EventOutcome("'Greedy.' He snaps his fingers. You are elsewhere.", -8, 0, True),
+            success_chance=0.10,
+        ),
+        rarity="rare", min_prestige=2,
+        buff_on_success=TempBuff("aghanim_blessing", "Aghanim's Blessing", 2, {"advance_bonus": 3, "jc_bonus": 2}),
+    ),
+    RandomEvent(
+        id="tormentor_encounter",
+        name="Tormentor",
+        description="A colossal stone figure blocks the path. Lightning crackles across its surface. It does not move. Yet.",
+        min_depth=75, max_depth=None,
+        safe_option=EventChoice(
+            "Take the long way around",
+            success=EventOutcome("You give it a wide berth. It watches you leave.", -2, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Attack while dormant",
+            success=EventOutcome("Critical hit! The Tormentor crumbles. Its core is priceless.", 3, 8, False),
+            failure=EventOutcome("It wakes up. Lightning everywhere. You regret this.", -6, 0, True),
+            success_chance=0.30,
+        ),
+        desperate_option=EventChoice(
+            "Channel everything",
+            success=EventOutcome("You pour everything into one strike. The Tormentor EXPLODES.", 5, 15, False),
+            failure=EventOutcome("It absorbs your energy and uses it against you. Badly.", -10, 0, True),
+            success_chance=0.12,
+        ),
+        rarity="rare",
+    ),
+    RandomEvent(
+        id="neutral_item_drop",
+        name="Neutral Item",
+        description="A defeated jungle creep lies in the corner. Something glints in the debris.",
+        min_depth=None, max_depth=None,
+        safe_option=EventChoice(
+            "Take nothing",
+            success=EventOutcome("You decline.", 0, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Take nothing",
+            success=EventOutcome("You decline.", 0, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        complexity="boon", rarity="uncommon",
+        boon_options=(
+            TempBuff("trusty_shovel", "Trusty Shovel", 3, {"advance_bonus": 2}),
+            TempBuff("philosophers_stone", "Philosopher's Stone", 3, {"jc_bonus": 2}),
+            TempBuff("spark_of_courage", "Spark of Courage", 2, {"cave_in_reduction": 0.10, "advance_bonus": 1}),
+        ),
+    ),
+
+    # --- BGO Chaos — All depths ---
+
+    RandomEvent(
+        id="gambling_den",
+        name="The Gambling Den",
+        description="A cave lit by guttering candles. Three goblins run a card game. 'Sit down,' one grins.",
+        min_depth=None, max_depth=None,
+        safe_option=EventChoice(
+            "Watch a round",
+            success=EventOutcome("You observe. One goblin slips you a coin for the audience.", 0, 1, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Play a hand",
+            success=EventOutcome("Full house! The goblins pay up, grudgingly.", 0, 5, False),
+            failure=EventOutcome("The goblins cheat. Of course they cheat.", 0, -4, False),
+            success_chance=0.45,
+        ),
+        desperate_option=EventChoice(
+            "Go all in",
+            success=EventOutcome("You stare down three goblins and win. They flip the table.", 0, 15, False),
+            failure=EventOutcome("You lose everything. A goblin pats your shoulder. 'Better luck next time.'", 0, -8, False),
+            success_chance=0.15,
+        ),
+        rarity="uncommon",
+    ),
+    RandomEvent(
+        id="item_goblin",
+        name="Item Goblin",
+        description="A small green creature sprints past carrying a bulging sack. Gold coins scatter.",
+        min_depth=None, max_depth=None,
+        safe_option=EventChoice(
+            "Pick up dropped coins",
+            success=EventOutcome("Free money on the ground. No complaints.", 0, 2, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Chase it",
+            success=EventOutcome("You corner it! The goblin surrenders the sack.", 0, 5, False),
+            failure=EventOutcome("It's faster than it looks. You trip on a stalagmite.", -2, 0, False),
+            success_chance=0.50,
+        ),
+        desperate_option=EventChoice(
+            "Flying tackle",
+            success=EventOutcome("WHAM! You and the goblin slide across the cave floor. The sack is yours!", 0, 8, False),
+            failure=EventOutcome("You miss. You slide into a wall. The goblin laughs.", -3, -2, False),
+            success_chance=0.20,
+        ),
+        rarity="uncommon",
+    ),
+    RandomEvent(
+        id="mystery_lever",
+        name="The Mystery Lever",
+        description="A lever protrudes from the wall. It's labeled 'PULL ME' in crayon. This can't end well.",
+        min_depth=None, max_depth=None,
+        safe_option=EventChoice(
+            "Pull it cautiously",
+            success=EventOutcome("A hidden panel opens. Coins spill out. Crayon was right!", 0, 3, False),
+            failure=EventOutcome("A bucket of water falls on your head. A sign drops: 'GOTCHA'. One coin as consolation.", 0, -1, False),
+            success_chance=0.80,
+        ),
+        risky_option=EventChoice(
+            "Yank it hard",
+            success=EventOutcome("The wall rotates! A secret passage opens, blasting you forward!", 6, 0, False),
+            failure=EventOutcome("The lever breaks. The ceiling groans. Run.", -5, 0, False),
+            success_chance=0.40,
+        ),
+    ),
+    RandomEvent(
+        id="identity_thief",
+        name="The Identity Thief",
+        description="A shapeshifter has stolen your face. It's telling other miners YOUR tunnel is abandoned.",
+        min_depth=None, max_depth=None,
+        safe_option=EventChoice(
+            "Report it to authorities",
+            success=EventOutcome("Bureaucracy wins. The shapeshifter is fined. You get a small settlement.", 0, 1, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Confront the imposter",
+            success=EventOutcome("'Which one is the real one?' You prove it. The crowd sides with you.", 0, 4, False),
+            failure=EventOutcome("The crowd picks the other one. You are escorted away from your own tunnel.", 0, -3, False),
+            success_chance=0.50,
+        ),
+        rarity="uncommon", social=True,
+    ),
+    RandomEvent(
+        id="neow_blessing",
+        name="Ancient Blessing",
+        description="A voice older than stone: 'You have walked this path before. I remember. Choose your gift.'",
+        min_depth=None, max_depth=None,
+        safe_option=EventChoice(
+            "Take nothing",
+            success=EventOutcome("You decline.", 0, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Take nothing",
+            success=EventOutcome("You decline.", 0, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        complexity="boon", rarity="legendary", min_prestige=3,
+        boon_options=(
+            TempBuff("blessing_depth", "Blessing of Depth", 5, {"advance_bonus": 3}),
+            TempBuff("blessing_fortune", "Blessing of Fortune", 5, {"jc_bonus": 5}),
+            TempBuff("blessing_iron", "Blessing of Iron", 5, {"cave_in_reduction": 0.25}),
+        ),
+    ),
 ]
 
 
@@ -2275,6 +3054,286 @@ PRESTIGE_PERK_VALUES: dict[str, dict[str, float]] = {
     "tunnel_mastery": {"expedition_reward_bonus": 0.50},
     "dark_adaptation": {"dim_cave_in_immunity": 1.0},
     "the_endless": {"hollow_advance_bonus": 1.0},  # The Hollow advance becomes 1-2
+}
+
+
+# ---------------------------------------------------------------------------
+# Ascension Modifiers (stacking per prestige level)
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class AscensionModifier:
+    """Difficulty + reward modifier activated at a prestige level."""
+    level: int
+    name: str
+    penalty: str          # player-facing penalty description
+    reward: str           # player-facing reward description
+    effects: dict         # mechanical effects dict
+    gameplay: bool        # True if this introduces new mechanics (not just numbers)
+
+
+ASCENSION_MODIFIERS: dict[int, AscensionModifier] = {
+    1: AscensionModifier(
+        level=1, name="Dense Stone",
+        penalty="Advance -1 per dig",
+        reward="JC loot +15%",
+        effects={"advance_penalty": 1, "jc_multiplier": 0.15},
+        gameplay=False,
+    ),
+    2: AscensionModifier(
+        level=2, name="Unstable Ground",
+        penalty="Cave-in chance +3%",
+        reward="Event chance +20%",
+        effects={"cave_in_bonus": 0.03, "event_chance_multiplier": 0.20},
+        gameplay=False,
+    ),
+    3: AscensionModifier(
+        level=3, name="Hungry Darkness",
+        penalty="Luminosity drains 25% faster",
+        reward="Rare events 50% more common",
+        effects={"luminosity_drain_multiplier": 0.25, "rare_event_multiplier": 0.50},
+        gameplay=False,
+    ),
+    4: AscensionModifier(
+        level=4, name="Boss Rage",
+        penalty="Bosses gain a secret second phase",
+        reward="Boss payouts +50%",
+        effects={"boss_phase2": True, "boss_payout_multiplier": 0.50},
+        gameplay=True,
+    ),
+    5: AscensionModifier(
+        level=5, name="Erosion",
+        penalty="Decay rate +50%",
+        reward="Milestone rewards +50%",
+        effects={"decay_multiplier": 0.50, "milestone_multiplier": 0.50},
+        gameplay=False,
+    ),
+    6: AscensionModifier(
+        level=6, name="Corruption",
+        penalty="Each dig rolls a random micro-modifier",
+        reward="Artifact find rate doubled",
+        effects={"corruption": True, "artifact_multiplier": 2.0},
+        gameplay=True,
+    ),
+    7: AscensionModifier(
+        level=7, name="Event Chains",
+        penalty="Events can chain (same or higher rarity)",
+        reward="Chained events give 1.5x JC",
+        effects={"event_chain": True, "chain_jc_multiplier": 1.5},
+        gameplay=True,
+    ),
+    8: AscensionModifier(
+        level=8, name="Mutations",
+        penalty="1 forced random mutation per prestige run",
+        reward="Choose 1 mutation from 3 (may be positive)",
+        effects={"mutations": True},
+        gameplay=True,
+    ),
+    9: AscensionModifier(
+        level=9, name="Cruel Echoes",
+        penalty="Safe event options now have 10% failure chance",
+        reward="Legendary events 3x more common",
+        effects={"cruel_safe_fail": 0.10, "legendary_event_multiplier": 3.0},
+        gameplay=True,
+    ),
+    10: AscensionModifier(
+        level=10, name="The Endless",
+        penalty="Paid dig costs +50%",
+        reward="Score multiplier 2x",
+        effects={"paid_dig_cost_multiplier": 0.50, "score_multiplier": 2.0},
+        gameplay=False,
+    ),
+}
+
+EVENT_CHAIN_CHANCE: float = 0.25
+EVENT_CHAIN_JC_MULTIPLIER: float = 1.5
+
+
+# ---------------------------------------------------------------------------
+# Mutation Definitions (P8+)
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class MutationDef:
+    """A permanent run quirk assigned at prestige (P8+)."""
+    id: str
+    name: str
+    description: str
+    positive: bool
+    effects: dict
+
+
+MUTATIONS_POOL: list[MutationDef] = [
+    # Positive
+    MutationDef("cave_in_loot", "Lucky Rubble", "Cave-ins have 30% chance to drop 1-3 JC", True,
+                {"cave_in_loot_chance": 0.30, "cave_in_loot_min": 1, "cave_in_loot_max": 3}),
+    MutationDef("dark_sight", "Dark Sight", "No luminosity penalty to cave-in chance", True,
+                {"ignore_luminosity_cave_in": True}),
+    MutationDef("thick_skin", "Thick Skin", "First cave-in each day is prevented", True,
+                {"daily_cave_in_shield": True}),
+    MutationDef("treasure_sense", "Treasure Sense", "+25% artifact find chance", True,
+                {"artifact_chance_bonus": 0.25}),
+    MutationDef("event_magnet", "Event Magnet", "+30% event encounter rate", True,
+                {"event_chance_bonus": 0.30}),
+    MutationDef("second_wind", "Second Wind", "After cave-in, next dig gets +3 advance", True,
+                {"post_cave_in_advance": 3}),
+    # Negative
+    MutationDef("brittle_walls", "Brittle Walls", "Cave-in block loss +2", False,
+                {"cave_in_loss_bonus": 2}),
+    MutationDef("heavy_air", "Heavy Air", "Advance max -1", False,
+                {"advance_max_penalty": 1}),
+    MutationDef("jinxed", "Jinxed", "5% chance any dig yields 0 JC", False,
+                {"zero_jc_chance": 0.05}),
+    MutationDef("paranoia", "Paranoia", "Sabotage damage +25%", False,
+                {"sabotage_damage_bonus": 0.25}),
+    MutationDef("restless", "Restless", "Free dig cooldown +1 hour", False,
+                {"cooldown_bonus_seconds": 3600}),
+    MutationDef("fragile", "Fragile", "Injuries last 1 extra dig", False,
+                {"injury_duration_bonus": 1}),
+]
+
+MUTATION_BY_ID: dict[str, MutationDef] = {m.id: m for m in MUTATIONS_POOL}
+
+
+# ---------------------------------------------------------------------------
+# Corruption Effects (P6+)
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class CorruptionEffect:
+    """A one-dig micro-modifier rolled at P6+."""
+    id: str
+    description: str
+    weird: bool           # True = chaotic/humorous, False = straightforward negative
+    effects: dict
+
+
+CORRUPTION_EFFECTS: list[CorruptionEffect] = [
+    # Bad (80% weight)
+    CorruptionEffect("corrupt_jc", "-1 JC this dig", False, {"jc_penalty": 1}),
+    CorruptionEffect("corrupt_cave_in", "+3% cave-in this dig", False, {"cave_in_bonus": 0.03}),
+    CorruptionEffect("corrupt_advance", "-1 advance this dig", False, {"advance_penalty": 1}),
+    CorruptionEffect("corrupt_luminosity", "-5 extra luminosity drain", False, {"luminosity_drain": 5}),
+    CorruptionEffect("corrupt_no_artifact", "No artifact roll this dig", False, {"skip_artifact": True}),
+    CorruptionEffect("corrupt_risky", "Risky event success -5%", False, {"risky_penalty": 0.05}),
+    # Weird (20% weight)
+    CorruptionEffect("corrupt_double_half", "JC doubled then halved (net loss on odd)", True,
+                     {"double_half_jc": True}),
+    CorruptionEffect("corrupt_ominous_name", "Tunnel name temporarily changes to something ominous", True,
+                     {"ominous_name": True}),
+    CorruptionEffect("corrupt_fixed_jc", "You find exactly 1 JC. Always 1. No more, no less.", True,
+                     {"fixed_jc": 1}),
+    CorruptionEffect("corrupt_echo", "Your pickaxe swings echo twice. Advance is rolled twice, take the lower.", True,
+                     {"min_advance_roll": True}),
+]
+
+CORRUPTION_BAD: list[CorruptionEffect] = [c for c in CORRUPTION_EFFECTS if not c.weird]
+CORRUPTION_WEIRD: list[CorruptionEffect] = [c for c in CORRUPTION_EFFECTS if c.weird]
+
+OMINOUS_TUNNEL_NAMES: list[str] = [
+    "The Descent That Never Ends",
+    "Tomb of the Last Digger",
+    "WHERE ARE YOU GOING",
+    "The Walls Are Watching",
+    "it knows your name",
+    "Tunnel of Regret",
+    "The Hungry Dark",
+    "Something Lives Here",
+]
+
+
+# ---------------------------------------------------------------------------
+# Boss Phase 2 Definitions (P4+, Sekiro / Mythic Lura style)
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class BossPhase2Def:
+    """Secret second phase for bosses at prestige 4+."""
+    depth: int
+    name: str
+    title: str
+    dialogue: list[str]
+    win_odds_penalty: float   # additional penalty to win odds (-0.10 = -10%)
+
+
+BOSS_PHASE2: dict[int, BossPhase2Def] = {
+    25: BossPhase2Def(
+        depth=25,
+        name="Grothak the Undying",
+        title="Skeletal Wrath",
+        dialogue=[
+            "You... thought that would STOP me?! I shed my flesh like a coat!",
+            "Back again, and so am I. Bones don't tire, worm.",
+            "At this point my chiropractor is just a necromancer.",
+        ],
+        win_odds_penalty=-0.10,
+    ),
+    50: BossPhase2Def(
+        depth=50,
+        name="Crystalia Shattered",
+        title="The Thousand Reflections",
+        dialogue=[
+            "You broke me! But every shard is a NEW me! Geometry is ETERNAL!",
+            "Which one is real? Trick question. They ALL are.",
+            "I have become a fractal. Please send help.",
+        ],
+        win_odds_penalty=-0.10,
+    ),
+    75: BossPhase2Def(
+        depth=75,
+        name="Magmus Unbound",
+        title="The Living Eruption",
+        dialogue=[
+            "My SHELL was holding me BACK! I AM THE VOLCANO NOW!",
+            "Cancel my PTO. This is PERSONAL.",
+            "I'm literally just lava in a vaguely angry shape at this point.",
+        ],
+        win_odds_penalty=-0.10,
+    ),
+    100: BossPhase2Def(
+        depth=100,
+        name="The Void Unraveled",
+        title="What Lies Beyond Nothing",
+        dialogue=[
+            "You defeated nothing. I AM nothing. How do you kill nothing?",
+            "I un-existed. Now I un-un-exist. The math checks out.",
+            "I'm a philosophical problem now. Good luck.",
+        ],
+        win_odds_penalty=-0.12,
+    ),
+    150: BossPhase2Def(
+        depth=150,
+        name="The Sporeling Collective",
+        title="We Are Legion",
+        dialogue=[
+            "You killed one. We are MILLIONS. The mycelium REMEMBERS.",
+            "We grew back. We always grow back. That's kind of our thing.",
+            "Would you like to become one of us? The benefits are excellent.",
+        ],
+        win_odds_penalty=-0.12,
+    ),
+    200: BossPhase2Def(
+        depth=200,
+        name="Chronofrost Paradox",
+        title="The Time That Bites Back",
+        dialogue=[
+            "You defeated me five minutes ago. I came back to before you did.",
+            "This is the 47th time we've done this. You just don't remember.",
+            "I've already won. I just haven't told you yet.",
+        ],
+        win_odds_penalty=-0.15,
+    ),
+    275: BossPhase2Def(
+        depth=275,
+        name="The Name Reclaimed",
+        title="[DATA EXPUNGED]",
+        dialogue=[
+            "I remember my name now. It's yours.",
+            "We are the same person. I'm just the part you buried.",
+            "Take my hand. Let's dig together. Forever.",
+        ],
+        win_odds_penalty=-0.15,
+    ),
 }
 
 
@@ -2726,6 +3785,264 @@ EVENT_ASCII_ART: dict[str, str] = {
         "..###*****####.............\n"
         "............................"
     ),
+    # --- Prestige Expansion Events ---
+    "creeper_ambush": (
+        "###########################\n"
+        "#.........................#\n"
+        "#..@.........SssSss.......#\n"
+        "#...........[#_#]........#\n"
+        "#............TNT..........#\n"
+        "###########################"
+    ),
+    "abandoned_minecart": (
+        "###########################\n"
+        "#........=rails=..........#\n"
+        "#..@.....[cart]>..........#\n"
+        "#........=rails=..........#\n"
+        "###########################"
+    ),
+    "enchanting_table": (
+        "***************************\n"
+        "*.......*..*..*..*..*.....*\n"
+        "*..@......[E].............*\n"
+        "*.......*..*..*..*..*.....*\n"
+        "*........[book]...........*\n"
+        "***************************"
+    ),
+    "villager_trade": (
+        "###########################\n"
+        "#.........................#\n"
+        "#..@.........V............#\n"
+        "#.........[====]..........#\n"
+        "#.........'Hmm.'..........#\n"
+        "###########################"
+    ),
+    "enderman_stare": (
+        "***************************\n"
+        "*...........|..............*\n"
+        "*..@.......[ ]............*\n"
+        "*...........|..............*\n"
+        "*.........*..*.*..........*\n"
+        "***************************"
+    ),
+    "mob_spawner": (
+        "***************************\n"
+        "*....[=]..{X}...[=]......*\n"
+        "*..@......|s|.............*\n"
+        "*........s.s.s............*\n"
+        "***************************"
+    ),
+    "witch_cauldron": (
+        "###########################\n"
+        "#..........~~~............#\n"
+        "#..@......(o o)...........#\n"
+        "#.........[===]...........#\n"
+        "#......[r] [b] [g]........#\n"
+        "###########################"
+    ),
+    "azurite_deposit": (
+        "***************************\n"
+        "*..<><><><><><>...........*\n"
+        "*..@...<><><>..AZURITE...*\n"
+        "*..<><><><><><>...........*\n"
+        "***************************"
+    ),
+    "crawler_breakdown": (
+        "***************************\n"
+        "*......[===||===].........*\n"
+        "*..@...[  rig   ]..!!....*\n"
+        "*......[===||===].........*\n"
+        "*..........sparks.........*\n"
+        "***************************"
+    ),
+    "fossil_cache": (
+        "***************************\n"
+        "*.......><>..<>............*\n"
+        "*..@....()..><>............*\n"
+        "*.......><>..<>............*\n"
+        "***************************"
+    ),
+    "breach_encounter": (
+        "............................\n"
+        "..####\\  /####.............\n"
+        "..@....\\/ BREACH...........\n"
+        "..####/\\  ####.............\n"
+        "............................"
+    ),
+    "vaal_side_area": (
+        "***..........***...........\n"
+        "*..########..............*\n"
+        "*..@..[VAAL]..$$.........*\n"
+        "*..########..............*\n"
+        "***..........***...........\n"
+    ),
+    "syndicate_ambush": (
+        "###########################\n"
+        "#......v..v..v............#\n"
+        "#..@...C..C..C............#\n"
+        "#......'toll'..............#\n"
+        "###########################"
+    ),
+    "delve_smuggler": (
+        "###.......####.............\n"
+        "#..@.....#    #............\n"
+        "#........# ?? #............\n"
+        "#........#    #............\n"
+        "###.......####............."
+    ),
+    "brann_bronzebeard": (
+        "###########################\n"
+        "#.........................#\n"
+        "#..@.........B............#\n"
+        "#........./beard\\........#\n"
+        "#.......'Well met!'......#\n"
+        "###########################"
+    ),
+    "earthen_cache": (
+        "~~~~~~~~~~~~~~~~~~~~~~~~~~~\n"
+        "~.........................~\n"
+        "~..@.......[==]...........~\n"
+        "~.........{rune}..........~\n"
+        "~~~~~~~~~~~~~~~~~~~~~~~~~~~"
+    ),
+    "campfire_rest": (
+        "###########################\n"
+        "#.........................#\n"
+        "#..@........*^*...........#\n"
+        "#...........|.|...........#\n"
+        "#........[bedroll]........#\n"
+        "###########################"
+    ),
+    "zekvir_shadow": (
+        "............................\n"
+        "...../\\  /\\  /\\............\n"
+        "..@.( o  o  o  o )........\n"
+        ".....\\/  \\/  \\/............\n"
+        "............................"
+    ),
+    "dark_rider": (
+        "~~~~~~~~~~~~~~~~~~~~~~~~~~~\n"
+        "~.........../|\\...........~\n"
+        "~..@.......[R]............~\n"
+        "~.........//|\\\\..........~\n"
+        "~........[horse]..........~\n"
+        "~~~~~~~~~~~~~~~~~~~~~~~~~~~"
+    ),
+    "titan_relic": (
+        "***************************\n"
+        "*........[?????]...........*\n"
+        "*..@.....(R)(B)(G)........*\n"
+        "*........[?????]...........*\n"
+        "***************************"
+    ),
+    "candle_glow": (
+        "............................\n"
+        "...........*..............\n"
+        "..@........|..............\n"
+        "..........[=]..............\n"
+        "............................"
+    ),
+    "olympian_boon": (
+        "...........\\|/..............\n"
+        "............*...............\n"
+        "..@......./|\\...............\n"
+        "..........CHOOSE............\n"
+        "............................"
+    ),
+    "charon_toll": (
+        "###########################\n"
+        "#.....~~~~~~~~~~~~........#\n"
+        "#..@..[__boat__]..C......#\n"
+        "#.....~~~~~~~~~~~~........#\n"
+        "###########################"
+    ),
+    "sisyphus_boulder": (
+        "###########################\n"
+        "#................/........#\n"
+        "#..@..........(O)/........#\n"
+        "#.............m./..........#\n"
+        "###########################"
+    ),
+    "infernal_gate": (
+        "###########################\n"
+        "#......[=GATE=]...........#\n"
+        "#..@...[chains]...........#\n"
+        "#......[=GATE=]...........#\n"
+        "###########################"
+    ),
+    "riki_ambush": (
+        "............................\n"
+        "..........  ~  ............\n"
+        "..@....... ~ ...............\n"
+        "..........  ~  ............\n"
+        "............................"
+    ),
+    "bounty_rune": (
+        "###########################\n"
+        "#.........................#\n"
+        "#..@........(*)...........#\n"
+        "#.........bounty..........#\n"
+        "###########################"
+    ),
+    "aghanim_trial": (
+        "***************************\n"
+        "*.........|||..............*\n"
+        "*..@......|A|..............*\n"
+        "*.........|||..............*\n"
+        "*.......'TRIAL'............*\n"
+        "***************************"
+    ),
+    "tormentor_encounter": (
+        "###########################\n"
+        "#.......zz[===]zz.........#\n"
+        "#..@...zz[     ]zz........#\n"
+        "#.......zz[===]zz.........#\n"
+        "#........TORMENTOR........#\n"
+        "###########################"
+    ),
+    "neutral_item_drop": (
+        "###########################\n"
+        "#.........................#\n"
+        "#..@........x.............#\n"
+        "#..........[?]............#\n"
+        "###########################"
+    ),
+    "gambling_den": (
+        "###########################\n"
+        "#.....G..G..G..............#\n"
+        "#..@..[table].............#\n"
+        "#.....[cards].............#\n"
+        "#......$$$$...............#\n"
+        "###########################"
+    ),
+    "item_goblin": (
+        "###########################\n"
+        "#.........................#\n"
+        "#..@..........g>>>........#\n"
+        "#...........$.$.$........#\n"
+        "###########################"
+    ),
+    "mystery_lever": (
+        "###########################\n"
+        "#.........................#\n"
+        "#..@........|/............#\n"
+        "#........[PULL ME]........#\n"
+        "###########################"
+    ),
+    "identity_thief": (
+        "###########################\n"
+        "#.........................#\n"
+        "#..@..........@...........#\n"
+        "#..........'who?'.........#\n"
+        "###########################"
+    ),
+    "neow_blessing": (
+        "...........***.............\n"
+        "..........*...*............\n"
+        "..@......* ?? *............\n"
+        "..........*...*............\n"
+        "...........***............."
+    ),
 }
 
 
@@ -2747,6 +4064,12 @@ EVENT_POOL: list[dict] = [
             "duration_digs": e.buff_on_success.duration_digs,
             "effect": dict(e.buff_on_success.effect),
         } if e.buff_on_success else None,
+        "desperate_option": _choice_to_dict(e.desperate_option) if e.desperate_option else None,
+        "boon_options": [
+            {"id": b.id, "name": b.name, "duration_digs": b.duration_digs, "effect": dict(b.effect)}
+            for b in e.boon_options
+        ] if e.boon_options else None,
+        "min_prestige": e.min_prestige,
     }
     for e in RANDOM_EVENTS
 ]

@@ -261,6 +261,7 @@ class SchemaManager:
             ("add_solo_grinder_columns", self._migration_add_solo_grinder_columns),
             ("create_dig_system_tables", self._migration_create_dig_system_tables),
             ("dig_expansion_luminosity_and_buffs", self._migration_dig_expansion),
+            ("dig_prestige_events_columns", self._migration_dig_prestige_events),
         ]
 
     # --- Migrations ---
@@ -1918,3 +1919,12 @@ class SchemaManager:
         """Add luminosity and temp buff columns for the dig expansion."""
         self._add_column_if_not_exists(cursor, "tunnels", "luminosity", "INTEGER NOT NULL DEFAULT 100")
         self._add_column_if_not_exists(cursor, "tunnels", "temp_buffs", "TEXT")
+
+    def _migration_dig_prestige_events(self, cursor) -> None:
+        """Add prestige run tracking and mutation columns for the dig prestige/events expansion."""
+        self._add_column_if_not_exists(cursor, "tunnels", "best_run_score", "INTEGER NOT NULL DEFAULT 0")
+        self._add_column_if_not_exists(cursor, "tunnels", "current_run_jc", "INTEGER NOT NULL DEFAULT 0")
+        self._add_column_if_not_exists(cursor, "tunnels", "current_run_artifacts", "INTEGER NOT NULL DEFAULT 0")
+        self._add_column_if_not_exists(cursor, "tunnels", "current_run_events", "INTEGER NOT NULL DEFAULT 0")
+        self._add_column_if_not_exists(cursor, "tunnels", "total_prestige_score", "INTEGER NOT NULL DEFAULT 0")
+        self._add_column_if_not_exists(cursor, "tunnels", "mutations", "TEXT")

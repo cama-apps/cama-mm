@@ -149,6 +149,31 @@ def get_layer_thumbnail(layer_name: str) -> discord.File | None:
         return None
 
 
+def get_event_art(event_id: str, layer_name: str) -> discord.File | None:
+    """Return a discord.File for event art.
+
+    Fallback chain: custom file on disk → PIL pixel art → None.
+    Naming: assets/dig/events/{event_id}.png (or .gif)
+    """
+    # 1. Custom art on disk
+    asset_path = _find_asset(ASSETS_DIR / "events", event_id)
+    if asset_path:
+        data = _load_cached_bytes(asset_path)
+        if data:
+            ext = asset_path.suffix
+            return _file_from_bytes(data, f"event_{event_id}{ext}")
+
+    # 2. PIL fallback
+    try:
+        from utils.dig_drawing import draw_event_scene, has_event_scene
+        if has_event_scene(event_id):
+            buf = draw_event_scene(layer_name, event_id)
+            return _file_from_buf(buf, f"event_{event_id}.png")
+    except Exception as e:
+        logger.debug("PIL event art fallback failed: %s", e)
+    return None
+
+
 def get_item_art(item_id: str) -> discord.File | None:
     """Return a discord.File for an item icon. No PIL fallback."""
     asset_path = _find_asset(ASSETS_DIR / "items", item_id)

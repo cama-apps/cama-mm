@@ -20,6 +20,8 @@ class DigRepository(BaseRepository, IDigRepository):
         "prestige_level", "trap_active", "trap_free_today", "insured_until",
         "reinforced_until", "paid_digs_today", "revenge_target", "revenge_until",
         "hard_hat_charges", "luminosity", "boss_attempts",
+        "best_run_score", "current_run_jc", "current_run_artifacts",
+        "current_run_events", "total_prestige_score",
     })
 
     @staticmethod
@@ -673,3 +675,20 @@ class DigRepository(BaseRepository, IDigRepository):
     def get_top_tunnels(self, guild_id: int, limit: int = 10) -> list[dict]:
         """Alias for get_leaderboard."""
         return self.get_leaderboard(guild_id, limit)
+
+    def get_hall_of_fame(self, guild_id: int) -> list[dict]:
+        """Get top 10 tunnels by best_run_score for the guild."""
+        gid = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT discord_id, tunnel_name, prestige_level, best_run_score
+                FROM tunnels
+                WHERE guild_id = ? AND best_run_score > 0
+                ORDER BY best_run_score DESC
+                LIMIT 10
+                """,
+                (gid,),
+            )
+            return [dict(row) for row in cursor.fetchall()]

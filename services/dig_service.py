@@ -16,14 +16,19 @@ from repositories.player_repository import PlayerRepository
 from services.dig_constants import (
     ACHIEVEMENTS,
     ARTIFACT_POOL,
+    ASCENSION_MODIFIERS,
     BOSS_ASCII,
     BOSS_BOUNDARIES,
     BOSS_DIALOGUE,
     BOSS_NAMES,
     BOSS_ODDS,
     BOSS_PAYOUTS,
+    BOSS_PHASE2,
     CONSUMABLE_ITEMS,
+    CORRUPTION_BAD,
+    CORRUPTION_WEIRD,
     DIG_TIPS,
+    EVENT_CHAIN_CHANCE,
     EVENT_POOL,
     FREE_DIG_COOLDOWN,
     INJURY_SLOW_COOLDOWN,
@@ -43,6 +48,8 @@ from services.dig_constants import (
     MAX_INVENTORY_SIZE,
     MAX_PRESTIGE,
     MILESTONES,
+    MUTATION_BY_ID,
+    MUTATIONS_POOL,
     PAID_DIG_COSTS,
     PICKAXE_TIERS,
     PRESTIGE_PERKS,
@@ -82,7 +89,12 @@ class DigService:
             return 0
         now = int(time.time())
         elapsed = now - tunnel["last_dig_at"]
-        remaining = FREE_DIG_COOLDOWN - elapsed
+        cooldown = FREE_DIG_COOLDOWN
+        # Mutation: restless — extra cooldown
+        mutations = self._get_mutations(tunnel)
+        mutation_fx = self._apply_mutation_effects(mutations)
+        cooldown += int(mutation_fx.get("cooldown_bonus_seconds", 0))
+        remaining = cooldown - elapsed
         # Check for stun from injury
         injury = json.loads(tunnel["injury_state"]) if tunnel.get("injury_state") else None
         if injury and injury.get("type") == "slower_cooldown":
@@ -160,9 +172,10 @@ class DigService:
         return None
 
     def _at_boss_boundary(self, depth: int, boss_progress: dict) -> int | None:
-        """Return the boss boundary if depth is exactly at one and boss is active."""
+        """Return the boss boundary if depth is exactly at one and boss is active or in phase 1."""
         for b in BOSS_BOUNDARIES:
-            if depth == b - 1 and boss_progress.get(str(b)) == "active":
+            status = boss_progress.get(str(b))
+            if depth == b - 1 and status in ("active", "phase1_defeated"):
                 return b
         return None
 
@@ -290,6 +303,144 @@ class DigService:
         }
         self.dig_repo.update_tunnel(discord_id, guild_id, temp_buffs=json.dumps(payload))
 
+    # ------------------------------------------------------------------
+    # Ascension System Helpers
+    # ------------------------------------------------------------------
+
+    def _get_ascension_effects(self, prestige_level: int) -> dict:
+        """Return cumulative ascension effects for all active levels."""
+        effects: dict = {}
+        for lvl in range(1, prestige_level + 1):
+            mod = ASCENSION_MODIFIERS.get(lvl)
+            if mod is None:
+                continue
+            for key, value in mod.effects.items():
+                if isinstance(value, bool):
+                    effects[key] = value
+                elif isinstance(value, (int, float)):
+                    effects[key] = effects.get(key, 0) + value
+        return effects
+
+    def _roll_corruption(self, prestige_level: int) -> dict | None:
+        """Roll a corruption effect for P6+. Returns effect dict or None."""
+        if prestige_level < 6:
+            return None
+        if random.random() < 0.80:
+            effect = random.choice(CORRUPTION_BAD)
+        else:
+            effect = random.choice(CORRUPTION_WEIRD)
+        return {"id": effect.id, "description": effect.description,
+                "weird": effect.weird, "effects": dict(effect.effects)}
+
+    def _get_mutations(self, tunnel: dict) -> list[dict]:
+        """Get active mutations from tunnel JSON."""
+        raw = tunnel.get("mutations")
+        if not raw:
+            return []
+        try:
+            return json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return []
+
+    def _apply_mutation_effects(self, mutations: list[dict]) -> dict:
+        """Return combined mutation effects dict."""
+        combined: dict = {}
+        for m in mutations:
+            mut_def = MUTATION_BY_ID.get(m.get("id", ""))
+            if mut_def is None:
+                continue
+            for key, value in mut_def.effects.items():
+                if isinstance(value, bool):
+                    combined[key] = value
+                elif isinstance(value, (int, float)):
+                    combined[key] = combined.get(key, 0) + value
+        return combined
+
+    def _roll_mutations_for_prestige(self) -> tuple[dict, list[dict]]:
+        """Roll mutations for P8+: 1 forced random + 3 choices to pick 1 from."""
+        pool = list(MUTATIONS_POOL)
+        random.shuffle(pool)
+        forced = pool[0]
+        remaining = [m for m in pool[1:] if m.id != forced.id]
+        choices = remaining[:3]
+        forced_dict = {"id": forced.id, "name": forced.name,
+                       "description": forced.description, "positive": forced.positive}
+        choices_dicts = [{"id": m.id, "name": m.name,
+                          "description": m.description, "positive": m.positive}
+                         for m in choices]
+        return forced_dict, choices_dicts
+
+    def _chain_event(self, depth: int, prestige_level: int,
+                     trigger_rarity: str, luminosity: int = 100) -> dict | None:
+        """P7+: 25% chance to chain another event of same or higher rarity."""
+        if prestige_level < 7:
+            return None
+        if random.random() >= EVENT_CHAIN_CHANCE:
+            return None
+        rarity_order = ["common", "uncommon", "rare", "legendary"]
+        min_idx = rarity_order.index(trigger_rarity) if trigger_rarity in rarity_order else 0
+        allowed_rarities = set(rarity_order[min_idx:])
+        eligible = [
+            e for e in EVENT_POOL
+            if depth >= (e.get("min_depth") or 0)
+            and (e.get("max_depth") is None or depth <= e["max_depth"])
+            and e.get("rarity", "common") in allowed_rarities
+            and prestige_level >= e.get("min_prestige", 0)
+        ]
+        if not eligible:
+            return None
+        weights_map = {"common": 70, "uncommon": 20, "rare": 8, "legendary": 2}
+        weighted = [(e, weights_map.get(e.get("rarity", "common"), 70)) for e in eligible]
+        events, w = zip(*weighted)
+        event = random.choices(events, weights=w, k=1)[0]
+        return {
+            "id": event["id"],
+            "name": event["name"],
+            "description": event["description"],
+            "complexity": event.get("complexity", "choice"),
+            "safe_option": event.get("safe_option"),
+            "risky_option": event.get("risky_option"),
+            "desperate_option": event.get("desperate_option"),
+            "boon_options": event.get("boon_options"),
+            "buff_on_success": event.get("buff_on_success"),
+            "rarity": event.get("rarity", "common"),
+            "chained": True,
+        }
+
+    def _calculate_run_score(self, tunnel: dict) -> int:
+        """Calculate prestige run score."""
+        depth = tunnel.get("depth", 0) or 0
+        boss_progress = self._get_boss_progress(tunnel)
+        bosses_defeated = sum(1 for v in boss_progress.values() if v == "defeated")
+        run_jc = tunnel.get("current_run_jc", 0) or 0
+        run_artifacts = tunnel.get("current_run_artifacts", 0) or 0
+        run_events = tunnel.get("current_run_events", 0) or 0
+        prestige_level = tunnel.get("prestige_level", 0) or 0
+
+        base = (depth * 1 + bosses_defeated * 50
+                + int(run_jc * 0.5) + run_artifacts * 25 + run_events * 10)
+        multiplier = 1 + prestige_level * 0.1
+        # P10 "The Endless" doubles score multiplier
+        ascension = self._get_ascension_effects(prestige_level)
+        score_mult = ascension.get("score_multiplier", 0)
+        if score_mult:
+            multiplier += score_mult
+        return int(base * multiplier)
+
+    def get_hall_of_fame(self, guild_id) -> dict:
+        """Get guild leaderboard of best prestige run scores."""
+        rows = self.dig_repo.get_hall_of_fame(guild_id)
+        entries = []
+        for row in rows:
+            r = dict(row) if not isinstance(row, dict) else row
+            entries.append({
+                "discord_id": r.get("discord_id"),
+                "tunnel_name": r.get("tunnel_name", "Unknown"),
+                "prestige_level": r.get("prestige_level", 0),
+                "best_run_score": r.get("best_run_score", 0),
+            })
+        return self._ok(entries=entries)
+
     def _error(self, msg: str) -> dict:
         """Return a standard error result."""
         return {"success": False, "error": msg}
@@ -373,7 +524,12 @@ class DigService:
         if self._has_relic(tunnel["discord_id"], guild_id, "frozen_clock"):
             relic_multiplier *= 0.50
 
-        total_decay = int(base_rate * days_elapsed * helper_multiplier * relic_multiplier)
+        # P5 ascension: decay rate multiplier
+        prestige_lvl = tunnel.get("prestige_level", 0) or 0
+        asc_decay = self._get_ascension_effects(prestige_lvl).get("decay_multiplier", 0)
+        ascension_decay_mult = 1.0 + asc_decay if asc_decay else 1.0
+
+        total_decay = int(base_rate * days_elapsed * helper_multiplier * relic_multiplier * ascension_decay_mult)
 
         if total_decay <= 0:
             return result
@@ -519,6 +675,11 @@ class DigService:
 
                 cost_index = min(paid_count, len(PAID_DIG_COSTS) - 1)
                 paid_dig_cost = PAID_DIG_COSTS[cost_index]
+                # P10 ascension: paid dig costs +50%
+                prestige_lvl = tunnel.get("prestige_level", 0) or 0
+                asc = self._get_ascension_effects(prestige_lvl)
+                if asc.get("paid_dig_cost_multiplier"):
+                    paid_dig_cost = int(paid_dig_cost * (1 + asc["paid_dig_cost_multiplier"]))
 
                 balance = self.player_repo.get_balance(discord_id, guild_id)
                 if balance < paid_dig_cost:
@@ -680,8 +841,26 @@ class DigService:
         buff_cavein_reduction = buff_effects.get("cave_in_reduction", 0.0)
         self._decrement_buff(discord_id, guild_id, tunnel)
 
-        # 8. Prestige perks and relics
+        # 8. Prestige perks, relics, and ASCENSION
         perks = self._get_prestige_perks(tunnel)
+        prestige_level = tunnel.get("prestige_level", 0) or 0
+        ascension = self._get_ascension_effects(prestige_level)
+
+        # 8a. Roll corruption (P6+)
+        corruption = self._roll_corruption(prestige_level)
+
+        # 8b. Get mutation effects (P8+)
+        mutations = self._get_mutations(tunnel)
+        mutation_fx = self._apply_mutation_effects(mutations)
+
+        # 8c. Apply ascension luminosity drain bonus (P3+)
+        extra_drain = ascension.get("luminosity_drain_multiplier", 0)
+        if extra_drain > 0 and lum_info["drained"] > 0:
+            bonus_drain = int(lum_info["drained"] * extra_drain)
+            luminosity = max(0, luminosity - bonus_drain)
+            lum_info["luminosity_after"] = luminosity
+            lum_info["drained"] += bonus_drain
+            self.dig_repo.update_tunnel(discord_id, guild_id, luminosity=luminosity)
 
         pickaxe_tier = tunnel.get("pickaxe_tier", 0) or 0
         pickaxe_data = PICKAXE_TIERS[pickaxe_tier] if pickaxe_tier < len(PICKAXE_TIERS) else {}
@@ -705,12 +884,20 @@ class DigService:
         mole_claws_bonus = 1 if self._has_relic(discord_id, guild_id, "mole_claws") else 0
         magma_heart_bonus = 1 if self._has_relic(discord_id, guild_id, "magma_heart") else 0
 
-        # 9. Cave-in check
+        # 9. Cave-in check (with ascension + corruption + mutation modifiers)
         hard_hat_charges = tunnel.get("hard_hat_charges", 0) or 0
         cave_in_chance = layer.get("cave_in_pct", 0.10)
+        # Ascension cave-in bonus
+        cave_in_chance += ascension.get("cave_in_bonus", 0)
+        # Corruption cave-in bonus (one-dig)
+        if corruption:
+            cave_in_chance += corruption["effects"].get("cave_in_bonus", 0)
         # dark_adaptation perk: dim luminosity has no cave-in penalty
         lum_cave_bonus = self._luminosity_cave_in_bonus(luminosity)
         if "dark_adaptation" in perks and luminosity >= LUMINOSITY_DIM and luminosity < LUMINOSITY_BRIGHT:
+            lum_cave_bonus = 0.0
+        # Mutation: dark_sight ignores luminosity cave-in penalty
+        if mutation_fx.get("ignore_luminosity_cave_in"):
             lum_cave_bonus = 0.0
         cave_in_chance += lum_cave_bonus
         cave_in_chance -= perk_cavein_reduction
@@ -720,6 +907,14 @@ class DigService:
         if has_hard_hat:
             cave_in_chance *= 0.5
         cave_in_chance = max(0.01, cave_in_chance)
+
+        # Mutation: thick_skin — first cave-in each day prevented
+        thick_skin_saved = False
+        if mutation_fx.get("daily_cave_in_shield"):
+            shield_date = tunnel.get("thick_skin_date")
+            if shield_date != today:
+                cave_in_chance = 0.0
+                thick_skin_saved = True
 
         # Hard hat charges prevent cave-in entirely
         if hard_hat_charges > 0:
@@ -732,12 +927,40 @@ class DigService:
         if cave_in:
             # 10. Cave-in consequences
             block_loss = random.randint(3, 8)
+            # Mutation: brittle_walls — extra block loss
+            block_loss += int(mutation_fx.get("cave_in_loss_bonus", 0))
             # Grappling hook prevents block loss
             if has_grappling_hook:
                 block_loss = 0
             new_depth = max(0, depth_before - block_loss)
 
+            # Mutation: thick_skin — record shield used
+            if thick_skin_saved:
+                self.dig_repo.update_tunnel(discord_id, guild_id, thick_skin_date=today)
+
+            # Mutation: cave_in_loot — chance to drop JC on cave-in
+            cave_in_jc = 0
+            loot_chance = mutation_fx.get("cave_in_loot_chance", 0)
+            if loot_chance > 0 and random.random() < loot_chance:
+                loot_min = int(mutation_fx.get("cave_in_loot_min", 1))
+                loot_max = int(mutation_fx.get("cave_in_loot_max", 3))
+                cave_in_jc = random.randint(loot_min, loot_max)
+                self.player_repo.add_balance(discord_id, guild_id, cave_in_jc)
+
+            # Mutation: second_wind — flag for next dig advance bonus
+            if mutation_fx.get("post_cave_in_advance"):
+                self.dig_repo.update_tunnel(
+                    discord_id, guild_id,
+                    temp_buffs=json.dumps({
+                        "id": "second_wind", "name": "Second Wind",
+                        "digs_remaining": 1,
+                        "effect": {"advance_bonus": int(mutation_fx["post_cave_in_advance"])},
+                    }),
+                )
+
             # Random additional consequence
+            # Mutation: fragile — injuries last longer
+            injury_bonus = int(mutation_fx.get("injury_duration_bonus", 0))
             consequence_roll = random.random()
             if consequence_roll < 0.3:
                 # Stun: extra cooldown on next dig
@@ -746,7 +969,7 @@ class DigService:
                     "block_loss": block_loss,
                     "message": f"Cave-in! Lost {block_loss} blocks and you're stunned.",
                 }
-                injury = {"type": "slower_cooldown", "digs_remaining": 2}
+                injury = {"type": "slower_cooldown", "digs_remaining": 2 + injury_bonus}
                 self.dig_repo.update_tunnel(
                     discord_id, guild_id, injury_state=json.dumps(injury)
                 )
@@ -755,9 +978,9 @@ class DigService:
                 cave_in_detail = {
                     "type": "injury",
                     "block_loss": block_loss,
-                    "message": f"Cave-in! Lost {block_loss} blocks and you're injured (reduced digging for 3 digs).",
+                    "message": f"Cave-in! Lost {block_loss} blocks and you're injured (reduced digging for {3 + injury_bonus} digs).",
                 }
-                injury = {"type": "reduced_advance", "digs_remaining": 3}
+                injury = {"type": "reduced_advance", "digs_remaining": 3 + injury_bonus}
                 self.dig_repo.update_tunnel(
                     discord_id, guild_id, injury_state=json.dumps(injury)
                 )
@@ -822,16 +1045,29 @@ class DigService:
                 luminosity_info=lum_info,
             )
 
-        # 11. Roll advance (no cave-in)
+        # 11. Roll advance (no cave-in) — with ascension/corruption/mutation
         base_min = layer.get("advance_min", 1)
         base_max = layer.get("advance_max", 5)
         # the_endless perk: The Hollow advance becomes 1-2 instead of 1-1
         if "the_endless" in perks and layer_name == "The Hollow" and base_max <= 1:
             base_max = 2
-        advance = random.randint(base_min, base_max)
+        # Mutation: heavy_air reduces max advance
+        base_max = max(base_min, base_max - int(mutation_fx.get("advance_max_penalty", 0)))
+        # Corruption: min_advance_roll — roll twice take lower
+        if corruption and corruption["effects"].get("min_advance_roll"):
+            roll1 = random.randint(base_min, base_max)
+            roll2 = random.randint(base_min, base_max)
+            advance = min(roll1, roll2)
+        else:
+            advance = random.randint(base_min, base_max)
 
         # Apply modifiers
         advance += pickaxe_advance_bonus + mole_claws_bonus + buff_advance_bonus
+        # Ascension advance penalty
+        advance -= int(ascension.get("advance_penalty", 0))
+        # Corruption advance penalty (one-dig)
+        if corruption:
+            advance -= int(corruption["effects"].get("advance_penalty", 0))
         dynamite_bonus = 0
         if has_dynamite:
             dynamite_bonus = 5
@@ -868,18 +1104,34 @@ class DigService:
 
         new_depth = depth_before + advance
 
-        # 13. Roll JC loot
+        # 13. Roll JC loot (with ascension/corruption/mutation)
         jc_min = layer.get("jc_min", 1)
         jc_max = layer.get("jc_max", 3)
         jc_earned = random.randint(jc_min, jc_max)
-        jc_earned = int(jc_earned * (1.0 + perk_loot_bonus) * self._luminosity_jc_multiplier(luminosity)) + magma_heart_bonus
-        jc_earned = max(1, jc_earned)
+        # Ascension JC multiplier
+        jc_mult = 1.0 + perk_loot_bonus + ascension.get("jc_multiplier", 0)
+        jc_earned = int(jc_earned * jc_mult * self._luminosity_jc_multiplier(luminosity)) + magma_heart_bonus
+        # Corruption: fixed JC override
+        if corruption and corruption["effects"].get("fixed_jc") is not None:
+            jc_earned = corruption["effects"]["fixed_jc"]
+        # Corruption: double-half JC (lose 1 on odd amounts)
+        elif corruption and corruption["effects"].get("double_half_jc"):
+            jc_earned = max(0, jc_earned - (jc_earned % 2))  # odd numbers lose 1
+        # Corruption: JC penalty
+        elif corruption:
+            jc_earned -= int(corruption["effects"].get("jc_penalty", 0))
+        # Mutation: jinxed — 5% chance 0 JC
+        if mutation_fx.get("zero_jc_chance") and random.random() < mutation_fx["zero_jc_chance"]:
+            jc_earned = 0
+        else:
+            jc_earned = max(0, jc_earned)
 
-        # 14. Check milestones
+        # 14. Check milestones (with ascension milestone multiplier)
         milestone_bonus = 0
+        milestone_mult = 1.0 + ascension.get("milestone_multiplier", 0)
         for m_depth, m_reward in MILESTONES.items():
             if depth_before < m_depth <= new_depth:
-                milestone_bonus += m_reward
+                milestone_bonus += int(m_reward * milestone_mult)
 
         jc_earned += milestone_bonus
 
@@ -906,21 +1158,28 @@ class DigService:
 
         jc_earned += streak_bonus
 
-        # 16. Roll for artifact
-        artifact = self.roll_artifact(discord_id, guild_id, new_depth)
+        # 16. Roll for artifact (skip if corruption says so)
+        artifact = None
+        if not (corruption and corruption["effects"].get("skip_artifact")):
+            artifact = self.roll_artifact(discord_id, guild_id, new_depth)
 
-        # 17. Roll for random event (layer-specific rates, luminosity boosts)
+        # 17. Roll for random event (layer-specific rates, luminosity, ascension, mutations)
         event_rates = {
             "Dirt": 0.08, "Stone": 0.08, "Crystal": 0.10, "Magma": 0.10,
             "Abyss": 0.12, "Fungal Depths": 0.15, "Frozen Core": 0.12, "The Hollow": 0.18,
         }
         event_chance = event_rates.get(layer_name, 0.10)
+        # Ascension event chance boost
+        event_chance *= (1.0 + ascension.get("event_chance_multiplier", 0))
+        # Mutation event_magnet boost
+        event_chance *= (1.0 + mutation_fx.get("event_chance_bonus", 0))
         # Dim luminosity increases event chance
         if luminosity < LUMINOSITY_BRIGHT:
             event_chance *= LUMINOSITY_DIM_EVENT_MULTIPLIER
         event = None
         if random.random() < event_chance:
-            event = self.roll_event(new_depth, luminosity=luminosity)
+            event = self.roll_event(new_depth, luminosity=luminosity,
+                                     prestige_level=prestige_level)
 
         # 18. Check achievements
         total_digs = (tunnel.get("total_digs", 0) or 0) + 1
@@ -930,7 +1189,10 @@ class DigService:
             {"action": "dig", "advance": advance, "boss_encounter": boss_encounter},
         )
 
-        # 19. Update tunnel in DB
+        # 19. Update tunnel in DB (including run counters)
+        run_jc = (tunnel.get("current_run_jc", 0) or 0) + jc_earned
+        run_artifacts = (tunnel.get("current_run_artifacts", 0) or 0) + (1 if artifact else 0)
+        run_events_count = (tunnel.get("current_run_events", 0) or 0) + (1 if event else 0)
         self.dig_repo.update_tunnel(
             discord_id, guild_id,
             depth=new_depth,
@@ -939,6 +1201,9 @@ class DigService:
             total_jc_earned=(tunnel.get("total_jc_earned", 0) or 0) + jc_earned,
             streak_days=streak,
             streak_last_date=today,
+            current_run_jc=run_jc,
+            current_run_artifacts=run_artifacts,
+            current_run_events=run_events_count,
         )
 
         # 20. Update player balance
@@ -953,6 +1218,7 @@ class DigService:
                 "depth_before": depth_before, "depth_after": new_depth,
                 "boss_encounter": boss_encounter,
                 "cave_in": False,
+                "corruption": corruption["id"] if corruption else None,
             }),
         )
 
@@ -982,6 +1248,8 @@ class DigService:
             luminosity_info=lum_info,
             paid_cost=paid_dig_cost if paid_dig_cost > 0 else 0,
             dynamite_bonus=dynamite_bonus,
+            corruption=corruption,
+            mutations=[m.get("name") for m in mutations] if mutations else None,
         )
 
     def calculate_decay(self, discord_id: int, guild_id) -> int:
@@ -1608,7 +1876,12 @@ class DigService:
         active_cheers = [c for c in cheers if c.get("expires_at", 0) > now]
         cheer_bonus = min(0.15, len(active_cheers) * 0.05)
 
-        win_chance = base_odds - depth_penalty - prestige_penalty + cheer_bonus
+        # Phase 2 penalty for P4+ bosses
+        phase2_penalty = 0.0
+        if boss_progress.get(str(at_boss)) == "phase1_defeated" and at_boss in BOSS_PHASE2:
+            phase2_penalty = abs(BOSS_PHASE2[at_boss].win_odds_penalty)
+
+        win_chance = base_odds - depth_penalty - prestige_penalty - phase2_penalty + cheer_bonus
         win_chance = max(0.05, min(0.95, win_chance))
 
         # Free fights use separate (lower) odds from the config
@@ -1625,10 +1898,59 @@ class DigService:
         boss_name = BOSS_NAMES.get(at_boss, "Unknown Boss")
         attempts = (tunnel.get("boss_attempts", 0) or 0) + 1
 
+        # Apply ascension boss payout modifier (P4+)
+        ascension = self._get_ascension_effects(prestige_level)
+        boss_payout_mult = 1.0 + ascension.get("boss_payout_multiplier", 0)
+
         if won:
-            # Win: advance past boundary
+            # Check if boss has secret phase 2 (P4+ ascension)
+            current_status = boss_progress.get(str(at_boss), "active")
+            needs_phase2 = (ascension.get("boss_phase2", False)
+                            and at_boss in BOSS_PHASE2
+                            and current_status == "active")
+
+            if needs_phase2:
+                # Phase 1 victory — boss transforms, fight again
+                boss_progress[str(at_boss)] = "phase1_defeated"
+                self.dig_repo.update_tunnel(
+                    discord_id, guild_id,
+                    boss_progress=json.dumps(boss_progress),
+                    boss_attempts=attempts,
+                )
+
+                phase2 = BOSS_PHASE2[at_boss]
+                p2_dialogue = phase2.dialogue[min(attempts - 1, len(phase2.dialogue) - 1)]
+
+                self.dig_repo.log_action(
+                    discord_id=discord_id, guild_id=guild_id,
+                    action_type="boss_fight",
+                    details=json.dumps({
+                        "boundary": at_boss, "won": True, "risk": risk_tier,
+                        "phase": 1, "wager": wager,
+                    }),
+                )
+
+                return self._ok(
+                    won=True,
+                    phase=1,
+                    phase2_incoming=True,
+                    boss_name=boss_name,
+                    phase2_name=phase2.name,
+                    phase2_title=phase2.title,
+                    boundary=at_boss,
+                    risk_tier=risk_tier,
+                    win_chance=round(win_chance, 2),
+                    jc_delta=0,
+                    payout=0,
+                    new_depth=depth,
+                    dialogue=p2_dialogue,
+                    achievements=[],
+                )
+
+            # Full victory (or phase 2 already cleared)
             new_depth = at_boss
-            jc_delta = int(wager * multiplier) if wager > 0 else random.randint(5, 15)
+            base_jc = int(wager * multiplier) if wager > 0 else random.randint(5, 15)
+            jc_delta = int(base_jc * boss_payout_mult)
 
             boss_progress[str(at_boss)] = "defeated"
             self.dig_repo.update_tunnel(
@@ -1640,7 +1962,7 @@ class DigService:
             )
 
             if wager > 0:
-                self.player_repo.add_balance(discord_id, guild_id, int(wager * (multiplier - 1)))
+                self.player_repo.add_balance(discord_id, guild_id, int(wager * (multiplier * boss_payout_mult - 1)))
             else:
                 self.player_repo.add_balance(discord_id, guild_id, jc_delta)
 
@@ -1665,6 +1987,7 @@ class DigService:
 
             return self._ok(
                 won=True,
+                phase=2 if current_status == "phase1_defeated" else None,
                 boss_name=boss_name,
                 boundary=at_boss,
                 risk_tier=risk_tier,
@@ -1892,18 +2215,30 @@ class DigService:
         elif at_max:
             reason = f"Already at max prestige ({MAX_PRESTIGE})."
 
+        run_score = self._calculate_run_score(tunnel) if can else 0
+
+        # Prepare mutation choices if P8+
+        mutation_info = None
+        if can and (prestige_level + 1) >= 8:
+            forced, choices = self._roll_mutations_for_prestige()
+            mutation_info = {"forced": forced, "choices": choices}
+
         return self._ok(
             can_prestige=can,
             reason=reason,
             prestige_level=prestige_level,
             available_perks=[p for p in PRESTIGE_PERKS if p not in self._get_prestige_perks(tunnel)],
+            run_score=run_score,
+            mutation_info=mutation_info,
         )
 
-    def prestige(self, discord_id: int, guild_id, perk_choice: str) -> dict:
+    def prestige(self, discord_id: int, guild_id, perk_choice: str,
+                  mutation_choice: str | None = None) -> dict:
         """
         Prestige: reset tunnel, keep pickaxe, gain a perk.
 
         perk_choice: ID of the perk to select.
+        mutation_choice: ID of chosen mutation (P8+ only, None if < P8).
         """
         check = self.can_prestige(discord_id, guild_id)
         if not check.get("can_prestige"):
@@ -1924,6 +2259,28 @@ class DigService:
         current_perks.append(perk_choice)
         prestige_level = (tunnel.get("prestige_level", 0) or 0) + 1
 
+        # Calculate run score before reset
+        run_score = self._calculate_run_score(tunnel)
+        best_score = max(tunnel.get("best_run_score", 0) or 0, run_score)
+        total_score = (tunnel.get("total_prestige_score", 0) or 0) + run_score
+
+        # Roll mutations for P8+
+        mutations_json = None
+        mutation_info = None
+        if prestige_level >= 8:
+            forced, choices = self._roll_mutations_for_prestige()
+            active_mutations = [forced]
+            if mutation_choice and MUTATION_BY_ID.get(mutation_choice):
+                chosen = {"id": mutation_choice,
+                          "name": MUTATION_BY_ID[mutation_choice].name,
+                          "description": MUTATION_BY_ID[mutation_choice].description,
+                          "positive": MUTATION_BY_ID[mutation_choice].positive}
+                active_mutations.append(chosen)
+            elif choices:
+                active_mutations.append(choices[0])
+            mutations_json = json.dumps(active_mutations)
+            mutation_info = {"forced": forced, "chosen": active_mutations[-1] if len(active_mutations) > 1 else None}
+
         # Reset tunnel
         boss_progress = {str(b): "active" for b in BOSS_BOUNDARIES}
         self.dig_repo.update_tunnel(
@@ -1935,6 +2292,12 @@ class DigService:
             prestige_perks=json.dumps(current_perks),
             cheer_data=None,
             injury_state=None,
+            best_run_score=best_score,
+            current_run_jc=0,
+            current_run_artifacts=0,
+            current_run_events=0,
+            total_prestige_score=total_score,
+            mutations=mutations_json,
         )
 
         self.dig_repo.log_action(
@@ -1942,13 +2305,28 @@ class DigService:
             action_type="prestige",
             details=json.dumps({
                 "level": prestige_level, "perk": perk_choice,
+                "run_score": run_score, "mutations": mutation_info,
             }),
         )
+
+        # Ascension modifiers active at new level
+        ascension = ASCENSION_MODIFIERS.get(prestige_level)
+        ascension_info = None
+        if ascension:
+            ascension_info = {"name": ascension.name,
+                              "penalty": ascension.penalty,
+                              "reward": ascension.reward,
+                              "gameplay": ascension.gameplay}
 
         return self._ok(
             prestige_level=prestige_level,
             perk_chosen=perk_choice,
             perks=current_perks,
+            run_score=run_score,
+            best_run_score=best_score,
+            total_prestige_score=total_score,
+            ascension_unlocked=ascension_info,
+            mutations=mutation_info,
         )
 
     # ------------------------------------------------------------------
@@ -2130,6 +2508,14 @@ class DigService:
 
         # Echo Stone relic bonus
         rate_mod = 1.1 if self._has_relic(discord_id, guild_id, "echo_stone") else 1.0
+        # P6 ascension: artifact find rate multiplier
+        prestige_level = tunnel.get("prestige_level", 0) or 0
+        ascension = self._get_ascension_effects(prestige_level)
+        rate_mod *= ascension.get("artifact_multiplier", 1.0)
+        # Mutation: treasure_sense (+25% artifact find)
+        mutations = self._get_mutations(tunnel)
+        mutation_fx = self._apply_mutation_effects(mutations)
+        rate_mod *= (1.0 + mutation_fx.get("artifact_chance_bonus", 0))
 
         # Roll for each rarity tier
         tiers = [
@@ -2280,23 +2666,26 @@ class DigService:
     # Events
     # ------------------------------------------------------------------
 
-    def roll_event(self, depth: int, luminosity: int = 100) -> dict | None:
+    def roll_event(self, depth: int, luminosity: int = 100,
+                   prestige_level: int = 0) -> dict | None:
         """
-        Roll for a random event with layer-specific rates and rarity.
+        Roll for a random event with layer-specific rates, rarity, and prestige gating.
 
         Returns event info dict, or None if no event triggers.
         """
         layer = self._get_layer(depth)
         layer_name = layer.get("name", "Dirt")
         is_pitch_black = luminosity <= 0
+        ascension = self._get_ascension_effects(prestige_level)
 
-        # Filter eligible events by depth, layer, and darkness requirement
+        # Filter eligible events by depth, layer, darkness, and prestige
         eligible = [
             e for e in EVENT_POOL
             if depth >= (e.get("min_depth") or 0)
             and (e.get("max_depth") is None or depth <= e["max_depth"])
             and (e.get("layer") is None or e["layer"] == layer_name)
             and (not e.get("requires_dark") or is_pitch_black)
+            and prestige_level >= e.get("min_prestige", 0)
         ]
 
         # Non-darkness events are excluded at pitch black if darkness events exist
@@ -2308,9 +2697,15 @@ class DigService:
         if not eligible:
             return None
 
-        # Rarity-weighted selection
+        # Rarity-weighted selection with ascension modifiers
         weights = {"common": 70, "uncommon": 20, "rare": 8, "legendary": 2}
-        weighted = [(e, weights.get(e.get("rarity", "common"), 70)) for e in eligible]
+        rare_mult = 1.0 + ascension.get("rare_event_multiplier", 0)
+        legendary_mult = 1.0 + ascension.get("legendary_event_multiplier", 0)
+        adjusted_weights = dict(weights)
+        adjusted_weights["rare"] = int(weights["rare"] * rare_mult)
+        adjusted_weights["legendary"] = int(weights["legendary"] * legendary_mult)
+
+        weighted = [(e, adjusted_weights.get(e.get("rarity", "common"), 70)) for e in eligible]
         events, w = zip(*weighted)
         event = random.choices(events, weights=w, k=1)[0]
 
@@ -2321,12 +2716,15 @@ class DigService:
             "complexity": event.get("complexity", "choice"),
             "safe_option": event.get("safe_option"),
             "risky_option": event.get("risky_option"),
+            "desperate_option": event.get("desperate_option"),
+            "boon_options": event.get("boon_options"),
             "buff_on_success": event.get("buff_on_success"),
             "rarity": event.get("rarity", "common"),
         }
 
-    def resolve_event(self, discord_id: int, guild_id, event_id: str, choice: str) -> dict:
-        """Apply event outcome based on safe/risky choice."""
+    def resolve_event(self, discord_id: int, guild_id, event_id: str, choice: str,
+                      chained: bool = False) -> dict:
+        """Apply event outcome based on safe/risky/desperate/boon choice."""
         event = next((e for e in EVENT_POOL if e["id"] == event_id), None)
         if event is None:
             return self._error("Unknown event.")
@@ -2337,49 +2735,150 @@ class DigService:
 
         tunnel = dict(tunnel)
         depth = tunnel.get("depth", 0)
+        prestige_level = tunnel.get("prestige_level", 0) or 0
+        ascension = self._get_ascension_effects(prestige_level)
 
-        outcomes = event.get("outcomes", {})
-        outcome = outcomes.get(choice)
-        if outcome is None:
-            return self._error(f"Invalid choice: {choice}")
+        # Handle boon choice — apply selected buff
+        if choice.startswith("boon_") and event.get("boon_options"):
+            boon_idx = int(choice.split("_")[1]) if choice.split("_")[1].isdigit() else 0
+            boons = event["boon_options"]
+            if boon_idx >= len(boons):
+                return self._error("Invalid boon selection.")
+            boon = boons[boon_idx]
+            # Apply buff
+            self.set_temp_buff(discord_id, guild_id, boon)
+            self.dig_repo.log_action(
+                discord_id=discord_id, guild_id=guild_id,
+                action_type="event",
+                details=json.dumps({"event_id": event_id, "choice": choice, "boon": boon.get("name", boon.get("id"))}),
+            )
+            return self._ok(
+                event_name=event.get("name", "Unknown Event"),
+                choice=choice,
+                jc_delta=0,
+                depth_delta=0,
+                message=f"You chose {boon.get('name', 'a boon')}!",
+                buff_applied=boon,
+            )
 
-        # Apply outcome
-        jc_delta = 0
-        depth_delta = 0
-        message = outcome.get("message", "Nothing happened.")
+        # Map choice to option data
+        option = None
+        if choice == "safe":
+            option = event.get("safe_option")
+        elif choice == "risky":
+            option = event.get("risky_option")
+        elif choice == "desperate":
+            option = event.get("desperate_option")
 
-        if "jc" in outcome:
-            jc_range = outcome["jc"]
-            if isinstance(jc_range, list):
-                jc_delta = random.randint(jc_range[0], jc_range[1])
-            else:
-                jc_delta = jc_range
-            self.player_repo.add_balance(discord_id, guild_id, jc_delta)
+        if option is None:
+            # Fall back to legacy outcomes format
+            outcomes = event.get("outcomes", {})
+            outcome = outcomes.get(choice)
+            if outcome is None:
+                return self._error(f"Invalid choice: {choice}")
 
-        if "depth" in outcome:
-            depth_range = outcome["depth"]
-            if isinstance(depth_range, list):
-                depth_delta = random.randint(depth_range[0], depth_range[1])
-            else:
-                depth_delta = depth_range
-            new_depth = max(0, depth + depth_delta)
+            jc_delta = 0
+            depth_delta = 0
+            message = outcome.get("message", "Nothing happened.")
+            if "jc" in outcome:
+                jc_range = outcome["jc"]
+                jc_delta = random.randint(jc_range[0], jc_range[1]) if isinstance(jc_range, list) else jc_range
+                self.player_repo.add_balance(discord_id, guild_id, jc_delta)
+            if "depth" in outcome:
+                depth_range = outcome["depth"]
+                depth_delta = random.randint(depth_range[0], depth_range[1]) if isinstance(depth_range, list) else depth_range
+                new_depth = max(0, depth + depth_delta)
+                self.dig_repo.update_tunnel(discord_id, guild_id, depth=new_depth)
+
+            self.dig_repo.log_action(
+                discord_id=discord_id, guild_id=guild_id,
+                action_type="event",
+                details=json.dumps({"event_id": event_id, "choice": choice, "jc_delta": jc_delta, "depth_delta": depth_delta}),
+            )
+            return self._ok(event_name=event.get("name", "Unknown Event"), choice=choice,
+                            jc_delta=jc_delta, depth_delta=depth_delta, message=message)
+
+        # New-style EventChoice resolution
+        success_chance = option.get("success_chance", 1.0)
+
+        # P9 Cruel Echoes: safe options now have 10% failure chance
+        cruel_fail = ascension.get("cruel_safe_fail", 0)
+        if choice == "safe" and cruel_fail > 0 and option.get("failure") is not None:
+            success_chance = min(success_chance, 1.0 - cruel_fail)
+        elif choice == "safe" and cruel_fail > 0 and option.get("failure") is None and random.random() < cruel_fail:
+            # Safe options with no failure defined — cruel echoes creates one
+            new_depth = max(0, depth - 1)
             self.dig_repo.update_tunnel(discord_id, guild_id, depth=new_depth)
+            self.player_repo.add_balance(discord_id, guild_id, -1)
+            self.dig_repo.log_action(
+                discord_id=discord_id, guild_id=guild_id,
+                action_type="event",
+                details=json.dumps({"event_id": event_id, "choice": choice, "cruel_echoes": True}),
+            )
+            return self._ok(
+                event_name=event.get("name", "Unknown Event"), choice=choice,
+                jc_delta=-1, depth_delta=-1, message="Cruel Echoes! Even safety betrays you. Lost 1 block and 1 JC.",
+                cruel_echoes=True,
+            )
+
+        succeeded = random.random() < success_chance
+        result = option.get("success") if succeeded else option.get("failure")
+
+        if result is None:
+            result = option.get("success")  # fallback if no failure defined
+
+        advance = result.get("advance", 0)
+        jc = result.get("jc", 0)
+        cave_in = result.get("cave_in", False)
+        description = result.get("description", "Something happened.")
+
+        # P7 chain JC multiplier: chained events get 1.5x JC
+        if chained and jc > 0:
+            chain_mult = ascension.get("chain_jc_multiplier", 1.0)
+            if chain_mult > 1.0:
+                jc = int(jc * chain_mult)
+
+        # Apply depth change
+        new_depth = max(0, depth + advance)
+        if advance != 0:
+            self.dig_repo.update_tunnel(discord_id, guild_id, depth=new_depth)
+
+        # Apply JC change
+        if jc != 0:
+            self.player_repo.add_balance(discord_id, guild_id, jc)
+
+        # Apply buff if risky/desperate success
+        buff_applied = None
+        if succeeded and choice in ("risky", "desperate") and event.get("buff_on_success"):
+            buff_data = event["buff_on_success"]
+            self.set_temp_buff(discord_id, guild_id, buff_data)
+            buff_applied = buff_data
+
 
         self.dig_repo.log_action(
             discord_id=discord_id, guild_id=guild_id,
             action_type="event",
             details=json.dumps({
-                "event_id": event_id, "choice": choice,
-                "jc_delta": jc_delta, "depth_delta": depth_delta,
+                "event_id": event_id, "choice": choice, "succeeded": succeeded,
+                "advance": advance, "jc": jc, "cave_in": cave_in,
             }),
         )
+
+        # Check for event chaining (P7+)
+        chain_event = self._chain_event(new_depth, prestige_level,
+                                         event.get("rarity", "common"),
+                                         tunnel.get("luminosity", 100))
 
         return self._ok(
             event_name=event.get("name", "Unknown Event"),
             choice=choice,
-            jc_delta=jc_delta,
-            depth_delta=depth_delta,
-            message=message,
+            succeeded=succeeded,
+            jc_delta=jc,
+            depth_delta=advance,
+            cave_in=cave_in,
+            message=description,
+            buff_applied=buff_applied,
+            chain_event=chain_event,
         )
 
     # ------------------------------------------------------------------

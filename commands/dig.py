@@ -16,7 +16,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from commands.checks import require_gamba_channel
-from services.dig_constants import MAX_INVENTORY_SLOTS, PICKAXE_TIERS
+from services.dig_constants import ASCENSION_MODIFIERS, MAX_INVENTORY_SLOTS, PICKAXE_TIERS
 from services.dig_constants import get_layer as get_layer_def
 from utils.formatting import JOPACOIN_EMOTE
 from utils.interaction_safety import safe_defer, safe_followup
@@ -364,6 +364,54 @@ class BossWagerModal(discord.ui.Modal):
                 await interaction.followup.send(embed=embed, ephemeral=True)
                 return
 
+            # Phase 2 incoming — fake victory then reveal transform
+            if getattr(self.result, "phase2_incoming", False):
+                phase2_name = getattr(self.result, "phase2_name", "???")
+                phase2_title = getattr(self.result, "phase2_title", "")
+                p2_dialogue = getattr(self.result, "dialogue", "...")
+                boss_name = getattr(self.result, "boss_name", "the boss")
+
+                victory_embed = discord.Embed(
+                    title="Victory!",
+                    description=f"You defeated **{boss_name}**!",
+                    color=0x00FF00,
+                )
+                msg = await interaction.followup.send(embed=victory_embed, wait=True)
+
+                await asyncio.sleep(2)
+
+                phase2_embed = discord.Embed(
+                    title=f"{phase2_title or phase2_name} Emerges!",
+                    description=(
+                        f"Wait... **{boss_name}** is transforming!\n\n"
+                        f"**{phase2_name}**\n"
+                        f"*{p2_dialogue}*\n\n"
+                        "The fight continues!"
+                    ),
+                    color=0x8B0000,
+                )
+                phase2_embed.set_footer(text="Use /dig go to encounter the boss again")
+
+                # Try to load phase 2 boss art
+                p2_file = None
+                boundary = getattr(self.result, "boundary", None)
+                if boundary:
+                    try:
+                        from utils.dig_assets import get_boss_art
+                        new_depth = getattr(self.result, "new_depth", 0)
+                        ld = get_layer_def(new_depth or boundary)
+                        ln = ld.name if ld else "Dirt"
+                        p2_file = await asyncio.to_thread(get_boss_art, boundary, "phase2", ln)
+                    except Exception:
+                        pass
+
+                if p2_file:
+                    phase2_embed.set_image(url=f"attachment://{p2_file.filename}")
+                    await msg.edit(embed=phase2_embed, attachments=[p2_file])
+                else:
+                    await msg.edit(embed=phase2_embed)
+                return
+
             embed = discord.Embed(
                 title="Boss Fight Result",
                 color=0x00FF00 if getattr(self.result, "won", False) else 0xFF0000,
@@ -439,8 +487,29 @@ class EventEncounterView(discord.ui.View):
                 safe_label = safe_opt.get("label", safe_label)
             if isinstance(risky_opt, dict):
                 risky_label = risky_opt.get("label", risky_label)
+            # Add desperate button if event has a desperate option
+            desperate_opt = event_data.get("desperate_option")
+            if isinstance(desperate_opt, dict) and desperate_opt:
+                desperate_label = desperate_opt.get("label", "Desperate gamble")[:80]
+                desperate_btn = discord.ui.Button(
+                    label=desperate_label,
+                    style=discord.ButtonStyle.danger,
+                    emoji="\U0001f480",
+                    custom_id="event_desperate",
+                )
+                desperate_btn.callback = self._desperate_callback
+                self.add_item(desperate_btn)
         self.safe_btn.label = safe_label[:80]
         self.risky_btn.label = risky_label[:80]
+
+    async def _desperate_callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("This isn't your event.", ephemeral=True)
+            return
+        await interaction.response.defer()
+        result = await self._resolve("desperate")
+        await interaction.followup.send(embed=result)
+        self.stop()
 
     @discord.ui.button(label="Safe", style=discord.ButtonStyle.secondary, emoji="\U0001f6e1\ufe0f")
     async def safe_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -463,47 +532,33 @@ class EventEncounterView(discord.ui.View):
         self.stop()
 
     async def _resolve(self, choice: str) -> discord.Embed:
-        """Resolve the event choice and return an embed with the outcome."""
+        """Resolve event choice via service layer (handles chaining, cruel echoes, logging)."""
         event = self.event_data
-        option = event.get(f"{choice}_option", {}) if isinstance(event, dict) else {}
-        success_chance = option.get("success_chance", 1.0) if isinstance(option, dict) else 1.0
+        if not isinstance(event, dict):
+            return discord.Embed(title="Event", description="Nothing happened.", color=0x808080)
 
-        won = random.random() < success_chance
-        outcome = option.get("success") if won else option.get("failure")
-        if outcome is None:
-            outcome = option.get("success", {})
-            won = True
-
-        desc = outcome.get("description", "Nothing happened.") if isinstance(outcome, dict) else "Nothing happened."
-        advance = outcome.get("advance", 0) if isinstance(outcome, dict) else 0
-        jc = outcome.get("jc", 0) if isinstance(outcome, dict) else 0
-        cave_in = outcome.get("cave_in", False) if isinstance(outcome, dict) else False
-
-        # Apply effects
-        if jc != 0:
-            await asyncio.to_thread(
-                self.dig_service.player_repo.add_balance, self.user_id, self.guild_id, jc
-            )
-        if advance != 0:
-            tunnel = await asyncio.to_thread(self.dig_service.dig_repo.get_tunnel, self.user_id, self.guild_id)
-            if tunnel:
-                depth = dict(tunnel).get("depth", 0)
-                new_depth = max(0, depth + advance)
-                await asyncio.to_thread(
-                    self.dig_service.dig_repo.update_tunnel, self.user_id, self.guild_id, depth=new_depth
-                )
-
-        # Apply temp buff if risky success
-        if won and choice == "risky" and isinstance(event, dict) and event.get("buff_on_success"):
-            await asyncio.to_thread(
-                self.dig_service.set_temp_buff, self.user_id, self.guild_id, event["buff_on_success"]
+        event_id = event.get("id", "")
+        result = _wrap(await asyncio.to_thread(
+            self.dig_service.resolve_event, self.user_id, self.guild_id, event_id, choice
+        ))
+        if not getattr(result, "success", True):
+            return discord.Embed(
+                title="Event Failed",
+                description=getattr(result, "error", "Something went wrong."),
+                color=0xFF4444,
             )
 
-        # Build result embed
-        color = 0x00FF00 if won else 0xFF4444
+        jc = getattr(result, "jc_delta", 0)
+        advance = getattr(result, "depth_delta", 0)
+        msg = getattr(result, "message", "Something happened.")
+        succeeded = getattr(result, "succeeded", True)
+        cave_in = getattr(result, "cave_in", False)
+        cruel = getattr(result, "cruel_echoes", False)
+
+        color = 0xFF4444 if (not succeeded or cruel or cave_in) else 0x00FF00
         embed = discord.Embed(
-            title=event.get("name", "Event") if isinstance(event, dict) else "Event",
-            description=desc,
+            title=event.get("name", "Event"),
+            description=msg,
             color=color,
         )
         parts = []
@@ -517,15 +572,91 @@ class EventEncounterView(discord.ui.View):
             embed.add_field(name="Outcome", value=" | ".join(parts), inline=False)
 
         # Show buff if granted
-        if won and choice == "risky" and isinstance(event, dict) and event.get("buff_on_success"):
-            buff = event["buff_on_success"]
+        buff = getattr(result, "buff_applied", None)
+        if buff:
+            buff_d = buff if isinstance(buff, dict) else (buff._d if hasattr(buff, "_d") else {})
             embed.add_field(
-                name=f"Buff: {buff.get('name', '?')}",
-                value=f"Active for {buff.get('duration_digs', 0)} digs",
+                name=f"Buff: {buff_d.get('name', '?')}",
+                value=f"Active for {buff_d.get('duration_digs', 0)} digs",
                 inline=True,
             )
 
+        # Show chain event if triggered (P7+)
+        chain = getattr(result, "chain_event", None)
+        if chain:
+            chain_d = chain if isinstance(chain, dict) else (chain._d if hasattr(chain, "_d") else {})
+            if chain_d:
+                embed.add_field(
+                    name=f"Chain Event: {chain_d.get('name', '?')}",
+                    value=chain_d.get("description", "Another event triggers!"),
+                    inline=False,
+                )
+
         return embed
+
+
+class BoonSelectionView(discord.ui.View):
+    """View for boon events — player picks one of 2-3 buffs."""
+
+    def __init__(
+        self,
+        dig_service: DigService,
+        user_id: int,
+        guild_id: int | None,
+        event_data: dict,
+    ):
+        super().__init__(timeout=60)
+        self.dig_service = dig_service
+        self.user_id = user_id
+        self.guild_id = guild_id
+        self.event_data = event_data
+        boons = event_data.get("boon_options", []) if isinstance(event_data, dict) else []
+        for i, boon in enumerate(boons[:5]):
+            label = boon.get("name", f"Boon {i + 1}")[:80]
+            btn = discord.ui.Button(
+                label=label,
+                style=discord.ButtonStyle.primary,
+                custom_id=f"boon_select_{i}",
+            )
+            btn.callback = self._make_callback(i, boon)
+            self.add_item(btn)
+
+    def _make_callback(self, index: int, boon: dict):
+        async def callback(interaction: discord.Interaction):
+            if interaction.user.id != self.user_id:
+                await interaction.response.send_message("This isn't your event.", ephemeral=True)
+                return
+            await interaction.response.defer()
+            event_id = self.event_data.get("id", "") if isinstance(self.event_data, dict) else ""
+            try:
+                result = _wrap(await asyncio.to_thread(
+                    self.dig_service.resolve_event,
+                    self.user_id, self.guild_id, event_id, f"boon_{index}",
+                ))
+                if not getattr(result, "success", True):
+                    await interaction.followup.send(
+                        getattr(result, "error", "Boon selection failed."), ephemeral=True
+                    )
+                    return
+                embed = discord.Embed(
+                    title=self.event_data.get("name", "Boon") if isinstance(self.event_data, dict) else "Boon",
+                    description=getattr(result, "message", f"You chose {boon.get('name', 'a boon')}!"),
+                    color=0x5865F2,
+                )
+                buff = getattr(result, "buff_applied", None)
+                if buff:
+                    buff_d = buff if isinstance(buff, dict) else (buff._d if hasattr(buff, "_d") else {})
+                    embed.add_field(
+                        name=f"Buff: {buff_d.get('name', '?')}",
+                        value=f"Active for {buff_d.get('duration_digs', 0)} digs",
+                        inline=True,
+                    )
+                await interaction.followup.send(embed=embed)
+            except Exception as e:
+                logger.error("Boon selection error: %s", e, exc_info=True)
+                await interaction.followup.send("Boon selection failed.", ephemeral=True)
+            self.stop()
+        return callback
 
 
 class BossEncounterView(discord.ui.View):
@@ -686,20 +817,54 @@ class PrestigePerksView(discord.ui.View):
                 return
             await interaction.response.defer()
             try:
+                mutation_choice = getattr(self, "_mutation_choice", None)
                 result = _wrap(await asyncio.to_thread(
                     self.dig_service.prestige,
                     self.user_id,
                     self.guild_id,
                     perk.get("id", index),
+                    mutation_choice,
                 ))
+                new_level = getattr(result, "prestige_level", 0)
+                run_score = getattr(result, "run_score", 0)
+                best_score = getattr(result, "best_run_score", 0)
+                desc_parts = [
+                    f"You selected **{perk.get('name', 'Unknown')}**.",
+                    f"Run Score: **{run_score}** (Best: {best_score})",
+                    getattr(result, "message", "Your tunnel has been reset. Dig deeper!"),
+                ]
                 embed = discord.Embed(
-                    title="Prestige Complete!",
-                    description=(
-                        f"You selected **{perk.get('name', 'Unknown')}**.\n"
-                        f"{getattr(result, 'message', 'Your tunnel has been reset. Dig deeper!')}"
-                    ),
+                    title=f"Prestige {new_level} Complete!",
+                    description="\n".join(desc_parts),
                     color=0xFFD700,
                 )
+
+                # Show ascension modifier unlocked at this level
+                ascension = getattr(result, "ascension_unlocked", None)
+                if ascension:
+                    asc_d = ascension if isinstance(ascension, dict) else (ascension._d if hasattr(ascension, "_d") else {})
+                    embed.add_field(
+                        name=f"Ascension Unlocked: {asc_d.get('name', '?')}",
+                        value=f"Penalty: {asc_d.get('penalty', '?')}\nReward: {asc_d.get('reward', '?')}",
+                        inline=False,
+                    )
+
+                # Show mutation info for P8+
+                mutations = getattr(result, "mutations", None)
+                if mutations:
+                    mut_d = mutations if isinstance(mutations, dict) else (mutations._d if hasattr(mutations, "_d") else {})
+                    forced = mut_d.get("forced") if isinstance(mut_d, dict) else None
+                    chosen = mut_d.get("chosen") if isinstance(mut_d, dict) else None
+                    mut_lines = []
+                    if forced:
+                        f_d = forced if isinstance(forced, dict) else (forced._d if hasattr(forced, "_d") else {})
+                        mut_lines.append(f"Forced: **{f_d.get('name', '?')}** — {f_d.get('description', '')}")
+                    if chosen:
+                        c_d = chosen if isinstance(chosen, dict) else (chosen._d if hasattr(chosen, "_d") else {})
+                        mut_lines.append(f"Chosen: **{c_d.get('name', '?')}** — {c_d.get('description', '')}")
+                    if mut_lines:
+                        embed.add_field(name="Mutations", value="\n".join(mut_lines), inline=False)
+
                 await interaction.followup.send(embed=embed)
             except ValueError as e:
                 await interaction.followup.send(str(e), ephemeral=True)
@@ -708,6 +873,55 @@ class PrestigePerksView(discord.ui.View):
                 await interaction.followup.send("Prestige failed.", ephemeral=True)
             self.stop()
 
+        return callback
+
+
+class MutationSelectionView(discord.ui.View):
+    """View for choosing a mutation during P8+ prestige.
+
+    After the player picks a mutation, this view sets the choice on the
+    paired PrestigePerksView and sends that view for the perk selection
+    step.
+    """
+
+    def __init__(
+        self,
+        dig_service: DigService,
+        user_id: int,
+        guild_id: int | None,
+        forced: dict,
+        choices: list[dict],
+        perks_view: PrestigePerksView,
+        perks_embed: discord.Embed,
+    ):
+        super().__init__(timeout=60)
+        self.dig_service = dig_service
+        self.user_id = user_id
+        self.guild_id = guild_id
+        self.forced = forced
+        self.choices = choices
+        self.perks_view = perks_view
+        self.perks_embed = perks_embed
+        for i, mut in enumerate(choices[:5]):
+            label = mut.get("name", f"Mutation {i + 1}")[:80]
+            btn = discord.ui.Button(
+                label=label,
+                style=discord.ButtonStyle.primary,
+                custom_id=f"mutation_select_{i}",
+            )
+            btn.callback = self._make_callback(i, mut)
+            self.add_item(btn)
+
+    def _make_callback(self, index: int, mut: dict):
+        async def callback(interaction: discord.Interaction):
+            if interaction.user.id != self.user_id:
+                await interaction.response.send_message("This isn't your prestige.", ephemeral=True)
+                return
+            await interaction.response.defer()
+            # Store the mutation choice on the perk view so it can pass it to prestige()
+            self.perks_view._mutation_choice = mut.get("id")
+            await interaction.followup.send(embed=self.perks_embed, view=self.perks_view)
+            self.stop()
         return callback
 
 
@@ -1027,6 +1241,50 @@ class DigCommands(commands.Cog):
         if event:
             event_data = event if isinstance(event, dict) else (event._d if hasattr(event, "_d") else None)
             complexity = event_data.get("complexity", "choice") if isinstance(event_data, dict) else "choice"
+
+            # Boon events — show buff selection buttons
+            if complexity == "boon" and isinstance(event_data, dict) and event_data.get("boon_options"):
+                embed, _layer_name, _pickaxe_tier, _items_ids = _build_dig_embed(result, interaction.user)
+                layer_file = await _attach_layer_thumbnail(embed, _layer_name)
+                boon_options = event_data["boon_options"]
+                boon_lines = [f"**{b.get('name', '?')}** — {b.get('description', '')}" for b in boon_options]
+                event_embed = discord.Embed(
+                    title=event_data.get("name", "Boon"),
+                    description=event_data.get("description", "Choose a boon:") + "\n\n" + "\n".join(boon_lines),
+                    color=0x5865F2,
+                )
+                rarity = event_data.get("rarity", "common")
+                if rarity != "common":
+                    event_embed.set_footer(text=f"{rarity.title()} encounter")
+                # Event art for boon events
+                boon_event_file = None
+                boon_event_id = event_data.get("id", "")
+                try:
+                    from utils.dig_assets import get_event_art
+                    depth = getattr(result, "depth", 0) or getattr(result, "depth_after", 0)
+                    layer_def = get_layer_def(depth)
+                    ev_layer = layer_def.name if layer_def else "Dirt"
+                    boon_event_file = await asyncio.to_thread(get_event_art, boon_event_id, ev_layer)
+                    if boon_event_file:
+                        event_embed.set_image(url=f"attachment://{boon_event_file.filename}")
+                except Exception as e:
+                    logger.debug("Boon event art failed: %s", e)
+                view = BoonSelectionView(self.dig_service, interaction.user.id, guild_id, event_data)
+                pickaxe_file = await _attach_pickaxe_footer(embed, _pickaxe_tier)
+                items_strip = await _attach_items_strip(embed, _items_ids)
+                dig_files = [f for f in (layer_file, pickaxe_file, items_strip) if f]
+                if len(dig_files) > 1:
+                    await safe_followup(interaction, embed=embed, files=dig_files)
+                elif dig_files:
+                    await safe_followup(interaction, embed=embed, file=dig_files[0])
+                else:
+                    await safe_followup(interaction, embed=embed)
+                if boon_event_file:
+                    await safe_followup(interaction, embed=event_embed, view=view, file=boon_event_file)
+                else:
+                    await safe_followup(interaction, embed=event_embed, view=view)
+                return
+
             if complexity in ("complex", "choice") and isinstance(event_data, dict) and event_data.get("safe_option"):
                 embed, _layer_name, _pickaxe_tier, _items_ids = _build_dig_embed(result, interaction.user)
                 layer_file = await _attach_layer_thumbnail(embed, _layer_name)
@@ -1042,21 +1300,19 @@ class DigCommands(commands.Cog):
                 rarity = event_data.get("rarity", "common")
                 if rarity != "common":
                     event_embed.set_footer(text=f"{rarity.title()} encounter")
-                # Pixel art scene for complex events
+                # Event art: custom diffusion art → PIL pixel art → none
                 event_file = None
                 event_id = event_data.get("id", "") if isinstance(event_data, dict) else ""
-                if complexity == "complex":
-                    try:
-                        from utils.dig_drawing import draw_event_scene, has_event_scene
-                        if has_event_scene(event_id):
-                            depth = getattr(result, "depth", 0) or getattr(result, "depth_after", 0)
-                            layer_def = get_layer_def(depth)
-                            layer_name = layer_def.name if layer_def else "Dirt"
-                            scene_buf = await asyncio.to_thread(draw_event_scene, layer_name, event_id)
-                            event_file = discord.File(scene_buf, filename="event_scene.png")
-                            event_embed.set_image(url="attachment://event_scene.png")
-                    except Exception as e:
-                        logger.debug("Event scene generation failed: %s", e)
+                try:
+                    from utils.dig_assets import get_event_art
+                    depth = getattr(result, "depth", 0) or getattr(result, "depth_after", 0)
+                    layer_def = get_layer_def(depth)
+                    ev_layer = layer_def.name if layer_def else "Dirt"
+                    event_file = await asyncio.to_thread(get_event_art, event_id, ev_layer)
+                    if event_file:
+                        event_embed.set_image(url=f"attachment://{event_file.filename}")
+                except Exception as e:
+                    logger.debug("Event art failed: %s", e)
                 view = EventEncounterView(self.dig_service, interaction.user.id, guild_id, event_data)
                 pickaxe_file = await _attach_pickaxe_footer(embed, _pickaxe_tier)
                 items_strip = await _attach_items_strip(embed, _items_ids)
@@ -1421,6 +1677,18 @@ class DigCommands(commands.Cog):
             )
             embed.add_field(name="Stats", value=stats_text, inline=False)
 
+        # Active ascension modifiers (prestige > 0)
+        if prestige > 0:
+            asc_lines = []
+            for level in range(1, prestige + 1):
+                mod = ASCENSION_MODIFIERS.get(level)
+                if mod:
+                    asc_lines.append(f"**P{level} {mod.name}**: {mod.penalty} / {mod.reward}")
+            if asc_lines:
+                # Truncate to fit embed field limit
+                asc_text = "\n".join(asc_lines[:10])
+                embed.add_field(name="Ascension Modifiers", value=asc_text, inline=False)
+
         embed.set_thumbnail(url=display_user.display_avatar.url)
         await safe_followup(interaction, embed=embed)
 
@@ -1480,6 +1748,60 @@ class DigCommands(commands.Cog):
             color=0xFFD700,
         )
         embed.set_footer(text="Community Mine")
+        await safe_followup(interaction, embed=embed)
+
+    # ------------------------------------------------------------------
+    # 5b. /dig halloffame — Best prestige run scores
+    # ------------------------------------------------------------------
+
+    @dig.command(name="halloffame", description="View the hall of fame (best prestige run scores)")
+    async def dig_halloffame(self, interaction: discord.Interaction):
+        if not await require_gamba_channel(interaction):
+            return
+
+        player = await _check_registered(interaction, self.bot)
+        if not player:
+            return
+
+        await safe_defer(interaction)
+
+        guild_id = interaction.guild.id if interaction.guild else None
+        try:
+            result = _wrap(await asyncio.to_thread(
+                self.dig_service.get_hall_of_fame, guild_id
+            ))
+        except Exception as e:
+            logger.error("Hall of fame error: %s", e)
+            await safe_followup(interaction, content="Hall of fame unavailable.", ephemeral=True)
+            return
+
+        entries = getattr(result, "entries", []) or []
+        if not entries:
+            await safe_followup(
+                interaction,
+                content="The hall of fame is empty. Prestige to earn a spot!",
+                ephemeral=True,
+            )
+            return
+
+        lines = []
+        for i, entry in enumerate(entries[:10], 1):
+            def _g(obj, key, default=None):
+                return obj.get(key, default) if isinstance(obj, dict) else getattr(obj, key, default)
+            name = _g(entry, "tunnel_name", "Unknown")
+            discord_id = _g(entry, "discord_id", None)
+            prestige = _g(entry, "prestige_level", 0)
+            score = _g(entry, "best_run_score", 0)
+            player_mention = f"<@{discord_id}>" if discord_id else "Unknown"
+            medal = {1: "\U0001f947", 2: "\U0001f948", 3: "\U0001f949"}.get(i, f"`#{i}`")
+            lines.append(f"{medal} **{name}** ({player_mention}) - Score: {score} (P{prestige})")
+
+        embed = discord.Embed(
+            title="\U0001f3c6 Hall of Fame",
+            description="\n".join(lines),
+            color=0xFFD700,
+        )
+        embed.set_footer(text="Best prestige run scores")
         await safe_followup(interaction, embed=embed)
 
     # ------------------------------------------------------------------
@@ -1846,6 +2168,143 @@ class DigCommands(commands.Cog):
 
         embed.set_thumbnail(url=interaction.user.display_avatar.url)
         await safe_followup(interaction, embed=embed)
+
+    # ------------------------------------------------------------------
+    # 10b. /dig prestige — Prestige your tunnel
+    # ------------------------------------------------------------------
+
+    @dig.command(name="prestige", description="Prestige your tunnel (reset depth, gain a perk)")
+    async def dig_prestige(self, interaction: discord.Interaction):
+        if not await require_gamba_channel(interaction):
+            return
+
+        player = await _check_registered(interaction, self.bot)
+        if not player:
+            return
+
+        await safe_defer(interaction)
+
+        guild_id = interaction.guild.id if interaction.guild else None
+        try:
+            check = _wrap(await asyncio.to_thread(
+                self.dig_service.can_prestige, interaction.user.id, guild_id
+            ))
+        except Exception as e:
+            logger.error("Prestige check error: %s", e, exc_info=True)
+            await safe_followup(interaction, content="Prestige check failed.", ephemeral=True)
+            return
+
+        can = getattr(check, "can_prestige", False)
+        if not can:
+            reason = getattr(check, "reason", "You cannot prestige yet.")
+            await safe_followup(interaction, content=reason, ephemeral=True)
+            return
+
+        prestige_level = getattr(check, "prestige_level", 0)
+        new_level = prestige_level + 1
+        run_score = getattr(check, "run_score", 0)
+
+        # Build the prestige preview embed
+        embed = discord.Embed(
+            title=f"Prestige to P{new_level}?",
+            description=(
+                "This will **reset your tunnel depth to 0** but grant a permanent perk.\n\n"
+                f"**Run Score:** {run_score}\n"
+            ),
+            color=0xFFD700,
+        )
+
+        # Show the ascension modifier that will be unlocked at this level
+        asc_mod = ASCENSION_MODIFIERS.get(new_level)
+        if asc_mod:
+            embed.add_field(
+                name=f"Ascension Unlock: {asc_mod.name}",
+                value=f"Penalty: {asc_mod.penalty}\nReward: {asc_mod.reward}",
+                inline=False,
+            )
+
+        # Build perk list for the view
+        available_perks_raw = getattr(check, "available_perks", []) or []
+        if isinstance(available_perks_raw, _DictObj):
+            available_perks_raw = available_perks_raw._d if hasattr(available_perks_raw, "_d") else []
+        perk_dicts = [
+            {"id": p, "name": p.replace("_", " ").title()}
+            for p in available_perks_raw
+        ]
+
+        if not perk_dicts:
+            await safe_followup(
+                interaction, content="No perks available. You may have unlocked them all.",
+                ephemeral=True,
+            )
+            return
+
+        perks_view = PrestigePerksView(self.dig_service, interaction.user.id, guild_id, perk_dicts)
+
+        # P8+ mutation selection step
+        mutation_info = getattr(check, "mutation_info", None)
+        if mutation_info:
+            mut_d = mutation_info if isinstance(mutation_info, dict) else (
+                mutation_info._d if hasattr(mutation_info, "_d") else {}
+            )
+            forced = mut_d.get("forced") if isinstance(mut_d, dict) else None
+            choices = mut_d.get("choices") if isinstance(mut_d, dict) else None
+
+            if forced and choices:
+                forced_d = forced if isinstance(forced, dict) else (
+                    forced._d if hasattr(forced, "_d") else {}
+                )
+                choices_list = choices if isinstance(choices, list) else (
+                    choices._d if hasattr(choices, "_d") else []
+                )
+                # Unwrap _DictObj items in choices_list
+                unwrapped_choices = []
+                for c in choices_list:
+                    if isinstance(c, dict):
+                        unwrapped_choices.append(c)
+                    elif hasattr(c, "_d"):
+                        unwrapped_choices.append(c._d)
+                    else:
+                        unwrapped_choices.append({"id": str(c), "name": str(c)})
+
+                embed.add_field(
+                    name=f"Forced Mutation: {forced_d.get('name', '?')}",
+                    value=forced_d.get("description", ""),
+                    inline=False,
+                )
+                mut_lines = [
+                    f"**{m.get('name', '?')}** — {m.get('description', '')}"
+                    for m in unwrapped_choices
+                ]
+                embed.add_field(
+                    name="Choose a Mutation",
+                    value="\n".join(mut_lines) or "No choices available",
+                    inline=False,
+                )
+
+                # Build a perk selection embed for after mutation choice
+                perks_embed = discord.Embed(
+                    title="Choose a Prestige Perk",
+                    description="\n".join(
+                        f"**{p.get('name', '?')}**" for p in perk_dicts
+                    ),
+                    color=0xFFD700,
+                )
+
+                mutation_view = MutationSelectionView(
+                    self.dig_service, interaction.user.id, guild_id,
+                    forced_d, unwrapped_choices, perks_view, perks_embed,
+                )
+                await safe_followup(interaction, embed=embed, view=mutation_view)
+                return
+
+        # No mutations — go straight to perk selection
+        embed.add_field(
+            name="Choose a Perk",
+            value="\n".join(f"**{p.get('name', '?')}**" for p in perk_dicts),
+            inline=False,
+        )
+        await safe_followup(interaction, embed=embed, view=perks_view)
 
     # ------------------------------------------------------------------
     # 11. /dig_abandon — Abandon tunnel
@@ -2248,6 +2707,14 @@ def _build_dig_embed(result: object, user: discord.User | discord.Member) -> tup
                 lum_text += f" (-{lum_drained})"
             embed.add_field(name="Luminosity", value=lum_text, inline=False)
 
+    # Corruption effect (P6+)
+    corruption = getattr(result, "corruption", None)
+    if corruption:
+        corr_d = corruption if isinstance(corruption, dict) else (corruption._d if hasattr(corruption, "_d") else {})
+        corr_desc = corr_d.get("description", "") if isinstance(corr_d, dict) else ""
+        if corr_desc:
+            embed.add_field(name="Corruption", value=corr_desc, inline=False)
+
     # Footer — user + tip
     tip = ""
     if depth == 69:
@@ -2256,6 +2723,13 @@ def _build_dig_embed(result: object, user: discord.User | discord.Member) -> tup
         tip = random.choice(DIG_DUG_FOOTERS)
     else:
         tip = getattr(result, "tip", "") or _tip(0)
+
+    # Active mutations footer (P8+)
+    mutations = getattr(result, "mutations", None)
+    if mutations and isinstance(mutations, (list, tuple)):
+        mut_names = [str(m) for m in mutations]
+        tip = f"Mutations: {', '.join(mut_names)}" + (f" | {tip}" if tip else "")
+
     embed.set_footer(text=tip)
     embed.set_author(name=user.display_name, icon_url=user.display_avatar.url)
 

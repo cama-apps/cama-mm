@@ -1319,6 +1319,9 @@ class IDigRepository(ABC):
     @abstractmethod
     def get_all_tunnels(self, guild_id: int) -> list[dict]: ...
 
+    @abstractmethod
+    def get_hall_of_fame(self, guild_id: int) -> list[dict]: ...
+
     # Action Logging
     @abstractmethod
     def log_action(
