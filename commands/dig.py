@@ -1122,6 +1122,8 @@ class DigCommands(commands.Cog):
     @_weather_broadcast_loop.before_loop
     async def _before_weather_loop(self) -> None:
         await self.bot.wait_until_ready()
+        # Seed with today so we don't re-broadcast on restart
+        self._last_weather_date = await asyncio.to_thread(self.dig_service._get_game_date)
 
     # ------------------------------------------------------------------
     # Autocomplete helpers
@@ -1162,6 +1164,85 @@ class DigCommands(commands.Cog):
             return choices[:25]
         except Exception:
             return []
+
+    # ------------------------------------------------------------------
+    # Event routing helper (shared by free and paid dig paths)
+    # ------------------------------------------------------------------
+
+    async def _route_event(self, interaction: discord.Interaction, result, guild_id) -> bool:
+        """If the dig result has an event, send the interactive event embed.
+
+        Returns True if an event was routed, False otherwise.
+        The caller is responsible for sending the dig embed first.
+        """
+        event = getattr(result, "event", None)
+        if not event:
+            return False
+
+        event_data = event if isinstance(event, dict) else (event._d if hasattr(event, "_d") else None)
+        if not isinstance(event_data, dict):
+            return False
+
+        complexity = event_data.get("complexity", "choice")
+
+        # Boon events — buff selection buttons
+        if complexity == "boon" and event_data.get("boon_options"):
+            boon_options = event_data["boon_options"]
+            boon_lines = [f"**{b.get('name', '?')}** — {b.get('description', '')}" for b in boon_options]
+            boon_flavor = pick_description(event_data) or "Choose a boon:"
+            event_embed = discord.Embed(
+                description=boon_flavor + "\n\n" + "\n".join(boon_lines),
+                color=0x5865F2,
+            )
+            boon_event_file = None
+            try:
+                from utils.dig_assets import get_event_art
+                depth = getattr(result, "depth", 0) or getattr(result, "depth_after", 0)
+                layer_def = get_layer_def(depth)
+                ev_layer = layer_def.name if layer_def else "Dirt"
+                boon_event_file = await asyncio.to_thread(get_event_art, event_data.get("id", ""), ev_layer)
+                if boon_event_file:
+                    event_embed.set_image(url=f"attachment://{boon_event_file.filename}")
+            except Exception as e:
+                logger.debug("Boon event art failed: %s", e)
+            view = BoonSelectionView(self.dig_service, interaction.user.id, guild_id, event_data)
+            if boon_event_file:
+                await safe_followup(interaction, embed=event_embed, view=view, file=boon_event_file)
+            else:
+                await safe_followup(interaction, embed=event_embed, view=view)
+            return True
+
+        # Choice / complex events — safe/risky/desperate buttons
+        if event_data.get("safe_option"):
+            event_embed = discord.Embed(
+                description=pick_description(event_data) or "Something happens...",
+                color=0xDAA520,
+            )
+            ascii_art = event_data.get("ascii_art")
+            if ascii_art:
+                event_embed.add_field(name="\u200b", value=f"```\n{ascii_art}\n```", inline=False)
+            event_file = None
+            try:
+                from utils.dig_assets import get_event_art
+                depth = getattr(result, "depth", 0) or getattr(result, "depth_after", 0)
+                layer_def = get_layer_def(depth)
+                ev_layer = layer_def.name if layer_def else "Dirt"
+                event_file = await asyncio.to_thread(get_event_art, event_data.get("id", ""), ev_layer)
+                if event_file:
+                    event_embed.set_image(url=f"attachment://{event_file.filename}")
+            except Exception as e:
+                logger.debug("Event art failed: %s", e)
+            _lum_info = getattr(result, "luminosity_info", None)
+            _lum_val = (_lum_info.get("luminosity_after", 100) if isinstance(_lum_info, dict)
+                        else getattr(_lum_info, "luminosity_after", 100)) if _lum_info else 100
+            view = EventEncounterView(self.dig_service, interaction.user.id, guild_id, event_data, luminosity=_lum_val)
+            if event_file:
+                await safe_followup(interaction, embed=event_embed, view=view, file=event_file)
+            else:
+                await safe_followup(interaction, embed=event_embed, view=view)
+            return True
+
+        return False
 
     # ------------------------------------------------------------------
     # 1. /dig — Main dig command
@@ -1289,6 +1370,9 @@ class DigCommands(commands.Cog):
                                 await msg.edit(embed=paid_embed, view=None, attachments=paid_files)
                             else:
                                 await msg.edit(embed=paid_embed, view=None)
+
+                            # Route events for paid digs (same as free dig path)
+                            await self._route_event(interaction, paid_result, guild_id)
                     except Exception as e:
                         logger.error("Paid dig error: %s", e)
                         await msg.edit(content="Paid dig failed.", embed=None, view=None)
@@ -1296,96 +1380,7 @@ class DigCommands(commands.Cog):
                     await msg.edit(content="Dig cancelled.", embed=None, view=None)
             return
 
-        # Complex event encounter — show interactive buttons with visuals
-        event = getattr(result, "event", None)
-        if event:
-            event_data = event if isinstance(event, dict) else (event._d if hasattr(event, "_d") else None)
-            complexity = event_data.get("complexity", "choice") if isinstance(event_data, dict) else "choice"
-
-            # Boon events — show buff selection buttons
-            if complexity == "boon" and isinstance(event_data, dict) and event_data.get("boon_options"):
-                embed, _layer_name, _pickaxe_tier, _items_ids = _build_dig_embed(result, interaction.user)
-                layer_file = await _attach_layer_thumbnail(embed, _layer_name)
-                boon_options = event_data["boon_options"]
-                boon_lines = [f"**{b.get('name', '?')}** — {b.get('description', '')}" for b in boon_options]
-                boon_flavor = pick_description(event_data) or "Choose a boon:"
-                event_embed = discord.Embed(
-                    description=boon_flavor + "\n\n" + "\n".join(boon_lines),
-                    color=0x5865F2,
-                )
-                # Event art for boon events
-                boon_event_file = None
-                boon_event_id = event_data.get("id", "")
-                try:
-                    from utils.dig_assets import get_event_art
-                    depth = getattr(result, "depth", 0) or getattr(result, "depth_after", 0)
-                    layer_def = get_layer_def(depth)
-                    ev_layer = layer_def.name if layer_def else "Dirt"
-                    boon_event_file = await asyncio.to_thread(get_event_art, boon_event_id, ev_layer)
-                    if boon_event_file:
-                        event_embed.set_image(url=f"attachment://{boon_event_file.filename}")
-                except Exception as e:
-                    logger.debug("Boon event art failed: %s", e)
-                view = BoonSelectionView(self.dig_service, interaction.user.id, guild_id, event_data)
-                pickaxe_file = await _attach_pickaxe_footer(embed, _pickaxe_tier)
-                items_strip = await _attach_items_strip(embed, _items_ids)
-                dig_files = [f for f in (layer_file, pickaxe_file, items_strip) if f]
-                if len(dig_files) > 1:
-                    await safe_followup(interaction, embed=embed, files=dig_files)
-                elif dig_files:
-                    await safe_followup(interaction, embed=embed, file=dig_files[0])
-                else:
-                    await safe_followup(interaction, embed=embed)
-                if boon_event_file:
-                    await safe_followup(interaction, embed=event_embed, view=view, file=boon_event_file)
-                else:
-                    await safe_followup(interaction, embed=event_embed, view=view)
-                return
-
-            if isinstance(event_data, dict) and event_data.get("safe_option"):
-                embed, _layer_name, _pickaxe_tier, _items_ids = _build_dig_embed(result, interaction.user)
-                layer_file = await _attach_layer_thumbnail(embed, _layer_name)
-                event_embed = discord.Embed(
-                    description=pick_description(event_data) or "Something happens...",
-                    color=0xDAA520,
-                )
-                # ASCII art in code block
-                ascii_art = event_data.get("ascii_art") if isinstance(event_data, dict) else None
-                if ascii_art:
-                    event_embed.add_field(name="\u200b", value=f"```\n{ascii_art}\n```", inline=False)
-                # Event art: custom diffusion art → PIL pixel art → none
-                event_file = None
-                event_id = event_data.get("id", "") if isinstance(event_data, dict) else ""
-                try:
-                    from utils.dig_assets import get_event_art
-                    depth = getattr(result, "depth", 0) or getattr(result, "depth_after", 0)
-                    layer_def = get_layer_def(depth)
-                    ev_layer = layer_def.name if layer_def else "Dirt"
-                    event_file = await asyncio.to_thread(get_event_art, event_id, ev_layer)
-                    if event_file:
-                        event_embed.set_image(url=f"attachment://{event_file.filename}")
-                except Exception as e:
-                    logger.debug("Event art failed: %s", e)
-                _lum_info = getattr(result, "luminosity_info", None)
-                _lum_val = (_lum_info.get("luminosity_after", 100) if isinstance(_lum_info, dict)
-                            else getattr(_lum_info, "luminosity_after", 100)) if _lum_info else 100
-                view = EventEncounterView(self.dig_service, interaction.user.id, guild_id, event_data, luminosity=_lum_val)
-                pickaxe_file = await _attach_pickaxe_footer(embed, _pickaxe_tier)
-                items_strip = await _attach_items_strip(embed, _items_ids)
-                dig_files = [f for f in (layer_file, pickaxe_file, items_strip) if f]
-                if len(dig_files) > 1:
-                    await safe_followup(interaction, embed=embed, files=dig_files)
-                elif dig_files:
-                    await safe_followup(interaction, embed=embed, file=dig_files[0])
-                else:
-                    await safe_followup(interaction, embed=embed)
-                if event_file:
-                    await safe_followup(interaction, embed=event_embed, view=view, file=event_file)
-                else:
-                    await safe_followup(interaction, embed=event_embed, view=view)
-                return
-
-        # Normal dig result
+        # Normal dig result — then route event interaction if applicable
         embed, layer_name, pickaxe_tier, items_ids = _build_dig_embed(result, interaction.user)
         layer_file = await _attach_layer_thumbnail(embed, layer_name)
         pickaxe_file = await _attach_pickaxe_footer(embed, pickaxe_tier)
@@ -1410,6 +1405,9 @@ class DigCommands(commands.Cog):
                     await msg.add_reaction(r)
                 except Exception:
                     pass
+
+        # Route event interaction (sent as follow-up after the dig embed)
+        await self._route_event(interaction, result, guild_id)
 
     # ------------------------------------------------------------------
     # 2. /dig_help — Help another player
@@ -2646,7 +2644,7 @@ class DigCommands(commands.Cog):
 
         embed = discord.Embed(
             title="Today's Layer Weather",
-            description="Conditions shift at 4 AM PST each day.",
+            description="Conditions shift daily.",
             color=0x5865F2,
         )
         for w in weather:
@@ -2829,9 +2827,10 @@ def _build_dig_embed(result: object, user: discord.User | discord.Member) -> tup
 
     # Layer weather (if active on player's layer)
     weather = getattr(result, "weather", None)
-    if weather and isinstance(weather, dict):
-        w_name = weather.get("name", "")
-        w_desc = weather.get("description", "")
+    if weather:
+        w_d = weather if isinstance(weather, dict) else (weather._d if hasattr(weather, "_d") else {})
+        w_name = w_d.get("name", "")
+        w_desc = w_d.get("description", "")
         if w_name:
             embed.add_field(name=f"\u26c5 {w_name}", value=f"*{w_desc}*", inline=False)
 
