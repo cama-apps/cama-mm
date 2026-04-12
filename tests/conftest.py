@@ -58,15 +58,39 @@ def clear_caches():
 @pytest.fixture(autouse=True)
 def _isolate_random_state():
     """
-    Isolate tests from `random.seed()` calls leaking across test boundaries.
+    Isolate tests from ``random.seed()`` calls leaking across test boundaries.
 
-    Some tests seed `random` for deterministic behavior. Without this fixture the
-    seeded state bleeds into subsequent tests (especially under pytest-xdist),
-    producing order-dependent pass/fail results.
+    Some tests seed ``random`` for deterministic behavior. Without this fixture
+    the seeded state bleeds into subsequent tests (especially under
+    pytest-xdist), producing order-dependent pass/fail results.
     """
     state = random.getstate()
     yield
     random.setstate(state)
+
+
+@pytest.fixture(autouse=True)
+def _disable_dig_weather(request, monkeypatch):
+    """
+    Default-disable the dig weather system for all tests.
+
+    ``DigService._get_weather_effects`` rolls random weather lazily on the
+    first ``/dig`` of each guild-day. That randomness leaks into any test that
+    calls ``dig()`` and asserts on advance bonuses, cave-in rates, or drain —
+    weather can add ±advance, ±cave_in, and ±luminosity_drain, which would
+    otherwise make these tests order-dependent under pytest-xdist.
+
+    Tests that specifically exercise the weather system should opt out with
+    ``@pytest.mark.real_weather``.
+    """
+    if request.node.get_closest_marker("real_weather"):
+        return
+    import services.dig_service as _dig_service_module
+    monkeypatch.setattr(
+        _dig_service_module.DigService,
+        "_get_weather_effects",
+        lambda self, guild_id, layer_name: {},
+    )
 
 
 @pytest.fixture(scope="session")
