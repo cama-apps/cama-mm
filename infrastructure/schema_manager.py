@@ -263,6 +263,7 @@ class SchemaManager:
             ("dig_expansion_luminosity_and_buffs", self._migration_dig_expansion),
             ("dig_prestige_events_columns", self._migration_dig_prestige_events),
             ("dig_void_bait_column", self._migration_dig_void_bait),
+            ("dig_weather_table", self._migration_dig_weather_table),
         ]
 
     # --- Migrations ---
@@ -1934,3 +1935,17 @@ class SchemaManager:
     def _migration_dig_void_bait(self, cursor) -> None:
         """Add void_bait_digs column for tracking Void Bait charges."""
         self._add_column_if_not_exists(cursor, "tunnels", "void_bait_digs", "INTEGER NOT NULL DEFAULT 0")
+
+    def _migration_dig_weather_table(self, cursor) -> None:
+        """Create dig_weather table for daily layer weather conditions."""
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS dig_weather (
+                guild_id    INTEGER NOT NULL,
+                game_date   TEXT NOT NULL,
+                layer_name  TEXT NOT NULL,
+                weather_id  TEXT NOT NULL,
+                PRIMARY KEY (guild_id, game_date, layer_name)
+            )
+            """
+        )

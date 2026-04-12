@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 from commands.checks import require_gamba_channel
 from services.dig_constants import (
@@ -1073,6 +1073,55 @@ class DigCommands(commands.Cog):
     def __init__(self, bot: commands.Bot, dig_service: DigService):
         self.bot = bot
         self.dig_service = dig_service
+        self._last_weather_date: str | None = None
+
+    async def cog_load(self) -> None:
+        self._weather_broadcast_loop.start()
+
+    async def cog_unload(self) -> None:
+        self._weather_broadcast_loop.cancel()
+
+    @tasks.loop(minutes=10)
+    async def _weather_broadcast_loop(self) -> None:
+        """Check every 10 min if the game day rolled over; if so, post weather."""
+        today = await asyncio.to_thread(self.dig_service._get_game_date)
+        if today == self._last_weather_date:
+            return
+        self._last_weather_date = today
+
+        for guild in self.bot.guilds:
+            try:
+                weather = await asyncio.to_thread(self.dig_service.get_weather, guild.id)
+                if not weather:
+                    continue
+
+                embed = discord.Embed(
+                    title="\u26c5 Daily Layer Weather",
+                    description="New conditions have settled across the depths.",
+                    color=0x5865F2,
+                )
+                for w in weather:
+                    layer = w.get("layer", "Unknown")
+                    name = w.get("name", "Unknown")
+                    desc = w.get("description", "")
+                    embed.add_field(
+                        name=f"{layer} — {name}",
+                        value=f"*{desc}*",
+                        inline=False,
+                    )
+                embed.set_footer(text="Weather affects all diggers in that layer today. Use /dig weather for details.")
+
+                # Post to first gamba channel found in this guild
+                for channel in guild.text_channels:
+                    if "gamba" in channel.name.lower():
+                        await channel.send(embed=embed)
+                        break
+            except Exception:
+                logger.exception("Failed to broadcast weather for guild %s", guild.id)
+
+    @_weather_broadcast_loop.before_loop
+    async def _before_weather_loop(self) -> None:
+        await self.bot.wait_until_ready()
 
     # ------------------------------------------------------------------
     # Autocomplete helpers
@@ -2580,7 +2629,68 @@ class DigCommands(commands.Cog):
         await safe_followup(interaction, embed=embed, file=inv_pickaxe_file)
 
     # ------------------------------------------------------------------
-    # 16. /dig guide — Paginated help
+    # 16b. /dig weather — View today's layer weather
+    # ------------------------------------------------------------------
+
+    @dig.command(name="weather", description="View today's layer weather conditions")
+    async def dig_weather(self, interaction: discord.Interaction):
+        if not await require_gamba_channel(interaction):
+            return
+
+        guild_id = interaction.guild.id if interaction.guild else None
+        weather = await asyncio.to_thread(self.dig_service.get_weather, guild_id)
+
+        if not weather:
+            await interaction.response.send_message("No weather today — skies are clear.", ephemeral=True)
+            return
+
+        embed = discord.Embed(
+            title="Today's Layer Weather",
+            description="Conditions shift at 4 AM PST each day.",
+            color=0x5865F2,
+        )
+        for w in weather:
+            layer = w.get("layer", "Unknown")
+            name = w.get("name", "Unknown")
+            desc = w.get("description", "")
+            effects = w.get("effects", {})
+
+            # Build a short mechanical summary
+            fx_parts = []
+            if effects.get("cave_in_bonus"):
+                val = effects["cave_in_bonus"]
+                fx_parts.append(f"{'+'if val > 0 else ''}{val:.0%} cave-in")
+            if effects.get("jc_multiplier"):
+                val = effects["jc_multiplier"]
+                fx_parts.append(f"{'+'if val > 0 else ''}{val:.0%} JC")
+            if effects.get("jc_bonus"):
+                val = effects["jc_bonus"]
+                fx_parts.append(f"{'+'if val > 0 else ''}{val} JC/dig")
+            if effects.get("advance_bonus"):
+                val = effects["advance_bonus"]
+                fx_parts.append(f"{'+'if val > 0 else ''}{val} advance")
+            if effects.get("event_chance_multiplier"):
+                val = effects["event_chance_multiplier"]
+                fx_parts.append(f"{'+'if val > 0 else ''}{val:.0%} events")
+            if effects.get("artifact_multiplier") and effects["artifact_multiplier"] != 1.0:
+                fx_parts.append(f"{effects['artifact_multiplier']:.1f}x artifacts")
+            if effects.get("luminosity_drain_multiplier"):
+                val = effects["luminosity_drain_multiplier"]
+                fx_parts.append(f"+{val:.0%} lum drain")
+
+            fx_str = " | ".join(fx_parts) if fx_parts else "No mechanical effect"
+
+            embed.add_field(
+                name=f"{layer} — {name}",
+                value=f"*{desc}*\n`{fx_str}`",
+                inline=False,
+            )
+
+        embed.set_footer(text="Weather affects all diggers in that layer today.")
+        await interaction.response.send_message(embed=embed)
+
+    # ------------------------------------------------------------------
+    # 17. /dig guide — Paginated help
     # ------------------------------------------------------------------
 
     @dig.command(name="guide", description="Learn how to dig")
@@ -2716,6 +2826,14 @@ def _build_dig_embed(result: object, user: discord.User | discord.Member) -> tup
             if lum_drained > 0:
                 lum_text += f" (-{lum_drained})"
             embed.add_field(name="Luminosity", value=lum_text, inline=False)
+
+    # Layer weather (if active on player's layer)
+    weather = getattr(result, "weather", None)
+    if weather and isinstance(weather, dict):
+        w_name = weather.get("name", "")
+        w_desc = weather.get("description", "")
+        if w_name:
+            embed.add_field(name=f"\u26c5 {w_name}", value=f"*{w_desc}*", inline=False)
 
     # Corruption effect (P6+)
     corruption = getattr(result, "corruption", None)

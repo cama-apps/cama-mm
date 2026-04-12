@@ -33,6 +33,7 @@ from services.dig_constants import (
     FREE_DIG_COOLDOWN,
     INJURY_SLOW_COOLDOWN,
     ITEM_PRICES,
+    LAYER_WEATHER_POOL,
     LAYERS,
     LUMINOSITY_BRIGHT,
     LUMINOSITY_DARK,
@@ -63,6 +64,7 @@ from services.dig_constants import (
     TUNNEL_NAME_NOUNS,
     TUNNEL_NAME_SILLY,
     TUNNEL_NAME_TITLES,
+    WEATHER_BY_ID,
 )
 
 logger = logging.getLogger("cama_bot.services.dig")
@@ -118,6 +120,87 @@ class DigService:
     def get_layer(self, depth: int) -> dict:
         """Public: return layer info for given depth."""
         return self._get_layer(depth)
+
+    # ── Layer Weather ────────────────────────────────────────────────
+
+    def _roll_weather(self, guild_id) -> list[dict]:
+        """Roll 2 weather events for today, targeting populated layers.
+
+        Returns list of dicts with layer_name and weather_id.
+        """
+        tunnels = self.dig_repo.get_all_tunnels(guild_id)
+
+        # Count players per layer (only tunnels active in last 7 days)
+        cutoff = int(time.time()) - 7 * 86400
+        layer_pop: dict[str, int] = {}
+        for t in tunnels:
+            if (t.get("last_dig_at") or 0) >= cutoff:
+                layer_name = self._get_layer(t.get("depth", 0)).get("name", "Dirt")
+                layer_pop[layer_name] = layer_pop.get(layer_name, 0) + 1
+
+        all_layers = list(LAYER_WEATHER_POOL.keys())
+        populated = [ly for ly in all_layers if layer_pop.get(ly, 0) > 0]
+
+        picks = []
+
+        # First pick: guaranteed populated layer (weighted by population)
+        if populated:
+            weights = [layer_pop[ly] for ly in populated]
+            first_layer = random.choices(populated, weights=weights, k=1)[0]
+        else:
+            first_layer = random.choice(all_layers)
+        weather = random.choice(LAYER_WEATHER_POOL[first_layer])
+        picks.append({"layer_name": first_layer, "weather_id": weather.id})
+
+        # Second pick: any populated layer (or random if < 2 populated)
+        remaining_pop = [ly for ly in populated if ly != first_layer]
+        if remaining_pop:
+            second_layer = random.choice(remaining_pop)
+        else:
+            remaining = [ly for ly in all_layers if ly != first_layer]
+            second_layer = random.choice(remaining)
+        weather2 = random.choice(LAYER_WEATHER_POOL[second_layer])
+        picks.append({"layer_name": second_layer, "weather_id": weather2.id})
+
+        return picks
+
+    def _ensure_weather(self, guild_id) -> list[dict]:
+        """Lazily roll weather for today if not already set. Returns active weather."""
+        today = self._get_game_date()
+        existing = self.dig_repo.get_weather(guild_id, today)
+        if existing:
+            return existing
+
+        picks = self._roll_weather(guild_id)
+        for pick in picks:
+            self.dig_repo.set_weather(guild_id, today, pick["layer_name"], pick["weather_id"])
+
+        return self.dig_repo.get_weather(guild_id, today)
+
+    def get_weather(self, guild_id) -> list[dict]:
+        """Public: get today's weather with full info for display."""
+        entries = self._ensure_weather(guild_id)
+        result = []
+        for entry in entries:
+            w = WEATHER_BY_ID.get(entry.get("weather_id"))
+            if w:
+                result.append({
+                    "layer": w.layer,
+                    "name": w.name,
+                    "description": w.description,
+                    "effects": w.effects,
+                })
+        return result
+
+    def _get_weather_effects(self, guild_id, layer_name: str) -> dict:
+        """Get combined weather effects for a specific layer today."""
+        entries = self._ensure_weather(guild_id)
+        for entry in entries:
+            if entry.get("layer_name") == layer_name:
+                w = WEATHER_BY_ID.get(entry.get("weather_id"))
+                if w:
+                    return dict(w.effects)
+        return {}
 
     def _get_prestige_perks(self, tunnel: dict) -> list[str]:
         """Get list of active prestige perks."""
@@ -859,6 +942,18 @@ class DigService:
 
         # 7b. Apply luminosity drain
         layer_name = layer.get("name", "Dirt")
+
+        # 7a. Get layer weather effects
+        weather_fx = self._get_weather_effects(guild_id, layer_name)
+        weather_info = None
+        if weather_fx:
+            # Find the weather entry for display
+            for entry in self._ensure_weather(guild_id):
+                if entry.get("layer_name") == layer_name:
+                    w = WEATHER_BY_ID.get(entry.get("weather_id"))
+                    if w:
+                        weather_info = {"name": w.name, "description": w.description}
+
         lum_info = self._apply_luminosity_drain(discord_id, guild_id, tunnel, layer_name)
         luminosity = lum_info["luminosity_after"]
 
@@ -904,6 +999,15 @@ class DigService:
             lum_info["drained"] += bonus_drain
             self.dig_repo.update_tunnel(discord_id, guild_id, luminosity=luminosity)
 
+        # 8d. Apply weather luminosity drain modifier
+        weather_drain = weather_fx.get("luminosity_drain_multiplier", 0)
+        if weather_drain > 0 and lum_info["drained"] > 0:
+            bonus_drain = int(lum_info["drained"] * weather_drain)
+            luminosity = max(0, luminosity - bonus_drain)
+            lum_info["luminosity_after"] = luminosity
+            lum_info["drained"] += bonus_drain
+            self.dig_repo.update_tunnel(discord_id, guild_id, luminosity=luminosity)
+
         pickaxe_tier = tunnel.get("pickaxe_tier", 0) or 0
         pickaxe_data = PICKAXE_TIERS[pickaxe_tier] if pickaxe_tier < len(PICKAXE_TIERS) else {}
         pickaxe_advance_bonus = pickaxe_data.get("advance_bonus", 0)
@@ -931,6 +1035,8 @@ class DigService:
         cave_in_chance = layer.get("cave_in_pct", 0.10)
         # Ascension cave-in bonus
         cave_in_chance += ascension.get("cave_in_bonus", 0)
+        # Weather cave-in modifier
+        cave_in_chance += weather_fx.get("cave_in_bonus", 0)
         # Corruption cave-in bonus (one-dig)
         if corruption:
             cave_in_chance += corruption["effects"].get("cave_in_bonus", 0)
@@ -970,6 +1076,12 @@ class DigService:
         if cave_in:
             # 10. Cave-in consequences
             block_loss = random.randint(3, 8)
+            # Weather: cap on block loss (e.g. Mudslide Warning)
+            weather_loss_cap = weather_fx.get("cave_in_loss_cap")
+            if weather_loss_cap is not None:
+                block_loss = min(block_loss, int(weather_loss_cap))
+            # Weather: extra block loss
+            block_loss += int(weather_fx.get("cave_in_loss_bonus", 0))
             # Mutation: brittle_walls — extra block loss
             block_loss += int(mutation_fx.get("cave_in_loss_bonus", 0))
             # Grappling hook prevents block loss
@@ -1089,6 +1201,7 @@ class DigService:
                 tip=self._pick_tip(new_depth),
                 decay_info=decay_info,
                 luminosity_info=lum_info,
+                weather=weather_info,
             )
 
         # 11. Roll advance (no cave-in) — with ascension/corruption/mutation
@@ -1109,6 +1222,8 @@ class DigService:
 
         # Apply modifiers
         advance += pickaxe_advance_bonus + mole_claws_bonus + buff_advance_bonus
+        # Weather advance modifier
+        advance += int(weather_fx.get("advance_bonus", 0))
         # Ascension advance penalty
         advance -= int(ascension.get("advance_penalty", 0))
         # Corruption advance penalty (one-dig)
@@ -1154,9 +1269,11 @@ class DigService:
         jc_min = layer.get("jc_min", 1)
         jc_max = layer.get("jc_max", 3)
         jc_earned = random.randint(jc_min, jc_max)
-        # Ascension JC multiplier
-        jc_mult = 1.0 + perk_loot_bonus + ascension.get("jc_multiplier", 0)
+        # Ascension JC multiplier + weather JC multiplier
+        jc_mult = 1.0 + perk_loot_bonus + ascension.get("jc_multiplier", 0) + weather_fx.get("jc_multiplier", 0)
         jc_earned = int(jc_earned * jc_mult * self._luminosity_jc_multiplier(luminosity)) + magma_heart_bonus
+        # Weather: flat JC bonus/penalty
+        jc_earned += int(weather_fx.get("jc_bonus", 0))
         # Corruption: fixed JC override
         if corruption and corruption["effects"].get("fixed_jc") is not None:
             jc_earned = corruption["effects"]["fixed_jc"]
@@ -1207,7 +1324,10 @@ class DigService:
         # 16. Roll for artifact (skip if corruption says so)
         artifact = None
         if not (corruption and corruption["effects"].get("skip_artifact")):
-            artifact = self.roll_artifact(discord_id, guild_id, new_depth)
+            artifact = self.roll_artifact(
+                discord_id, guild_id, new_depth,
+                extra_rate_mod=weather_fx.get("artifact_multiplier", 1.0),
+            )
 
         # 17. Roll for random event (layer-specific rates, luminosity, ascension, mutations)
         event_rates = {
@@ -1217,6 +1337,8 @@ class DigService:
         event_chance = event_rates.get(layer_name, 0.20)
         # Ascension event chance boost
         event_chance *= (1.0 + ascension.get("event_chance_multiplier", 0))
+        # Weather event chance modifier
+        event_chance *= (1.0 + weather_fx.get("event_chance_multiplier", 0))
         # Mutation event_magnet boost
         event_chance *= (1.0 + mutation_fx.get("event_chance_bonus", 0))
         # Darkness increases event chance (tiered)
@@ -1322,6 +1444,7 @@ class DigService:
             corruption=corruption,
             mutations=[m.get("name") for m in mutations] if mutations else None,
             event_preview=event_preview,
+            weather=weather_info,
         )
 
     def calculate_decay(self, discord_id: int, guild_id) -> int:
@@ -2564,7 +2687,7 @@ class DigService:
     # Artifacts
     # ------------------------------------------------------------------
 
-    def roll_artifact(self, discord_id: int, guild_id, depth: int) -> dict | None:
+    def roll_artifact(self, discord_id: int, guild_id, depth: int, *, extra_rate_mod: float = 1.0) -> dict | None:
         """
         Roll for an artifact drop. Returns artifact info or None.
 
@@ -2580,6 +2703,8 @@ class DigService:
 
         # Echo Stone relic bonus
         rate_mod = 1.1 if self._has_relic(discord_id, guild_id, "echo_stone") else 1.0
+        # Weather / external artifact modifier
+        rate_mod *= extra_rate_mod
         # P6 ascension: artifact find rate multiplier
         prestige_level = tunnel.get("prestige_level", 0) or 0
         ascension = self._get_ascension_effects(prestige_level)

@@ -145,6 +145,31 @@ class DigRepository(BaseRepository, IDigRepository):
             )
             return [self._normalize_tunnel(dict(row)) for row in cursor.fetchall()]
 
+    # ── Weather ──────────────────────────────────────────────────────────
+
+    def get_weather(self, guild_id: int, game_date: str) -> list[dict]:
+        """Get all active weather entries for a guild on a given game date."""
+        gid = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM dig_weather WHERE guild_id = ? AND game_date = ?",
+                (gid, game_date),
+            )
+            return [dict(row) for row in cursor.fetchall()]
+
+    def set_weather(self, guild_id: int, game_date: str, layer_name: str, weather_id: str) -> None:
+        """Set weather for a layer on a given game date."""
+        gid = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """INSERT OR REPLACE INTO dig_weather (guild_id, game_date, layer_name, weather_id)
+                   VALUES (?, ?, ?, ?)""",
+                (gid, game_date, layer_name, weather_id),
+            )
+            conn.commit()
+
     # ── Action Logging ───────────────────────────────────────────────────
 
     def log_action(
