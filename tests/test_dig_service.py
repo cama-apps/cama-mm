@@ -989,7 +989,7 @@ class TestItems:
         assert result.get("dynamite_bonus") or result["advance"] >= CONSUMABLES["dynamite"].params["bonus_blocks"]
 
     def test_hard_hat_prevents_cave_in(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """Hard hat blocks cave-in (for 3 digs)."""
+        """Hard hat blocks cave-in (for 3 digs) when charges are already set."""
         _register_player(player_repository, balance=200)
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
         monkeypatch.setattr(random, "random", lambda: 0.99)
@@ -1006,6 +1006,119 @@ class TestItems:
 
         tunnel = dig_repo.get_tunnel(10001, guild_id)
         assert tunnel["hard_hat_charges"] == HARD_HAT_USES - 1
+
+    def test_hard_hat_queued_sets_charges(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+        """Buying and queuing a hard hat actually sets hard_hat_charges on the tunnel."""
+        _register_player(player_repository, balance=200)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+        dig_repo.update_tunnel(10001, guild_id, depth=20)
+
+        # Buy and queue hard hat
+        result = dig_service.buy_item(10001, guild_id, "hard_hat")
+        assert result["success"]
+        items = dig_repo.get_inventory(10001, guild_id)
+        dig_repo.queue_item(items[0]["id"])
+
+        # Dig with hard hat queued — force cave-in roll
+        t = 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1
+        monkeypatch.setattr(time, "time", lambda: t)
+        monkeypatch.setattr(random, "random", lambda: 0.001)
+        result = dig_service.dig(10001, guild_id)
+        assert result["success"]
+        assert not result.get("cave_in"), "Queued hard hat should prevent cave-in"
+
+        # Charges should be set to HARD_HAT_USES - 1 (one consumed this dig)
+        tunnel = dig_repo.get_tunnel(10001, guild_id)
+        assert tunnel["hard_hat_charges"] == HARD_HAT_USES - 1
+
+    def test_lantern_reduces_cave_in(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+        """Lantern halves cave-in chance for the dig it's used on."""
+        _register_player(player_repository, balance=200)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+        # Place at depth 76 (Magma layer, 25% base cave-in) so halved = 12.5%
+        dig_repo.update_tunnel(10001, guild_id, depth=76)
+
+        # Buy and queue lantern
+        dig_service.buy_item(10001, guild_id, "lantern")
+        items = dig_repo.get_inventory(10001, guild_id)
+        dig_repo.queue_item(items[0]["id"])
+
+        # Roll 0.13 — would cave-in at 25% but NOT at ~12.5%
+        t = 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1
+        monkeypatch.setattr(time, "time", lambda: t)
+        monkeypatch.setattr(random, "random", lambda: 0.13)
+        result = dig_service.dig(10001, guild_id)
+        assert result["success"]
+        assert not result.get("cave_in"), "Lantern should halve cave-in chance"
+
+    def test_reinforcement_sets_reinforced_until(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+        """Reinforcement item sets reinforced_until timestamp on the tunnel."""
+        _register_player(player_repository, balance=200)
+        base_time = 1_000_000
+        monkeypatch.setattr(time, "time", lambda: base_time)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+        dig_repo.update_tunnel(10001, guild_id, depth=20)
+
+        # Buy and queue reinforcement
+        dig_service.buy_item(10001, guild_id, "reinforcement")
+        items = dig_repo.get_inventory(10001, guild_id)
+        dig_repo.queue_item(items[0]["id"])
+
+        # Dig to consume it
+        t = base_time + FREE_DIG_COOLDOWN_SECONDS + 1
+        monkeypatch.setattr(time, "time", lambda: t)
+        dig_service.dig(10001, guild_id)
+
+        tunnel = dig_repo.get_tunnel(10001, guild_id)
+        assert tunnel["reinforced_until"] >= t + 47 * 3600, "Reinforcement should set ~48h protection"
+
+    def test_void_bait_doubles_event_chance(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+        """Void Bait sets void_bait_digs and decrements each dig."""
+        _register_player(player_repository, balance=200)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+        dig_repo.update_tunnel(10001, guild_id, depth=20)
+
+        # Buy and queue void bait
+        dig_service.buy_item(10001, guild_id, "void_bait")
+        items = dig_repo.get_inventory(10001, guild_id)
+        dig_repo.queue_item(items[0]["id"])
+
+        # Dig to consume it
+        t = 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1
+        monkeypatch.setattr(time, "time", lambda: t)
+        dig_service.dig(10001, guild_id)
+
+        # Void bait should have set 3 charges, then decremented to 2 on this dig
+        tunnel = dig_repo.get_tunnel(10001, guild_id)
+        assert tunnel["void_bait_digs"] == 2
+
+    def test_sonar_pulse_returns_event_preview(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+        """Sonar Pulse includes an event_preview in the dig result."""
+        _register_player(player_repository, balance=200)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+        dig_repo.update_tunnel(10001, guild_id, depth=20)
+
+        # Buy and queue sonar pulse
+        dig_service.buy_item(10001, guild_id, "sonar_pulse")
+        items = dig_repo.get_inventory(10001, guild_id)
+        dig_repo.queue_item(items[0]["id"])
+
+        t = 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1
+        monkeypatch.setattr(time, "time", lambda: t)
+        result = dig_service.dig(10001, guild_id)
+        assert result["success"]
+        # event_preview may or may not have a value depending on the roll,
+        # but the key should be present
+        assert "event_preview" in result
 
     def test_queue_item_for_next_dig(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
         """Queued item consumed on next dig."""
@@ -2205,20 +2318,18 @@ class TestAscensionSystem:
         assert effects == {}
 
     def test_get_ascension_effects_level_1(self, dig_service):
-        """Level 1 returns advance_penalty and jc_multiplier."""
+        """Level 1 returns jc_multiplier (no advance penalty)."""
         effects = dig_service._get_ascension_effects(1)
-        assert "advance_penalty" in effects
-        assert effects["advance_penalty"] == 1
+        assert "advance_penalty" not in effects
         assert "jc_multiplier" in effects
-        assert effects["jc_multiplier"] == 0.15
+        assert effects["jc_multiplier"] == 0.25
 
     def test_ascension_effects_cumulative(self, dig_service):
         """Multiple levels stack their effects."""
         effects = dig_service._get_ascension_effects(3)
-        # Level 1 advance_penalty=1
-        assert effects["advance_penalty"] == 1
-        # Level 1 jc_multiplier=0.15
-        assert effects["jc_multiplier"] == 0.15
+        # Level 1 jc_multiplier=0.25 (no advance_penalty)
+        assert "advance_penalty" not in effects
+        assert effects["jc_multiplier"] == 0.25
         # Level 2 cave_in_bonus=0.03
         assert effects["cave_in_bonus"] == 0.03
         # Level 2 event_chance_multiplier=0.20
