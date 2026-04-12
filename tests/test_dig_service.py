@@ -1144,6 +1144,93 @@ class TestItems:
 
 
 # =============================================================================
+# Layer Weather Tests
+# =============================================================================
+
+
+class TestLayerWeather:
+    """Tests for the daily layer weather system."""
+
+    def _setup_and_second_dig(self, dig_service, player_repository, monkeypatch):
+        """Helper: register, first dig, then second dig to trigger weather."""
+        _register_player(player_repository, balance=200)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, 12345)  # first dig (early return, no weather)
+        t = 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1
+        monkeypatch.setattr(time, "time", lambda: t)
+        dig_service.dig(10001, 12345)  # second dig triggers weather
+
+    def test_weather_rolled_on_dig(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+        """Weather should be rolled lazily when a dig reaches the main flow."""
+        self._setup_and_second_dig(dig_service, player_repository, monkeypatch)
+
+        today = dig_service._get_game_date()
+        weather = dig_repo.get_weather(guild_id, today)
+        assert len(weather) == 2, "Should roll exactly 2 weather events"
+
+    def test_weather_targets_populated_layer(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+        """At least one weather event should target a layer with active players."""
+        self._setup_and_second_dig(dig_service, player_repository, monkeypatch)
+
+        today = dig_service._get_game_date()
+        weather = dig_repo.get_weather(guild_id, today)
+        layers_hit = {w["layer_name"] for w in weather}
+        # Dirt should be targeted since the player is in Dirt
+        assert "Dirt" in layers_hit
+
+    def test_weather_stable_within_day(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+        """Weather should not re-roll on subsequent digs the same day."""
+        self._setup_and_second_dig(dig_service, player_repository, monkeypatch)
+
+        today = dig_service._get_game_date()
+        weather1 = dig_repo.get_weather(guild_id, today)
+
+        # Third dig same day
+        t = 1_000_000 + 2 * FREE_DIG_COOLDOWN_SECONDS + 2
+        monkeypatch.setattr(time, "time", lambda: t)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+
+        weather2 = dig_repo.get_weather(guild_id, today)
+        assert weather1 == weather2, "Weather should not change within the same day"
+
+    def test_get_weather_returns_info(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+        """get_weather() should return displayable weather info."""
+        self._setup_and_second_dig(dig_service, player_repository, monkeypatch)
+
+        weather = dig_service.get_weather(guild_id)
+        assert len(weather) == 2
+        for w in weather:
+            assert "name" in w
+            assert "description" in w
+            assert "layer" in w
+            assert "effects" in w
+
+    def test_weather_effects_in_dig_result(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+        """Dig result should include weather info when player is in an affected layer."""
+        _register_player(player_repository, balance=200)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+
+        # Force weather on Dirt layer
+        today = dig_service._get_game_date()
+        dig_repo.set_weather(guild_id, today, "Dirt", "earthworm_migration")
+        # Clear the other weather entries to control the test
+        dig_repo.set_weather(guild_id, today, "Stone", "mineral_vein")
+
+        dig_repo.update_tunnel(10001, guild_id, depth=5)
+
+        t = 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1
+        monkeypatch.setattr(time, "time", lambda: t)
+        result = dig_service.dig(10001, guild_id)
+        assert result["success"]
+        assert result.get("weather") is not None
+        assert result["weather"]["name"] == "Earthworm Migration"
+
+
+# =============================================================================
 # Artifact Tests
 # =============================================================================
 
@@ -1734,6 +1821,11 @@ class TestLuminosity:
         dig_service.dig(10001, guild_id)
         dig_repo.update_tunnel(10001, guild_id, depth=50)  # Stone layer, base 0.16
 
+        # Neutralize weather so it doesn't alter event chance
+        today = dig_service._get_game_date()
+        dig_repo.set_weather(guild_id, today, "Dirt", "earthworm_migration")
+        dig_repo.set_weather(guild_id, today, "Magma", "cooling_period")
+
         # Stone at depth 50: bright event=0.16, dim=0.24, dark=0.40, pitch=0.48
         # Stone cave-in: bright=0.10, dim=0.15, dark=0.25, pitch=0.35
         # roll=0.38 is above all cave-in thresholds but between dim(0.24) and dark(0.40)
@@ -1759,6 +1851,12 @@ class TestLuminosity:
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
         monkeypatch.setattr(ds_mod.random, "random", lambda: 0.99)
         dig_service.dig(10001, guild_id)
+
+        # Neutralize weather so it doesn't alter event/cave-in chances
+        today = dig_service._get_game_date()
+        dig_repo.set_weather(guild_id, today, "Crystal", "crystal_resonance")
+        dig_repo.set_weather(guild_id, today, "Magma", "cooling_period")
+
         # Dirt (depth 0-25) at pitch black: 0.16 * 3.0 = 0.48.
         # Cave-in at pitch: 0.05 + 0.25 = 0.30. So roll=0.35 avoids cave-in
         # and triggers event (0.35 < 0.48). But we need uncapped > 0.75.
