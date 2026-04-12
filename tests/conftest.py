@@ -9,6 +9,7 @@ This module provides centralized constants and fixtures to reduce duplication
 across the test suite. Import TEST_GUILD_ID from here instead of defining it locally.
 """
 
+import random
 import shutil
 
 import pytest
@@ -52,6 +53,20 @@ def clear_caches():
     clear_role_assignment_cache()
     yield
     clear_role_assignment_cache()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_random_state():
+    """
+    Isolate tests from `random.seed()` calls leaking across test boundaries.
+
+    Some tests seed `random` for deterministic behavior. Without this fixture the
+    seeded state bleeds into subsequent tests (especially under pytest-xdist),
+    producing order-dependent pass/fail results.
+    """
+    state = random.getstate()
+    yield
+    random.setstate(state)
 
 
 @pytest.fixture(scope="session")
@@ -140,6 +155,16 @@ def test_db(temp_db_path):
     Use this fixture instead of defining custom fixtures with time.sleep().
     """
     return Database(temp_db_path)
+
+
+@pytest.fixture
+def test_db_with_schema(repo_db_path):
+    """Create a Database instance over a pre-initialized schema.
+
+    Prefer this over ``test_db`` when a test needs tables to exist up front
+    (e.g., record_match, player mutations).
+    """
+    return Database(repo_db_path)
 
 
 @pytest.fixture

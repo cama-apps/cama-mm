@@ -14,7 +14,12 @@ logger = logging.getLogger("cama_bot.utils.neon_helpers")
 
 
 def get_neon_service(bot):
-    """Get the NeonDegenService from the bot, or None if unavailable."""
+    """Get the ``NeonDegenService`` from the bot, or ``None`` if unavailable.
+
+    This helper is a deliberate facade for the neon degen service — the
+    ``isinstance`` check is load-bearing: it filters out ``MagicMock`` bots
+    in tests (so command code can skip the neon block without special-casing).
+    """
     from services.neon_degen_service import NeonDegenService
 
     svc = getattr(bot, "neon_degen_service", None)

@@ -7,7 +7,7 @@ from __future__ import annotations
 import json
 import time
 
-from repositories.base_repository import BaseRepository
+from repositories.base_repository import BaseRepository, safe_json_loads
 from repositories.interfaces import IDisburseRepository
 
 
@@ -383,5 +383,9 @@ class DisburseRepository(BaseRepository, IDisburseRepository):
                 "total_amount": row["total_amount"],
                 "method": row["method"],
                 "recipient_count": row["recipient_count"],
-                "recipients": json.loads(row["recipients"]),
+                "recipients": safe_json_loads(
+                    row["recipients"],
+                    default=[],
+                    context=f"disbursements.recipients id={row['id']}",
+                ),
             }

@@ -77,10 +77,48 @@ class DigRepository(BaseRepository, IDigRepository):
             )
             return self._normalize_tunnel(dict(cursor.fetchone()))
 
+    #: Columns that ``update_tunnel`` is allowed to write. Keep in sync with
+    #: ``infrastructure/schema_manager.py`` CREATE TABLE tunnels and all
+    #: subsequent ``_add_column_if_not_exists`` migrations for this table.
+    _TUNNEL_UPDATABLE_COLUMNS: frozenset[str] = frozenset({
+        # Original CREATE TABLE columns (excluding PK discord_id / guild_id and created_at)
+        "depth", "max_depth", "total_digs", "total_jc_earned",
+        "last_dig_at", "streak_days", "streak_last_date",
+        "pickaxe_tier", "prestige_level", "prestige_perks", "tunnel_name",
+        "boss_progress", "boss_attempts",
+        "trap_active", "trap_free_today", "trap_date",
+        "insured_until", "reinforced_until", "injury_state",
+        "paid_digs_today", "paid_dig_date",
+        "revenge_target", "revenge_type", "revenge_until",
+        "hard_hat_charges", "cheer_data",
+        # dig_expansion_luminosity_and_buffs migration
+        "luminosity", "temp_buffs",
+        # dig_prestige_events_columns migration
+        "best_run_score", "current_run_jc", "current_run_artifacts",
+        "current_run_events", "total_prestige_score", "mutations",
+        # dig_void_bait_column migration
+        "void_bait_digs",
+        # dig_thick_skin_date migration
+        "thick_skin_date",
+    })
+
     def update_tunnel(self, discord_id: int, guild_id: int, **kwargs) -> None:
-        """Update arbitrary tunnel columns."""
+        """Update a fixed whitelist of tunnel columns.
+
+        Raises ``ValueError`` if a kwarg is not in
+        :attr:`_TUNNEL_UPDATABLE_COLUMNS`. This replaces the old
+        f-string-from-kwargs path so a caller typo fails loudly instead of
+        silently running an UPDATE with an unknown column (SQLite error) or,
+        worse, a column that happens to exist but isn't meant to be mutated.
+        """
         if not kwargs:
             return
+        unknown = set(kwargs) - self._TUNNEL_UPDATABLE_COLUMNS
+        if unknown:
+            raise ValueError(
+                f"update_tunnel got unknown columns: {sorted(unknown)}. "
+                f"Add them to _TUNNEL_UPDATABLE_COLUMNS (and a migration) if valid."
+            )
         gid = self.normalize_guild_id(guild_id)
         set_clauses = ", ".join(f"{col} = ?" for col in kwargs)
         values = list(kwargs.values())
@@ -592,51 +630,6 @@ class DigRepository(BaseRepository, IDigRepository):
             return cursor.fetchone() is not None
 
     # ── Atomic Operations ────────────────────────────────────────────────
-
-    def atomic_dig(
-        self, discord_id: int, guild_id: int, depth_delta: int, jc_delta: int, updates: dict,
-    ) -> dict:
-        """Atomically update depth + balance + tunnel fields. Returns updated tunnel."""
-        gid = self.normalize_guild_id(guild_id)
-        with self.atomic_transaction() as conn:
-            cursor = conn.cursor()
-
-            # Update player balance
-            if jc_delta != 0:
-                cursor.execute(
-                    "UPDATE players SET jopacoin_balance = jopacoin_balance + ? WHERE discord_id = ? AND guild_id = ?",
-                    (jc_delta, discord_id, gid),
-                )
-
-            # Build tunnel update: always include depth and jc earned
-            tunnel_updates = dict(updates)
-            set_parts = [
-                "depth = depth + ?",
-                "total_jc_earned = total_jc_earned + ?",
-                "total_digs = total_digs + 1",
-            ]
-            params = [depth_delta, max(jc_delta, 0)]
-
-            # Update max_depth if needed
-            set_parts.append("max_depth = MAX(max_depth, depth + ?)")
-            params.append(depth_delta)
-
-            for col, val in tunnel_updates.items():
-                set_parts.append(f"{col} = ?")
-                params.append(val)
-
-            params.extend([discord_id, gid])
-            cursor.execute(
-                f"UPDATE tunnels SET {', '.join(set_parts)} WHERE discord_id = ? AND guild_id = ?",
-                params,
-            )
-
-            # Return updated tunnel
-            cursor.execute(
-                "SELECT * FROM tunnels WHERE discord_id = ? AND guild_id = ?",
-                (discord_id, gid),
-            )
-            return self._normalize_tunnel(dict(cursor.fetchone()))
 
     def atomic_sabotage(
         self,

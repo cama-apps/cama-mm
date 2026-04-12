@@ -19,7 +19,6 @@ from repositories.player_repository import PlayerRepository
 from services import error_codes
 from services.interfaces import IBankruptcyService
 from services.result import Result
-from utils.guild import normalize_guild_id
 
 
 @dataclass
@@ -200,26 +199,7 @@ class BankruptcyService(IBankruptcyService):
         Returns:
             New total penalty games remaining
         """
-        normalized_id = normalize_guild_id(guild_id)
-        with self.bankruptcy_repo.connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                UPDATE bankruptcy_state
-                SET penalty_games_remaining = MAX(0, penalty_games_remaining + ?),
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE discord_id = ? AND guild_id = ?
-                """,
-                (games, discord_id, normalized_id),
-            )
-            conn.commit()
-            # Return new total
-            cursor.execute(
-                "SELECT penalty_games_remaining FROM bankruptcy_state WHERE discord_id = ? AND guild_id = ?",
-                (discord_id, normalized_id),
-            )
-            row = cursor.fetchone()
-            return row["penalty_games_remaining"] if row else games
+        return self.bankruptcy_repo.adjust_penalty_games(discord_id, guild_id, games)
 
     # =========================================================================
     # Result-returning methods (new API)

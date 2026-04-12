@@ -899,7 +899,7 @@ def draw_pairwise_slide(
         if avatar_images and discord_id and discord_id in avatar_images:
             try:
                 avatar_data = avatar_images[discord_id]
-                avatar_img = Image.open(io.BytesIO(avatar_data)).convert("RGBA").resize((48, 48))
+                avatar_img = Image.open(io.BytesIO(avatar_data)).convert("RGBA").resize((48, 48), Image.Resampling.LANCZOS)
                 # Create circular mask
                 mask = Image.new("L", (48, 48), 0)
                 mask_draw = ImageDraw.Draw(mask)
@@ -1124,12 +1124,15 @@ def draw_package_deal_slide(
     jc_spent: int,
     jc_spent_on_you: int,
     total_games: int,
+    flavor_text: str | None = None,
 ) -> io.BytesIO:
     """
     Draw anonymized package deal stats slide.
 
     Shows how many deals the player bought and how many were bought on them,
-    without revealing any names.
+    without revealing any names. ``flavor_text`` is an optional caption drawn
+    near the bottom; callers pass the localized string rather than having this
+    util reach up to the services layer to generate one.
     """
     width, height = 800, 600
     img = Image.new("RGBA", (width, height), (*BG_GRADIENT_START, 255))
@@ -1148,8 +1151,6 @@ def draw_package_deal_slide(
     title_font = _get_font(20, bold=True)
     _center_text(draw, "PACKAGE DEALS", title_font, 50, width, accent)
     draw.line([(50, 80), (width - 50, 80)], fill=(*accent, 128), width=1)
-
-    from services.wrapped_service import get_random_flavor
 
     # --- "Bought on you" card ---
     card_y = 110
@@ -1182,10 +1183,9 @@ def draw_package_deal_slide(
     draw.text((70, games_y + 45), "games committed across all deals", fill=TEXT_GREY, font=detail_font)
 
     # Flavor
-    flavor = get_random_flavor("package_deal")
-    if flavor:
+    if flavor_text:
         flavor_font = _get_font(14)
-        _center_text(draw, f'"{flavor}"', flavor_font, height - 60, width, TEXT_GREY)
+        _center_text(draw, f'"{flavor_text}"', flavor_font, height - 60, width, TEXT_GREY)
 
     buffer = io.BytesIO()
     img.save(buffer, format="PNG")
@@ -1235,7 +1235,7 @@ def wrap_chart_in_slide(
             ratio = min(max_w / chart_w, max_h / chart_h)
             new_w = int(chart_w * ratio)
             new_h = int(chart_h * ratio)
-            chart_img = chart_img.resize((new_w, new_h), Image.LANCZOS)
+            chart_img = chart_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
             chart_w, chart_h = new_w, new_h
 
         x_offset = (width - chart_w) // 2

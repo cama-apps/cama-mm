@@ -323,7 +323,9 @@ def _build_slides(
 
     # --- Slide 14: Package Deals (all-time, conditional) ---
     if package_deal_data:
-        def _render_deals(pd=package_deal_data, u=target_username):
+        _package_deal_flavor = get_random_flavor("package_deal")
+
+        def _render_deals(pd=package_deal_data, u=target_username, flavor=_package_deal_flavor):
             return draw_package_deal_slide(
                 u, "All-Time",
                 times_bought=pd.times_bought,
@@ -332,6 +334,7 @@ def _build_slides(
                 jc_spent=pd.jc_spent,
                 jc_spent_on_you=pd.jc_spent_on_you,
                 total_games=pd.total_games_committed,
+                flavor_text=flavor,
             )
         slides.append(WrappedSlide("story_packages", "Package Deals", _render_deals))
 

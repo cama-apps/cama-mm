@@ -79,8 +79,11 @@ _container: ServiceContainer | None = None
 _lobby_rally_cooldowns: dict[tuple[int, int], float] = {}
 
 # Lobby ready notification cooldowns
-# Key: guild_id -> timestamp
+# Key: guild_id -> timestamp. Guarded by ``_lobby_ready_lock`` so that
+# concurrent reaction handlers cannot both pass the cooldown check and
+# double-post the "lobby ready" message.
 _lobby_ready_cooldowns: dict[int, float] = {}
+_lobby_ready_lock = asyncio.Lock()
 
 
 def _init_services():
@@ -239,10 +242,14 @@ async def update_lobby_message(message, lobby, guild_id=None):
 
 async def notify_lobby_ready(channel, lobby, guild_id: int = 0):
     """Notify that lobby is ready to shuffle."""
-    now = time.time()
-    last_sent = _lobby_ready_cooldowns.get(guild_id, 0)
-    if now - last_sent < LOBBY_READY_COOLDOWN_SECONDS:
-        return
+    async with _lobby_ready_lock:
+        now = time.time()
+        last_sent = _lobby_ready_cooldowns.get(guild_id, 0)
+        if now - last_sent < LOBBY_READY_COOLDOWN_SECONDS:
+            return
+        # Claim the cooldown slot immediately so a concurrent handler firing
+        # during the await-chain below can't also pass the check.
+        _lobby_ready_cooldowns[guild_id] = now
     try:
         embed = discord.Embed(
             title="🎮 Lobby Ready!",
@@ -277,8 +284,9 @@ async def notify_lobby_ready(channel, lobby, guild_id: int = 0):
                 target_channel = channel  # Fallback
 
         await target_channel.send(embed=embed)
-        _lobby_ready_cooldowns[guild_id] = time.time()
     except Exception as exc:
+        # Send failed — release the cooldown slot we claimed so a retry can fire.
+        _lobby_ready_cooldowns.pop(guild_id, None)
         logger.error(f"Error notifying lobby ready: {exc}", exc_info=True)
 
 

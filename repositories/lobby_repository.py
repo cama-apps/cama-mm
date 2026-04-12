@@ -4,7 +4,7 @@ Repository for lobby persistence.
 
 import json
 
-from repositories.base_repository import BaseRepository
+from repositories.base_repository import BaseRepository, safe_json_loads
 from repositories.interfaces import ILobbyRepository
 
 
@@ -67,12 +67,24 @@ class LobbyRepository(BaseRepository, ILobbyRepository):
             if not row:
                 return None
             row_dict = dict(row)
-            raw_join_times = row_dict.get("player_join_times", "{}")
-            join_times = json.loads(raw_join_times) if raw_join_times else {}
+            lobby_id = row_dict["lobby_id"]
+            join_times = safe_json_loads(
+                row_dict.get("player_join_times"),
+                default={},
+                context=f"lobby_state.player_join_times lobby_id={lobby_id}",
+            )
             return {
-                "lobby_id": row_dict["lobby_id"],
-                "players": json.loads(row_dict["players"]) if row_dict.get("players") else [],
-                "conditional_players": json.loads(row_dict["conditional_players"]) if row_dict.get("conditional_players") else [],
+                "lobby_id": lobby_id,
+                "players": safe_json_loads(
+                    row_dict.get("players"),
+                    default=[],
+                    context=f"lobby_state.players lobby_id={lobby_id}",
+                ),
+                "conditional_players": safe_json_loads(
+                    row_dict.get("conditional_players"),
+                    default=[],
+                    context=f"lobby_state.conditional_players lobby_id={lobby_id}",
+                ),
                 "player_join_times": {int(k): v for k, v in join_times.items()},
                 "status": row_dict["status"],
                 "created_by": row_dict["created_by"],

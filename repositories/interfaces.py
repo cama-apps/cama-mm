@@ -1408,7 +1408,4 @@ class IDigRepository(ABC):
 
     # Atomic Operations
     @abstractmethod
-    def atomic_dig(self, discord_id: int, guild_id: int, depth_delta: int, jc_delta: int, updates: dict) -> dict: ...
-
-    @abstractmethod
     def atomic_sabotage(self, actor_id: int, target_id: int, guild_id: int, target_depth_delta: int, actor_jc_cost: int) -> dict: ...

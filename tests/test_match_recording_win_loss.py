@@ -4,21 +4,13 @@ Additional unit tests for win/loss recording edge cases and integrity.
 
 import pytest
 
-from database import Database
-
 
 @pytest.fixture
-def test_db(repo_db_path):
-    """Temporary database for win/loss recording tests using centralized fast fixture."""
-    return Database(repo_db_path)
-
-
-@pytest.fixture
-def player_ids(test_db):
+def player_ids(test_db_with_schema):
     """Create 10 players in the database."""
     ids = list(range(11001, 11011))
     for pid in ids:
-        test_db.add_player(
+        test_db_with_schema.add_player(
             discord_id=pid,
             discord_username=f"Player{pid}",
             initial_mmr=1500,
@@ -29,79 +21,68 @@ def player_ids(test_db):
     return ids
 
 
-def _fetch_wins_losses(test_db, discord_id):
-    player = test_db.get_player(discord_id)
+def _fetch_wins_losses(db, discord_id):
+    player = db.get_player(discord_id)
     return player.wins, player.losses
 
 
-def test_radiant_win_updates_wins_and_losses(test_db, player_ids):
+@pytest.mark.parametrize(
+    ("winning_team", "winning_slice", "losing_slice"),
+    [
+        ("radiant", slice(0, 5), slice(5, 10)),
+        ("dire", slice(5, 10), slice(0, 5)),
+    ],
+    ids=["radiant_wins", "dire_wins"],
+)
+def test_win_updates_wins_and_losses(
+    test_db_with_schema, player_ids, winning_team, winning_slice, losing_slice
+):
     radiant = player_ids[:5]
     dire = player_ids[5:]
 
-    test_db.record_match(
+    test_db_with_schema.record_match(
         radiant_team_ids=radiant,
         dire_team_ids=dire,
-        winning_team="radiant",
+        winning_team=winning_team,
     )
 
-    for pid in radiant:
-        wins, losses = _fetch_wins_losses(test_db, pid)
+    for pid in player_ids[winning_slice]:
+        wins, losses = _fetch_wins_losses(test_db_with_schema, pid)
         assert wins == 1
         assert losses == 0
 
-    for pid in dire:
-        wins, losses = _fetch_wins_losses(test_db, pid)
+    for pid in player_ids[losing_slice]:
+        wins, losses = _fetch_wins_losses(test_db_with_schema, pid)
         assert wins == 0
         assert losses == 1
 
 
-def test_dire_win_updates_wins_and_losses(test_db, player_ids):
-    radiant = player_ids[:5]
-    dire = player_ids[5:]
-
-    test_db.record_match(
-        radiant_team_ids=radiant,
-        dire_team_ids=dire,
-        winning_team="dire",
-    )
-
-    for pid in dire:
-        wins, losses = _fetch_wins_losses(test_db, pid)
-        assert wins == 1
-        assert losses == 0
-
-    for pid in radiant:
-        wins, losses = _fetch_wins_losses(test_db, pid)
-        assert wins == 0
-        assert losses == 1
-
-
-def test_multiple_matches_accumulate_correctly(test_db, player_ids):
+def test_multiple_matches_accumulate_correctly(test_db_with_schema, player_ids):
     radiant = player_ids[:5]
     dire = player_ids[5:]
 
     # Radiant wins twice, Dire wins once
-    test_db.record_match(radiant_team_ids=radiant, dire_team_ids=dire, winning_team="radiant")
-    test_db.record_match(radiant_team_ids=radiant, dire_team_ids=dire, winning_team="radiant")
-    test_db.record_match(radiant_team_ids=radiant, dire_team_ids=dire, winning_team="dire")
+    test_db_with_schema.record_match(radiant_team_ids=radiant, dire_team_ids=dire, winning_team="radiant")
+    test_db_with_schema.record_match(radiant_team_ids=radiant, dire_team_ids=dire, winning_team="radiant")
+    test_db_with_schema.record_match(radiant_team_ids=radiant, dire_team_ids=dire, winning_team="dire")
 
     for pid in radiant:
-        wins, losses = _fetch_wins_losses(test_db, pid)
+        wins, losses = _fetch_wins_losses(test_db_with_schema, pid)
         assert wins == 2
         assert losses == 1
 
     for pid in dire:
-        wins, losses = _fetch_wins_losses(test_db, pid)
+        wins, losses = _fetch_wins_losses(test_db_with_schema, pid)
         assert wins == 1
         assert losses == 2
 
 
-def test_existing_wins_losses_are_incremented(test_db, player_ids):
+def test_existing_wins_losses_are_incremented(test_db_with_schema, player_ids):
     radiant = player_ids[:5]
     dire = player_ids[5:]
 
     # Seed some prior stats
-    with test_db.connection() as conn:
+    with test_db_with_schema.connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
             "UPDATE players SET wins = 2, losses = 3 WHERE discord_id IN ({})".format(
@@ -116,30 +97,30 @@ def test_existing_wins_losses_are_incremented(test_db, player_ids):
             dire,
         )
 
-    test_db.record_match(radiant_team_ids=radiant, dire_team_ids=dire, winning_team="dire")
+    test_db_with_schema.record_match(radiant_team_ids=radiant, dire_team_ids=dire, winning_team="dire")
 
     for pid in radiant:
-        wins, losses = _fetch_wins_losses(test_db, pid)
+        wins, losses = _fetch_wins_losses(test_db_with_schema, pid)
         assert wins == 2  # unchanged wins
         assert losses == 4  # incremented loss
 
     for pid in dire:
-        wins, losses = _fetch_wins_losses(test_db, pid)
+        wins, losses = _fetch_wins_losses(test_db_with_schema, pid)
         assert wins == 2  # incremented win
         assert losses == 4  # unchanged losses
 
 
-def test_participants_table_has_correct_side_and_won_flags(test_db, player_ids):
+def test_participants_table_has_correct_side_and_won_flags(test_db_with_schema, player_ids):
     radiant = player_ids[:5]
     dire = player_ids[5:]
 
-    match_id = test_db.record_match(
+    match_id = test_db_with_schema.record_match(
         radiant_team_ids=radiant,
         dire_team_ids=dire,
         winning_team="radiant",
     )
 
-    conn = test_db.get_connection()
+    conn = test_db_with_schema.get_connection()
     cursor = conn.cursor()
     cursor.execute(
         "SELECT discord_id, team_number, won, side FROM match_participants WHERE match_id = ?",

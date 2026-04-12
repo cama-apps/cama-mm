@@ -19,8 +19,6 @@ from pathlib import Path
 import discord
 from PIL import Image
 
-from services.dig_constants import BOSS_SLUGS, PICKAXE_SLUGS
-
 logger = logging.getLogger(__name__)
 
 ASSETS_DIR = Path(__file__).resolve().parent.parent / "assets" / "dig"
@@ -37,6 +35,18 @@ LAYER_SLUGS: dict[str, str] = {
     "Frozen Core": "frozen_core",
     "The Hollow": "the_hollow",
 }
+
+#: Asset-filename slug for each boss depth boundary. Lives here (not in
+#: ``services.dig_constants``) so the utils → services layering stays clean.
+BOSS_SLUGS: dict[int, str] = {
+    25: "grothak", 50: "crystalia", 75: "magmus",
+    100: "void_warden", 150: "sporeling", 200: "chronofrost", 275: "nameless",
+}
+
+#: Asset-filename slug for each pickaxe tier index (0 = wooden, 6 = void_touched).
+PICKAXE_SLUGS: list[str] = [
+    "wooden", "stone", "iron", "diamond", "obsidian", "frostforged", "void_touched",
+]
 
 # Module-level byte cache:  path-string -> bytes
 # Bounded by the finite asset set (~29 entries: 21 boss + 8 layer images).

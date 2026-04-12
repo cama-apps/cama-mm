@@ -2,7 +2,6 @@
 Tests for the /addfake command in AdminCommands.
 """
 
-import random
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -68,9 +67,18 @@ class FakeChannel:
         raise Exception("message not found")
 
 
+_fake_interaction_counter = 0
+
+
+def _next_fake_interaction_id() -> int:
+    global _fake_interaction_counter
+    _fake_interaction_counter += 1
+    return _fake_interaction_counter
+
+
 class FakeInteraction:
     def __init__(self, user_id=1, guild_id=123):
-        self.id = random.randint(1, 999999999)  # Unique ID each time
+        self.id = _next_fake_interaction_id()
         self.user = SimpleNamespace(id=user_id)
         self.guild = SimpleNamespace(id=guild_id)
         self.channel = FakeChannel()

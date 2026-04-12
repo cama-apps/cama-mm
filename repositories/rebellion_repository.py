@@ -6,7 +6,7 @@ Handles CRUD for wheel_wars and war_bets tables.
 
 import json
 
-from repositories.base_repository import BaseRepository
+from repositories.base_repository import BaseRepository, safe_json_loads
 from repositories.interfaces import IRebellionRepository
 
 
@@ -83,7 +83,11 @@ class RebellionRepository(BaseRepository, IRebellionRepository):
             row = cursor.fetchone()
             if not row:
                 raise ValueError(f"War {war_id} not found")
-            voters = json.loads(row["attack_voter_ids"])
+            voters = safe_json_loads(
+                row["attack_voter_ids"],
+                default=[],
+                context=f"wheel_wars.attack_voter_ids war_id={war_id}",
+            )
             # Prevent duplicate votes
             if any(v["discord_id"] == discord_id for v in voters):
                 return {
@@ -113,7 +117,11 @@ class RebellionRepository(BaseRepository, IRebellionRepository):
             row = cursor.fetchone()
             if not row:
                 raise ValueError(f"War {war_id} not found")
-            voters = json.loads(row["defend_voter_ids"])
+            voters = safe_json_loads(
+                row["defend_voter_ids"],
+                default=[],
+                context=f"wheel_wars.defend_voter_ids war_id={war_id}",
+            )
             # Prevent duplicate votes
             if discord_id in voters:
                 return {"effective_defend_count": row["effective_defend_count"], "duplicate": True}
@@ -136,6 +144,41 @@ class RebellionRepository(BaseRepository, IRebellionRepository):
             cursor.execute(
                 "UPDATE wheel_wars SET status = ? WHERE war_id = ?",
                 (status, war_id),
+            )
+
+    def set_inciter_veteran_weight(
+        self,
+        war_id: int,
+        bankruptcy_count: int,
+        effective_attack_count: float,
+    ) -> None:
+        """Overwrite the inciter's attack-voter row with a veteran weight.
+
+        The inciter is always the first entry in ``attack_voter_ids`` (it's
+        created as the sole voter when the war is created). This helper rewrites
+        that entry's bankruptcy_count and bumps ``effective_attack_count`` so
+        the repository remains the only layer that touches the column.
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT attack_voter_ids FROM wheel_wars WHERE war_id = ?",
+                (war_id,),
+            )
+            row = cursor.fetchone()
+            if not row:
+                raise ValueError(f"War {war_id} not found")
+            voters = safe_json_loads(
+                row["attack_voter_ids"],
+                default=[],
+                context=f"wheel_wars.attack_voter_ids war_id={war_id}",
+            )
+            if not voters:
+                return
+            voters[0]["bankruptcy_count"] = bankruptcy_count
+            cursor.execute(
+                "UPDATE wheel_wars SET attack_voter_ids = ?, effective_attack_count = ? WHERE war_id = ?",
+                (json.dumps(voters), effective_attack_count, war_id),
             )
 
     def set_war_outcome(
@@ -326,7 +369,11 @@ class RebellionRepository(BaseRepository, IRebellionRepository):
             row = cursor.fetchone()
             if not row:
                 return False
-            used = json.loads(row["celebration_spins_used"])
+            used = safe_json_loads(
+                row["celebration_spins_used"],
+                default=[],
+                context=f"wheel_wars.celebration_spins_used war_id={war_id}",
+            )
             if discord_id in used:
                 return False
             used.append(discord_id)

@@ -147,18 +147,11 @@ class RebellionService:
 
         # Update inciter's vote weight if veteran
         if bankruptcy_count >= REBELLION_VETERAN_REBEL_MIN_BANKRUPTCIES:
-            # Update stored voter metadata and effective count to veteran weight.
-            import json
-            war = self.rebellion_repo.get_war(war_id)
-            voters = json.loads(war["attack_voter_ids"])
-            voters[0]["bankruptcy_count"] = bankruptcy_count
-            # Update effective count to veteran weight
-            with self.rebellion_repo.connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    "UPDATE wheel_wars SET attack_voter_ids = ?, effective_attack_count = ? WHERE war_id = ?",
-                    (json.dumps(voters), REBELLION_VETERAN_REBEL_VOTE_WEIGHT, war_id),
-                )
+            self.rebellion_repo.set_inciter_veteran_weight(
+                war_id=war_id,
+                bankruptcy_count=bankruptcy_count,
+                effective_attack_count=REBELLION_VETERAN_REBEL_VOTE_WEIGHT,
+            )
 
         return {
             "war_id": war_id,

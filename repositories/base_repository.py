@@ -2,14 +2,36 @@
 Base repository with common database operations.
 """
 
+import json
 import logging
 import sqlite3
 from abc import ABC
 from contextlib import contextmanager
+from typing import Any
 
 from database import Database
 
 logger = logging.getLogger("cama_bot.repositories")
+
+
+def safe_json_loads(raw: Any, default: Any, *, context: str = "") -> Any:
+    """Parse a JSON column value, falling back to ``default`` on corruption.
+
+    Logs a warning with ``context`` when the raw value is missing or malformed
+    so that schema/data issues are visible without crashing the read path.
+    """
+    if raw is None or raw == "":
+        return default
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, TypeError) as exc:
+        logger.warning(
+            "Corrupt JSON column (%s): %r — falling back to default. Error: %s",
+            context or "unknown",
+            raw,
+            exc,
+        )
+        return default
 
 
 class BaseRepository(ABC):

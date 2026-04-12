@@ -264,6 +264,7 @@ class SchemaManager:
             ("dig_prestige_events_columns", self._migration_dig_prestige_events),
             ("dig_void_bait_column", self._migration_dig_void_bait),
             ("dig_weather_table", self._migration_dig_weather_table),
+            ("dig_thick_skin_date", self._migration_dig_thick_skin_date),
         ]
 
     # --- Migrations ---
@@ -782,7 +783,14 @@ class SchemaManager:
         self._add_column_if_not_exists(cursor, "matches", "lobby_type", "TEXT DEFAULT 'shuffle'")
 
     def _migration_create_player_stakes_table(self, cursor) -> None:
-        """Create table for player stake pool in draft mode."""
+        """Create table for player stake pool in draft mode.
+
+        .. note::
+            As of 2026-04, this table has no active reader/writer. The pool
+            system it was planned for did not ship. The migration is kept so
+            existing databases don't drift; do not delete without also writing
+            a drop migration to keep dev and prod in sync.
+        """
         cursor.execute(
             """
             CREATE TABLE IF NOT EXISTS player_stakes (
@@ -810,7 +818,14 @@ class SchemaManager:
         )
 
     def _migration_create_spectator_bets_table(self, cursor) -> None:
-        """Create table for spectator pool bets (parimutuel with player cut)."""
+        """Create table for spectator pool bets (parimutuel with player cut).
+
+        .. note::
+            As of 2026-04, this table has no active reader/writer. The pool
+            system it was planned for did not ship. The migration is kept so
+            existing databases don't drift; do not delete without also writing
+            a drop migration to keep dev and prod in sync.
+        """
         cursor.execute(
             """
             CREATE TABLE IF NOT EXISTS spectator_bets (
@@ -1949,3 +1964,12 @@ class SchemaManager:
             )
             """
         )
+
+    def _migration_dig_thick_skin_date(self, cursor) -> None:
+        """Track last date the thick_skin mutation consumed its daily shield.
+
+        Without this column, `DigService._apply_cave_in_mutations` crashes when
+        the ``thick_skin`` mutation is active because it calls
+        ``update_tunnel(thick_skin_date=today)`` against a non-existent column.
+        """
+        self._add_column_if_not_exists(cursor, "tunnels", "thick_skin_date", "TEXT")

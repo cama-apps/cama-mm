@@ -101,6 +101,32 @@ class BankruptcyRepository(BaseRepository, IBankruptcyRepository):
                 (last_bankruptcy_at, penalty_games_remaining, discord_id, normalized_id),
             )
 
+    def adjust_penalty_games(
+        self, discord_id: int, guild_id: int | None, delta: int
+    ) -> int:
+        """Add ``delta`` to ``penalty_games_remaining`` (clamped to >= 0).
+
+        Returns the resulting total. Use a negative delta to subtract.
+        """
+        normalized_id = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE bankruptcy_state
+                SET penalty_games_remaining = MAX(0, penalty_games_remaining + ?),
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE discord_id = ? AND guild_id = ?
+                """,
+                (delta, discord_id, normalized_id),
+            )
+            cursor.execute(
+                "SELECT penalty_games_remaining FROM bankruptcy_state WHERE discord_id = ? AND guild_id = ?",
+                (discord_id, normalized_id),
+            )
+            row = cursor.fetchone()
+            return row["penalty_games_remaining"] if row else max(delta, 0)
+
     def decrement_penalty_games(self, discord_id: int, guild_id: int | None = None) -> int:
         """
         Decrement penalty games remaining by 1 if > 0.
