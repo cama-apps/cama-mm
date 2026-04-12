@@ -478,6 +478,35 @@ async def on_raw_reaction_add(payload):
                 logger.error(f"Error handling readycheck reaction: {exc}", exc_info=True)
         return
 
+    # Handle 🔔 readycheck-shortcut reactions on the lobby embed
+    if payload.emoji.name == "🔔":
+        _init_services()
+        if payload.message_id != bot.lobby_service.get_lobby_message_id():
+            return
+        cog = bot.get_cog("LobbyCommands")
+        if not cog:
+            return
+        guild = bot.get_guild(payload.guild_id) if payload.guild_id else None
+        if not guild:
+            return
+        try:
+            status, _info = await cog._execute_readycheck(guild, payload.guild_id)
+        except Exception as exc:
+            logger.error(f"Error running 🔔 readycheck shortcut: {exc}", exc_info=True)
+            status = "error"
+        if status != "ok":
+            # Visible feedback that nothing happened — remove only this user's reaction
+            try:
+                channel = bot.get_channel(payload.channel_id)
+                if not channel:
+                    channel = await bot.fetch_channel(payload.channel_id)
+                message = await channel.fetch_message(payload.message_id)
+                user = await bot.fetch_user(payload.user_id)
+                await message.remove_reaction("🔔", user)
+            except Exception:
+                pass
+        return
+
     is_sword = _is_sword_emoji(payload.emoji)
     is_frogling = _is_frogling_emoji(payload.emoji)
     is_jopacoin = _is_jopacoin_emoji(payload.emoji)

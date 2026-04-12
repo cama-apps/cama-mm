@@ -381,7 +381,8 @@ class LobbyCommands(commands.Cog):
             # Pin the lobby message for visibility
             await self._safe_pin(channel_msg)
 
-            # Add reaction emojis for joining (sword for regular, frogling for conditional, jopacoin for gamba notifications)
+            # Add reaction emojis for joining (sword for regular, frogling for conditional,
+            # jopacoin for gamba notifications, bell for /readycheck shortcut)
             try:
                 await channel_msg.add_reaction("⚔️")
                 # Add frogling emoji using PartialEmoji with ID
@@ -390,6 +391,8 @@ class LobbyCommands(commands.Cog):
                 # Add jopacoin emoji for subscribing to gamba notifications
                 jopacoin_emoji = discord.PartialEmoji(name="jopacoin", id=JOPACOIN_EMOJI_ID)
                 await channel_msg.add_reaction(jopacoin_emoji)
+                # Bell triggers a ready check (equivalent to /readycheck)
+                await channel_msg.add_reaction("🔔")
             except Exception as e:
                 logger.debug("Failed to add lobby reactions: %s", e)
 
@@ -755,24 +758,71 @@ class LobbyCommands(commands.Cog):
         if not await safe_defer(interaction, ephemeral=False):
             return
 
-        guild_id = interaction.guild.id if interaction.guild else None
+        guild = interaction.guild
+        guild_id = guild.id if guild else None
+        status, info = await self._execute_readycheck(guild, guild_id)
 
-        lobby = self.lobby_service.get_lobby()
-        if not lobby:
+        if status == "no_lobby":
             await safe_followup(interaction, content="⚠️ No active lobby.", ephemeral=True)
-            return
-
-        if lobby.get_total_count() < 10:
+        elif status == "not_enough_players":
             await safe_followup(
-                interaction, content=f"⚠️ Need at least 10 players for a ready check ({lobby.get_total_count()}/10).",
+                interaction,
+                content=f"⚠️ Need at least 10 players for a ready check ({info['count']}/10).",
                 ephemeral=True,
             )
-            return
-
-        guild = interaction.guild
-        if not guild:
+        elif status == "no_guild":
             await safe_followup(interaction, content="❌ This command must be used in a server.", ephemeral=True)
-            return
+        elif status == "cooldown":
+            await safe_followup(
+                interaction,
+                content=f"⏳ Ready check on cooldown. Try again in {info['retry_after_seconds']}s.",
+                ephemeral=True,
+            )
+        elif status == "no_thread":
+            await safe_followup(
+                interaction, content="❌ No lobby thread found. Create a lobby with `/lobby` first.",
+                ephemeral=True,
+            )
+        elif status == "ok":
+            verb = "refreshed" if info.get("is_refresh") else "posted"
+            await safe_followup(
+                interaction,
+                content=f"✅ Ready check {verb}! [View]({info['message_jump_url']})",
+                ephemeral=True,
+            )
+        else:  # "error"
+            await safe_followup(interaction, content="❌ Ready check failed.", ephemeral=True)
+
+    async def _execute_readycheck(
+        self,
+        guild: discord.Guild | None,
+        guild_id: int | None,
+    ) -> tuple[str, dict]:
+        """Run the readycheck flow. Returns (status, info).
+
+        Shared by /readycheck and the 🔔 lobby-embed reaction shortcut so the
+        cooldown is genuinely a single per-guild bucket. Does not touch any
+        Discord interaction object — callers translate the status into the
+        appropriate user-facing feedback (ephemeral followup or reaction
+        removal).
+
+        status: one of "ok" | "no_lobby" | "not_enough_players" | "no_thread"
+                | "cooldown" | "no_guild" | "error"
+        info contents:
+            ok                  -> {"message_jump_url": str, "is_refresh": bool}
+            not_enough_players  -> {"count": int}
+            cooldown            -> {"retry_after_seconds": int}
+            (others)            -> {}
+        """
+        lobby = self.lobby_service.get_lobby()
+        if not lobby:
+            return "no_lobby", {}
+
+        if lobby.get_total_count() < 10:
+            return "not_enough_players", {"count": lobby.get_total_count()}
+
+        if not guild:
+            return "no_guild", {}
 
         # Global shared rate limit (1 per 120s per guild) — checked after
         # preconditions so failed attempts don't consume the cooldown
@@ -784,11 +834,7 @@ class LobbyCommands(commands.Cog):
             per_seconds=120,
         )
         if not rl.allowed:
-            await safe_followup(
-                interaction, content=f"⏳ Ready check on cooldown. Try again in {rl.retry_after_seconds}s.",
-                ephemeral=True,
-            )
-            return
+            return "cooldown", {"retry_after_seconds": rl.retry_after_seconds}
 
         all_player_ids = list(lobby.players | lobby.conditional_players)
         current_lobby_set = set(all_player_ids)
@@ -895,11 +941,7 @@ class LobbyCommands(commands.Cog):
                 logger.debug("Failed to fetch lobby thread channel: %s", e)
 
         if not target_channel:
-            await safe_followup(
-                interaction, content="❌ No lobby thread found. Create a lobby with `/lobby` first.",
-                ephemeral=True,
-            )
-            return
+            return "no_thread", {}
 
         # Ping all lobby members (exclude those who already reacted)
         allowed_mentions = discord.AllowedMentions(
@@ -915,25 +957,21 @@ class LobbyCommands(commands.Cog):
             self.lobby_service.update_readycheck_data(current_lobby_set, player_data)
             if ping_content:
                 await msg.channel.send(ping_content, allowed_mentions=allowed_mentions)
-            await safe_followup(
-                interaction, content=f"✅ Ready check refreshed! [View]({msg.jump_url})", ephemeral=True
-            )
-        else:
-            # Post to lobby thread (target_channel is guaranteed to exist here)
-            msg = await target_channel.send(embed=embed)
-            try:
-                await msg.add_reaction("✅")
-            except Exception as e:
-                logger.debug("Failed to add checkmark reaction: %s", e)
-            if ping_content:
-                await target_channel.send(ping_content, allowed_mentions=allowed_mentions)
-            await safe_followup(
-                interaction, content=f"✅ Ready check posted! [View]({msg.jump_url})", ephemeral=True
-            )
+            return "ok", {"message_jump_url": msg.jump_url, "is_refresh": True}
 
-            self.lobby_service.set_readycheck_state(
-                msg.id, msg.channel.id, current_lobby_set, player_data
-            )
+        # Post to lobby thread (target_channel is guaranteed to exist here)
+        msg = await target_channel.send(embed=embed)
+        try:
+            await msg.add_reaction("✅")
+        except Exception as e:
+            logger.debug("Failed to add checkmark reaction: %s", e)
+        if ping_content:
+            await target_channel.send(ping_content, allowed_mentions=allowed_mentions)
+
+        self.lobby_service.set_readycheck_state(
+            msg.id, msg.channel.id, current_lobby_set, player_data
+        )
+        return "ok", {"message_jump_url": msg.jump_url, "is_refresh": False}
 
 
 def build_readycheck_embed(
