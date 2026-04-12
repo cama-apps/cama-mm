@@ -234,39 +234,37 @@ class TestCommandFilesExist:
     """Basic sanity tests that command files exist and can be imported."""
 
     def test_all_command_files_can_be_imported(self):
-        """Verify all command modules can be imported without errors."""
-        import commands.admin
-        import commands.advstats
-        import commands.betting
-        import commands.draft
-        import commands.enrichment
-        import commands.herogrid
-        import commands.info
-        import commands.lobby
-        import commands.match
-        import commands.predictions
-        import commands.profile
-        import commands.rating_analysis
-        import commands.registration
-        import commands.shop
-        import commands.wrapped
+        """Verify all command modules can be imported without errors.
 
-        # If we get here, all imports succeeded
-        assert commands.admin is not None
-        assert commands.advstats is not None
-        assert commands.betting is not None
-        assert commands.draft is not None
-        assert commands.enrichment is not None
-        assert commands.herogrid is not None
-        assert commands.info is not None
-        assert commands.lobby is not None
-        assert commands.match is not None
-        assert commands.predictions is not None
-        assert commands.profile is not None
-        assert commands.rating_analysis is not None
-        assert commands.registration is not None
-        assert commands.shop is not None
-        assert commands.wrapped is not None
+        Uses importlib.import_module instead of `import commands.X` +
+        attribute access. Under xdist parallel runs, sys.modules can already
+        contain a submodule (cached by another worker's collection) without
+        the parent `commands` package having the attribute bound — this made
+        the previous form flake intermittently with "module 'commands' has
+        no attribute 'X'" even though the import succeeded.
+        """
+        import importlib
+
+        module_names = [
+            "commands.admin",
+            "commands.advstats",
+            "commands.betting",
+            "commands.draft",
+            "commands.enrichment",
+            "commands.herogrid",
+            "commands.info",
+            "commands.lobby",
+            "commands.match",
+            "commands.predictions",
+            "commands.profile",
+            "commands.rating_analysis",
+            "commands.registration",
+            "commands.shop",
+            "commands.wrapped",
+        ]
+        for name in module_names:
+            module = importlib.import_module(name)
+            assert module is not None, f"{name} imported as None"
 
 
 class TestGuildIdPatternConsistency:
