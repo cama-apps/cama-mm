@@ -19,7 +19,7 @@ class DigRepository(BaseRepository, IDigRepository):
         "total_jc_earned", "last_dig_at", "streak_days", "pickaxe_tier",
         "prestige_level", "trap_active", "trap_free_today", "insured_until",
         "reinforced_until", "paid_digs_today", "revenge_target", "revenge_until",
-        "hard_hat_charges", "luminosity", "boss_attempts",
+        "hard_hat_charges", "void_bait_digs", "luminosity", "boss_attempts",
         "best_run_score", "current_run_jc", "current_run_artifacts",
         "current_run_events", "total_prestige_score",
     })
@@ -64,9 +64,9 @@ class DigRepository(BaseRepository, IDigRepository):
                     boss_progress, boss_attempts, trap_active, trap_free_today,
                     trap_date, insured_until, reinforced_until, injury_state,
                     paid_digs_today, paid_dig_date, revenge_target, revenge_type,
-                    revenge_until, created_at, hard_hat_charges, cheer_data)
+                    revenge_until, created_at, hard_hat_charges, void_bait_digs, cheer_data)
                 VALUES (?, ?, 0, 0, 0, 0, NULL, 0, NULL, 0, 0, NULL, ?, NULL, NULL, 0, 1,
-                    NULL, NULL, NULL, NULL, 0, NULL, NULL, NULL, NULL, ?, 0, NULL)
+                    NULL, NULL, NULL, NULL, 0, NULL, NULL, NULL, NULL, ?, 0, 0, NULL)
                 """,
                 (discord_id, gid, tunnel_name, now),
             )

@@ -234,6 +234,10 @@ class DigService:
 
         before = luminosity
         drain = LUMINOSITY_DRAIN_PER_DIG.get(layer_name, 0)
+        # Frostforged / Void-Touched pickaxe: -25% luminosity drain
+        pickaxe_tier = tunnel.get("pickaxe_tier", 0) or 0
+        if pickaxe_tier >= 5:  # Frostforged or better
+            drain = max(0, drain - drain // 4)
         luminosity = max(0, luminosity - drain)
 
         # Persist
@@ -780,6 +784,9 @@ class DigService:
         has_torch = False
         has_grappling_hook = False
         has_depth_charge = False
+        has_reinforcement = False
+        has_sonar_pulse = False
+        has_void_bait = False
 
         for item in queued:
             itype = item.get("type")
@@ -802,10 +809,13 @@ class DigService:
                 has_depth_charge = True
                 items_used.append("Depth Charge")
             elif itype == "reinforcement":
+                has_reinforcement = True
                 items_used.append("Reinforcement")
             elif itype == "sonar_pulse":
+                has_sonar_pulse = True
                 items_used.append("Sonar Pulse")
             elif itype == "void_bait":
+                has_void_bait = True
                 items_used.append("Void Bait")
             if itype:
                 items_used_ids.append(itype)
@@ -817,6 +827,32 @@ class DigService:
                     discord_id, guild_id, item.get("type")
                 )
             self.dig_repo.unqueue_all(discord_id, guild_id)
+
+        # Hard hat: grant 3 charges of full cave-in prevention
+        if has_hard_hat:
+            existing_charges = tunnel.get("hard_hat_charges", 0) or 0
+            self.dig_repo.update_tunnel(
+                discord_id, guild_id,
+                hard_hat_charges=existing_charges + 3,
+            )
+            tunnel["hard_hat_charges"] = existing_charges + 3
+
+        # Reinforcement: prevent decay for 48h and reduce sabotage damage
+        if has_reinforcement:
+            reinforced_until_ts = now + 48 * 3600
+            self.dig_repo.update_tunnel(
+                discord_id, guild_id,
+                reinforced_until=reinforced_until_ts,
+            )
+
+        # Void Bait: double event chance for next 3 digs
+        if has_void_bait:
+            existing_vb = tunnel.get("void_bait_digs", 0) or 0
+            self.dig_repo.update_tunnel(
+                discord_id, guild_id,
+                void_bait_digs=existing_vb + 3,
+            )
+            tunnel["void_bait_digs"] = existing_vb + 3
 
         # 7. Get layer info
         layer = self._get_layer(depth_before)
@@ -909,9 +945,10 @@ class DigService:
         cave_in_chance -= perk_cavein_reduction
         cave_in_chance -= pickaxe_cavein_reduction
         cave_in_chance -= buff_cavein_reduction
+        # Lantern: -50% cave-in chance for this dig
+        if has_lantern:
+            cave_in_chance *= 0.50
         cave_in_chance *= relic_cavein_mod
-        if has_hard_hat:
-            cave_in_chance *= 0.5
         cave_in_chance = max(0.01, cave_in_chance)
 
         # Mutation: thick_skin — first cave-in each day prevented
@@ -938,6 +975,9 @@ class DigService:
             # Grappling hook prevents block loss
             if has_grappling_hook:
                 block_loss = 0
+            # Void-Touched pickaxe: salvage 1 block on cave-in
+            elif pickaxe_tier >= 6:
+                block_loss = max(1, block_loss - 1)
             new_depth = max(0, depth_before - block_loss)
 
             # Mutation: thick_skin — record shield used
@@ -1186,11 +1226,31 @@ class DigService:
             event_chance *= LUMINOSITY_DARK_EVENT_MULTIPLIER
         elif luminosity < LUMINOSITY_BRIGHT:
             event_chance *= LUMINOSITY_DIM_EVENT_MULTIPLIER
+        # Void Bait: double event chance while charges remain
+        void_bait_digs = tunnel.get("void_bait_digs", 0) or 0
+        if void_bait_digs > 0:
+            event_chance *= 2.0
+            self.dig_repo.update_tunnel(
+                discord_id, guild_id,
+                void_bait_digs=void_bait_digs - 1,
+            )
         event_chance = min(event_chance, 0.75)
         event = None
         if random.random() < event_chance:
             event = self.roll_event(new_depth, luminosity=luminosity,
                                      prestige_level=prestige_level)
+
+        # Sonar Pulse: preview what the next event would be
+        event_preview = None
+        if has_sonar_pulse:
+            preview = self.roll_event(new_depth, luminosity=luminosity,
+                                      prestige_level=prestige_level)
+            if preview:
+                event_preview = {
+                    "name": preview.get("name"),
+                    "description": preview.get("description"),
+                    "rarity": preview.get("rarity", "common"),
+                }
 
         # 18. Check achievements
         total_digs = (tunnel.get("total_digs", 0) or 0) + 1
@@ -1261,6 +1321,7 @@ class DigService:
             dynamite_bonus=dynamite_bonus,
             corruption=corruption,
             mutations=[m.get("name") for m in mutations] if mutations else None,
+            event_preview=event_preview,
         )
 
     def calculate_decay(self, discord_id: int, guild_id) -> int:
