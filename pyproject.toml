@@ -46,6 +46,7 @@ addopts = "--dist=loadscope -n 8 --reruns 1 --reruns-delay 0.5"
 markers = [
     "timeout: mark test with a timeout",
     "forceserial: mark test to run in isolation (avoid parallel test state pollution)",
+    "real_weather: opt out of the default _disable_dig_weather autouse fixture",
 ]
 filterwarnings = [
     "ignore:'asyncio\\.iscoroutinefunction' is deprecated:DeprecationWarning:discord\\..*",
