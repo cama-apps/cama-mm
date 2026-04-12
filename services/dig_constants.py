@@ -9,7 +9,9 @@ sabotage/defense, injuries, and tips.
 
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass, field
+from typing import Any
 
 # ---------------------------------------------------------------------------
 # Layer Definitions
@@ -760,7 +762,7 @@ class TempBuff:
 @dataclass(frozen=True)
 class EventStep:
     """One step in a multi-step complex encounter."""
-    description: str
+    description: tuple[str, ...]
     choices: list[EventChoice] = field(default_factory=list)
 
 
@@ -768,8 +770,8 @@ class EventStep:
 class RandomEvent:
     """Immutable definition for a random tunnel event."""
     id: str
-    name: str
-    description: str
+    name: str                       # internal label (logs, admin, debug) — not shown to players
+    description: tuple[str, ...]    # 1+ flavor variants; one is picked at display time
     min_depth: int | None           # None = any depth
     max_depth: int | None           # None = any depth
     safe_option: EventChoice
@@ -789,11 +791,36 @@ class RandomEvent:
     min_prestige: int = 0           # minimum prestige level required
 
 
+def pick_description(event: Any) -> str:
+    """Pick a random flavor-text variant from an event.
+
+    Accepts RandomEvent, EventStep, wrapper with ``_d`` dict, or plain dict.
+    If the description is a tuple/list, one entry is chosen at random.
+    If it's a bare string (legacy/dynamic payloads), it's returned as-is.
+    """
+    desc: Any
+    if isinstance(event, dict):
+        desc = event.get("description", "")
+    elif hasattr(event, "_d") and isinstance(event._d, dict):
+        desc = event._d.get("description", "")
+    else:
+        desc = getattr(event, "description", "")
+    if isinstance(desc, (tuple, list)):
+        if not desc:
+            return ""
+        return random.choice(desc)
+    return desc or ""
+
+
 RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="underground_stream",
         name="Underground Stream",
-        description="You break through into a cavern with a rushing underground river.",
+        description=(
+            "You break through into a cavern with a rushing underground river.",
+            "The wall gives way and cold spray hits your face — an underground river roars past in the dark.",
+            "A river you did not know existed carves through the rock ahead of you, fast and unlit.",
+        ),
         min_depth=None, max_depth=None,
         safe_option=EventChoice(
             "Wade through carefully",
@@ -810,7 +837,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="gas_pocket",
         name="Gas Pocket",
-        description="A foul-smelling green gas seeps from a crack in the wall.",
+        description=(
+            "A foul-smelling green gas seeps from a crack in the wall.",
+            "Your lantern flame turns sickly green. Something is leaking through the rock.",
+            "A hiss. A smell. A color gas has no business being. You hold your breath on instinct.",
+        ),
         min_depth=10, max_depth=None,
         safe_option=EventChoice(
             "Retreat and ventilate",
@@ -827,7 +858,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="techies_cache",
         name="Techies' Hidden Cache",
-        description="A suspicious pile of barrels marked with a smiley face. Squee, Spleen, and Spoon were here.",
+        description=(
+            "A suspicious pile of barrels marked with a smiley face. Squee, Spleen, and Spoon were here.",
+            "Barrels. Stacked in a pyramid with a crayon smiley taped to the top one. You do not hear giggling. Probably.",
+            "Someone left a tidy pile of explosives in the tunnel. The 'Do Not Dismount' sticker is a nice touch.",
+        ),
         min_depth=15, max_depth=75,
         safe_option=EventChoice(
             "Leave the explosives alone",
@@ -844,7 +879,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="meepo_clones",
         name="Meepo's Lost Clones",
-        description="Three identical Meepos are arguing about which way is up.",
+        description=(
+            "Three identical Meepos are arguing about which way is up.",
+            "A Meepo is loudly disagreeing with himself. Four times, in perfect unison, except when he isn't.",
+            "Several Meepos are pointing in different directions and all shouting 'this way!' with complete confidence.",
+        ),
         min_depth=None, max_depth=50,
         safe_option=EventChoice(
             "Give them directions",
@@ -861,7 +900,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="cursed_chest",
         name="Cursed Chest",
-        description="An ornate chest sits in the middle of the tunnel, glowing faintly purple.",
+        description=(
+            "An ornate chest sits in the middle of the tunnel, glowing faintly purple.",
+            "A chest has been placed dead center in the passage. It hums. The floor around it is suspiciously clean.",
+            "A gilded box sits in the tunnel, radiating a faint purple glow. Its lock has no keyhole.",
+        ),
         min_depth=25, max_depth=None,
         safe_option=EventChoice(
             "Walk past it",
@@ -878,7 +921,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="lost_miner",
         name="Lost Miner",
-        description="A bewildered NPC miner is wandering in circles, muttering about 'the surface.'",
+        description=(
+            "A bewildered miner is wandering in circles, muttering about 'the surface.'",
+            "Another miner stumbles past, eyes hollow. 'Which way's up?' they ask. They don't wait for an answer.",
+            "A figure in mining gear walks by in the wrong direction, mumbling to a pickaxe they no longer carry.",
+        ),
         min_depth=None, max_depth=None,
         safe_option=EventChoice(
             "Point them toward the exit",
@@ -895,7 +942,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="crystal_golem",
         name="Crystal Golem",
-        description="A golem made of shimmering crystals blocks the path. It seems to be... sleeping?",
+        description=(
+            "A golem made of shimmering crystals blocks the path. It seems to be... sleeping?",
+            "Something the size of an ox, built entirely of crystal shards, snores softly against the tunnel wall.",
+            "A crystalline giant is crumpled in a heap like it laid down for a nap and forgot to get up.",
+        ),
         min_depth=40, max_depth=90,
         safe_option=EventChoice(
             "Tiptoe around it",
@@ -912,7 +963,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="mushroom_grove",
         name="Mushroom Grove",
-        description="A bioluminescent mushroom grove fills a side chamber with soft blue light.",
+        description=(
+            "A bioluminescent mushroom grove fills a side chamber with soft blue light.",
+            "Glowing mushrooms the size of your head carpet a small chamber. The light is almost the color of the sky.",
+            "You step into a grotto lit only by living blue fungus. It's beautiful and slightly wrong.",
+        ),
         min_depth=5, max_depth=60,
         safe_option=EventChoice(
             "Admire and move on",
@@ -929,7 +984,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="magma_geyser",
         name="Magma Geyser",
-        description="The ground rumbles. A vent of superheated steam shoots up ahead.",
+        description=(
+            "The ground rumbles. A vent of superheated steam shoots up ahead.",
+            "A low hiss becomes a shriek. Ahead, scalding steam jets from a crack on a timer you don't know.",
+            "You feel the heat before you see it — a magma vent blasting straight up through the tunnel.",
+        ),
         min_depth=60, max_depth=None,
         safe_option=EventChoice(
             "Wait for it to subside",
@@ -946,7 +1005,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="ancient_elevator",
         name="Ancient Elevator",
-        description="A rickety mine elevator with frayed ropes. A sign reads: 'Use at own risk.'",
+        description=(
+            "A rickety mine elevator with frayed ropes. A sign reads: 'Use at own risk.'",
+            "A wooden lift dangles from rope that is, charitably, half of what it should be. The platform creaks in a breeze that isn't there.",
+            "An old mine elevator sits in its shaft. Ropes frayed, sign illegible, and technically still operational.",
+        ),
         min_depth=20, max_depth=None,
         safe_option=EventChoice(
             "Take the stairs",
@@ -963,7 +1026,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="void_whispers",
         name="Void Whispers",
-        description="Unintelligible whispers echo from a crack in the abyss wall. They're... offering a deal?",
+        description=(
+            "Unintelligible whispers echo from a crack in the abyss wall. They're... offering a deal?",
+            "A thin crack in the rock exhales syllables. You don't understand them but you know what they want.",
+            "Voices drift from a fissure, polite and patient. They have been waiting for someone to listen.",
+        ),
         min_depth=80, max_depth=None,
         safe_option=EventChoice(
             "Ignore the voices",
@@ -980,7 +1047,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="friendly_mole",
         name="Friendly Mole",
-        description="A large mole pokes its nose out of the wall and squeaks at you encouragingly.",
+        description=(
+            "A large mole pokes its nose out of the wall and squeaks at you encouragingly.",
+            "Something soft and velvet-furred emerges from the dirt in front of you, chirps once, and waits.",
+            "A mole the size of a small dog has made a hole beside yours. It seems very pleased to have company.",
+        ),
         min_depth=None, max_depth=40,
         safe_option=EventChoice(
             "Pet the mole",
@@ -1002,7 +1073,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="worm_council",
         name="Worm Council",
-        description="A circle of earthworms convenes before you. They appear to be voting on something important.",
+        description=(
+            "A circle of earthworms convenes before you. They appear to be voting on something important.",
+            "Worms in a perfect ring. One of them is clearly the chair. They pause their deliberation to look at you.",
+            "Something that looks like a parliament of worms is in session. You have walked in during an important motion.",
+        ),
         min_depth=None, max_depth=25,
         safe_option=EventChoice(
             "Observe respectfully",
@@ -1020,7 +1095,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="buried_lunch_box",
         name="Buried Lunch Box",
-        description="A perfectly preserved lunch box from the surface. The sandwich inside is... questionable.",
+        description=(
+            "A perfectly preserved lunch box from the surface. The sandwich inside is... questionable.",
+            "A tin lunch pail, rust-free despite the years, with a sandwich inside that smells neither fresh nor dead.",
+            "You unearth someone's lost midday meal. The bread is intact. That is the most alarming part.",
+        ),
         min_depth=None, max_depth=25,
         safe_option=EventChoice(
             "Sell the vintage box",
@@ -1038,7 +1117,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="dig_dog",
         name="The Dig Dog",
-        description="A dog is digging enthusiastically nearby. It is objectively better at this than you.",
+        description=(
+            "A dog is digging enthusiastically nearby. It is objectively better at this than you.",
+            "A scruffy terrier has a tunnel going in parallel to yours. It is already two blocks ahead.",
+            "A dog. Underground. Digging with the technique of a professional. It hasn't noticed you yet.",
+        ),
         min_depth=None, max_depth=25,
         safe_option=EventChoice(
             "Watch and learn",
@@ -1056,7 +1139,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="root_maze",
         name="Root Maze",
-        description="A tangle of ancient roots blocks the path. Something metallic glints deep inside.",
+        description=(
+            "A tangle of ancient roots blocks the path. Something metallic glints deep inside.",
+            "Old roots have woven themselves into a wall. Deep in the mesh, the reflection of something small and shiny.",
+            "The passage ends in a wall of gnarled roots. Through a gap, you catch a metallic wink.",
+        ),
         min_depth=5, max_depth=25,
         safe_option=EventChoice(
             "Hack a narrow path",
@@ -1074,7 +1161,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="pickaxe_head_flies_off",
         name="Pickaxe Head Flies Off",
-        description="Your pickaxe head detaches mid-swing and sails into the darkness. You hear it land... somewhere.",
+        description=(
+            "Your pickaxe head detaches mid-swing and sails into the darkness. You hear it land... somewhere.",
+            "CLANG. Your pickaxe is suddenly half a pickaxe. The heavy end is out there, past the lantern light.",
+            "The head of your tool flies off mid-swing. It bounces once, twice, and is gone.",
+        ),
         min_depth=None, max_depth=30,
         safe_option=EventChoice(
             "Go find it",
@@ -1097,7 +1188,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="toll_keeper",
         name="The Toll Keeper",
-        description="A spectral figure blocks the path. It holds out one translucent hand. 'Toll or riddle. Your choice.'",
+        description=(
+            "A spectral figure blocks the path. It holds out one translucent hand. 'Toll or riddle. Your choice.'",
+            "A ghost in threadbare robes stands in the middle of the tunnel. 'The usual,' it sighs. 'Coin or clever.'",
+            "Cold air thickens into a translucent shape. It has been guarding this passage for a very long time and is clearly bored.",
+        ),
         min_depth=26, max_depth=55,
         safe_option=EventChoice(
             "Pay the toll (3 JC)",
@@ -1115,7 +1210,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="gravity_pocket",
         name="Gravity Pocket",
-        description="An area where gravity is... optional. Your tools float. You float. Everything floats down here.",
+        description=(
+            "An area where gravity is... optional. Your tools float. You float. Everything floats down here.",
+            "You take one step and your feet don't come back down. Your pickaxe hovers at eye level, patient.",
+            "Something has switched off the down. You drift sideways, mildly confused, alongside a cloud of rock dust.",
+        ),
         min_depth=26, max_depth=55,
         safe_option=EventChoice(
             "Wait for gravity to return",
@@ -1133,7 +1232,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="fossil_argument",
         name="Fossil Argument",
-        description="Two fossils embedded in the wall face each other. They look like they were fighting when they died.",
+        description=(
+            "Two fossils embedded in the wall face each other. They look like they were fighting when they died.",
+            "Locked in the stone, two creatures frozen mid-grapple. Nobody won. Nobody moved.",
+            "Two skeletons fused into the wall, still arguing after several million years.",
+        ),
         min_depth=26, max_depth=55,
         safe_option=EventChoice(
             "Leave them to their eternal dispute",
@@ -1151,7 +1254,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="sandwich_lady",
         name="The Sandwich Lady",
-        description="A woman appears from behind a stalagmite carrying a tray of baguettes. 'I didn't ask for this,' you think.",
+        description=(
+            "A woman appears from behind a stalagmite carrying a tray of baguettes. 'I didn't ask for this,' you think.",
+            "A woman rounds the corner with a tray of baguettes, as if the tunnel were a hotel corridor and you had called room service.",
+            "Someone is selling sandwiches down here. Underground. A hundred feet deep. She seems completely unbothered.",
+        ),
         min_depth=26, max_depth=55,
         safe_option=EventChoice(
             "Accept the baguette",
@@ -1169,7 +1276,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="echo_chamber",
         name="Echo Chamber",
-        description="Your footsteps echo in impossibly complex patterns. For a moment, you hear the steps of every miner who has ever been here.",
+        description=(
+            "Your footsteps echo in impossibly complex patterns. For a moment, you hear the steps of every miner who has ever been here.",
+            "The chamber plays your footsteps back to you, layered with the footsteps of everyone who ever stood where you stand.",
+            "You take a single step. The echo comes back as a chorus. You are not the first.",
+        ),
         min_depth=26, max_depth=55,
         safe_option=EventChoice(
             "Listen",
@@ -1192,7 +1303,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="mirror_tunnel",
         name="Mirror Tunnel",
-        description="Crystal walls reflect infinite copies of you. One of the reflections waves. You didn't wave.",
+        description=(
+            "Crystal walls reflect infinite copies of you. One of the reflections waves. You didn't wave.",
+            "The corridor is mirrored on every surface. You are reflected a thousand times. One of you is smiling.",
+            "Polished crystal on every wall. You see yourself everywhere. Then one of the yous blinks out of sync.",
+        ),
         min_depth=51, max_depth=80,
         safe_option=EventChoice(
             "Ignore it and move on",
@@ -1210,7 +1325,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="resonance_cascade",
         name="Resonance Cascade",
-        description="Crystals vibrate at increasing frequency. They're about to shatter. The air tastes like ozone.",
+        description=(
+            "Crystals vibrate at increasing frequency. They're about to shatter. The air tastes like ozone.",
+            "The whole chamber is humming. The pitch climbs past what your teeth can stand. Something is about to give.",
+            "Every crystal in the wall is ringing like a tuning fork. You have maybe thirty seconds before they all let go.",
+        ),
         min_depth=51, max_depth=80,
         safe_option=EventChoice(
             "Run",
@@ -1228,7 +1347,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="crystal_garden",
         name="Crystal Garden",
-        description="Someone has been cultivating crystals here. Tiny signs read 'do not touch' and 'water weekly.'",
+        description=(
+            "Someone has been cultivating crystals here. Tiny signs read 'do not touch' and 'water weekly.'",
+            "A little crystal garden sits in a sconce, neatly arranged. Hand-lettered placards label each variety in a language you don't know.",
+            "Someone has been tending crystals like houseplants. There is a watering can. Nobody has been here in a while.",
+        ),
         min_depth=51, max_depth=80,
         safe_option=EventChoice(
             "Admire the garden",
@@ -1246,7 +1369,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="gem_rock",
         name="Gem Rock",
-        description="A rock glitters with embedded gems. Mining it is risky — these rocks are known to fight back.",
+        description=(
+            "A rock glitters with embedded gems. Mining it is risky — these rocks are known to fight back.",
+            "A boulder studded with raw gems sits in the middle of your path. It is slightly warm to the touch.",
+            "You find a lump of ore flecked with color. Everyone you know has warned you about lumps of ore flecked with color.",
+        ),
         min_depth=51, max_depth=80,
         safe_option=EventChoice(
             "Chip carefully at the edges",
@@ -1264,7 +1391,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="prism_trap",
         name="Prism Trap",
-        description="Light bends through crystal prisms creating a dazzling but disorienting maze of rainbows.",
+        description=(
+            "Light bends through crystal prisms creating a dazzling but disorienting maze of rainbows.",
+            "The tunnel becomes a refraction puzzle. Rainbows crisscross the floor. You can't tell where solid rock ends and colored air begins.",
+            "Prisms scatter your lantern light into a dozen false paths. Only one of them is real.",
+        ),
         min_depth=51, max_depth=80,
         safe_option=EventChoice(
             "Close your eyes and feel the walls",
@@ -1287,7 +1418,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="lava_surfer",
         name="Lava Surfer",
-        description="A chunk of obsidian floats on a lava river. It's just barely big enough to stand on.",
+        description=(
+            "A chunk of obsidian floats on a lava river. It's just barely big enough to stand on.",
+            "A slab of cooled volcanic glass rides the lava flow like a raft. The current is faster than it looks.",
+            "A river of molten rock. A single dark slab rides the surface. Someone has carved a foothold into it.",
+        ),
         min_depth=76, max_depth=105,
         safe_option=EventChoice(
             "Go around",
@@ -1305,7 +1440,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="forge_spirit",
         name="Forge Spirit",
-        description="A fire elemental hammers at an anvil. It notices you. 'Trade or fight. I don't do small talk.'",
+        description=(
+            "A fire elemental hammers at an anvil. It notices you. 'Trade or fight. I don't do small talk.'",
+            "Something shaped like a man, made entirely of fire, is working an anvil. It pauses, hammer raised, and looks at you.",
+            "An elemental smith turns its burning face toward you. The anvil smokes. 'Trade. Or don't.'",
+        ),
         min_depth=76, max_depth=105,
         safe_option=EventChoice(
             "Trade (5 JC)",
@@ -1324,7 +1463,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="volcanic_vent_gambit",
         name="Volcanic Vent Gambit",
-        description="A volcanic vent cycles between eruptions. The gap between bursts is exactly three heartbeats.",
+        description=(
+            "A volcanic vent cycles between eruptions. The gap between bursts is exactly three heartbeats.",
+            "A geyser of fire punches the ceiling on a rhythm. One. Two. Three. One. Two. Three.",
+            "The vent ahead fires in perfect intervals. You can cross between bursts if you are brave and fast.",
+        ),
         min_depth=76, max_depth=None,
         safe_option=EventChoice(
             "Wait for it to subside",
@@ -1342,7 +1485,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="heat_mirage",
         name="Heat Mirage",
-        description="You see an oasis ahead. With a swimming pool. And a bartender. It's 100% not real.",
+        description=(
+            "You see an oasis ahead. With a swimming pool. And a bartender. It's 100% not real.",
+            "The heat shimmers, and through the shimmer you see palm trees, a pool, and a man polishing glasses. It cannot possibly be there.",
+            "A resort. In a magma tunnel. The bartender even waves at you. You are not fooled. You are tempted.",
+        ),
         min_depth=76, max_depth=105,
         safe_option=EventChoice(
             "Keep walking",
@@ -1360,7 +1507,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="shooting_star",
         name="Shooting Star",
-        description="A blazing rock tears through the cavern wall and embeds itself in the floor. It radiates warmth and value.",
+        description=(
+            "A blazing rock tears through the cavern wall and embeds itself in the floor. It radiates warmth and value.",
+            "A chunk of sky has punched through the ceiling. The rock at the bottom of the crater is still glowing.",
+            "You watch a meteor carve a line through the cavern and thud into the ground. It hisses softly. It is yours for the taking.",
+        ),
         min_depth=76, max_depth=None,
         safe_option=EventChoice(
             "Mine the star",
@@ -1383,7 +1534,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="pudge_fishing",
         name="Pudge's Fishing Hole",
-        description="A butcher on the far side of a chasm is fishing with a meat hook. 'Fresh meat delivery service!' he calls. 'First ride's free.'",
+        description=(
+            "A butcher on the far side of a chasm is fishing with a meat hook. 'Fresh meat delivery service!' he calls. 'First ride's free.'",
+            "A massive butcher stands on the far rim of a chasm, swinging a meat hook over his head. 'FRESH MEAT!' he calls cheerfully. He points at you.",
+            "Across the gap, an enormous figure grins through rotten teeth. He holds a meat hook the size of your arm. 'First ride's free.'",
+        ),
         min_depth=26, max_depth=None,
         safe_option=EventChoice(
             "Climb around the chasm",
@@ -1401,7 +1556,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="tinker_workshop",
         name="Tinker's Abandoned Workshop",
-        description="A cluttered workshop full of half-finished gadgets. A sign reads: 'Gone to rearm. Back in 5 minutes.' The sign is 400 years old.",
+        description=(
+            "A cluttered workshop full of half-finished gadgets. A sign reads: 'Gone to rearm. Back in 5 minutes.' The sign is 400 years old.",
+            "A workbench covered in half-built gadgets, gears, and miniature rockets. A note pinned to the wall: 'be right back'. The ink is very, very faded.",
+            "Someone abandoned this tinkerer's workshop mid-project. Half-finished inventions still hum faintly on the bench, waiting for a return.",
+        ),
         min_depth=51, max_depth=None,
         safe_option=EventChoice(
             "Scavenge for parts",
@@ -1420,7 +1579,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="the_burrow",
         name="The Burrow",
-        description="The ground cracks beneath you. Something chitinous scuttles below. It's been waiting.",
+        description=(
+            "The ground cracks beneath you. Something chitinous scuttles below. It's been waiting.",
+            "A hairline fissure spreads under your boots, and beneath it, a dozen faceted eyes open at once.",
+            "The floor is thinner than it should be. Underneath, something carapaced is moving, slow and deliberate.",
+        ),
         min_depth=101, max_depth=None,
         safe_option=EventChoice(
             "Retreat slowly",
@@ -1439,7 +1602,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="arcanist_library",
         name="The Arcanist's Library",
-        description="A chamber lined with tomes. An impossibly old man surrounded by floating orbs doesn't look up. 'I know why you're here,' he says. He sounds bored.",
+        description=(
+            "A chamber lined with tomes. An impossibly old man surrounded by floating orbs doesn't look up. 'I know why you're here,' he says. He sounds bored.",
+            "Bookshelves carved into the ice rise past your lantern's reach. A hooded figure turns a page without looking at you. 'Ask your question.'",
+            "A library that should not exist. At its center, an old man in grey robes surrounded by slow-orbiting orbs. 'Yes, yes. Come in.'",
+        ),
         min_depth=201, max_depth=None,
         safe_option=EventChoice(
             "Browse the shelves",
@@ -1457,7 +1624,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="the_dark_rift",
         name="The Dark Rift",
-        description="The tunnel opens into a vast underground kingdom. A horned figure on a throne of basalt offers passage. 'Everything has a price,' it says. 'Even the ground you stand on.'",
+        description=(
+            "The tunnel opens into a vast underground kingdom. A horned figure on a throne of basalt offers passage. 'Everything has a price,' it says. 'Even the ground you stand on.'",
+            "The passage empties into a throne room the size of a city. Something horned watches you from a seat carved from a single block of obsidian.",
+            "You step into an underground kingdom. A figure with antlers of black stone waits on a throne. It has been expecting you for some time.",
+        ),
         min_depth=101, max_depth=155,
         safe_option=EventChoice(
             "Bow and withdraw",
@@ -1480,7 +1651,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="void_market",
         name="Void Market",
-        description="Shadowy merchants materialize from nothing. They trade in concepts. 'Depth for wealth? Wealth for depth? Information for blocks?'",
+        description=(
+            "Shadowy merchants materialize from nothing. They trade in concepts. 'Depth for wealth? Wealth for depth? Information for blocks?'",
+            "Three silhouettes fade into existence around you, draped in hoods that are more void than cloth. 'We barter,' one says.",
+            "The dark folds itself into the shape of merchants. They have no faces but they have terms, and the terms are fair.",
+        ),
         min_depth=101, max_depth=155,
         safe_option=EventChoice(
             "Trade depth for wealth (3 blocks for 6 JC)",
@@ -1498,7 +1673,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="abyssal_fishing",
         name="Abyssal Fishing",
-        description="A luminous pool of liquid void. Something moves beneath the surface. It might be valuable. It might be alive.",
+        description=(
+            "A luminous pool of liquid void. Something moves beneath the surface. It might be valuable. It might be alive.",
+            "A pool so black it seems to drink the light. Beneath its surface, something large turns over slowly.",
+            "The water in this pool is not water. It ripples without wind, and something pale rises just close enough to see before sinking again.",
+        ),
         min_depth=101, max_depth=155,
         safe_option=EventChoice(
             "Peer into the depths",
@@ -1516,7 +1695,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="gravity_inversion",
         name="Gravity Inversion",
-        description="You are suddenly falling upward. Then sideways. Then in a direction that doesn't have a name.",
+        description=(
+            "You are suddenly falling upward. Then sideways. Then in a direction that doesn't have a name.",
+            "Down stops working. You fall, but the fall has no direction you can put a word to.",
+            "Gravity turns inside out. Your pickaxe floats to the ceiling. You follow it, then keep going.",
+        ),
         min_depth=101, max_depth=None,
         safe_option=EventChoice(
             "Grab hold of something",
@@ -1534,7 +1717,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="whispering_walls_extended",
         name="Whispering Walls",
-        description="The void's whispers form coherent sentences. 'We remember when this stone was sky.'",
+        description=(
+            "The void's whispers form coherent sentences. 'We remember when this stone was sky.'",
+            "The walls are speaking. Not metaphorically. They have things to say about the age before there was rock.",
+            "For the first time down here, the whispers use words. 'We remember.' It repeats, patient, for your benefit.",
+        ),
         min_depth=101, max_depth=155,
         safe_option=EventChoice(
             "Cover your ears",
@@ -1557,7 +1744,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="spore_storm",
         name="Spore Storm",
-        description="A cloud of bioluminescent spores erupts from the fungal walls. Beautiful. Also, you're inhaling them.",
+        description=(
+            "A cloud of bioluminescent spores erupts from the fungal walls. Beautiful. Also, you're inhaling them.",
+            "The wall ahead breathes out a sparkling green cloud. It's lovely. It's also already in your lungs.",
+            "Spores everywhere — glowing, drifting, slightly sweet. You are suddenly aware of every breath you have ever taken.",
+        ),
         min_depth=151, max_depth=205,
         safe_option=EventChoice(
             "Retreat and breathe",
@@ -1576,7 +1767,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="mycelium_network",
         name="Mycelium Network",
-        description="The fungal root network pulses with light. Data flows through it — the locations of other tunnels.",
+        description=(
+            "The fungal root network pulses with light. Data flows through it — the locations of other tunnels.",
+            "A web of mycelium covers the chamber, and every strand pulses in sequence. It is transmitting something.",
+            "The fungus here is thinking. Light moves through its filaments the way a signal moves through a wire.",
+        ),
         min_depth=151, max_depth=205,
         safe_option=EventChoice(
             "Just watch",
@@ -1594,7 +1789,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="sporewalker",
         name="The Sporewalker",
-        description="A humanoid made entirely of mushrooms waves at you. It offers a glowing fungal cap with the enthusiasm of someone who has never been told 'no.'",
+        description=(
+            "A humanoid made entirely of mushrooms waves at you. It offers a glowing fungal cap with the enthusiasm of someone who has never been told 'no.'",
+            "Something vaguely human-shaped, built entirely of mushroom flesh, steps forward with a glowing cap held out on its palm.",
+            "A walking mushroom lights up at the sight of you and presents a cap like a gift. It's very proud of this cap.",
+        ),
         min_depth=151, max_depth=205,
         safe_option=EventChoice(
             "Accept the cap",
@@ -1613,7 +1812,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="bioluminescent_cathedral",
         name="Bioluminescent Cathedral",
-        description="You emerge into a cavern so vast your lantern is unnecessary. The ceiling is a galaxy of living light.",
+        description=(
+            "You emerge into a cavern so vast your lantern is unnecessary. The ceiling is a galaxy of living light.",
+            "The passage opens into a chamber the size of a cathedral. Its ceiling is alive with bioluminescent stars.",
+            "You turn off your lantern. You don't need it. The ceiling is holding its own light, and it is an entire sky.",
+        ),
         min_depth=151, max_depth=205,
         safe_option=EventChoice(
             "Sit and watch",
@@ -1636,7 +1839,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="time_eddy",
         name="Time Eddy",
-        description="A pocket where time runs differently. You can see your past digs playing out like ghosts ahead of you.",
+        description=(
+            "A pocket where time runs differently. You can see your past digs playing out like ghosts ahead of you.",
+            "The air ahead shimmers. In it, you see yourself digging at a thousand different past moments, overlapping.",
+            "Time is curdled here. Your own ghost is swinging a pickaxe in the middle of the tunnel, a few minutes behind you. Or ahead.",
+        ),
         min_depth=201, max_depth=280,
         safe_option=EventChoice(
             "Observe from outside",
@@ -1654,7 +1861,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="frozen_ancient",
         name="Frozen Ancient",
-        description="Something enormous is frozen in the ice. It has too many limbs. Most of them are wrong.",
+        description=(
+            "Something enormous is frozen in the ice. It has too many limbs. Most of them are wrong.",
+            "A shape the size of a whale is locked in the ice wall. Its anatomy does not match anything in any book.",
+            "A massive figure, perfectly preserved, embedded in the frozen rock. You try to count its limbs and lose count.",
+        ),
         min_depth=201, max_depth=280,
         safe_option=EventChoice(
             "Photograph it",
@@ -1672,7 +1883,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="the_still_point",
         name="The Still Point",
-        description="Absolute silence. Absolute cold. Absolute peace. For one perfect moment, nothing decays.",
+        description=(
+            "Absolute silence. Absolute cold. Absolute peace. For one perfect moment, nothing decays.",
+            "The chamber is so still that your heartbeat feels loud. The air is not cold. The air is not anything.",
+            "A pocket of impossible stillness. No sound. No temperature. No motion. You feel time stop being a factor.",
+        ),
         min_depth=201, max_depth=280,
         safe_option=EventChoice(
             "Be still",
@@ -1691,7 +1906,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="paradox_loop",
         name="Paradox Loop",
-        description="You meet yourself coming the other direction. You both stop. Neither of you seems surprised.",
+        description=(
+            "You meet yourself coming the other direction. You both stop. Neither of you seems surprised.",
+            "Around the next corner, you are waiting for yourself. The other you is holding a lantern at the same angle.",
+            "You see yourself walking toward you. Same pickaxe. Same dust on the boots. Neither of you reacts. You have been expecting this.",
+        ),
         min_depth=201, max_depth=None,
         safe_option=EventChoice(
             "Offer yourself a coin",
@@ -1714,7 +1933,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="the_cartographer",
         name="The Cartographer",
-        description="A figure with no face draws maps on the walls. The maps are of places that shouldn't exist. Some of them are accurate.",
+        description=(
+            "A figure with no face draws maps on the walls. The maps are of places that shouldn't exist. Some of them are accurate.",
+            "A tall figure in grey is sketching on the walls with a piece of chalk. Maps, coastlines, rooms. None of them are places you know. All of them are detailed.",
+            "A cartographer without a face hunches over a wall, drawing. The maps are of nowhere you've ever been. At least one of them is the tunnel you came from.",
+        ),
         min_depth=276, max_depth=None,
         safe_option=EventChoice(
             "Help draw",
@@ -1732,7 +1955,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="the_final_merchant",
         name="The Final Merchant",
-        description="A merchant who sells only one thing, and it changes every time you meet them. They seem tired of existing.",
+        description=(
+            "A merchant who sells only one thing, and it changes every time you meet them. They seem tired of existing.",
+            "A stall in the dark. On it: one item. A single item you have never seen before. Behind it, someone who looks like they have been here a very long time.",
+            "A merchant without a stall waits in the center of the chamber. They hold one thing. You cannot quite tell what it is. 'Last one,' they say, without hope.",
+        ),
         min_depth=276, max_depth=None,
         safe_option=EventChoice(
             "Browse and leave",
@@ -1750,7 +1977,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="memory_of_the_surface",
         name="Memory of the Surface",
-        description="For a moment, you remember what sunlight feels like. The warmth. The color. It hurts more than you expected.",
+        description=(
+            "For a moment, you remember what sunlight feels like. The warmth. The color. It hurts more than you expected.",
+            "Something in the air brings back the feeling of a summer afternoon. You stop digging. Your chest aches for reasons that have nothing to do with the tunnel.",
+            "Sunlight. Grass. The smell of a road in July. You haven't thought about any of it in a long time. The memory is sharp and cruel.",
+        ),
         min_depth=276, max_depth=None,
         safe_option=EventChoice(
             "Let it pass",
@@ -1773,7 +2004,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="things_in_the_dark",
         name="Things in the Dark",
-        description="You can't see what's touching your shoulder. It's warm. It might be friendly. It might not.",
+        description=(
+            "You can't see what's touching your shoulder. It's warm. It might be friendly. It might not.",
+            "Something has its hand on your shoulder. You cannot see it. It is breathing, slowly, by your ear.",
+            "A pressure on your back. A warmth. It has been there for a few seconds before you noticed. The dark is too thick for your lantern.",
+        ),
         min_depth=76, max_depth=None,
         safe_option=EventChoice(
             "Stand very still",
@@ -1791,7 +2026,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="the_lightless_path",
         name="The Lightless Path",
-        description="In total darkness, your other senses sharpen. You can hear a path the light would never reveal.",
+        description=(
+            "In total darkness, your other senses sharpen. You can hear a path the light would never reveal.",
+            "Without light, your ears start to compensate. You can hear a passage opening somewhere to your left. Air moving. A distant sound of water.",
+            "The darkness sharpens your other senses. There is a route here you could never have found with a lantern.",
+        ),
         min_depth=76, max_depth=None,
         safe_option=EventChoice(
             "Stay put",
@@ -1809,7 +2048,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="phosphor_vein",
         name="Phosphor Vein",
-        description="Your pickaxe strikes something that glows. A vein of phosphorescent mineral splits the darkness.",
+        description=(
+            "Your pickaxe strikes something that glows. A vein of phosphorescent mineral splits the darkness.",
+            "You swing blind and hit something that lights up. A line of glowing mineral runs through the wall, and the tunnel starts to exist again.",
+            "A single strike and the wall begins to glow. Phosphor. A whole vein of it. The dark pulls back one step.",
+        ),
         min_depth=76, max_depth=None,
         safe_option=EventChoice(
             "Mine the vein",
@@ -1832,7 +2075,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="roshan_lair",
         name="Roshan's Lair",
-        description="An ancient pit radiates power that makes your bones vibrate. Something immense stirs in the darkness. It has been here since before the stone was stone.",
+        description=(
+            "An ancient pit radiates power that makes your bones vibrate. Something immense stirs in the darkness. It has been here since before the stone was stone.",
+            "The tunnel ends at a pit so deep that looking into it makes you nauseous. Something down there is breathing. The walls shake in time with it.",
+            "A circular shaft opens in the floor. It does not end. Something enormous coils at the bottom, older than the rock, and it is aware of you.",
+        ),
         min_depth=276, max_depth=None,
         safe_option=EventChoice(
             "Flee",
@@ -1855,7 +2102,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="buying_gf",
         name="The Persistent Miner",
-        description="A miner is shouting into the void with impressive conviction. 'Buying GF 10k!' The void does not respond.",
+        description=(
+            "A miner is shouting into the void with impressive conviction. 'Buying GF 10k!' The void does not respond.",
+            "You hear someone yelling from a side passage. 'BUYING GF 10K!' Over and over. Hope springs eternal.",
+            "A lone figure stands in a side chamber yelling into the dark. They have been there a while. They are very committed to the bit.",
+        ),
         min_depth=101, max_depth=None,
         safe_option=EventChoice(
             "Walk away slowly",
@@ -1873,7 +2124,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="rock_golem_encounter",
         name="Rock Golem",
-        description="A tiny golem made of living rock follows you. It seems to have chosen you specifically. It cannot be discouraged.",
+        description=(
+            "A tiny golem made of living rock follows you. It seems to have chosen you specifically. It cannot be discouraged.",
+            "A small figure of animate pebbles has imprinted on you. It trots behind you, stone clattering, with absolute devotion.",
+            "Something the size of a cat, made of loose rock, has decided you are its favorite person. It will not be talked out of it.",
+        ),
         min_depth=50, max_depth=None,
         safe_option=EventChoice(
             "Accept your new companion",
@@ -1898,7 +2153,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="creeper_ambush",
         name="Creeper Ambush",
-        description="A familiar hissing sound. The walls flash green. You have seconds.",
+        description=(
+            "A familiar hissing sound. The walls flash green. You have seconds.",
+            "Ssssssss. A green flash from behind. You know exactly what this is. You have seconds.",
+            "Something hisses at you from the dark. The walls pulse green. You recognize the timer.",
+        ),
         min_depth=0, max_depth=75,
         safe_option=EventChoice(
             "Sprint back",
@@ -1921,7 +2180,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="abandoned_minecart",
         name="Abandoned Minecart",
-        description="A rusted minecart sits on ancient rails. Something rattles inside.",
+        description=(
+            "A rusted minecart sits on ancient rails. Something rattles inside.",
+            "An old wooden minecart rests on tracks that disappear into the dark. Whatever is inside it clinks when the cart shifts.",
+            "A minecart abandoned mid-journey. The rails vanish into the tunnel ahead. You can hear something rolling around in the cart.",
+        ),
         min_depth=0, max_depth=75,
         safe_option=EventChoice(
             "Search the cart",
@@ -1938,7 +2201,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="enchanting_table",
         name="Enchanting Table",
-        description="Purple particles drift from a floating book. Strange symbols orbit the air.",
+        description=(
+            "Purple particles drift from a floating book. Strange symbols orbit the air.",
+            "A book hovers at waist height over a stone pedestal. Its pages turn by themselves. Purple motes drift out and fade.",
+            "A floating tome, open to a page you can't read. Runes orbit it slowly, trailing violet light.",
+        ),
         min_depth=0, max_depth=55,
         safe_option=EventChoice(
             "Take nothing",
@@ -1960,7 +2227,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="villager_trade",
         name="Suspicious Villager",
-        description="Hmm. A villager in a brown robe offers emeralds for... dirt blocks?",
+        description=(
+            "Hmm. A villager in a brown robe offers emeralds for... dirt blocks?",
+            "A big-nosed fellow in a brown robe holds out a handful of emeralds. He wants some of your dirt. He will not explain.",
+            "A villager blocks your path, grinning. 'Hmmm!' He gestures at a small pile of emeralds. The trade terms are written in a dialect only he speaks.",
+        ),
         min_depth=0, max_depth=80,
         safe_option=EventChoice(
             "Trade politely",
@@ -1977,7 +2248,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="enderman_stare",
         name="The Staring Contest",
-        description="A tall dark figure stands motionless. Purple particles shimmer. It's watching.",
+        description=(
+            "A tall dark figure stands motionless. Purple particles shimmer. It's watching.",
+            "In the corner of the tunnel, a tall, thin figure stands perfectly still. Purple sparks drift off its shoulders. Its eyes are on you.",
+            "Something three meters tall, entirely black, perfectly still. The only motion is the slow drift of violet particles around its head.",
+        ),
         min_depth=0, max_depth=80,
         safe_option=EventChoice(
             "Look away slowly",
@@ -2001,7 +2276,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="mob_spawner",
         name="Mob Spawner",
-        description="A cage spins in the corner, spawning skeletal shapes. Treasure chests flank it.",
+        description=(
+            "A cage spins in the corner, spawning skeletal shapes. Treasure chests flank it.",
+            "A wireframe cube in the middle of the chamber whirls, spitting out small skeletal figures one at a time. On either side, chests.",
+            "Bones rise out of a rotating cage. Each time it spins, another skeleton. The two chests at its base look extremely full.",
+        ),
         min_depth=0, max_depth=75,
         safe_option=EventChoice(
             "Sneak past",
@@ -2026,7 +2305,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="witch_cauldron",
         name="Witch's Cauldron",
-        description="A bubbling cauldron sits unattended. Three potion bottles labeled in illegible handwriting.",
+        description=(
+            "A bubbling cauldron sits unattended. Three potion bottles labeled in illegible handwriting.",
+            "A black cauldron gurgles over a fire that was not lit by you. Three bottles rest on the rim. The labels are smeared.",
+            "Someone's cauldron. No one's witch. The brew smells like rust and strawberries. Three stoppered potions sit near the rim.",
+        ),
         min_depth=0, max_depth=75,
         safe_option=EventChoice(
             "Take nothing",
@@ -2051,7 +2334,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="azurite_deposit",
         name="Azurite Deposit",
-        description="A vein of deep blue crystal hums with stored energy. Cartographers would kill for this.",
+        description=(
+            "A vein of deep blue crystal hums with stored energy. Cartographers would kill for this.",
+            "A seam of blue crystal runs diagonally across the tunnel wall. You can feel the charge in it from a meter away.",
+            "Azurite. An entire vein of it, humming. People go to war for less.",
+        ),
         min_depth=40, max_depth=120,
         safe_option=EventChoice(
             "Mine carefully",
@@ -2068,7 +2355,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="crawler_breakdown",
         name="Crawler Breakdown",
-        description="Your mining rig shudders and sparks. The darkness closes in around you.",
+        description=(
+            "Your mining rig shudders and sparks. The darkness closes in around you.",
+            "The mining crawler coughs, sparks, and dies. Its lantern rig sputters. The tunnel gets a lot bigger without the light.",
+            "Your rig has picked a terrible time to break down. Something in the engine is ticking. Something behind you is not.",
+        ),
         min_depth=40, max_depth=120,
         safe_option=EventChoice(
             "Repair with spare parts",
@@ -2092,7 +2383,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="fossil_cache",
         name="Fossil Cache",
-        description="Fossilized remains embedded in crystal. They could be valuable... or fragile.",
+        description=(
+            "Fossilized remains embedded in crystal. They could be valuable... or fragile.",
+            "Something small and ancient is suspended in a chunk of clear crystal. The outlines are perfect. Too perfect to be safe.",
+            "A cluster of fossils encased in crystal like insects in amber. Intact. Priceless. And very, very old.",
+        ),
         min_depth=40, max_depth=120,
         safe_option=EventChoice(
             "Photograph and catalog",
@@ -2109,7 +2404,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="breach_encounter",
         name="Breach Encounter",
-        description="A hand-shaped tear in reality splits open. Things pour through. Purple. Endless. Hungry.",
+        description=(
+            "A hand-shaped tear in reality splits open. Things pour through. Purple. Endless. Hungry.",
+            "The air in front of you splits like a seam. A purple hand, too large, emerges. Then another. Then more.",
+            "Reality bends, and then breaks. A tear in the shape of a grasping hand opens, and things come through. They keep coming through.",
+        ),
         min_depth=40, max_depth=170,
         safe_option=EventChoice(
             "Retreat and seal",
@@ -2133,7 +2432,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="vaal_side_area",
         name="Vaal Side Area",
-        description="A blood-red door pulses in the crystal. Corrupted inscriptions promise treasure and death.",
+        description=(
+            "A blood-red door pulses in the crystal. Corrupted inscriptions promise treasure and death.",
+            "A door set into the crystal wall throbs red, faintly, in time with your heartbeat. Its inscriptions are in a dead tongue, and they make promises.",
+            "The wall hides a door. The door hides an altar. The altar hides something that was once powerful and is now only hungry.",
+        ),
         min_depth=40, max_depth=170,
         safe_option=EventChoice(
             "Walk past",
@@ -2157,7 +2460,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="syndicate_ambush",
         name="Syndicate Ambush",
-        description="Cloaked figures drop from the ceiling. 'Your tunnel or your coins.'",
+        description=(
+            "Cloaked figures drop from the ceiling. 'Your tunnel or your coins.'",
+            "Three cloaked figures land silently in front of you. One draws a crooked dagger. 'You know the deal.'",
+            "A syndicate crew drops from the ceiling in perfect silence. They do not introduce themselves. They don't need to.",
+        ),
         min_depth=40, max_depth=170,
         safe_option=EventChoice(
             "Pay the toll",
@@ -2176,7 +2483,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="delve_smuggler",
         name="Delve Smuggler",
-        description="A figure from a hidden passage. 'Psst. Got the good stuff. Fell off a crawler, innit.'",
+        description=(
+            "A figure from a hidden passage. 'Psst. Got the good stuff. Fell off a crawler, innit.'",
+            "A hand beckons from a hidden side passage. 'Oi. Over 'ere. Got stuff, don't ask where from.'",
+            "A grinning smuggler leans out of a crack in the wall, wares spread on a dirty cloth. 'All genuine. All completely legal. Mostly.'",
+        ),
         min_depth=40, max_depth=170,
         safe_option=EventChoice(
             "Take nothing",
@@ -2201,7 +2512,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="brann_bronzebeard",
         name="Brann Bronzebeard",
-        description="'Well met, adventurer! Brann Bronzebeard, at yer service. Been mapping these depths for decades.'",
+        description=(
+            "'Well met, adventurer! Brann Bronzebeard, at yer service. Been mapping these depths for decades.'",
+            "A ruddy dwarf looks up from a journal and beams at you. 'Well met! Down to explore? Aye, I could use the company.'",
+            "A bearded figure in explorer's gear waves from a small camp. 'Ah, a fellow delver! Share a fire and I'll share a trick or two.'",
+        ),
         min_depth=130, max_depth=290,
         safe_option=EventChoice(
             "Take nothing",
@@ -2223,7 +2538,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="earthen_cache",
         name="Earthen Cache",
-        description="A stone chest sealed with dwarven runes. The lock is complex but cracked with age.",
+        description=(
+            "A stone chest sealed with dwarven runes. The lock is complex but cracked with age.",
+            "A heavy stone chest rests in an alcove, bound with dwarven ironwork. The runes on the lid are mostly faded.",
+            "A runebound chest the color of mountains. The seals have been broken and rewritten many times. They are weakest now.",
+        ),
         min_depth=130, max_depth=290,
         safe_option=EventChoice(
             "Force open carefully",
@@ -2240,7 +2559,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="campfire_rest",
         name="Campfire Rest",
-        description="A warm campfire glows in an alcove. A bedroll and whetstone sit nearby.",
+        description=(
+            "A warm campfire glows in an alcove. A bedroll and whetstone sit nearby.",
+            "Someone has left a campfire burning in a sheltered alcove. A neat bedroll. A whetstone on a flat rock. An invitation.",
+            "A small fire crackles in a pit, warming a space someone else clearly used as camp. Everything needed for a short rest is laid out.",
+        ),
         min_depth=130, max_depth=300,
         safe_option=EventChoice(
             "Rest by the fire",
@@ -2258,7 +2581,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="zekvir_shadow",
         name="Zekvir's Shadow",
-        description="A massive spider silhouette blocks the tunnel. Eight eyes gleam red.",
+        description=(
+            "A massive spider silhouette blocks the tunnel. Eight eyes gleam red.",
+            "The tunnel ends in legs — eight of them, too long, folded against a body the size of a house. Eight red pinpricks focus on you.",
+            "A shape the size of a barn occupies the chamber ahead. Only the eyes move. They move to you.",
+        ),
         min_depth=130, max_depth=290,
         safe_option=EventChoice(
             "Find another way",
@@ -2282,7 +2609,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="dark_rider",
         name="The Dark Rider",
-        description="A cloaked rider on a skeletal mount emerges from fungal mist. It extends a gauntlet.",
+        description=(
+            "A cloaked rider on a skeletal mount emerges from fungal mist. It extends a gauntlet.",
+            "Out of the spore-mist rides a figure on a horse made of bones. The rider is cloaked. The rider extends a gauntlet.",
+            "A horseman parts the fungal fog. Both rider and mount are skeletal. A gauntleted hand rises in a greeting, or a demand.",
+        ),
         min_depth=130, max_depth=290,
         safe_option=EventChoice(
             "Bow and let it pass",
@@ -2306,7 +2637,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="titan_relic",
         name="Titan Relic",
-        description="An ancient device of impossible complexity. Three runes glow: red, blue, gold.",
+        description=(
+            "An ancient device of impossible complexity. Three runes glow: red, blue, gold.",
+            "A relic built by hands that were not human sits on a plinth. Three runes orbit it slowly. You are invited to touch one.",
+            "A device older than the rock around it hums at chest height. It offers three glowing options. You do not know what they mean.",
+        ),
         min_depth=130, max_depth=290,
         safe_option=EventChoice(
             "Take nothing",
@@ -2328,7 +2663,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="candle_glow",
         name="The Candle",
-        description="A single candle burns impossibly in the frozen dark. Its light is warm. It shouldn't be here.",
+        description=(
+            "A single candle burns impossibly in the frozen dark. Its light is warm. It shouldn't be here.",
+            "In the middle of the ice, a single candle burns. No drafts. No breath. No reason. Its light reaches further than it should.",
+            "A candle sits on a simple iron holder in the frozen dark. Its flame is steady. Its warmth is real. Its presence makes no sense.",
+        ),
         min_depth=130, max_depth=290,
         safe_option=EventChoice(
             "Light your torch from it",
@@ -2348,7 +2687,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="olympian_boon",
         name="Olympian Boon",
-        description="A divine light pierces the darkness. 'Choose wisely, mortal. My gift is not given lightly.'",
+        description=(
+            "A divine light pierces the darkness. 'Choose wisely, mortal. My gift is not given lightly.'",
+            "A column of golden light punches down through the stone ceiling. Inside it, the silhouette of a god. A voice you cannot refuse says: 'Pick one.'",
+            "The air fills with the scent of ozone and olive oil. Something vast and divine is paying attention to you specifically. It has a gift.",
+        ),
         min_depth=100, max_depth=None,
         safe_option=EventChoice(
             "Take nothing",
@@ -2370,7 +2713,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="charon_toll",
         name="Charon's Toll",
-        description="A boat drifts on an underground river. The ferryman extends a bony hand.",
+        description=(
+            "A boat drifts on an underground river. The ferryman extends a bony hand.",
+            "A skiff glides silently along a black river. At its prow, a robed figure holds out a skeletal palm, waiting.",
+            "The river here is still and the ferryman is silent. The price is the price. It has always been the price.",
+        ),
         min_depth=100, max_depth=None,
         safe_option=EventChoice(
             "Pay the toll",
@@ -2394,7 +2741,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="sisyphus_boulder",
         name="Sisyphus's Request",
-        description="A man pushes an enormous boulder uphill. 'Help me,' he wheezes. 'Just one more push.'",
+        description=(
+            "A man pushes an enormous boulder uphill. 'Help me,' he wheezes. 'Just one more push.'",
+            "A lean, exhausted man leans against an enormous round stone, straining to roll it up a slope. He turns his head. 'Help. Please. Just this once.'",
+            "A figure pushes a boulder up an incline that is somehow both a corridor and a hill. He has been doing this for a long time. His eyes are very tired.",
+        ),
         min_depth=100, max_depth=None,
         safe_option=EventChoice(
             "Help push",
@@ -2411,7 +2762,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="infernal_gate",
         name="Infernal Gate",
-        description="A gate of black iron sealed with chains. Beyond: combat sounds and clinking gold.",
+        description=(
+            "A gate of black iron sealed with chains. Beyond: combat sounds and clinking gold.",
+            "A massive iron gate wrapped in chains. Through the bars: the sound of a battle and the unmistakable clink of spilled coin.",
+            "An infernal gate blocks the passage, chained shut from the far side. Beyond it, you can hear fighting, and gold, and something laughing.",
+        ),
         min_depth=100, max_depth=None,
         safe_option=EventChoice(
             "Leave it sealed",
@@ -2438,7 +2793,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="riki_ambush",
         name="Riki's Ambush",
-        description="You feel watched. A shimmer in the air. Suddenly — a blade at your throat. 'Surprise.'",
+        description=(
+            "You feel watched. A shimmer in the air. Suddenly — a blade at your throat. 'Surprise.'",
+            "The air behind you displaces. Something cold touches your neck. 'Hello,' says a voice you cannot see.",
+            "A rustle. A shadow that isn't yours. Then a blade, polite and patient, resting against your throat. 'Don't turn around.'",
+        ),
         min_depth=None, max_depth=None,
         safe_option=EventChoice(
             "Drop coins and run",
@@ -2462,7 +2821,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="bounty_rune",
         name="Bounty Rune",
-        description="A golden rune hovers in a side chamber, spinning gently. It pulses with energy.",
+        description=(
+            "A golden rune hovers in a side chamber, spinning gently. It pulses with energy.",
+            "A rune spins in a pocket of open air, throwing off flecks of gold. It hums, patient, on the verge of paying out.",
+            "In the middle of a small side chamber, a bounty rune rotates slowly, dripping light. It's been there a while. It's ready.",
+        ),
         min_depth=None, max_depth=None,
         safe_option=EventChoice(
             "Grab it",
@@ -2479,7 +2842,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="aghanim_trial",
         name="Aghanim's Trial",
-        description="Aghanim materializes in a flash of arcane energy. 'Another one. Let's see what you're made of.'",
+        description=(
+            "Aghanim materializes in a flash of arcane energy. 'Another one. Let's see what you're made of.'",
+            "A flash of arcane light and a robed figure with a deep hood steps into the tunnel. 'So,' Aghanim says, without enthusiasm. 'Another applicant.'",
+            "The passage fills with light and the smell of burnt ozone. An old wizard crosses his arms and sighs. 'Let's get this over with.'",
+        ),
         min_depth=None, max_depth=None,
         safe_option=EventChoice(
             "Decline the trial",
@@ -2504,7 +2871,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="tormentor_encounter",
         name="Tormentor",
-        description="A colossal stone figure blocks the path. Lightning crackles across its surface. It does not move. Yet.",
+        description=(
+            "A colossal stone figure blocks the path. Lightning crackles across its surface. It does not move. Yet.",
+            "Something taller than the ceiling, shaped like a man and built of basalt, stands motionless in the passage. Arcs of lightning run along its joints.",
+            "A Tormentor waits in the middle of the chamber. It has been waiting for an age. The lightning in its seams says it is almost ready to stop waiting.",
+        ),
         min_depth=75, max_depth=None,
         safe_option=EventChoice(
             "Take the long way around",
@@ -2528,7 +2899,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="neutral_item_drop",
         name="Neutral Item",
-        description="A defeated jungle creep lies in the corner. Something glints in the debris.",
+        description=(
+            "A defeated jungle creep lies in the corner. Something glints in the debris.",
+            "A slain creature sprawls against the tunnel wall, clearly not killed by you. Something catches the light in the mess around it.",
+            "A dead neutral lies near the wall. Whatever killed it left the body. In the debris, something valuable peeks out.",
+        ),
         min_depth=None, max_depth=None,
         safe_option=EventChoice(
             "Take nothing",
@@ -2553,7 +2928,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="gambling_den",
         name="The Gambling Den",
-        description="A cave lit by guttering candles. Three goblins run a card game. 'Sit down,' one grins.",
+        description=(
+            "A cave lit by guttering candles. Three goblins run a card game. 'Sit down,' one grins.",
+            "In a candlelit alcove, three goblins hunch over a card table. One glances up and kicks out an empty stool with his foot. 'Fresh blood. Sit.'",
+            "A gambling den tucked into a side passage. Three green-skinned dealers, a deck of cards, and a single empty seat.",
+        ),
         min_depth=None, max_depth=None,
         safe_option=EventChoice(
             "Watch a round",
@@ -2577,7 +2956,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="item_goblin",
         name="Item Goblin",
-        description="A small green creature sprints past carrying a bulging sack. Gold coins scatter.",
+        description=(
+            "A small green creature sprints past carrying a bulging sack. Gold coins scatter.",
+            "Something small and green hurtles past you at knee height, clutching a sack twice its size. Coins trail behind it in an arc.",
+            "A goblin pelts down the tunnel on short legs, dragging a bulging loot bag. Gold leaks from a hole in the bottom.",
+        ),
         min_depth=None, max_depth=None,
         safe_option=EventChoice(
             "Pick up dropped coins",
@@ -2601,7 +2984,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="mystery_lever",
         name="The Mystery Lever",
-        description="A lever protrudes from the wall. It's labeled 'PULL ME' in crayon. This can't end well.",
+        description=(
+            "A lever protrudes from the wall. It's labeled 'PULL ME' in crayon. This can't end well.",
+            "A wooden lever sticks out of the tunnel wall. Above it, in red crayon: 'PULL ME'. Below it, a crude smiley. Everything about this is a warning.",
+            "Someone has installed a lever in the middle of nowhere and labeled it, with great enthusiasm, 'PULL ME'. You consider your options.",
+        ),
         min_depth=None, max_depth=None,
         safe_option=EventChoice(
             "Pull it cautiously",
@@ -2619,7 +3006,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="identity_thief",
         name="The Identity Thief",
-        description="A shapeshifter has stolen your face. It's telling other miners YOUR tunnel is abandoned.",
+        description=(
+            "A shapeshifter has stolen your face. It's telling other miners YOUR tunnel is abandoned.",
+            "You round a corner and see yourself, talking to two other miners, gesturing at your tunnel. Your double is in the middle of saying it is abandoned and free for the taking.",
+            "Something has taken your face. It is wearing it down the passage and confidently lying about you.",
+        ),
         min_depth=None, max_depth=None,
         safe_option=EventChoice(
             "Report it to authorities",
@@ -2637,7 +3028,11 @@ RANDOM_EVENTS: list[RandomEvent] = [
     RandomEvent(
         id="neow_blessing",
         name="Ancient Blessing",
-        description="A voice older than stone: 'You have walked this path before. I remember. Choose your gift.'",
+        description=(
+            "A voice older than stone: 'You have walked this path before. I remember. Choose your gift.'",
+            "A presence that is not a person speaks to you from every direction at once. 'Old friend. You always come back. Choose.'",
+            "The air hums with attention. A voice, patient and ancient, says: 'I remember you. Take what you need.'",
+        ),
         min_depth=None, max_depth=None,
         safe_option=EventChoice(
             "Take nothing",
