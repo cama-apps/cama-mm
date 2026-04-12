@@ -67,6 +67,8 @@ from services.dig_constants import (
 
 logger = logging.getLogger("cama_bot.services.dig")
 
+RARITY_WEIGHTS = {"common": 70, "uncommon": 20, "rare": 12, "legendary": 4}
+
 
 class DigService:
     """Encapsulates all tunnel digging minigame logic."""
@@ -394,8 +396,7 @@ class DigService:
         ]
         if not eligible:
             return None
-        weights_map = {"common": 70, "uncommon": 20, "rare": 8, "legendary": 2}
-        weighted = [(e, weights_map.get(e.get("rarity", "common"), 70)) for e in eligible]
+        weighted = [(e, RARITY_WEIGHTS.get(e.get("rarity", "common"), 70)) for e in eligible]
         events, w = zip(*weighted)
         event = random.choices(events, weights=w, k=1)[0]
         return {
@@ -2708,12 +2709,11 @@ class DigService:
             return None
 
         # Rarity-weighted selection with ascension modifiers
-        weights = {"common": 70, "uncommon": 20, "rare": 8, "legendary": 2}
         rare_mult = 1.0 + ascension.get("rare_event_multiplier", 0)
         legendary_mult = 1.0 + ascension.get("legendary_event_multiplier", 0)
-        adjusted_weights = dict(weights)
-        adjusted_weights["rare"] = int(weights["rare"] * rare_mult)
-        adjusted_weights["legendary"] = int(weights["legendary"] * legendary_mult)
+        adjusted_weights = dict(RARITY_WEIGHTS)
+        adjusted_weights["rare"] = int(RARITY_WEIGHTS["rare"] * rare_mult)
+        adjusted_weights["legendary"] = int(RARITY_WEIGHTS["legendary"] * legendary_mult)
 
         weighted = [(e, adjusted_weights.get(e.get("rarity", "common"), 70)) for e in eligible]
         events, w = zip(*weighted)

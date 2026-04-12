@@ -1899,7 +1899,7 @@ RANDOM_EVENTS: list[RandomEvent] = [
         id="creeper_ambush",
         name="Creeper Ambush",
         description="A familiar hissing sound. The walls flash green. You have seconds.",
-        min_depth=0, max_depth=55,
+        min_depth=0, max_depth=75,
         safe_option=EventChoice(
             "Sprint back",
             success=EventOutcome("You dive clear as the blast craters the tunnel behind you.", -1, 0, False),
@@ -1917,13 +1917,12 @@ RANDOM_EVENTS: list[RandomEvent] = [
             failure=EventOutcome("You punch it. It detonates. You are not Steve.", -8, 0, True),
             success_chance=0.15,
         ),
-        layer="Dirt",
     ),
     RandomEvent(
         id="abandoned_minecart",
         name="Abandoned Minecart",
         description="A rusted minecart sits on ancient rails. Something rattles inside.",
-        min_depth=0, max_depth=55,
+        min_depth=0, max_depth=75,
         safe_option=EventChoice(
             "Search the cart",
             success=EventOutcome("A single coin wedged in the seat. Better than nothing.", 0, 1, False),
@@ -1935,7 +1934,6 @@ RANDOM_EVENTS: list[RandomEvent] = [
             failure=EventOutcome("The rails end abruptly. You and the cart part ways.", -3, 0, False),
             success_chance=0.50,
         ),
-        layer="Dirt",
     ),
     RandomEvent(
         id="enchanting_table",
@@ -1952,7 +1950,7 @@ RANDOM_EVENTS: list[RandomEvent] = [
             success=EventOutcome("You decline.", 0, 0, False),
             failure=None, success_chance=1.0,
         ),
-        complexity="boon", layer="Stone", rarity="uncommon",
+        complexity="boon", rarity="uncommon",
         boon_options=(
             TempBuff("efficiency", "Efficiency", 3, {"advance_bonus": 2}),
             TempBuff("fortune", "Fortune", 3, {"jc_bonus": 3}),
@@ -1963,7 +1961,7 @@ RANDOM_EVENTS: list[RandomEvent] = [
         id="villager_trade",
         name="Suspicious Villager",
         description="Hmm. A villager in a brown robe offers emeralds for... dirt blocks?",
-        min_depth=0, max_depth=55,
+        min_depth=0, max_depth=80,
         safe_option=EventChoice(
             "Trade politely",
             success=EventOutcome("A fair deal. The villager nods approvingly. 'Hmm.'", 0, 2, False),
@@ -1975,13 +1973,12 @@ RANDOM_EVENTS: list[RandomEvent] = [
             failure=EventOutcome("The villager slams the trading window shut. You lose your deposit.", 0, -2, False),
             success_chance=0.45,
         ),
-        layer="Dirt",
     ),
     RandomEvent(
         id="enderman_stare",
         name="The Staring Contest",
         description="A tall dark figure stands motionless. Purple particles shimmer. It's watching.",
-        min_depth=0, max_depth=55,
+        min_depth=0, max_depth=80,
         safe_option=EventChoice(
             "Look away slowly",
             success=EventOutcome("It teleports away. You exhale.", 1, 0, False),
@@ -1999,13 +1996,13 @@ RANDOM_EVENTS: list[RandomEvent] = [
             failure=EventOutcome("It teleports behind you. 'Nothing personnel, kid.' Cave-in.", -6, 0, True),
             success_chance=0.12,
         ),
-        layer="Stone", rarity="uncommon",
+        rarity="uncommon",
     ),
     RandomEvent(
         id="mob_spawner",
         name="Mob Spawner",
         description="A cage spins in the corner, spawning skeletal shapes. Treasure chests flank it.",
-        min_depth=0, max_depth=55,
+        min_depth=0, max_depth=75,
         safe_option=EventChoice(
             "Sneak past",
             success=EventOutcome("You slip through unnoticed. The skeletons argue among themselves.", 1, 0, False),
@@ -2023,14 +2020,14 @@ RANDOM_EVENTS: list[RandomEvent] = [
             failure=EventOutcome("The spawner surges. More skeletons than you can count.", -6, 0, True),
             success_chance=0.20,
         ),
-        layer="Stone", rarity="uncommon",
+        rarity="uncommon",
         buff_on_success=TempBuff("mob_farm", "Mob Farm", 2, {"jc_bonus": 2}),
     ),
     RandomEvent(
         id="witch_cauldron",
         name="Witch's Cauldron",
         description="A bubbling cauldron sits unattended. Three potion bottles labeled in illegible handwriting.",
-        min_depth=0, max_depth=55,
+        min_depth=0, max_depth=75,
         safe_option=EventChoice(
             "Take nothing",
             success=EventOutcome("You decline.", 0, 0, False),
@@ -2041,7 +2038,7 @@ RANDOM_EVENTS: list[RandomEvent] = [
             success=EventOutcome("You decline.", 0, 0, False),
             failure=None, success_chance=1.0,
         ),
-        complexity="boon", layer="Dirt",
+        complexity="boon",
         boon_options=(
             TempBuff("red_potion", "Red Potion", 1, {"advance_bonus": 3}),
             TempBuff("blue_potion", "Blue Potion", 2, {"cave_in_reduction": 0.20}),
@@ -2055,7 +2052,7 @@ RANDOM_EVENTS: list[RandomEvent] = [
         id="azurite_deposit",
         name="Azurite Deposit",
         description="A vein of deep blue crystal hums with stored energy. Cartographers would kill for this.",
-        min_depth=51, max_depth=100,
+        min_depth=40, max_depth=120,
         safe_option=EventChoice(
             "Mine carefully",
             success=EventOutcome("You chip out a few clean crystals. Respectable haul.", 0, 2, False),
@@ -2067,13 +2064,12 @@ RANDOM_EVENTS: list[RandomEvent] = [
             failure=EventOutcome("The blast destabilizes the passage. Crystals shatter worthlessly.", -3, 0, False),
             success_chance=0.45,
         ),
-        layer="Crystal",
     ),
     RandomEvent(
         id="crawler_breakdown",
         name="Crawler Breakdown",
         description="Your mining rig shudders and sparks. The darkness closes in around you.",
-        min_depth=51, max_depth=100,
+        min_depth=40, max_depth=120,
         safe_option=EventChoice(
             "Repair with spare parts",
             success=EventOutcome("A patch job. It'll hold. You lost some parts though.", 1, -2, False),
@@ -2091,13 +2087,13 @@ RANDOM_EVENTS: list[RandomEvent] = [
             failure=EventOutcome("The darkness catches you. Something in it has claws.", -6, 0, True),
             success_chance=0.15,
         ),
-        layer="Crystal", rarity="uncommon",
+        rarity="uncommon",
     ),
     RandomEvent(
         id="fossil_cache",
         name="Fossil Cache",
         description="Fossilized remains embedded in crystal. They could be valuable... or fragile.",
-        min_depth=51, max_depth=100,
+        min_depth=40, max_depth=120,
         safe_option=EventChoice(
             "Photograph and catalog",
             success=EventOutcome("Careful documentation. A small finder's fee.", 1, 1, False),
@@ -2109,13 +2105,12 @@ RANDOM_EVENTS: list[RandomEvent] = [
             failure=EventOutcome("They crumble to dust the moment you touch them. Ancient and fragile.", -3, 0, False),
             success_chance=0.55,
         ),
-        layer="Crystal",
     ),
     RandomEvent(
         id="breach_encounter",
         name="Breach Encounter",
         description="A hand-shaped tear in reality splits open. Things pour through. Purple. Endless. Hungry.",
-        min_depth=51, max_depth=150,
+        min_depth=40, max_depth=170,
         safe_option=EventChoice(
             "Retreat and seal",
             success=EventOutcome("You back away. The breach closes. Wise.", 0, 0, False),
@@ -2139,7 +2134,7 @@ RANDOM_EVENTS: list[RandomEvent] = [
         id="vaal_side_area",
         name="Vaal Side Area",
         description="A blood-red door pulses in the crystal. Corrupted inscriptions promise treasure and death.",
-        min_depth=51, max_depth=150,
+        min_depth=40, max_depth=170,
         safe_option=EventChoice(
             "Walk past",
             success=EventOutcome("Discretion. Valor. You keep walking.", 0, 0, False),
@@ -2163,7 +2158,7 @@ RANDOM_EVENTS: list[RandomEvent] = [
         id="syndicate_ambush",
         name="Syndicate Ambush",
         description="Cloaked figures drop from the ceiling. 'Your tunnel or your coins.'",
-        min_depth=51, max_depth=150,
+        min_depth=40, max_depth=170,
         safe_option=EventChoice(
             "Pay the toll",
             success=EventOutcome("They take your coins and let you pass. Professional thieves.", 2, -3, False),
@@ -2182,7 +2177,7 @@ RANDOM_EVENTS: list[RandomEvent] = [
         id="delve_smuggler",
         name="Delve Smuggler",
         description="A figure from a hidden passage. 'Psst. Got the good stuff. Fell off a crawler, innit.'",
-        min_depth=51, max_depth=150,
+        min_depth=40, max_depth=170,
         safe_option=EventChoice(
             "Take nothing",
             success=EventOutcome("You decline.", 0, 0, False),
@@ -2207,7 +2202,7 @@ RANDOM_EVENTS: list[RandomEvent] = [
         id="brann_bronzebeard",
         name="Brann Bronzebeard",
         description="'Well met, adventurer! Brann Bronzebeard, at yer service. Been mapping these depths for decades.'",
-        min_depth=151, max_depth=275,
+        min_depth=130, max_depth=290,
         safe_option=EventChoice(
             "Take nothing",
             success=EventOutcome("You decline.", 0, 0, False),
@@ -2229,7 +2224,7 @@ RANDOM_EVENTS: list[RandomEvent] = [
         id="earthen_cache",
         name="Earthen Cache",
         description="A stone chest sealed with dwarven runes. The lock is complex but cracked with age.",
-        min_depth=151, max_depth=275,
+        min_depth=130, max_depth=290,
         safe_option=EventChoice(
             "Force open carefully",
             success=EventOutcome("The lock gives way. Modest treasure inside.", 0, 2, False),
@@ -2241,13 +2236,12 @@ RANDOM_EVENTS: list[RandomEvent] = [
             failure=EventOutcome("The runes were a trap. The blast sends you reeling.", -3, 0, False),
             success_chance=0.50,
         ),
-        layer="Fungal Depths",
     ),
     RandomEvent(
         id="campfire_rest",
         name="Campfire Rest",
         description="A warm campfire glows in an alcove. A bedroll and whetstone sit nearby.",
-        min_depth=151, max_depth=275,
+        min_depth=130, max_depth=300,
         safe_option=EventChoice(
             "Rest by the fire",
             success=EventOutcome("You sit. The warmth seeps into your bones. A moment of peace.", 0, 0, False),
@@ -2259,14 +2253,13 @@ RANDOM_EVENTS: list[RandomEvent] = [
             failure=EventOutcome("You slip. A cut on the hand. It'll heal.", 0, 0, False),
             success_chance=0.65,
         ),
-        layer="Frozen Core",
         buff_on_success=TempBuff("honed_edge", "Honed Edge", 2, {"advance_bonus": 2}),
     ),
     RandomEvent(
         id="zekvir_shadow",
         name="Zekvir's Shadow",
         description="A massive spider silhouette blocks the tunnel. Eight eyes gleam red.",
-        min_depth=151, max_depth=275,
+        min_depth=130, max_depth=290,
         safe_option=EventChoice(
             "Find another way",
             success=EventOutcome("A detour. Longer, but you keep your limbs.", -1, 0, False),
@@ -2290,7 +2283,7 @@ RANDOM_EVENTS: list[RandomEvent] = [
         id="dark_rider",
         name="The Dark Rider",
         description="A cloaked rider on a skeletal mount emerges from fungal mist. It extends a gauntlet.",
-        min_depth=151, max_depth=275,
+        min_depth=130, max_depth=290,
         safe_option=EventChoice(
             "Bow and let it pass",
             success=EventOutcome("It drops a coin as tribute. Respect, it seems, has value.", 0, 1, False),
@@ -2314,7 +2307,7 @@ RANDOM_EVENTS: list[RandomEvent] = [
         id="titan_relic",
         name="Titan Relic",
         description="An ancient device of impossible complexity. Three runes glow: red, blue, gold.",
-        min_depth=151, max_depth=275,
+        min_depth=130, max_depth=290,
         safe_option=EventChoice(
             "Take nothing",
             success=EventOutcome("You decline.", 0, 0, False),
@@ -2336,7 +2329,7 @@ RANDOM_EVENTS: list[RandomEvent] = [
         id="candle_glow",
         name="The Candle",
         description="A single candle burns impossibly in the frozen dark. Its light is warm. It shouldn't be here.",
-        min_depth=151, max_depth=275,
+        min_depth=130, max_depth=290,
         safe_option=EventChoice(
             "Light your torch from it",
             success=EventOutcome("The flame passes to your torch. The candle keeps burning.", 0, 0, False),
@@ -2437,7 +2430,7 @@ RANDOM_EVENTS: list[RandomEvent] = [
             failure=EventOutcome("The gate opens both ways. What was inside is now outside. With you.", -8, 0, True),
             success_chance=0.12,
         ),
-        rarity="rare", min_prestige=5,
+        rarity="rare",
     ),
 
     # --- Dota 2-themed — All depths ---
@@ -2505,7 +2498,7 @@ RANDOM_EVENTS: list[RandomEvent] = [
             failure=EventOutcome("'Greedy.' He snaps his fingers. You are elsewhere.", -8, 0, True),
             success_chance=0.10,
         ),
-        rarity="rare", min_prestige=2,
+        rarity="rare",
         buff_on_success=TempBuff("aghanim_blessing", "Aghanim's Blessing", 2, {"advance_bonus": 3, "jc_bonus": 2}),
     ),
     RandomEvent(
@@ -2656,7 +2649,7 @@ RANDOM_EVENTS: list[RandomEvent] = [
             success=EventOutcome("You decline.", 0, 0, False),
             failure=None, success_chance=1.0,
         ),
-        complexity="boon", rarity="legendary", min_prestige=3,
+        complexity="boon", rarity="legendary",
         boon_options=(
             TempBuff("blessing_depth", "Blessing of Depth", 5, {"advance_bonus": 3}),
             TempBuff("blessing_fortune", "Blessing of Fortune", 5, {"jc_bonus": 5}),

@@ -2529,17 +2529,13 @@ class TestNewEventMechanics:
         boon_events = [e for e in EVENT_POOL if e.get("boon_options")]
         assert len(boon_events) > 0, "Expected at least one event with boon_options"
 
-    def test_event_pool_has_prestige_gated_events(self):
-        """Some events require min_prestige > 0."""
-        from services.dig_constants import EVENT_POOL
-        gated = [e for e in EVENT_POOL if e.get("min_prestige", 0) > 0]
-        assert len(gated) > 0, "Expected at least one prestige-gated event"
-
     def test_roll_event_filters_by_prestige(self, dig_service):
-        """roll_event excludes events above player's prestige level."""
+        """roll_event still respects min_prestige if any event ever uses it.
+        Currently the pool has zero gated events (the original three were
+        unlocked), so this test passes vacuously and serves as a regression
+        guard for the filter mechanism if a gate is ever re-introduced."""
         from services.dig_constants import EVENT_POOL
         gated_ids = {e["id"] for e in EVENT_POOL if e.get("min_prestige", 0) > 0}
-        # Roll many events at prestige 0 at deep depth (to maximize eligible pool)
         random.seed(42)
         found_gated = set()
         for _ in range(500):
@@ -2655,3 +2651,110 @@ class TestHallOfFame:
         assert len(hof["entries"]) == 1
         assert hof["entries"][0]["discord_id"] == 10001
         assert hof["entries"][0]["best_run_score"] > 0
+
+
+class TestEventPoolInvariants:
+    """Invariants on the EVENT_POOL itself, independent of the service."""
+
+    def test_every_non_boon_event_has_safe_option(self):
+        """After widening the encounter gate, any non-boon event reaches the
+        encounter UI via its safe_option. Events without one would orphan
+        into _build_dig_embed's text-only branch."""
+        from services.dig_constants import EVENT_POOL
+        offenders = [
+            e["id"] for e in EVENT_POOL
+            if e.get("complexity") != "boon" and not e.get("safe_option")
+        ]
+        assert offenders == [], (
+            f"Non-boon events missing safe_option: {offenders}. "
+            "These would render as orphaned flavor text."
+        )
+
+    def test_rarity_weights_constant(self):
+        from services.dig_service import RARITY_WEIGHTS
+        assert RARITY_WEIGHTS == {"common": 70, "uncommon": 20, "rare": 12, "legendary": 4}
+
+    def test_prestige_gates_unlocked(self):
+        """infernal_gate, aghanim_trial, neow_blessing should be rollable
+        for prestige-0 players after the unlock."""
+        from services.dig_constants import EVENT_POOL
+        unlocked = {"infernal_gate", "aghanim_trial", "neow_blessing"}
+        for e in EVENT_POOL:
+            if e["id"] in unlocked:
+                assert (e.get("min_prestige") or 0) == 0, (
+                    f"{e['id']} still has min_prestige={e.get('min_prestige')}"
+                )
+
+    def test_widened_depth_ranges(self):
+        """Verify the depth widening from the variance pass didn't get reverted."""
+        from services.dig_constants import EVENT_POOL
+        expected = {
+            "creeper_ambush": (0, 75),
+            "abandoned_minecart": (0, 75),
+            "villager_trade": (0, 80),
+            "enderman_stare": (0, 80),
+            "mob_spawner": (0, 75),
+            "witch_cauldron": (0, 75),
+            "azurite_deposit": (40, 120),
+            "crawler_breakdown": (40, 120),
+            "fossil_cache": (40, 120),
+            "breach_encounter": (40, 170),
+            "vaal_side_area": (40, 170),
+            "syndicate_ambush": (40, 170),
+            "delve_smuggler": (40, 170),
+            "brann_bronzebeard": (130, 290),
+            "earthen_cache": (130, 290),
+            "campfire_rest": (130, 300),
+            "zekvir_shadow": (130, 290),
+            "dark_rider": (130, 290),
+            "titan_relic": (130, 290),
+            "candle_glow": (130, 290),
+        }
+        by_id = {e["id"]: e for e in EVENT_POOL}
+        for eid, (lo, hi) in expected.items():
+            e = by_id[eid]
+            assert (e["min_depth"], e["max_depth"]) == (lo, hi), (
+                f"{eid}: expected ({lo},{hi}) got ({e['min_depth']},{e['max_depth']})"
+            )
+
+
+class TestRarityRebalance:
+    """Statistical test that the rarity rebalance lands rare share at ~4%."""
+
+    def test_rare_share_in_expected_band(self, dig_service):
+        from services.dig_constants import EVENT_POOL, get_layer
+        from services.dig_service import RARITY_WEIGHTS
+
+        # Use a depth/layer where we know there's a healthy mix of rarities.
+        # Compute expected rare share against the EVENT_POOL filter at the
+        # same depth, deriving the layer name dynamically so this stays
+        # correct if depth or layer boundaries change.
+        random.seed(20260412)
+        depth = 30
+        layer_name = get_layer(depth).name
+        rolls = 5000
+        rare_hits = 0
+        for _ in range(rolls):
+            ev = dig_service.roll_event(depth, luminosity=100, prestige_level=0)
+            if ev and ev.get("rarity") == "rare":
+                rare_hits += 1
+        share = rare_hits / rolls
+
+        # Expected rare share at this depth depends on the eligible pool.
+        # Compute it analytically using the same filter roll_event applies.
+        eligible = [
+            e for e in EVENT_POOL
+            if depth >= (e.get("min_depth") or 0)
+            and (e.get("max_depth") is None or depth <= e["max_depth"])
+            and (e.get("layer") is None or e["layer"] == layer_name)
+            and (e.get("min_prestige") or 0) == 0
+        ]
+        total_w = sum(RARITY_WEIGHTS[e.get("rarity", "common")] for e in eligible)
+        rare_w = sum(RARITY_WEIGHTS["rare"] for e in eligible if e.get("rarity") == "rare")
+        expected = rare_w / total_w if total_w else 0
+
+        # Allow ±2 percentage points around analytic expectation.
+        assert abs(share - expected) < 0.02, (
+            f"rare share {share:.3f} drifted from analytic {expected:.3f} "
+            f"(weights={RARITY_WEIGHTS})"
+        )

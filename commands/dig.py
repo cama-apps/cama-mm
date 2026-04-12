@@ -1264,9 +1264,6 @@ class DigCommands(commands.Cog):
                     description=event_data.get("description", "Choose a boon:") + "\n\n" + "\n".join(boon_lines),
                     color=0x5865F2,
                 )
-                rarity = event_data.get("rarity", "common")
-                if rarity != "common":
-                    event_embed.set_footer(text=f"{rarity.title()} encounter")
                 # Event art for boon events
                 boon_event_file = None
                 boon_event_id = event_data.get("id", "")
@@ -1296,7 +1293,7 @@ class DigCommands(commands.Cog):
                     await safe_followup(interaction, embed=event_embed, view=view)
                 return
 
-            if complexity in ("complex", "choice") and isinstance(event_data, dict) and event_data.get("safe_option"):
+            if isinstance(event_data, dict) and event_data.get("safe_option"):
                 embed, _layer_name, _pickaxe_tier, _items_ids = _build_dig_embed(result, interaction.user)
                 layer_file = await _attach_layer_thumbnail(embed, _layer_name)
                 event_embed = discord.Embed(
@@ -1308,9 +1305,6 @@ class DigCommands(commands.Cog):
                 ascii_art = event_data.get("ascii_art") if isinstance(event_data, dict) else None
                 if ascii_art:
                     event_embed.add_field(name="\u200b", value=f"```\n{ascii_art}\n```", inline=False)
-                rarity = event_data.get("rarity", "common")
-                if rarity != "common":
-                    event_embed.set_footer(text=f"{rarity.title()} encounter")
                 # Event art: custom diffusion art → PIL pixel art → none
                 event_file = None
                 event_id = event_data.get("id", "") if isinstance(event_data, dict) else ""
