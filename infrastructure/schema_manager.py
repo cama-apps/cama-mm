@@ -262,6 +262,7 @@ class SchemaManager:
             ("create_dig_system_tables", self._migration_create_dig_system_tables),
             ("dig_expansion_luminosity_and_buffs", self._migration_dig_expansion),
             ("dig_prestige_events_columns", self._migration_dig_prestige_events),
+            ("dig_void_bait_column", self._migration_dig_void_bait),
         ]
 
     # --- Migrations ---
@@ -1820,6 +1821,7 @@ class SchemaManager:
                 revenge_type     TEXT,
                 revenge_until    INTEGER,
                 hard_hat_charges INTEGER NOT NULL DEFAULT 0,
+                void_bait_digs   INTEGER NOT NULL DEFAULT 0,
                 cheer_data       TEXT,
                 created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (discord_id, guild_id)
@@ -1928,3 +1930,7 @@ class SchemaManager:
         self._add_column_if_not_exists(cursor, "tunnels", "current_run_events", "INTEGER NOT NULL DEFAULT 0")
         self._add_column_if_not_exists(cursor, "tunnels", "total_prestige_score", "INTEGER NOT NULL DEFAULT 0")
         self._add_column_if_not_exists(cursor, "tunnels", "mutations", "TEXT")
+
+    def _migration_dig_void_bait(self, cursor) -> None:
+        """Add void_bait_digs column for tracking Void Bait charges."""
+        self._add_column_if_not_exists(cursor, "tunnels", "void_bait_digs", "INTEGER NOT NULL DEFAULT 0")
