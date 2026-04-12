@@ -21,6 +21,7 @@ from services.dig_constants import (
     LUMINOSITY_PITCH_BLACK,
     MAX_INVENTORY_SLOTS,
     PICKAXE_TIERS,
+    pick_description,
 )
 from services.dig_constants import get_layer as get_layer_def
 from utils.formatting import JOPACOIN_EMOTE
@@ -568,7 +569,6 @@ class EventEncounterView(discord.ui.View):
 
         color = 0xFF4444 if (not succeeded or cruel or cave_in) else 0x00FF00
         embed = discord.Embed(
-            title=event.get("name", "Event"),
             description=msg,
             color=color,
         )
@@ -598,8 +598,8 @@ class EventEncounterView(discord.ui.View):
             chain_d = chain if isinstance(chain, dict) else (chain._d if hasattr(chain, "_d") else {})
             if chain_d:
                 embed.add_field(
-                    name=f"Chain Event: {chain_d.get('name', '?')}",
-                    value=chain_d.get("description", "Another event triggers!"),
+                    name="\u200b",
+                    value=pick_description(chain_d) or "Another event triggers!",
                     inline=False,
                 )
 
@@ -1259,9 +1259,9 @@ class DigCommands(commands.Cog):
                 layer_file = await _attach_layer_thumbnail(embed, _layer_name)
                 boon_options = event_data["boon_options"]
                 boon_lines = [f"**{b.get('name', '?')}** — {b.get('description', '')}" for b in boon_options]
+                boon_flavor = pick_description(event_data) or "Choose a boon:"
                 event_embed = discord.Embed(
-                    title=event_data.get("name", "Boon"),
-                    description=event_data.get("description", "Choose a boon:") + "\n\n" + "\n".join(boon_lines),
+                    description=boon_flavor + "\n\n" + "\n".join(boon_lines),
                     color=0x5865F2,
                 )
                 # Event art for boon events
@@ -1297,8 +1297,7 @@ class DigCommands(commands.Cog):
                 embed, _layer_name, _pickaxe_tier, _items_ids = _build_dig_embed(result, interaction.user)
                 layer_file = await _attach_layer_thumbnail(embed, _layer_name)
                 event_embed = discord.Embed(
-                    title=event_data.get("name", "Event"),
-                    description=event_data.get("description", "Something happens..."),
+                    description=pick_description(event_data) or "Something happens...",
                     color=0xDAA520,
                 )
                 # ASCII art in code block
@@ -2676,19 +2675,22 @@ def _build_dig_embed(result: object, user: discord.User | discord.Member) -> tup
     # Event (with ASCII art for simple events)
     event = getattr(result, "event", None)
     if event:
-        e_desc = getattr(event, "description", str(event)) if not isinstance(event, str) else event
-        e_name = getattr(event, "name", "Event") if not isinstance(event, str) else "Event"
-        # Check for ASCII art
-        e_art = None
-        if isinstance(event, dict):
-            e_art = event.get("ascii_art")
-        elif hasattr(event, "_d") and isinstance(event._d, dict):
-            e_art = event._d.get("ascii_art")
+        if isinstance(event, str):
+            e_desc = event
+            e_art = None
+        else:
+            e_desc = pick_description(event) or "Something happens..."
+            if isinstance(event, dict):
+                e_art = event.get("ascii_art")
+            elif hasattr(event, "_d") and isinstance(event._d, dict):
+                e_art = event._d.get("ascii_art")
+            else:
+                e_art = getattr(event, "ascii_art", None)
         event_text = e_desc
         if e_art:
             event_text = f"```\n{e_art}\n```\n{e_desc}"
         embed.add_field(
-            name=e_name,
+            name="\u200b",
             value=event_text,
             inline=False,
         )
