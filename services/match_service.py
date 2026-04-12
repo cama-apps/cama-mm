@@ -567,6 +567,134 @@ class MatchService:
 
         return base_player, player_id
 
+    def _settle_match_bets_and_bonuses(
+        self,
+        match_id: int,
+        winning_team: str,
+        winning_ids: list[int],
+        losing_ids: list[int],
+        excluded_player_ids: list[int],
+        last_shuffle: dict,
+        guild_id: int | None,
+    ) -> dict:
+        """Pay participation, win, bomb-pot, and exclusion bonuses, then settle
+        the pot. Returns the bet distributions (empty dict if no betting service)."""
+        distributions: dict = {"winners": [], "losers": []}
+        if not self.betting_service:
+            return distributions
+
+        is_bomb_pot = last_shuffle.get("is_bomb_pot", False)
+        self.betting_service.award_participation(losing_ids, guild_id, is_bomb_pot=is_bomb_pot)
+        if is_bomb_pot:
+            # Winners also get the bomb-pot bonus (+1 JC) on top of their win bonus.
+            self.betting_service.award_participation(
+                winning_ids, guild_id, is_bomb_pot=True, bomb_pot_bonus_only=True
+            )
+
+        distributions = self.betting_service.settle_bets(
+            match_id, guild_id, winning_team, pending_state=last_shuffle
+        )
+        self.betting_service.award_win_bonus(winning_ids, guild_id)
+        if excluded_player_ids:
+            self.betting_service.award_exclusion_bonus(excluded_player_ids, guild_id)
+        excluded_conditional_ids = last_shuffle.get("excluded_conditional_player_ids", [])
+        if excluded_conditional_ids:
+            self.betting_service.award_exclusion_bonus_half(excluded_conditional_ids, guild_id)
+        return distributions
+
+    def _repay_outstanding_loans(
+        self, participant_ids: list[int], guild_id: int | None
+    ) -> list[dict]:
+        """Attempt loan repayment for every participant with an outstanding loan.
+        Returns one dict per successful repayment (order follows input)."""
+        if not self.loan_service:
+            return []
+        repayments: list[dict] = []
+        for player_id in participant_ids:
+            state = self.loan_service.get_state(player_id, guild_id)
+            if not state.has_outstanding_loan:
+                continue
+            result = self.loan_service.execute_repayment(player_id, guild_id)
+            if not result.success:
+                continue
+            r = result.value
+            repayments.append({
+                "player_id": player_id,
+                "success": True,
+                "principal": r.principal,
+                "fee": r.fee,
+                "total_repaid": r.total_repaid,
+                "balance_before": r.balance_before,
+                "new_balance": r.new_balance,
+                "nonprofit_total": r.nonprofit_total,
+            })
+        return repayments
+
+    def _collect_match_easter_eggs(
+        self,
+        radiant_team_ids: list[int],
+        dire_team_ids: list[int],
+        winning_ids: list[int],
+        expected_ids: set[int],
+        streak_data: dict[int, tuple[int, float]],
+        guild_id: int | None,
+    ) -> dict:
+        """Collect rivalry detections, games milestones, and personal-best
+        streak records into a single dict for post-record neon hooks."""
+        easter_egg_data: dict = {
+            "games_milestones": [],
+            "win_streak_records": [],
+            "rivalries_detected": [],
+        }
+
+        if self.pairings_repo:
+            try:
+                all_players = radiant_team_ids + dire_team_ids
+                for i, p1 in enumerate(all_players):
+                    for p2 in all_players[i + 1:]:
+                        pairing = self.pairings_repo.get_pairing(p1, p2, guild_id)
+                        if not pairing or pairing.get("games_together", 0) < 10:
+                            continue
+                        wins = pairing.get("p1_wins", 0)
+                        losses = pairing.get("p1_losses", 0)
+                        total = wins + losses
+                        if total < 10:
+                            continue
+                        winrate = (wins / total) * 100
+                        if winrate >= 70 or winrate <= 30:
+                            easter_egg_data["rivalries_detected"].append({
+                                "player1_id": p1,
+                                "player2_id": p2,
+                                "games_together": total,
+                                "winrate_vs": winrate,
+                            })
+            except Exception as e:
+                logger.debug(f"Rivalry detection error: {e}")
+
+        milestone_values = {10, 50, 100, 200, 500}
+        milestone_players = self.player_repo.get_by_ids(list(expected_ids), guild_id)
+        for player in milestone_players:
+            total_games = player.wins + player.losses
+            if total_games in milestone_values:
+                easter_egg_data["games_milestones"].append({
+                    "discord_id": player.discord_id,
+                    "total_games": total_games,
+                })
+
+        for pid in winning_ids:
+            slen, _ = streak_data.get(pid, (1, 1.0))
+            if slen >= 5 and hasattr(self.player_repo, "get_personal_best_win_streak"):
+                prev_best = self.player_repo.get_personal_best_win_streak(pid, guild_id)
+                if slen > prev_best:
+                    self.player_repo.update_personal_best_win_streak(pid, guild_id, slen)
+                    easter_egg_data["win_streak_records"].append({
+                        "discord_id": pid,
+                        "current_streak": slen,
+                        "previous_best": prev_best,
+                    })
+
+        return easter_egg_data
+
     def record_match(
         self,
         winning_team: str,
@@ -639,51 +767,13 @@ class MatchService:
                 for pid in losing_ids:
                     self.player_repo.increment_losses(pid, guild_id)
 
-            distributions = {"winners": [], "losers": []}
-            is_bomb_pot = last_shuffle.get("is_bomb_pot", False)
-            if self.betting_service:
-                # Reward participation for the losing team (1 JC base + bomb pot bonus if applicable)
-                self.betting_service.award_participation(losing_ids, guild_id, is_bomb_pot=is_bomb_pot)
-
-                # In bomb pot mode, winners ALSO get the bomb pot participation bonus (+1 JC)
-                # This is on top of their win bonus, giving all 10 players the +1 JC bomb pot bonus
-                # Use bomb_pot_bonus_only=True so they don't get the base participation (just the bonus)
-                if is_bomb_pot:
-                    self.betting_service.award_participation(
-                        winning_ids, guild_id, is_bomb_pot=True, bomb_pot_bonus_only=True
-                    )
-
-                distributions = self.betting_service.settle_bets(
-                    match_id, guild_id, winning_team, pending_state=last_shuffle
-                )
-                self.betting_service.award_win_bonus(winning_ids, guild_id)
-                if excluded_player_ids:
-                    self.betting_service.award_exclusion_bonus(excluded_player_ids, guild_id)
-                # Award half exclusion bonus to conditional players who were excluded
-                excluded_conditional_ids = last_shuffle.get("excluded_conditional_player_ids", [])
-                if excluded_conditional_ids:
-                    self.betting_service.award_exclusion_bonus_half(excluded_conditional_ids, guild_id)
-
-            # Repay outstanding loans for all participants
-            loan_repayments = []
-            if self.loan_service:
-                all_participant_ids = winning_ids + losing_ids
-                for player_id in all_participant_ids:
-                    state = self.loan_service.get_state(player_id, guild_id)
-                    if state.has_outstanding_loan:
-                        repay_result = self.loan_service.execute_repayment(player_id, guild_id)
-                        if repay_result.success:
-                            r = repay_result.value
-                            loan_repayments.append({
-                                "player_id": player_id,
-                                "success": True,
-                                "principal": r.principal,
-                                "fee": r.fee,
-                                "total_repaid": r.total_repaid,
-                                "balance_before": r.balance_before,
-                                "new_balance": r.new_balance,
-                                "nonprofit_total": r.nonprofit_total,
-                            })
+            distributions = self._settle_match_bets_and_bonuses(
+                match_id, winning_team, winning_ids, losing_ids,
+                excluded_player_ids, last_shuffle, guild_id,
+            )
+            loan_repayments = self._repay_outstanding_loans(
+                winning_ids + losing_ids, guild_id
+            )
 
             # Build Glicko players
             radiant_glicko = [self._load_glicko_player(pid, guild_id) for pid in radiant_team_ids]
@@ -895,61 +985,10 @@ class MatchService:
                         "is_win": won,
                     }
 
-            # --- Easter Egg Data Collection ---
-            easter_egg_data = {
-                "games_milestones": [],
-                "win_streak_records": [],
-                "rivalries_detected": [],
-            }
-
-            # Check for rivalries (10+ games together with 70%+ winrate imbalance)
-            if self.pairings_repo:
-                try:
-                    all_players = radiant_team_ids + dire_team_ids
-                    for i, p1 in enumerate(all_players):
-                        for p2 in all_players[i+1:]:
-                            pairing = self.pairings_repo.get_pairing(p1, p2, guild_id)
-                            if pairing and pairing.get("games_together", 0) >= 10:
-                                wins = pairing.get("p1_wins", 0)
-                                losses = pairing.get("p1_losses", 0)
-                                total = wins + losses
-                                if total >= 10:
-                                    winrate = (wins / total) * 100
-                                    if winrate >= 70 or winrate <= 30:
-                                        easter_egg_data["rivalries_detected"].append({
-                                            "player1_id": p1,
-                                            "player2_id": p2,
-                                            "games_together": total,
-                                            "winrate_vs": winrate,
-                                        })
-                except Exception as e:
-                    logger.debug(f"Rivalry detection error: {e}")
-
-            # Check for games milestones (10, 50, 100, 200, 500)
-            milestone_values = {10, 50, 100, 200, 500}
-            milestone_players = self.player_repo.get_by_ids(list(expected_ids), guild_id)
-            for player in milestone_players:
-                total_games = player.wins + player.losses
-                if total_games in milestone_values:
-                    easter_egg_data["games_milestones"].append({
-                        "discord_id": player.discord_id,
-                        "total_games": total_games,
-                    })
-
-            # Check for personal best win streak records (for winners only)
-            for pid in winning_ids:
-                slen, _ = streak_data.get(pid, (1, 1.0))
-                if slen >= 5 and hasattr(self.player_repo, "get_personal_best_win_streak"):
-                    # Get player's personal best
-                    prev_best = self.player_repo.get_personal_best_win_streak(pid, guild_id)
-                    if slen > prev_best:
-                        # Update the record
-                        self.player_repo.update_personal_best_win_streak(pid, guild_id, slen)
-                        easter_egg_data["win_streak_records"].append({
-                            "discord_id": pid,
-                            "current_streak": slen,
-                            "previous_best": prev_best,
-                        })
+            easter_egg_data = self._collect_match_easter_eggs(
+                radiant_team_ids, dire_team_ids, winning_ids, expected_ids,
+                streak_data, guild_id,
+            )
 
             # Clear state after successful record (only this specific match)
             self.clear_last_shuffle(guild_id, pending_match_id)

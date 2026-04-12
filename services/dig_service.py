@@ -664,6 +664,154 @@ class DigService:
     # Core Dig
     # ------------------------------------------------------------------
 
+    def _build_parked_boss_return(
+        self, tunnel: dict, discord_id: int, guild_id, decay_info
+    ) -> dict | None:
+        """If the tunnel is already at a defeated-eligible boss boundary, return
+        a boss-encounter result dict so /dig stops here without charging cooldown
+        or paid fees. Returns ``None`` if the tunnel is not parked at a boundary."""
+        depth_before = tunnel.get("depth", 0)
+        boss_progress_early = self._get_boss_progress(tunnel)
+        at_boss_early = self._at_boss_boundary(depth_before, boss_progress_early)
+        if at_boss_early is None:
+            return None
+
+        inv = self.dig_repo.get_inventory(discord_id, guild_id)
+        has_lantern_early = any(i.get("item_type") == "lantern" for i in inv)
+        boss_name = BOSS_NAMES.get(at_boss_early, "Unknown Boss")
+        attempts = tunnel.get("boss_attempts", 0) or 0
+        dialogue_list = BOSS_DIALOGUE.get(at_boss_early, ["..."])
+        dialogue = dialogue_list[min(attempts, len(dialogue_list) - 1)]
+        return self._ok(
+            tunnel_name=tunnel.get("tunnel_name") or "Unknown Tunnel",
+            depth_before=depth_before,
+            depth_after=depth_before,
+            advance=0,
+            jc_earned=0,
+            milestone_bonus=0,
+            streak_bonus=0,
+            cave_in=False,
+            cave_in_detail=None,
+            boss_encounter=True,
+            boss_info={
+                "boundary": at_boss_early,
+                "name": boss_name,
+                "dialogue": dialogue,
+                "ascii_art": BOSS_ASCII.get(at_boss_early, ""),
+            },
+            has_lantern=has_lantern_early,
+            event=None,
+            artifact=None,
+            achievements=[],
+            is_first_dig=False,
+            items_used=[],
+            items_used_ids=[],
+            pickaxe_tier=tunnel.get("pickaxe_tier", 0) or 0,
+            tip="A boss blocks your path!",
+            decay_info=decay_info,
+            luminosity_info=None,
+        )
+
+    def _execute_first_dig(
+        self, discord_id: int, guild_id, tunnel: dict, depth_before: int, now: int, today: str, decay_info
+    ) -> dict:
+        """Run the first-ever dig for a tunnel: guaranteed safe, writes the
+        initial depth/streak/run counters, awards small JC, returns a welcome
+        result dict."""
+        advance = random.randint(3, 7)
+        jc_earned = random.randint(1, 5)
+        new_depth = depth_before + advance
+
+        self.dig_repo.update_tunnel(
+            discord_id, guild_id,
+            depth=new_depth,
+            total_digs=(tunnel.get("total_digs", 0) or 0) + 1,
+            last_dig_at=now,
+            total_jc_earned=(tunnel.get("total_jc_earned", 0) or 0) + jc_earned,
+            streak_days=1,
+            streak_last_date=today,
+        )
+        self.player_repo.add_balance(discord_id, guild_id, jc_earned)
+        self.dig_repo.log_action(
+            discord_id=discord_id, guild_id=guild_id,
+            action_type="dig",
+            details=json.dumps({
+                "advance": advance, "jc": jc_earned, "first_dig": True,
+                "depth_before": depth_before, "depth_after": new_depth,
+            }),
+        )
+
+        return self._ok(
+            tunnel_name=tunnel.get("tunnel_name") or "Unknown Tunnel",
+            depth_before=depth_before,
+            depth_after=new_depth,
+            advance=advance,
+            jc_earned=jc_earned,
+            milestone_bonus=0,
+            streak_bonus=0,
+            cave_in=False,
+            cave_in_detail=None,
+            boss_encounter=False,
+            boss_info=None,
+            has_lantern=False,
+            event=None,
+            artifact=None,
+            achievements=[],
+            is_first_dig=True,
+            items_used=[],
+            items_used_ids=[],
+            pickaxe_tier=0,
+            tip="Welcome to the mines! Use /dig again after the cooldown.",
+            decay_info=decay_info,
+        )
+
+    def _resolve_queued_items(
+        self, discord_id: int, guild_id
+    ) -> tuple[list[str], list[str], dict[str, bool]]:
+        """Pop queued items from the inventory and return display names, ids, and
+        a flag-map (one ``has_<item>`` key per consumable) for the main dig loop."""
+        queued = self._get_queued_items_for_tunnel(discord_id, guild_id)
+        items_used: list[str] = []
+        items_used_ids: list[str] = []
+        flags = {
+            "has_dynamite": False,
+            "has_hard_hat": False,
+            "has_lantern": False,
+            "has_torch": False,
+            "has_grappling_hook": False,
+            "has_depth_charge": False,
+            "has_reinforcement": False,
+            "has_sonar_pulse": False,
+            "has_void_bait": False,
+        }
+        _display_names = {
+            "dynamite": "Dynamite",
+            "hard_hat": "Hard Hat",
+            "lantern": "Lantern",
+            "torch": "Torch",
+            "grappling_hook": "Grappling Hook",
+            "depth_charge": "Depth Charge",
+            "reinforcement": "Reinforcement",
+            "sonar_pulse": "Sonar Pulse",
+            "void_bait": "Void Bait",
+        }
+        for item in queued:
+            itype = item.get("type")
+            if itype in _display_names:
+                items_used.append(_display_names[itype])
+            flag_key = f"has_{itype}" if itype else None
+            if flag_key and flag_key in flags:
+                flags[flag_key] = True
+            if itype:
+                items_used_ids.append(itype)
+
+        if queued:
+            for item in queued:
+                self.dig_repo.remove_inventory_item(discord_id, guild_id, item.get("type"))
+            self.dig_repo.unqueue_all(discord_id, guild_id)
+
+        return items_used, items_used_ids, flags
+
     def dig(self, discord_id: int, guild_id, paid: bool = False) -> dict:
         """
         Main dig action.
@@ -700,44 +848,11 @@ class DigService:
         # 2b. If already at a boss boundary, return boss encounter without
         #     consuming cooldown or charging for paid dig.
         if not is_first_dig:
-            boss_progress_early = self._get_boss_progress(tunnel)
-            at_boss_early = self._at_boss_boundary(depth_before, boss_progress_early)
-            if at_boss_early is not None:
-                inv = self.dig_repo.get_inventory(discord_id, guild_id)
-                has_lantern_early = any(i.get("item_type") == "lantern" for i in inv)
-                boss_name = BOSS_NAMES.get(at_boss_early, "Unknown Boss")
-                attempts = tunnel.get("boss_attempts", 0) or 0
-                dialogue_list = BOSS_DIALOGUE.get(at_boss_early, ["..."])
-                dialogue = dialogue_list[min(attempts, len(dialogue_list) - 1)]
-                return self._ok(
-                    tunnel_name=tunnel.get("tunnel_name") or "Unknown Tunnel",
-                    depth_before=depth_before,
-                    depth_after=depth_before,
-                    advance=0,
-                    jc_earned=0,
-                    milestone_bonus=0,
-                    streak_bonus=0,
-                    cave_in=False,
-                    cave_in_detail=None,
-                    boss_encounter=True,
-                    boss_info={
-                        "boundary": at_boss_early,
-                        "name": boss_name,
-                        "dialogue": dialogue,
-                        "ascii_art": BOSS_ASCII.get(at_boss_early, ""),
-                    },
-                    has_lantern=has_lantern_early,
-                    event=None,
-                    artifact=None,
-                    achievements=[],
-                    is_first_dig=False,
-                    items_used=[],
-                    items_used_ids=[],
-                    pickaxe_tier=tunnel.get("pickaxe_tier", 0) or 0,
-                    tip="A boss blocks your path!",
-                    decay_info=decay_info,
-                    luminosity_info=None,
-                )
+            parked_return = self._build_parked_boss_return(
+                tunnel, discord_id, guild_id, decay_info
+            )
+            if parked_return is not None:
+                return parked_return
 
         # 3. Cooldown / paid dig check
         paid_dig_cost = 0
@@ -790,51 +905,8 @@ class DigService:
 
         # 4. First dig ever: guaranteed safe, welcome info
         if is_first_dig:
-            advance = random.randint(3, 7)
-            jc_earned = random.randint(1, 5)
-            new_depth = depth_before + advance
-
-            self.dig_repo.update_tunnel(
-                discord_id, guild_id,
-                depth=new_depth,
-                total_digs=(tunnel.get("total_digs", 0) or 0) + 1,
-                last_dig_at=now,
-                total_jc_earned=(tunnel.get("total_jc_earned", 0) or 0) + jc_earned,
-                streak_days=1,
-                streak_last_date=today,
-            )
-            self.player_repo.add_balance(discord_id, guild_id, jc_earned)
-            self.dig_repo.log_action(
-                discord_id=discord_id, guild_id=guild_id,
-                action_type="dig",
-                details=json.dumps({
-                    "advance": advance, "jc": jc_earned, "first_dig": True,
-                    "depth_before": depth_before, "depth_after": new_depth,
-                }),
-            )
-
-            return self._ok(
-                tunnel_name=tunnel.get("tunnel_name") or "Unknown Tunnel",
-                depth_before=depth_before,
-                depth_after=new_depth,
-                advance=advance,
-                jc_earned=jc_earned,
-                milestone_bonus=0,
-                streak_bonus=0,
-                cave_in=False,
-                cave_in_detail=None,
-                boss_encounter=False,
-                boss_info=None,
-                has_lantern=False,
-                event=None,
-                artifact=None,
-                achievements=[],
-                is_first_dig=True,
-                items_used=[],
-                items_used_ids=[],
-                pickaxe_tier=0,
-                tip="Welcome to the mines! Use /dig again after the cooldown.",
-                decay_info=decay_info,
+            return self._execute_first_dig(
+                discord_id, guild_id, tunnel, depth_before, now, today, decay_info
             )
 
         # 5. Check injury state
@@ -858,58 +930,16 @@ class DigService:
             )
 
         # 6. Get queued items and apply effects
-        queued = self._get_queued_items_for_tunnel(discord_id, guild_id)
-        items_used = []
-        items_used_ids = []
-        has_dynamite = False
-        has_hard_hat = False
-        has_lantern = False
-        has_torch = False
-        has_grappling_hook = False
-        has_depth_charge = False
-        has_reinforcement = False
-        has_sonar_pulse = False
-        has_void_bait = False
-
-        for item in queued:
-            itype = item.get("type")
-            if itype == "dynamite":
-                has_dynamite = True
-                items_used.append("Dynamite")
-            elif itype == "hard_hat":
-                has_hard_hat = True
-                items_used.append("Hard Hat")
-            elif itype == "lantern":
-                has_lantern = True
-                items_used.append("Lantern")
-            elif itype == "torch":
-                has_torch = True
-                items_used.append("Torch")
-            elif itype == "grappling_hook":
-                has_grappling_hook = True
-                items_used.append("Grappling Hook")
-            elif itype == "depth_charge":
-                has_depth_charge = True
-                items_used.append("Depth Charge")
-            elif itype == "reinforcement":
-                has_reinforcement = True
-                items_used.append("Reinforcement")
-            elif itype == "sonar_pulse":
-                has_sonar_pulse = True
-                items_used.append("Sonar Pulse")
-            elif itype == "void_bait":
-                has_void_bait = True
-                items_used.append("Void Bait")
-            if itype:
-                items_used_ids.append(itype)
-
-        # Consume queued items from inventory
-        if queued:
-            for item in queued:
-                self.dig_repo.remove_inventory_item(
-                    discord_id, guild_id, item.get("type")
-                )
-            self.dig_repo.unqueue_all(discord_id, guild_id)
+        items_used, items_used_ids, _item_flags = self._resolve_queued_items(discord_id, guild_id)
+        has_dynamite = _item_flags["has_dynamite"]
+        has_hard_hat = _item_flags["has_hard_hat"]
+        has_lantern = _item_flags["has_lantern"]
+        has_torch = _item_flags["has_torch"]
+        has_grappling_hook = _item_flags["has_grappling_hook"]
+        has_depth_charge = _item_flags["has_depth_charge"]
+        has_reinforcement = _item_flags["has_reinforcement"]
+        has_sonar_pulse = _item_flags["has_sonar_pulse"]
+        has_void_bait = _item_flags["has_void_bait"]
 
         # Hard hat: grant 3 charges of full cave-in prevention
         if has_hard_hat:
