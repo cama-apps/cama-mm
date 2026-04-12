@@ -349,15 +349,11 @@ class MatchCommands(commands.Cog):
             lobby_manager.clear_lock_time(guild_id)
             shuffle_lock.release()
 
-    async def _execute_shuffle(
-        self,
-        interaction: discord.Interaction,
-        guild: discord.Guild | None,
-        guild_id: int | None,
-        rating_system: app_commands.Choice[str] | None,
+    async def _validate_shuffle_preconditions(
+        self, interaction: discord.Interaction, guild_id: int | None
     ):
-        """Execute the shuffle logic. Called within the shuffle lock."""
-        # Check if the user calling shuffle is already in a pending match
+        """Pre-flight checks for ``/shuffle``. Sends the error message to the user
+        and returns ``None`` if anything fails; otherwise returns the active lobby."""
         player_match = self.match_service.state_service.get_pending_match_for_player(
             guild_id, interaction.user.id
         )
@@ -370,15 +366,13 @@ class MatchCommands(commands.Cog):
             else:
                 message_text += " Use `/record` to complete it first."
             await interaction.followup.send(message_text, ephemeral=True)
-            return
+            return None
 
-        # Check for active draft
         draft_state_manager = getattr(self.bot, "draft_state_manager", None)
         if draft_state_manager and draft_state_manager.has_active_draft(guild_id):
             state = draft_state_manager.get_state(guild_id)
             user_id = interaction.user.id
 
-            # Check if user can restart (captain or admin)
             is_captain = state and user_id in (state.captain1_id, state.captain2_id)
             is_admin = user_id in getattr(self.bot, "admin_user_ids", set())
             if not is_admin and interaction.guild:
@@ -386,7 +380,6 @@ class MatchCommands(commands.Cog):
                 if member and member.guild_permissions.administrator:
                     is_admin = True
 
-            # Only show restart option to captains and admins
             if is_captain or is_admin:
                 msg = (
                     "❌ There's an active Immortal Draft in progress! "
@@ -397,28 +390,78 @@ class MatchCommands(commands.Cog):
                     "❌ There's an active Immortal Draft in progress! "
                     "Please wait for it to complete."
                 )
-
             await interaction.followup.send(msg, ephemeral=True)
-            return
+            return None
 
         lobby = self.lobby_service.get_lobby()
         if not lobby:
             await interaction.followup.send(
                 "❌ No active lobby. Use `/lobby` to create one!", ephemeral=True
             )
-            return
+            return None
 
         regular_count = lobby.get_player_count()
         conditional_count = lobby.get_conditional_count()
         total_count = lobby.get_total_count()
-
         if total_count < 10:
             await interaction.followup.send(
                 f"❌ Need at least 10 players in lobby. Currently {total_count}/10 "
                 f"({regular_count} regular, {conditional_count} conditional).",
                 ephemeral=True,
             )
+            return None
+
+        return lobby
+
+    def _select_shuffle_roster(
+        self, lobby, guild_id: int | None
+    ) -> tuple[list[int], list, list[int], list[int]]:
+        """Pick exactly 10 players for the shuffle, filling from the conditional
+        queue when the regular queue is short. Returns ``(player_ids, players,
+        conditional_included, excluded_conditional_ids)``."""
+        player_ids, players = self.lobby_service.get_lobby_players(lobby, guild_id)
+        conditional_player_ids_included: list[int] = []
+        excluded_conditional_ids: list[int] = []
+
+        all_conditional_ids, all_conditional_players = self.lobby_service.get_conditional_players(
+            lobby, guild_id
+        )
+
+        regular_count = lobby.get_player_count()
+        if regular_count < 10:
+            def priority_key(player):
+                rating = player.glicko_rating if player.glicko_rating else 1500.0
+                rd = player.glicko_rd if player.glicko_rd else 350.0
+                return (rating, -rd)
+
+            conditional_pairs = list(zip(all_conditional_ids, all_conditional_players))
+            conditional_pairs.sort(key=lambda x: priority_key(x[1]), reverse=True)
+
+            slots_available = 10 - regular_count
+            for cid, cplayer in conditional_pairs[:slots_available]:
+                player_ids.append(cid)
+                players.append(cplayer)
+                conditional_player_ids_included.append(cid)
+
+            excluded_conditional_ids = [cid for cid, _ in conditional_pairs[slots_available:]]
+        else:
+            excluded_conditional_ids = list(all_conditional_ids)
+
+        return player_ids, players, conditional_player_ids_included, excluded_conditional_ids
+
+    async def _execute_shuffle(
+        self,
+        interaction: discord.Interaction,
+        guild: discord.Guild | None,
+        guild_id: int | None,
+        rating_system: app_commands.Choice[str] | None,
+    ):
+        """Execute the shuffle logic. Called within the shuffle lock."""
+        lobby = await self._validate_shuffle_preconditions(interaction, guild_id)
+        if lobby is None:
             return
+
+        regular_count = lobby.get_player_count()
 
         # 15 or more regular (non-conditional) players → force Immortal Draft
         if regular_count >= 15:
@@ -451,45 +494,12 @@ class MatchCommands(commands.Cog):
                 )
             return
 
-        # Build the player list for shuffling
-        # Priority: regular players first, then fill with conditional if needed
-        player_ids, players = self.lobby_service.get_lobby_players(lobby, guild_id)
-        conditional_player_ids_included = []
-        excluded_conditional_ids = []
-
-        # Always get conditional players to track who wasn't included
-        all_conditional_ids, all_conditional_players = self.lobby_service.get_conditional_players(lobby, guild_id)
-
-        if regular_count < 10:
-            # Need to include some conditional players to reach exactly 10
-            # Regular players should ALWAYS play when there are fewer than 10 of them
-            # Only conditional players can fill the remaining slots
-            # Sort conditional players by rating/RD priority (same as exclusion logic)
-            # Higher RD = more uncertain = lower priority, higher rating = higher priority
-            def priority_key(player):
-                rating = player.glicko_rating if player.glicko_rating else 1500.0
-                rd = player.glicko_rd if player.glicko_rd else 350.0
-                # Higher rating and lower RD = higher priority
-                return (rating, -rd)
-
-            # Pair conditional players with their IDs for sorting
-            conditional_pairs = list(zip(all_conditional_ids, all_conditional_players))
-            conditional_pairs.sort(key=lambda x: priority_key(x[1]), reverse=True)
-
-            # Take exactly enough conditional players to reach 10 (no more)
-            # This ensures the shuffler gets exactly 10 players and excludes none,
-            # guaranteeing all regular players are included
-            slots_available = 10 - regular_count
-            for cid, cplayer in conditional_pairs[:slots_available]:
-                player_ids.append(cid)
-                players.append(cplayer)
-                conditional_player_ids_included.append(cid)
-
-            # All remaining conditional players are excluded
-            excluded_conditional_ids = [cid for cid, _ in conditional_pairs[slots_available:]]
-        else:
-            # 10+ regular players means all conditional players are excluded
-            excluded_conditional_ids = list(all_conditional_ids)
+        (
+            player_ids,
+            players,
+            conditional_player_ids_included,
+            excluded_conditional_ids,
+        ) = self._select_shuffle_roster(lobby, guild_id)
 
         # Check if any of the players to be shuffled are already in a pending match
         pending_player_ids = self.match_service.state_service.get_all_pending_player_ids(guild_id)
@@ -795,7 +805,22 @@ class MatchCommands(commands.Cog):
         else:
             embed.set_footer(text=f"{glicko_prob:.2f} {os_prob:.2f}")
 
-        # Post shuffle embed to the lobby channel (dedicated channel where embed lives)
+        await self._finalize_shuffle(
+            interaction=interaction,
+            guild_id=guild_id,
+            embed=embed,
+            pending_match_id=pending_match_id,
+        )
+
+    async def _finalize_shuffle(
+        self,
+        interaction: discord.Interaction,
+        guild_id: int | None,
+        embed: discord.Embed,
+        pending_match_id: int | None,
+    ) -> None:
+        """Post the shuffle embed, persist its location, schedule reminders,
+        lock the lobby thread, unpin, and reset the lobby."""
         lobby_channel_id = self.lobby_service.get_lobby_channel_id()
         message = None
         if lobby_channel_id:
@@ -807,7 +832,6 @@ class MatchCommands(commands.Cog):
             except Exception as exc:
                 logger.warning(f"Failed to post shuffle to lobby channel: {exc}")
 
-        # Also post to command channel if different from lobby channel
         command_channel_id = interaction.channel.id if interaction.channel else None
         cmd_message = None
         if command_channel_id and command_channel_id != lobby_channel_id:
@@ -816,11 +840,9 @@ class MatchCommands(commands.Cog):
             except Exception as exc:
                 logger.warning(f"Failed to post shuffle to command channel: {exc}")
 
-        # Send ephemeral confirmation to user
         await interaction.followup.send("✅ Teams shuffled!", ephemeral=True)
 
-        # Save the shuffle message link so pending-match prompts can point to it
-        # Capture origin_channel_id before reset_lobby clears it (needed for betting reminders)
+        # Capture origin_channel_id before reset_lobby clears it (betting reminders need it).
         try:
             origin_channel_id = self.lobby_service.get_origin_channel_id()
             if message or cmd_message:
@@ -838,12 +860,10 @@ class MatchCommands(commands.Cog):
         except Exception as exc:
             logger.warning(f"Failed to store shuffle message URL: {exc}", exc_info=True)
 
-        # Schedule betting reminders (5-minute warning and close) if applicable
         pending_state = self.match_service.get_last_shuffle(guild_id, pending_match_id=pending_match_id)
         bet_lock_until = pending_state.get("bet_lock_until") if pending_state else None
         await self._schedule_betting_reminders(guild_id, bet_lock_until, pending_match_id=pending_match_id)
 
-        # Lock lobby thread and post shuffle results there too
         included_ids = []
         if pending_state:
             included_ids = pending_state.get("radiant_team_ids", []) + pending_state.get(
@@ -855,8 +875,7 @@ class MatchCommands(commands.Cog):
             included_player_ids=included_ids,
             pending_match_id=pending_match_id,
         )
-        # Unpin from the lobby channel (may be dedicated channel, not interaction channel)
-        lobby_channel_id = self.lobby_service.get_lobby_channel_id()
+
         lobby_channel = None
         if lobby_channel_id:
             try:
@@ -871,7 +890,6 @@ class MatchCommands(commands.Cog):
         await safe_unpin_all_bot_messages(lobby_channel, self.bot.user)
         await asyncio.to_thread(self.lobby_service.reset_lobby)
 
-        # Clear lobby rally cooldowns
         from bot import clear_lobby_rally_cooldowns
         clear_lobby_rally_cooldowns(guild_id or 0)
 
