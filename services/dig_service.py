@@ -1477,6 +1477,14 @@ class DigService:
             weather=weather_info,
         )
 
+    def reset_dig_cooldown(self, discord_id: int, guild_id) -> dict:
+        """Admin: reset a player's free dig cooldown."""
+        tunnel = self.dig_repo.get_tunnel(discord_id, guild_id)
+        if tunnel is None:
+            return self._error("That player doesn't have a tunnel.")
+        self.dig_repo.update_tunnel(discord_id, guild_id, last_dig_at=0)
+        return self._ok(reset=True)
+
     def calculate_decay(self, discord_id: int, guild_id) -> int:
         """Public wrapper: calculate how much decay would occur, return blocks lost.
 

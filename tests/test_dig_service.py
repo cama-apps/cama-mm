@@ -47,8 +47,13 @@ def dig_repo(repo_db_path):
 
 
 @pytest.fixture
-def dig_service(dig_repo, player_repository):
-    return DigService(dig_repo, player_repository)
+def dig_service(dig_repo, player_repository, monkeypatch):
+    svc = DigService(dig_repo, player_repository)
+    # Neutralize weather so random rolls don't interfere with tests
+    # that depend on exact probabilities. Tests that need weather
+    # can override _get_weather_effects or set weather explicitly.
+    monkeypatch.setattr(svc, "_get_weather_effects", lambda guild_id, layer_name: {})
+    return svc
 
 
 def _register_player(player_repository, discord_id=10001, guild_id=12345, balance=100):
@@ -1154,6 +1159,8 @@ class TestLayerWeather:
 
     def _setup_and_second_dig(self, dig_service, player_repository, monkeypatch):
         """Helper: register, first dig, then second dig to trigger weather."""
+        # Restore real weather effects (fixture stubs them out)
+        monkeypatch.setattr(dig_service, "_get_weather_effects", DigService._get_weather_effects.__get__(dig_service))
         _register_player(player_repository, balance=200)
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
         monkeypatch.setattr(random, "random", lambda: 0.99)
@@ -1210,6 +1217,9 @@ class TestLayerWeather:
 
     def test_weather_effects_in_dig_result(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
         """Dig result should include weather info when player is in an affected layer."""
+        # Restore real _get_weather_effects (fixture stubs it out)
+        monkeypatch.setattr(dig_service, "_get_weather_effects", DigService._get_weather_effects.__get__(dig_service))
+
         _register_player(player_repository, balance=200)
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
         monkeypatch.setattr(random, "random", lambda: 0.99)
@@ -1824,10 +1834,7 @@ class TestLuminosity:
         dig_service.dig(10001, guild_id)
         dig_repo.update_tunnel(10001, guild_id, depth=50)  # Stone layer, base 0.16
 
-        # Neutralize weather so it doesn't alter event chance
-        today = dig_service._get_game_date()
-        dig_repo.set_weather(guild_id, today, "Dirt", "earthworm_migration")
-        dig_repo.set_weather(guild_id, today, "Magma", "cooling_period")
+        # Weather neutralized by fixture (effects stubbed to {})
 
         # Stone at depth 50: bright event=0.16, dim=0.24, dark=0.40, pitch=0.48
         # Stone cave-in: bright=0.10, dim=0.15, dark=0.25, pitch=0.35
@@ -1855,10 +1862,7 @@ class TestLuminosity:
         monkeypatch.setattr(ds_mod.random, "random", lambda: 0.99)
         dig_service.dig(10001, guild_id)
 
-        # Neutralize weather so it doesn't alter event/cave-in chances
-        today = dig_service._get_game_date()
-        dig_repo.set_weather(guild_id, today, "Crystal", "crystal_resonance")
-        dig_repo.set_weather(guild_id, today, "Magma", "cooling_period")
+        # Weather neutralized by fixture (effects stubbed to {})
 
         # Dirt (depth 0-25) at pitch black: 0.16 * 3.0 = 0.48.
         # Cave-in at pitch: 0.05 + 0.25 = 0.30. So roll=0.35 avoids cave-in
