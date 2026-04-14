@@ -70,6 +70,39 @@ from services.dig_constants import (
 logger = logging.getLogger("cama_bot.services.dig")
 
 RARITY_WEIGHTS = {"common": 70, "uncommon": 20, "rare": 12, "legendary": 4}
+DIG_STARTING_STAT_POINTS = 5
+DIG_BOSS_STAT_POINT_BONUS = 1
+MINER_BACKSTORY_MAX_LENGTH = 600
+STRENGTH_MAX_ADVANCE_INTERVAL = 2
+STRENGTH_MIN_ADVANCE_INTERVAL = 5
+SMARTS_CAVE_IN_REDUCTION = 0.02
+STAMINA_COOLDOWN_REDUCTION = 0.04
+STAMINA_MAX_REDUCTION = 0.50
+
+# Pre-compute which event IDs have art assets (disk or PIL).
+# Lazily initialized on first use to avoid import-time side effects.
+_EVENTS_WITH_ART: set[str] | None = None
+
+
+def _get_events_with_art() -> set[str]:
+    """Return the set of event IDs that have art (on-disk or PIL-generated)."""
+    global _EVENTS_WITH_ART  # noqa: PLW0603
+    if _EVENTS_WITH_ART is not None:
+        return _EVENTS_WITH_ART
+    try:
+        import os
+
+        from utils.dig_drawing import has_event_scene
+
+        art_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "dig", "events")
+        disk = set()
+        if os.path.isdir(art_dir):
+            disk = {f.split(".")[0] for f in os.listdir(art_dir)}
+        pil = {eid for e in EVENT_POOL if has_event_scene(eid := e["id"])}
+        _EVENTS_WITH_ART = disk | pil
+    except Exception:
+        _EVENTS_WITH_ART = set()
+    return _EVENTS_WITH_ART
 
 
 class DigService:
@@ -103,11 +136,12 @@ class DigService:
         mutations = self._get_mutations(tunnel)
         mutation_fx = self._apply_mutation_effects(mutations)
         cooldown += int(mutation_fx.get("cooldown_bonus_seconds", 0))
-        remaining = cooldown - elapsed
         # Check for stun from injury
         injury = json.loads(tunnel["injury_state"]) if tunnel.get("injury_state") else None
         if injury and injury.get("type") == "slower_cooldown":
-            remaining = INJURY_SLOW_COOLDOWN - elapsed
+            cooldown = INJURY_SLOW_COOLDOWN
+        cooldown = self._apply_stamina_to_cooldown(cooldown, tunnel)
+        remaining = cooldown - elapsed
         return max(0, remaining)
 
     def _get_layer(self, depth: int) -> dict:
@@ -120,6 +154,14 @@ class DigService:
     def get_layer(self, depth: int) -> dict:
         """Public: return layer info for given depth."""
         return self._get_layer(depth)
+
+    def _is_unstarted_tunnel(self, tunnel: dict) -> bool:
+        """True for profile-created tunnels that have not had a first dig yet."""
+        return (
+            (tunnel.get("total_digs", 0) or 0) == 0
+            and tunnel.get("last_dig_at") is None
+            and (tunnel.get("depth", 0) or 0) == 0
+        )
 
     # ── Layer Weather ────────────────────────────────────────────────
 
@@ -211,6 +253,203 @@ class DigService:
             return json.loads(raw)
         except (json.JSONDecodeError, TypeError):
             return []
+
+    def _get_miner_stats(self, tunnel: dict) -> dict:
+        """Return normalized miner S stats and available point budget."""
+        strength = max(0, int(tunnel.get("stat_strength") or 0))
+        smarts = max(0, int(tunnel.get("stat_smarts") or 0))
+        stamina = max(0, int(tunnel.get("stat_stamina") or 0))
+        total_points = max(
+            DIG_STARTING_STAT_POINTS,
+            int(tunnel.get("stat_points") or DIG_STARTING_STAT_POINTS),
+        )
+        spent = strength + smarts + stamina
+        return {
+            "strength": strength,
+            "smarts": smarts,
+            "stamina": stamina,
+            "stat_points": total_points,
+            "spent_points": spent,
+            "unspent_points": max(0, total_points - spent),
+        }
+
+    def _get_stat_effects(self, stats: dict) -> dict:
+        """Translate S stats into mechanical dig modifiers."""
+        strength = stats.get("strength", 0)
+        smarts = stats.get("smarts", 0)
+        stamina = stats.get("stamina", 0)
+        stamina_reduction = min(STAMINA_MAX_REDUCTION, stamina * STAMINA_COOLDOWN_REDUCTION)
+        return {
+            "advance_min_bonus": strength // STRENGTH_MIN_ADVANCE_INTERVAL,
+            "advance_max_bonus": strength // STRENGTH_MAX_ADVANCE_INTERVAL,
+            "cave_in_reduction": smarts * SMARTS_CAVE_IN_REDUCTION,
+            "cooldown_multiplier": 1.0 - stamina_reduction,
+            "paid_cost_multiplier": 1.0 - stamina_reduction,
+        }
+
+    def _apply_stamina_to_cooldown(self, cooldown: int, tunnel: dict) -> int:
+        stats = self._get_miner_stats(tunnel)
+        effects = self._get_stat_effects(stats)
+        return max(1, int(cooldown * effects["cooldown_multiplier"]))
+
+    def _apply_stamina_to_paid_cost(self, cost: int, tunnel: dict) -> int:
+        stats = self._get_miner_stats(tunnel)
+        effects = self._get_stat_effects(stats)
+        return max(1, int(cost * effects["paid_cost_multiplier"]))
+
+    def _calculate_paid_dig_cost(self, tunnel: dict, paid_count: int) -> int:
+        cost_index = min(paid_count, len(PAID_DIG_COSTS) - 1)
+        paid_dig_cost = PAID_DIG_COSTS[cost_index]
+        prestige_lvl = tunnel.get("prestige_level", 0) or 0
+        asc = self._get_ascension_effects(prestige_lvl)
+        if asc.get("paid_dig_cost_multiplier"):
+            paid_dig_cost = int(paid_dig_cost * (1 + asc["paid_dig_cost_multiplier"]))
+        return self._apply_stamina_to_paid_cost(paid_dig_cost, tunnel)
+
+    def _sanitize_miner_text(self, value: str | None, max_length: int) -> str:
+        if value is None:
+            return ""
+        clean = " ".join(str(value).replace("@", "(at)").split())
+        return clean[:max_length]
+
+    def _has_locked_backstory(self, tunnel: dict) -> bool:
+        return bool((tunnel.get("miner_about") or "").strip())
+
+    def _ensure_tunnel_for_profile(self, discord_id: int, guild_id) -> dict:
+        tunnel = self.dig_repo.get_tunnel(discord_id, guild_id)
+        if tunnel is None:
+            self.dig_repo.create_tunnel(
+                discord_id, guild_id, name=self.generate_tunnel_name()
+            )
+            tunnel = self.dig_repo.get_tunnel(discord_id, guild_id)
+        return dict(tunnel)
+
+    def _get_stat_boss_awards(self, tunnel: dict) -> list[int]:
+        raw = tunnel.get("stat_boss_awards")
+        if not raw:
+            return []
+        try:
+            decoded = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return []
+        if not isinstance(decoded, list):
+            return []
+        awards = []
+        for value in decoded:
+            try:
+                awards.append(int(value))
+            except (TypeError, ValueError):
+                continue
+        return awards
+
+    def _award_boss_stat_point_if_first(
+        self, discord_id: int, guild_id, tunnel: dict, boundary: int
+    ) -> bool:
+        """Award one S-stat point the first time this boss is fully defeated."""
+        awarded = self._get_stat_boss_awards(tunnel)
+        if boundary in awarded:
+            return False
+        awarded.append(boundary)
+        current_points = max(
+            DIG_STARTING_STAT_POINTS,
+            int(tunnel.get("stat_points") or DIG_STARTING_STAT_POINTS),
+        )
+        self.dig_repo.update_tunnel(
+            discord_id,
+            guild_id,
+            stat_points=current_points + DIG_BOSS_STAT_POINT_BONUS,
+            stat_boss_awards=json.dumps(sorted(set(awarded))),
+        )
+        tunnel["stat_points"] = current_points + DIG_BOSS_STAT_POINT_BONUS
+        tunnel["stat_boss_awards"] = json.dumps(sorted(set(awarded)))
+        return True
+
+    def get_miner_profile(self, discord_id: int, guild_id) -> dict:
+        """Return the player's dig profile and S-stat effects."""
+        if not self.player_repo.exists(discord_id, guild_id):
+            return self._error("You need to register first. Use /player register.")
+        tunnel = self._ensure_tunnel_for_profile(discord_id, guild_id)
+        stats = self._get_miner_stats(tunnel)
+        effects = self._get_stat_effects(stats)
+        return self._ok(
+            backstory=tunnel.get("miner_about") or "",
+            stats=stats,
+            effects=effects,
+            awarded_bosses=self._get_stat_boss_awards(tunnel),
+        )
+
+    def set_miner_profile(
+        self,
+        discord_id: int,
+        guild_id,
+        *,
+        backstory: str | None = None,
+    ) -> dict:
+        """Set the player's miner backstory once."""
+        if not self.player_repo.exists(discord_id, guild_id):
+            return self._error("You need to register first. Use /player register.")
+        tunnel = self._ensure_tunnel_for_profile(discord_id, guild_id)
+        if self._has_locked_backstory(tunnel):
+            return self._error("Your miner backstory is already set and cannot be changed.")
+        story = self._sanitize_miner_text(backstory, MINER_BACKSTORY_MAX_LENGTH)
+        if not story:
+            return self._error("Provide a backstory to lock in.")
+        self.dig_repo.update_tunnel(discord_id, guild_id, miner_about=story)
+        tunnel["miner_about"] = story
+        return self._ok(
+            backstory=tunnel.get("miner_about") or "",
+        )
+
+    def set_miner_stats(
+        self,
+        discord_id: int,
+        guild_id,
+        *,
+        strength: int,
+        smarts: int,
+        stamina: int,
+    ) -> dict:
+        """Allocate additional S-stat points without allowing respecs."""
+        if not self.player_repo.exists(discord_id, guild_id):
+            return self._error("You need to register first. Use /player register.")
+        tunnel = self._ensure_tunnel_for_profile(discord_id, guild_id)
+        try:
+            values = {
+                "strength": int(strength),
+                "smarts": int(smarts),
+                "stamina": int(stamina),
+            }
+        except (TypeError, ValueError):
+            return self._error("S stats must be whole numbers.")
+        if any(v < 0 for v in values.values()):
+            return self._error("S stats cannot be negative.")
+        if not any(values.values()):
+            return self._error("Spend at least one point.")
+        stats = self._get_miner_stats(tunnel)
+        total = sum(values.values())
+        if total > stats["unspent_points"]:
+            return self._error(
+                f"That spends {total} points, but you only have {stats['unspent_points']} unspent."
+            )
+        next_values = {
+            "stat_strength": stats["strength"] + values["strength"],
+            "stat_smarts": stats["smarts"] + values["smarts"],
+            "stat_stamina": stats["stamina"] + values["stamina"],
+        }
+        self.dig_repo.update_tunnel(
+            discord_id,
+            guild_id,
+            **next_values,
+        )
+        updated = {
+            **tunnel,
+            **next_values,
+        }
+        updated_stats = self._get_miner_stats(updated)
+        return self._ok(
+            stats=updated_stats,
+            effects=self._get_stat_effects(updated_stats),
+        )
 
     def _get_equipped_relics_for_player(self, discord_id: int, guild_id) -> list[dict]:
         """Get list of equipped relic artifacts from DB."""
@@ -836,6 +1075,8 @@ class DigService:
             self.dig_repo.create_tunnel(discord_id, guild_id, name=name)
             tunnel = self.dig_repo.get_tunnel(discord_id, guild_id)
             is_first_dig = True
+        elif self._is_unstarted_tunnel(dict(tunnel)):
+            is_first_dig = True
 
         tunnel = dict(tunnel)
         tunnel["discord_id"] = discord_id
@@ -865,12 +1106,12 @@ class DigService:
                     pc = tunnel.get("paid_digs_today") or 0
                     if pd != today:
                         pc = 0
-                    ci = min(pc, len(PAID_DIG_COSTS) - 1)
+                    preview_cost = self._calculate_paid_dig_cost(tunnel, pc)
                     return {
                         "success": False,
                         "error": f"Dig on cooldown ({cooldown_remaining}s remaining).",
                         "cooldown_remaining": cooldown_remaining,
-                        "paid_dig_cost": PAID_DIG_COSTS[ci],
+                        "paid_dig_cost": preview_cost,
                         "paid_dig_available": True,
                     }
 
@@ -881,13 +1122,7 @@ class DigService:
                 if paid_date != today:
                     paid_count = 0
 
-                cost_index = min(paid_count, len(PAID_DIG_COSTS) - 1)
-                paid_dig_cost = PAID_DIG_COSTS[cost_index]
-                # P10 ascension: paid dig costs +50%
-                prestige_lvl = tunnel.get("prestige_level", 0) or 0
-                asc = self._get_ascension_effects(prestige_lvl)
-                if asc.get("paid_dig_cost_multiplier"):
-                    paid_dig_cost = int(paid_dig_cost * (1 + asc["paid_dig_cost_multiplier"]))
+                paid_dig_cost = self._calculate_paid_dig_cost(tunnel, paid_count)
 
                 balance = self.player_repo.get_balance(discord_id, guild_id)
                 if balance < paid_dig_cost:
@@ -1059,6 +1294,8 @@ class DigService:
         relic_cavein_mod = 0.97 if self._has_relic(discord_id, guild_id, "crystal_compass") else 1.0
         mole_claws_bonus = 1 if self._has_relic(discord_id, guild_id, "mole_claws") else 0
         magma_heart_bonus = 1 if self._has_relic(discord_id, guild_id, "magma_heart") else 0
+        miner_stats = self._get_miner_stats(tunnel)
+        stat_effects = self._get_stat_effects(miner_stats)
 
         # 9. Cave-in check (with ascension + corruption + mutation modifiers)
         hard_hat_charges = tunnel.get("hard_hat_charges", 0) or 0
@@ -1081,6 +1318,7 @@ class DigService:
         cave_in_chance -= perk_cavein_reduction
         cave_in_chance -= pickaxe_cavein_reduction
         cave_in_chance -= buff_cavein_reduction
+        cave_in_chance -= stat_effects["cave_in_reduction"]
         # Lantern: -50% cave-in chance for this dig
         if has_lantern:
             cave_in_chance *= 0.50
@@ -1237,6 +1475,8 @@ class DigService:
         # 11. Roll advance (no cave-in) — with ascension/corruption/mutation
         base_min = layer.get("advance_min", 1)
         base_max = layer.get("advance_max", 5)
+        base_min += stat_effects["advance_min_bonus"]
+        base_max += stat_effects["advance_max_bonus"]
         # the_endless perk: The Hollow advance becomes 1-2 instead of 1-1
         if "the_endless" in perks and layer_name == "The Hollow" and base_max <= 1:
             base_max = 2
@@ -1387,6 +1627,11 @@ class DigService:
                 void_bait_digs=void_bait_digs - 1,
             )
         event_chance = min(event_chance, 0.75)
+        # Admin force-event override
+        force_key = (discord_id, guild_id)
+        if hasattr(self, "_force_event_for") and force_key in self._force_event_for:
+            event_chance = 1.0
+            self._force_event_for.discard(force_key)
         event = None
         if random.random() < event_chance:
             event = self.roll_event(new_depth, luminosity=luminosity,
@@ -1476,6 +1721,1033 @@ class DigService:
             event_preview=event_preview,
             weather=weather_info,
         )
+
+    # ------------------------------------------------------------------
+    # DM Mode: Preconditions / Outcome split
+    # ------------------------------------------------------------------
+
+    def _compute_preconditions(
+        self, discord_id: int, guild_id, paid: bool = False,
+    ) -> tuple[dict | None, dict | None]:
+        """Compute all preconditions for a dig without rolling outcomes.
+
+        Returns ``(terminal_result, preconditions)``.
+        Exactly one of the two will be non-None.
+
+        *terminal_result* is returned for early-exit scenarios (error,
+        cooldown offer, first dig, boss-parked).
+
+        *preconditions* is a dict with computed modifiers + effective ranges
+        that the DM (or the deterministic fallback) uses to decide the outcome.
+        """
+        if not self.player_repo.exists(discord_id, guild_id):
+            return self._error("You need to register first. Use /player register."), None
+
+        now = int(time.time())
+        today = self._get_game_date()
+
+        tunnel = self.dig_repo.get_tunnel(discord_id, guild_id)
+        is_first_dig = False
+        if tunnel is None:
+            name = self.generate_tunnel_name()
+            self.dig_repo.create_tunnel(discord_id, guild_id, name=name)
+            tunnel = self.dig_repo.get_tunnel(discord_id, guild_id)
+            is_first_dig = True
+        elif self._is_unstarted_tunnel(dict(tunnel)):
+            is_first_dig = True
+        tunnel = dict(tunnel)
+        tunnel["discord_id"] = discord_id
+
+        decay_info = self._apply_lazy_decay(tunnel, guild_id)
+        depth_before = tunnel.get("depth", 0)
+
+        if not is_first_dig:
+            parked_return = self._build_parked_boss_return(
+                tunnel, discord_id, guild_id, decay_info,
+            )
+            if parked_return is not None:
+                return parked_return, None
+
+        # Cooldown / paid dig check
+        paid_dig_cost = 0
+        if not is_first_dig:
+            cooldown_remaining = self._get_cooldown_remaining(tunnel)
+            if cooldown_remaining > 0:
+                if not paid:
+                    pd = tunnel.get("paid_dig_date")
+                    pc = tunnel.get("paid_digs_today") or 0
+                    if pd != today:
+                        pc = 0
+                    preview_cost = self._calculate_paid_dig_cost(tunnel, pc)
+                    return {
+                        "success": False,
+                        "error": f"Dig on cooldown ({cooldown_remaining}s remaining).",
+                        "cooldown_remaining": cooldown_remaining,
+                        "paid_dig_cost": preview_cost,
+                        "paid_dig_available": True,
+                    }, None
+
+                paid_date = tunnel.get("paid_dig_date")
+                paid_count = tunnel.get("paid_digs_today") or 0
+                if paid_date != today:
+                    paid_count = 0
+                paid_dig_cost = self._calculate_paid_dig_cost(tunnel, paid_count)
+                balance = self.player_repo.get_balance(discord_id, guild_id)
+                if balance < paid_dig_cost:
+                    return self._error(
+                        f"Paid dig costs {paid_dig_cost} JC but you only have {balance} JC."
+                    ), None
+                self.player_repo.add_balance(discord_id, guild_id, -paid_dig_cost)
+                self.dig_repo.update_tunnel(
+                    discord_id, guild_id,
+                    paid_dig_date=today,
+                    paid_digs_today=paid_count + 1,
+                )
+
+        if is_first_dig:
+            return self._execute_first_dig(
+                discord_id, guild_id, tunnel, depth_before, now, today, decay_info,
+            ), None
+
+        # Injury state
+        injury_advance_mod = 1.0
+        if tunnel.get("injury_state"):
+            try:
+                injury = json.loads(tunnel["injury_state"])
+            except (json.JSONDecodeError, TypeError):
+                injury = None
+            else:
+                if injury and injury.get("digs_remaining", 0) > 0:
+                    if injury.get("type") == "reduced_advance":
+                        injury_advance_mod = 0.5
+                    injury["digs_remaining"] -= 1
+                    if injury["digs_remaining"] <= 0:
+                        injury = None
+                    self.dig_repo.update_tunnel(
+                        discord_id, guild_id,
+                        injury_state=json.dumps(injury) if injury else None,
+                    )
+
+        # Queued items
+        items_used, items_used_ids, _item_flags = self._resolve_queued_items(
+            discord_id, guild_id,
+        )
+        has_dynamite = _item_flags["has_dynamite"]
+        has_hard_hat = _item_flags["has_hard_hat"]
+        has_lantern = _item_flags["has_lantern"]
+        has_torch = _item_flags["has_torch"]
+        has_grappling_hook = _item_flags["has_grappling_hook"]
+        has_depth_charge = _item_flags["has_depth_charge"]
+        has_reinforcement = _item_flags["has_reinforcement"]
+        has_sonar_pulse = _item_flags["has_sonar_pulse"]
+        has_void_bait = _item_flags["has_void_bait"]
+
+        if has_hard_hat:
+            existing_charges = tunnel.get("hard_hat_charges", 0) or 0
+            self.dig_repo.update_tunnel(
+                discord_id, guild_id, hard_hat_charges=existing_charges + 3,
+            )
+            tunnel["hard_hat_charges"] = existing_charges + 3
+        if has_reinforcement:
+            self.dig_repo.update_tunnel(
+                discord_id, guild_id, reinforced_until=now + 48 * 3600,
+            )
+        if has_void_bait:
+            existing_vb = tunnel.get("void_bait_digs", 0) or 0
+            self.dig_repo.update_tunnel(
+                discord_id, guild_id, void_bait_digs=existing_vb + 3,
+            )
+            tunnel["void_bait_digs"] = existing_vb + 3
+
+        # Layer, luminosity, weather, buffs
+        layer = self._get_layer(depth_before)
+        layer_name = layer.get("name", "Dirt")
+        weather_fx = self._get_weather_effects(guild_id, layer_name)
+        weather_info = None
+        if weather_fx:
+            for entry in self._ensure_weather(guild_id):
+                if entry.get("layer_name") == layer_name:
+                    w = WEATHER_BY_ID.get(entry.get("weather_id"))
+                    if w:
+                        weather_info = {"name": w.name, "description": w.description}
+
+        lum_info = self._apply_luminosity_drain(discord_id, guild_id, tunnel, layer_name)
+        luminosity = lum_info["luminosity_after"]
+
+        if has_torch:
+            luminosity = min(LUMINOSITY_MAX, luminosity + 50)
+            self.dig_repo.update_tunnel(discord_id, guild_id, luminosity=luminosity)
+            lum_info["luminosity_after"] = luminosity
+
+        if self._has_relic(discord_id, guild_id, "spore_cloak") and lum_info["drained"] > 0:
+            restored = lum_info["drained"] // 2
+            luminosity = min(LUMINOSITY_MAX, luminosity + restored)
+            lum_info["drained"] -= restored
+            lum_info["luminosity_after"] = luminosity
+            self.dig_repo.update_tunnel(discord_id, guild_id, luminosity=luminosity)
+
+        active_buff = self._get_active_buff(tunnel)
+        buff_effects = self._apply_buff_effects(active_buff)
+        buff_advance_bonus = buff_effects.get("advance_bonus", 0)
+        buff_cavein_reduction = buff_effects.get("cave_in_reduction", 0.0)
+        self._decrement_buff(discord_id, guild_id, tunnel)
+
+        # Prestige, ascension, corruption, mutations, pickaxe
+        perks = self._get_prestige_perks(tunnel)
+        prestige_level = tunnel.get("prestige_level", 0) or 0
+        ascension = self._get_ascension_effects(prestige_level)
+        corruption = self._roll_corruption(prestige_level)
+        mutations = self._get_mutations(tunnel)
+        mutation_fx = self._apply_mutation_effects(mutations)
+
+        extra_drain = ascension.get("luminosity_drain_multiplier", 0)
+        if extra_drain > 0 and lum_info["drained"] > 0:
+            bonus_drain = int(lum_info["drained"] * extra_drain)
+            luminosity = max(0, luminosity - bonus_drain)
+            lum_info["luminosity_after"] = luminosity
+            lum_info["drained"] += bonus_drain
+            self.dig_repo.update_tunnel(discord_id, guild_id, luminosity=luminosity)
+
+        weather_drain = weather_fx.get("luminosity_drain_multiplier", 0)
+        if weather_drain > 0 and lum_info["drained"] > 0:
+            bonus_drain = int(lum_info["drained"] * weather_drain)
+            luminosity = max(0, luminosity - bonus_drain)
+            lum_info["luminosity_after"] = luminosity
+            lum_info["drained"] += bonus_drain
+            self.dig_repo.update_tunnel(discord_id, guild_id, luminosity=luminosity)
+
+        pickaxe_tier = tunnel.get("pickaxe_tier", 0) or 0
+        pickaxe_data = PICKAXE_TIERS[pickaxe_tier] if pickaxe_tier < len(PICKAXE_TIERS) else {}
+        pickaxe_advance_bonus = pickaxe_data.get("advance_bonus", 0)
+        pickaxe_cavein_reduction = pickaxe_data.get("cave_in_reduction", 0)
+
+        perk_cavein_reduction = 0.05 if "reinforced_walls" in perks else 0.0
+        perk_advance_bonus = 0.1 if "efficient_digging" in perks else 0.0
+        perk_loot_bonus = 0.15 if "keen_eye" in perks else 0.0
+
+        if "deep_sight" in perks and lum_info.get("drained", 0) > 0:
+            restored = max(1, lum_info["drained"] // 4)
+            luminosity = min(LUMINOSITY_MAX, luminosity + restored)
+            lum_info["luminosity_after"] = luminosity
+            self.dig_repo.update_tunnel(discord_id, guild_id, luminosity=luminosity)
+            tunnel["luminosity"] = luminosity
+
+        relic_cavein_mod = 0.97 if self._has_relic(discord_id, guild_id, "crystal_compass") else 1.0
+        mole_claws_bonus = 1 if self._has_relic(discord_id, guild_id, "mole_claws") else 0
+        magma_heart_bonus = 1 if self._has_relic(discord_id, guild_id, "magma_heart") else 0
+        miner_stats = self._get_miner_stats(tunnel)
+        stat_effects = self._get_stat_effects(miner_stats)
+
+        # ── Cave-in chance ────────────────────────────────────────
+        hard_hat_charges = tunnel.get("hard_hat_charges", 0) or 0
+        cave_in_chance = layer.get("cave_in_pct", 0.10)
+        cave_in_chance += ascension.get("cave_in_bonus", 0)
+        cave_in_chance += weather_fx.get("cave_in_bonus", 0)
+        if corruption:
+            cave_in_chance += corruption["effects"].get("cave_in_bonus", 0)
+        lum_cave_bonus = self._luminosity_cave_in_bonus(luminosity)
+        if "dark_adaptation" in perks and LUMINOSITY_DIM <= luminosity < LUMINOSITY_BRIGHT:
+            lum_cave_bonus = 0.0
+        if mutation_fx.get("ignore_luminosity_cave_in"):
+            lum_cave_bonus = 0.0
+        cave_in_chance += lum_cave_bonus
+        cave_in_chance -= perk_cavein_reduction
+        cave_in_chance -= pickaxe_cavein_reduction
+        cave_in_chance -= buff_cavein_reduction
+        cave_in_chance -= stat_effects["cave_in_reduction"]
+        if has_lantern:
+            cave_in_chance *= 0.50
+        cave_in_chance *= relic_cavein_mod
+        cave_in_chance = max(0.01, cave_in_chance)
+
+        thick_skin_saved = False
+        if mutation_fx.get("daily_cave_in_shield"):
+            shield_date = tunnel.get("thick_skin_date")
+            if shield_date != today:
+                cave_in_chance = 0.0
+                thick_skin_saved = True
+
+        hard_hat_prevents = hard_hat_charges > 0
+
+        # ── Effective advance range ───────────────────────────────
+        base_adv_min = layer.get("advance_min", 1)
+        base_adv_max = layer.get("advance_max", 5)
+        base_adv_min += stat_effects["advance_min_bonus"]
+        base_adv_max += stat_effects["advance_max_bonus"]
+        if "the_endless" in perks and layer_name == "The Hollow" and base_adv_max <= 1:
+            base_adv_max = 2
+        base_adv_max = max(
+            base_adv_min,
+            base_adv_max - int(mutation_fx.get("advance_max_penalty", 0)),
+        )
+
+        adv_fixed = pickaxe_advance_bonus + mole_claws_bonus + buff_advance_bonus
+        adv_fixed += int(weather_fx.get("advance_bonus", 0))
+        adv_fixed -= int(ascension.get("advance_penalty", 0))
+        if corruption:
+            adv_fixed -= int(corruption["effects"].get("advance_penalty", 0))
+        if has_dynamite:
+            adv_fixed += 5
+        if has_depth_charge:
+            adv_fixed += 8
+
+        adv_mult = (1.0 + perk_advance_bonus) * injury_advance_mod
+        advance_min = max(1, int((base_adv_min + adv_fixed) * adv_mult))
+        advance_max = max(1, int((base_adv_max + adv_fixed) * adv_mult))
+        if has_depth_charge:
+            advance_min = max(1, advance_min - 3)
+            advance_max = max(1, advance_max - 3)
+
+        # ── Effective JC range ────────────────────────────────────
+        jc_min_base = layer.get("jc_min", 1)
+        jc_max_base = layer.get("jc_max", 3)
+        jc_mult = (
+            1.0
+            + perk_loot_bonus
+            + ascension.get("jc_multiplier", 0)
+            + weather_fx.get("jc_multiplier", 0)
+        )
+        jc_mult *= self._luminosity_jc_multiplier(luminosity)
+        jc_fixed = magma_heart_bonus + int(weather_fx.get("jc_bonus", 0))
+        jc_min = max(0, int(jc_min_base * jc_mult) + jc_fixed)
+        jc_max = max(0, int(jc_max_base * jc_mult) + jc_fixed)
+        if corruption and corruption["effects"].get("fixed_jc") is not None:
+            jc_min = jc_max = corruption["effects"]["fixed_jc"]
+
+        # ── Event chance + eligible events ────────────────────────
+        event_rates = {
+            "Dirt": 0.16, "Stone": 0.16, "Crystal": 0.20, "Magma": 0.20,
+            "Abyss": 0.24, "Fungal Depths": 0.30, "Frozen Core": 0.24,
+            "The Hollow": 0.36,
+        }
+        event_chance = event_rates.get(layer_name, 0.20)
+        event_chance *= 1.0 + ascension.get("event_chance_multiplier", 0)
+        event_chance *= 1.0 + weather_fx.get("event_chance_multiplier", 0)
+        event_chance *= 1.0 + mutation_fx.get("event_chance_bonus", 0)
+        if luminosity <= LUMINOSITY_PITCH_BLACK:
+            event_chance *= LUMINOSITY_PITCH_EVENT_MULTIPLIER
+        elif luminosity < LUMINOSITY_DIM:
+            event_chance *= LUMINOSITY_DARK_EVENT_MULTIPLIER
+        elif luminosity < LUMINOSITY_BRIGHT:
+            event_chance *= LUMINOSITY_DIM_EVENT_MULTIPLIER
+        void_bait_digs = tunnel.get("void_bait_digs", 0) or 0
+        if void_bait_digs > 0:
+            event_chance *= 2.0
+        event_chance = min(event_chance, 0.75)
+        force_key = (discord_id, guild_id)
+        if hasattr(self, "_force_event_for") and force_key in self._force_event_for:
+            event_chance = 1.0
+            self._force_event_for.discard(force_key)
+
+        is_pitch_black = luminosity <= 0
+        art_ids = _get_events_with_art()
+        available_events = [
+            {
+                "id": e["id"],
+                "name": e["name"],
+                "rarity": e.get("rarity", "common"),
+                "has_art": e["id"] in art_ids,
+            }
+            for e in EVENT_POOL
+            if depth_before >= (e.get("min_depth") or 0)
+            and (e.get("max_depth") is None or depth_before <= e["max_depth"])
+            and (e.get("layer") is None or e["layer"] == layer_name)
+            and (not e.get("requires_dark") or is_pitch_black)
+            and prestige_level >= e.get("min_prestige", 0)
+        ]
+
+        preconditions = {
+            "discord_id": discord_id,
+            "guild_id": guild_id,
+            "now": now,
+            "today": today,
+            "tunnel": tunnel,
+            "depth_before": depth_before,
+            "decay_info": decay_info,
+            "injury_advance_mod": injury_advance_mod,
+            "items_used": items_used,
+            "items_used_ids": items_used_ids,
+            "has_dynamite": has_dynamite,
+            "has_hard_hat": has_hard_hat,
+            "has_lantern": has_lantern,
+            "has_grappling_hook": has_grappling_hook,
+            "has_depth_charge": has_depth_charge,
+            "has_sonar_pulse": has_sonar_pulse,
+            "layer": layer,
+            "layer_name": layer_name,
+            "luminosity": luminosity,
+            "lum_info": lum_info,
+            "weather_fx": weather_fx,
+            "weather_info": weather_info,
+            "buff_advance_bonus": buff_advance_bonus,
+            "buff_cavein_reduction": buff_cavein_reduction,
+            "perks": perks,
+            "prestige_level": prestige_level,
+            "ascension": ascension,
+            "corruption": corruption,
+            "mutations": mutations,
+            "mutation_fx": mutation_fx,
+            "pickaxe_tier": pickaxe_tier,
+            "pickaxe_advance_bonus": pickaxe_advance_bonus,
+            "perk_advance_bonus": perk_advance_bonus,
+            "perk_loot_bonus": perk_loot_bonus,
+            "mole_claws_bonus": mole_claws_bonus,
+            "magma_heart_bonus": magma_heart_bonus,
+            "miner_stats": miner_stats,
+            "stat_effects": stat_effects,
+            "hard_hat_charges": hard_hat_charges,
+            "hard_hat_prevents": hard_hat_prevents,
+            "cave_in_chance": cave_in_chance,
+            "thick_skin_saved": thick_skin_saved,
+            "paid_dig_cost": paid_dig_cost,
+            "advance_min": advance_min,
+            "advance_max": advance_max,
+            "jc_min": jc_min,
+            "jc_max": jc_max,
+            "event_chance": event_chance,
+            "available_events": available_events,
+        }
+        return None, preconditions
+
+    def dig_with_preconditions(
+        self, discord_id: int, guild_id, paid: bool = False,
+    ) -> tuple[dict | None, dict | None]:
+        """Public interface for DM mode: compute preconditions only.
+
+        Returns ``(terminal_result, preconditions)``.
+        If *terminal_result* is not None the dig ends there (error / cooldown /
+        first-dig / boss-parked).  Otherwise *preconditions* has the computed
+        state the DM uses to decide the outcome.
+        """
+        return self._compute_preconditions(discord_id, guild_id, paid)
+
+    def _execute_deterministic_outcome(self, p: dict) -> dict:
+        """Run the deterministic outcome phase on pre-computed preconditions.
+
+        This is the fallback path when the DM is unavailable.  It mirrors
+        steps 9-22 of the original ``dig()`` method.
+        """
+        discord_id = p["discord_id"]
+        guild_id = p["guild_id"]
+        now = p["now"]
+        today = p["today"]
+        tunnel = p["tunnel"]
+        depth_before = p["depth_before"]
+
+        # Cave-in check
+        if p["hard_hat_prevents"]:
+            cave_in = False
+            self.dig_repo.update_tunnel(
+                discord_id, guild_id, hard_hat_charges=p["hard_hat_charges"] - 1,
+            )
+        else:
+            cave_in = random.random() < p["cave_in_chance"]
+        cave_in_detail = None
+
+        if cave_in:
+            block_loss = random.randint(3, 8)
+            weather_loss_cap = p["weather_fx"].get("cave_in_loss_cap")
+            if weather_loss_cap is not None:
+                block_loss = min(block_loss, int(weather_loss_cap))
+            block_loss += int(p["weather_fx"].get("cave_in_loss_bonus", 0))
+            block_loss += int(p["mutation_fx"].get("cave_in_loss_bonus", 0))
+            if p["has_grappling_hook"]:
+                block_loss = 0
+            elif p["pickaxe_tier"] >= 6:
+                block_loss = max(1, block_loss - 1)
+            new_depth = max(0, depth_before - block_loss)
+
+            if p["thick_skin_saved"]:
+                self.dig_repo.update_tunnel(discord_id, guild_id, thick_skin_date=today)
+
+            cave_in_jc = 0
+            loot_chance = p["mutation_fx"].get("cave_in_loot_chance", 0)
+            if loot_chance > 0 and random.random() < loot_chance:
+                loot_min = int(p["mutation_fx"].get("cave_in_loot_min", 1))
+                loot_max = int(p["mutation_fx"].get("cave_in_loot_max", 3))
+                cave_in_jc = random.randint(loot_min, loot_max)
+                self.player_repo.add_balance(discord_id, guild_id, cave_in_jc)
+
+            if p["mutation_fx"].get("post_cave_in_advance"):
+                self.dig_repo.update_tunnel(
+                    discord_id, guild_id,
+                    temp_buffs=json.dumps({
+                        "id": "second_wind", "name": "Second Wind",
+                        "digs_remaining": 1,
+                        "effect": {"advance_bonus": int(p["mutation_fx"]["post_cave_in_advance"])},
+                    }),
+                )
+
+            injury_bonus = int(p["mutation_fx"].get("injury_duration_bonus", 0))
+            consequence_roll = random.random()
+            if consequence_roll < 0.3:
+                cave_in_detail = {
+                    "type": "stun", "block_loss": block_loss,
+                    "message": f"Cave-in! Lost {block_loss} blocks and you're stunned.",
+                }
+                injury = {"type": "slower_cooldown", "digs_remaining": 2 + injury_bonus}
+                self.dig_repo.update_tunnel(discord_id, guild_id, injury_state=json.dumps(injury))
+            elif consequence_roll < 0.6:
+                cave_in_detail = {
+                    "type": "injury", "block_loss": block_loss,
+                    "message": (
+                        f"Cave-in! Lost {block_loss} blocks and you're injured "
+                        f"(reduced digging for {3 + injury_bonus} digs)."
+                    ),
+                }
+                injury = {"type": "reduced_advance", "digs_remaining": 3 + injury_bonus}
+                self.dig_repo.update_tunnel(discord_id, guild_id, injury_state=json.dumps(injury))
+            else:
+                med_cost = random.randint(2, 6)
+                balance = self.player_repo.get_balance(discord_id, guild_id)
+                med_cost = min(med_cost, max(0, balance))
+                if med_cost > 0:
+                    self.player_repo.add_balance(discord_id, guild_id, -med_cost)
+                cave_in_detail = {
+                    "type": "medical_bill", "block_loss": block_loss,
+                    "jc_lost": med_cost,
+                    "message": (
+                        f"Cave-in! Lost {block_loss} blocks and paid "
+                        f"{med_cost} JC in medical bills."
+                    ),
+                }
+
+            self.dig_repo.update_tunnel(
+                discord_id, guild_id,
+                depth=new_depth,
+                total_digs=(tunnel.get("total_digs", 0) or 0) + 1,
+                last_dig_at=now,
+            )
+            self.dig_repo.log_action(
+                discord_id=discord_id, guild_id=guild_id, action_type="dig",
+                details=json.dumps({
+                    "cave_in": True, "block_loss": block_loss,
+                    "detail": cave_in_detail,
+                    "depth_before": depth_before, "depth_after": new_depth,
+                }),
+            )
+            achievements = self.check_achievements(
+                discord_id, guild_id,
+                {**tunnel, "depth": new_depth},
+                {"action": "cave_in"},
+            )
+            return self._ok(
+                tunnel_name=tunnel.get("tunnel_name") or "Unknown Tunnel",
+                depth_before=depth_before, depth_after=new_depth,
+                advance=0, jc_earned=0, milestone_bonus=0, streak_bonus=0,
+                cave_in=True, cave_in_detail=cave_in_detail,
+                boss_encounter=False, boss_info=None,
+                has_lantern=p["has_lantern"],
+                event=None, artifact=None,
+                achievements=achievements, is_first_dig=False,
+                items_used=p["items_used"], items_used_ids=p["items_used_ids"],
+                pickaxe_tier=p["pickaxe_tier"],
+                tip=self._pick_tip(new_depth),
+                decay_info=p["decay_info"],
+                luminosity_info=p["lum_info"],
+                weather=p["weather_info"],
+            )
+
+        # No cave-in — roll advance
+        layer = p["layer"]
+        layer_name = p["layer_name"]
+        base_min = layer.get("advance_min", 1)
+        base_max = layer.get("advance_max", 5)
+        stat_effects = p.get("stat_effects", {})
+        base_min += int(stat_effects.get("advance_min_bonus", 0))
+        base_max += int(stat_effects.get("advance_max_bonus", 0))
+        if "the_endless" in p["perks"] and layer_name == "The Hollow" and base_max <= 1:
+            base_max = 2
+        base_max = max(base_min, base_max - int(p["mutation_fx"].get("advance_max_penalty", 0)))
+        if p["corruption"] and p["corruption"]["effects"].get("min_advance_roll"):
+            roll1 = random.randint(base_min, base_max)
+            roll2 = random.randint(base_min, base_max)
+            advance = min(roll1, roll2)
+        else:
+            advance = random.randint(base_min, base_max)
+
+        advance += p["pickaxe_advance_bonus"] + p["mole_claws_bonus"] + p["buff_advance_bonus"]
+        advance += int(p["weather_fx"].get("advance_bonus", 0))
+        advance -= int(p["ascension"].get("advance_penalty", 0))
+        if p["corruption"]:
+            advance -= int(p["corruption"]["effects"].get("advance_penalty", 0))
+        dynamite_bonus = 0
+        if p["has_dynamite"]:
+            dynamite_bonus = 5
+            advance += dynamite_bonus
+        depth_charge_bonus = 0
+        if p["has_depth_charge"]:
+            depth_charge_bonus = 8
+            advance += depth_charge_bonus
+        advance = int(
+            advance * (1.0 + p["perk_advance_bonus"]) * p["injury_advance_mod"]
+        )
+        advance = max(1, advance)
+        if p["has_depth_charge"]:
+            advance = max(1, advance - 3)
+
+        # Boss boundary
+        boss_progress = self._get_boss_progress(tunnel)
+        next_boss = self._next_boss_boundary(depth_before, boss_progress)
+        boss_encounter = False
+        boss_info = None
+        if next_boss is not None and depth_before + advance >= next_boss:
+            advance = max(0, next_boss - 1 - depth_before)
+            boss_encounter = True
+            boss_name = BOSS_NAMES.get(next_boss, "Unknown Boss")
+            attempts = tunnel.get("boss_attempts", 0) or 0
+            dialogue_list = BOSS_DIALOGUE.get(next_boss, ["..."])
+            boss_info = {
+                "boundary": next_boss, "name": boss_name,
+                "dialogue": dialogue_list[min(attempts, len(dialogue_list) - 1)],
+                "ascii_art": BOSS_ASCII.get(next_boss, ""),
+            }
+        new_depth = depth_before + advance
+
+        # JC loot
+        luminosity = p["luminosity"]
+        jc_min_base = layer.get("jc_min", 1)
+        jc_max_base = layer.get("jc_max", 3)
+        jc_earned = random.randint(jc_min_base, jc_max_base)
+        jc_mult = (
+            1.0
+            + p["perk_loot_bonus"]
+            + p["ascension"].get("jc_multiplier", 0)
+            + p["weather_fx"].get("jc_multiplier", 0)
+        )
+        jc_earned = (
+            int(jc_earned * jc_mult * self._luminosity_jc_multiplier(luminosity))
+            + p["magma_heart_bonus"]
+        )
+        jc_earned += int(p["weather_fx"].get("jc_bonus", 0))
+        if p["corruption"] and p["corruption"]["effects"].get("fixed_jc") is not None:
+            jc_earned = p["corruption"]["effects"]["fixed_jc"]
+        elif p["corruption"] and p["corruption"]["effects"].get("double_half_jc"):
+            jc_earned = max(0, jc_earned - (jc_earned % 2))
+        elif p["corruption"]:
+            jc_earned -= int(p["corruption"]["effects"].get("jc_penalty", 0))
+        if p["mutation_fx"].get("zero_jc_chance") and random.random() < p["mutation_fx"]["zero_jc_chance"]:
+            jc_earned = 0
+        else:
+            jc_earned = max(0, jc_earned)
+
+        # Milestones
+        milestone_bonus = 0
+        milestone_mult = 1.0 + p["ascension"].get("milestone_multiplier", 0)
+        for m_depth, m_reward in MILESTONES.items():
+            if depth_before < m_depth <= new_depth:
+                milestone_bonus += int(m_reward * milestone_mult)
+        jc_earned += milestone_bonus
+
+        # Streak
+        streak = tunnel.get("streak_days", 0) or 0
+        streak_last = tunnel.get("streak_last_date")
+        yesterday = (
+            datetime.datetime.strptime(today, "%Y-%m-%d") - datetime.timedelta(days=1)
+        ).strftime("%Y-%m-%d")
+        if streak_last == yesterday:
+            streak += 1
+        elif streak_last == today:
+            pass
+        else:
+            streak = 1
+        streak_bonus = 0
+        for threshold in sorted(STREAKS.keys(), reverse=True):
+            if streak >= threshold:
+                streak_bonus = STREAKS[threshold]
+                break
+        jc_earned += streak_bonus
+
+        # Artifact
+        artifact = None
+        if not (p["corruption"] and p["corruption"]["effects"].get("skip_artifact")):
+            artifact = self.roll_artifact(
+                discord_id, guild_id, new_depth,
+                extra_rate_mod=p["weather_fx"].get("artifact_multiplier", 1.0),
+            )
+
+        # Event
+        void_bait_digs = tunnel.get("void_bait_digs", 0) or 0
+        if void_bait_digs > 0:
+            self.dig_repo.update_tunnel(
+                discord_id, guild_id, void_bait_digs=void_bait_digs - 1,
+            )
+        event = None
+        if random.random() < p["event_chance"]:
+            event = self.roll_event(
+                new_depth, luminosity=luminosity, prestige_level=p["prestige_level"],
+            )
+
+        event_preview = None
+        if p["has_sonar_pulse"]:
+            preview = self.roll_event(
+                new_depth, luminosity=luminosity, prestige_level=p["prestige_level"],
+            )
+            if preview:
+                event_preview = {
+                    "name": preview.get("name"),
+                    "description": preview.get("description"),
+                    "rarity": preview.get("rarity", "common"),
+                }
+
+        # Achievements
+        total_digs = (tunnel.get("total_digs", 0) or 0) + 1
+        tunnel_updated = {
+            **tunnel, "depth": new_depth, "total_digs": total_digs, "streak_days": streak,
+        }
+        achievements = self.check_achievements(
+            discord_id, guild_id, tunnel_updated,
+            {"action": "dig", "advance": advance, "boss_encounter": boss_encounter},
+        )
+
+        # DB writes
+        run_jc = (tunnel.get("current_run_jc", 0) or 0) + jc_earned
+        run_artifacts = (tunnel.get("current_run_artifacts", 0) or 0) + (1 if artifact else 0)
+        run_events_count = (tunnel.get("current_run_events", 0) or 0) + (1 if event else 0)
+        self.dig_repo.update_tunnel(
+            discord_id, guild_id,
+            depth=new_depth, total_digs=total_digs, last_dig_at=now,
+            total_jc_earned=(tunnel.get("total_jc_earned", 0) or 0) + jc_earned,
+            streak_days=streak, streak_last_date=today,
+            current_run_jc=run_jc,
+            current_run_artifacts=run_artifacts,
+            current_run_events=run_events_count,
+        )
+        self.player_repo.add_balance(discord_id, guild_id, jc_earned)
+        self.dig_repo.log_action(
+            discord_id=discord_id, guild_id=guild_id, action_type="dig",
+            details=json.dumps({
+                "advance": advance, "jc": jc_earned,
+                "depth_before": depth_before, "depth_after": new_depth,
+                "boss_encounter": boss_encounter, "cave_in": False,
+                "corruption": p["corruption"]["id"] if p["corruption"] else None,
+            }),
+        )
+
+        paid_dig_cost = p["paid_dig_cost"]
+        return self._ok(
+            tunnel_name=tunnel.get("tunnel_name") or "Unknown Tunnel",
+            depth_before=depth_before, depth_after=new_depth,
+            advance=advance, jc_earned=jc_earned,
+            milestone_bonus=milestone_bonus, streak_bonus=streak_bonus,
+            cave_in=False, cave_in_detail=None,
+            boss_encounter=boss_encounter, boss_info=boss_info,
+            has_lantern=p["has_lantern"],
+            event=event, artifact=artifact,
+            achievements=achievements, is_first_dig=False,
+            items_used=p["items_used"], items_used_ids=p["items_used_ids"],
+            pickaxe_tier=p["pickaxe_tier"],
+            tip=self._pick_tip(new_depth),
+            decay_info=p["decay_info"],
+            luminosity_info=p["lum_info"],
+            paid_cost=paid_dig_cost if paid_dig_cost > 0 else 0,
+            dynamite_bonus=dynamite_bonus,
+            corruption=p["corruption"],
+            mutations=[m.get("name") for m in p["mutations"]] if p["mutations"] else None,
+            event_preview=event_preview,
+            weather=p["weather_info"],
+        )
+
+    def apply_dig_outcome(self, preconditions: dict, outcome: dict) -> dict:
+        """Apply a DM-decided outcome to the database.
+
+        *outcome* should contain keys from the ``resolve_dig`` tool call:
+        advance, jc_earned, cave_in, cave_in_block_loss, cave_in_type,
+        cave_in_jc_lost, event_id, narrative, tone.
+
+        Handles boss-boundary capping, milestone/streak bonuses, achievement
+        checking, and all DB writes.  Returns the standard result dict for
+        the embed builder.
+        """
+        p = preconditions
+        discord_id = p["discord_id"]
+        guild_id = p["guild_id"]
+        now = p["now"]
+        today = p["today"]
+        tunnel = p["tunnel"]
+        depth_before = p["depth_before"]
+
+        cave_in = outcome.get("cave_in", False)
+
+        # Hard hat prevents cave-in regardless of DM decision
+        if p["hard_hat_prevents"]:
+            cave_in = False
+            self.dig_repo.update_tunnel(
+                discord_id, guild_id, hard_hat_charges=p["hard_hat_charges"] - 1,
+            )
+
+        if cave_in:
+            block_loss = outcome.get("cave_in_block_loss", 5)
+            # Enforce game-rule constraints
+            if p["has_grappling_hook"]:
+                block_loss = 0
+            elif p["pickaxe_tier"] >= 6:
+                block_loss = max(1, block_loss - 1)
+            weather_loss_cap = p["weather_fx"].get("cave_in_loss_cap")
+            if weather_loss_cap is not None:
+                block_loss = min(block_loss, int(weather_loss_cap))
+
+            new_depth = max(0, depth_before - block_loss)
+
+            if p["thick_skin_saved"]:
+                self.dig_repo.update_tunnel(discord_id, guild_id, thick_skin_date=today)
+
+            # Cave-in type from DM
+            cave_in_type = outcome.get("cave_in_type", "stun")
+            injury_bonus = int(p["mutation_fx"].get("injury_duration_bonus", 0))
+
+            if cave_in_type == "stun":
+                cave_in_detail = {
+                    "type": "stun", "block_loss": block_loss,
+                    "message": f"Cave-in! Lost {block_loss} blocks and you're stunned.",
+                }
+                self.dig_repo.update_tunnel(
+                    discord_id, guild_id,
+                    injury_state=json.dumps(
+                        {"type": "slower_cooldown", "digs_remaining": 2 + injury_bonus}
+                    ),
+                )
+            elif cave_in_type == "injury":
+                cave_in_detail = {
+                    "type": "injury", "block_loss": block_loss,
+                    "message": (
+                        f"Cave-in! Lost {block_loss} blocks and you're injured "
+                        f"(reduced digging for {3 + injury_bonus} digs)."
+                    ),
+                }
+                self.dig_repo.update_tunnel(
+                    discord_id, guild_id,
+                    injury_state=json.dumps(
+                        {"type": "reduced_advance", "digs_remaining": 3 + injury_bonus}
+                    ),
+                )
+            else:  # medical_bill
+                med_cost = outcome.get("cave_in_jc_lost", 3)
+                balance = self.player_repo.get_balance(discord_id, guild_id)
+                med_cost = min(med_cost, max(0, balance))
+                if med_cost > 0:
+                    self.player_repo.add_balance(discord_id, guild_id, -med_cost)
+                cave_in_detail = {
+                    "type": "medical_bill", "block_loss": block_loss,
+                    "jc_lost": med_cost,
+                    "message": (
+                        f"Cave-in! Lost {block_loss} blocks and paid "
+                        f"{med_cost} JC in medical bills."
+                    ),
+                }
+
+            # Mutation: cave_in_loot
+            loot_chance = p["mutation_fx"].get("cave_in_loot_chance", 0)
+            if loot_chance > 0 and random.random() < loot_chance:
+                loot_min = int(p["mutation_fx"].get("cave_in_loot_min", 1))
+                loot_max = int(p["mutation_fx"].get("cave_in_loot_max", 3))
+                self.player_repo.add_balance(
+                    discord_id, guild_id, random.randint(loot_min, loot_max),
+                )
+            # Mutation: second_wind
+            if p["mutation_fx"].get("post_cave_in_advance"):
+                self.dig_repo.update_tunnel(
+                    discord_id, guild_id,
+                    temp_buffs=json.dumps({
+                        "id": "second_wind", "name": "Second Wind",
+                        "digs_remaining": 1,
+                        "effect": {"advance_bonus": int(p["mutation_fx"]["post_cave_in_advance"])},
+                    }),
+                )
+
+            self.dig_repo.update_tunnel(
+                discord_id, guild_id,
+                depth=new_depth,
+                total_digs=(tunnel.get("total_digs", 0) or 0) + 1,
+                last_dig_at=now,
+            )
+            self.dig_repo.log_action(
+                discord_id=discord_id, guild_id=guild_id, action_type="dig",
+                details=json.dumps({
+                    "cave_in": True, "block_loss": block_loss,
+                    "detail": cave_in_detail,
+                    "depth_before": depth_before, "depth_after": new_depth,
+                    "dm_mode": True,
+                }),
+            )
+            achievements = self.check_achievements(
+                discord_id, guild_id,
+                {**tunnel, "depth": new_depth},
+                {"action": "cave_in"},
+            )
+            result = self._ok(
+                tunnel_name=tunnel.get("tunnel_name") or "Unknown Tunnel",
+                depth_before=depth_before, depth_after=new_depth,
+                advance=0, jc_earned=0, milestone_bonus=0, streak_bonus=0,
+                cave_in=True, cave_in_detail=cave_in_detail,
+                boss_encounter=False, boss_info=None,
+                has_lantern=p["has_lantern"],
+                event=None, artifact=None,
+                achievements=achievements, is_first_dig=False,
+                items_used=p["items_used"], items_used_ids=p["items_used_ids"],
+                pickaxe_tier=p["pickaxe_tier"],
+                tip=self._pick_tip(new_depth),
+                decay_info=p["decay_info"],
+                luminosity_info=p["lum_info"],
+                weather=p["weather_info"],
+            )
+        else:
+            # No cave-in — DM-decided advance + JC
+            advance = outcome.get("advance", 1)
+
+            # Boss boundary cap (DM cannot skip bosses)
+            boss_progress = self._get_boss_progress(tunnel)
+            next_boss = self._next_boss_boundary(depth_before, boss_progress)
+            boss_encounter = False
+            boss_info = None
+            if next_boss is not None and depth_before + advance >= next_boss:
+                advance = max(0, next_boss - 1 - depth_before)
+                boss_encounter = True
+                boss_name = BOSS_NAMES.get(next_boss, "Unknown Boss")
+                attempts = tunnel.get("boss_attempts", 0) or 0
+                dialogue_list = BOSS_DIALOGUE.get(next_boss, ["..."])
+                boss_info = {
+                    "boundary": next_boss, "name": boss_name,
+                    "dialogue": dialogue_list[min(attempts, len(dialogue_list) - 1)],
+                    "ascii_art": BOSS_ASCII.get(next_boss, ""),
+                }
+            new_depth = depth_before + advance
+
+            jc_earned = outcome.get("jc_earned", 0)
+
+            # Milestones (deterministic bookkeeping)
+            milestone_bonus = 0
+            milestone_mult = 1.0 + p["ascension"].get("milestone_multiplier", 0)
+            for m_depth, m_reward in MILESTONES.items():
+                if depth_before < m_depth <= new_depth:
+                    milestone_bonus += int(m_reward * milestone_mult)
+            jc_earned += milestone_bonus
+
+            # Streak (deterministic bookkeeping)
+            streak = tunnel.get("streak_days", 0) or 0
+            streak_last = tunnel.get("streak_last_date")
+            yesterday = (
+                datetime.datetime.strptime(today, "%Y-%m-%d") - datetime.timedelta(days=1)
+            ).strftime("%Y-%m-%d")
+            if streak_last == yesterday:
+                streak += 1
+            elif streak_last == today:
+                pass
+            else:
+                streak = 1
+            streak_bonus = 0
+            for threshold in sorted(STREAKS.keys(), reverse=True):
+                if streak >= threshold:
+                    streak_bonus = STREAKS[threshold]
+                    break
+            jc_earned += streak_bonus
+
+            # Artifact (deterministic)
+            artifact = None
+            if not (p["corruption"] and p["corruption"]["effects"].get("skip_artifact")):
+                artifact = self.roll_artifact(
+                    discord_id, guild_id, new_depth,
+                    extra_rate_mod=p["weather_fx"].get("artifact_multiplier", 1.0),
+                )
+
+            # Event from DM
+            event = None
+            event_id = outcome.get("event_id", "")
+            if event_id:
+                pool_event = next((e for e in EVENT_POOL if e["id"] == event_id), None)
+                if pool_event:
+                    event = {
+                        "id": pool_event["id"],
+                        "name": pool_event["name"],
+                        "description": outcome.get("event_description") or pool_event["description"],
+                        "complexity": pool_event.get("complexity", "choice"),
+                        "safe_option": pool_event.get("safe_option"),
+                        "risky_option": pool_event.get("risky_option"),
+                        "desperate_option": pool_event.get("desperate_option"),
+                        "boon_options": pool_event.get("boon_options"),
+                        "buff_on_success": pool_event.get("buff_on_success"),
+                        "rarity": pool_event.get("rarity", "common"),
+                    }
+
+            # Void bait decrement
+            void_bait_digs = tunnel.get("void_bait_digs", 0) or 0
+            if void_bait_digs > 0:
+                self.dig_repo.update_tunnel(
+                    discord_id, guild_id, void_bait_digs=void_bait_digs - 1,
+                )
+
+            # Sonar pulse
+            event_preview = None
+            if p["has_sonar_pulse"]:
+                preview = self.roll_event(
+                    new_depth, luminosity=p["luminosity"], prestige_level=p["prestige_level"],
+                )
+                if preview:
+                    event_preview = {
+                        "name": preview.get("name"),
+                        "description": preview.get("description"),
+                        "rarity": preview.get("rarity", "common"),
+                    }
+
+            # Achievements
+            total_digs = (tunnel.get("total_digs", 0) or 0) + 1
+            tunnel_updated = {
+                **tunnel, "depth": new_depth, "total_digs": total_digs, "streak_days": streak,
+            }
+            achievements = self.check_achievements(
+                discord_id, guild_id, tunnel_updated,
+                {"action": "dig", "advance": advance, "boss_encounter": boss_encounter},
+            )
+
+            # DB writes
+            run_jc = (tunnel.get("current_run_jc", 0) or 0) + jc_earned
+            run_artifacts = (tunnel.get("current_run_artifacts", 0) or 0) + (1 if artifact else 0)
+            run_events_count = (tunnel.get("current_run_events", 0) or 0) + (1 if event else 0)
+            self.dig_repo.update_tunnel(
+                discord_id, guild_id,
+                depth=new_depth, total_digs=total_digs, last_dig_at=now,
+                total_jc_earned=(tunnel.get("total_jc_earned", 0) or 0) + jc_earned,
+                streak_days=streak, streak_last_date=today,
+                current_run_jc=run_jc,
+                current_run_artifacts=run_artifacts,
+                current_run_events=run_events_count,
+            )
+            self.player_repo.add_balance(discord_id, guild_id, jc_earned)
+            self.dig_repo.log_action(
+                discord_id=discord_id, guild_id=guild_id, action_type="dig",
+                details=json.dumps({
+                    "advance": advance, "jc": jc_earned,
+                    "depth_before": depth_before, "depth_after": new_depth,
+                    "boss_encounter": boss_encounter, "cave_in": False,
+                    "corruption": p["corruption"]["id"] if p["corruption"] else None,
+                    "dm_mode": True,
+                }),
+            )
+
+            paid_dig_cost = p["paid_dig_cost"]
+            result = self._ok(
+                tunnel_name=tunnel.get("tunnel_name") or "Unknown Tunnel",
+                depth_before=depth_before, depth_after=new_depth,
+                advance=advance, jc_earned=jc_earned,
+                milestone_bonus=milestone_bonus, streak_bonus=streak_bonus,
+                cave_in=False, cave_in_detail=None,
+                boss_encounter=boss_encounter, boss_info=boss_info,
+                has_lantern=p["has_lantern"],
+                event=event, artifact=artifact,
+                achievements=achievements, is_first_dig=False,
+                items_used=p["items_used"], items_used_ids=p["items_used_ids"],
+                pickaxe_tier=p["pickaxe_tier"],
+                tip=self._pick_tip(new_depth),
+                decay_info=p["decay_info"],
+                luminosity_info=p["lum_info"],
+                paid_cost=paid_dig_cost if paid_dig_cost > 0 else 0,
+                corruption=p["corruption"],
+                mutations=[m.get("name") for m in p["mutations"]] if p["mutations"] else None,
+                event_preview=event_preview,
+                weather=p["weather_info"],
+            )
+
+        return result
 
     def reset_dig_cooldown(self, discord_id: int, guild_id) -> dict:
         """Admin: reset a player's free dig cooldown."""
@@ -2186,6 +3458,9 @@ class DigService:
             jc_delta = int(base_jc * boss_payout_mult)
 
             boss_progress[str(at_boss)] = "defeated"
+            stat_point_awarded = self._award_boss_stat_point_if_first(
+                discord_id, guild_id, tunnel, at_boss
+            )
             self.dig_repo.update_tunnel(
                 discord_id, guild_id,
                 depth=new_depth,
@@ -2215,6 +3490,7 @@ class DigService:
                 details=json.dumps({
                     "boundary": at_boss, "won": True, "risk": risk_tier,
                     "wager": wager, "jc_delta": jc_delta,
+                    "stat_point_awarded": stat_point_awarded,
                 }),
             )
 
@@ -2230,6 +3506,7 @@ class DigService:
                 new_depth=new_depth,
                 dialogue=defeat_msg,
                 achievements=achievements,
+                stat_point_awarded=stat_point_awarded,
             )
         else:
             # Lose: knocked back + lose wager

@@ -44,7 +44,8 @@ class ServiceContainer:
         loan_fee_rate: float = 0.20,
         # AI (optional)
         cerebras_api_key: str | None = None,
-        ai_model: str = "cerebras/qwen-3-235b-a22b-instruct-2507",
+        llm_api_key: str | None = None,
+        ai_model: str = "groq/qwen/qwen3-32b",
         ai_timeout_seconds: int = 30,
         ai_max_tokens: int = 4096,
     ):
@@ -59,7 +60,7 @@ class ServiceContainer:
         self.loan_cooldown_seconds = loan_cooldown_seconds
         self.loan_max_amount = loan_max_amount
         self.loan_fee_rate = loan_fee_rate
-        self.cerebras_api_key = cerebras_api_key
+        self.cerebras_api_key = llm_api_key or cerebras_api_key
         self.ai_model = ai_model
         self.ai_timeout_seconds = ai_timeout_seconds
         self.ai_max_tokens = ai_max_tokens
@@ -349,6 +350,24 @@ class ServiceContainer:
             player_repo=c["player_repo"],
         )
 
+        # Wire LLM engine service if AI is available
+        ai_service = c.get("ai_service")
+        if ai_service:
+            try:
+                from services.dig_llm_service import DigLLMService
+
+                c["dig_llm_service"] = DigLLMService(
+                    ai_service=ai_service,
+                    dig_repo=c["dig_repo"],
+                    player_repo=c["player_repo"],
+                    dig_service=c["dig_service"],
+                )
+            except Exception:
+                logger.warning("Failed to initialize DigLLMService", exc_info=True)
+                c["dig_llm_service"] = None
+        else:
+            c["dig_llm_service"] = None
+
     def _init_extras(self) -> None:
         """Neon Degen Terminal and Wrapped services."""
         from services.neon_degen_service import NeonDegenService
@@ -433,6 +452,7 @@ class ServiceContainer:
         bot.mana_effects_service = c["mana_effects_service"]
         bot.dig_service = c["dig_service"]
         bot.dig_repo = c["dig_repo"]
+        bot.dig_llm_service = c.get("dig_llm_service")
 
         # AI services (may be None)
         bot.ai_service = c["ai_service"]

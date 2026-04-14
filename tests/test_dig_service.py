@@ -238,6 +238,169 @@ class TestCooldown:
         assert "error" in result
 
 
+class TestMinerProfile:
+    """Tests for miner S stats and profile customization."""
+
+    def test_set_profile_and_stats(self, dig_service, player_repository, guild_id):
+        _register_player(player_repository)
+
+        profile = dig_service.set_miner_profile(
+            10001,
+            guild_id,
+            backstory="Former cartographer @everyone who fears ceilings.",
+        )
+        assert profile["success"]
+        assert "(at)everyone" in profile["backstory"]
+
+        result = dig_service.set_miner_stats(
+            10001,
+            guild_id,
+            strength=2,
+            smarts=2,
+            stamina=1,
+        )
+        assert result["success"]
+        assert result["stats"]["stat_points"] == 5
+        assert result["stats"]["unspent_points"] == 0
+
+        profile = dig_service.get_miner_profile(10001, guild_id)
+        assert profile["stats"]["strength"] == 2
+        assert profile["stats"]["smarts"] == 2
+        assert profile["stats"]["stamina"] == 1
+
+    def test_backstory_can_only_be_set_once(self, dig_service, player_repository, guild_id):
+        _register_player(player_repository)
+        first = dig_service.set_miner_profile(
+            10001,
+            guild_id,
+            backstory="Escaped from a failed mushroom commune.",
+        )
+        assert first["success"]
+
+        second = dig_service.set_miner_profile(
+            10001,
+            guild_id,
+            backstory="Actually a duke in exile.",
+        )
+        assert not second["success"]
+        assert "cannot be changed" in second["error"]
+
+    def test_profile_created_tunnel_still_gets_first_dig(
+        self, dig_service, player_repository, guild_id, monkeypatch,
+    ):
+        _register_player(player_repository)
+        dig_service.set_miner_profile(
+            10001,
+            guild_id,
+            backstory="Keeps receipts for every rock.",
+        )
+
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.001)
+        result = dig_service.dig(10001, guild_id)
+        assert result["success"]
+        assert result["is_first_dig"] is True
+        assert result["cave_in"] is False
+
+    def test_stat_build_cannot_overspend(self, dig_service, player_repository, guild_id):
+        _register_player(player_repository)
+
+        result = dig_service.set_miner_stats(
+            10001,
+            guild_id,
+            strength=5,
+            smarts=1,
+            stamina=0,
+        )
+        assert not result["success"]
+        assert "only have 5" in result["error"]
+
+    def test_stat_build_cannot_respec(self, dig_service, player_repository, guild_id):
+        _register_player(player_repository)
+        first = dig_service.set_miner_stats(
+            10001,
+            guild_id,
+            strength=3,
+            smarts=2,
+            stamina=0,
+        )
+        assert first["success"]
+
+        second = dig_service.set_miner_stats(
+            10001,
+            guild_id,
+            strength=0,
+            smarts=1,
+            stamina=0,
+        )
+        assert not second["success"]
+        assert "only have 0 unspent" in second["error"]
+
+    def test_strength_and_smarts_affect_preconditions(
+        self, dig_service, player_repository, guild_id, monkeypatch,
+    ):
+        _register_player(player_repository, discord_id=10001)
+        _register_player(player_repository, discord_id=10002)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+        dig_service.dig(10002, guild_id)
+        dig_service.reset_dig_cooldown(10001, guild_id)
+        dig_service.reset_dig_cooldown(10002, guild_id)
+
+        dig_service.set_miner_stats(10001, guild_id, strength=5, smarts=0, stamina=0)
+        _, preconditions = dig_service.dig_with_preconditions(10001, guild_id)
+        assert preconditions["advance_min"] >= 2
+        assert preconditions["advance_max"] >= 5
+
+        dig_service.set_miner_stats(10002, guild_id, strength=0, smarts=5, stamina=0)
+        _, preconditions = dig_service.dig_with_preconditions(10002, guild_id)
+        assert preconditions["cave_in_chance"] == 0.01
+
+    def test_stamina_reduces_cooldown_and_paid_cost(
+        self, dig_service, player_repository, guild_id, monkeypatch,
+    ):
+        _register_player(player_repository, balance=100)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+        dig_service.set_miner_stats(10001, guild_id, strength=0, smarts=0, stamina=5)
+
+        monkeypatch.setattr(time, "time", lambda: 1_000_060)
+        result = dig_service.dig(10001, guild_id)
+        assert result["paid_dig_available"]
+        assert result["cooldown_remaining"] < FREE_DIG_COOLDOWN_SECONDS
+        assert result["paid_dig_cost"] == 2
+
+    def test_boss_first_clear_awards_stat_point_once(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
+    ):
+        _register_player(player_repository, balance=200)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+        dig_repo.update_tunnel(10001, guild_id, depth=24)
+
+        monkeypatch.setattr(random, "random", lambda: 0.01)
+        result = dig_service.fight_boss(10001, guild_id, "cautious", wager=0)
+        assert result["success"]
+        assert result["stat_point_awarded"] is True
+        tunnel = dig_repo.get_tunnel(10001, guild_id)
+        assert tunnel["stat_points"] == 6
+
+        dig_repo.update_tunnel(
+            10001,
+            guild_id,
+            depth=24,
+            boss_progress=json.dumps({"25": "active"}),
+        )
+        result = dig_service.fight_boss(10001, guild_id, "cautious", wager=0)
+        assert result["success"]
+        assert result["stat_point_awarded"] is False
+        tunnel = dig_repo.get_tunnel(10001, guild_id)
+        assert tunnel["stat_points"] == 6
+
+
 # =============================================================================
 # Cave-in Tests
 # =============================================================================

@@ -1409,3 +1409,21 @@ class IDigRepository(ABC):
     # Atomic Operations
     @abstractmethod
     def atomic_sabotage(self, actor_id: int, target_id: int, guild_id: int, target_depth_delta: int, actor_jc_cost: int) -> dict: ...
+
+    # Engine mode
+    @abstractmethod
+    def get_engine_mode(self, discord_id: int, guild_id: int) -> str: ...
+
+    @abstractmethod
+    def set_engine_mode(self, discord_id: int, guild_id: int, mode: str) -> None: ...
+
+    # Personality
+    @abstractmethod
+    def get_personality(self, discord_id: int, guild_id: int) -> dict | None: ...
+
+    @abstractmethod
+    def upsert_personality(self, discord_id: int, guild_id: int, data: dict) -> None: ...
+
+    # Social actions
+    @abstractmethod
+    def get_recent_social_actions(self, discord_id: int, guild_id: int, hours: int = 48) -> list[dict]: ...

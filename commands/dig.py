@@ -29,6 +29,7 @@ from utils.interaction_safety import safe_defer, safe_followup
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
 
 if TYPE_CHECKING:
+    from services.dig_llm_service import DigLLMService
     from services.dig_service import DigService
 
 logger = logging.getLogger("cama_bot.commands.dig")
@@ -214,6 +215,28 @@ def _fmt_duration(seconds: int) -> str:
     return f"{d}d {h}h" if h else f"{d}d"
 
 
+def _format_s_stats(stats: dict, effects: dict) -> str:
+    strength = stats.get("strength", 0)
+    smarts = stats.get("smarts", 0)
+    stamina = stats.get("stamina", 0)
+    total = stats.get("stat_points", 5)
+    unspent = stats.get("unspent_points", 0)
+    cooldown_multiplier = effects.get("cooldown_multiplier", 1.0)
+    reduction = max(0.0, 1.0 - cooldown_multiplier)
+    return (
+        f"Strength **{strength}** | Smarts **{smarts}** | Stamina **{stamina}**\n"
+        f"Points: **{total}** total, **{unspent}** unspent\n"
+        f"Effects: +{effects.get('advance_min_bonus', 0)}/"
+        f"+{effects.get('advance_max_bonus', 0)} advance range, "
+        f"-{effects.get('cave_in_reduction', 0):.0%} cave-in, "
+        f"-{reduction:.0%} cooldown/paid costs"
+    )
+
+
+def _backstory_text(result: dict) -> str:
+    return result.get("backstory") or "Backstory not set."
+
+
 async def _check_registered(interaction: discord.Interaction, bot: commands.Bot):
     """Return the Player if registered, else send an ephemeral error and return None."""
     guild_id = interaction.guild.id if interaction.guild else None
@@ -321,11 +344,12 @@ class BossWagerModal(discord.ui.Modal):
         required=True,
     )
 
-    def __init__(self, dig_service: DigService, user_id: int, guild_id: int | None):
+    def __init__(self, dig_service: DigService, user_id: int, guild_id: int | None, dig_llm_service=None):
         super().__init__(title="Boss Fight Wager")
         self.dig_service = dig_service
         self.user_id = user_id
         self.guild_id = guild_id
+        self.dig_llm_service = dig_llm_service
         self.result = None
 
     async def on_submit(self, interaction: discord.Interaction):
@@ -418,6 +442,22 @@ class BossWagerModal(discord.ui.Modal):
                     await msg.edit(embed=phase2_embed)
                 return
 
+            # LLM narrative for the boss fight (best-effort)
+            boss_narrative = None
+            result_dict = self.result._d if hasattr(self.result, "_d") else {}
+            if self.dig_llm_service and result_dict:
+                try:
+                    engine_mode = await asyncio.to_thread(
+                        self.dig_service.dig_repo.get_engine_mode,
+                        self.user_id, self.guild_id,
+                    )
+                    if engine_mode == "llm":
+                        boss_narrative = await self.dig_llm_service.narrate_boss_fight(
+                            result_dict, self.user_id, self.guild_id,
+                        )
+                except Exception:
+                    logger.debug("Boss fight narration failed", exc_info=True)
+
             embed = discord.Embed(
                 title="Boss Fight Result",
                 color=0x00FF00 if getattr(self.result, "won", False) else 0xFF0000,
@@ -430,6 +470,14 @@ class BossWagerModal(discord.ui.Modal):
                     f"Victory! You defeated **{boss_name}** and earned "
                     f"**{payout}** {JOPACOIN_EMOTE}!"
                 )
+                if boss_narrative:
+                    embed.add_field(name="\u200b", value=f"*{boss_narrative}*", inline=False)
+                if getattr(self.result, "stat_point_awarded", False):
+                    embed.add_field(
+                        name="S Point Earned",
+                        value="First clear bonus: use `/dig miner build` to allocate it.",
+                        inline=False,
+                    )
             else:
                 loss = abs(getattr(self.result, "jc_delta", 0)) or amount
                 knockback = getattr(self.result, "knockback", 0)
@@ -438,6 +486,8 @@ class BossWagerModal(discord.ui.Modal):
                     f"You lost **{loss}** {JOPACOIN_EMOTE}"
                     f" and were knocked back {knockback} blocks."
                 )
+                if boss_narrative:
+                    embed.add_field(name="\u200b", value=f"*{boss_narrative}*", inline=False)
             embed.add_field(
                 name="Details",
                 value=f"Risk: {tier.title()} | Win chance: {int(win_chance * 100)}%",
@@ -680,6 +730,7 @@ class BossEncounterView(discord.ui.View):
         guild_id: int | None,
         boss_info: object,
         has_lantern: bool = False,
+        dig_llm_service=None,
     ):
         super().__init__(timeout=60)
         self.dig_service = dig_service
@@ -687,6 +738,7 @@ class BossEncounterView(discord.ui.View):
         self.guild_id = guild_id
         self.boss_info = boss_info
         self.has_lantern = has_lantern
+        self.dig_llm_service = dig_llm_service
         if not has_lantern:
             self.scout.disabled = True
 
@@ -696,7 +748,7 @@ class BossEncounterView(discord.ui.View):
             # Others can cheer, not fight
             await interaction.response.send_message("Only the tunnel owner can fight.", ephemeral=True)
             return
-        modal = BossWagerModal(self.dig_service, self.user_id, self.guild_id)
+        modal = BossWagerModal(self.dig_service, self.user_id, self.guild_id, dig_llm_service=self.dig_llm_service)
         await interaction.response.send_modal(modal)
         self.stop()
 
@@ -1070,9 +1122,10 @@ class UpgradeView(discord.ui.View):
 class DigCommands(commands.Cog):
     dig = app_commands.Group(name="dig", description="Tunnel digging minigame")
 
-    def __init__(self, bot: commands.Bot, dig_service: DigService):
+    def __init__(self, bot: commands.Bot, dig_service: DigService, dig_llm_service: DigLLMService | None = None):
         self.bot = bot
         self.dig_service = dig_service
+        self.dig_llm_service = dig_llm_service
         self._last_weather_date: str | None = None
 
     async def cog_load(self) -> None:
@@ -1122,6 +1175,45 @@ class DigCommands(commands.Cog):
     async def _before_weather_loop(self) -> None:
         await self.bot.wait_until_ready()
         self._last_weather_date = await asyncio.to_thread(self.dig_service._get_game_date)
+
+    # ------------------------------------------------------------------
+    # DM Mode helpers
+    # ------------------------------------------------------------------
+
+    def _is_dm_mode(self) -> bool:
+        """Whether the DM engine service is available."""
+        return self.dig_llm_service is not None and self.dig_llm_service.dig_service is not None
+
+    async def _run_dm_dig(
+        self, user_id: int, guild_id: int | None, paid: bool = False,
+    ):
+        """Execute a DM-powered dig if the player opted in.
+
+        Returns ``(result, used_dm)`` — *result* is the wrapped result
+        ready for embed building, *used_dm* is True if the DM path was
+        taken (or its fallback).  Returns ``(None, False)`` if the player
+        is in legacy mode so the caller can fall through to ``dig()``.
+        """
+        if not self._is_dm_mode():
+            return None, False
+        try:
+            engine_mode = await asyncio.to_thread(
+                self.dig_service.dig_repo.get_engine_mode, user_id, guild_id,
+            )
+            if engine_mode != "llm":
+                return None, False
+
+            terminal, preconditions = await asyncio.to_thread(
+                self.dig_service.dig_with_preconditions, user_id, guild_id, paid,
+            )
+            if terminal is not None:
+                return _wrap(terminal), True
+            # DM decides the outcome (falls back to deterministic internally)
+            result = await self.dig_llm_service.run_dig(user_id, guild_id, preconditions)
+            return _wrap(result), True
+        except Exception:
+            logger.warning("DM dig failed, falling through to legacy", exc_info=True)
+            return None, False
 
     # ------------------------------------------------------------------
     # Autocomplete helpers
@@ -1189,14 +1281,17 @@ class DigCommands(commands.Cog):
 
         await safe_defer(interaction)
 
-        try:
-            result = _wrap(await asyncio.to_thread(
-                self.dig_service.dig, interaction.user.id, guild_id
-            ))
-        except Exception as e:
-            logger.error("Dig error: %s", e, exc_info=True)
-            await safe_followup(interaction, content="Dig failed. Try again later.", ephemeral=True)
-            return
+        # DM-first flow: if player opted into DM mode, use preconditions + LLM
+        result, used_dm = await self._run_dm_dig(interaction.user.id, guild_id)
+        if not used_dm:
+            try:
+                result = _wrap(await asyncio.to_thread(
+                    self.dig_service.dig, interaction.user.id, guild_id
+                ))
+            except Exception as e:
+                logger.error("Dig error: %s", e, exc_info=True)
+                await safe_followup(interaction, content="Dig failed. Try again later.", ephemeral=True)
+                return
 
         # Non-cooldown errors (cooldown is handled by the paid_dig_available branch)
         if not getattr(result, "success", False) and not getattr(result, "paid_dig_available", False):
@@ -1278,7 +1373,7 @@ class DigCommands(commands.Cog):
         elif hasattr(boss_info, "ascii_art"):
             embed.add_field(name="\u200b", value=f"```\n{boss_info.ascii_art}\n```", inline=False)
 
-        view = BossEncounterView(self.dig_service, interaction.user.id, guild_id, boss_info, has_lantern)
+        view = BossEncounterView(self.dig_service, interaction.user.id, guild_id, boss_info, has_lantern, dig_llm_service=self.dig_llm_service)
         msg = await safe_followup(interaction, embed=embed, view=view, file=boss_file)
         if msg:
             try:
@@ -1309,14 +1404,24 @@ class DigCommands(commands.Cog):
         if not view.value:
             await msg.edit(content="Dig cancelled.", embed=None, view=None)
             return
-        try:
-            paid_result = _wrap(await asyncio.to_thread(
-                self.dig_service.dig, interaction.user.id, guild_id, paid=True
-            ))
-        except Exception as e:
-            logger.error("Paid dig error: %s", e)
-            await msg.edit(content="Paid dig failed.", embed=None, view=None)
-            return
+        # Show immediate feedback while the dig runs
+        await msg.edit(
+            embed=discord.Embed(title="Digging...", description="Your pickaxe swings.", color=0xFFA500),
+            view=None,
+        )
+        # DM-first flow for paid dig
+        paid_result, used_dm = await self._run_dm_dig(
+            interaction.user.id, guild_id, paid=True,
+        )
+        if not used_dm:
+            try:
+                paid_result = _wrap(await asyncio.to_thread(
+                    self.dig_service.dig, interaction.user.id, guild_id, paid=True
+                ))
+            except Exception as e:
+                logger.error("Paid dig error: %s", e)
+                await msg.edit(content="Paid dig failed.", embed=None, view=None)
+                return
         if not getattr(paid_result, "success", False):
             err = getattr(paid_result, "error", "Paid dig failed.")
             await msg.edit(content=err, embed=None, view=None)
@@ -2774,9 +2879,208 @@ class DigCommands(commands.Cog):
 
         await interaction.response.send_message(f"Reset free dig cooldown for {user.mention}.", ephemeral=True)
 
+    @dig.command(name="forceevent", description="Force next dig to trigger an event (Admin only)")
+    @app_commands.describe(user="The player whose next dig gets an event")
+    async def dig_forceevent(self, interaction: discord.Interaction, user: discord.User):
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("Admin only.", ephemeral=True)
+            return
+        # Store on the service so the next dig() for this user forces an event
+        if not hasattr(self.dig_service, "_force_event_for"):
+            self.dig_service._force_event_for = set()
+        guild_id = interaction.guild.id if interaction.guild else None
+        self.dig_service._force_event_for.add((user.id, guild_id))
+        await interaction.response.send_message(f"Next dig for {user.mention} will force an event.", ephemeral=True)
+
+    @dig.command(name="setdepth", description="Set a player's tunnel depth (Admin only)")
+    @app_commands.describe(user="The player", depth="New depth value")
+    async def dig_setdepth(self, interaction: discord.Interaction, user: discord.User, depth: int):
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("Admin only.", ephemeral=True)
+            return
+
+        guild_id = interaction.guild.id if interaction.guild else None
+        tunnel = await asyncio.to_thread(self.dig_service.dig_repo.get_tunnel, user.id, guild_id)
+        if not tunnel:
+            await interaction.response.send_message("That player doesn't have a tunnel.", ephemeral=True)
+            return
+
+        depth = max(0, depth)
+        await asyncio.to_thread(self.dig_service.dig_repo.update_tunnel, user.id, guild_id, depth=depth)
+        await asyncio.to_thread(self.dig_service.dig_repo.update_tunnel, user.id, guild_id, last_dig_at=0)
+        await interaction.response.send_message(
+            f"Set {user.mention} to depth **{depth}** and reset cooldown.", ephemeral=True,
+        )
+
     # ------------------------------------------------------------------
-    # 18. /dig guide — Paginated help
+    # 18. /dig profile/about/build — Miner customization
     # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # /dig miner subgroup — profile, about, build
+    # ------------------------------------------------------------------
+    miner = app_commands.Group(name="miner", description="Miner profile and S stats", parent=dig)
+
+    @miner.command(name="profile", description="View your miner profile and S stats")
+    async def dig_profile(self, interaction: discord.Interaction):
+        if not await require_gamba_channel(interaction):
+            return
+
+        player = await _check_registered(interaction, self.bot)
+        if not player:
+            return
+
+        guild_id = interaction.guild.id if interaction.guild else None
+        result = await asyncio.to_thread(
+            self.dig_service.get_miner_profile,
+            interaction.user.id,
+            guild_id,
+        )
+        if not result.get("success"):
+            await interaction.response.send_message(result.get("error", "No profile."), ephemeral=True)
+            return
+
+        embed = discord.Embed(
+            title=f"{interaction.user.display_name} - Miner Profile",
+            color=0x5865F2,
+        )
+        embed.description = _backstory_text(result)
+        embed.add_field(
+            name="S Stats",
+            value=_format_s_stats(result.get("stats", {}), result.get("effects", {})),
+            inline=False,
+        )
+        embed.set_footer(text="Backstory locks after you set it. Boss first clears grant one extra S point.")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @miner.command(name="about", description="Set your miner backstory once")
+    @app_commands.describe(
+        backstory="Short backstory blurb for the AI Dungeon Master",
+    )
+    async def dig_about(
+        self,
+        interaction: discord.Interaction,
+        backstory: str,
+    ):
+        if not await require_gamba_channel(interaction):
+            return
+
+        player = await _check_registered(interaction, self.bot)
+        if not player:
+            return
+
+        guild_id = interaction.guild.id if interaction.guild else None
+        result = await asyncio.to_thread(
+            self.dig_service.set_miner_profile,
+            interaction.user.id,
+            guild_id,
+            backstory=backstory,
+        )
+        if not result.get("success"):
+            await interaction.response.send_message(result.get("error", "Profile update failed."), ephemeral=True)
+            return
+
+        embed = discord.Embed(
+            title="Backstory Locked In",
+            description=_backstory_text(result),
+            color=0x5865F2,
+        )
+        embed.set_footer(text="This cannot be changed later.")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @miner.command(name="build", description="Spend unallocated points on Strength, Smarts, and Stamina")
+    @app_commands.describe(
+        strength="Points to add. Every 2 total points raises max advance; every 5 raises min.",
+        smarts="Points to add. Each total point reduces cave-in chance by 2%.",
+        stamina="Points to add. Each total point reduces cooldowns and paid digs by 4%.",
+    )
+    async def dig_build(
+        self,
+        interaction: discord.Interaction,
+        strength: int = 0,
+        smarts: int = 0,
+        stamina: int = 0,
+    ):
+        if not await require_gamba_channel(interaction):
+            return
+
+        player = await _check_registered(interaction, self.bot)
+        if not player:
+            return
+
+        guild_id = interaction.guild.id if interaction.guild else None
+        result = await asyncio.to_thread(
+            self.dig_service.set_miner_stats,
+            interaction.user.id,
+            guild_id,
+            strength=strength,
+            smarts=smarts,
+            stamina=stamina,
+        )
+        if not result.get("success"):
+            await interaction.response.send_message(result.get("error", "Build update failed."), ephemeral=True)
+            return
+
+        embed = discord.Embed(
+            title="S Points Spent",
+            description=_format_s_stats(result.get("stats", {}), result.get("effects", {})),
+            color=0x5865F2,
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    # ------------------------------------------------------------------
+    # 19. /dig guide — Paginated help
+    # ------------------------------------------------------------------
+
+    @dig.command(name="mode", description="Switch between legacy and DM Mode (AI-narrated) dig")
+    @app_commands.describe(mode="Choose your dig experience")
+    @app_commands.choices(mode=[
+        app_commands.Choice(name="Legacy (deterministic)", value="legacy"),
+        app_commands.Choice(name="DM Mode (AI-narrated)", value="llm"),
+    ])
+    async def dig_mode(self, interaction: discord.Interaction, mode: app_commands.Choice[str]):
+        if not await require_gamba_channel(interaction):
+            return
+
+        player = await _check_registered(interaction, self.bot)
+        if not player:
+            return
+
+        guild_id = interaction.guild.id if interaction.guild else None
+
+        if mode.value == "llm" and not self.dig_llm_service:
+            await interaction.response.send_message(
+                "DM Mode is not available (AI service not configured).", ephemeral=True,
+            )
+            return
+
+        # Ensure tunnel exists before setting mode (create one if needed)
+        tunnel = await asyncio.to_thread(
+            self.dig_service.dig_repo.get_tunnel,
+            interaction.user.id, guild_id,
+        )
+        if not tunnel:
+            await asyncio.to_thread(
+                self.dig_service.dig_repo.create_tunnel,
+                interaction.user.id, guild_id, f"{interaction.user.display_name}'s Tunnel",
+            )
+
+        await asyncio.to_thread(
+            self.dig_service.dig_repo.set_engine_mode,
+            interaction.user.id, guild_id, mode.value,
+        )
+
+        if mode.value == "llm":
+            desc = "**DM Mode enabled.** Your digs will now be narrated by an AI Dungeon Master with personalized storytelling."
+        else:
+            desc = "**Legacy mode enabled.** Your digs will use the standard deterministic engine."
+
+        embed = discord.Embed(
+            title="Dig Mode Updated",
+            description=desc,
+            color=0x5865F2,
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @dig.command(name="guide", description="Learn how to dig")
     async def dig_guide(self, interaction: discord.Interaction):
@@ -2816,6 +3120,11 @@ def _build_dig_embed(result: object, user: discord.User | discord.Member) -> tup
         color=_layer_color(layer_name),
     )
 
+    # LLM narrative (DM Mode) — shown as first field when present
+    llm_narrative = getattr(result, "llm_narrative", None)
+    if llm_narrative:
+        embed.add_field(name="\u200b", value=f"*{llm_narrative}*", inline=False)
+
     # Blocks gained and JC earned (skip misleading "+0" during cave-ins)
     cave_in = getattr(result, "cave_in", False)
     blocks = getattr(result, "advance", 0)
@@ -2831,10 +3140,29 @@ def _build_dig_embed(result: object, user: discord.User | discord.Member) -> tup
     cave_in_detail = getattr(result, "cave_in_detail", None)
     if cave_in and cave_in_detail:
         block_loss = getattr(cave_in_detail, "block_loss", "?")
-        message = getattr(cave_in_detail, "message", "")
+        jc_lost = getattr(cave_in_detail, "jc_lost", 0)
+        llm_cave_in = getattr(result, "llm_cave_in_flavor", None)
+        cave_in_type = getattr(cave_in_detail, "type", "") if not isinstance(cave_in_detail, dict) else cave_in_detail.get("type", "")
+        if llm_cave_in:
+            message = llm_cave_in
+        elif llm_narrative:
+            # DM narrative tells the story — show only the mechanical consequence
+            consequence = {
+                "stun": "Stunned — next dig has longer cooldown!",
+                "injury": "Injured — reduced digging for several digs!",
+                "medical_bill": "",  # JC loss shown via jc_lost below
+            }.get(cave_in_type, "")
+            message = consequence
+        else:
+            message = getattr(cave_in_detail, "message", "")
+        cave_in_text = f"Lost **{block_loss}** blocks"
+        if jc_lost:
+            cave_in_text += f" and **{jc_lost}** {JOPACOIN_EMOTE}"
+        if message:
+            cave_in_text += f". {message}"
         embed.add_field(
             name="Cave-in!",
-            value=f"Lost **{block_loss}** blocks. {message}",
+            value=cave_in_text,
             inline=False,
         )
 
@@ -2867,14 +3195,26 @@ def _build_dig_embed(result: object, user: discord.User | discord.Member) -> tup
             inline=False,
         )
 
-    # Event (with ASCII art for simple events)
+    # Event (with ASCII art for simple events).
+    # Skip this field for choice/boon events — they get their own encounter
+    # embed with art, so showing the text here would be a duplicate.
     event = getattr(result, "event", None)
     if event:
+        event_dict = event if isinstance(event, dict) else (event._d if hasattr(event, "_d") else None)
+        has_encounter_ui = isinstance(event_dict, dict) and (
+            event_dict.get("safe_option") or event_dict.get("boon_options")
+        )
+        if has_encounter_ui:
+            event = None  # suppress from stats embed — encounter UI will show it
+
+    if event:
+        # Use LLM event flavor if available, otherwise stock description
+        llm_event_flavor = getattr(result, "llm_event_flavor", None)
         if isinstance(event, str):
-            e_desc = event
+            e_desc = llm_event_flavor or event
             e_art = None
         else:
-            e_desc = pick_description(event) or "Something happens..."
+            e_desc = llm_event_flavor or pick_description(event) or "Something happens..."
             if isinstance(event, dict):
                 e_art = event.get("ascii_art")
             elif hasattr(event, "_d") and isinstance(event._d, dict):
@@ -2934,6 +3274,11 @@ def _build_dig_embed(result: object, user: discord.User | discord.Member) -> tup
     if mutations and isinstance(mutations, (list, tuple)):
         mut_names = [str(m) for m in mutations]
         tip = f"Mutations: {', '.join(mut_names)}" + (f" | {tip}" if tip else "")
+
+    # LLM callback reference (appended to footer)
+    llm_callback = getattr(result, "llm_callback", None)
+    if llm_callback:
+        tip = f"{tip} | {llm_callback}" if tip else llm_callback
 
     embed.set_footer(text=tip)
     embed.set_author(name=user.display_name, icon_url=user.display_avatar.url)
@@ -3029,4 +3374,5 @@ async def setup(bot: commands.Bot):
     dig_service = getattr(bot, "dig_service", None)
     if dig_service is None:
         raise RuntimeError("Dig service not registered on bot.")
-    await bot.add_cog(DigCommands(bot, dig_service))
+    dig_llm_service = getattr(bot, "dig_llm_service", None)
+    await bot.add_cog(DigCommands(bot, dig_service, dig_llm_service))

@@ -21,7 +21,8 @@ class DigRepository(BaseRepository, IDigRepository):
         "reinforced_until", "paid_digs_today", "revenge_target", "revenge_until",
         "hard_hat_charges", "void_bait_digs", "luminosity", "boss_attempts",
         "best_run_score", "current_run_jc", "current_run_artifacts",
-        "current_run_events", "total_prestige_score",
+        "current_run_events", "total_prestige_score", "stat_strength",
+        "stat_smarts", "stat_stamina", "stat_points",
     })
 
     @staticmethod
@@ -100,6 +101,11 @@ class DigRepository(BaseRepository, IDigRepository):
         "void_bait_digs",
         # dig_thick_skin_date migration
         "thick_skin_date",
+        # dig_engine_mode_column migration
+        "engine_mode",
+        # dig_miner_profile_columns migration
+        "miner_origin", "miner_about", "stat_strength", "stat_smarts",
+        "stat_stamina", "stat_points", "stat_boss_awards",
     })
 
     def update_tunnel(self, discord_id: int, guild_id: int, **kwargs) -> None:
@@ -708,5 +714,104 @@ class DigRepository(BaseRepository, IDigRepository):
                 LIMIT 10
                 """,
                 (gid,),
+            )
+            return [dict(row) for row in cursor.fetchall()]
+
+    # ── Engine Mode (legacy/llm toggle) ─────────────────────────────────
+
+    def get_engine_mode(self, discord_id: int, guild_id: int) -> str:
+        """Get the dig engine mode for a player ('legacy' or 'llm')."""
+        tunnel = self.get_tunnel(discord_id, guild_id)
+        if tunnel is None:
+            return "legacy"
+        return tunnel.get("engine_mode", "legacy") or "legacy"
+
+    def set_engine_mode(self, discord_id: int, guild_id: int, mode: str) -> None:
+        """Set the dig engine mode for a player."""
+        self.update_tunnel(discord_id, guild_id, engine_mode=mode)
+
+    # ── Personality (LLM player profiling) ──────────────────────────────
+
+    def get_personality(self, discord_id: int, guild_id: int) -> dict | None:
+        """Get player personality data for LLM context."""
+        gid = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM dig_personality WHERE discord_id = ? AND guild_id = ?",
+                (discord_id, gid),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return None
+            result = dict(row)
+            # Deserialize JSON fields
+            for field in ("choice_histogram", "notable_moments"):
+                raw = result.get(field)
+                if raw and isinstance(raw, str):
+                    try:
+                        result[field] = json.loads(raw)
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+            return result
+
+    def upsert_personality(self, discord_id: int, guild_id: int, data: dict) -> None:
+        """Insert or update player personality data."""
+        gid = self.normalize_guild_id(guild_id)
+        now = int(time.time())
+
+        histogram = data.get("choice_histogram", {})
+        notable = data.get("notable_moments", [])
+        histogram_json = json.dumps(histogram) if isinstance(histogram, dict) else str(histogram)
+        notable_json = json.dumps(notable) if isinstance(notable, list) else str(notable)
+
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO dig_personality
+                    (discord_id, guild_id, play_style, choice_histogram,
+                     notable_moments, summary, social_summary, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(discord_id, guild_id) DO UPDATE SET
+                    play_style = excluded.play_style,
+                    choice_histogram = excluded.choice_histogram,
+                    notable_moments = excluded.notable_moments,
+                    summary = excluded.summary,
+                    social_summary = excluded.social_summary,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    discord_id, gid,
+                    data.get("play_style", "unknown"),
+                    histogram_json, notable_json,
+                    data.get("summary", ""),
+                    data.get("social_summary", ""),
+                    now,
+                ),
+            )
+            conn.commit()
+
+    # ── Social Action Queries ───────────────────────────────────────────
+
+    def get_recent_social_actions(
+        self, discord_id: int, guild_id: int, hours: int = 48,
+    ) -> list[dict]:
+        """Get recent social actions involving this player (help, sabotage, cheer)."""
+        gid = self.normalize_guild_id(guild_id)
+        cutoff = int(time.time()) - (hours * 3600)
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT * FROM dig_actions
+                WHERE guild_id = ?
+                  AND (actor_id = ? OR target_id = ?)
+                  AND action_type IN ('sabotage', 'help', 'cheer')
+                  AND created_at >= ?
+                ORDER BY created_at DESC
+                LIMIT 20
+                """,
+                (gid, discord_id, discord_id, cutoff),
             )
             return [dict(row) for row in cursor.fetchall()]

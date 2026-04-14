@@ -207,9 +207,12 @@ TIP_FEE_RATE = max(0.0, min(0.5, _raw_tip_fee_rate))  # 1% default, max 50%
 # Steam/Valve API
 STEAM_API_KEY = os.getenv("STEAM_API_KEY")
 
-# AI/LLM Configuration (Cerebras via LiteLLM)
+# AI/LLM Configuration (Groq or Cerebras via LiteLLM)
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 CEREBRAS_API_KEY = os.getenv("CEREBRAS_API_KEY")
-AI_MODEL = os.getenv("AI_MODEL", "cerebras/qwen-3-235b-a22b-instruct-2507")
+# Prefer Groq, fall back to Cerebras
+LLM_API_KEY = GROQ_API_KEY or CEREBRAS_API_KEY
+AI_MODEL = os.getenv("AI_MODEL", "groq/qwen/qwen3-32b" if GROQ_API_KEY else "cerebras/qwen-3-235b-a22b-instruct-2507")
 AI_TIMEOUT_SECONDS = _parse_float("AI_TIMEOUT_SECONDS", 15.0)
 AI_MAX_TOKENS = _parse_int("AI_MAX_TOKENS", 500)
 AI_RATE_LIMIT_REQUESTS = _parse_int("AI_RATE_LIMIT_REQUESTS", 10)  # Requests per window

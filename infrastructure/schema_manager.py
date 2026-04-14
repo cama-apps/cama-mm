@@ -265,6 +265,9 @@ class SchemaManager:
             ("dig_void_bait_column", self._migration_dig_void_bait),
             ("dig_weather_table", self._migration_dig_weather_table),
             ("dig_thick_skin_date", self._migration_dig_thick_skin_date),
+            ("dig_engine_mode_column", self._migration_dig_engine_mode),
+            ("dig_personality_table", self._migration_dig_personality_table),
+            ("dig_miner_profile_columns", self._migration_dig_miner_profile),
         ]
 
     # --- Migrations ---
@@ -1973,3 +1976,51 @@ class SchemaManager:
         ``update_tunnel(thick_skin_date=today)`` against a non-existent column.
         """
         self._add_column_if_not_exists(cursor, "tunnels", "thick_skin_date", "TEXT")
+
+    def _migration_dig_engine_mode(self, cursor) -> None:
+        """Add engine_mode column to tunnels for legacy/llm toggle."""
+        self._add_column_if_not_exists(
+            cursor, "tunnels", "engine_mode", "TEXT NOT NULL DEFAULT 'legacy'"
+        )
+
+    def _migration_dig_personality_table(self, cursor) -> None:
+        """Create dig_personality table for LLM player personality tracking."""
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS dig_personality (
+                discord_id       INTEGER NOT NULL,
+                guild_id         INTEGER NOT NULL DEFAULT 0,
+                summary          TEXT DEFAULT '',
+                choice_histogram TEXT DEFAULT '{}',
+                notable_moments  TEXT DEFAULT '[]',
+                play_style       TEXT DEFAULT 'unknown',
+                social_summary   TEXT DEFAULT '',
+                updated_at       INTEGER DEFAULT 0,
+                PRIMARY KEY (discord_id, guild_id)
+            )
+            """
+        )
+
+    def _migration_dig_miner_profile(self, cursor) -> None:
+        """Add miner profile/stat columns used by DM mode and dig mechanics."""
+        self._add_column_if_not_exists(
+            cursor, "tunnels", "miner_origin", "TEXT NOT NULL DEFAULT ''"
+        )
+        self._add_column_if_not_exists(
+            cursor, "tunnels", "miner_about", "TEXT NOT NULL DEFAULT ''"
+        )
+        self._add_column_if_not_exists(
+            cursor, "tunnels", "stat_strength", "INTEGER NOT NULL DEFAULT 0"
+        )
+        self._add_column_if_not_exists(
+            cursor, "tunnels", "stat_smarts", "INTEGER NOT NULL DEFAULT 0"
+        )
+        self._add_column_if_not_exists(
+            cursor, "tunnels", "stat_stamina", "INTEGER NOT NULL DEFAULT 0"
+        )
+        self._add_column_if_not_exists(
+            cursor, "tunnels", "stat_points", "INTEGER NOT NULL DEFAULT 5"
+        )
+        self._add_column_if_not_exists(
+            cursor, "tunnels", "stat_boss_awards", "TEXT NOT NULL DEFAULT '[]'"
+        )

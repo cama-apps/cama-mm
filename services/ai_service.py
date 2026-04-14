@@ -107,10 +107,14 @@ class AIService:
         self.max_tokens = max_tokens
 
         # Configure LiteLLM - set provider-specific API key
-        # For Cerebras, we need to set CEREBRAS_API_KEY
         import os
 
-        os.environ["CEREBRAS_API_KEY"] = api_key
+        if model.startswith("groq/"):
+            os.environ["GROQ_API_KEY"] = api_key
+        elif model.startswith("cerebras/"):
+            os.environ["CEREBRAS_API_KEY"] = api_key
+        else:
+            os.environ["CEREBRAS_API_KEY"] = api_key
 
         # Disable LiteLLM's automatic retries - we want to fail fast
         litellm.num_retries = 0
