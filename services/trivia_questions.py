@@ -11,6 +11,7 @@ import random
 from dataclasses import dataclass
 
 from services.trivia_data import (
+    AbilityData,
     HeroData,
     get_hero_by_id,
     load_abilities,
@@ -63,6 +64,40 @@ def _hero_pool() -> list[str]:
 
 def _heroes_by_attr(attr: str) -> list[HeroData]:
     return [h for h in load_heroes() if h.attr_primary == attr]
+
+
+def _eligible_upgrade_abilities(enabled_attr: str, description_attr: str) -> list[tuple[AbilityData, str]]:
+    """Return abilities whose upgrade description remains safe after redaction."""
+    eligible: list[tuple[AbilityData, str]] = []
+    for ability in load_abilities():
+        description = getattr(ability, description_attr)
+        if not getattr(ability, enabled_attr) or not description or not ability.hero_name:
+            continue
+        redacted = redact_hero_name(description[:100], ability.hero_name)
+        # Some descriptions still leak via substrings, e.g. "Demon" in "Demonic".
+        if _hero_name_leaks(redacted, ability.hero_name):
+            continue
+        eligible.append((ability, redacted))
+    return eligible
+
+
+def _pick_upgrade_distractors(
+    correct_desc: str,
+    other_abilities: list[tuple[AbilityData, str]],
+    n: int = 3,
+) -> list[str] | None:
+    """Pick unique redacted upgrade descriptions for multiple-choice options."""
+    random.shuffle(other_abilities)
+    distractors: list[str] = []
+    seen = {correct_desc}
+    for _, description in other_abilities:
+        if description in seen:
+            continue
+        seen.add(description)
+        distractors.append(description)
+        if len(distractors) == n:
+            return distractors
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -285,24 +320,14 @@ def gen_hero_real_name() -> TriviaQuestion | None:
 
 def gen_scepter_upgrade() -> TriviaQuestion | None:
     """M3→H: What does Aghanim's Scepter do for this hero?"""
-    abilities = [a for a in load_abilities() if a.scepter_upgrades and a.scepter_description and a.hero_name]
+    abilities = _eligible_upgrade_abilities("scepter_upgrades", "scepter_description")
     if len(abilities) < 4:
         return None
-    ability = random.choice(abilities)
-    # Use other scepter descriptions as distractors
-    other = [a for a in abilities if a.hero_name != ability.hero_name and a.scepter_description]
-    if len(other) < 3:
+    ability, correct_desc = random.choice(abilities)
+    other = [(a, desc) for a, desc in abilities if a.hero_name != ability.hero_name]
+    distractors = _pick_upgrade_distractors(correct_desc, other)
+    if not distractors:
         return None
-    dist_abilities = random.sample(other, 3)
-    # Redact hero names from ALL option descriptions to prevent leaks
-    correct_desc = redact_hero_name(ability.scepter_description[:100], ability.hero_name)
-    # Skip if hero name still leaks as a substring (e.g. "Demon" in "Demonic")
-    if _hero_name_leaks(correct_desc, ability.hero_name):
-        return None
-    distractors = [
-        redact_hero_name(a.scepter_description[:100], a.hero_name)
-        for a in dist_abilities
-    ]
     options, idx = _shuffle_options(correct_desc, distractors)
     hero = get_hero_by_id(ability.hero_id) if ability.hero_id else None
     return TriviaQuestion(
@@ -425,23 +450,14 @@ def gen_damage_type() -> TriviaQuestion | None:
 
 def gen_shard_upgrade() -> TriviaQuestion | None:
     """M8→H: What does Aghanim's Shard do for this hero?"""
-    abilities = [a for a in load_abilities() if a.shard_upgrades and a.shard_description and a.hero_name]
+    abilities = _eligible_upgrade_abilities("shard_upgrades", "shard_description")
     if len(abilities) < 4:
         return None
-    ability = random.choice(abilities)
-    other = [a for a in abilities if a.hero_name != ability.hero_name and a.shard_description]
-    if len(other) < 3:
+    ability, correct_desc = random.choice(abilities)
+    other = [(a, desc) for a, desc in abilities if a.hero_name != ability.hero_name]
+    distractors = _pick_upgrade_distractors(correct_desc, other)
+    if not distractors:
         return None
-    dist_abilities = random.sample(other, 3)
-    # Redact hero names from ALL option descriptions to prevent leaks
-    correct_desc = redact_hero_name(ability.shard_description[:100], ability.hero_name)
-    # Skip if hero name still leaks as a substring (e.g. "Demon" in "Demonic")
-    if _hero_name_leaks(correct_desc, ability.hero_name):
-        return None
-    distractors = [
-        redact_hero_name(a.shard_description[:100], a.hero_name)
-        for a in dist_abilities
-    ]
     options, idx = _shuffle_options(correct_desc, distractors)
     hero = get_hero_by_id(ability.hero_id) if ability.hero_id else None
     return TriviaQuestion(

@@ -2,6 +2,7 @@
 
 import pytest
 
+from services.trivia_data import AbilityData
 from services.trivia_questions import (
     CHALLENGING_GENERATORS,
     EASY_GENERATORS,
@@ -185,6 +186,105 @@ class TestHardGenerators:
         q = gen_scepter_upgrade()
         _validate_question(q)
         assert q.difficulty == "hard"
+
+    def test_scepter_upgrade_skips_leaking_descriptions(self, monkeypatch):
+        abilities = [
+            AbilityData(
+                id=1,
+                name="shadow_demon_demonic_purge",
+                localized_name="Demonic Purge",
+                hero_id=None,
+                hero_name="Shadow Demon",
+                damage_type=None,
+                damage=None,
+                cooldown=None,
+                lore=None,
+                scepter_upgrades=True,
+                scepter_description="Causes Demonic Purge to break and gain charges.",
+                shard_upgrades=False,
+                shard_description=None,
+                innate=False,
+                icon_url=None,
+            ),
+            AbilityData(
+                id=2,
+                name="axe_berserkers_call",
+                localized_name="Berserker's Call",
+                hero_id=None,
+                hero_name="Axe",
+                damage_type=None,
+                damage=None,
+                cooldown=None,
+                lore=None,
+                scepter_upgrades=True,
+                scepter_description="Applies Battle Hunger to taunted enemies.",
+                shard_upgrades=False,
+                shard_description=None,
+                innate=False,
+                icon_url=None,
+            ),
+            AbilityData(
+                id=3,
+                name="crystal_maiden_frostbite",
+                localized_name="Frostbite",
+                hero_id=None,
+                hero_name="Crystal Maiden",
+                damage_type=None,
+                damage=None,
+                cooldown=None,
+                lore=None,
+                scepter_upgrades=True,
+                scepter_description="Creates a freezing explosion around the target.",
+                shard_upgrades=False,
+                shard_description=None,
+                innate=False,
+                icon_url=None,
+            ),
+            AbilityData(
+                id=4,
+                name="juggernaut_blade_fury",
+                localized_name="Blade Fury",
+                hero_id=None,
+                hero_name="Juggernaut",
+                damage_type=None,
+                damage=None,
+                cooldown=None,
+                lore=None,
+                scepter_upgrades=True,
+                scepter_description="Allows movement during Omnislash and increases slash rate.",
+                shard_upgrades=False,
+                shard_description=None,
+                innate=False,
+                icon_url=None,
+            ),
+            AbilityData(
+                id=5,
+                name="lich_frost_shield",
+                localized_name="Frost Shield",
+                hero_id=None,
+                hero_name="Lich",
+                damage_type=None,
+                damage=None,
+                cooldown=None,
+                lore=None,
+                scepter_upgrades=True,
+                scepter_description="Adds a damaging nova when the shield expires.",
+                shard_upgrades=False,
+                shard_description=None,
+                innate=False,
+                icon_url=None,
+            ),
+        ]
+
+        monkeypatch.setattr("services.trivia_questions.load_abilities", lambda: abilities)
+        monkeypatch.setattr("services.trivia_questions.random.choice", lambda seq: seq[0])
+        monkeypatch.setattr("services.trivia_questions.random.shuffle", lambda seq: None)
+
+        q = gen_scepter_upgrade()
+
+        _validate_question(q)
+        assert q.text == "What does Aghanim's Scepter do for Axe?"
+        assert "Shadow Demon" not in q.text
 
     def test_shard_upgrade(self):
         q = gen_shard_upgrade()
