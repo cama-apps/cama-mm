@@ -508,6 +508,18 @@ class DigService:
                 return b
         return None
 
+    def _build_boss_info(self, tunnel: dict, boundary: int) -> dict:
+        """Build the standard boss encounter payload for a boundary."""
+        boss_name = BOSS_NAMES.get(boundary, "Unknown Boss")
+        attempts = tunnel.get("boss_attempts", 0) or 0
+        dialogue_list = BOSS_DIALOGUE.get(boundary, ["..."])
+        return {
+            "boundary": boundary,
+            "name": boss_name,
+            "dialogue": dialogue_list[min(attempts, len(dialogue_list) - 1)],
+            "ascii_art": BOSS_ASCII.get(boundary, ""),
+        }
+
     def _pick_tip(self, depth: int) -> str:
         """Pick a progressive tip based on current depth."""
         eligible = [
@@ -4249,6 +4261,8 @@ class DigService:
         luminosity = tunnel.get("luminosity", LUMINOSITY_MAX)
         prestige_level = tunnel.get("prestige_level", 0) or 0
         ascension = self._get_ascension_effects(prestige_level)
+        boss_encounter = False
+        boss_info = None
 
         # Pitch black: force risky (safe option removed)
         if LUMINOSITY_PITCH_FORCE_RISKY and luminosity <= LUMINOSITY_PITCH_BLACK and choice == "safe" and event.get("risky_option"):
@@ -4303,6 +4317,13 @@ class DigService:
             if "depth" in outcome:
                 depth_range = outcome["depth"]
                 depth_delta = random.randint(depth_range[0], depth_range[1]) if isinstance(depth_range, list) else depth_range
+                if depth_delta > 0:
+                    boss_progress = self._get_boss_progress(tunnel)
+                    next_boss = self._next_boss_boundary(depth, boss_progress)
+                    if next_boss is not None and depth + depth_delta >= next_boss:
+                        depth_delta = max(0, next_boss - 1 - depth)
+                        boss_encounter = True
+                        boss_info = self._build_boss_info(tunnel, next_boss)
                 new_depth = max(0, depth + depth_delta)
                 self.dig_repo.update_tunnel(discord_id, guild_id, depth=new_depth)
 
@@ -4312,7 +4333,8 @@ class DigService:
                 details=json.dumps({"event_id": event_id, "choice": choice, "jc_delta": jc_delta, "depth_delta": depth_delta}),
             )
             return self._ok(event_name=event.get("name", "Unknown Event"), choice=choice,
-                            jc_delta=jc_delta, depth_delta=depth_delta, message=message)
+                            jc_delta=jc_delta, depth_delta=depth_delta, message=message,
+                            boss_encounter=boss_encounter, boss_info=boss_info)
 
         # New-style EventChoice resolution
         success_chance = option.get("success_chance", 1.0)
@@ -4358,6 +4380,14 @@ class DigService:
             if chain_mult > 1.0:
                 jc = int(jc * chain_mult)
 
+        if advance > 0:
+            boss_progress = self._get_boss_progress(tunnel)
+            next_boss = self._next_boss_boundary(depth, boss_progress)
+            if next_boss is not None and depth + advance >= next_boss:
+                advance = max(0, next_boss - 1 - depth)
+                boss_encounter = True
+                boss_info = self._build_boss_info(tunnel, next_boss)
+
         # Apply depth change
         new_depth = max(0, depth + advance)
         if advance != 0:
@@ -4399,6 +4429,8 @@ class DigService:
             message=description,
             buff_applied=buff_applied,
             chain_event=chain_event,
+            boss_encounter=boss_encounter,
+            boss_info=boss_info,
         )
 
     # ------------------------------------------------------------------

@@ -633,6 +633,18 @@ class EventEncounterView(discord.ui.View):
         if parts:
             embed.add_field(name="Outcome", value=" | ".join(parts), inline=False)
 
+        boss_encounter = getattr(result, "boss_encounter", False)
+        boss_info = getattr(result, "boss_info", None)
+        if boss_encounter:
+            boss_name = getattr(boss_info, "name", "Unknown Boss") if boss_info else "Unknown Boss"
+            boundary = getattr(boss_info, "boundary", None) if boss_info else None
+            path_text = f"Depth {boundary}" if boundary is not None else "the next layer"
+            embed.add_field(
+                name="Boss Encountered",
+                value=f"**{boss_name}** blocks {path_text}. Use `/dig` to fight, scout, or retreat.",
+                inline=False,
+            )
+
         # Show buff if granted
         buff = getattr(result, "buff_applied", None)
         if buff:
