@@ -24,6 +24,7 @@ from services.dig_constants import (
     pick_description,
 )
 from services.dig_constants import get_layer as get_layer_def
+from services.permissions import has_admin_permission
 from utils.formatting import JOPACOIN_EMOTE
 from utils.interaction_safety import safe_defer, safe_followup
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
@@ -2866,7 +2867,7 @@ class DigCommands(commands.Cog):
     @dig.command(name="resetcooldown", description="Reset a player's free dig cooldown (Admin only)")
     @app_commands.describe(user="The player whose cooldown to reset")
     async def dig_resetcooldown(self, interaction: discord.Interaction, user: discord.User):
-        if not interaction.user.guild_permissions.administrator:
+        if not has_admin_permission(interaction):
             await interaction.response.send_message("Admin only.", ephemeral=True)
             return
 
@@ -2882,7 +2883,7 @@ class DigCommands(commands.Cog):
     @dig.command(name="forceevent", description="Force next dig to trigger an event (Admin only)")
     @app_commands.describe(user="The player whose next dig gets an event")
     async def dig_forceevent(self, interaction: discord.Interaction, user: discord.User):
-        if not interaction.user.guild_permissions.administrator:
+        if not has_admin_permission(interaction):
             await interaction.response.send_message("Admin only.", ephemeral=True)
             return
         # Store on the service so the next dig() for this user forces an event
@@ -2895,7 +2896,7 @@ class DigCommands(commands.Cog):
     @dig.command(name="setdepth", description="Set a player's tunnel depth (Admin only)")
     @app_commands.describe(user="The player", depth="New depth value")
     async def dig_setdepth(self, interaction: discord.Interaction, user: discord.User, depth: int):
-        if not interaction.user.guild_permissions.administrator:
+        if not has_admin_permission(interaction):
             await interaction.response.send_message("Admin only.", ephemeral=True)
             return
 
