@@ -967,6 +967,24 @@ class TestBoss:
         # Either depth is capped at boundary-1 or a boss encounter is signaled
         assert tunnel["depth"] <= 25 or result.get("boss_encounter")
 
+    def test_event_does_not_skip_boss_boundary(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+        """Positive-depth events should stop at the boss boundary instead of skipping it."""
+        _register_player(player_repository, balance=200)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+        dig_repo.update_tunnel(10001, guild_id, depth=24)
+
+        result = dig_service.resolve_event(10001, guild_id, "friendly_mole", "safe")
+
+        assert result["success"]
+        assert result.get("depth_delta") == 0
+        assert result.get("boss_encounter") is True
+        assert result.get("boss_info", {}).get("boundary") == 25
+
+        tunnel = dig_repo.get_tunnel(10001, guild_id)
+        assert tunnel["depth"] == 24
+
     def test_boss_fight_win(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
         """Win advances past boundary, awards payout."""
         _register_player(player_repository, balance=200)
