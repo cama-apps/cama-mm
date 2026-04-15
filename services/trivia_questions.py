@@ -916,24 +916,31 @@ def gen_attack_damage_compare() -> TriviaQuestion | None:
 
 
 def gen_night_vision_compare() -> TriviaQuestion | None:
-    """C: Which hero has the highest night vision?"""
-    heroes = [h for h in load_heroes() if h.vision_night and h.vision_night > 0]
-    if len(heroes) < 4:
+    """C: What is this hero's night vision range?"""
+    all_heroes = [h for h in load_heroes() if h.vision_night and h.vision_night > 0]
+    distinct_values = sorted({h.vision_night for h in all_heroes})
+    if len(distinct_values) < 4:
         return None
-    chosen = random.sample(heroes, 4)
-    highest = max(chosen, key=lambda h: h.vision_night)
-    if sum(1 for h in chosen if h.vision_night == highest.vision_night) > 1:
+    # Only ask about heroes with non-default night vision — they're the interesting ones
+    default = min(distinct_values)
+    notable = [h for h in all_heroes if h.vision_night != default]
+    if not notable:
         return None
-    distractors = [h.localized_name for h in chosen if h != highest][:3]
-    options, idx = _shuffle_options(highest.localized_name, distractors)
+    hero = random.choice(notable)
+    correct = str(hero.vision_night)
+    distractors = [str(v) for v in distinct_values if v != hero.vision_night]
+    if len(distractors) < 3:
+        return None
+    distractors = random.sample(distractors, 3)
+    options, idx = _shuffle_options(correct, distractors)
     return TriviaQuestion(
-        text="Which of these heroes has the highest night vision?",
+        text=f"What is {hero.localized_name}'s night vision range?",
         options=options,
         correct_index=idx,
         difficulty="challenging",
-        image_url=None,
+        image_url=hero.image_url,
         category="night_vision_compare",
-        explanation=f"{highest.localized_name} has {highest.vision_night} night vision.",
+        explanation=f"{hero.localized_name} has {hero.vision_night} night vision.",
     )
 
 
@@ -1030,6 +1037,7 @@ IMAGE_GENERATORS = {
     gen_item_active_cooldown,
     gen_turn_rate,
     gen_voiceline_with_image,
+    gen_night_vision_compare,
 }
 
 

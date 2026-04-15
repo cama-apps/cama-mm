@@ -208,6 +208,7 @@ class TestHardGenerators:
                 shard_description=None,
                 innate=False,
                 icon_url=None,
+                mana_cost=None,
             ),
             AbilityData(
                 id=2,
@@ -225,6 +226,7 @@ class TestHardGenerators:
                 shard_description=None,
                 innate=False,
                 icon_url=None,
+                mana_cost=None,
             ),
             AbilityData(
                 id=3,
@@ -242,6 +244,7 @@ class TestHardGenerators:
                 shard_description=None,
                 innate=False,
                 icon_url=None,
+                mana_cost=None,
             ),
             AbilityData(
                 id=4,
@@ -259,6 +262,7 @@ class TestHardGenerators:
                 shard_description=None,
                 innate=False,
                 icon_url=None,
+                mana_cost=None,
             ),
             AbilityData(
                 id=5,
@@ -276,6 +280,7 @@ class TestHardGenerators:
                 shard_description=None,
                 innate=False,
                 icon_url=None,
+                mana_cost=None,
             ),
         ]
 
@@ -412,14 +417,14 @@ class TestChallengingGenerators:
         pytest.fail("gen_attribute_gain returned None")
 
     def test_night_vision_compare(self):
-        for _ in range(10):
-            q = gen_night_vision_compare()
-            if q is not None:
-                _validate_question(q)
-                assert q.difficulty == "challenging"
-                assert q.category == "night_vision_compare"
-                return
-        pytest.fail("gen_night_vision_compare returned None")
+        q = gen_night_vision_compare()
+        assert q is not None
+        _validate_question(q)
+        assert q.difficulty == "challenging"
+        assert q.category == "night_vision_compare"
+        assert q.image_url is not None
+        for opt in q.options:
+            int(opt)  # options are numeric vision range values
 
     def test_turn_rate(self):
         q = gen_turn_rate()
