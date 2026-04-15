@@ -187,14 +187,14 @@ class TestHeroFacets:
 
     def test_hero_has_facets(self):
         """Test that heroes have facets."""
-        hero = _get_hero_by_name("Anti-Mage")
+        hero = _get_hero_by_name("Witch Doctor")
         assert hero is not None
         assert hero.facets is not None
         assert len(hero.facets) >= 2  # Should have at least 2 facets
 
     def test_facet_has_description(self):
         """Test that facets have descriptions."""
-        hero = _get_hero_by_name("Anti-Mage")
+        hero = _get_hero_by_name("Witch Doctor")
         assert hero is not None
         for facet in hero.facets:
             assert facet.localized_name is not None
