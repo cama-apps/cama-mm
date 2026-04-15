@@ -15,7 +15,6 @@ from services.trivia_data import (
     HeroData,
     get_hero_by_id,
     load_abilities,
-    load_facets,
     load_heroes,
     load_items,
     load_voicelines,
@@ -396,31 +395,6 @@ def gen_move_speed() -> TriviaQuestion | None:
     )
 
 
-def gen_facet_to_hero() -> TriviaQuestion | None:
-    """M6: This facet description belongs to which hero?"""
-    facets = [
-        f for f in load_facets()
-        if f.description and f.hero_name
-        and not _hero_name_leaks(f.localized_name, f.hero_name)
-    ]
-    if len(facets) < 4:
-        return None
-    facet = random.choice(facets)
-    desc = redact_hero_name(facet.description[:120], facet.hero_name)
-    distractors = _pick_distractors(facet.hero_name, _hero_pool())
-    if not distractors:
-        return None
-    options, idx = _shuffle_options(facet.hero_name, distractors)
-    return TriviaQuestion(
-        text=f"'{facet.localized_name}: {desc}' — which hero's facet is this?",
-        options=options,
-        correct_index=idx,
-        difficulty="medium",
-        image_url=None,
-        category="facet_to_hero",
-        explanation=f"'{facet.localized_name}' is a facet for {facet.hero_name}.",
-    )
-
 
 def gen_damage_type() -> TriviaQuestion | None:
     """M7: What damage type is this ability?"""
@@ -542,8 +516,8 @@ def gen_hero_bio() -> TriviaQuestion | None:
     )
 
 
-def gen_voiceline() -> TriviaQuestion | None:
-    """H4: Which hero says this quote?"""
+def _pick_voiceline() -> tuple | None:
+    """Shared logic: pick a voiceline with name-leak check. Returns (hero, text) or None."""
     voicelines = load_voicelines()
     if len(voicelines) < 10:
         return None
@@ -551,12 +525,41 @@ def gen_voiceline() -> TriviaQuestion | None:
     hero = get_hero_by_id(vl.hero_id)
     if not hero:
         return None
-    # Make sure the voiceline doesn't contain the hero's name
-    text = vl.text.strip()
-    text = redact_hero_name(text, hero.localized_name)
-    # Skip if hero name still leaks after redaction
+    text = redact_hero_name(vl.text.strip(), hero.localized_name)
     if _hero_name_leaks(text, hero.localized_name):
         return None
+    return hero, text
+
+
+def gen_voiceline_with_image() -> TriviaQuestion | None:
+    """M: Which hero says this quote? (hero portrait shown)"""
+    result = _pick_voiceline()
+    if not result:
+        return None
+    hero, text = result
+    if not hero.image_url:
+        return None
+    distractors = _pick_distractors(hero.localized_name, _hero_pool())
+    if not distractors:
+        return None
+    options, idx = _shuffle_options(hero.localized_name, distractors)
+    return TriviaQuestion(
+        text=f'Which hero says: "{text}"?',
+        options=options,
+        correct_index=idx,
+        difficulty="medium",
+        image_url=hero.image_url,
+        category="voiceline_with_image",
+        explanation=f"This is a {hero.localized_name} voiceline.",
+    )
+
+
+def gen_voiceline() -> TriviaQuestion | None:
+    """C: Which hero says this quote? (no image)"""
+    result = _pick_voiceline()
+    if not result:
+        return None
+    hero, text = result
     distractors = _pick_distractors(hero.localized_name, _hero_pool())
     if not distractors:
         return None
@@ -687,57 +690,28 @@ def gen_ability_cooldown() -> TriviaQuestion | None:
     )
 
 
-def gen_facet_name() -> TriviaQuestion | None:
-    """H6: Which of these is a facet for this hero?"""
-    facets = load_facets()
-    if len(facets) < 4:
-        return None
-    facet = random.choice(facets)
-    hero = get_hero_by_id(facet.hero_id)
-    if not hero:
-        return None
-    # Use other heroes' facet names as distractors — filter out names that leak their hero
-    other_facets = [
-        f for f in facets
-        if f.hero_id != facet.hero_id
-        and not _hero_name_leaks(f.localized_name, f.hero_name or "")
-    ]
-    if len(other_facets) < 3:
-        return None
-    dist = random.sample(other_facets, 3)
-    distractors = [f.localized_name for f in dist]
-    options, idx = _shuffle_options(facet.localized_name, distractors)
-    return TriviaQuestion(
-        text=f"Which of these is a facet for {hero.localized_name}?",
-        options=options,
-        correct_index=idx,
-        difficulty="hard",
-        image_url=hero.image_url,
-        category="facet_name",
-        explanation=f"'{facet.localized_name}' is a facet for {hero.localized_name}.",
-    )
 
-
-def gen_base_armor_compare() -> TriviaQuestion | None:
-    """H7: Which hero has the highest base armor?"""
-    heroes = [h for h in load_heroes() if h.base_armor is not None]
+def gen_armor_at_level1_compare() -> TriviaQuestion | None:
+    """H7: Which hero has the highest armor at level 1?"""
+    heroes = [h for h in load_heroes() if h.armor_at_level1 is not None]
     if len(heroes) < 4:
         return None
     chosen = random.sample(heroes, 4)
-    armors = [h.base_armor for h in chosen]
-    if len(set(armors)) < 3:
+    highest = max(chosen, key=lambda h: h.armor_at_level1)
+    # Skip if the top value ties with another chosen hero
+    if sum(1 for h in chosen if h.armor_at_level1 == highest.armor_at_level1) > 1:
         return None
-    highest = max(chosen, key=lambda h: h.base_armor)
     distractors = [h.localized_name for h in chosen if h != highest][:3]
     options, idx = _shuffle_options(highest.localized_name, distractors)
+    armor_val = round(highest.armor_at_level1, 1)
     return TriviaQuestion(
-        text="Which of these heroes has the highest base armor?",
+        text="Which of these heroes has the highest armor at level 1?",
         options=options,
         correct_index=idx,
         difficulty="hard",
         image_url=None,
-        category="base_armor_compare",
-        explanation=f"{highest.localized_name} has {highest.base_armor} base armor.",
+        category="armor_at_level1_compare",
+        explanation=f"{highest.localized_name} has {armor_val} armor at level 1.",
     )
 
 
@@ -826,6 +800,171 @@ def gen_enchantment_effect() -> TriviaQuestion | None:
 
 
 # ---------------------------------------------------------------------------
+# New stat-based generators
+# ---------------------------------------------------------------------------
+
+def gen_ability_mana_cost() -> TriviaQuestion | None:
+    """H: What is X's max-level mana cost?"""
+    abilities = [a for a in load_abilities() if a.mana_cost and a.icon_url and a.hero_name]
+    if len(abilities) < 4:
+        return None
+    ability = random.choice(abilities)
+    mc_str = ability.mana_cost.replace("/", " ")
+    mc_parts = mc_str.split()
+    correct = mc_parts[-1].strip() if mc_parts else ""
+    if not correct:
+        return None
+    try:
+        mc_val = float(correct)
+    except ValueError:
+        return None
+    if mc_val > 600:
+        return None  # sanity check
+    offsets = [-50, -25, -15, 15, 25, 50, 75]
+    random.shuffle(offsets)
+    wrong = []
+    for off in offsets:
+        val = mc_val + off
+        if val > 0:
+            formatted = str(int(val)) if val == int(val) else str(val)
+            if formatted != correct and formatted not in wrong:
+                wrong.append(formatted)
+        if len(wrong) >= 3:
+            break
+    if len(wrong) < 3:
+        return None
+    options, idx = _shuffle_options(correct, wrong)
+    return TriviaQuestion(
+        text=f"What is {ability.localized_name}'s max-level mana cost?",
+        options=options,
+        correct_index=idx,
+        difficulty="hard",
+        image_url=ability.icon_url,
+        category="ability_mana_cost",
+        explanation=f"{ability.localized_name} costs {correct} mana at max level.",
+    )
+
+
+def gen_item_active_cooldown() -> TriviaQuestion | None:
+    """H: What is this item's active cooldown?"""
+    items = [
+        i for i in load_items()
+        if i.active_cooldown and i.icon_url and i.neutral_tier is None
+    ]
+    if len(items) < 4:
+        return None
+    item = random.choice(items)
+    cd_str = item.active_cooldown.replace("/", " ")
+    cd_parts = cd_str.split()
+    correct = cd_parts[-1].strip() if cd_parts else ""
+    if not correct:
+        return None
+    try:
+        cd_val = float(correct)
+    except ValueError:
+        return None
+    if cd_val > 300:
+        return None
+    offsets = [-20, -10, -5, 5, 10, 20, 30]
+    random.shuffle(offsets)
+    wrong = []
+    for off in offsets:
+        val = cd_val + off
+        if val > 0:
+            formatted = str(int(val)) if val == int(val) else str(val)
+            if formatted != correct and formatted not in wrong:
+                wrong.append(formatted)
+        if len(wrong) >= 3:
+            break
+    if len(wrong) < 3:
+        return None
+    options, idx = _shuffle_options(correct, wrong)
+    return TriviaQuestion(
+        text=f"What is {item.localized_name}'s active cooldown (seconds)?",
+        options=options,
+        correct_index=idx,
+        difficulty="hard",
+        image_url=item.icon_url,
+        category="item_active_cooldown",
+        explanation=f"{item.localized_name} has a {correct}s cooldown.",
+    )
+
+
+def gen_attack_damage_compare() -> TriviaQuestion | None:
+    """H: Which hero has the highest base attack damage?"""
+    heroes = [h for h in load_heroes() if h.attack_damage_min and h.attack_damage_max]
+    if len(heroes) < 4:
+        return None
+    chosen = random.sample(heroes, 4)
+    # Use average of min/max as the comparison value
+    highest = max(chosen, key=lambda h: (h.attack_damage_min + h.attack_damage_max) / 2)
+    highest_avg = (highest.attack_damage_min + highest.attack_damage_max) / 2
+    if sum(1 for h in chosen if (h.attack_damage_min + h.attack_damage_max) / 2 == highest_avg) > 1:
+        return None
+    distractors = [h.localized_name for h in chosen if h != highest][:3]
+    options, idx = _shuffle_options(highest.localized_name, distractors)
+    dmg_range = f"{highest.attack_damage_min}–{highest.attack_damage_max}"
+    return TriviaQuestion(
+        text="Which of these heroes has the highest base attack damage?",
+        options=options,
+        correct_index=idx,
+        difficulty="hard",
+        image_url=None,
+        category="attack_damage_compare",
+        explanation=f"{highest.localized_name} has {dmg_range} base attack damage.",
+    )
+
+
+def gen_night_vision_compare() -> TriviaQuestion | None:
+    """C: Which hero has the highest night vision?"""
+    heroes = [h for h in load_heroes() if h.vision_night and h.vision_night > 0]
+    if len(heroes) < 4:
+        return None
+    chosen = random.sample(heroes, 4)
+    highest = max(chosen, key=lambda h: h.vision_night)
+    if sum(1 for h in chosen if h.vision_night == highest.vision_night) > 1:
+        return None
+    distractors = [h.localized_name for h in chosen if h != highest][:3]
+    options, idx = _shuffle_options(highest.localized_name, distractors)
+    return TriviaQuestion(
+        text="Which of these heroes has the highest night vision?",
+        options=options,
+        correct_index=idx,
+        difficulty="challenging",
+        image_url=None,
+        category="night_vision_compare",
+        explanation=f"{highest.localized_name} has {highest.vision_night} night vision.",
+    )
+
+
+def gen_turn_rate() -> TriviaQuestion | None:
+    """C: What is this hero's turn rate?"""
+    heroes = [h for h in load_heroes() if h.turn_rate and h.turn_rate > 0]
+    if not heroes:
+        return None
+    # Only a handful of distinct turn rate values exist — use them as options
+    distinct_rates = sorted({h.turn_rate for h in heroes})
+    if len(distinct_rates) < 4:
+        return None
+    hero = random.choice(heroes)
+    correct = f"{hero.turn_rate:.2f}"
+    distractors = [f"{r:.2f}" for r in distinct_rates if r != hero.turn_rate]
+    if len(distractors) < 3:
+        return None
+    distractors = random.sample(distractors, 3)
+    options, idx = _shuffle_options(correct, distractors)
+    return TriviaQuestion(
+        text=f"What is {hero.localized_name}'s turn rate?",
+        options=options,
+        correct_index=idx,
+        difficulty="challenging",
+        image_url=hero.image_url,
+        category="turn_rate",
+        explanation=f"{hero.localized_name} has a turn rate of {correct}.",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Generator registry + selection
 # ---------------------------------------------------------------------------
 
@@ -843,10 +982,9 @@ EASY_GENERATORS = [
 
 MEDIUM_GENERATORS = [
     gen_hero_real_name,
-    gen_facet_to_hero,
     gen_hero_by_hype,
     gen_innate_ability,
-    gen_enchantment_effect,
+    gen_voiceline_with_image,
 ]
 
 HARD_GENERATORS = [
@@ -858,14 +996,18 @@ HARD_GENERATORS = [
     gen_hero_bio,
     gen_move_speed,
     gen_ability_cooldown,
-    gen_facet_name,
-    gen_base_armor_compare,
+    gen_armor_at_level1_compare,
+    gen_ability_mana_cost,
+    gen_item_active_cooldown,
+    gen_attack_damage_compare,
 ]
 
 CHALLENGING_GENERATORS = [
     gen_voiceline,
     gen_base_attack_time,
     gen_attribute_gain,
+    gen_night_vision_compare,
+    gen_turn_rate,
 ]
 
 # Generators known to produce images — given 2x weight in selection
@@ -884,7 +1026,10 @@ IMAGE_GENERATORS = {
     gen_ability_lore,
     gen_item_lore,
     gen_ability_cooldown,
-    gen_facet_name,
+    gen_ability_mana_cost,
+    gen_item_active_cooldown,
+    gen_turn_rate,
+    gen_voiceline_with_image,
 }
 
 
