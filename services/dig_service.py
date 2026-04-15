@@ -2075,6 +2075,66 @@ class DigService:
             and prestige_level >= e.get("min_prestige", 0)
         ]
 
+        # ── Social Modifiers ──────────────────────────────────────
+        # Cheers, help, and sabotage create karmic feedback loops.
+        cheer_advance_bonus = 0
+        help_jc_bonus = 0
+        sabotage_karma = 0.0
+        sabotage_sympathy = 0.0
+        help_event_bonus = 0.0
+
+        # Active cheers → advance bonus (+1 per cheer, max +3)
+        active_cheers = [
+            c for c in self._get_cheers(tunnel)
+            if c.get("expires_at", 0) > now
+        ]
+        cheer_advance_bonus = min(len(active_cheers), 3)
+        advance_max += cheer_advance_bonus
+
+        # Recent social actions (single DB call, last 24h)
+        recent_social = self.dig_repo.get_recent_actions(
+            discord_id, guild_id, 20, hours=24,
+        )
+        help_given = [
+            a for a in recent_social
+            if a.get("action_type") == "help" and a.get("actor_id") == discord_id
+        ]
+        help_received = [
+            a for a in recent_social
+            if a.get("action_type") == "help" and a.get("target_id") == discord_id
+        ]
+        sabotage_given = [
+            a for a in recent_social
+            if a.get("action_type") == "sabotage" and a.get("actor_id") == discord_id
+        ]
+        sabotage_received = [
+            a for a in recent_social
+            if a.get("action_type") == "sabotage" and a.get("target_id") == discord_id
+        ]
+
+        # Helped someone recently → +1 jc_min (generosity rewarded)
+        if help_given:
+            help_jc_bonus = 1
+            jc_min += help_jc_bonus
+
+        # Sabotaged someone recently → +3% cave-in per sabotage (max +9%)
+        sabotage_karma = min(len(sabotage_given), 3) * 0.03
+        cave_in_chance += sabotage_karma
+
+        # Been sabotaged recently → -3% cave-in (sympathy)
+        if sabotage_received:
+            sabotage_sympathy = 0.03
+            cave_in_chance -= sabotage_sympathy
+
+        # Been helped recently → +5% event chance (allied passages)
+        if help_received:
+            help_event_bonus = 0.05
+            event_chance += help_event_bonus
+
+        # Re-clamp after social modifiers
+        cave_in_chance = max(0.01, cave_in_chance)
+        event_chance = min(event_chance, 0.75)
+
         preconditions = {
             "discord_id": discord_id,
             "guild_id": guild_id,
@@ -2125,6 +2185,11 @@ class DigService:
             "jc_max": jc_max,
             "event_chance": event_chance,
             "available_events": available_events,
+            "cheer_advance_bonus": cheer_advance_bonus,
+            "help_jc_bonus": help_jc_bonus,
+            "sabotage_karma": sabotage_karma,
+            "sabotage_sympathy": sabotage_sympathy,
+            "help_event_bonus": help_event_bonus,
         }
         return None, preconditions
 

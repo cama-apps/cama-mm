@@ -12,13 +12,13 @@ import pytest
 from repositories.dig_repository import DigRepository
 from repositories.player_repository import PlayerRepository
 from services.dig_llm_prompts import (
-    DIG_DICE_TOOL,
     DIG_ENGINE_SYSTEM_PROMPT,
     DIG_ENGINE_TOOL,
     DIG_OUTCOME_TOOL,
     DIG_SYSTEM_PROMPT,
     PLAY_STYLE_DESCRIPTIONS,
     build_dice_results_context,
+    build_dig_history_context,
     build_dig_outcome_context,
     build_engine_messages,
     build_messages,
@@ -306,12 +306,185 @@ class TestBuildMultiplayerContext:
 
     def test_with_actions(self):
         actions = [
-            {"action_type": "sabotage", "actor_id": 111, "target_id": 222, "created_at": 1000},
-            {"action_type": "help", "actor_id": 333, "target_id": 222, "created_at": 1001},
+            {
+                "action_type": "sabotage",
+                "actor_id": 111,
+                "target_id": 222,
+                "detail": json.dumps({"damage": 5, "target_id": 222}),
+            },
+            {
+                "action_type": "help",
+                "actor_id": 333,
+                "target_id": 222,
+                "detail": json.dumps({"advance": 3, "target_id": 222}),
+            },
         ]
         ctx = build_multiplayer_context(actions)
-        assert "SABOTAGE" in ctx
-        assert "HELP" in ctx
+        assert "Sabotage" in ctx
+        assert "Help" in ctx
+
+    def test_backward_compatible_no_tunnel(self):
+        actions = [
+            {"action_type": "sabotage", "detail": json.dumps({"damage": 4})},
+        ]
+        ctx = build_multiplayer_context(actions)
+        assert "Sabotage" in ctx
+
+    def test_active_cheers(self):
+        import time as _time
+        future = int(_time.time()) + 3600
+        tunnel = {"cheer_data": json.dumps([
+            {"cheerer_id": 111, "expires_at": future},
+            {"cheerer_id": 222, "expires_at": future},
+        ])}
+        ctx = build_multiplayer_context([], tunnel=tunnel)
+        assert "+10%" in ctx
+        assert "+2 advance" in ctx
+
+    def test_expired_cheers_excluded(self):
+        tunnel = {"cheer_data": json.dumps([
+            {"cheerer_id": 111, "expires_at": 1000},
+        ])}
+        ctx = build_multiplayer_context([], tunnel=tunnel)
+        assert "Cheer" not in ctx
+
+    def test_revenge_window_active(self):
+        import time as _time
+        future = int(_time.time()) + 7200
+        tunnel = {"revenge_target": 999, "revenge_type": "damage", "revenge_until": future}
+        ctx = build_multiplayer_context([], tunnel=tunnel)
+        assert "Revenge" in ctx
+        assert "damage" in ctx
+
+    def test_revenge_window_expired(self):
+        tunnel = {"revenge_target": 999, "revenge_type": "damage", "revenge_until": 1000}
+        ctx = build_multiplayer_context([], tunnel=tunnel)
+        assert "Revenge" not in ctx
+
+    def test_trap_armed(self):
+        tunnel = {"trap_active": 1}
+        ctx = build_multiplayer_context([], tunnel=tunnel)
+        assert "armed" in ctx
+
+    def test_protection_insured(self):
+        import time as _time
+        future = int(_time.time()) + 3600
+        tunnel = {"insured_until": future}
+        ctx = build_multiplayer_context([], tunnel=tunnel)
+        assert "insured" in ctx
+
+    def test_rank_shown(self):
+        ctx = build_multiplayer_context([], rank=3)
+        assert "#3" in ctx
+
+    def test_rank_zero_skipped(self):
+        ctx = build_multiplayer_context([], rank=0)
+        assert "Rank" not in ctx
+
+    def test_injury_shown(self):
+        tunnel = {"injury_state": json.dumps({"type": "reduced_advance", "digs_remaining": 2})}
+        ctx = build_multiplayer_context([], tunnel=tunnel)
+        assert "Injury" in ctx
+        assert "2 digs" in ctx
+
+    def test_all_empty(self):
+        ctx = build_multiplayer_context([], tunnel=None, rank=0)
+        assert ctx == ""
+
+
+class TestBuildDigHistoryContext:
+    def test_empty_actions_and_tunnel(self):
+        ctx = build_dig_history_context([], {})
+        assert ctx == ""
+
+    def test_lifetime_stats_from_tunnel(self):
+        tunnel = {"total_digs": 50, "total_jc_earned": 200, "max_depth": 60}
+        ctx = build_dig_history_context([], tunnel)
+        assert "50 digs" in ctx
+        assert "200 JC" in ctx
+
+    def test_dig_summary_with_cave_ins(self):
+        actions = []
+        for i in range(10):
+            cave_in = i < 3  # first 3 (most recent) are cave-ins
+            actions.append({
+                "action_type": "dig",
+                "depth_before": 40 + i,
+                "depth_after": 40 + i + (0 if cave_in else 2),
+                "detail": json.dumps({"cave_in": cave_in, "block_loss": 5 if cave_in else 0}),
+            })
+        ctx = build_dig_history_context(actions, {})
+        assert "7 advances" in ctx
+        assert "3 cave-ins" in ctx
+        assert "1 digs ago" in ctx  # most recent cave-in
+
+    def test_depth_trend(self):
+        actions = [
+            {"action_type": "dig", "depth_before": 50, "depth_after": 52, "detail": "{}"},
+            {"action_type": "dig", "depth_before": 38, "depth_after": 40, "detail": "{}"},
+        ]
+        tunnel = {"max_depth": 74}
+        ctx = build_dig_history_context(actions, tunnel)
+        assert "38->52" in ctx
+        assert "+14" in ctx
+        assert "74" in ctx
+
+    def test_boss_progress_display(self):
+        tunnel = {
+            "boss_progress": json.dumps({"25": "defeated", "50": "defeated", "75": "active"}),
+            "boss_attempts": 2,
+        }
+        ctx = build_dig_history_context([], tunnel)
+        assert "\u2713" in ctx  # checkmark for defeated
+        assert "2 attempts" in ctx
+
+    def test_prestige_shown_when_nonzero(self):
+        tunnel = {"prestige_level": 2, "best_run_score": 450}
+        ctx = build_dig_history_context([], tunnel)
+        assert "Prestige" in ctx
+        assert "450" in ctx
+
+    def test_prestige_hidden_when_zero(self):
+        tunnel = {"prestige_level": 0}
+        ctx = build_dig_history_context([], tunnel)
+        assert "Prestige" not in ctx
+
+    def test_recent_events(self):
+        actions = [
+            {"action_type": "event", "detail": json.dumps({"event_id": "crystal_golem"})},
+            {"action_type": "event", "detail": json.dumps({"event_id": "tunnel_collapse"})},
+        ]
+        ctx = build_dig_history_context(actions, {})
+        assert "crystal_golem" in ctx
+        assert "tunnel_collapse" in ctx
+
+    def test_recent_boss_fights(self):
+        actions = [
+            {
+                "action_type": "boss_fight",
+                "detail": json.dumps({"won": True, "risk": "reckless", "boundary": 50}),
+            },
+            {
+                "action_type": "boss_fight",
+                "detail": json.dumps({"won": False, "risk": "bold", "boundary": 75}),
+            },
+        ]
+        ctx = build_dig_history_context(actions, {})
+        assert "won" in ctx
+        assert "lost" in ctx
+        assert "reckless" in ctx
+
+    def test_invalid_detail_json(self):
+        actions = [
+            {"action_type": "dig", "depth_before": 10, "depth_after": 12, "detail": "not json"},
+        ]
+        ctx = build_dig_history_context(actions, {})
+        # Should not raise
+        assert "1 advances" in ctx
+
+    def test_none_tunnel(self):
+        ctx = build_dig_history_context([], None)
+        assert ctx == ""
 
 
 class TestBuildMessages:
@@ -329,6 +502,17 @@ class TestBuildMessages:
     def test_with_multiplayer(self):
         msgs = build_messages("system", "state", "personality", "outcome", "sabotage stuff")
         assert "MULTIPLAYER" in msgs[1]["content"]
+
+    def test_with_history(self):
+        msgs = build_messages("system", "state", "personality", "outcome", "", history="some history")
+        content = msgs[1]["content"]
+        assert "DIG HISTORY" in content
+        # History should appear between personality and outcome
+        assert content.index("PERSONALITY") < content.index("DIG HISTORY") < content.index("DIG OUTCOME")
+
+    def test_without_history(self):
+        msgs = build_messages("system", "state", "personality", "outcome", "")
+        assert "DIG HISTORY" not in msgs[1]["content"]
 
 
 # ---------------------------------------------------------------------------
@@ -651,13 +835,6 @@ class TestEngineToolDefinition:
         required = set(func["parameters"]["required"])
         assert {"advance", "jc_earned", "cave_in"} <= required
 
-    def test_dice_tool_structure(self):
-        assert DIG_DICE_TOOL["type"] == "function"
-        func = DIG_DICE_TOOL["function"]
-        assert func["name"] == "roll_dice"
-        props = func["parameters"]["properties"]
-        assert "rolls" in props
-
     def test_engine_system_prompt_not_empty(self):
         assert len(DIG_ENGINE_SYSTEM_PROMPT) > 100
         assert "Dungeon Master" in DIG_ENGINE_SYSTEM_PROMPT
@@ -845,23 +1022,6 @@ class TestValidateEngineOutcome:
         assert "narrative" not in result
         assert "tone" not in result
 
-    def test_validate_dice_rolls_clamps(self):
-        result = self.validator.validate_dice_rolls(
-            {"rolls": [{"label": "cave in!", "sides": 500, "count": 99, "modifier": 500}]},
-            self._preconditions(),
-        )
-        assert result == [{
-            "label": "cavein",
-            "sides": 100,
-            "count": 3,
-            "modifier": 100,
-        }]
-
-    def test_validate_dice_rolls_defaults(self):
-        result = self.validator.validate_dice_rolls({}, self._preconditions())
-        labels = {r["label"] for r in result}
-        assert {"cave_in", "event", "advance", "jc"} <= labels
-
 
 # ---------------------------------------------------------------------------
 # dig_with_preconditions
@@ -999,12 +1159,8 @@ class TestDigLLMServiceRunDig:
         elif tool_result:
             ai_service.call_with_tools = AsyncMock(return_value=tool_result)
         else:
-            # Default: 3-call flow — dice → resolve (mechanics) → narrate
+            # Default: 2-call flow — resolve (mechanics) → narrate
             ai_service.call_with_tools = AsyncMock(side_effect=[
-                _MockToolCallResult(
-                    tool_name="roll_dice",
-                    tool_args={"rolls": [{"label": "cave_in", "sides": 100}]},
-                ),
                 _MockToolCallResult(
                     tool_name="resolve_dig",
                     tool_args={
@@ -1042,16 +1198,12 @@ class TestDigLLMServiceRunDig:
         assert result["llm_narrative"] == "DM narrates the dig."
 
     @pytest.mark.asyncio
-    async def test_run_dig_rolls_dice_before_resolving(self, dig_repo, player_repository, dig_service):
+    async def test_run_dig_includes_dice_results(self, dig_repo, player_repository, dig_service):
         uid = _register_player(player_repository)
         p = self._get_preconditions(dig_service, uid)
 
         ai_service = MagicMock()
         ai_service.call_with_tools = AsyncMock(side_effect=[
-            _MockToolCallResult(
-                tool_name="roll_dice",
-                tool_args={"rolls": [{"label": "cave_in", "sides": 100}]},
-            ),
             _MockToolCallResult(
                 tool_name="resolve_dig",
                 tool_args={
@@ -1071,9 +1223,9 @@ class TestDigLLMServiceRunDig:
 
         assert result["success"] is True
         assert result["llm_narrative"] == "The dice clatter in the dark."
-        assert ai_service.call_with_tools.call_count == 3
-        # Second call (resolve) should see dice results
-        resolve_messages = ai_service.call_with_tools.call_args_list[1].args[0]
+        assert ai_service.call_with_tools.call_count == 2
+        # First call (resolve) should see locally-rolled dice results
+        resolve_messages = ai_service.call_with_tools.call_args_list[0].args[0]
         assert "DICE RESULTS" in resolve_messages[1]["content"]
 
     @pytest.mark.asyncio

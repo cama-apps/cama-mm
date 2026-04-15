@@ -186,6 +186,7 @@ class AIService:
         messages: list[dict[str, str]],
         tools: list[dict[str, Any]],
         tool_choice: str | dict[str, Any] = "auto",
+        max_tokens: int | None = None,
     ) -> ToolCallResult:
         """
         Call LLM with tool definitions and return tool call results.
@@ -207,7 +208,7 @@ class AIService:
                 "tools": tools,
                 "tool_choice": tool_choice,
                 "timeout": self.timeout,
-                "max_tokens": 2000,  # Reasoning models need more tokens for thinking + tool call
+                "max_tokens": max_tokens or 2000,
                 "num_retries": 0,  # No retries - fail fast
             }
             # Groq requires parsed/hidden reasoning_format with tool calls

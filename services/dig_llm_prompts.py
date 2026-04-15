@@ -10,7 +10,10 @@ messages list that gets sent to ``AIService.call_with_tools``.
 from __future__ import annotations
 
 import json
+import time
 from typing import Any
+
+from services.dig_constants import BOSS_NAMES
 
 # ---------------------------------------------------------------------------
 # Pickaxe tier names (index == tier number in the tunnel dict)
@@ -58,36 +61,21 @@ DIG_OUTCOME_TOOL: dict[str, Any] = {
     "type": "function",
     "function": {
         "name": "narrate_dig_outcome",
-        "description": (
-            "Produce a structured narrative for a single dig outcome. "
-            "The deterministic engine has already resolved all mechanics -- "
-            "this tool wraps the creative narration."
-        ),
+        "description": "Narrate a dig outcome. Mechanics are already resolved.",
         "parameters": {
             "type": "object",
             "properties": {
                 "narrative": {
                     "type": "string",
-                    "description": (
-                        "2-4 sentences of personalized narrative for this dig. "
-                        "Reference player history, personality, current context. "
-                        "Be vivid and specific to the layer/depth."
-                    ),
+                    "description": "2-4 sentences. Personalized, vivid, layer-specific.",
                 },
                 "event_flavor": {
                     "type": "string",
-                    "description": (
-                        "If an event triggered, a personalized description "
-                        "replacing the stock event text. Must preserve the "
-                        "event's mechanical meaning. Empty string if no event."
-                    ),
+                    "description": "Personalized event description, or empty.",
                 },
                 "cave_in_flavor": {
                     "type": "string",
-                    "description": (
-                        "If a cave-in occurred, personalized cave-in "
-                        "description. Empty string if no cave-in."
-                    ),
+                    "description": "Personalized cave-in description, or empty.",
                 },
                 "tone": {
                     "type": "string",
@@ -99,14 +87,11 @@ DIG_OUTCOME_TOOL: dict[str, Any] = {
                         "melancholy",
                         "absurd",
                     ],
-                    "description": "The emotional tone of this narration",
+                    "description": "Emotional tone.",
                 },
                 "callback_reference": {
                     "type": "string",
-                    "description": (
-                        "Optional: reference to a previous notable moment "
-                        "in this player's history. Empty string if none."
-                    ),
+                    "description": "Reference to a past notable moment, or empty.",
                 },
             },
             "required": ["narrative", "tone"],
@@ -118,55 +103,42 @@ DIG_ENGINE_TOOL: dict[str, Any] = {
     "type": "function",
     "function": {
         "name": "resolve_dig",
-        "description": (
-            "Resolve a dig action as the Dungeon Master. Make mechanical decisions "
-            "(advance, JC, cave-in, events) within the provided ranges. "
-            "Narration is handled in a separate step — only return numbers."
-        ),
+        "description": "Resolve a dig. Return only mechanical decisions, no narration.",
         "parameters": {
             "type": "object",
             "properties": {
-                # Mechanical decisions
                 "advance": {
                     "type": "integer",
-                    "description": "Blocks the player advances (0 if cave-in). Must be within the provided range.",
+                    "description": "Blocks advanced. 0 if cave-in. Within [advance_min, advance_max].",
                 },
                 "jc_earned": {
                     "type": "integer",
-                    "description": "Jopacoins earned. Must be within the provided range.",
+                    "description": "JC earned. Within [jc_min, jc_max].",
                 },
                 "cave_in": {
                     "type": "boolean",
-                    "description": "Whether the tunnel collapses. Cave-in chance is provided — you decide.",
+                    "description": "Whether cave-in occurs. Use dice + cave-in chance.",
                 },
                 "cave_in_block_loss": {
                     "type": "integer",
-                    "description": "Blocks lost in cave-in (3-8). 0 if no cave-in.",
+                    "description": "Blocks lost (3-8). 0 if no cave-in.",
                 },
                 "cave_in_type": {
                     "type": "string",
                     "enum": ["none", "stun", "injury", "medical_bill"],
-                    "description": "Cave-in consequence type. 'none' if no cave-in.",
+                    "description": "Consequence type. 'none' if no cave-in.",
                 },
                 "cave_in_jc_lost": {
                     "type": "integer",
-                    "description": "JC lost to medical bills (only for medical_bill type). 0 otherwise.",
+                    "description": "JC lost for medical_bill type. 0 otherwise.",
                 },
-                # Event decisions
                 "event_id": {
                     "type": "string",
-                    "description": (
-                        "Event ID from the available events list, or empty string for no event. "
-                        "Event chance is provided — you decide whether one triggers."
-                    ),
-                },
-                "event_name": {
-                    "type": "string",
-                    "description": "Display name for the event (use the event's name from the list).",
+                    "description": "Event ID from available list, or empty for no event.",
                 },
                 "event_description": {
                     "type": "string",
-                    "description": "Personalized event description replacing stock text. Empty if no event.",
+                    "description": "Personalized event description, or empty.",
                 },
             },
             "required": [
@@ -174,58 +146,6 @@ DIG_ENGINE_TOOL: dict[str, Any] = {
                 "jc_earned",
                 "cave_in",
             ],
-        },
-    },
-}
-
-DIG_DICE_TOOL: dict[str, Any] = {
-    "type": "function",
-    "function": {
-        "name": "roll_dice",
-        "description": (
-            "Request random dice rolls needed to resolve a dig. Use this before "
-            "resolve_dig for chance procs such as cave-ins, events, advance, JC, "
-            "cave-in loss, and consequence type."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "rolls": {
-                    "type": "array",
-                    "description": "Dice rolls requested by the Dungeon Master.",
-                    "maxItems": 8,
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "label": {
-                                "type": "string",
-                                "description": (
-                                    "Short label like cave_in, event, advance, "
-                                    "jc, cave_in_loss, or consequence."
-                                ),
-                            },
-                            "sides": {
-                                "type": "integer",
-                                "minimum": 2,
-                                "maximum": 100,
-                                "description": "Number of sides on the die.",
-                            },
-                            "count": {
-                                "type": "integer",
-                                "minimum": 1,
-                                "maximum": 3,
-                                "description": "How many dice of this type to roll.",
-                            },
-                            "modifier": {
-                                "type": "integer",
-                                "description": "Flat modifier added to the total.",
-                            },
-                        },
-                        "required": ["label", "sides"],
-                    },
-                },
-            },
-            "required": ["rolls"],
         },
     },
 }
@@ -256,8 +176,10 @@ CAVE-INS: Lose 3-8 blocks. Secondary effects: stun (skip next dig), injury \
 (reduced advance 3 digs), or medical bill (lose JC). Mitigated by Hard Hat \
 charges, pickaxe tier, and prestige perks.
 
-LUMINOSITY (0-100): Drains each dig. Bright/Dim/Dark/Pitch Black. Lower light \
-increases cave-in chance and reduces JC earnings. Lanterns restore it.
+LIGHT (0-100, labeled "luminosity" in data): Drains each dig. \
+Bright/Dim/Dark/Pitch Black. Lower light increases cave-in chance and \
+reduces JC earnings. Lanterns restore it. Narrate as "light", "glow", \
+"darkness" — never use the word "luminosity" in your narrative.
 
 PRESTIGE (0-10): Reset depth to 0, keep pickaxe, gain perks. Ascension \
 modifiers add difficulty + rewards. Higher prestige unlocks better pickaxes \
@@ -283,8 +205,13 @@ WHAT TO NARRATE (check the DIG OUTCOME section carefully):
   - If there was an ARTIFACT FOUND, celebrate the discovery
   - If there was a BOSS ENCOUNTER, build tension for the upcoming fight
   - If there was a STREAK BONUS, note the player's consistency
-  - Reference equipped relics, active weather, luminosity, miner backstory, \
-3 S stats, and personality traits
+  - The miner's BACKSTORY is their identity — weave it into the narrative \
+when set. 
+  - Show the EFFECTS of S stats indirectly — a high-Strength miner swings \
+powerfully, high-Smarts notices details, high-Stamina endures hardship. \
+Never name the stats directly ("Stamina", "Strength") in your text.
+  - Reference equipped relics, active weather, and light level (called \
+"luminosity" in the data — narrate as "light", "glow", "darkness", etc.)
   - Keep narratives to 2-4 sentences. Be vivid, specific to the layer.
   - ONLY narrate things that ACTUALLY HAPPENED in the outcome. If cave_in is \
 not in the outcome, do NOT describe walls collapsing or blocks being lost.
@@ -293,6 +220,10 @@ CRITICAL: Do NOT repeat exact numbers (blocks gained/lost, JC amounts, depths) \
 in your narrative — those are already shown in the embed fields below your text. \
 Focus on atmosphere, emotion, and flavor. Say "the walls collapse around you" \
 not "you lost 7 blocks". Say "gold glints in the rubble" not "you earned 5 JC".
+
+DIG HISTORY for personalization: cave-in streaks, depth milestones, \
+boss victories, ally cheers, rival sabotage dynamics. Use MULTIPLAYER context \
+(revenge windows, active cheers, rivalries) for narrative flavor.
 
 BOSS FIGHTS: If the outcome describes a boss fight, narrate the battle itself. \
 Reference the boss's personality and title, the player's risk choice \
@@ -306,33 +237,21 @@ the visual weight."""
 # ===================================================================
 
 DIG_ENGINE_SYSTEM_PROMPT: str = """\
-You are the Dungeon Master for a tunnel-digging minigame inside a Discord bot \
-for a Dota 2 inhouse league. You don't just narrate — you DECIDE what happens. \
-You receive the game rules, player state, and context, and determine the outcome \
-when a player digs.
+You are the Dungeon Master for a tunnel-digging minigame. You DECIDE what \
+happens when a player digs!
 
-LAYERS (depth -> name | cave-in% | JC range | advance):
-  0-25 Dirt 5% 0-1 JC 1-3 blk | 26-50 Stone 10% 0-2 JC 1-3 blk
-  51-75 Crystal 18% 1-3 JC 1-2 blk | 76-100 Magma 25% 1-5 JC 1-2 blk
-  101-150 Abyss 35% 2-8 JC 1-2 blk | 151-200 Fungal Depths 40% 3-10 JC 1-2 blk
-  201-275 Frozen Core 45% 4-12 JC 1-2 blk | 276+ The Hollow 50% 5-15 JC 1-1 blk
+All effective ranges (advance, JC, cave-in chance, events) are pre-computed \
+and provided in the DIG PRECONDITIONS section. Your choices MUST stay within \
+those ranges.
 
-BOSSES at depths 25/50/75/100/150/200/275 — you CANNOT skip boss boundaries.
+CAVE-INS: Player loses 3-8 blocks. Secondary: stun (skip next dig), injury \
+(reduced advance 3 digs), or medical_bill (lose JC).
 
-PICKAXES (7 tiers): Wooden > Stone > Iron > Diamond > Obsidian > Frostforged > \
-Void-Touched. Higher tiers grant advance bonus, cave-in reduction, loot bonus.
-
-CAVE-INS: When you decide a cave-in occurs, the player loses 3-8 blocks. \
-Secondary effects: stun (skip next dig), injury (reduced advance 3 digs), or \
-medical bill (lose JC). Consider the player's gear and history when choosing \
-consequences.
-
-ITEM CONSTRAINTS (read the preconditions carefully!):
-  - If "Hard Hat" is active: cave-in CANNOT happen. Do not set cave_in=true.
-  - If "Grappling Hook" is active: cave_in_block_loss MUST be 0.
-  - If "Void-Touched Pickaxe": subtract 1 from cave_in_block_loss (min 1).
-  - If a weather loss cap is listed: cave_in_block_loss must not exceed it.
-  - Never set cave_in=true when a rule prevents it.
+ITEM CONSTRAINTS (from preconditions):
+  - Hard Hat active → cave-in CANNOT happen.
+  - Grappling Hook active → cave_in_block_loss MUST be 0.
+  - Void-Touched Pickaxe → subtract 1 from cave_in_block_loss (min 1).
+  - Weather loss cap → cave_in_block_loss must not exceed it.
 
 LUMINOSITY (0-100): Lower light increases danger. Bright/Dim/Dark/Pitch Black.
 
@@ -348,22 +267,21 @@ perks, and modifiers). Your choices MUST stay within these ranges:
   - event: pick from available events or skip (event chance is guidance)
 
 DECISION GUIDELINES:
-  - First call roll_dice for the randomness you need, especially d100 cave-in, \
-d100 event, advance, JC, cave-in loss, and consequence rolls. Treat dice results \
-as binding randomness.
-  - Use the provided cave-in chance as a probability. If the cave-in d100 result \
-is under the chance, trigger a cave-in unless a listed rule prevents it.
-  - For events, use the event chance similarly. Pick events that fit the player's \
-current depth, layer atmosphere, and personality. STRONGLY prefer events marked \
-with ★ (has artwork) — these display with custom art in the player's embed.
-  - Reward persistence: if a player has been grinding steadily, give them a good \
-dig occasionally. If they're on a hot streak, introduce tension.
-  - Personalize consequences: a veteran player gets dramatic cave-ins, a new player \
-gets gentler ones.
+  - Dice results are pre-rolled in the DICE RESULTS section. Treat them as \
+binding randomness.
+  - Use cave-in chance as probability: if the cave_in d100 is under the \
+chance, trigger a cave-in unless a rule prevents it.
+  - For events, use event chance similarly. STRONGLY prefer ★ events (has artwork).
+  - Reward persistence; introduce tension on hot streaks.
+  - Personalize consequences: a veteran players may get dramatic cave-ins; new players get gentler ones.
 
-OUTPUT: Return ONLY mechanical decisions via the resolve_dig tool. \
-Do NOT write narrative text — narration is generated in a separate step \
-after the outcome is applied to the game state.\""""
+HISTORY AWARENESS:
+  - Check DIG HISTORY for recent cave-ins. Don't pile more on a \
+player who just had several.
+  - Reward persistence and long streaks with slightly better outcomes.
+  - Consider social context (cheers, sabotage, rivalry).
+
+OUTPUT: Return ONLY mechanical decisions via resolve_dig. No narrative.\""""
 
 # ===================================================================
 # Play style descriptions
@@ -814,49 +732,317 @@ def build_preconditions_context(preconditions: dict) -> str:
     luminosity = preconditions.get("luminosity", 100)
     lines.append(f"Luminosity: {luminosity}/100")
 
+    # Social modifiers (already folded into ranges above)
+    social_parts = []
+    if preconditions.get("cheer_advance_bonus"):
+        social_parts.append(
+            f"Cheers: +{preconditions['cheer_advance_bonus']} advance "
+            "(allied strength flows through connected tunnels)"
+        )
+    if preconditions.get("help_jc_bonus"):
+        social_parts.append("Generosity: +1 JC min (the tunnels remember your kindness)")
+    if preconditions.get("sabotage_karma"):
+        social_parts.append(
+            f"Karma: +{preconditions['sabotage_karma']:.0%} cave-in "
+            "(the deep has noticed your treachery)"
+        )
+    if preconditions.get("sabotage_sympathy"):
+        social_parts.append(
+            f"Sympathy: -{preconditions['sabotage_sympathy']:.0%} cave-in "
+            "(the tunnels offer respite after hardship)"
+        )
+    if preconditions.get("help_event_bonus"):
+        social_parts.append(
+            f"Allied passages: +{preconditions['help_event_bonus']:.0%} event chance "
+            "(connected tunnels reveal new paths)"
+        )
+    if social_parts:
+        lines.append("Social effects: " + " | ".join(social_parts))
+
     return "\n".join(lines)
 
 
-def build_multiplayer_context(social_actions: list[dict]) -> str:
-    """Summarize recent social interactions for the LLM.
+def build_multiplayer_context(
+    social_actions: list[dict],
+    tunnel: dict | None = None,
+    rank: int = 0,
+    names: dict[int, str] | None = None,
+) -> str:
+    """Summarize recent social interactions and social state for the LLM.
 
-    Groups actions by type and mentions player IDs and timing.
-    Returns an empty string when there are no social actions so the
-    caller can skip the section entirely.
+    Includes action summaries with player names, active cheers, revenge
+    windows, trap/protection status, injury state, and leaderboard rank.
+    Returns an empty string when there is nothing to report.
+
+    *names* maps discord_id → display name for personalizing references.
     """
-    if not social_actions:
-        return ""
-
-    grouped: dict[str, list[dict]] = {}
-    for action in social_actions:
-        if not isinstance(action, dict):
-            continue
-        atype = action.get("action_type", "unknown")
-        grouped.setdefault(atype, []).append(action)
-
     lines: list[str] = []
-    for atype, actions in grouped.items():
-        entries: list[str] = []
-        for a in actions:
-            actor = a.get("actor_id", "?")
-            target = a.get("target_id", "?")
-            created = a.get("created_at", "")
-            detail = a.get("details", "")
-            if isinstance(detail, str):
+    now = int(time.time())
+    _names = names or {}
+
+    def _name(pid: int | None) -> str:
+        if pid and pid in _names:
+            return _names[pid]
+        return "someone"
+
+    # --- Social action summaries with names ---
+    if social_actions:
+        sab_received_parts: list[str] = []
+        sab_dealt_parts: list[str] = []
+        help_received_parts: list[str] = []
+        help_given_parts: list[str] = []
+        other_counts: dict[str, int] = {}
+        for action in social_actions:
+            if not isinstance(action, dict):
+                continue
+            atype = action.get("action_type", "unknown")
+            detail_raw = action.get("detail") or action.get("details") or ""
+            detail: dict = {}
+            if isinstance(detail_raw, str):
                 try:
-                    detail = json.loads(detail)
+                    detail = json.loads(detail_raw)
                 except (json.JSONDecodeError, TypeError):
                     pass
-            summary = ""
-            if isinstance(detail, dict):
-                summary = detail.get("summary", detail.get("message", ""))
-            entries.append(
-                f"  actor={actor} target={target}"
-                + (f" at={created}" if created else "")
-                + (f" ({summary})" if summary else "")
-            )
-        lines.append(f"{atype.upper()} ({len(actions)}):")
-        lines.extend(entries)
+            elif isinstance(detail_raw, dict):
+                detail = detail_raw
+
+            if atype == "sabotage":
+                dmg = int(detail.get("damage", 0) or 0)
+                tid = detail.get("target_id")
+                aid = action.get("actor_id")
+                if tid:
+                    # Player was actor — sabotaged someone
+                    sab_dealt_parts.append(f"-{dmg} to {_name(tid)}")
+                else:
+                    # Player was target — got sabotaged
+                    sab_received_parts.append(f"-{dmg} from {_name(aid)}")
+            elif atype == "help":
+                adv = int(detail.get("advance", 0) or 0)
+                tid = detail.get("target_id")
+                aid = action.get("actor_id")
+                if tid:
+                    help_given_parts.append(f"+{adv} to {_name(tid)}")
+                else:
+                    help_received_parts.append(f"+{adv} from {_name(aid)}")
+            else:
+                other_counts[atype] = other_counts.get(atype, 0) + 1
+
+        if sab_received_parts or sab_dealt_parts:
+            parts = []
+            if sab_received_parts:
+                parts.append(f"hit by: {', '.join(sab_received_parts)}")
+            if sab_dealt_parts:
+                parts.append(f"dealt: {', '.join(sab_dealt_parts)}")
+            lines.append(f"Sabotage: {'; '.join(parts)}")
+        if help_received_parts or help_given_parts:
+            parts = []
+            if help_received_parts:
+                parts.append(f"received: {', '.join(help_received_parts)}")
+            if help_given_parts:
+                parts.append(f"gave: {', '.join(help_given_parts)}")
+            lines.append(f"Help: {'; '.join(parts)}")
+        for atype, count in other_counts.items():
+            lines.append(f"{atype.capitalize()}: {count}")
+
+    # --- Tunnel-derived social state ---
+    if tunnel and isinstance(tunnel, dict):
+        # Active cheers
+        cheer_raw = tunnel.get("cheer_data")
+        if cheer_raw:
+            if isinstance(cheer_raw, str):
+                try:
+                    cheers = json.loads(cheer_raw)
+                except (json.JSONDecodeError, TypeError):
+                    cheers = []
+            else:
+                cheers = cheer_raw if isinstance(cheer_raw, list) else []
+            active_cheers = [c for c in cheers if isinstance(c, dict) and c.get("expires_at", 0) > now]
+            if active_cheers:
+                boost = min(len(active_cheers) * 5, 15)
+                cheerer_names = [_name(c.get("cheerer_id")) for c in active_cheers]
+                lines.append(
+                    f"Cheers: {', '.join(cheerer_names)} "
+                    f"(+{boost}% boss boost, +{len(active_cheers)} advance)"
+                )
+
+        # Revenge window
+        revenge_until = int(tunnel.get("revenge_until") or 0)
+        if revenge_until > now:
+            rtype = tunnel.get("revenge_type", "unknown")
+            hours_left = max(1, (revenge_until - now) // 3600)
+            lines.append(f"Revenge: {rtype} boost active ({hours_left}h left)")
+
+        # Trap
+        if tunnel.get("trap_active"):
+            lines.append("Trap: armed")
+
+        # Protection
+        protections = []
+        if int(tunnel.get("insured_until") or 0) > now:
+            protections.append("insured")
+        if int(tunnel.get("reinforced_until") or 0) > now:
+            protections.append("reinforced")
+        if protections:
+            lines.append(f"Protection: {', '.join(protections)}")
+
+        # Injury
+        injury_raw = tunnel.get("injury_state")
+        if injury_raw:
+            if isinstance(injury_raw, str):
+                try:
+                    injury = json.loads(injury_raw)
+                except (json.JSONDecodeError, TypeError):
+                    injury = {}
+            else:
+                injury = injury_raw if isinstance(injury_raw, dict) else {}
+            remaining = int(injury.get("digs_remaining", 0) or 0)
+            if remaining > 0:
+                itype = injury.get("type", "injury")
+                lines.append(f"Injury: {itype} ({remaining} digs remaining)")
+
+    # --- Leaderboard rank ---
+    if rank > 0:
+        lines.append(f"Rank: #{rank} in guild")
+
+    return "\n".join(lines)
+
+
+def _parse_detail(action: dict) -> dict:
+    """Parse the detail JSON from a dig_actions row, returning {} on failure."""
+    raw = action.get("detail") or action.get("details") or ""
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        try:
+            return json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return {}
+    return {}
+
+
+# Short boss name lookup: "The Void Warden" -> "Void Warden", etc.
+_SHORT_BOSS_NAMES: dict[int, str] = {
+    boundary: (name[4:] if name.startswith("The ") else name)
+    for boundary, name in BOSS_NAMES.items()
+}
+
+
+def build_dig_history_context(recent_actions: list[dict], tunnel: dict) -> str:
+    """Build a compact history block from recent actions and tunnel aggregates.
+
+    Gives the LLM visibility into dig patterns, cave-in frequency, boss
+    progress, and recent events — things it cannot infer from the current
+    dig alone.
+    """
+    if not tunnel and not recent_actions:
+        return ""
+
+    tunnel = tunnel or {}
+    lines: list[str] = []
+
+    # --- Recent dig summary ---
+    digs = [a for a in recent_actions if a.get("action_type") == "dig"]
+    if digs:
+        cave_ins = 0
+        last_cave_in_ago = None
+        last_cave_in_loss = 0
+        for i, d in enumerate(digs):
+            detail = _parse_detail(d)
+            if detail.get("cave_in"):
+                cave_ins += 1
+                if last_cave_in_ago is None:
+                    last_cave_in_ago = i + 1
+                    last_cave_in_loss = int(detail.get("block_loss", 0) or 0)
+        advances = len(digs) - cave_ins
+        parts = [f"{advances} advances, {cave_ins} cave-ins"]
+        if last_cave_in_ago is not None:
+            parts.append(f"last cave-in: {last_cave_in_ago} digs ago, -{last_cave_in_loss} blocks")
+        lines.append(f"Last {len(digs)} digs: {', '.join(parts)}")
+
+        # Depth trend (oldest to newest)
+        oldest = digs[-1]
+        newest = digs[0]
+        d_from = oldest.get("depth_before", 0) or 0
+        d_to = newest.get("depth_after", newest.get("depth_before", 0)) or 0
+        delta = d_to - d_from
+        sign = "+" if delta >= 0 else ""
+        max_depth = int(tunnel.get("max_depth", 0) or 0)
+        trend = f"Depth trend: {d_from}->{d_to} ({sign}{delta})"
+        if max_depth:
+            trend += f" | Record: {max_depth}"
+        lines.append(trend)
+
+    # --- Lifetime stats ---
+    total_digs = int(tunnel.get("total_digs", 0) or 0)
+    total_jc = int(tunnel.get("total_jc_earned", 0) or 0)
+    if total_digs or total_jc:
+        lines.append(f"Lifetime: {total_digs} digs, {total_jc} JC earned")
+
+    # --- Boss progress ---
+    boss_raw = tunnel.get("boss_progress")
+    if boss_raw:
+        if isinstance(boss_raw, str):
+            try:
+                boss_prog = json.loads(boss_raw)
+            except (json.JSONDecodeError, TypeError):
+                boss_prog = {}
+        else:
+            boss_prog = boss_raw if isinstance(boss_raw, dict) else {}
+        if boss_prog:
+            boss_parts = []
+            attempts_raw = tunnel.get("boss_attempts")
+            attempts = 0
+            if isinstance(attempts_raw, int):
+                attempts = attempts_raw
+            elif isinstance(attempts_raw, str):
+                try:
+                    attempts = int(attempts_raw)
+                except (ValueError, TypeError):
+                    pass
+            for boundary in sorted(_SHORT_BOSS_NAMES):
+                name = _SHORT_BOSS_NAMES[boundary]
+                status = boss_prog.get(str(boundary), "active")
+                if status == "defeated":
+                    boss_parts.append(f"{name} \u2713")
+                elif status == "phase1_defeated":
+                    boss_parts.append(f"{name} (phase 2)")
+                elif attempts:
+                    boss_parts.append(f"{name} ({attempts} attempts)")
+                    attempts = 0  # only show attempts for the first active boss
+            if boss_parts:
+                lines.append(f"Bosses: {', '.join(boss_parts)}")
+
+    # --- Prestige ---
+    prestige = int(tunnel.get("prestige_level", 0) or 0)
+    if prestige:
+        best_score = int(tunnel.get("best_run_score", 0) or 0)
+        lines.append(f"Prestige: level {prestige}, best run score {best_score}")
+
+    # --- Recent events ---
+    events = [a for a in recent_actions if a.get("action_type") == "event"]
+    if events:
+        event_ids = []
+        for e in events:
+            detail = _parse_detail(e)
+            eid = detail.get("event_id", "")
+            if eid and eid not in event_ids:
+                event_ids.append(eid)
+        if event_ids:
+            lines.append(f"Recent events: {', '.join(event_ids[:5])}")
+
+    # --- Recent boss fights ---
+    boss_fights = [a for a in recent_actions if a.get("action_type") == "boss_fight"]
+    if boss_fights:
+        fight_parts = []
+        for bf in boss_fights[:3]:
+            detail = _parse_detail(bf)
+            won = detail.get("won", False)
+            risk = detail.get("risk", "?")
+            boundary = detail.get("boundary", 0)
+            boss_name = _SHORT_BOSS_NAMES.get(boundary, f"boss@{boundary}")
+            outcome = "won" if won else "lost"
+            fight_parts.append(f"{outcome} vs {boss_name} ({risk})")
+        lines.append(f"Boss fights: {', '.join(fight_parts)}")
 
     return "\n".join(lines)
 
@@ -891,6 +1077,7 @@ def build_messages(
     personality: str,
     outcome: str,
     multiplayer: str,
+    history: str = "",
 ) -> list[dict[str, str]]:
     """Construct the messages list for ``AIService.call_with_tools``.
 
@@ -901,6 +1088,8 @@ def build_messages(
 
     user_sections.append("=== PLAYER STATE ===\n" + player_state)
     user_sections.append("=== PERSONALITY ===\n" + personality)
+    if history:
+        user_sections.append("=== DIG HISTORY ===\n" + history)
     user_sections.append("=== DIG OUTCOME ===\n" + outcome)
 
     if multiplayer:
@@ -919,6 +1108,7 @@ def build_engine_messages(
     preconditions_ctx: str,
     multiplayer: str,
     dice_results: str = "",
+    history: str = "",
 ) -> list[dict[str, str]]:
     """Construct the messages list for the DM engine mode.
 
@@ -929,6 +1119,8 @@ def build_engine_messages(
 
     user_sections.append("=== PLAYER STATE ===\n" + player_state)
     user_sections.append("=== PERSONALITY ===\n" + personality)
+    if history:
+        user_sections.append("=== DIG HISTORY ===\n" + history)
     user_sections.append("=== DIG PRECONDITIONS ===\n" + preconditions_ctx)
 
     if dice_results:

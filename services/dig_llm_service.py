@@ -15,13 +15,13 @@ from repositories.dig_repository import DigRepository
 from repositories.player_repository import PlayerRepository
 from services.ai_service import AIService
 from services.dig_llm_prompts import (
-    DIG_DICE_TOOL,
     DIG_ENGINE_SYSTEM_PROMPT,
     DIG_ENGINE_TOOL,
     DIG_OUTCOME_TOOL,
     DIG_SYSTEM_PROMPT,
     build_boss_outcome_context,
     build_dice_results_context,
+    build_dig_history_context,
     build_dig_outcome_context,
     build_engine_messages,
     build_messages,
@@ -172,45 +172,6 @@ class DigLLMValidator:
             "event_description": event_description,
         }
 
-    def validate_dice_rolls(self, tool_args: dict, preconditions: dict) -> list[dict]:
-        """Validate the DM's requested dice rolls and fill safe defaults.
-
-        The model chooses which dice it wants, but the app owns the random
-        source and caps the request size so this stays fast and predictable.
-        """
-        raw_rolls = tool_args.get("rolls")
-        if not isinstance(raw_rolls, list) or not raw_rolls:
-            raw_rolls = _default_dice_rolls(preconditions)
-
-        rolls: list[dict] = []
-        for idx, raw in enumerate(raw_rolls[:8]):
-            if not isinstance(raw, dict):
-                continue
-            label = str(raw.get("label") or f"roll_{idx + 1}")
-            label = "".join(ch for ch in label.lower() if ch.isalnum() or ch in "_-")
-            label = (label or f"roll_{idx + 1}")[:40]
-            try:
-                sides = int(raw.get("sides", 100))
-            except (TypeError, ValueError):
-                sides = 100
-            try:
-                count = int(raw.get("count", 1))
-            except (TypeError, ValueError):
-                count = 1
-            try:
-                modifier = int(raw.get("modifier", 0))
-            except (TypeError, ValueError):
-                modifier = 0
-
-            rolls.append({
-                "label": label,
-                "sides": max(2, min(sides, 100)),
-                "count": max(1, min(count, 3)),
-                "modifier": max(-100, min(modifier, 100)),
-            })
-
-        return rolls or _default_dice_rolls(preconditions)
-
 
 def _default_dice_rolls(preconditions: dict) -> list[dict]:
     """Fallback dice request when the model does not provide a usable one."""
@@ -278,6 +239,41 @@ class DigLLMService:
         self.dig_service = dig_service
         self.validator = DigLLMValidator()
 
+    def _resolve_names(
+        self,
+        social_actions: list[dict] | None,
+        tunnel: dict | None,
+        guild_id: int,
+    ) -> dict[int, str]:
+        """Resolve discord IDs from social actions and cheers to usernames."""
+        ids: set[int] = set()
+        for a in social_actions or []:
+            for key in ("actor_id", "target_id"):
+                pid = a.get(key)
+                if pid:
+                    ids.add(int(pid))
+        if tunnel:
+            import json as _json
+            cheer_raw = tunnel.get("cheer_data")
+            if cheer_raw and isinstance(cheer_raw, str):
+                try:
+                    for c in _json.loads(cheer_raw):
+                        cid = c.get("cheerer_id")
+                        if cid:
+                            ids.add(int(cid))
+                except (ValueError, TypeError):
+                    pass
+            elif isinstance(cheer_raw, list):
+                for c in cheer_raw:
+                    if isinstance(c, dict):
+                        cid = c.get("cheerer_id")
+                        if cid:
+                            ids.add(int(cid))
+        if not ids:
+            return {}
+        players = self.player_repo.get_by_ids(list(ids), guild_id)
+        return {p.discord_id: p.name for p in players if p}
+
     async def enhance(
         self,
         result: dict,
@@ -293,22 +289,36 @@ class DigLLMService:
         """
         try:
             # Gather context from repos (synchronous, so use to_thread)
-            tunnel, balance, personality, social_actions = await asyncio.gather(
-                asyncio.to_thread(self.dig_repo.get_tunnel, discord_id, guild_id),
-                asyncio.to_thread(self.player_repo.get_balance, discord_id, guild_id),
-                asyncio.to_thread(self.dig_repo.get_personality, discord_id, guild_id),
-                asyncio.to_thread(
-                    self.dig_repo.get_recent_social_actions,
-                    discord_id,
-                    guild_id,
-                ),
+            tunnel, balance, personality, social_actions, recent_actions, rank = (
+                await asyncio.gather(
+                    asyncio.to_thread(self.dig_repo.get_tunnel, discord_id, guild_id),
+                    asyncio.to_thread(self.player_repo.get_balance, discord_id, guild_id),
+                    asyncio.to_thread(self.dig_repo.get_personality, discord_id, guild_id),
+                    asyncio.to_thread(
+                        self.dig_repo.get_recent_social_actions,
+                        discord_id,
+                        guild_id,
+                    ),
+                    asyncio.to_thread(
+                        self.dig_repo.get_recent_actions, discord_id, guild_id, 15,
+                    ),
+                    asyncio.to_thread(self.dig_repo.get_player_rank, discord_id, guild_id),
+                )
+            )
+
+            # Resolve player names for social context
+            names = await asyncio.to_thread(
+                self._resolve_names, social_actions, tunnel, guild_id,
             )
 
             # Build prompt context
             player_state = build_player_state_context(tunnel or {}, balance)
             personality_ctx = build_personality_context(personality)
             outcome_ctx = build_dig_outcome_context(result)
-            multiplayer_ctx = build_multiplayer_context(social_actions or [])
+            history_ctx = build_dig_history_context(recent_actions or [], tunnel or {})
+            multiplayer_ctx = build_multiplayer_context(
+                social_actions or [], tunnel, rank, names=names,
+            )
 
             messages = build_messages(
                 DIG_SYSTEM_PROMPT,
@@ -316,6 +326,7 @@ class DigLLMService:
                 personality_ctx,
                 outcome_ctx,
                 multiplayer_ctx,
+                history=history_ctx,
             )
 
             # Call LLM with a hard timeout
@@ -327,6 +338,7 @@ class DigLLMService:
                         "type": "function",
                         "function": {"name": "narrate_dig_outcome"},
                     },
+                    max_tokens=800,
                 ),
                 timeout=2.5,
             )
@@ -342,9 +354,14 @@ class DigLLMService:
 
             result["llm_narrative"] = validated["narrative"]
             result["llm_tone"] = validated["tone"]
-            result["llm_event_flavor"] = validated["event_flavor"]
-            result["llm_cave_in_flavor"] = validated["cave_in_flavor"]
-            result["llm_callback"] = validated["callback_reference"]
+            if validated["event_flavor"]:
+                result["llm_event_flavor"] = validated["event_flavor"]
+            if validated["cave_in_flavor"]:
+                result["llm_cave_in_flavor"] = validated["cave_in_flavor"]
+            # Only set callback if it's an actual sentence, not a raw ID
+            cb = validated["callback_reference"]
+            if cb and " " in cb:
+                result["llm_callback"] = cb
 
             return result
 
@@ -359,6 +376,9 @@ class DigLLMService:
         balance: int,
         personality: dict | None,
         social_actions: list[dict] | None,
+        recent_actions: list[dict] | None = None,
+        rank: int = 0,
+        names: dict[int, str] | None = None,
     ) -> dict:
         """Narrate a completed dig result using the actual outcome.
 
@@ -376,7 +396,10 @@ class DigLLMService:
             player_state = build_player_state_context(narr_tunnel, balance)
             personality_ctx = build_personality_context(personality)
             outcome_ctx = build_dig_outcome_context(result)
-            multiplayer_ctx = build_multiplayer_context(social_actions or [])
+            history_ctx = build_dig_history_context(recent_actions or [], narr_tunnel)
+            multiplayer_ctx = build_multiplayer_context(
+                social_actions or [], narr_tunnel, rank, names=names,
+            )
 
             messages = build_messages(
                 DIG_SYSTEM_PROMPT,
@@ -384,6 +407,7 @@ class DigLLMService:
                 personality_ctx,
                 outcome_ctx,
                 multiplayer_ctx,
+                history=history_ctx,
             )
 
             llm_result = await asyncio.wait_for(
@@ -394,6 +418,7 @@ class DigLLMService:
                         "type": "function",
                         "function": {"name": "narrate_dig_outcome"},
                     },
+                    max_tokens=800,
                 ),
                 timeout=5.0,
             )
@@ -427,19 +452,34 @@ class DigLLMService:
         """Generate a narrative for a completed boss fight. Returns the
         narrative string, or None on failure."""
         try:
-            tunnel, balance, personality, social_actions = await asyncio.gather(
-                asyncio.to_thread(self.dig_repo.get_tunnel, discord_id, guild_id),
-                asyncio.to_thread(self.player_repo.get_balance, discord_id, guild_id),
-                asyncio.to_thread(self.dig_repo.get_personality, discord_id, guild_id),
-                asyncio.to_thread(
-                    self.dig_repo.get_recent_social_actions, discord_id, guild_id,
-                ),
+            tunnel, balance, personality, social_actions, recent_actions, rank = (
+                await asyncio.gather(
+                    asyncio.to_thread(self.dig_repo.get_tunnel, discord_id, guild_id),
+                    asyncio.to_thread(self.player_repo.get_balance, discord_id, guild_id),
+                    asyncio.to_thread(self.dig_repo.get_personality, discord_id, guild_id),
+                    asyncio.to_thread(
+                        self.dig_repo.get_recent_social_actions, discord_id, guild_id,
+                    ),
+                    asyncio.to_thread(
+                        self.dig_repo.get_recent_actions, discord_id, guild_id, 15,
+                    ),
+                    asyncio.to_thread(
+                        self.dig_repo.get_player_rank, discord_id, guild_id,
+                    ),
+                )
+            )
+
+            names = await asyncio.to_thread(
+                self._resolve_names, social_actions, tunnel, guild_id,
             )
 
             player_state = build_player_state_context(tunnel or {}, balance)
             personality_ctx = build_personality_context(personality)
             boss_ctx = build_boss_outcome_context(result)
-            multiplayer_ctx = build_multiplayer_context(social_actions or [])
+            history_ctx = build_dig_history_context(recent_actions or [], tunnel or {})
+            multiplayer_ctx = build_multiplayer_context(
+                social_actions or [], tunnel, rank, names=names,
+            )
 
             messages = build_messages(
                 DIG_SYSTEM_PROMPT,
@@ -447,6 +487,7 @@ class DigLLMService:
                 personality_ctx,
                 boss_ctx,
                 multiplayer_ctx,
+                history=history_ctx,
             )
 
             llm_result = await asyncio.wait_for(
@@ -457,6 +498,7 @@ class DigLLMService:
                         "type": "function",
                         "function": {"name": "narrate_dig_outcome"},
                     },
+                    max_tokens=800,
                 ),
                 timeout=5.0,
             )
@@ -480,28 +522,48 @@ class DigLLMService:
         """DM-powered dig: LLM determines the outcome.
 
         1. Build context from preconditions + personality
-        2. Ask the LLM for dice rolls, execute them locally, and pass them back
-        3. Call the LLM with DIG_ENGINE_TOOL for the final outcome
+        2. Roll dice locally and include results in context
+        3. Call the LLM with DIG_ENGINE_TOOL for the outcome
         4. Validate/clamp the response
         5. Call dig_service.apply_dig_outcome() to write to DB
-        6. Return result dict for embed builder
+        6. Narrate the result
+        7. Return result dict for embed builder
 
         Falls back to deterministic on any failure.
         """
         try:
-            tunnel, balance, personality, social_actions = await asyncio.gather(
-                asyncio.to_thread(self.dig_repo.get_tunnel, discord_id, guild_id),
-                asyncio.to_thread(self.player_repo.get_balance, discord_id, guild_id),
-                asyncio.to_thread(self.dig_repo.get_personality, discord_id, guild_id),
-                asyncio.to_thread(
-                    self.dig_repo.get_recent_social_actions, discord_id, guild_id,
-                ),
+            tunnel, balance, personality, social_actions, recent_actions, rank = (
+                await asyncio.gather(
+                    asyncio.to_thread(self.dig_repo.get_tunnel, discord_id, guild_id),
+                    asyncio.to_thread(self.player_repo.get_balance, discord_id, guild_id),
+                    asyncio.to_thread(self.dig_repo.get_personality, discord_id, guild_id),
+                    asyncio.to_thread(
+                        self.dig_repo.get_recent_social_actions, discord_id, guild_id,
+                    ),
+                    asyncio.to_thread(
+                        self.dig_repo.get_recent_actions, discord_id, guild_id, 15,
+                    ),
+                    asyncio.to_thread(
+                        self.dig_repo.get_player_rank, discord_id, guild_id,
+                    ),
+                )
+            )
+
+            names = await asyncio.to_thread(
+                self._resolve_names, social_actions, tunnel, guild_id,
             )
 
             player_state = build_player_state_context(tunnel or {}, balance)
             personality_ctx = build_personality_context(personality)
             preconditions_ctx = build_preconditions_context(preconditions)
-            multiplayer_ctx = build_multiplayer_context(social_actions or [])
+            history_ctx = build_dig_history_context(recent_actions or [], tunnel or {})
+            multiplayer_ctx = build_multiplayer_context(
+                social_actions or [], tunnel, rank, names=names,
+            )
+
+            # Roll dice locally — no LLM call needed for randomness
+            dice_rolls = _default_dice_rolls(preconditions)
+            dice_ctx = build_dice_results_context(_roll_dice(dice_rolls))
 
             messages = build_engine_messages(
                 DIG_ENGINE_SYSTEM_PROMPT,
@@ -509,61 +571,22 @@ class DigLLMService:
                 personality_ctx,
                 preconditions_ctx,
                 multiplayer_ctx,
+                dice_results=dice_ctx,
+                history=history_ctx,
             )
 
-            # Dice step is best-effort: if it times out or errors, we
-            # roll default dice locally and proceed to resolve_dig.
-            llm_result = None
-            dice_ctx = None
-
-            try:
-                dice_call = await asyncio.wait_for(
-                    self.ai_service.call_with_tools(
-                        messages,
-                        [DIG_DICE_TOOL],
-                        tool_choice={
-                            "type": "function",
-                            "function": {"name": "roll_dice"},
-                        },
-                    ),
-                    timeout=3.0,
-                )
-                if dice_call.tool_name == "resolve_dig":
-                    # Backwards-compatible path for tests/older mocks.
-                    llm_result = dice_call
-                else:
-                    dice_rolls = self.validator.validate_dice_rolls(
-                        dice_call.tool_args if dice_call.tool_name == "roll_dice" else {},
-                        preconditions,
-                    )
-                    dice_ctx = build_dice_results_context(_roll_dice(dice_rolls))
-            except Exception:
-                logger.debug("Dice call failed, using default rolls")
-                default_rolls = _default_dice_rolls(preconditions)
-                dice_ctx = build_dice_results_context(_roll_dice(default_rolls))
-
-            if dice_ctx is not None:
-                messages = build_engine_messages(
-                    DIG_ENGINE_SYSTEM_PROMPT,
-                    player_state,
-                    personality_ctx,
-                    preconditions_ctx,
-                    multiplayer_ctx,
-                    dice_results=dice_ctx,
-                )
-
-            if llm_result is None:
-                llm_result = await asyncio.wait_for(
-                    self.ai_service.call_with_tools(
-                        messages,
-                        [DIG_ENGINE_TOOL],
-                        tool_choice={
-                            "type": "function",
-                            "function": {"name": "resolve_dig"},
-                        },
-                    ),
-                    timeout=10.0,
-                )
+            llm_result = await asyncio.wait_for(
+                self.ai_service.call_with_tools(
+                    messages,
+                    [DIG_ENGINE_TOOL],
+                    tool_choice={
+                        "type": "function",
+                        "function": {"name": "resolve_dig"},
+                    },
+                    max_tokens=1200,
+                ),
+                timeout=10.0,
+            )
 
             if llm_result.tool_name != "resolve_dig":
                 logger.warning(
@@ -586,6 +609,7 @@ class DigLLMService:
             # boss encounters, artifacts are all known now.
             result = await self._narrate_outcome(
                 result, tunnel, balance, personality, social_actions,
+                recent_actions=recent_actions, rank=rank, names=names,
             )
             return result
 
