@@ -4,7 +4,9 @@ Cached data loading from dotabase for trivia questions.
 
 from __future__ import annotations
 
+import json
 import re
+from collections import Counter
 from dataclasses import dataclass
 from functools import lru_cache
 
@@ -35,6 +37,11 @@ class HeroData:
     attr_agi_gain: float | None
     attr_int_gain: float | None
     image_url: str | None
+    armor_at_level1: float | None  # base_armor + agility_base / 6 (stat panel value at level 1)
+    vision_night: int | None
+    turn_rate: float | None
+    attack_damage_min: int | None
+    attack_damage_max: int | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +61,7 @@ class AbilityData:
     shard_description: str | None
     innate: bool
     icon_url: str | None
+    mana_cost: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +74,7 @@ class ItemData:
     icon_url: str | None
     is_neutral_enhancement: bool
     ability_special: str | None  # JSON string of bonus descriptions
+    active_cooldown: str | None  # cooldown for active use (e.g. BKB, Blink)
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,6 +140,8 @@ def load_heroes() -> list[HeroData]:
     heroes = session.query(Hero).all()
     result = []
     for h in heroes:
+        agi_base = h.attr_agility_base or 0
+        base_a = h.base_armor if h.base_armor is not None else 0
         result.append(HeroData(
             id=h.id,
             name=h.name or "",
@@ -147,6 +158,11 @@ def load_heroes() -> list[HeroData]:
             attr_agi_gain=h.attr_agility_gain if h.attr_agility_gain else None,
             attr_int_gain=h.attr_intelligence_gain if h.attr_intelligence_gain else None,
             image_url=hero_image_url(h.name or ""),
+            armor_at_level1=round(base_a + agi_base / 6, 4),
+            vision_night=h.vision_night if h.vision_night else None,
+            turn_rate=h.turn_rate if h.turn_rate else None,
+            attack_damage_min=h.attack_damage_min if h.attack_damage_min else None,
+            attack_damage_max=h.attack_damage_max if h.attack_damage_max else None,
         ))
     return result
 
@@ -181,6 +197,7 @@ def load_abilities() -> list[AbilityData]:
             shard_description=a.shard_description if a.shard_description else None,
             innate=bool(a.innate),
             icon_url=ability_icon_url(a.icon),
+            mana_cost=a.mana_cost if a.mana_cost and a.mana_cost != "0" else None,
         ))
     return result
 
@@ -189,19 +206,42 @@ def load_abilities() -> list[AbilityData]:
 def load_items() -> list[ItemData]:
     session = dotabase_session()
     items = session.query(Item).all()
-    result = []
+
+    # First pass: filter unavailable items and extract base_level for suffix logic
+    raw: list[tuple[Item, int | None]] = []
     for i in items:
         if not i.localized_name or "_" in i.localized_name:
             continue
+        item_json = json.loads(i.json_data) if isinstance(i.json_data, str) else (i.json_data or {})
+        # Skip items disabled in Valve's game files (removed/unavailable items like Trident,
+        # Iron Talon, etc.). Neutral drops are exempt — they're obtained, not purchased.
+        if i.neutral_tier is None and item_json.get("ItemPurchasable") in (0, "0"):
+            continue
+        base_level = item_json.get("ItemBaseLevel")
+        raw.append((i, int(base_level) if base_level is not None else None))
+
+    # Items whose localized_name appears at multiple base levels need a level suffix
+    # (currently only Dagon 1-5 all share the name "Dagon")
+    name_counts = Counter(i.localized_name for i, _ in raw)
+
+    # Second pass: build ItemData with level suffix applied where needed
+    result = []
+    for i, base_level in raw:
+        name = i.localized_name
+        if name_counts[name] > 1 and base_level is not None:
+            level_str = f" {base_level}"
+            if not name.endswith(level_str):
+                name = name + level_str
         result.append(ItemData(
             id=i.id,
-            localized_name=i.localized_name,
+            localized_name=name,
             cost=i.cost if i.cost and i.cost > 0 else None,
             lore=i.lore if i.lore else None,
             neutral_tier=i.neutral_tier,
             icon_url=item_icon_url(i.icon),
-            is_neutral_enhancement=bool(getattr(i, 'is_neutral_enhancement', False)),
+            is_neutral_enhancement=bool(getattr(i, "is_neutral_enhancement", False)),
             ability_special=i.ability_special if i.ability_special else None,
+            active_cooldown=i.cooldown if i.cooldown and i.cooldown != "0" else None,
         ))
     return result
 

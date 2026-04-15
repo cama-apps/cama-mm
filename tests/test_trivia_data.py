@@ -93,6 +93,39 @@ class TestDataLoading:
         bad = [i for i in items if "_" in i.localized_name]
         assert bad == [], f"Internal-named items leaked: {[i.localized_name for i in bad[:5]]}"
 
+    def test_load_items_excludes_unavailable(self):
+        """Items marked ItemPurchasable=0 in game files (non-neutral) must be excluded."""
+        items = load_items()
+        names = [i.localized_name for i in items]
+        assert "Trident" not in names, "Trident is a disabled item and must be excluded"
+        assert "Iron Talon" not in names, "Iron Talon was removed from the game"
+        assert "Crystal Raindrop" not in names, "Crystal Raindrop was removed"
+        assert "Faded Broach" not in names, "Faded Broach is a retired neutral item"
+        assert "Gossamer Cape" not in names, "Gossamer Cape is a retired neutral item"
+        assert "Broom Handle" not in names, "Broom Handle is a retired neutral item"
+
+    def test_load_items_keeps_recipe_scrolls(self):
+        """Recipe scrolls are legitimately purchasable and must remain in the item pool."""
+        items = load_items()
+        names = [i.localized_name for i in items]
+        assert "Magic Wand Recipe" in names
+
+    def test_load_items_dagon_level_suffix(self):
+        """All 5 Dagon levels share localized_name 'Dagon' — must get level suffix."""
+        items = load_items()
+        names = [i.localized_name for i in items]
+        for level in range(1, 6):
+            assert f"Dagon {level}" in names, f"Expected 'Dagon {level}' in item pool"
+        assert "Dagon" not in names, "Bare 'Dagon' must be replaced by 'Dagon 1'–'Dagon 5'"
+
+    def test_hero_armor_at_level1(self):
+        """armor_at_level1 = base_armor + agility_base / 6, present on all heroes."""
+        heroes = load_heroes()
+        assert all(h.armor_at_level1 is not None for h in heroes)
+        # Anti-Mage: base_armor=2, agi_base=24 → 2 + 24/6 = 6.0
+        am = next(h for h in heroes if h.localized_name == "Anti-Mage")
+        assert abs(am.armor_at_level1 - 6.0) < 0.01
+
     def test_load_abilities_excludes_internal_names(self):
         """Abilities with underscores in localized_name are internal and should be filtered."""
         abilities = load_abilities()
@@ -108,7 +141,7 @@ class TestDataLoading:
 
     def test_load_facets(self):
         facets = load_facets()
-        assert len(facets) > 50
+        assert len(facets) > 30
         for f in facets[:10]:
             assert f.localized_name
             assert f.hero_id

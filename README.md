@@ -17,6 +17,7 @@ A Discord bot for balanced team shuffling in Dota 2 inhouse games for the Camara
 - **Economy Features**: Loans, bankruptcy, nonprofit fund, disbursement voting, tipping, Wheel of Fortune
 - **Match Enrichment**: Automatic stats from OpenDota/Valve APIs (K/D/A, heroes, GPM, fantasy points)
 - **Dota 2 Reference**: Hero and ability lookup with autocomplete
+- **Trivia**: Dota 2 trivia with escalating difficulty streaks, covering heroes, items, abilities, facets, and voicelines
 - **Stats Visualization**: Image generation for match tables, radar graphs, and charts
 - **AI Features** (optional): Flavor text and natural language queries via Cerebras LLM
 - **SQLite Database**: Lightweight database with automatic migrations
@@ -85,6 +86,39 @@ uv run python bot.py
 ```
 
 The bot will connect to Discord and sync slash commands automatically.
+
+## Maintenance
+
+### Syncing Trivia Data After a Dota 2 Patch
+
+The trivia system uses [dotabase](https://github.com/mdiller/dotabase) for hero and item data. dotabase's PyPI releases can lag behind patches. To keep hero stats accurate (armor, movement speed, attribute gains, etc.), run the sync script against your local Dota 2 installation:
+
+```bash
+# Dry-run — shows what would change without writing
+uv run python update_trivia_db.py --dry-run
+
+# Write updated stats to dotabase.db
+uv run python update_trivia_db.py
+
+# Specify a non-default Dota 2 install path
+uv run python update_trivia_db.py --dota-path "D:/Steam/steamapps/common/dota 2 beta"
+```
+
+The script reads `scripts/npc/npc_heroes.txt` from the Dota 2 VPK files and updates the following hero stats in `dotabase.db`:
+
+| Game file field | dotabase column |
+|-----------------|-----------------|
+| `AttributeAgilityGain` | `attr_agility_gain` |
+| `AttributeStrengthGain` | `attr_strength_gain` |
+| `AttributeIntelligenceGain` | `attr_intelligence_gain` |
+| `AttributeBaseAgility` | `attr_agility_base` |
+| `AttributeBaseStrength` | `attr_strength_base` |
+| `AttributeBaseIntelligence` | `attr_intelligence_base` |
+| `ArmorPhysical` | `base_armor` |
+| `MovementSpeed` | `base_movement` |
+| `AttackRate` | `attack_rate` |
+
+**Run the bot offline when applying changes.** The bot caches all dotabase data at startup via `@lru_cache` — restart it after the sync to pick up the new values.
 
 ## Discord Commands
 
@@ -301,6 +335,23 @@ Look up ability details.
 
 **Options:**
 - `ability_name`: Ability name (autocomplete enabled)
+
+### Trivia
+
+#### `/trivia`
+Play a Dota 2 trivia question. Questions span heroes, abilities, and items across four difficulty tiers that escalate with your streak:
+
+| Streak | Difficulty | Question types |
+|--------|------------|----------------|
+| 0–2 | Easy | Hero by image, primary attribute, melee/ranged, ability → hero, ability by icon, item by icon, item cost compare, neutral item tier, damage type |
+| 3–5 | Medium | Hero real name, hero by hype, innate ability, voiceline (with portrait) |
+| 6–9 | Hard | Scepter/shard upgrades, item cost exact, ability lore, item lore, hero bio, move speed, ability cooldown, ability mana cost, item active cooldown, armor at level 1, attack damage |
+| 10+ | Challenging | Voiceline, base attack time, attribute gain per level, night vision, turn rate |
+
+Each question has 4 options with a 30-second timer. A correct answer extends your streak; a wrong answer resets it.
+
+#### `/trivia-reset-cooldown` (Admin)
+Reset the cooldown on the trivia streak for testing or moderation.
 
 ### Rating Analysis
 

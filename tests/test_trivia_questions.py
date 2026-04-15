@@ -14,30 +14,33 @@ from services.trivia_questions import (
     gen_ability_by_icon,
     gen_ability_cooldown,
     gen_ability_lore,
+    gen_ability_mana_cost,
     gen_ability_to_hero,
+    gen_armor_at_level1_compare,
+    gen_attack_damage_compare,
     gen_attack_type,
     gen_attribute_gain,
-    gen_base_armor_compare,
     gen_base_attack_time,
     gen_damage_type,
-    gen_enchantment_effect,
-    gen_facet_name,
-    gen_facet_to_hero,
     gen_hero_bio,
     gen_hero_by_hype,
     gen_hero_by_image,
     gen_hero_real_name,
     gen_innate_ability,
+    gen_item_active_cooldown,
     gen_item_by_icon,
     gen_item_cost_compare,
     gen_item_cost_exact,
     gen_item_lore,
     gen_move_speed,
     gen_neutral_item_tier,
+    gen_night_vision_compare,
     gen_primary_attribute,
     gen_scepter_upgrade,
     gen_shard_upgrade,
+    gen_turn_rate,
     gen_voiceline,
+    gen_voiceline_with_image,
     generate_question,
     get_difficulty_tier,
 )
@@ -153,10 +156,6 @@ class TestMediumGenerators:
         _validate_question(q)
         assert q.difficulty == "medium"
 
-    def test_facet_to_hero(self):
-        q = gen_facet_to_hero()
-        _validate_question(q)
-        assert q.difficulty == "medium"
 
     def test_hero_by_hype(self):
         for _ in range(10):
@@ -173,12 +172,16 @@ class TestMediumGenerators:
         assert q.difficulty == "medium"
         assert q.image_url is not None
 
-    def test_enchantment_effect(self):
-        q = gen_enchantment_effect()
-        _validate_question(q)
-        assert q.difficulty == "medium"
-        assert q.category == "enchantment_effect"
-        assert "bonuses" in q.text
+    def test_voiceline_with_image(self):
+        for _ in range(10):
+            q = gen_voiceline_with_image()
+            if q is not None:
+                _validate_question(q)
+                assert q.difficulty == "medium"
+                assert q.category == "voiceline_with_image"
+                assert q.image_url is not None
+                return
+        pytest.fail("gen_voiceline_with_image returned None after 10 tries")
 
 
 class TestHardGenerators:
@@ -331,19 +334,49 @@ class TestHardGenerators:
                 return
         pytest.fail("gen_ability_cooldown returned None")
 
-    def test_facet_name(self):
-        q = gen_facet_name()
-        _validate_question(q)
-        assert q.difficulty == "hard"
 
-    def test_base_armor_compare(self):
+    def test_armor_at_level1_compare(self):
         for _ in range(10):
-            q = gen_base_armor_compare()
+            q = gen_armor_at_level1_compare()
             if q is not None:
                 _validate_question(q)
                 assert q.difficulty == "hard"
+                assert q.category == "armor_at_level1_compare"
+                assert "level 1" in q.text
                 return
-        pytest.fail("gen_base_armor_compare returned None")
+        pytest.fail("gen_armor_at_level1_compare returned None")
+
+    def test_ability_mana_cost(self):
+        for _ in range(10):
+            q = gen_ability_mana_cost()
+            if q is not None:
+                _validate_question(q)
+                assert q.difficulty == "hard"
+                assert q.category == "ability_mana_cost"
+                assert q.image_url is not None
+                return
+        pytest.fail("gen_ability_mana_cost returned None")
+
+    def test_item_active_cooldown(self):
+        for _ in range(10):
+            q = gen_item_active_cooldown()
+            if q is not None:
+                _validate_question(q)
+                assert q.difficulty == "hard"
+                assert q.category == "item_active_cooldown"
+                assert q.image_url is not None
+                return
+        pytest.fail("gen_item_active_cooldown returned None")
+
+    def test_attack_damage_compare(self):
+        for _ in range(10):
+            q = gen_attack_damage_compare()
+            if q is not None:
+                _validate_question(q)
+                assert q.difficulty == "hard"
+                assert q.category == "attack_damage_compare"
+                return
+        pytest.fail("gen_attack_damage_compare returned None")
 
 
 class TestChallengingGenerators:
@@ -377,6 +410,27 @@ class TestChallengingGenerators:
                 assert "gain per level" in q.text
                 return
         pytest.fail("gen_attribute_gain returned None")
+
+    def test_night_vision_compare(self):
+        for _ in range(10):
+            q = gen_night_vision_compare()
+            if q is not None:
+                _validate_question(q)
+                assert q.difficulty == "challenging"
+                assert q.category == "night_vision_compare"
+                return
+        pytest.fail("gen_night_vision_compare returned None")
+
+    def test_turn_rate(self):
+        q = gen_turn_rate()
+        assert q is not None
+        _validate_question(q)
+        assert q.difficulty == "challenging"
+        assert q.category == "turn_rate"
+        assert q.image_url is not None
+        # Options should all be numeric strings
+        for opt in q.options:
+            float(opt)  # will raise if not a valid number
 
 
 class TestAnswerLeaks:
@@ -424,20 +478,6 @@ class TestAnswerLeaks:
                         f"Leak: correct option '{correct_opt}' contains hero word '{word}'"
                     )
 
-    def test_facet_to_hero_no_hero_name_leak(self):
-        """Verify facet names shown in question don't leak the hero name."""
-        for _ in range(50):
-            q = gen_facet_to_hero()
-            if q is None:
-                continue
-            correct_hero = q.options[q.correct_index]
-            # The facet name appears before the colon in the question text
-            facet_part = q.text.split(":")[0].strip("'\"")
-            for word in correct_hero.split():
-                if len(word) > 2:
-                    assert word.lower() not in facet_part.lower(), (
-                        f"Leak: facet text '{facet_part}' contains hero word '{word}'"
-                    )
 
 
 class TestImageGenerators:
@@ -487,6 +527,6 @@ class TestGenerateQuestion:
 
     def test_all_generators_registered(self):
         assert len(EASY_GENERATORS) == 9
-        assert len(MEDIUM_GENERATORS) == 5
-        assert len(HARD_GENERATORS) == 10
-        assert len(CHALLENGING_GENERATORS) == 3
+        assert len(MEDIUM_GENERATORS) == 4
+        assert len(HARD_GENERATORS) == 12
+        assert len(CHALLENGING_GENERATORS) == 5
