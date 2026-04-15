@@ -206,7 +206,7 @@ WHAT TO NARRATE (check the DIG OUTCOME section carefully):
   - If there was a BOSS ENCOUNTER, build tension for the upcoming fight
   - If there was a STREAK BONUS, note the player's consistency
   - The miner's BACKSTORY is their identity — weave it into the narrative \
-when set. 
+when set.
   - Show the EFFECTS of S stats indirectly — a high-Strength miner swings \
 powerfully, high-Smarts notices details, high-Stamina endures hardship. \
 Never name the stats directly ("Stamina", "Strength") in your text.
