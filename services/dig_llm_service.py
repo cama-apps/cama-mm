@@ -340,7 +340,7 @@ class DigLLMService:
                     },
                     max_tokens=800,
                 ),
-                timeout=2.5,
+                timeout=10.0,
             )
 
             if llm_result.tool_name != "narrate_dig_outcome":
@@ -420,7 +420,7 @@ class DigLLMService:
                     },
                     max_tokens=800,
                 ),
-                timeout=5.0,
+                timeout=10.0,
             )
 
             if llm_result.tool_name != "narrate_dig_outcome":
@@ -500,7 +500,7 @@ class DigLLMService:
                     },
                     max_tokens=800,
                 ),
-                timeout=5.0,
+                timeout=10.0,
             )
 
             if llm_result.tool_name != "narrate_dig_outcome":
@@ -585,7 +585,7 @@ class DigLLMService:
                     },
                     max_tokens=1200,
                 ),
-                timeout=10.0,
+                timeout=15.0,
             )
 
             if llm_result.tool_name != "resolve_dig":
