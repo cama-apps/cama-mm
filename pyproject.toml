@@ -12,7 +12,7 @@ dependencies = [
     "requests>=2.31.0",
     "beautifulsoup4>=4.12.0",
     "glicko2>=0.0.5",
-    "dotabase==7.8.8",
+    "dotabase>=7.0",
     "sqlalchemy-utils>=0.41.0",
     "pillow>=10.0.0",
     "litellm==1.80.13",
@@ -20,7 +20,7 @@ dependencies = [
     "scipy>=1.11.0",
     "openskill>=6.0.0",
     "pilmoji>=2.0.5",
-    "vpk>=1.4.0",
+
 ]
 
 [dependency-groups]

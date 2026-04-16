@@ -87,39 +87,6 @@ uv run python bot.py
 
 The bot will connect to Discord and sync slash commands automatically.
 
-## Maintenance
-
-### Syncing Trivia Data After a Dota 2 Patch
-
-The trivia system uses [dotabase](https://github.com/mdiller/dotabase) for hero and item data. dotabase's PyPI releases can lag behind patches. To keep hero stats accurate (armor, movement speed, attribute gains, etc.), run the sync script against your local Dota 2 installation:
-
-```bash
-# Dry-run — shows what would change without writing
-uv run python update_trivia_db.py --dry-run
-
-# Write updated stats to dotabase.db
-uv run python update_trivia_db.py
-
-# Specify a non-default Dota 2 install path
-uv run python update_trivia_db.py --dota-path "D:/Steam/steamapps/common/dota 2 beta"
-```
-
-The script reads `scripts/npc/npc_heroes.txt` from the Dota 2 VPK files and updates the following hero stats in `dotabase.db`:
-
-| Game file field | dotabase column |
-|-----------------|-----------------|
-| `AttributeAgilityGain` | `attr_agility_gain` |
-| `AttributeStrengthGain` | `attr_strength_gain` |
-| `AttributeIntelligenceGain` | `attr_intelligence_gain` |
-| `AttributeBaseAgility` | `attr_agility_base` |
-| `AttributeBaseStrength` | `attr_strength_base` |
-| `AttributeBaseIntelligence` | `attr_intelligence_base` |
-| `ArmorPhysical` | `base_armor` |
-| `MovementSpeed` | `base_movement` |
-| `AttackRate` | `attack_rate` |
-
-**Run the bot offline when applying changes.** The bot caches all dotabase data at startup via `@lru_cache` — restart it after the sync to pick up the new values.
-
 ## Discord Commands
 
 ### Registration & Profile
