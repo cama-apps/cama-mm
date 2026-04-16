@@ -554,18 +554,18 @@ class TestDecay:
         decay = dig_service.calculate_decay(10001, guild_id)
         assert decay == 0
 
-    def test_decay_after_24h(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """Depth decreases after 24h inactive."""
+    def test_decay_disabled(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+        """Decay is disabled — no depth loss regardless of inactivity."""
         _register_player(player_repository)
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
         monkeypatch.setattr(random, "random", lambda: 0.99)
         dig_service.dig(10001, guild_id)
         dig_repo.update_tunnel(10001, guild_id, depth=30)
 
-        # 48h later (24h past the decay start threshold)
+        # 48h later — decay would have fired but is now disabled
         monkeypatch.setattr(time, "time", lambda: 1_000_000 + 48 * 3600)
         decay = dig_service.calculate_decay(10001, guild_id)
-        assert decay > 0
+        assert decay == 0
 
     def test_decay_stops_at_layer_boundary(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
         """Decay doesn't go below 25/50/75."""
@@ -582,28 +582,17 @@ class TestDecay:
         tunnel = dig_repo.get_tunnel(10001, guild_id)
         assert tunnel["depth"] >= 25, "Decay should not cross layer boundary at 25"
 
-    def test_decay_accelerated_after_72h(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """2x decay rate after 72h."""
+    def test_decay_disabled_even_after_72h(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+        """Decay is disabled — no depth loss even after extended inactivity."""
         _register_player(player_repository)
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
         monkeypatch.setattr(random, "random", lambda: 0.99)
         dig_service.dig(10001, guild_id)
         dig_repo.update_tunnel(10001, guild_id, depth=60, last_dig_at=1_000_000)
 
-        # 48h: normal decay
-        monkeypatch.setattr(time, "time", lambda: 1_000_000 + 48 * 3600)
-        decay_48h = dig_service.calculate_decay(10001, guild_id)
-
-        # Reset depth and last_dig_at for a clean second measurement
-        # (decay now resets last_dig_at to prevent stale re-application)
-        dig_repo.update_tunnel(10001, guild_id, depth=60, last_dig_at=1_000_000)
-
-        # 96h: accelerated decay (past 72h threshold)
         monkeypatch.setattr(time, "time", lambda: 1_000_000 + 96 * 3600)
-        decay_96h = dig_service.calculate_decay(10001, guild_id)
-
-        # The 96h decay should be more than double the 48h decay due to acceleration
-        assert decay_96h > decay_48h
+        decay = dig_service.calculate_decay(10001, guild_id)
+        assert decay == 0
 
     def test_helpers_reduce_decay(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
         """Recent helpers slow decay rate."""
