@@ -1677,6 +1677,12 @@ class MatchCommands(commands.Cog):
 
         self._register_betting_tasks(guild_id, tasks)
 
+        reminder_svc = getattr(self.bot, "reminder_service", None)
+        if reminder_svc and guild_id is not None:
+            asyncio.create_task(
+                reminder_svc.notify_betting_subscribers(self.bot, guild_id, bet_lock_until)
+            )
+
     async def _run_bet_reminder_after_delay(
         self,
         *,

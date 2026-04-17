@@ -88,6 +88,7 @@ class ServiceContainer:
         self._init_mana_service()
         self._init_dig_service()
         self._init_extras()
+        self._init_reminder_service()
 
         self._initialized = True
         logger.info("ServiceContainer initialization complete")
@@ -112,6 +113,7 @@ class ServiceContainer:
         from repositories.mana_repository import ManaRepository
         from repositories.match_repository import MatchRepository
         from repositories.neon_event_repository import NeonEventRepository
+        from repositories.notification_repository import NotificationRepository
         from repositories.package_deal_repository import PackageDealRepository
         from repositories.pairings_repository import PairingsRepository
         from repositories.player_repository import PlayerRepository
@@ -143,6 +145,7 @@ class ServiceContainer:
             "rebellion_repo": RebellionRepository(p),
             "mana_repo": ManaRepository(p),
             "dig_repo": DigRepository(p),
+            "notification_repo": NotificationRepository(p),
         })
 
     def _init_core_services(self) -> None:
@@ -403,6 +406,15 @@ class ServiceContainer:
             package_deal_service=c["package_deal_service"],
         )
 
+    def _init_reminder_service(self) -> None:
+        from services.reminder_service import ReminderService
+
+        c = self._components
+        c["reminder_service"] = ReminderService(
+            notification_repo=c["notification_repo"],
+            player_repo=c["player_repo"],
+        )
+
     # ------------------------------------------------------------------
     # Bot exposure
     # ------------------------------------------------------------------
@@ -464,6 +476,8 @@ class ServiceContainer:
         bot.dig_service = c["dig_service"]
         bot.dig_repo = c["dig_repo"]
         bot.dig_llm_service = c.get("dig_llm_service")
+        bot.notification_repo = c["notification_repo"]
+        bot.reminder_service = c["reminder_service"]
 
         # AI services (may be None)
         bot.ai_service = c["ai_service"]
