@@ -1139,6 +1139,40 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             row = cursor.fetchone()
             return {"discord_id": row["discord_id"], "jopacoin_balance": row["jopacoin_balance"]} if row else None
 
+    def get_richest_players(
+        self, guild_id: int, limit: int = 5, min_balance: int = 1
+    ) -> list[dict]:
+        """Return the top ``limit`` players by positive jopacoin balance.
+
+        Used by dig splash events (``richest_n`` pool) so inflation pain can
+        land on the concentration of wealth rather than on newer players.
+        Excludes zero and negative balances so nobody flagged as a debtor
+        picks up an extra debit.
+
+        Returns:
+            List of dicts with ``discord_id`` and ``jopacoin_balance``,
+            ordered by balance descending.
+        """
+        guild_id = self.normalize_guild_id(guild_id)
+        if limit <= 0:
+            return []
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT discord_id, jopacoin_balance
+                FROM players
+                WHERE guild_id = ? AND jopacoin_balance >= ?
+                ORDER BY jopacoin_balance DESC
+                LIMIT ?
+                """,
+                (guild_id, min_balance, limit),
+            )
+            return [
+                {"discord_id": row["discord_id"], "jopacoin_balance": row["jopacoin_balance"]}
+                for row in cursor.fetchall()
+            ]
+
     def apply_interest_bulk(self, updates: list[tuple[int, int]], guild_id: int) -> int:
         """
         Apply interest charges to multiple players in a single transaction.

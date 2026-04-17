@@ -69,7 +69,10 @@ FIRST_DIG_JC_MIN: int = 1
 FIRST_DIG_JC_MAX: int = 5
 FIRST_DIG_CAVE_IN: bool = False
 
-# Milestone rewards: depth -> JC bonus
+# Milestone rewards: depth -> JC bonus.
+# Only awarded the first time a tunnel reaches each depth (tracked via
+# ``tunnels.max_depth``) so bosses knocking players back and forth do not
+# farm the bonuses repeatedly.
 MILESTONES: dict[int, int] = {
     25: 5,
     50: 10,
@@ -78,8 +81,8 @@ MILESTONES: dict[int, int] = {
     150: 75,
     200: 150,
     275: 300,
-    300: 500,
-    400: 1000,
+    300: 400,
+    400: 700,
 }
 
 # Streak rewards: consecutive-day count -> JC bonus
@@ -87,7 +90,7 @@ STREAKS: dict[int, int] = {
     3: 2,
     7: 5,
     14: 10,
-    30: 20,
+    30: 15,
 }
 
 
@@ -481,32 +484,39 @@ BOSSES: dict[int, BossDef] = {
     ),
 }
 
-# Boss fight odds ────────────────────────────────────────────────
-# Strategy -> base win probability (before depth/prestige scaling)
-BOSS_WIN_ODDS: dict[str, float] = {
-    "cautious": 0.75,
-    "bold": 0.45,
-    "reckless": 0.20,
+# Boss fight mechanics ────────────────────────────────────────────
+# Bosses are resolved as a multi-round HP duel: player and boss alternate
+# turns (player first), each rolling their tier's hit chance and dealing
+# damage on a hit. Whoever reaches 0 HP first loses. Player loss = forfeit
+# wager + cave-in to the previous milestone.
+#
+# Per-tier stats (player_hp, boss_hp, player_hit, player_dmg, boss_hit, boss_dmg).
+BOSS_DUEL_STATS: dict[str, dict[str, float]] = {
+    "cautious": {"player_hp": 5, "boss_hp": 3, "player_hit": 0.65, "player_dmg": 1, "boss_hit": 0.30, "boss_dmg": 1},
+    "bold":     {"player_hp": 3, "boss_hp": 4, "player_hit": 0.40, "player_dmg": 2, "boss_hit": 0.45, "boss_dmg": 1},
+    "reckless": {"player_hp": 2, "boss_hp": 5, "player_hit": 0.15, "player_dmg": 3, "boss_hit": 0.60, "boss_dmg": 1},
 }
 
-BOSS_FREE_FIGHT_ODDS: dict[str, float] = {
-    "cautious": 0.50,
-    "bold": 0.25,
-    "reckless": 0.10,
-}
+BOSS_HP_PER_50_DEPTH: int = 1                     # boss HP bonus per 50 depth
+BOSS_HP_PER_PRESTIGE: int = 1                     # boss HP bonus per prestige level
+PLAYER_HIT_PENALTY_PER_25_DEPTH: float = 0.02     # -2% player hit per 25 depth
+PLAYER_HIT_PENALTY_PER_PRESTIGE: float = 0.02     # -2% player hit per prestige level
+PLAYER_HIT_FLOOR: float = 0.05                     # hard floor so Reckless remains playable
+PLAYER_HIT_CEILING: float = 0.95                   # hard ceiling even with max cheers
+BOSS_FREE_FIGHT_ACCURACY_MOD: float = 0.6          # multiplied into player_hit when wager == 0
+BOSS_ROUND_CAP: int = 20                           # safety valve against infinite loops
 
-BOSS_DEPTH_SCALING_PER_25: float = 0.05            # -5% per 25 depth
-BOSS_PRESTIGE_SCALING_PER_LEVEL: float = 0.05       # -5% per prestige
-
-# Payouts: depth -> (cautious_multiplier, bold_multiplier, reckless_multiplier)
+# Payouts: depth -> (cautious_multiplier, bold_multiplier, reckless_multiplier).
+# Flatter and harder than the pre-nerf table; the old exponential growth at
+# top-end depths was the main jopacoin inflation source.
 BOSS_PAYOUTS: dict[int, tuple[float, float, float]] = {
-    25: (1.5, 3.0, 6.0),
-    50: (2.0, 4.0, 8.0),
-    75: (2.5, 5.0, 10.0),
-    100: (3.0, 6.0, 12.0),
-    150: (3.5, 7.0, 14.0),
-    200: (4.0, 8.0, 16.0),
-    275: (5.0, 10.0, 20.0),
+    25:  (1.2, 2.0, 3.5),
+    50:  (1.5, 2.8, 4.8),
+    75:  (1.8, 3.5, 6.0),
+    100: (2.0, 4.0, 7.0),
+    150: (2.4, 4.8, 8.2),
+    200: (2.8, 5.5, 9.5),
+    275: (3.0, 6.5, 10.0),
 }
 
 
@@ -856,6 +866,28 @@ class EventOutcome:
 
 
 @dataclass(frozen=True)
+class SplashConfig:
+    """Splash penalty that hits other players when a digger's event resolves.
+
+    ``strategy`` selects the victim pool:
+        * ``"random_active"``  - recently-active players in the guild
+        * ``"richest_n"``      - top-N positive-balance players
+        * ``"active_diggers"`` - players who have dug in the last 7 days
+
+    ``trigger`` picks when the splash fires on the event outcome:
+    ``"success"``, ``"failure"``, or ``"always"``.
+
+    Victims' balances are debited (JC burned, not transferred to the digger).
+    The debit is clamped so a non-negative player is not pushed below 0.
+    """
+
+    strategy: str
+    victim_count: int
+    penalty_jc: int
+    trigger: str = "failure"
+
+
+@dataclass(frozen=True)
 class EventChoice:
     """A choice the player can make during an event."""
     label: str
@@ -903,6 +935,9 @@ class RandomEvent:
     desperate_option: EventChoice | None = None   # third choice: very low odds, massive reward/fail
     boon_options: tuple[TempBuff, ...] | None = None  # for complexity="boon" events
     min_prestige: int = 0           # minimum prestige level required
+    # Splash: optional penalty applied to other players in the guild when
+    # this event resolves (see SplashConfig.trigger for which outcome fires it).
+    splash: SplashConfig | None = None
 
 
 def pick_description(event: Any) -> str:
@@ -965,8 +1000,8 @@ RANDOM_EVENTS: list[RandomEvent] = [
         risky_option=EventChoice(
             "Dig through the gas",
             success=EventOutcome("The gas was harmless! And behind it—gems!", 2, 3, False),
-            failure=EventOutcome("The gas ignites! BOOM!", -5, -2, True),
-            success_chance=0.40,
+            failure=EventOutcome("The gas ignites! BOOM!", -5, -4, True),
+            success_chance=0.35,
         ),
     ),
     RandomEvent(
@@ -986,8 +1021,8 @@ RANDOM_EVENTS: list[RandomEvent] = [
         risky_option=EventChoice(
             "Repurpose the explosives",
             success=EventOutcome("KABOOM! A new passage opens up—and some coins fly out!", 5, 4, False),
-            failure=EventOutcome("KABOOM! ...in the wrong direction. Techies sends his regards.", -6, -3, True),
-            success_chance=0.35,
+            failure=EventOutcome("KABOOM! ...in the wrong direction. Techies sends his regards.", -6, -5, True),
+            success_chance=0.30,
         ),
     ),
     RandomEvent(
@@ -1028,8 +1063,8 @@ RANDOM_EVENTS: list[RandomEvent] = [
         risky_option=EventChoice(
             "Open the chest",
             success=EventOutcome("Jackpot! The 'curse' was just mood lighting!", 0, 8, False),
-            failure=EventOutcome("The chest bites you. Yes, bites.", -4, -3, False),
-            success_chance=0.40,
+            failure=EventOutcome("The chest bites you. Yes, bites.", -4, -5, False),
+            success_chance=0.35,
         ),
     ),
     RandomEvent(
@@ -1070,8 +1105,8 @@ RANDOM_EVENTS: list[RandomEvent] = [
         risky_option=EventChoice(
             "Mine the golem for crystals",
             success=EventOutcome("You harvest rare crystals before it wakes!", 0, 6, False),
-            failure=EventOutcome("It wakes up. It's not happy.", -5, -2, True),
-            success_chance=0.30,
+            failure=EventOutcome("It wakes up. It's not happy.", -5, -4, True),
+            success_chance=0.25,
         ),
     ),
     RandomEvent(
@@ -1112,8 +1147,8 @@ RANDOM_EVENTS: list[RandomEvent] = [
         risky_option=EventChoice(
             "Sprint through between eruptions",
             success=EventOutcome("You dash through and find a treasure cache behind!", 3, 5, False),
-            failure=EventOutcome("Terrible timing. You get steamed like a dumpling.", -4, -2, True),
-            success_chance=0.35,
+            failure=EventOutcome("Terrible timing. You get steamed like a dumpling.", -4, -5, True),
+            success_chance=0.30,
         ),
     ),
     RandomEvent(
@@ -1133,8 +1168,8 @@ RANDOM_EVENTS: list[RandomEvent] = [
         risky_option=EventChoice(
             "Ride the elevator",
             success=EventOutcome("WHOOSH! Express to the depths!", 6, 0, False),
-            failure=EventOutcome("The rope snaps. You tumble.", -3, -1, True),
-            success_chance=0.45,
+            failure=EventOutcome("The rope snaps. You tumble.", -3, -3, True),
+            success_chance=0.40,
         ),
     ),
     RandomEvent(
@@ -1154,8 +1189,8 @@ RANDOM_EVENTS: list[RandomEvent] = [
         risky_option=EventChoice(
             "Accept the void's bargain",
             success=EventOutcome("The void is generous today. Dark riches are yours!", 2, 8, False),
-            failure=EventOutcome("The void takes more than it gives.", -6, -4, True),
-            success_chance=0.30,
+            failure=EventOutcome("The void takes more than it gives.", -6, -7, True),
+            success_chance=0.25,
         ),
     ),
     RandomEvent(
@@ -3165,6 +3200,200 @@ RANDOM_EVENTS: list[RandomEvent] = [
             TempBuff("blessing_iron", "Blessing of Iron", 5, {"cave_in_reduction": 0.25}),
         ),
     ),
+    # ---- Negative-EV "trap" events (rare). Safe option is always weakly
+    # positive so declining is rational; the risky option averages below zero
+    # to punish FOMO plays and drain jopacoin out of circulation. -----------
+    RandomEvent(
+        id="fools_vein",
+        name="Fool's Vein",
+        description=(
+            "A vein of glittering ore runs along the wall. Half of it looks like pyrite. The other half might be real.",
+            "The wall sparkles impossibly. Some of it is gold. Some of it is painted rock. You can't tell which.",
+            "An offer so good it has to be a trick — or does it? The ore shines back at you, unreadable.",
+        ),
+        min_depth=10, max_depth=None,
+        safe_option=EventChoice(
+            "Pocket a sample and move on",
+            success=EventOutcome("A steady hand keeps a steady coin. You take the small find.", 0, 1, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Pry the whole vein loose",
+            success=EventOutcome("The vein is real! A jackpot rattles into your pack.", 0, 12, False),
+            failure=EventOutcome("Pyrite. Worthless. Dust rains down and so do a few of your coins.", 0, -4, False),
+            success_chance=0.20,
+        ),
+        rarity="rare",
+    ),
+    RandomEvent(
+        id="sirens_hollow",
+        name="Siren's Hollow",
+        description=(
+            "A low, sweet hum drifts out of a fissure. Something is singing. The sound promises gold.",
+            "The stones vibrate with a melody that feels like it's shaping itself to what you want.",
+            "A voice behind the magma whispers a price, then offers to forget the price.",
+        ),
+        min_depth=76, max_depth=None,
+        safe_option=EventChoice(
+            "Ignore the song and keep digging",
+            success=EventOutcome("The hum fades as you pass. Nothing lost, nothing gained.", 0, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Follow the singing",
+            success=EventOutcome("A small hoard glimmers in the hollow. You walk out richer.", 0, 4, False),
+            failure=EventOutcome("The song ends and so does your luck. Coins slip from your belt.", 0, -6, False),
+            success_chance=0.55,
+        ),
+        rarity="rare",
+    ),
+    RandomEvent(
+        id="hex_cursed_shrine",
+        name="Hex-Cursed Shrine",
+        description=(
+            "An old altar, still warm. The offerings on it are fresh. The curse on it is older.",
+            "A shrine to a forgotten dig-god. The coins around it look untouched. That's probably fine.",
+            "Carvings around the pedestal spell out a warning. Unfortunately, you cannot read dwarvish.",
+        ),
+        min_depth=51, max_depth=None,
+        safe_option=EventChoice(
+            "Bow respectfully and move on",
+            success=EventOutcome("A small offering left in thanks. The shrine accepts your respect.", 0, 1, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Grab the offerings",
+            success=EventOutcome("The shrine lets you keep them. This time.", 0, 10, False),
+            failure=EventOutcome("The hex lands. You feel lighter — mostly in the coin pouch.", 0, -8, False),
+            success_chance=0.25,
+        ),
+        rarity="rare",
+    ),
+    RandomEvent(
+        id="tricksters_toll",
+        name="Trickster's Toll",
+        description=(
+            "A tollgate in the middle of nowhere. A skeleton leans against it, grinning. 'Coin, or coin?' it asks.",
+            "A polite sign reads 'Pay the toll or play the toll'. Neither option looks appealing.",
+            "Someone set up a toll booth inside the mines. The operator refuses to explain how.",
+        ),
+        min_depth=151, max_depth=None,
+        safe_option=EventChoice(
+            "Pay the toll quietly",
+            success=EventOutcome("A few coins change hands. Nothing more.", 0, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Play the toll",
+            success=EventOutcome("The skeleton shrugs and waves you through. You keep what you have.", 0, 0, False),
+            failure=EventOutcome("Bad game, bad luck. The toll collects itself.", 0, -5, False),
+            success_chance=0.50,
+        ),
+        rarity="rare",
+    ),
+    RandomEvent(
+        id="gamblers_rest",
+        name="Gambler's Rest",
+        description=(
+            "A small tavern tucked into the rock. The sign reads 'Gambler's Rest - No Refunds'.",
+            "Dim lanterns, sticky tables, and a dealer who smiles a little too much. Just one hand.",
+            "The tavern has no name written, only painted dice. The dealer is already shuffling.",
+        ),
+        min_depth=101, max_depth=None,
+        safe_option=EventChoice(
+            "Nurse a drink and leave",
+            success=EventOutcome("You drink. You leave. You are none the poorer.", 0, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Sit at the table",
+            success=EventOutcome("The dice smile on you. A tidy pile slides your way.", 0, 6, False),
+            failure=EventOutcome("The house always wins. Even down here.", 0, -5, False),
+            success_chance=0.40,
+        ),
+        rarity="rare",
+    ),
+    # ---- Splash events (legendary). When the configured trigger outcome
+    # fires, a SplashConfig debits a pool of other players in the guild.
+    # Coin is burned, not transferred to the digger. ------------------------
+    RandomEvent(
+        id="lumber_collapse",
+        name="Lumber Collapse",
+        description=(
+            "A support beam groans. Somewhere distant, a tunnel just gave up.",
+            "The rock around you shifts. Elsewhere in the network, someone else's ceiling comes down.",
+            "A deep shudder passes through the whole mine. You feel people stumble.",
+        ),
+        min_depth=10, max_depth=None,
+        safe_option=EventChoice(
+            "Shore up the beam",
+            success=EventOutcome("You steady the beam. The mine breathes again.", 0, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Gamble that it holds",
+            success=EventOutcome("The beam creaks, settles, holds. You pocket a small find.", 0, 3, False),
+            failure=EventOutcome(
+                "The collapse cascades through the network. Two other diggers' stashes get buried with it.",
+                0, -3, True,
+            ),
+            success_chance=0.40,
+        ),
+        rarity="legendary",
+        splash=SplashConfig(strategy="random_active", victim_count=2, penalty_jc=5, trigger="failure"),
+    ),
+    RandomEvent(
+        id="wealth_siphon",
+        name="Wealth Siphon",
+        description=(
+            "A crystalline node pulses faintly. It tugs at the wealth in the air itself.",
+            "The node hums at the frequency of coin. Somewhere above, three very rich people feel a chill.",
+            "The deeper you dig, the louder the siphon sings. It is a very hungry song.",
+        ),
+        min_depth=51, max_depth=None,
+        safe_option=EventChoice(
+            "Leave it alone",
+            success=EventOutcome("You pass without engaging the siphon.", 0, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Activate the siphon",
+            success=EventOutcome(
+                "The siphon pulls from the richest pockets in the guild and dumps a cut into yours.",
+                0, 8, False,
+            ),
+            failure=EventOutcome("The siphon sputters and coughs. Nothing happens.", 0, 0, False),
+            success_chance=0.50,
+        ),
+        rarity="legendary",
+        splash=SplashConfig(strategy="richest_n", victim_count=3, penalty_jc=10, trigger="success"),
+    ),
+    RandomEvent(
+        id="tunnel_network_breach",
+        name="Tunnel Network Breach",
+        description=(
+            "You break through into another tunnel. The digger on the other side is not pleased.",
+            "The wall is thinner here than it should be. You hear muffled cursing on the far side.",
+            "A draft of someone else's stale air hits you. Apparently three of you share this rock.",
+        ),
+        min_depth=101, max_depth=None,
+        safe_option=EventChoice(
+            "Back off and shore it up",
+            success=EventOutcome("You seal the breach. The other diggers never notice.", 0, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Punch through",
+            success=EventOutcome("You crash in and come out with a pile of whatever was lying around.", 2, 5, False),
+            failure=EventOutcome(
+                "The collapse spreads down the network. Three other diggers lose coin to the cave-in.",
+                0, -2, True,
+            ),
+            success_chance=0.35,
+        ),
+        rarity="legendary",
+        splash=SplashConfig(strategy="active_diggers", victim_count=3, penalty_jc=8, trigger="failure"),
+    ),
 ]
 
 
@@ -3974,10 +4203,6 @@ BOSS_DEPTHS: list[int] = LAYER_BOUNDARIES
 BOSS_NAMES: dict[int, str] = {d: b.name for d, b in BOSSES.items()}
 BOSS_DIALOGUE: dict[int, list[str]] = {d: b.dialogue for d, b in BOSSES.items()}
 BOSS_ASCII: dict[int, str] = {d: b.ascii_art for d, b in BOSSES.items()}
-BOSS_ODDS: dict[str, dict] = {
-    tier: {"base": odds, "free": BOSS_FREE_FIGHT_ODDS[tier]}
-    for tier, odds in BOSS_WIN_ODDS.items()
-}
 
 # Consumable items as dicts for service-layer lookups
 CONSUMABLE_ITEMS: dict[str, dict] = {
@@ -4568,6 +4793,12 @@ EVENT_POOL: list[dict] = [
             for b in e.boon_options
         ] if e.boon_options else None,
         "min_prestige": e.min_prestige,
+        "splash": {
+            "strategy": e.splash.strategy,
+            "victim_count": e.splash.victim_count,
+            "penalty_jc": e.splash.penalty_jc,
+            "trigger": e.splash.trigger,
+        } if e.splash else None,
     }
     for e in RANDOM_EVENTS
 ]

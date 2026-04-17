@@ -189,6 +189,39 @@ class DigRepository(BaseRepository, IDigRepository):
             )
             return [self._normalize_tunnel(dict(row)) for row in cursor.fetchall()]
 
+    def get_recent_diggers(
+        self,
+        guild_id: int,
+        *,
+        days: int = 7,
+        exclude_id: int | None = None,
+        limit: int | None = None,
+    ) -> list[int]:
+        """Return ``discord_id``s that have logged a ``dig`` action recently.
+
+        Used by dig splash events (``active_diggers`` pool) so collateral
+        events only hit players who actually dig. Draws from ``dig_actions``
+        rather than ``tunnels.last_dig_at`` so lookbacks are precise and
+        don't count stale tunnel timestamps.
+        """
+        gid = self.normalize_guild_id(guild_id)
+        cutoff = int(time.time()) - max(0, days) * 86400
+        params: list = [gid, cutoff]
+        query = (
+            "SELECT DISTINCT actor_id FROM dig_actions "
+            "WHERE guild_id = ? AND action_type = 'dig' AND created_at >= ?"
+        )
+        if exclude_id is not None:
+            query += " AND actor_id != ?"
+            params.append(exclude_id)
+        if limit is not None and limit > 0:
+            query += " LIMIT ?"
+            params.append(limit)
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(query, params)
+            return [row["actor_id"] for row in cursor.fetchall() if row["actor_id"] is not None]
+
     # ── Weather ──────────────────────────────────────────────────────────
 
     def get_weather(self, guild_id: int, game_date: str) -> list[dict]:

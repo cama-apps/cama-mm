@@ -996,7 +996,7 @@ class TestBoss:
         assert result.get("payout", 0) > 0
 
     def test_boss_fight_lose(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """Lose costs wager + knockback."""
+        """Lose forfeits the wager and applies a small 5-10 block knockback."""
         _register_player(player_repository, balance=200)
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
         monkeypatch.setattr(random, "random", lambda: 0.99)
@@ -1004,13 +1004,13 @@ class TestBoss:
         dig_repo.update_tunnel(10001, guild_id, depth=24)
 
         balance_before = player_repository.get_balance(10001, guild_id)
-        # Force loss
+        # Force loss: hit rolls never succeed, round cap triggers boss win.
         monkeypatch.setattr(random, "random", lambda: 0.999)
         result = dig_service.fight_boss(10001, guild_id, "cautious", wager=10)
         assert result["success"]
         assert not result.get("won")
-        balance_after = player_repository.get_balance(10001, guild_id)
-        assert balance_after < balance_before
+        assert player_repository.get_balance(10001, guild_id) == balance_before - 10
+        assert 5 <= result.get("knockback", 0) <= 10
         tunnel = dig_repo.get_tunnel(10001, guild_id)
         assert tunnel["depth"] < 24
 
@@ -2026,7 +2026,7 @@ class TestLuminosity:
             assert (spy.call_count > 0) == expect, f"lum={lum}, roll=0.38: expected triggered={expect}"
 
     def test_event_chance_cap(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """Event chance should be capped at 75%: The Hollow + pitch black = 0.36*3.0 = 1.08, capped."""
+        """Event chance should be capped at 75%, even when multipliers push uncapped math above."""
         from unittest.mock import patch
 
         import services.dig_service as ds_mod
@@ -2036,50 +2036,40 @@ class TestLuminosity:
         monkeypatch.setattr(ds_mod.random, "random", lambda: 0.99)
         dig_service.dig(10001, guild_id)
 
-        # Weather neutralized by fixture (effects stubbed to {})
-
-        # Dirt (depth 0-25) at pitch black: 0.16 * 3.0 = 0.48.
-        # Cave-in at pitch: 0.05 + 0.25 = 0.30. So roll=0.35 avoids cave-in
-        # and triggers event (0.35 < 0.48). But we need uncapped > 0.75.
-        # Use Abyss (depth 101-150): event = 0.24 * 3.0 = 0.72, cave-in = 0.35 + 0.25 = 0.60.
-        # Not quite above cap. But we just need to verify the cap works:
-        # verify that at pitch-black Dirt (event=0.48), roll=0.47 triggers and roll=0.49 doesn't.
-        # Then verify at pitch-black Abyss (event=0.72, close to cap), roll=0.71 triggers.
-        # The cap at 0.75 prevents event_chance from exceeding that, even if
-        # the uncapped math yields >0.75 (e.g. The Hollow at 1.08).
+        # Weather neutralized by fixture (effects stubbed to {}).
         import json as _json
         all_bosses_defeated = _json.dumps({str(b): "defeated" for b in [25, 50, 75, 100, 150, 200, 275]})
 
         cd = FREE_DIG_COOLDOWN_SECONDS
 
-        # Dirt at pitch black: event_chance = min(0.16 * 3.0, 0.75) = 0.48
+        # Dirt at pitch black: event_chance = min(0.20 * 3.0, 0.75) = 0.60
         # cave_in_chance = 0.05 + 0.25 = 0.30
         dig_repo.update_tunnel(10001, guild_id, depth=10, luminosity=0)
-        # Roll 0.35: above cave-in (0.30), below event (0.48) -> event triggers
+        # Roll 0.45: above cave-in (0.30), below event (0.60) -> event triggers
         monkeypatch.setattr(time, "time", lambda: 1_000_000 + cd + 1)
-        monkeypatch.setattr(ds_mod.random, "random", lambda: 0.35)
+        monkeypatch.setattr(ds_mod.random, "random", lambda: 0.45)
         with patch.object(dig_service, "roll_event", wraps=dig_service.roll_event) as spy:
             dig_service.dig(10001, guild_id)
-        assert spy.call_count > 0, "Pitch-black Dirt: roll=0.35 should trigger event (chance=0.48)"
+        assert spy.call_count > 0, "Pitch-black Dirt: roll=0.45 should trigger event (chance=0.60)"
 
-        # Roll 0.49: above event (0.48) -> no event
+        # Roll 0.65: above event (0.60) -> no event
         dig_repo.update_tunnel(10001, guild_id, depth=10, luminosity=0)
         monkeypatch.setattr(time, "time", lambda: 1_000_000 + 2 * (cd + 1))
-        monkeypatch.setattr(ds_mod.random, "random", lambda: 0.49)
-        with patch.object(dig_service, "roll_event", wraps=dig_service.roll_event) as spy:
-            dig_service.dig(10001, guild_id)
-        assert spy.call_count == 0, "Pitch-black Dirt: roll=0.49 should NOT trigger (chance=0.48)"
-
-        # Abyss at pitch black: event_chance = min(0.24 * 3.0, 0.75) = 0.72
-        # cave_in_chance = 0.35 + 0.25 = 0.60
-        dig_repo.update_tunnel(10001, guild_id, depth=120, luminosity=0,
-                               boss_progress=all_bosses_defeated)
-        # Roll 0.65: above cave-in (0.60), below event (0.72) -> triggers
-        monkeypatch.setattr(time, "time", lambda: 1_000_000 + 3 * (cd + 1))
         monkeypatch.setattr(ds_mod.random, "random", lambda: 0.65)
         with patch.object(dig_service, "roll_event", wraps=dig_service.roll_event) as spy:
             dig_service.dig(10001, guild_id)
-        assert spy.call_count > 0, "Pitch-black Abyss: roll=0.65 should trigger event (chance=0.72)"
+        assert spy.call_count == 0, "Pitch-black Dirt: roll=0.65 should NOT trigger (chance=0.60)"
+
+        # Abyss at pitch black: event_chance = min(0.28 * 3.0, 0.75) = 0.75 (at the cap)
+        # cave_in_chance = 0.35 + 0.25 = 0.60
+        dig_repo.update_tunnel(10001, guild_id, depth=120, luminosity=0,
+                               boss_progress=all_bosses_defeated)
+        # Roll 0.70: above cave-in (0.60), below cap (0.75) -> triggers
+        monkeypatch.setattr(time, "time", lambda: 1_000_000 + 3 * (cd + 1))
+        monkeypatch.setattr(ds_mod.random, "random", lambda: 0.70)
+        with patch.object(dig_service, "roll_event", wraps=dig_service.roll_event) as spy:
+            dig_service.dig(10001, guild_id)
+        assert spy.call_count > 0, "Pitch-black Abyss: roll=0.70 should trigger event (capped chance=0.75)"
 
         # Roll 0.76: above cap (0.75) -> never triggers regardless of layer
         dig_repo.update_tunnel(10001, guild_id, depth=120, luminosity=0,
@@ -2209,10 +2199,10 @@ class TestTempBuffs:
 class TestExpandedEvents:
     """Verify expanded event system."""
 
-    def test_event_pool_has_93_events(self):
-        """Event pool should have 93 events (58 original + 35 prestige expansion)."""
+    def test_event_pool_has_101_events(self):
+        """Event pool should have 101 events (93 baseline + 5 trap + 3 splash)."""
         from services.dig_constants import EVENT_POOL
-        assert len(EVENT_POOL) == 93
+        assert len(EVENT_POOL) == 101
 
     def test_new_events_have_complexity_field(self):
         """All events should have a complexity field."""
@@ -2349,7 +2339,14 @@ class TestCheer:
         assert player_repository.get_balance(10001, guild_id) == balance_target_before
 
     def test_cheer_increases_boss_win_chance(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """Cheer bonus should increase fight_boss win chance (wagered fight)."""
+        """Cheer bonus should increase fight_boss per-round hit chance.
+
+        In the HP duel model, cheers raise ``player_hit`` per round.
+        Using a random value that sits between the un-cheered and
+        cheered hit rates, the player misses every round without
+        cheers (round cap loss) but hits every round with cheers
+        (boss dies). Verifies cheering flips the outcome deterministically.
+        """
         _register_player(player_repository, discord_id=10001, balance=200)
         _register_player(player_repository, discord_id=10002, balance=200)
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
@@ -2358,15 +2355,16 @@ class TestCheer:
         dig_service.dig(10002, guild_id)
         dig_repo.update_tunnel(10001, guild_id, depth=24)
 
-        # Add a cheer
+        # Add 3 cheers so player_hit jumps by +0.15, flipping deterministically.
         monkeypatch.setattr(time, "time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1)
-        cheer_result = dig_service.cheer_boss(10002, 10001, guild_id)
-        assert cheer_result["success"]
+        _register_player(player_repository, discord_id=10003, balance=200)
+        _register_player(player_repository, discord_id=10004, balance=200)
+        for cheerer_id in (10002, 10003, 10004):
+            dig_service.cheer_boss(cheerer_id, 10001, guild_id)
 
-        # Wagered cautious base = 0.75, depth penalty ~0.0125, cheer bonus +0.05
-        # => win_chance ~0.7875.  Random 0.76 < 0.7875 => wins WITH cheer.
-        # Without cheer, 0.75 - 0.0125 = 0.7375, so 0.76 > 0.7375 => would lose.
-        monkeypatch.setattr(random, "random", lambda: 0.76)
+        # Cautious player_hit with cheers ~= 0.65 - 0.02 (depth) + 0.15 (cheers) = 0.78.
+        # A random of 0.70 passes the hit check with cheers but fails without them.
+        monkeypatch.setattr(random, "random", lambda: 0.70)
         fight_result = dig_service.fight_boss(10001, guild_id, "cautious", wager=10)
         assert fight_result["success"]
         assert fight_result.get("won") is True
@@ -2628,8 +2626,11 @@ class TestAscensionSystem:
         dig_service.dig(10001, guild_id)
         dig_repo.update_tunnel(10001, guild_id, depth=24, prestige_level=4)
 
-        # Force win
-        monkeypatch.setattr(random, "random", lambda: 0.01)
+        # Cautious at prestige 4, depth 25: player_hit ≈ 0.58 with free-fight
+        # modifier; boss_hit = 0.30. A roll of 0.40 lets the player hit every
+        # round while the boss misses every round, so the duel resolves to
+        # a deterministic win against a +4-HP boss.
+        monkeypatch.setattr(random, "random", lambda: 0.31)
         result = dig_service.fight_boss(10001, guild_id, "cautious", wager=0)
         assert result["success"]
         assert result.get("won") is True
@@ -2650,8 +2651,8 @@ class TestAscensionSystem:
         dig_service.dig(10001, guild_id)
         dig_repo.update_tunnel(10001, guild_id, depth=24, prestige_level=3)
 
-        # Force win
-        monkeypatch.setattr(random, "random", lambda: 0.01)
+        # See test_boss_phase2_at_prestige_4 for the 0.25 roll rationale.
+        monkeypatch.setattr(random, "random", lambda: 0.31)
         result = dig_service.fight_boss(10001, guild_id, "cautious", wager=0)
         assert result["success"]
         assert result.get("won") is True
@@ -2937,9 +2938,9 @@ class TestNewEventMechanics:
         assert len(found_gated) == 0, f"Prestige-gated events should not appear at P0: {found_gated}"
 
     def test_all_new_events_have_valid_structure(self):
-        """All 93 events have required fields."""
+        """All 101 events have required fields."""
         from services.dig_constants import EVENT_POOL
-        assert len(EVENT_POOL) == 93
+        assert len(EVENT_POOL) == 101
         for e in EVENT_POOL:
             assert "id" in e, "Event missing 'id'"
             assert "name" in e, f"Event {e.get('id', '?')} missing 'name'"
@@ -3064,7 +3065,7 @@ class TestEventPoolInvariants:
 
     def test_rarity_weights_constant(self):
         from services.dig_service import RARITY_WEIGHTS
-        assert RARITY_WEIGHTS == {"common": 70, "uncommon": 20, "rare": 12, "legendary": 4}
+        assert RARITY_WEIGHTS == {"common": 70, "uncommon": 20, "rare": 12, "legendary": 6}
 
     def test_prestige_gates_unlocked(self):
         """infernal_gate, aghanim_trial, neow_blessing should be rollable

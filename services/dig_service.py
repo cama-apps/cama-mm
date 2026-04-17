@@ -20,10 +20,14 @@ from services.dig_constants import (
     BOSS_ASCII,
     BOSS_BOUNDARIES,
     BOSS_DIALOGUE,
+    BOSS_DUEL_STATS,
+    BOSS_FREE_FIGHT_ACCURACY_MOD,
+    BOSS_HP_PER_50_DEPTH,
+    BOSS_HP_PER_PRESTIGE,
     BOSS_NAMES,
-    BOSS_ODDS,
     BOSS_PAYOUTS,
     BOSS_PHASE2,
+    BOSS_ROUND_CAP,
     CONSUMABLE_ITEMS,
     CORRUPTION_BAD,
     CORRUPTION_WEIRD,
@@ -58,6 +62,10 @@ from services.dig_constants import (
     MUTATIONS_POOL,
     PAID_DIG_COSTS,
     PICKAXE_TIERS,
+    PLAYER_HIT_CEILING,
+    PLAYER_HIT_FLOOR,
+    PLAYER_HIT_PENALTY_PER_25_DEPTH,
+    PLAYER_HIT_PENALTY_PER_PRESTIGE,
     PRESTIGE_PERKS,
     STREAKS,
     TUNNEL_NAME_ADJECTIVES,
@@ -69,7 +77,7 @@ from services.dig_constants import (
 
 logger = logging.getLogger("cama_bot.services.dig")
 
-RARITY_WEIGHTS = {"common": 70, "uncommon": 20, "rare": 12, "legendary": 4}
+RARITY_WEIGHTS = {"common": 70, "uncommon": 20, "rare": 12, "legendary": 6}
 DIG_STARTING_STAT_POINTS = 5
 DIG_BOSS_STAT_POINT_BONUS = 1
 MINER_BACKSTORY_MAX_LENGTH = 600
@@ -78,6 +86,62 @@ STRENGTH_MIN_ADVANCE_INTERVAL = 5
 SMARTS_CAVE_IN_REDUCTION = 0.02
 STAMINA_COOLDOWN_REDUCTION = 0.04
 STAMINA_MAX_REDUCTION = 0.50
+
+def _splash_trigger_matches(trigger: str, succeeded: bool) -> bool:
+    """Does the event's splash config fire on this outcome?"""
+    if trigger == "always":
+        return True
+    if trigger == "success":
+        return bool(succeeded)
+    # default "failure"
+    return not succeeded
+
+
+def _splash_to_dict(result) -> dict | None:
+    """Serialize a :class:`SplashResult` for return from resolve_event."""
+    if result is None or not getattr(result, "victims", None):
+        return None
+    return {
+        "strategy": result.strategy,
+        "event_name": result.event_name,
+        "victims": [{"discord_id": vid, "amount": amt} for vid, amt in result.victims],
+        "total_burned": result.total_burned,
+    }
+
+
+def _approx_duel_win_prob(
+    *, player_hp: int, boss_hp: int,
+    player_hit: float, player_dmg: int,
+    boss_hit: float, boss_dmg: int,
+    trials: int = 500,
+) -> float:
+    """Estimate the probability the player wins a boss HP duel.
+
+    Used by ``scout_boss`` to surface an approximate win% to players
+    without resolving an actual fight. Monte Carlo with a local ``Random``
+    so the estimate does not consume the global RNG stream (important for
+    deterministic dig tests).
+    """
+    if player_hp <= 0 or boss_hp <= 0:
+        return 0.0
+    if trials <= 0:
+        return 0.0
+    rng = random.Random()
+    wins = 0
+    for _ in range(trials):
+        php, bhp = player_hp, boss_hp
+        while True:
+            if rng.random() < player_hit:
+                bhp -= player_dmg
+            if bhp <= 0:
+                wins += 1
+                break
+            if rng.random() < boss_hit:
+                php -= boss_dmg
+            if php <= 0:
+                break
+    return wins / trials
+
 
 # Pre-compute which event IDs have art assets (disk or PIL).
 # Lazily initialized on first use to avoid import-time side effects.
@@ -1486,11 +1550,15 @@ class DigService:
         else:
             jc_earned = max(0, jc_earned)
 
-        # 14. Check milestones (with ascension milestone multiplier)
+        # 14. Check milestones (with ascension milestone multiplier).
+        # Only award milestones that extend the tunnel's all-time high
+        # so boss cave-ins cannot be farmed by re-crossing boundaries.
         milestone_bonus = 0
         milestone_mult = 1.0 + ascension.get("milestone_multiplier", 0)
+        prev_max_depth = tunnel.get("max_depth", 0) or 0
+        milestone_floor = max(depth_before, prev_max_depth)
         for m_depth, m_reward in MILESTONES.items():
-            if depth_before < m_depth <= new_depth:
+            if milestone_floor < m_depth <= new_depth:
                 milestone_bonus += int(m_reward * milestone_mult)
 
         jc_earned += milestone_bonus
@@ -1528,10 +1596,10 @@ class DigService:
 
         # 17. Roll for random event (layer-specific rates, luminosity, ascension, mutations)
         event_rates = {
-            "Dirt": 0.16, "Stone": 0.16, "Crystal": 0.20, "Magma": 0.20,
-            "Abyss": 0.24, "Fungal Depths": 0.30, "Frozen Core": 0.24, "The Hollow": 0.36,
+            "Dirt": 0.20, "Stone": 0.20, "Crystal": 0.24, "Magma": 0.24,
+            "Abyss": 0.28, "Fungal Depths": 0.34, "Frozen Core": 0.28, "The Hollow": 0.40,
         }
-        event_chance = event_rates.get(layer_name, 0.20)
+        event_chance = event_rates.get(layer_name, 0.24)
         # Ascension event chance boost
         event_chance *= (1.0 + ascension.get("event_chance_multiplier", 0))
         # Weather event chance modifier
@@ -1591,6 +1659,7 @@ class DigService:
         self.dig_repo.update_tunnel(
             discord_id, guild_id,
             depth=new_depth,
+            max_depth=max(prev_max_depth, new_depth),
             total_digs=total_digs,
             last_dig_at=now,
             total_jc_earned=(tunnel.get("total_jc_earned", 0) or 0) + jc_earned,
@@ -1943,11 +2012,11 @@ class DigService:
 
         # ── Event chance + eligible events ────────────────────────
         event_rates = {
-            "Dirt": 0.16, "Stone": 0.16, "Crystal": 0.20, "Magma": 0.20,
-            "Abyss": 0.24, "Fungal Depths": 0.30, "Frozen Core": 0.24,
-            "The Hollow": 0.36,
+            "Dirt": 0.20, "Stone": 0.20, "Crystal": 0.24, "Magma": 0.24,
+            "Abyss": 0.28, "Fungal Depths": 0.34, "Frozen Core": 0.28,
+            "The Hollow": 0.40,
         }
-        event_chance = event_rates.get(layer_name, 0.20)
+        event_chance = event_rates.get(layer_name, 0.24)
         event_chance *= 1.0 + ascension.get("event_chance_multiplier", 0)
         event_chance *= 1.0 + weather_fx.get("event_chance_multiplier", 0)
         event_chance *= 1.0 + mutation_fx.get("event_chance_bonus", 0)
@@ -2323,11 +2392,13 @@ class DigService:
         else:
             jc_earned = max(0, jc_earned)
 
-        # Milestones
+        # Milestones (anti-farm: only award on depths that extend all-time high).
         milestone_bonus = 0
         milestone_mult = 1.0 + p["ascension"].get("milestone_multiplier", 0)
+        prev_max_depth = tunnel.get("max_depth", 0) or 0
+        milestone_floor = max(depth_before, prev_max_depth)
         for m_depth, m_reward in MILESTONES.items():
-            if depth_before < m_depth <= new_depth:
+            if milestone_floor < m_depth <= new_depth:
                 milestone_bonus += int(m_reward * milestone_mult)
         jc_earned += milestone_bonus
 
@@ -2399,6 +2470,7 @@ class DigService:
         self.dig_repo.update_tunnel(
             discord_id, guild_id,
             depth=new_depth, total_digs=total_digs, last_dig_at=now,
+            max_depth=max(prev_max_depth, new_depth),
             total_jc_earned=(tunnel.get("total_jc_earned", 0) or 0) + jc_earned,
             streak_days=streak, streak_last_date=today,
             current_run_jc=run_jc,
@@ -3353,45 +3425,86 @@ class DigService:
             if balance < wager:
                 return self._error(f"You only have {balance} JC (wager: {wager}).")
 
-        # Calculate odds using configured values
-        odds_config = BOSS_ODDS.get(risk_tier, {})
-        base_odds = odds_config.get("base", 0.50)
-
-        # Get depth-specific payout multiplier from BOSS_PAYOUTS
+        # ---- Multi-round HP duel ---------------------------------------
+        # Each round the player attacks first; if the boss survives, it
+        # counterattacks. Whichever side reaches 0 HP first loses.
+        stats = BOSS_DUEL_STATS.get(risk_tier, BOSS_DUEL_STATS["bold"])
         tier_index = {"cautious": 0, "bold": 1, "reckless": 2}.get(risk_tier, 1)
         payouts = BOSS_PAYOUTS.get(at_boss, (2.0, 3.0, 6.0))
         multiplier = payouts[tier_index] if tier_index < len(payouts) else 2.0
 
-        # Depth scaling: harder bosses are deeper
-        depth_penalty = (at_boss / 100) * 0.05
         prestige_level = tunnel.get("prestige_level", 0) or 0
-        prestige_penalty = prestige_level * 0.02
 
-        # Cheer bonus
+        # Cheer bonus (existing mechanic: +5% accuracy per cheer, cap 3 cheers).
         cheers = self._get_cheers(tunnel)
         now = int(time.time())
         active_cheers = [c for c in cheers if c.get("expires_at", 0) > now]
         cheer_bonus = min(0.15, len(active_cheers) * 0.05)
 
-        # Phase 2 penalty for P4+ bosses
+        # Phase 2 accuracy penalty for P4+ bosses (kept, interpreted as per-round hit penalty).
         phase2_penalty = 0.0
         if boss_progress.get(str(at_boss)) == "phase1_defeated" and at_boss in BOSS_PHASE2:
             phase2_penalty = abs(BOSS_PHASE2[at_boss].win_odds_penalty)
 
-        win_chance = base_odds - depth_penalty - prestige_penalty - phase2_penalty + cheer_bonus
-        win_chance = max(0.05, min(0.95, win_chance))
-
-        # Free fights use separate (lower) odds from the config
+        depth_hit_penalty = (at_boss // 25) * PLAYER_HIT_PENALTY_PER_25_DEPTH
+        prestige_hit_penalty = prestige_level * PLAYER_HIT_PENALTY_PER_PRESTIGE
+        player_hit = stats["player_hit"] - depth_hit_penalty - prestige_hit_penalty - phase2_penalty + cheer_bonus
         if wager == 0:
-            free_odds = odds_config.get("free")
-            if free_odds is not None:
-                win_chance = free_odds - depth_penalty - prestige_penalty + cheer_bonus
-                win_chance = max(0.05, min(0.95, win_chance))
-            else:
-                win_chance *= 0.85
+            player_hit *= BOSS_FREE_FIGHT_ACCURACY_MOD
+        player_hit = max(PLAYER_HIT_FLOOR, min(PLAYER_HIT_CEILING, player_hit))
 
-        # Roll fight
-        won = random.random() < win_chance
+        player_hp = int(stats["player_hp"])
+        boss_hp = (int(stats["boss_hp"])
+                   + (at_boss // 50) * BOSS_HP_PER_50_DEPTH
+                   + prestige_level * BOSS_HP_PER_PRESTIGE)
+        player_dmg = int(stats["player_dmg"])
+        boss_hit_chance = float(stats["boss_hit"])
+        boss_dmg = int(stats["boss_dmg"])
+
+        # Estimate actual win probability via Monte Carlo on the entry
+        # stats so the returned ``win_chance`` matches what ``scout_boss``
+        # would show — per-round hit rate is not the same as duel win rate.
+        win_chance = _approx_duel_win_prob(
+            player_hp=player_hp,
+            boss_hp=boss_hp,
+            player_hit=player_hit,
+            player_dmg=player_dmg,
+            boss_hit=boss_hit_chance,
+            boss_dmg=boss_dmg,
+        )
+
+        round_log: list[dict] = []
+        won: bool | None = None
+        for round_num in range(1, BOSS_ROUND_CAP + 1):
+            entry: dict = {"round": round_num}
+            player_roll = random.random() < player_hit
+            if player_roll:
+                boss_hp -= player_dmg
+            entry["player_hit"] = player_roll
+            entry["boss_hp"] = max(0, boss_hp)
+            if boss_hp <= 0:
+                won = True
+                round_log.append(entry)
+                break
+            boss_roll = random.random() < boss_hit_chance
+            if boss_roll:
+                player_hp -= boss_dmg
+            entry["boss_hit"] = boss_roll
+            entry["player_hp"] = max(0, player_hp)
+            round_log.append(entry)
+            if player_hp <= 0:
+                won = False
+                break
+        else:
+            # Round cap hit without a decision: the boss wins. Players who
+            # can't land a killing blow in BOSS_ROUND_CAP rounds have
+            # clearly lost the initiative. In realistic play with the
+            # default hit rates this branch is essentially unreachable
+            # (Cautious at 0.65 hit has <1-in-40k chance of missing 20
+            # times). It matters for deterministic tests that pin
+            # ``random.random`` to extreme values.
+            won = False
+
         boss_name = BOSS_NAMES.get(at_boss, "Unknown Boss")
         attempts = (tunnel.get("boss_attempts", 0) or 0) + 1
 
@@ -3424,7 +3537,7 @@ class DigService:
                     action_type="boss_fight",
                     details=json.dumps({
                         "boundary": at_boss, "won": True, "risk": risk_tier,
-                        "phase": 1, "wager": wager,
+                        "phase": 1, "wager": wager, "rounds": round_log,
                     }),
                 )
 
@@ -3443,6 +3556,7 @@ class DigService:
                     new_depth=depth,
                     dialogue=p2_dialogue,
                     achievements=[],
+                    round_log=round_log,
                 )
 
             # Full victory (or phase 2 already cleared)
@@ -3454,9 +3568,11 @@ class DigService:
             stat_point_awarded = self._award_boss_stat_point_if_first(
                 discord_id, guild_id, tunnel, at_boss
             )
+            prev_max_depth = tunnel.get("max_depth", 0) or 0
             self.dig_repo.update_tunnel(
                 discord_id, guild_id,
                 depth=new_depth,
+                max_depth=max(prev_max_depth, new_depth),
                 boss_progress=json.dumps(boss_progress),
                 boss_attempts=0,
                 cheer_data=None,  # Clear cheers
@@ -3485,6 +3601,7 @@ class DigService:
                     "boundary": at_boss, "won": True, "risk": risk_tier,
                     "wager": wager, "jc_delta": jc_delta,
                     "stat_point_awarded": stat_point_awarded,
+                    "rounds": round_log,
                 }),
             )
 
@@ -3501,9 +3618,12 @@ class DigService:
                 dialogue=defeat_msg,
                 achievements=achievements,
                 stat_point_awarded=stat_point_awarded,
+                round_log=round_log,
             )
         else:
-            # Lose: knocked back + lose wager
+            # Lose: forfeit wager + a small depth knockback. The nerf's main
+            # EV lever is the wager forfeit plus reduced payouts on wins —
+            # knockback stays modest so a loss isn't a run-ending setback.
             knockback = random.randint(5, 10)
             new_depth = max(0, depth - knockback)
             jc_delta = -wager if wager > 0 else 0
@@ -3512,6 +3632,7 @@ class DigService:
                 discord_id, guild_id,
                 depth=new_depth,
                 boss_attempts=attempts,
+                cheer_data=None,     # clear cheers on defeat
                 last_dig_at=now,
             )
 
@@ -3524,6 +3645,7 @@ class DigService:
                 details=json.dumps({
                     "boundary": at_boss, "won": False, "risk": risk_tier,
                     "wager": wager, "knockback": knockback,
+                    "rounds": round_log,
                 }),
             )
 
@@ -3538,6 +3660,7 @@ class DigService:
                 new_depth=new_depth,
                 dialogue=f"{boss_name} sends you flying back {knockback} blocks!",
                 achievements=[],
+                round_log=round_log,
             )
 
     def retreat_boss(self, discord_id: int, guild_id) -> dict:
@@ -3594,10 +3717,10 @@ class DigService:
         # Consume lantern
         self.dig_repo.remove_inventory_item(discord_id, guild_id, "lantern")
 
-        # Calculate odds for all tiers
+        # Calculate odds for all tiers using the HP-duel model.
         prestige_level = tunnel.get("prestige_level", 0) or 0
-        depth_penalty = (at_boss / 100) * 0.05
-        prestige_penalty = prestige_level * 0.02
+        depth_hit_penalty = (at_boss // 25) * PLAYER_HIT_PENALTY_PER_25_DEPTH
+        prestige_hit_penalty = prestige_level * PLAYER_HIT_PENALTY_PER_PRESTIGE
 
         cheers = self._get_cheers(tunnel)
         now = int(time.time())
@@ -3608,16 +3731,39 @@ class DigService:
 
         odds = {}
         for i, tier in enumerate(("cautious", "bold", "reckless")):
-            cfg = BOSS_ODDS.get(tier, {})
-            base = cfg.get("base", 0.50)
-            chance = base - depth_penalty - prestige_penalty + cheer_bonus
-            chance = max(0.05, min(0.95, chance))
-            free_base = cfg.get("free", base * 0.85)
-            free_chance = free_base - depth_penalty - prestige_penalty + cheer_bonus
-            free_chance = max(0.05, min(0.95, free_chance))
+            stats = BOSS_DUEL_STATS[tier]
+            player_hit = stats["player_hit"] - depth_hit_penalty - prestige_hit_penalty + cheer_bonus
+            player_hit = max(PLAYER_HIT_FLOOR, min(PLAYER_HIT_CEILING, player_hit))
+            free_hit = max(
+                PLAYER_HIT_FLOOR,
+                min(PLAYER_HIT_CEILING, player_hit * BOSS_FREE_FIGHT_ACCURACY_MOD),
+            )
+            boss_hp = (int(stats["boss_hp"])
+                       + (at_boss // 50) * BOSS_HP_PER_50_DEPTH
+                       + prestige_level * BOSS_HP_PER_PRESTIGE)
+            win_pct = _approx_duel_win_prob(
+                player_hp=int(stats["player_hp"]),
+                boss_hp=boss_hp,
+                player_hit=player_hit,
+                player_dmg=int(stats["player_dmg"]),
+                boss_hit=float(stats["boss_hit"]),
+                boss_dmg=int(stats["boss_dmg"]),
+            )
+            free_win_pct = _approx_duel_win_prob(
+                player_hp=int(stats["player_hp"]),
+                boss_hp=boss_hp,
+                player_hit=free_hit,
+                player_dmg=int(stats["player_dmg"]),
+                boss_hit=float(stats["boss_hit"]),
+                boss_dmg=int(stats["boss_dmg"]),
+            )
             odds[tier] = {
-                "win_pct": round(chance, 2),
-                "free_fight_pct": round(free_chance, 2),
+                "win_pct": round(win_pct, 2),
+                "free_fight_pct": round(free_win_pct, 2),
+                "player_hp": int(stats["player_hp"]),
+                "boss_hp": boss_hp,
+                "player_hit": round(player_hit, 2),
+                "boss_hit": round(float(stats["boss_hit"]), 2),
                 "multiplier": payouts[i] if i < len(payouts) else 2.0,
             }
 
@@ -4387,6 +4533,29 @@ class DigService:
             self.set_temp_buff(discord_id, guild_id, buff_data)
             buff_applied = buff_data
 
+        # Splash: event may burn JC from other players in the guild when the
+        # configured trigger outcome fires. Splash events are wired on risky
+        # outcomes only (safe options never splash).
+        splash_result = None
+        splash_cfg = event.get("splash")
+        if (
+            splash_cfg
+            and choice in ("risky", "desperate")
+            and _splash_trigger_matches(splash_cfg.get("trigger", "failure"), succeeded)
+        ):
+            from services.dig_splash import (
+                resolve_splash,  # local import: keeps dig_service import graph light
+            )
+            splash_result = resolve_splash(
+                player_repo=self.player_repo,
+                dig_repo=self.dig_repo,
+                guild_id=guild_id,
+                digger_id=discord_id,
+                event_name=event.get("name", "Unknown Event"),
+                strategy=splash_cfg.get("strategy", "random_active"),
+                victim_count=int(splash_cfg.get("victim_count", 0)),
+                penalty_jc=int(splash_cfg.get("penalty_jc", 0)),
+            )
 
         self.dig_repo.log_action(
             discord_id=discord_id, guild_id=guild_id,
@@ -4394,6 +4563,10 @@ class DigService:
             details=json.dumps({
                 "event_id": event_id, "choice": choice, "succeeded": succeeded,
                 "advance": advance, "jc": jc, "cave_in": cave_in,
+                "splash_victims": (
+                    [{"id": vid, "amount": amt} for vid, amt in splash_result.victims]
+                    if splash_result else None
+                ),
             }),
         )
 
@@ -4414,6 +4587,7 @@ class DigService:
             chain_event=chain_event,
             boss_encounter=boss_encounter,
             boss_info=boss_info,
+            splash=_splash_to_dict(splash_result),
         )
 
     # ------------------------------------------------------------------
