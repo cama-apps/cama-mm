@@ -527,6 +527,18 @@ class BossWagerModal(discord.ui.Modal):
                 inline=False,
             )
 
+            if getattr(self.result, "echo_applied", False):
+                killer_id = getattr(self.result, "echo_killer_id", None)
+                killer_mention = f"<@{killer_id}>" if killer_id else "a guildmate"
+                embed.add_field(
+                    name="Echoing in the Tunnels",
+                    value=(
+                        f"{killer_mention} killed this boss recently. "
+                        "It came in weakened (-25% HP, -30% payout)."
+                    ),
+                    inline=False,
+                )
+
             # Try to load boss fight result art
             boss_file = None
             boundary = getattr(self.result, "boundary", None)
@@ -876,6 +888,13 @@ class BossEncounterView(discord.ui.View):
             if odds and hasattr(odds, "_d"):
                 odds = odds._d
             lines = [f"**{boss_name}** — Intel Report\n"]
+            if getattr(info, "echo_applied", False):
+                killer_id = getattr(info, "echo_killer_id", None)
+                killer_mention = f"<@{killer_id}>" if killer_id else "a guildmate"
+                lines.append(
+                    f"*Weakened — {killer_mention} killed this boss in the last 24h. "
+                    "(-25% HP, -30% payout)*\n"
+                )
             if isinstance(odds, dict):
                 for tier in ("cautious", "bold", "reckless"):
                     t = odds.get(tier)

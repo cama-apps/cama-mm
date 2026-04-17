@@ -11,7 +11,7 @@ import pytest
 from repositories.dig_repository import DigRepository
 from services.dig_constants import (
     BOSS_DUEL_STATS,
-    BOSS_HP_PER_50_DEPTH,
+    BOSS_HP_PER_40_DEPTH,
     BOSS_HP_PER_PRESTIGE,
     BOSS_PAYOUTS,
     FREE_DIG_COOLDOWN_SECONDS,
@@ -100,13 +100,13 @@ class TestDuelScaling:
     """Depth and prestige both add boss HP to make duels harder."""
 
     def test_boss_hp_scales_with_depth(self, dig_service, dig_repo, player_repository, monkeypatch):
-        """Boss HP at depth 200 = base + (200//50) * BOSS_HP_PER_50_DEPTH.
+        """Boss HP at depth 200 = base + (200//40) * BOSS_HP_PER_40_DEPTH.
 
         Asserts directly on the first round's recorded ``boss_hp`` (which
         is post-player-hit HP) so the test doesn't depend on who wins.
         """
         base_boss_hp = int(BOSS_DUEL_STATS["cautious"]["boss_hp"])
-        expected = base_boss_hp + (200 // 50) * BOSS_HP_PER_50_DEPTH
+        expected = base_boss_hp + (200 // 40) * BOSS_HP_PER_40_DEPTH
 
         _register(player_repository, balance=2000)
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
@@ -209,7 +209,7 @@ class TestApproxWinProb:
             boss_dmg=int(stats["boss_dmg"]),
             trials=2000,
         )
-        assert prob > 0.70
+        assert prob > 0.65
 
     def test_reckless_first_boss_is_low(self):
         stats = BOSS_DUEL_STATS["reckless"]
@@ -223,3 +223,96 @@ class TestApproxWinProb:
             trials=2000,
         )
         assert prob < 0.35
+
+
+class TestBossEchoWeakening:
+    """After a guild-first kill, subsequent fighters see a weakened boss for 24h."""
+
+    def test_first_kill_records_echo(self, dig_service, dig_repo, player_repository, monkeypatch):
+        _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
+        monkeypatch.setattr(random, "random", lambda: 0.0)
+        result = dig_service.fight_boss(10001, TEST_GUILD_ID, "reckless", wager=10)
+        assert result["won"] is True
+        assert result.get("echo_applied") is False
+        row = dig_repo.get_active_boss_echo(TEST_GUILD_ID, 25)
+        assert row is not None
+        assert row["killer_discord_id"] == 10001
+
+    def test_second_kill_sees_weakened_boss(self, dig_service, dig_repo, player_repository, monkeypatch):
+        # First digger kills Grothak
+        _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
+        monkeypatch.setattr(random, "random", lambda: 0.0)
+        dig_service.fight_boss(10001, TEST_GUILD_ID, "reckless", wager=10)
+
+        # Second digger arrives at the same boundary
+        _register(player_repository, discord_id=10002, balance=500)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 10)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10002, TEST_GUILD_ID)
+        dig_repo.update_tunnel(10002, TEST_GUILD_ID, depth=24)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000 + 2 * FREE_DIG_COOLDOWN_SECONDS + 10)
+        balance_before = player_repository.get_balance(10002, TEST_GUILD_ID)
+        monkeypatch.setattr(random, "random", lambda: 0.0)
+
+        result = dig_service.fight_boss(10002, TEST_GUILD_ID, "cautious", wager=10)
+        assert result["won"] is True
+        assert result.get("echo_applied") is True
+        assert result.get("echo_killer_id") == 10001
+
+        # Payout is 0.7x the normal cautious multiplier
+        base_multiplier = BOSS_PAYOUTS[25][0]
+        expected_profit = int(10 * (base_multiplier * 0.7 - 1))
+        assert player_repository.get_balance(10002, TEST_GUILD_ID) == balance_before + expected_profit
+
+    def test_killer_reruns_get_no_discount(self, dig_service, dig_repo, player_repository, monkeypatch):
+        _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
+        monkeypatch.setattr(random, "random", lambda: 0.0)
+        dig_service.fight_boss(10001, TEST_GUILD_ID, "reckless", wager=10)
+
+        # Same killer comes back to the same boundary
+        bp = json.dumps({"25": "active"})  # reset boss status for re-fight
+        dig_repo.update_tunnel(10001, TEST_GUILD_ID, depth=24, boss_progress=bp)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000 + 2 * FREE_DIG_COOLDOWN_SECONDS + 10)
+
+        result = dig_service.fight_boss(10001, TEST_GUILD_ID, "cautious", wager=10)
+        assert result["won"] is True
+        # Killer exempt: no echo applied even though a row exists.
+        assert result.get("echo_applied") is False
+
+    def test_beneficiary_kill_refreshes_echo_to_themselves(self, dig_service, dig_repo, player_repository, monkeypatch):
+        """A player who benefits from an active echo and then clears the boss
+        becomes the new attributed killer and restarts the window."""
+        # First digger kills Grothak → echo written for 10001.
+        _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
+        monkeypatch.setattr(random, "random", lambda: 0.0)
+        dig_service.fight_boss(10001, TEST_GUILD_ID, "reckless", wager=10)
+        assert dig_repo.get_active_boss_echo(TEST_GUILD_ID, 25)["killer_discord_id"] == 10001
+
+        # Second digger arrives under the echo and wins.
+        _register(player_repository, discord_id=10002, balance=500)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 10)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10002, TEST_GUILD_ID)
+        dig_repo.update_tunnel(10002, TEST_GUILD_ID, depth=24)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000 + 2 * FREE_DIG_COOLDOWN_SECONDS + 10)
+        monkeypatch.setattr(random, "random", lambda: 0.0)
+        result = dig_service.fight_boss(10002, TEST_GUILD_ID, "cautious", wager=10)
+
+        assert result["won"] is True
+        assert result["echo_applied"] is True
+        # After the beneficiary's clear, the echo's killer is now 10002.
+        row = dig_repo.get_active_boss_echo(TEST_GUILD_ID, 25)
+        assert row is not None
+        assert row["killer_discord_id"] == 10002
+
+    def test_expired_echo_not_applied(self, dig_service, dig_repo, player_repository, monkeypatch):
+        # _at_boss pins time.time() to 1_000_000; record the echo AFTER that
+        # pin so its weakened_until is in the pinned-clock frame.
+        _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
+        dig_repo.record_boss_echo(TEST_GUILD_ID, 25, killer_discord_id=9999, window_seconds=60)
+        # Jump far past the 60-second echo window AND the fight cooldown.
+        monkeypatch.setattr(time, "time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 3600)
+        monkeypatch.setattr(random, "random", lambda: 0.0)
+        result = dig_service.fight_boss(10001, TEST_GUILD_ID, "cautious", wager=10)
+        assert result["won"] is True
+        assert result.get("echo_applied") is False

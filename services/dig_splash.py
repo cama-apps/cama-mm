@@ -1,9 +1,10 @@
 """Splash event resolver for the dig minigame.
 
-When a tagged dig event fires its splash outcome, jopacoin is **burned**
-from a pool of other players in the guild. This is distinct from every
-other economic mechanic in the bot: coins are destroyed, not transferred
-to the digger, so splash events are a true deflation lever.
+When a tagged dig event fires its splash outcome, jopacoin is either
+**burned** from a pool of other players in the guild (default, a true
+deflation lever since coins are destroyed not transferred) or
+**granted** to a cooperative target (positive splash, e.g. the Io
+tether pact sharing spoils with a partner).
 
 Three victim pools are supported (see :class:`SplashConfig`):
 
@@ -12,9 +13,11 @@ Three victim pools are supported (see :class:`SplashConfig`):
 * ``active_diggers`` - random sample of players who have dug in the
   last ``active_diggers_days`` days
 
-The resolver clamps each victim's debit so non-debtors cannot be pushed
-below zero by a splash, and records every actual debit as a
-``splash_victim`` row in ``dig_actions`` for auditing.
+For ``mode="burn"`` the resolver clamps each victim's debit so
+non-debtors cannot be pushed below zero. For ``mode="grant"`` the
+credit is unclamped (adds JC to the recipient). Every actual balance
+change is recorded as a ``splash_victim`` row in ``dig_actions`` for
+auditing.
 """
 
 from __future__ import annotations
@@ -33,17 +36,19 @@ ACTIVE_DIGGERS_LOOKBACK_DAYS = 7
 class SplashResult:
     """Outcome of a splash event.
 
-    ``victims`` is a list of ``(discord_id, amount_burned)`` tuples where
-    ``amount_burned`` is the positive integer actually debited from each
-    victim. ``total_burned`` is the sum. ``strategy`` and ``event_name``
-    are copied in so the broadcast layer doesn't need access to the
-    original config.
+    ``victims`` is a list of ``(discord_id, amount)`` tuples. For
+    ``mode="burn"`` amount is the positive integer actually debited;
+    for ``mode="grant"`` it is the positive integer credited.
+    ``total_burned`` is the sum (regardless of mode — it's the
+    magnitude moved). ``mode`` is copied in so the broadcast layer
+    can render either "coins burned" or "coins shared" flavor.
     """
 
     strategy: str
     event_name: str
     victims: list[tuple[int, int]]
     total_burned: int
+    mode: str = "burn"
 
 
 def _select_random_active(repos, guild_id: int, digger_id: int, count: int) -> list[int]:
@@ -103,43 +108,61 @@ def resolve_splash(
     strategy: str,
     victim_count: int,
     penalty_jc: int,
+    mode: str = "burn",
 ) -> SplashResult:
-    """Select victims, burn JC from each, and audit the debit.
+    """Select targets and move JC — burn from each (default) or grant to each.
 
-    Returns a :class:`SplashResult` with the actual amount burned per victim
-    (clamped to the victim's current balance so non-debtors stay >= 0).
-    On an empty pool or invalid strategy the returned result has an empty
-    ``victims`` list and ``total_burned=0``; the event still resolves
-    normally, there is just no collateral damage to announce.
+    Returns a :class:`SplashResult` with the actual amount moved per target.
+    In ``burn`` mode debits are clamped to the target's balance so
+    non-debtors stay >= 0; debtors are skipped. In ``grant`` mode each
+    target is credited unconditionally. On an empty pool or invalid
+    strategy the returned result has an empty ``victims`` list and
+    ``total_burned=0``.
     """
     selector = _SELECTORS.get(strategy)
     if selector is None:
         logger.warning("Unknown splash strategy %r for event %r", strategy, event_name)
-        return SplashResult(strategy=strategy, event_name=event_name, victims=[], total_burned=0)
+        return SplashResult(
+            strategy=strategy, event_name=event_name, victims=[],
+            total_burned=0, mode=mode,
+        )
 
     if victim_count <= 0 or penalty_jc <= 0:
-        return SplashResult(strategy=strategy, event_name=event_name, victims=[], total_burned=0)
+        return SplashResult(
+            strategy=strategy, event_name=event_name, victims=[],
+            total_burned=0, mode=mode,
+        )
 
     repos = _ReposBundle(player_repo, dig_repo)
     victim_ids = selector(repos, guild_id, digger_id, victim_count)
 
-    # Serialized audit context shared across victims — static within one event.
     audit_detail = json.dumps({
         "event_name": event_name,
         "strategy": strategy,
         "digger_id": digger_id,
         "penalty_requested": penalty_jc,
+        "mode": mode,
     })
 
     victims: list[tuple[int, int]] = []
     for vid in victim_ids:
+        if mode == "grant":
+            actual = int(penalty_jc)
+            player_repo.add_balance(vid, guild_id, actual)
+            dig_repo.log_action(
+                discord_id=vid,
+                guild_id=guild_id,
+                action_type="splash_victim",
+                jc_delta=actual,
+                details=audit_detail,
+            )
+            victims.append((vid, actual))
+            continue
         try:
             current_balance = player_repo.get_balance(vid, guild_id)
         except Exception:
             logger.exception("Splash: get_balance failed for victim %s in guild %s", vid, guild_id)
             continue
-        # Clamp so a non-debtor isn't pushed below zero. Debtors (balance <= 0)
-        # are already negative and we refuse to deepen that hole via splash.
         if current_balance <= 0:
             continue
         actual = int(min(penalty_jc, current_balance))
@@ -157,5 +180,6 @@ def resolve_splash(
 
     total = sum(amount for _, amount in victims)
     return SplashResult(
-        strategy=strategy, event_name=event_name, victims=victims, total_burned=total,
+        strategy=strategy, event_name=event_name, victims=victims,
+        total_burned=total, mode=mode,
     )

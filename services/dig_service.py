@@ -22,7 +22,7 @@ from services.dig_constants import (
     BOSS_DIALOGUE,
     BOSS_DUEL_STATS,
     BOSS_FREE_FIGHT_ACCURACY_MOD,
-    BOSS_HP_PER_50_DEPTH,
+    BOSS_HP_PER_40_DEPTH,
     BOSS_HP_PER_PRESTIGE,
     BOSS_NAMES,
     BOSS_PAYOUTS,
@@ -3455,11 +3455,22 @@ class DigService:
 
         player_hp = int(stats["player_hp"])
         boss_hp = (int(stats["boss_hp"])
-                   + (at_boss // 50) * BOSS_HP_PER_50_DEPTH
+                   + (at_boss // 40) * BOSS_HP_PER_40_DEPTH
                    + prestige_level * BOSS_HP_PER_PRESTIGE)
         player_dmg = int(stats["player_dmg"])
         boss_hit_chance = float(stats["boss_hit"])
         boss_dmg = int(stats["boss_dmg"])
+
+        # Echo weakening: if another guildmate has killed this boss within
+        # the last 24h, the boss comes in at -25% HP and pays -30%. The
+        # original killer is exempt so re-runs can't farm their own discount.
+        active_echo = self.dig_repo.get_active_boss_echo(guild_id, at_boss)
+        echo_applied = bool(
+            active_echo
+            and active_echo.get("killer_discord_id") != discord_id
+        )
+        if echo_applied:
+            boss_hp = max(1, int(round(boss_hp * 0.75)))
 
         # Estimate actual win probability via Monte Carlo on the entry
         # stats so the returned ``win_chance`` matches what ``scout_boss``
@@ -3557,12 +3568,15 @@ class DigService:
                     dialogue=p2_dialogue,
                     achievements=[],
                     round_log=round_log,
+                    echo_applied=echo_applied,
+                    echo_killer_id=active_echo.get("killer_discord_id") if echo_applied else None,
                 )
 
             # Full victory (or phase 2 already cleared)
             new_depth = at_boss
+            echo_payout_mult = 0.7 if echo_applied else 1.0
             base_jc = int(wager * multiplier) if wager > 0 else random.randint(5, 15)
-            jc_delta = int(base_jc * boss_payout_mult)
+            jc_delta = int(base_jc * boss_payout_mult * echo_payout_mult)
 
             boss_progress[str(at_boss)] = "defeated"
             stat_point_awarded = self._award_boss_stat_point_if_first(
@@ -3579,8 +3593,23 @@ class DigService:
                 last_dig_at=now,
             )
 
+            # Record the echo window so subsequent guildmates find this boss
+            # weakened. Every full kill (including a beneficiary who then
+            # achieves their own clear, and re-kills by the registered
+            # killer) refreshes the 24h window under the current fighter
+            # as the attributed killer.
+            self.dig_repo.record_boss_echo(
+                guild_id=guild_id,
+                depth=at_boss,
+                killer_discord_id=discord_id,
+                window_seconds=24 * 3600,
+            )
+
             if wager > 0:
-                self.player_repo.add_balance(discord_id, guild_id, int(wager * (multiplier * boss_payout_mult - 1)))
+                self.player_repo.add_balance(
+                    discord_id, guild_id,
+                    int(wager * (multiplier * boss_payout_mult * echo_payout_mult - 1)),
+                )
             else:
                 self.player_repo.add_balance(discord_id, guild_id, jc_delta)
 
@@ -3601,6 +3630,7 @@ class DigService:
                     "boundary": at_boss, "won": True, "risk": risk_tier,
                     "wager": wager, "jc_delta": jc_delta,
                     "stat_point_awarded": stat_point_awarded,
+                    "echo_applied": echo_applied,
                     "rounds": round_log,
                 }),
             )
@@ -3619,6 +3649,8 @@ class DigService:
                 achievements=achievements,
                 stat_point_awarded=stat_point_awarded,
                 round_log=round_log,
+                echo_applied=echo_applied,
+                echo_killer_id=active_echo.get("killer_discord_id") if echo_applied else None,
             )
         else:
             # Lose: forfeit wager + a small depth knockback. The nerf's main
@@ -3661,6 +3693,8 @@ class DigService:
                 dialogue=f"{boss_name} sends you flying back {knockback} blocks!",
                 achievements=[],
                 round_log=round_log,
+                echo_applied=echo_applied,
+                echo_killer_id=active_echo.get("killer_discord_id") if echo_applied else None,
             )
 
     def retreat_boss(self, discord_id: int, guild_id) -> dict:
@@ -3729,6 +3763,14 @@ class DigService:
 
         payouts = BOSS_PAYOUTS.get(at_boss, (2.0, 3.0, 6.0))
 
+        active_echo = self.dig_repo.get_active_boss_echo(guild_id, at_boss)
+        echo_applied = bool(
+            active_echo
+            and active_echo.get("killer_discord_id") != discord_id
+        )
+        hp_mult = 0.75 if echo_applied else 1.0
+        payout_mult = 0.7 if echo_applied else 1.0
+
         odds = {}
         for i, tier in enumerate(("cautious", "bold", "reckless")):
             stats = BOSS_DUEL_STATS[tier]
@@ -3739,8 +3781,9 @@ class DigService:
                 min(PLAYER_HIT_CEILING, player_hit * BOSS_FREE_FIGHT_ACCURACY_MOD),
             )
             boss_hp = (int(stats["boss_hp"])
-                       + (at_boss // 50) * BOSS_HP_PER_50_DEPTH
+                       + (at_boss // 40) * BOSS_HP_PER_40_DEPTH
                        + prestige_level * BOSS_HP_PER_PRESTIGE)
+            boss_hp = max(1, int(round(boss_hp * hp_mult)))
             win_pct = _approx_duel_win_prob(
                 player_hp=int(stats["player_hp"]),
                 boss_hp=boss_hp,
@@ -3757,6 +3800,7 @@ class DigService:
                 boss_hit=float(stats["boss_hit"]),
                 boss_dmg=int(stats["boss_dmg"]),
             )
+            base_multiplier = payouts[i] if i < len(payouts) else 2.0
             odds[tier] = {
                 "win_pct": round(win_pct, 2),
                 "free_fight_pct": round(free_win_pct, 2),
@@ -3764,13 +3808,15 @@ class DigService:
                 "boss_hp": boss_hp,
                 "player_hit": round(player_hit, 2),
                 "boss_hit": round(float(stats["boss_hit"]), 2),
-                "multiplier": payouts[i] if i < len(payouts) else 2.0,
+                "multiplier": round(base_multiplier * payout_mult, 2),
             }
 
         return self._ok(
             boundary=at_boss,
             boss_name=BOSS_NAMES.get(at_boss, "Unknown Boss"),
             odds=odds,
+            echo_applied=echo_applied,
+            echo_killer_id=active_echo.get("killer_discord_id") if echo_applied else None,
         )
 
     def cheer_boss(self, cheerer_id: int, target_id: int, guild_id) -> dict:
@@ -4555,6 +4601,7 @@ class DigService:
                 strategy=splash_cfg.get("strategy", "random_active"),
                 victim_count=int(splash_cfg.get("victim_count", 0)),
                 penalty_jc=int(splash_cfg.get("penalty_jc", 0)),
+                mode=splash_cfg.get("mode", "burn"),
             )
 
         self.dig_repo.log_action(

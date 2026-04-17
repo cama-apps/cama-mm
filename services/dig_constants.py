@@ -35,11 +35,11 @@ _LAYERS_DEF: list[LayerDef] = [
     LayerDef("Dirt",          0,   25,  0.05, 0,  1,  1, 3, "\U0001f7eb"),        # brown square
     LayerDef("Stone",         26,  50,  0.10, 0,  2,  1, 3, "\u2b1c"),            # gray (white square)
     LayerDef("Crystal",       51,  75,  0.18, 1,  3,  1, 2, "\U0001f48e"),        # diamond
-    LayerDef("Magma",         76,  100, 0.25, 1,  5,  1, 2, "\U0001f525"),        # fire
-    LayerDef("Abyss",         101, 150, 0.35, 2,  8,  1, 2, "\U0001f573\ufe0f"),  # hole
-    LayerDef("Fungal Depths", 151, 200, 0.40, 3,  10, 1, 2, "\U0001f344"),        # mushroom
-    LayerDef("Frozen Core",   201, 275, 0.45, 4,  12, 1, 2, "\u2744\ufe0f"),      # snowflake
-    LayerDef("The Hollow",    276, None, 0.50, 5,  15, 1, 1, "\u26ab"),            # black circle
+    LayerDef("Magma",         76,  100, 0.25, 1,  4,  1, 2, "\U0001f525"),        # fire
+    LayerDef("Abyss",         101, 150, 0.35, 2,  6,  1, 2, "\U0001f573\ufe0f"),  # hole
+    LayerDef("Fungal Depths", 151, 200, 0.40, 2,  7,  1, 2, "\U0001f344"),        # mushroom
+    LayerDef("Frozen Core",   201, 275, 0.45, 3,  8,  1, 2, "\u2744\ufe0f"),      # snowflake
+    LayerDef("The Hollow",    276, None, 0.50, 3,  10, 1, 1, "\u26ab"),           # black circle
 ]
 
 LAYER_BOUNDARIES: list[int] = [25, 50, 75, 100, 150, 200, 275]
@@ -74,15 +74,15 @@ FIRST_DIG_CAVE_IN: bool = False
 # ``tunnels.max_depth``) so bosses knocking players back and forth do not
 # farm the bonuses repeatedly.
 MILESTONES: dict[int, int] = {
-    25: 5,
-    50: 10,
-    75: 20,
-    100: 50,
-    150: 75,
-    200: 150,
-    275: 300,
-    300: 400,
-    400: 700,
+    25: 3,
+    50: 6,
+    75: 12,
+    100: 20,
+    150: 30,
+    200: 50,
+    275: 80,
+    300: 100,
+    400: 150,
 }
 
 # Streak rewards: consecutive-day count -> JC bonus
@@ -491,13 +491,16 @@ BOSSES: dict[int, BossDef] = {
 # wager + cave-in to the previous milestone.
 #
 # Per-tier stats (player_hp, boss_hp, player_hit, player_dmg, boss_hit, boss_dmg).
+# Reckless is tuned for WAGERED play. Free-fight reckless clamps to the
+# PLAYER_HIT_FLOOR (0.10 * BOSS_FREE_FIGHT_ACCURACY_MOD = 0.06, floored to
+# 0.05) which is intentionally near-impossible: high-stakes wager only.
 BOSS_DUEL_STATS: dict[str, dict[str, float]] = {
-    "cautious": {"player_hp": 5, "boss_hp": 3, "player_hit": 0.65, "player_dmg": 1, "boss_hit": 0.30, "boss_dmg": 1},
-    "bold":     {"player_hp": 3, "boss_hp": 4, "player_hit": 0.40, "player_dmg": 2, "boss_hit": 0.45, "boss_dmg": 1},
-    "reckless": {"player_hp": 2, "boss_hp": 5, "player_hit": 0.15, "player_dmg": 3, "boss_hit": 0.60, "boss_dmg": 1},
+    "cautious": {"player_hp": 5, "boss_hp": 4, "player_hit": 0.60, "player_dmg": 1, "boss_hit": 0.30, "boss_dmg": 1},
+    "bold":     {"player_hp": 3, "boss_hp": 5, "player_hit": 0.35, "player_dmg": 2, "boss_hit": 0.45, "boss_dmg": 1},
+    "reckless": {"player_hp": 2, "boss_hp": 6, "player_hit": 0.10, "player_dmg": 3, "boss_hit": 0.60, "boss_dmg": 1},
 }
 
-BOSS_HP_PER_50_DEPTH: int = 1                     # boss HP bonus per 50 depth
+BOSS_HP_PER_40_DEPTH: int = 1                     # boss HP bonus per 40 depth
 BOSS_HP_PER_PRESTIGE: int = 1                     # boss HP bonus per prestige level
 PLAYER_HIT_PENALTY_PER_25_DEPTH: float = 0.02     # -2% player hit per 25 depth
 PLAYER_HIT_PENALTY_PER_PRESTIGE: float = 0.02     # -2% player hit per prestige level
@@ -510,13 +513,13 @@ BOSS_ROUND_CAP: int = 20                           # safety valve against infini
 # Flatter and harder than the pre-nerf table; the old exponential growth at
 # top-end depths was the main jopacoin inflation source.
 BOSS_PAYOUTS: dict[int, tuple[float, float, float]] = {
-    25:  (1.2, 2.0, 3.5),
-    50:  (1.5, 2.8, 4.8),
-    75:  (1.8, 3.5, 6.0),
-    100: (2.0, 4.0, 7.0),
-    150: (2.4, 4.8, 8.2),
-    200: (2.8, 5.5, 9.5),
-    275: (3.0, 6.5, 10.0),
+    25:  (1.0, 1.6, 2.8),
+    50:  (1.2, 2.2, 3.8),
+    75:  (1.4, 2.8, 4.8),
+    100: (1.6, 3.2, 5.6),
+    150: (1.9, 3.8, 6.5),
+    200: (2.2, 4.4, 7.5),
+    275: (2.4, 5.2, 8.0),
 }
 
 
@@ -867,7 +870,7 @@ class EventOutcome:
 
 @dataclass(frozen=True)
 class SplashConfig:
-    """Splash penalty that hits other players when a digger's event resolves.
+    """Splash effect that reaches other players when a digger's event resolves.
 
     ``strategy`` selects the victim pool:
         * ``"random_active"``  - recently-active players in the guild
@@ -877,14 +880,19 @@ class SplashConfig:
     ``trigger`` picks when the splash fires on the event outcome:
     ``"success"``, ``"failure"``, or ``"always"``.
 
-    Victims' balances are debited (JC burned, not transferred to the digger).
-    The debit is clamped so a non-negative player is not pushed below 0.
+    ``mode`` controls direction:
+        * ``"burn"``  - victims' JC is debited (coins destroyed, deflation lever)
+        * ``"grant"`` - targets are credited JC (cooperative splash, e.g.
+                        Io tether pact sharing spoils with a partner)
+
+    Debits are clamped so a non-negative player is not pushed below 0.
     """
 
     strategy: str
     victim_count: int
     penalty_jc: int
     trigger: str = "failure"
+    mode: str = "burn"
 
 
 @dataclass(frozen=True)
@@ -3394,6 +3402,457 @@ RANDOM_EVENTS: list[RandomEvent] = [
         rarity="legendary",
         splash=SplashConfig(strategy="active_diggers", victim_count=3, penalty_jc=8, trigger="failure"),
     ),
+
+    # ---- Delve-themed roguelike expansion (PoE Delve / WoW Delves / Dota 2).
+    # Bigger absolute swings than the baseline pool; risky/desperate options
+    # land in the ±8-15 / ±20-40 JC band. Five of these carry SplashConfigs
+    # (four burn, one grant).
+    # -------------------------------------------------------------------------
+
+    # --- Path of Exile Delve ---
+
+    RandomEvent(
+        id="sulphite_drought",
+        name="Sulphite Drought",
+        description=(
+            "Your Voltaxic reserves sputter. Niko's crawler rattles to a halt.",
+            "The fuel gauge bottoms out mid-delve. The darkness leans in a little closer.",
+            "You squeeze the last drop of sulphite from the canister. It isn't enough.",
+        ),
+        min_depth=26, max_depth=200,
+        safe_option=EventChoice(
+            "Turn back to refuel",
+            success=EventOutcome("You retreat to the last checkpoint. No coin, but you're alive.", -1, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Scavenge the fractured walls",
+            success=EventOutcome("Residual sulphite crystals line the cracks — you bottle what you can.", 0, 12, False),
+            failure=EventOutcome("The fracture widens. Rocks and dust; no fuel.", -3, -10, False),
+            success_chance=0.50,
+        ),
+        desperate_option=EventChoice(
+            "Bleed azurite into the crawler",
+            success=EventOutcome("The crawler roars back to life on azurite fumes. Deeper you go.", 2, 30, False),
+            failure=EventOutcome("The crawler chokes on the impurity. You're in the dark, down a lot of coin.", -4, -28, False),
+            success_chance=0.25,
+        ),
+        rarity="rare",
+    ),
+
+    RandomEvent(
+        id="auls_bullet_hell",
+        name="Throne of Aul",
+        description=(
+            "A vast ice cavern opens. Aul the Crystal King regards you from a frozen throne.",
+            "Spears of ice rotate around a seated figure at the cavern's far end. He does not speak.",
+            "The walls become mirrors. The Crystal King's spear volleys rotate in three different directions.",
+        ),
+        min_depth=151, max_depth=275,
+        safe_option=EventChoice(
+            "Flee the throne room",
+            success=EventOutcome("You back out the way you came. The ice follows you a little too far.", -2, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Weave between the spear volleys",
+            success=EventOutcome("You thread the needle. A Hollow Fossil lies at the throne's base.", 0, 14, False),
+            failure=EventOutcome("A spear catches your shoulder. You leave a trail of coin on the way out.", -6, -15, False),
+            success_chance=0.40,
+        ),
+        desperate_option=EventChoice(
+            "Charge the throne",
+            success=EventOutcome("Impossible, and yet — you strike a chip from the throne itself. The hoard is yours.", 3, 40, False),
+            failure=EventOutcome("The spears rotate through you. The throne is unchanged.", -5, -35, True),
+            success_chance=0.22,
+        ),
+        rarity="legendary",
+    ),
+
+    RandomEvent(
+        id="kurgal_summons",
+        name="Kurgal's Circle",
+        description=(
+            "A bone-lich floats above a cracked obsidian floor. Abyssal wraiths spool from his fingers.",
+            "The Blackblooded raises a summoning hand. The tunnels behind you have gone very quiet.",
+            "Kurgal's eyes find you. The wraiths begin their patient spiral outward.",
+        ),
+        min_depth=101, max_depth=200,
+        safe_option=EventChoice(
+            "Evade the summoning circle",
+            success=EventOutcome("You hug the wall and slip past. Kurgal does not turn.", -1, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Fight the wraith waves",
+            success=EventOutcome("You shatter the summoning. Kurgal retreats into the obsidian.", 0, 12, False),
+            failure=EventOutcome("A wraith slips past you and out into the network. You hear distant screaming.", -3, -12, False),
+            success_chance=0.45,
+        ),
+        desperate_option=EventChoice(
+            "Light the Abyss beacon",
+            success=EventOutcome("The beacon binds Kurgal in his own circle. His hoard is yours.", 2, 28, False),
+            failure=EventOutcome("The beacon detonates. Kurgal's wraiths scatter across the whole network.", -4, -30, False),
+            success_chance=0.22,
+        ),
+        rarity="legendary",
+        splash=SplashConfig(strategy="active_diggers", victim_count=2, penalty_jc=10, trigger="failure"),
+    ),
+
+    RandomEvent(
+        id="flare_starvation",
+        name="Flare Starvation",
+        description=(
+            "Your last flare gutters. At the edge of the light, six pairs of Stalker eyes.",
+            "The darkness takes a slow breath. You have one flare left. The Stalkers are patient.",
+            "Something in the tunnel ahead just learned your light radius. You have very little left.",
+        ),
+        min_depth=None, max_depth=None,
+        safe_option=EventChoice(
+            "Burn your own spare",
+            success=EventOutcome("The flare catches. The Stalkers recede for now.", 0, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Push through the dim",
+            success=EventOutcome("You make the next checkpoint before the light dies. A small score.", 2, 10, False),
+            failure=EventOutcome("A Stalker touches you. Your flare goes out early; your coin with it.", -4, -10, False),
+            success_chance=0.55,
+        ),
+        desperate_option=EventChoice(
+            "Steal a nearby digger's flare",
+            success=EventOutcome("You cross a tunnel wall and lift a flare from another digger's pack. Their problem now.", 0, 16, False),
+            failure=EventOutcome("The flare snaps in your hand. The Stalkers close in.", -3, -15, False),
+            success_chance=0.30,
+        ),
+        requires_dark=True, rarity="legendary",
+        splash=SplashConfig(strategy="active_diggers", victim_count=1, penalty_jc=8, trigger="success"),
+    ),
+
+    RandomEvent(
+        id="resonator_socket",
+        name="Resonator Gamble",
+        description=(
+            "A brass-ringed resonator hums from the cavern wall, four empty fossil sockets waiting.",
+            "The resonator's sockets glitter with old crafting potential. The fossils in your pack start rattling.",
+            "Niko's laugh echoes somewhere: 'Try it. What's the worst that could happen?'",
+        ),
+        min_depth=51, max_depth=275,
+        safe_option=EventChoice(
+            "Take the Prismatic and leave",
+            success=EventOutcome("A modest crafting bonus, banked. You move on.", 0, 2, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Socket the Aberrant",
+            success=EventOutcome("Chaotic resonance, but the output is real coin.", 0, 13, False),
+            failure=EventOutcome("The Aberrant shatters. Your pack is lighter by a fossil.", 0, -10, False),
+            success_chance=0.50,
+        ),
+        desperate_option=EventChoice(
+            "Stack Faceted and Hollow together",
+            success=EventOutcome("The resonator sings. Gem-tag currency cascades out of the socket.", 2, 35, False),
+            failure=EventOutcome("A Hollow Fossil does not forgive bad company. The resonator detonates.", -5, -32, True),
+            success_chance=0.22,
+        ),
+        rarity="rare",
+    ),
+
+    # --- WoW Delves ---
+
+    RandomEvent(
+        id="branns_potion",
+        name="Brann's Gambit",
+        description=(
+            "Brann Bronzebeard winds up a throw. You don't recognize the potion in his hand.",
+            "'Catch!' Brann shouts, a little too cheerfully. The vial is already airborne.",
+            "Brann has been rummaging again. He is smiling in a way that does not comfort you.",
+        ),
+        min_depth=None, max_depth=None,
+        safe_option=EventChoice(
+            "Dodge the throw",
+            success=EventOutcome("The vial shatters behind you. You scrape a coin or two from the residue.", -1, 2, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Catch it",
+            success=EventOutcome("Elixir of Undermining. Brann beams like it was the plan all along.", 0, 12, False),
+            failure=EventOutcome("You caught the wrong end. Acid gets on the coin pouch.", 0, -10, False),
+            success_chance=0.55,
+        ),
+        desperate_option=EventChoice(
+            "Redirect the throw toward the wealthiest digger in the guild",
+            success=EventOutcome("Brann approves. Someone wealthy, somewhere, is suddenly less wealthy.", 0, 18, False),
+            failure=EventOutcome("The vial boomerangs. The potion is inside you now.", -2, -14, False),
+            success_chance=0.30,
+        ),
+        rarity="legendary", social=True,
+        # Splash fires on ANY risky/desperate success, not just the desperate
+        # "redirect" path. Flavor-only leak: players picking risky and
+        # succeeding also tax the richest 3, even though the narrative
+        # attributes the redirect to the desperate choice. Accepted as-is.
+        splash=SplashConfig(strategy="richest_n", victim_count=3, penalty_jc=12, trigger="success"),
+    ),
+
+    RandomEvent(
+        id="zekvir_challenge",
+        name="Zekvir's Lair",
+        description=(
+            "A webbed pit. Eight red eyes and eight legs. Above the pit, a faint '??' flickers.",
+            "Zekvir's Angler's Web coils around the chamber. He's been waiting.",
+            "The ?? tier door is unlocked. Zekvir's maw is already open.",
+        ),
+        min_depth=201, max_depth=275,
+        safe_option=EventChoice(
+            "Skip the arena entirely",
+            success=EventOutcome("You give Zekvir a wide berth. He does not pursue.", -2, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Enter at the ? tier",
+            success=EventOutcome("You survive the Claw Smashes. The Web Terrors leave a chest behind.", 0, 15, False),
+            failure=EventOutcome("Angler's Web pulls you in. You escape with bruises and a shorter coin pouch.", -4, -15, False),
+            success_chance=0.40,
+        ),
+        desperate_option=EventChoice(
+            "Take the ?? tier",
+            success=EventOutcome("Nobody has killed ?? tier. You just did. The loot is unreal.", 3, 45, False),
+            failure=EventOutcome("Zekvir devours you whole. Your pack reappears empty at the tunnel mouth.", -6, -40, True),
+            success_chance=0.20,
+        ),
+        rarity="legendary",
+    ),
+
+    RandomEvent(
+        id="enchanted_candle",
+        name="Kriegval's Candle",
+        description=(
+            "An Enchanted Candle waits at the room's entrance. Smothering Shadows pool in the corners.",
+            "You know how this one works. Light the candle. Keep moving. It burns fast when you run.",
+            "Kriegval's Rest never forgave a slow foot. The candle is already half gone.",
+        ),
+        min_depth=51, max_depth=200,
+        safe_option=EventChoice(
+            "Walk slowly and shield the candle",
+            success=EventOutcome("You conserve the flame. Steady coin at a steady pace.", 1, 2, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Jog the room",
+            success=EventOutcome("The candle stutters but holds. You clear the room with a handful of coin.", 2, 12, False),
+            failure=EventOutcome("Smothering Shadows catch you mid-stride. The candle dies. You limp out.", -3, -12, False),
+            success_chance=0.55,
+        ),
+        desperate_option=EventChoice(
+            "Sprint the entire gauntlet",
+            success=EventOutcome("Candle out at the exit — a second too late for the Shadows. Huge haul.", 4, 30, False),
+            failure=EventOutcome("Candle out mid-room. The ceiling follows it.", -6, -28, True),
+            success_chance=0.25,
+        ),
+        rarity="rare",
+    ),
+
+    RandomEvent(
+        id="sporbit_cavern",
+        name="Mycomancer Cavern",
+        description=(
+            "Pink Sporbits drift along patrol routes. Their AoEs flicker in rhythm.",
+            "The Mycomancer Cavern glows bioluminescent. You count three Sporbit patrol loops.",
+            "Fungal cavern. Bright-pink orbs on circuits. You can see the pattern if you watch.",
+        ),
+        min_depth=101, max_depth=200,
+        safe_option=EventChoice(
+            "Wait for the patrol pattern",
+            success=EventOutcome("You slip through on the timing gap. No coin, but no Sporbits either.", 1, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Dash between Sporbits",
+            success=EventOutcome("Threaded it. A fungal cache waits in the far alcove.", 2, 11, False),
+            failure=EventOutcome("A Sporbit's AoE catches you. Spores in the pack, coin on the floor.", -3, -11, False),
+            success_chance=0.50,
+        ),
+        desperate_option=EventChoice(
+            "Trigger a chain explosion",
+            success=EventOutcome("Every Sporbit in the room pops in sequence. The aftermath is all yours.", 3, 32, False),
+            failure=EventOutcome("The chain misfires. You are at the epicentre.", -5, -30, True),
+            success_chance=0.22,
+        ),
+        rarity="rare",
+    ),
+
+    RandomEvent(
+        id="coffer_key_gamble",
+        name="Restored Coffer",
+        description=(
+            "A Restored Coffer sits on a stone altar. Your Coffer Key fits, barely.",
+            "The coffer lid is gilded. The Delver's Journey card in your pack suggests you can try for more.",
+            "Bountiful? Gilded? The altar offers both doors.",
+        ),
+        min_depth=26, max_depth=275,
+        safe_option=EventChoice(
+            "Bank the key for a deeper run",
+            success=EventOutcome("You pocket the key. No coin now, but it's still yours.", 0, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Unlock the Bountiful Coffer here",
+            success=EventOutcome("A tidy Restored Coffer pull. Cosmetics flagged, coin counted.", 0, 14, False),
+            failure=EventOutcome("The coffer was trapped — a bad pull on a bad key.", 0, -8, False),
+            success_chance=0.60,
+        ),
+        desperate_option=EventChoice(
+            "Gamble the key at the Gilded Stash",
+            success=EventOutcome("Seven Myth Dawncrests spill into your pack. The week is made.", 0, 42, False),
+            failure=EventOutcome("The stash was picked clean. Your key is ash.", -2, -35, False),
+            success_chance=0.20,
+        ),
+        rarity="rare",
+    ),
+
+    # --- Dota 2 ---
+
+    RandomEvent(
+        id="chain_frost_cascade",
+        name="Chain Frost",
+        description=(
+            "Lich's orb of Chain Frost hovers at the cavern mouth. It does not care who's adjacent.",
+            "The frost finds three diggers at once. Yours, and two others in the network.",
+            "You cast Chain Frost. It never bounces just once.",
+        ),
+        min_depth=101, max_depth=275,
+        safe_option=EventChoice(
+            "Shield against the cold",
+            success=EventOutcome("You weather the pass. A small expense for a clean tunnel.", 0, -5, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Cast Chain Frost and let it bounce",
+            success=EventOutcome("The frost lands ten times and pays in crystallized coin.", 0, 13, False),
+            failure=EventOutcome("The frost bounces back. Your pack is iced shut.", -2, -12, False),
+            success_chance=0.50,
+        ),
+        rarity="legendary",
+        splash=SplashConfig(strategy="active_diggers", victim_count=2, penalty_jc=8, trigger="always"),
+    ),
+
+    RandomEvent(
+        id="divine_rapier_drop",
+        name="Divine Rapier",
+        description=(
+            "A Divine Rapier juts from the rubble. Heat wafts off the blade.",
+            "The Rapier hasn't been claimed. The previous owner is a scorch mark on the wall.",
+            "You know the rules. Pick it up and the next cave-in drops it back on the floor.",
+        ),
+        min_depth=101, max_depth=275,
+        safe_option=EventChoice(
+            "Leave the Rapier",
+            success=EventOutcome("Scraps of creep carcass; a small coin in the ash.", 0, 3, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Pick it up and sprint to the next checkpoint",
+            success=EventOutcome("You clear the tunnel without incident. Rapier sold, pockets heavy.", 2, 35, False),
+            failure=EventOutcome("The Rapier drops at the cave-in. You don't.", -6, -25, True),
+            success_chance=0.50,
+        ),
+        desperate_option=EventChoice(
+            "Carry it deeper",
+            success=EventOutcome("Two checkpoints later the Rapier is still yours. Nobody can believe it.", 4, 55, False),
+            failure=EventOutcome("A cave-in. A Rapier drop. A very rich stranger a tunnel over.", -8, -50, True),
+            success_chance=0.22,
+        ),
+        rarity="legendary",
+    ),
+
+    RandomEvent(
+        id="enigma_blackhole",
+        name="Event Horizon",
+        description=(
+            "Enigma's Black Hole anchors a side passage. It is pulling at everything with mass.",
+            "The pull is gentle. The thing at the center is not.",
+            "Rocks, ore, and the silhouettes of two distant diggers drift slowly toward the sphere.",
+        ),
+        min_depth=151, max_depth=275,
+        safe_option=EventChoice(
+            "Skirt the event horizon",
+            success=EventOutcome("You take the long way around. It is much longer than you expected.", -1, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Channel through the edge",
+            success=EventOutcome("The edge scours your pack and leaves coin behind as sediment.", 0, 14, False),
+            failure=EventOutcome("A partial pull. You leave a lot on the other side.", -4, -14, False),
+            success_chance=0.40,
+        ),
+        desperate_option=EventChoice(
+            "Drag two diggers in with you",
+            success=EventOutcome("The three of you enter. Only you come back out. Pockets full.", 2, 38, False),
+            failure=EventOutcome("The Hole has opinions about this plan.", -6, -36, True),
+            success_chance=0.25,
+        ),
+        rarity="legendary",
+        splash=SplashConfig(strategy="active_diggers", victim_count=2, penalty_jc=15, trigger="success"),
+    ),
+
+    RandomEvent(
+        id="io_tether_pact",
+        name="Wisp Tether",
+        description=(
+            "A gold-and-white orb drifts beside you. A tether line flickers to a distant digger.",
+            "Io's tether wants a partner. Somewhere in the network, another digger just felt a tug.",
+            "The wisp hums. The tether is soft, then insistent.",
+        ),
+        min_depth=26, max_depth=200,
+        safe_option=EventChoice(
+            "Decline the tether",
+            success=EventOutcome("The wisp fades. You pay a small tribute for its time.", 0, -2, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Accept a soft tether",
+            success=EventOutcome("The tether holds. You move a little faster, pay a little less.", 1, 10, False),
+            failure=EventOutcome("The tether snaps. The wisp leaves with a grudge.", 0, -8, False),
+            success_chance=0.55,
+        ),
+        desperate_option=EventChoice(
+            "Full tether pact",
+            success=EventOutcome("The tether sings. Your partner feels the haul land in their pack too.", 2, 25, False),
+            failure=EventOutcome("The tether yanks you both the wrong way. You eat the loss.", -3, -20, False),
+            success_chance=0.30,
+        ),
+        rarity="legendary", social=True,
+        splash=SplashConfig(strategy="active_diggers", victim_count=1, penalty_jc=10, trigger="success", mode="grant"),
+    ),
+
+    RandomEvent(
+        id="refresher_shard",
+        name="Refresher Shard",
+        description=(
+            "A Refresher Shard crystal is wedged into the wall. Purple light doubles your shadow.",
+            "The shard hums at the frequency of cooldowns. A second cast is waiting for you.",
+            "Rubick is not here, but you feel watched anyway.",
+        ),
+        min_depth=76, max_depth=275,
+        safe_option=EventChoice(
+            "Pocket the shard for later",
+            success=EventOutcome("You bank the shard. A modest finder's bounty for the find.", 0, 1, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Double-cast the next event",
+            success=EventOutcome("The next event fires twice. Both land clean.", 0, 18, False),
+            failure=EventOutcome("Both casts miss. The shard shivers apart in your hand.", 0, -15, False),
+            success_chance=0.50,
+        ),
+        desperate_option=EventChoice(
+            "Activate on this event, right now",
+            success=EventOutcome("The Refresher refreshes itself. The cave gives twice over.", 2, 38, False),
+            failure=EventOutcome("Two casts, two misfires. The cave answers with a collapse.", -4, -35, True),
+            success_chance=0.22,
+        ),
+        rarity="legendary",
+    ),
 ]
 
 
@@ -3879,8 +4338,8 @@ ASCENSION_MODIFIERS: dict[int, AscensionModifier] = {
     ),
 }
 
-EVENT_CHAIN_CHANCE: float = 0.25
-EVENT_CHAIN_JC_MULTIPLIER: float = 1.5
+EVENT_CHAIN_CHANCE: float = 0.15
+EVENT_CHAIN_JC_MULTIPLIER: float = 1.2
 
 
 # ---------------------------------------------------------------------------
@@ -4798,6 +5257,7 @@ EVENT_POOL: list[dict] = [
             "victim_count": e.splash.victim_count,
             "penalty_jc": e.splash.penalty_jc,
             "trigger": e.splash.trigger,
+            "mode": e.splash.mode,
         } if e.splash else None,
     }
     for e in RANDOM_EVENTS

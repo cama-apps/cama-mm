@@ -2199,10 +2199,13 @@ class TestTempBuffs:
 class TestExpandedEvents:
     """Verify expanded event system."""
 
-    def test_event_pool_has_101_events(self):
-        """Event pool should have 101 events (93 baseline + 5 trap + 3 splash)."""
+    def test_event_pool_size_floor(self):
+        """Event pool: 93 baseline + 5 trap + 3 splash + 15 delve-themed, so ≥116.
+
+        Floor, not exact count, so routine event additions don't break the test.
+        """
         from services.dig_constants import EVENT_POOL
-        assert len(EVENT_POOL) == 101
+        assert len(EVENT_POOL) >= 116
 
     def test_new_events_have_complexity_field(self):
         """All events should have a complexity field."""
@@ -2626,12 +2629,12 @@ class TestAscensionSystem:
         dig_service.dig(10001, guild_id)
         dig_repo.update_tunnel(10001, guild_id, depth=24, prestige_level=4)
 
-        # Cautious at prestige 4, depth 25: player_hit ≈ 0.58 with free-fight
-        # modifier; boss_hit = 0.30. A roll of 0.40 lets the player hit every
-        # round while the boss misses every round, so the duel resolves to
-        # a deterministic win against a +4-HP boss.
-        monkeypatch.setattr(random, "random", lambda: 0.31)
-        result = dig_service.fight_boss(10001, guild_id, "cautious", wager=0)
+        # Cautious @ depth 25, P4 with wager=10: player_hit 0.60 − 0.02 − 0.08
+        # = 0.50 (no free-fight mod). boss_hit=0.30. A roll of 0.35 hits for
+        # the player (<0.50) and misses for the boss (>0.30), so the duel
+        # resolves deterministically against an 8-HP boss.
+        monkeypatch.setattr(random, "random", lambda: 0.35)
+        result = dig_service.fight_boss(10001, guild_id, "cautious", wager=10)
         assert result["success"]
         assert result.get("won") is True
         # At P4, boss should enter phase 2 on first victory
@@ -2651,9 +2654,11 @@ class TestAscensionSystem:
         dig_service.dig(10001, guild_id)
         dig_repo.update_tunnel(10001, guild_id, depth=24, prestige_level=3)
 
-        # See test_boss_phase2_at_prestige_4 for the 0.25 roll rationale.
-        monkeypatch.setattr(random, "random", lambda: 0.31)
-        result = dig_service.fight_boss(10001, guild_id, "cautious", wager=0)
+        # Same rationale as test_boss_phase2_at_prestige_4 but P3 so
+        # prestige penalty is 0.06. player_hit = 0.60 − 0.02 − 0.06 = 0.52
+        # with wager=10. roll=0.35 hits player (<0.52), misses boss (>0.30).
+        monkeypatch.setattr(random, "random", lambda: 0.35)
+        result = dig_service.fight_boss(10001, guild_id, "cautious", wager=10)
         assert result["success"]
         assert result.get("won") is True
         # No phase 2 at P3
@@ -2938,9 +2943,8 @@ class TestNewEventMechanics:
         assert len(found_gated) == 0, f"Prestige-gated events should not appear at P0: {found_gated}"
 
     def test_all_new_events_have_valid_structure(self):
-        """All 101 events have required fields."""
+        """Every event in the pool has the required fields."""
         from services.dig_constants import EVENT_POOL
-        assert len(EVENT_POOL) == 101
         for e in EVENT_POOL:
             assert "id" in e, "Event missing 'id'"
             assert "name" in e, f"Event {e.get('id', '?')} missing 'name'"

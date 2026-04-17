@@ -252,3 +252,52 @@ class TestActiveDiggersLookback:
             penalty_jc=5,
         )
         assert result.victims == []
+
+
+class TestSplashGrantMode:
+    """Cooperative splash (mode='grant') credits JC to the recipient instead of burning it."""
+
+    def test_grant_credits_recipient(self, dig_repo, player_repository, monkeypatch):
+        _register(player_repository, 10001, balance=100)
+        _register(player_repository, 10002, balance=100)
+        monkeypatch.setattr(random, "sample", lambda pool, k: pool[:k])
+
+        result = resolve_splash(
+            player_repo=player_repository,
+            dig_repo=dig_repo,
+            guild_id=TEST_GUILD_ID,
+            digger_id=10001,
+            event_name="Wisp Tether",
+            strategy="random_active",
+            victim_count=1,
+            penalty_jc=10,
+            mode="grant",
+        )
+        assert result.mode == "grant"
+        assert len(result.victims) == 1
+        vid, amount = result.victims[0]
+        assert vid == 10002
+        assert amount == 10
+        # Recipient balance goes UP.
+        assert player_repository.get_balance(10002, TEST_GUILD_ID) == 110
+
+    def test_grant_ignores_zero_balance_guard(self, dig_repo, player_repository, monkeypatch):
+        """Grant mode does not skip debtors — you can gift into a negative balance."""
+        _register(player_repository, 10001, balance=100)
+        _register(player_repository, 10002, balance=0)
+        player_repository.add_balance(10002, TEST_GUILD_ID, -25)  # now -25
+        monkeypatch.setattr(random, "sample", lambda pool, k: pool[:k])
+
+        result = resolve_splash(
+            player_repo=player_repository,
+            dig_repo=dig_repo,
+            guild_id=TEST_GUILD_ID,
+            digger_id=10001,
+            event_name="Wisp Tether",
+            strategy="random_active",
+            victim_count=1,
+            penalty_jc=10,
+            mode="grant",
+        )
+        assert result.victims == [(10002, 10)]
+        assert player_repository.get_balance(10002, TEST_GUILD_ID) == -15
