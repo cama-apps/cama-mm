@@ -209,6 +209,13 @@ class IPlayerRepository(ABC):
         """Get recently active players for lottery selection."""
         ...
 
+    @abstractmethod
+    def get_richest_players(
+        self, guild_id: int, limit: int = 5, min_balance: int = 1
+    ) -> list[dict]:
+        """Get the top N players by positive jopacoin balance."""
+        ...
+
 
 class IBetRepository(ABC):
     VALID_TEAMS: set
@@ -1318,6 +1325,18 @@ class IDigRepository(ABC):
 
     @abstractmethod
     def get_all_tunnels(self, guild_id: int) -> list[dict]: ...
+
+    @abstractmethod
+    def get_recent_diggers(
+        self,
+        guild_id: int,
+        *,
+        days: int = 7,
+        exclude_id: int | None = None,
+        limit: int | None = None,
+    ) -> list[int]:
+        """Return ``discord_id``s that have logged a ``dig`` action within ``days``."""
+        ...
 
     @abstractmethod
     def get_hall_of_fame(self, guild_id: int) -> list[dict]: ...

@@ -35,6 +35,38 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("cama_bot.commands.dig")
 
+
+def _splash_aftermath_lines(splash: dict) -> list[str]:
+    """Format splash victim lines for display in embeds.
+
+    Returned as a list so callers can join with newlines or slice for the
+    public broadcast vs. the digger's private reply.
+    """
+    victims = splash.get("victims", []) if splash else []
+    return [
+        f"<@{v['discord_id']}>: -{v['amount']} {JOPACOIN_EMOTE}"
+        for v in victims
+    ]
+
+
+def _build_splash_broadcast_embed(splash: dict, digger_id: int) -> discord.Embed:
+    """Build the public Discord embed announcing a splash event's collateral damage."""
+    event_name = splash.get("event_name", "Event")
+    total = splash.get("total_burned", 0)
+    embed = discord.Embed(
+        title=f"\u26a0\ufe0f Splash Event: {event_name}",
+        description=(
+            f"<@{digger_id}>'s dig rippled through the tunnel network. "
+            f"**{total} {JOPACOIN_EMOTE}** was lost to the collapse."
+        ),
+        color=0xC23B22,
+    )
+    lines = _splash_aftermath_lines(splash)
+    if lines:
+        embed.add_field(name="Caught in the cave-in", value="\n".join(lines), inline=False)
+    return embed
+
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -572,6 +604,7 @@ class EventEncounterView(discord.ui.View):
         await interaction.response.defer()
         result = await self._resolve("desperate")
         await interaction.followup.send(embed=result)
+        await self._maybe_broadcast_splash(interaction)
         self.stop()
 
     @discord.ui.button(label="Safe", style=discord.ButtonStyle.secondary, emoji="\U0001f6e1\ufe0f")
@@ -582,6 +615,7 @@ class EventEncounterView(discord.ui.View):
         await interaction.response.defer()
         result = await self._resolve("safe")
         await interaction.followup.send(embed=result)
+        await self._maybe_broadcast_splash(interaction)
         self.stop()
 
     @discord.ui.button(label="Risky", style=discord.ButtonStyle.danger, emoji="\u2694\ufe0f")
@@ -592,7 +626,24 @@ class EventEncounterView(discord.ui.View):
         await interaction.response.defer()
         result = await self._resolve("risky")
         await interaction.followup.send(embed=result)
+        await self._maybe_broadcast_splash(interaction)
         self.stop()
+
+    async def _maybe_broadcast_splash(self, interaction: discord.Interaction) -> None:
+        """Post the splash event announcement to the channel, if one fired.
+
+        Broadcast failures (missing channel permissions, deleted channel,
+        etc.) must never propagate back to the digger — they already got
+        their result embed.
+        """
+        broadcast = getattr(self, "_pending_splash_broadcast", None)
+        self._pending_splash_broadcast = None
+        if broadcast is None or interaction.channel is None:
+            return
+        try:
+            await interaction.channel.send(embed=broadcast)
+        except Exception as exc:  # noqa: BLE001 — broadcast must not fail the dig
+            logger.warning("Splash broadcast failed: %s", exc)
 
     async def _resolve(self, choice: str) -> discord.Embed:
         """Resolve event choice via service layer (handles chaining, cruel echoes, logging)."""
@@ -665,6 +716,21 @@ class EventEncounterView(discord.ui.View):
                     value=pick_description(chain_d) or "Another event triggers!",
                     inline=False,
                 )
+
+        # Splash: private Aftermath field for the digger + public broadcast
+        # queued on the view so the callback can post it after followup.send.
+        splash_obj = getattr(result, "splash", None)
+        splash_d = splash_obj._d if hasattr(splash_obj, "_d") else splash_obj
+        self._pending_splash_broadcast = None
+        if isinstance(splash_d, dict) and splash_d.get("victims"):
+            aftermath_lines = _splash_aftermath_lines(splash_d)
+            if aftermath_lines:
+                embed.add_field(
+                    name="Aftermath",
+                    value="\n".join(aftermath_lines),
+                    inline=False,
+                )
+            self._pending_splash_broadcast = _build_splash_broadcast_embed(splash_d, self.user_id)
 
         return embed
 
