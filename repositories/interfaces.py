@@ -1427,3 +1427,14 @@ class IDigRepository(ABC):
     # Social actions
     @abstractmethod
     def get_recent_social_actions(self, discord_id: int, guild_id: int, hours: int = 48) -> list[dict]: ...
+
+
+class IReminderRepository(ABC):
+    @abstractmethod
+    def get_preferences(self, discord_id: int, guild_id: int) -> dict: ...
+
+    @abstractmethod
+    def set_preference(self, discord_id: int, guild_id: int, reminder_type: str, enabled: bool) -> None: ...
+
+    @abstractmethod
+    def get_enabled_users_for_type(self, guild_id: int, reminder_type: str) -> list[int]: ...

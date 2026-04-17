@@ -146,6 +146,7 @@ EXTENSIONS = [
     "commands.mana",
     "commands.roll",
     "commands.dig",
+    "commands.reminders",
 ]
 
 
@@ -414,6 +415,11 @@ async def on_ready():
         asyncio.ensure_future(asyncio.to_thread(warm_cache))
     except Exception as exc:
         logger.debug(f"Trivia image cache warm failed: {exc}")
+
+    reminder_svc = getattr(bot, "reminder_service", None)
+    if reminder_svc:
+        guild_ids = [g.id for g in bot.guilds]
+        asyncio.ensure_future(reminder_svc.reschedule_all(bot, guild_ids))
 
 
 @bot.tree.error

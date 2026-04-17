@@ -268,6 +268,7 @@ class SchemaManager:
             ("dig_engine_mode_column", self._migration_dig_engine_mode),
             ("dig_personality_table", self._migration_dig_personality_table),
             ("dig_miner_profile_columns", self._migration_dig_miner_profile),
+            ("create_reminder_preferences_table", self._migration_create_reminder_preferences_table),
         ]
 
     # --- Migrations ---
@@ -2023,4 +2024,35 @@ class SchemaManager:
         )
         self._add_column_if_not_exists(
             cursor, "tunnels", "stat_boss_awards", "TEXT NOT NULL DEFAULT '[]'"
+        )
+
+    def _migration_create_reminder_preferences_table(self, cursor) -> None:
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS reminder_preferences (
+                discord_id      INTEGER NOT NULL,
+                guild_id        INTEGER NOT NULL DEFAULT 0,
+                wheel_enabled   INTEGER NOT NULL DEFAULT 0,
+                trivia_enabled  INTEGER NOT NULL DEFAULT 0,
+                betting_enabled INTEGER NOT NULL DEFAULT 0,
+                updated_at      INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (discord_id, guild_id)
+            )
+            """
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_reminder_prefs_guild "
+            "ON reminder_preferences(guild_id)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_reminder_prefs_wheel "
+            "ON reminder_preferences(guild_id, wheel_enabled)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_reminder_prefs_trivia "
+            "ON reminder_preferences(guild_id, trivia_enabled)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_reminder_prefs_betting "
+            "ON reminder_preferences(guild_id, betting_enabled)"
         )

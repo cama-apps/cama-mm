@@ -384,6 +384,12 @@ class TriviaCog(commands.Cog):
                         "Trivia is on cooldown.", ephemeral=True
                     )
                 return
+        else:
+            reminder_svc = getattr(self.bot, "reminder_service", None)
+            if reminder_svc:
+                reminder_svc.schedule_trivia_reminder(
+                    self.bot, user_id, guild_id, now + TRIVIA_COOLDOWN_SECONDS
+                )
 
         if not await safe_defer(interaction):
             return
