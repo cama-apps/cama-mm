@@ -848,3 +848,52 @@ class DigRepository(BaseRepository, IDigRepository):
                 (gid, discord_id, discord_id, cutoff),
             )
             return [dict(row) for row in cursor.fetchall()]
+
+    # ── Boss echoes (post-kill weakening window) ────────────────────────
+
+    def record_boss_echo(
+        self,
+        guild_id: int | None,
+        depth: int,
+        killer_discord_id: int,
+        window_seconds: int,
+    ) -> None:
+        """Upsert the echo row for (guild, depth) with a fresh window.
+
+        A BEGIN IMMEDIATE write lock is used so simultaneous kills at the
+        same boundary don't race; last writer wins.
+        """
+        gid = self.normalize_guild_id(guild_id)
+        weakened_until = int(time.time()) + int(window_seconds)
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO dig_boss_echoes
+                    (guild_id, depth, killer_discord_id, weakened_until)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(guild_id, depth) DO UPDATE SET
+                    killer_discord_id = excluded.killer_discord_id,
+                    weakened_until    = excluded.weakened_until
+                """,
+                (gid, int(depth), int(killer_discord_id), weakened_until),
+            )
+
+    def get_active_boss_echo(
+        self, guild_id: int | None, depth: int,
+    ) -> dict | None:
+        """Return the active echo row for (guild, depth) or None if expired."""
+        gid = self.normalize_guild_id(guild_id)
+        now = int(time.time())
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT killer_discord_id, weakened_until
+                FROM dig_boss_echoes
+                WHERE guild_id = ? AND depth = ? AND weakened_until > ?
+                """,
+                (gid, int(depth), now),
+            )
+            row = cursor.fetchone()
+            return dict(row) if row else None

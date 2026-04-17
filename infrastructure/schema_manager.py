@@ -268,6 +268,7 @@ class SchemaManager:
             ("dig_engine_mode_column", self._migration_dig_engine_mode),
             ("dig_personality_table", self._migration_dig_personality_table),
             ("dig_miner_profile_columns", self._migration_dig_miner_profile),
+            ("create_dig_boss_echoes", self._migration_create_dig_boss_echoes),
         ]
 
     # --- Migrations ---
@@ -2023,4 +2024,23 @@ class SchemaManager:
         )
         self._add_column_if_not_exists(
             cursor, "tunnels", "stat_boss_awards", "TEXT NOT NULL DEFAULT '[]'"
+        )
+
+    def _migration_create_dig_boss_echoes(self, cursor) -> None:
+        """Per-guild, per-boss 'echo' window.
+
+        After a guild's first kill of a boss, subsequent fighters at that
+        same boundary see the boss weakened for a fixed window. The row is
+        upserted on every kill so the window restarts.
+        """
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS dig_boss_echoes (
+                guild_id INTEGER NOT NULL,
+                depth INTEGER NOT NULL,
+                killer_discord_id INTEGER NOT NULL,
+                weakened_until INTEGER NOT NULL,
+                PRIMARY KEY (guild_id, depth)
+            )
+            """
         )

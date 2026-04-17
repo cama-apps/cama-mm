@@ -1446,3 +1446,15 @@ class IDigRepository(ABC):
     # Social actions
     @abstractmethod
     def get_recent_social_actions(self, discord_id: int, guild_id: int, hours: int = 48) -> list[dict]: ...
+
+    # Boss echoes (post-kill weakening window)
+    @abstractmethod
+    def record_boss_echo(
+        self, guild_id: int | None, depth: int,
+        killer_discord_id: int, window_seconds: int,
+    ) -> None: ...
+
+    @abstractmethod
+    def get_active_boss_echo(
+        self, guild_id: int | None, depth: int,
+    ) -> dict | None: ...
