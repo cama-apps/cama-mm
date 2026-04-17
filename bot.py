@@ -146,6 +146,7 @@ EXTENSIONS = [
     "commands.mana",
     "commands.roll",
     "commands.dig",
+    "commands.russianroulette",
 ]
 
 
