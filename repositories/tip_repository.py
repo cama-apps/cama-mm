@@ -103,6 +103,32 @@ class TipRepository(BaseRepository, ITipRepository):
             )
             return [dict(row) for row in cursor.fetchall()]
 
+    def get_all_tips_for_user(
+        self, discord_id: int, guild_id: int | None = None
+    ) -> list[dict]:
+        """
+        Return every tip involving ``discord_id`` as sender or recipient, newest first.
+
+        Each row adds a ``direction`` field: ``"sent"`` or ``"received"``. A self-tip
+        (sender_id == recipient_id) produces one row labelled ``"sent"`` — the net
+        balance impact is still correct (the only real movement is the fee to the
+        nonprofit fund).
+        """
+        normalized_guild = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT id, sender_id, recipient_id, amount, fee, guild_id, timestamp,
+                       CASE WHEN sender_id = ? THEN 'sent' ELSE 'received' END AS direction
+                FROM tip_transactions
+                WHERE (sender_id = ? OR recipient_id = ?) AND guild_id = ?
+                ORDER BY timestamp DESC
+                """,
+                (discord_id, discord_id, discord_id, normalized_guild),
+            )
+            return [dict(row) for row in cursor.fetchall()]
+
     def get_total_fees_collected(self, guild_id: int | None = None) -> int:
         """
         Get total fees collected from tips.

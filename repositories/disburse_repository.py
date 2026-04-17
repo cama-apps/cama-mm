@@ -389,3 +389,48 @@ class DisburseRepository(BaseRepository, IDisburseRepository):
                     context=f"disbursements.recipients id={row['id']}",
                 ),
             }
+
+    def get_recipient_history(
+        self, discord_id: int, guild_id: int | None = None
+    ) -> list[dict]:
+        """
+        Return every disbursement in which ``discord_id`` was a recipient, newest first.
+
+        Each entry: ``{disbursed_at, amount, method}`` where ``amount`` is the
+        portion credited to this user in that disbursement.
+        """
+        normalized_guild = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT id, disbursed_at, method, recipients
+                FROM disburse_history
+                WHERE guild_id = ?
+                ORDER BY disbursed_at DESC
+                """,
+                (normalized_guild,),
+            )
+
+            results: list[dict] = []
+            for row in cursor.fetchall():
+                distributions = safe_json_loads(
+                    row["recipients"],
+                    default=[],
+                    context=f"disbursements.recipients id={row['id']}",
+                )
+                for entry in distributions:
+                    # Entries are stored as [discord_id, amount] tuples (JSON arrays).
+                    if not entry or len(entry) < 2:
+                        continue
+                    recipient_id, amount = entry[0], entry[1]
+                    if recipient_id == discord_id and amount:
+                        results.append(
+                            {
+                                "disbursed_at": row["disbursed_at"],
+                                "amount": amount,
+                                "method": row["method"],
+                            }
+                        )
+                        break
+            return results

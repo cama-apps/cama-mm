@@ -480,6 +480,42 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
             )
             return [dict(row) for row in cursor.fetchall()]
 
+    def get_player_prediction_history(
+        self, discord_id: int, guild_id: int | None = None
+    ) -> list[dict]:
+        """
+        Return every resolved prediction bet for ``discord_id`` in a guild.
+
+        Each row is ``{prediction_id, settle_time, total_amount, payout, position, status}``
+        where ``settle_time`` is ``resolved_at``. Cancelled predictions don't carry a
+        ``resolved_at`` timestamp so they're excluded; refunded stakes never moved a
+        net balance anyway. Rows are ordered by ``settle_time`` ascending.
+        """
+        normalized_guild = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT
+                    p.prediction_id,
+                    p.resolved_at as settle_time,
+                    p.status,
+                    pb.position,
+                    SUM(pb.amount) as total_amount,
+                    MAX(pb.payout) as payout
+                FROM prediction_bets pb
+                JOIN predictions p ON pb.prediction_id = p.prediction_id
+                WHERE pb.discord_id = ?
+                  AND p.guild_id = ?
+                  AND p.status = 'resolved'
+                  AND p.resolved_at IS NOT NULL
+                GROUP BY p.prediction_id, pb.position
+                ORDER BY p.resolved_at ASC
+                """,
+                (discord_id, normalized_guild),
+            )
+            return [dict(row) for row in cursor.fetchall()]
+
     def get_prediction_totals(self, prediction_id: int) -> dict:
         """Get bet totals: {"yes_total": n, "no_total": m, "yes_count": x, "no_count": y}."""
         with self.connection() as conn:

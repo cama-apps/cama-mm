@@ -465,6 +465,43 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 return None
             return json.loads(row["enrichment_data"])
 
+    def get_player_bonus_events(
+        self, discord_id: int, guild_id: int | None = None
+    ) -> list[dict]:
+        """
+        Return every match the player participated in (with win flag and date),
+        used to reconstruct participation and win bonuses for the balance history
+        chart. Ordered by ``match_date`` ascending.
+
+        Only the persisted fields are included (``match_id, match_date, won``). Other
+        bonus types (streaming, first-game, exclusion, bomb-pot) are not reconstructable
+        from the current schema and are silently omitted by the caller.
+        """
+        normalized_guild = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT
+                    m.match_id,
+                    CAST(strftime('%s', m.match_date) AS INTEGER) AS match_time,
+                    mp.won
+                FROM match_participants mp
+                JOIN matches m ON mp.match_id = m.match_id
+                WHERE mp.discord_id = ? AND mp.guild_id = ?
+                ORDER BY m.match_date ASC
+                """,
+                (discord_id, normalized_guild),
+            )
+            return [
+                {
+                    "match_id": row["match_id"],
+                    "match_time": row["match_time"],
+                    "won": bool(row["won"]),
+                }
+                for row in cursor.fetchall()
+            ]
+
     def get_player_matches(self, discord_id: int, guild_id: int, limit: int = 10) -> list[dict]:
         """Get recent matches for a player in a guild."""
         with self.connection() as conn:

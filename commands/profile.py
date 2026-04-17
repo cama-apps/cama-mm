@@ -46,7 +46,7 @@ class ProfileView(discord.ui.View):
     """View with tab buttons for navigating profile sections."""
 
     # Tabs that require expensive operations (OpenDota API, chart generation)
-    EXPENSIVE_TABS = {"dota", "gambling", "heroes"}
+    EXPENSIVE_TABS = {"dota", "gambling", "heroes", "economy"}
 
     def __init__(
         self,
@@ -237,6 +237,9 @@ class ProfileCommands(commands.Cog):
 
     def _get_tip_service(self):
         return getattr(self.bot, "tip_service", None)
+
+    def _get_balance_history_service(self):
+        return getattr(self.bot, "balance_history_service", None)
 
     def _get_rating_system(self):
         match_service = getattr(self.bot, "match_service", None)
@@ -628,140 +631,10 @@ class ProfileCommands(commands.Cog):
         target_discord_id: int,
         guild_id: int | None = None,
     ) -> tuple[discord.Embed, discord.File | None]:
-        """Build the Economy tab embed with balance, loans, and bankruptcy."""
-        player_repo = self._get_player_repo()
-        loan_service = self._get_loan_service()
-        bankruptcy_service = self._get_bankruptcy_service()
+        """Build the Economy tab embed with balance, loans, bankruptcy, and chart."""
+        from commands.profile_helpers.economy import build_economy_embed
 
-        if not player_repo:
-            return discord.Embed(
-                title="Error", description="Player repository unavailable", color=COLOR_RED
-            ), None
-
-        player = player_repo.get_by_id(target_discord_id, guild_id)
-        if not player:
-            return discord.Embed(
-                title="Not Registered",
-                description=f"{target_user.display_name} is not registered.",
-                color=COLOR_RED,
-            ), None
-
-        balance = player.jopacoin_balance or 0
-
-        # Determine color based on balance
-        if balance > 0:
-            color = COLOR_GREEN
-        elif balance < 0:
-            color = COLOR_RED
-        else:
-            color = COLOR_ORANGE
-
-        embed = discord.Embed(
-            title=f"Profile: {target_user.display_name} > Economy",
-            color=color,
-        )
-
-        # Balance with visual indicator
-        balance_emoji = "💰" if balance > 0 else "⚠️" if balance < 0 else "📭"
-        embed.add_field(
-            name=f"{balance_emoji} Balance",
-            value=f"**{balance}** {JOPACOIN_EMOTE}",
-            inline=False,
-        )
-
-        # Loan information
-        if loan_service:
-            loan_state = loan_service.get_state(target_discord_id, guild_id)
-
-            loan_lines = []
-            loan_lines.append(f"**Loans Taken:** {loan_state.total_loans_taken}")
-            loan_lines.append(f"**Fees Paid:** {loan_state.total_fees_paid} {JOPACOIN_EMOTE}")
-
-            if loan_state.negative_loans_taken > 0:
-                loan_lines.append(f"🔥 **Borrowed While Broke:** {loan_state.negative_loans_taken}x")
-
-            if loan_state.has_outstanding_loan:
-                loan_lines.append("\n⚠️ **Outstanding Loan:**")
-                loan_lines.append(f"  Principal: {loan_state.outstanding_principal} {JOPACOIN_EMOTE}")
-                loan_lines.append(f"  Fee: {loan_state.outstanding_fee} {JOPACOIN_EMOTE}")
-                loan_lines.append(f"  **Total Owed:** {loan_state.outstanding_total} {JOPACOIN_EMOTE}")
-                loan_lines.append("  *(Repaid on next match)*")
-
-            if loan_state.is_on_cooldown and loan_state.cooldown_ends_at:
-                loan_lines.append(f"\n⏳ **Cooldown:** <t:{loan_state.cooldown_ends_at}:R>")
-            elif not loan_state.has_outstanding_loan:
-                loan_lines.append("\n✅ **Loan Available**")
-
-            embed.add_field(
-                name="🏦 Loans",
-                value="\n".join(loan_lines),
-                inline=True,
-            )
-
-        # Bankruptcy information
-        if bankruptcy_service:
-            bankruptcy_repo = bankruptcy_service.bankruptcy_repo
-            state_data = bankruptcy_repo.get_state(target_discord_id, guild_id)
-            bankruptcy_state = bankruptcy_service.get_state(target_discord_id, guild_id)
-
-            bankruptcy_lines = []
-            bankruptcy_count = state_data["bankruptcy_count"] if state_data else 0
-            bankruptcy_lines.append(f"**Declarations:** {bankruptcy_count}")
-
-            if bankruptcy_state.penalty_games_remaining > 0:
-                penalty_rate_pct = int(BANKRUPTCY_PENALTY_RATE * 100)
-                bankruptcy_lines.append(f"\n{TOMBSTONE_EMOJI} **Active Penalty:**")
-                bankruptcy_lines.append(f"  {penalty_rate_pct}% win bonus")
-                bankruptcy_lines.append(f"  {bankruptcy_state.penalty_games_remaining} game(s) remaining")
-
-            if bankruptcy_state.is_on_cooldown and bankruptcy_state.cooldown_ends_at:
-                bankruptcy_lines.append(f"\n⏳ **Cooldown:** <t:{bankruptcy_state.cooldown_ends_at}:R>")
-            elif balance < 0:
-                bankruptcy_lines.append("\n⚠️ **Bankruptcy Available**")
-
-            embed.add_field(
-                name=f"{TOMBSTONE_EMOJI} Bankruptcy",
-                value="\n".join(bankruptcy_lines),
-                inline=True,
-            )
-
-        # Lowest balance ever reached
-        lowest_balance = player_repo.get_lowest_balance(target_discord_id, guild_id)
-        if lowest_balance is not None and lowest_balance < 0:
-            embed.add_field(
-                name="📉 Lowest Balance",
-                value=f"**{lowest_balance}** {JOPACOIN_EMOTE}",
-                inline=True,
-            )
-
-        # Tipping statistics
-        tip_service = self._get_tip_service()
-        if tip_service:
-            tip_stats = tip_service.get_user_tip_stats(target_discord_id, guild_id)
-
-            # Only show if user has tip history
-            if tip_stats["tips_sent_count"] > 0 or tip_stats["tips_received_count"] > 0:
-                tip_lines = []
-                if tip_stats["tips_sent_count"] > 0:
-                    tip_lines.append(
-                        f"**Sent:** {tip_stats['total_sent']} {JOPACOIN_EMOTE} ({tip_stats['tips_sent_count']} tips)"
-                    )
-                if tip_stats["tips_received_count"] > 0:
-                    tip_lines.append(
-                        f"**Received:** {tip_stats['total_received']} {JOPACOIN_EMOTE} ({tip_stats['tips_received_count']} tips)"
-                    )
-                if tip_stats["fees_paid"] > 0:
-                    tip_lines.append(f"**Fees Paid:** {tip_stats['fees_paid']} {JOPACOIN_EMOTE}")
-
-                embed.add_field(
-                    name="💝 Tipping",
-                    value="\n".join(tip_lines),
-                    inline=True,
-                )
-
-        embed.set_footer(text="Tip: Use /balance for quick check, /loan to borrow")
-
-        return embed, None
+        return await build_economy_embed(self, target_user, target_discord_id, guild_id)
 
     async def _build_gambling_embed(
         self,

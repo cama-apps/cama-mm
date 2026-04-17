@@ -180,6 +180,7 @@ class ServiceContainer:
 
     def _init_economy_services(self) -> None:
         """Services that depend on core services."""
+        from services.balance_history_service import BalanceHistoryService
         from services.betting_service import BettingService
         from services.disburse_service import DisburseService
         from services.gambling_stats_service import GamblingStatsService
@@ -209,6 +210,14 @@ class ServiceContainer:
             prediction_repo=c["prediction_repo"],
             player_repo=c["player_repo"],
             admin_user_ids=self.admin_user_ids,
+        )
+        c["balance_history_service"] = BalanceHistoryService(
+            bet_repo=c["bet_repo"],
+            match_repo=c["match_repo"],
+            player_repo=c["player_repo"],
+            prediction_repo=c["prediction_repo"],
+            disburse_repo=c["disburse_repo"],
+            tip_repo=c["tip_repo"],
         )
 
     def _init_match_services(self) -> None:
@@ -432,6 +441,7 @@ class ServiceContainer:
         bot.lobby_service = c["lobby_service"]
         bot.lobby_manager = c["lobby_manager"]
         bot.gambling_stats_service = c["gambling_stats_service"]
+        bot.balance_history_service = c["balance_history_service"]
         bot.guild_config_service = c["guild_config_service"]
         bot.recalibration_service = c["recalibration_service"]
         bot.disburse_service = c["disburse_service"]

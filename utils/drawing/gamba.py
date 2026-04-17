@@ -16,6 +16,10 @@ from utils.drawing._common import (
     DISCORD_WHITE,
     _get_font,
     _get_text_size,
+    draw_x_axis_labels,
+    draw_y_axis_labels,
+    draw_zero_line,
+    make_projection,
 )
 
 
@@ -85,89 +89,25 @@ def draw_gamba_chart(
     pnl_values = [p[1] for p in pnl_series]
     bet_infos = [p[2] for p in pnl_series]
 
-    # Signed log scale: sign(x) * log(1 + |x|) for better visualization of large swings
-    def signed_log(x: float) -> float:
-        """Apply signed log transformation to compress large values while preserving sign."""
-        if x == 0:
-            return 0.0
-        sign = 1 if x > 0 else -1
-        return sign * math.log1p(abs(x))
-
-    def signed_log_inverse(y: float) -> float:
-        """Inverse of signed_log for label generation."""
-        if y == 0:
-            return 0.0
-        sign = 1 if y > 0 else -1
-        return sign * (math.exp(abs(y)) - 1)
-
-    # Transform P&L values to log scale for chart bounds
-    log_pnl_values = [signed_log(p) for p in pnl_values]
-    min_log_pnl = min(min(log_pnl_values), 0)
-    max_log_pnl = max(max(log_pnl_values), 0)
-    log_pnl_range = max(abs(max_log_pnl - min_log_pnl), 0.1)
-
-    # Add 10% padding to range
-    min_log_pnl -= log_pnl_range * 0.1
-    max_log_pnl += log_pnl_range * 0.1
-    log_pnl_range = max_log_pnl - min_log_pnl
-
     # Chart origin
     chart_x = padding
     chart_y = header_height + 20
 
-    # Helper to convert data to pixel coordinates (using log scale for Y)
-    def to_pixel(bet_num: int, pnl: int) -> tuple[int, int]:
-        x = chart_x + int((bet_num - 1) / max(len(bet_nums) - 1, 1) * chart_width)
-        log_pnl = signed_log(pnl)
-        y = chart_y + int((max_log_pnl - log_pnl) / log_pnl_range * chart_height)
-        return (x, y)
-
-    # Draw zero line (using log scale position)
-    zero_y = chart_y + int((max_log_pnl - 0) / log_pnl_range * chart_height)
-    draw.line(
-        [(chart_x, zero_y), (chart_x + chart_width, zero_y)],
-        fill=DISCORD_GREY,
-        width=1,
+    proj = make_projection(
+        y_values=[float(p) for p in pnl_values],
+        total_x=len(bet_nums),
+        chart_x=chart_x,
+        chart_y=chart_y,
+        chart_width=chart_width,
+        chart_height=chart_height,
     )
-    draw.text((chart_x - 25, zero_y - 6), "0", fill=DISCORD_GREY, font=value_font)
 
-    # Draw Y-axis labels at log-spaced positions
-    # Generate nice round values that span the actual data range
-    actual_min = min(pnl_values)
-    actual_max = max(pnl_values)
+    def to_pixel(bet_num: int, pnl: int) -> tuple[int, int]:
+        return proj.to_pixel(bet_num, pnl)
 
-    # Generate label values at key points (powers of 10, nice round numbers)
-    label_values = [0]
-    for magnitude in [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000]:
-        if magnitude <= abs(actual_max) * 1.2:
-            label_values.append(magnitude)
-        if -magnitude >= actual_min * 1.2:
-            label_values.append(-magnitude)
-
-    for pnl_val in sorted(set(label_values)):
-        log_val = signed_log(pnl_val)
-        # Skip if outside the visible range
-        if log_val < min_log_pnl or log_val > max_log_pnl:
-            continue
-        y_pos = chart_y + int((max_log_pnl - log_val) / log_pnl_range * chart_height)
-        if pnl_val == 0:
-            continue  # Already drawn zero line
-        label = f"{pnl_val:+d}"
-        text_w = _get_text_size(value_font, label)[0]
-        draw.text((chart_x - text_w - 8, y_pos - 6), label, fill=DISCORD_GREY, font=value_font)
-
-    # Draw X-axis labels (bet numbers)
-    x_step = max(len(bet_nums) // 5, 1)
-    for i in range(0, len(bet_nums), x_step):
-        x_pos, _ = to_pixel(bet_nums[i], 0)
-        label = str(bet_nums[i])
-        text_w = _get_text_size(value_font, label)[0]
-        draw.text(
-            (x_pos - text_w // 2, chart_y + chart_height + 5),
-            label,
-            fill=DISCORD_GREY,
-            font=value_font,
-        )
+    zero_y = draw_zero_line(draw, proj)
+    draw_y_axis_labels(draw, proj, min(pnl_values), max(pnl_values))
+    draw_x_axis_labels(draw, proj, bet_nums)
 
     # Draw filled area under/over the line
     # Create overlay for transparency

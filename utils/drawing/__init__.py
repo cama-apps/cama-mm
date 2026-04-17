@@ -32,6 +32,7 @@ from utils.drawing.analysis import (
     draw_prediction_over_time,
     draw_scout_report,
 )
+from utils.drawing.balance_history import draw_balance_chart
 from utils.drawing.gamba import draw_gamba_chart
 from utils.drawing.heroes import (
     _fetch_hero_image,
@@ -78,6 +79,8 @@ __all__ = [
     "draw_attribute_distribution",
     # Gamba P&L
     "draw_gamba_chart",
+    # Balance history
+    "draw_balance_chart",
     # Ratings
     "draw_rating_history_chart",
     "draw_rating_distribution",
