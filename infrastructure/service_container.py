@@ -218,6 +218,7 @@ class ServiceContainer:
             prediction_repo=c["prediction_repo"],
             disburse_repo=c["disburse_repo"],
             tip_repo=c["tip_repo"],
+            dig_repo=c["dig_repo"],
         )
 
     def _init_match_services(self) -> None:
