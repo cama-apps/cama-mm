@@ -36,6 +36,7 @@ SOURCE_COLORS: dict[str, str] = {
     "tips": "#EC4899",              # Pink
     "disburse": "#22C55E",          # Green
     "bonus": "#9CA3AF",             # Grey
+    "dig": "#A16207",               # Amber/Brown
 }
 
 # Short labels used in the legend.
@@ -47,6 +48,7 @@ SOURCE_LABELS: dict[str, str] = {
     "tips": "Tips",
     "disburse": "Disburse",
     "bonus": "Bonuses",
+    "dig": "Dig",
 }
 
 

@@ -336,6 +336,30 @@ class DigRepository(BaseRepository, IDigRepository):
             )
             return [dict(row) for row in cursor.fetchall()]
 
+    def get_player_jc_events(
+        self, discord_id: int, guild_id: int | None = None
+    ) -> list[dict]:
+        """
+        Return every dig action where ``discord_id`` is actor or target, oldest first,
+        for balance-history reconstruction. Each row includes ``actor_id, target_id,
+        action_type, detail, created_at, jc_delta``. The caller parses the ``detail``
+        JSON to derive the per-user JC delta for action types whose JC movement isn't
+        captured in the ``jc_delta`` column (which is always 0 in current code).
+        """
+        gid = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT actor_id, target_id, action_type, detail, created_at, jc_delta
+                FROM dig_actions
+                WHERE guild_id = ? AND (actor_id = ? OR target_id = ?)
+                ORDER BY created_at ASC
+                """,
+                (gid, discord_id, discord_id),
+            )
+            return [dict(row) for row in cursor.fetchall()]
+
     def get_sabotage_history(
         self, actor_id: int, target_id: int, guild_id: int, since_ts: int,
     ) -> list[dict]:

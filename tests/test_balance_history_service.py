@@ -1,12 +1,14 @@
-"""Unit tests for ``BalanceHistoryService`` — merges seven event sources into one series."""
+"""Unit tests for ``BalanceHistoryService`` — merges eight event sources into one series."""
 
 from __future__ import annotations
 
+import json
 from unittest.mock import MagicMock
 
 from services.balance_history_service import (
     SOURCE_BETS,
     SOURCE_BONUS,
+    SOURCE_DIG,
     SOURCE_DISBURSE,
     SOURCE_DOUBLE_OR_NOTHING,
     SOURCE_PREDICTIONS,
@@ -24,6 +26,7 @@ def _build_service(**overrides):
         "prediction_repo": MagicMock(),
         "disburse_repo": MagicMock(),
         "tip_repo": MagicMock(),
+        "dig_repo": MagicMock(),
     }
     # Every repo returns an empty list by default so tests only populate what they need.
     repos["bet_repo"].get_player_bet_history.return_value = []
@@ -33,8 +36,20 @@ def _build_service(**overrides):
     repos["prediction_repo"].get_player_prediction_history.return_value = []
     repos["disburse_repo"].get_recipient_history.return_value = []
     repos["tip_repo"].get_all_tips_for_user.return_value = []
+    repos["dig_repo"].get_player_jc_events.return_value = []
     repos.update(overrides)
     return BalanceHistoryService(**repos), repos
+
+
+def _dig_row(*, actor_id=1, target_id=None, action_type="dig", detail=None, created_at=1000, jc_delta=0):
+    return {
+        "actor_id": actor_id,
+        "target_id": target_id,
+        "action_type": action_type,
+        "detail": json.dumps(detail) if detail else None,
+        "created_at": created_at,
+        "jc_delta": jc_delta,
+    }
 
 
 def test_empty_history_returns_empty_series_and_totals():
@@ -188,6 +203,193 @@ def test_match_bonuses_collapse_to_one_event_per_match():
     assert totals.get(SOURCE_BONUS) == 4
     # First event carries a detail breakdown with both components
     assert series[0][2]["detail"]["components"] == {"participation": 1, "win": 2}
+
+
+def test_dig_action_earnings_credit_actor():
+    svc, repos = _build_service()
+    repos["dig_repo"].get_player_jc_events.return_value = [
+        _dig_row(action_type="dig", detail={"jc": 3, "advance": 2}, created_at=100),
+        _dig_row(action_type="dig", detail={"jc": 5, "advance": 4}, created_at=200),
+    ]
+    series, totals = svc.get_balance_event_series(discord_id=1, guild_id=123)
+    assert [info["delta"] for _, _, info in series] == [3, 5]
+    assert totals == {SOURCE_DIG: 8}
+
+
+def test_dig_cave_in_logs_are_silently_skipped():
+    svc, repos = _build_service()
+    repos["dig_repo"].get_player_jc_events.return_value = [
+        _dig_row(action_type="dig", detail={"cave_in": True, "block_loss": 3}, created_at=100),
+        _dig_row(action_type="dig", detail={"jc": 2}, created_at=200),
+    ]
+    series, totals = svc.get_balance_event_series(discord_id=1, guild_id=123)
+    # Cave-in log has no "jc" field → delta=0 → skipped.
+    assert [info["delta"] for _, _, info in series] == [2]
+    assert totals == {SOURCE_DIG: 2}
+
+
+def test_dig_sabotage_trap_debits_actor_and_credits_target():
+    svc, repos = _build_service()
+    # From actor's perspective: trap_triggered, lost jc_lost=10 → delta = -10.
+    # From target's perspective: same row; target gains jc_lost // 2 = 5.
+    trap_detail = {"target_id": 2, "trap_triggered": True, "jc_lost": 10, "blocks_lost": 3}
+
+    repos["dig_repo"].get_player_jc_events.return_value = [
+        _dig_row(actor_id=1, target_id=2, action_type="sabotage", detail=trap_detail, created_at=100),
+    ]
+    series_actor, _ = svc.get_balance_event_series(discord_id=1, guild_id=123)
+    assert [info["delta"] for _, _, info in series_actor] == [-10]
+
+    repos["dig_repo"].get_player_jc_events.return_value = [
+        _dig_row(actor_id=1, target_id=2, action_type="sabotage", detail=trap_detail, created_at=100),
+    ]
+    series_target, _ = svc.get_balance_event_series(discord_id=2, guild_id=123)
+    assert [info["delta"] for _, _, info in series_target] == [5]
+
+
+def test_dig_sabotage_no_trap_debits_cost_and_target_untouched():
+    svc, repos = _build_service()
+    detail = {"target_id": 2, "damage": 5, "cost": 7, "trap_triggered": False}
+    repos["dig_repo"].get_player_jc_events.return_value = [
+        _dig_row(actor_id=1, target_id=2, action_type="sabotage", detail=detail, created_at=100),
+    ]
+    # Actor loses the cost; target takes block damage only (no JC change).
+    series_actor, _ = svc.get_balance_event_series(discord_id=1, guild_id=123)
+    assert [info["delta"] for _, _, info in series_actor] == [-7]
+
+    repos["dig_repo"].get_player_jc_events.return_value = [
+        _dig_row(actor_id=1, target_id=2, action_type="sabotage", detail=detail, created_at=100),
+    ]
+    series_target, _ = svc.get_balance_event_series(discord_id=2, guild_id=123)
+    assert series_target == []
+
+
+def test_dig_boss_fight_wagered_win_returns_net_not_gross():
+    """Wagered boss wins log the gross payout as jc_delta but credit gross - wager."""
+    svc, repos = _build_service()
+    repos["dig_repo"].get_player_jc_events.return_value = [
+        # Wager 5, gross jc_delta 15 → net credit = 10.
+        _dig_row(action_type="boss_fight",
+                 detail={"boundary": 1, "won": True, "wager": 5, "jc_delta": 15}, created_at=100),
+    ]
+    series, totals = svc.get_balance_event_series(discord_id=1, guild_id=123)
+    assert [info["delta"] for _, _, info in series] == [10]
+    assert totals == {SOURCE_DIG: 10}
+
+
+def test_dig_boss_fight_unwagered_win_uses_full_jc_delta():
+    """Non-wagered boss wins credit the full jc_delta (a random 5-15 roll)."""
+    svc, repos = _build_service()
+    repos["dig_repo"].get_player_jc_events.return_value = [
+        _dig_row(action_type="boss_fight",
+                 detail={"boundary": 1, "won": True, "wager": 0, "jc_delta": 12}, created_at=100),
+    ]
+    series, totals = svc.get_balance_event_series(discord_id=1, guild_id=123)
+    assert [info["delta"] for _, _, info in series] == [12]
+    assert totals == {SOURCE_DIG: 12}
+
+
+def test_dig_boss_fight_phase1_win_with_no_jc_delta_is_zero():
+    """Phase-1 transitions log won=True with no jc_delta key; no balance change."""
+    svc, repos = _build_service()
+    repos["dig_repo"].get_player_jc_events.return_value = [
+        _dig_row(action_type="boss_fight",
+                 detail={"boundary": 1, "won": True, "phase": 1, "wager": 10}, created_at=100),
+    ]
+    series, totals = svc.get_balance_event_series(discord_id=1, guild_id=123)
+    assert series == []
+    assert totals == {}
+
+
+def test_dig_boss_fight_loss_debits_wager():
+    svc, repos = _build_service()
+    repos["dig_repo"].get_player_jc_events.return_value = [
+        _dig_row(action_type="boss_fight",
+                 detail={"boundary": 1, "won": False, "wager": 8}, created_at=100),
+    ]
+    series, totals = svc.get_balance_event_series(discord_id=1, guild_id=123)
+    assert [info["delta"] for _, _, info in series] == [-8]
+    assert totals == {SOURCE_DIG: -8}
+
+
+def test_dig_event_handles_jc_delta_cruel_echoes_and_jc_keys():
+    svc, repos = _build_service()
+    repos["dig_repo"].get_player_jc_events.return_value = [
+        _dig_row(action_type="event",
+                 detail={"event_id": "x", "choice": "A", "jc_delta": 4, "depth_delta": 1},
+                 created_at=100),
+        _dig_row(action_type="event",
+                 detail={"event_id": "y", "choice": "B", "cruel_echoes": True},
+                 created_at=200),
+        _dig_row(action_type="event",
+                 detail={"event_id": "z", "choice": "C", "succeeded": True, "jc": 6, "advance": 2},
+                 created_at=300),
+    ]
+    series, totals = svc.get_balance_event_series(discord_id=1, guild_id=123)
+    assert [info["delta"] for _, _, info in series] == [4, -1, 6]
+    assert totals == {SOURCE_DIG: 9}
+
+
+def test_dig_help_always_credits_one_jc():
+    svc, repos = _build_service()
+    repos["dig_repo"].get_player_jc_events.return_value = [
+        _dig_row(actor_id=1, target_id=2, action_type="help",
+                 detail={"target_id": 2, "advance": 1}, created_at=100),
+    ]
+    series, totals = svc.get_balance_event_series(discord_id=1, guild_id=123)
+    assert [info["delta"] for _, _, info in series] == [1]
+    assert totals == {SOURCE_DIG: 1}
+
+
+def test_dig_abandon_refund_and_retreat_loss():
+    svc, repos = _build_service()
+    repos["dig_repo"].get_player_jc_events.return_value = [
+        _dig_row(action_type="abandon", detail={"depth": 5, "refund": 3}, created_at=100),
+        _dig_row(action_type="boss_retreat", detail={"boundary": 1, "loss": 2}, created_at=200),
+    ]
+    series, totals = svc.get_balance_event_series(discord_id=1, guild_id=123)
+    assert [info["delta"] for _, _, info in series] == [3, -2]
+    assert totals == {SOURCE_DIG: 1}
+
+
+def test_dig_prestige_and_unknown_action_types_skipped():
+    svc, repos = _build_service()
+    repos["dig_repo"].get_player_jc_events.return_value = [
+        _dig_row(action_type="prestige", detail={"level": 2, "perk": "fast_dig"}, created_at=100),
+        _dig_row(action_type="nonsense_made_up", detail={"jc": 100}, created_at=200),
+    ]
+    series, totals = svc.get_balance_event_series(discord_id=1, guild_id=123)
+    assert series == []
+    assert totals == {}
+
+
+def test_dig_jc_delta_column_overrides_json_when_populated():
+    svc, repos = _build_service()
+    # Future-proofing: if a log writes jc_delta into the column, trust it.
+    repos["dig_repo"].get_player_jc_events.return_value = [
+        _dig_row(action_type="dig", detail={"jc": 2}, jc_delta=999, created_at=100),
+    ]
+    series, _ = svc.get_balance_event_series(discord_id=1, guild_id=123)
+    assert [info["delta"] for _, _, info in series] == [999]
+
+
+def test_dig_missing_repo_produces_no_dig_events():
+    """If dig_repo is not provided, the service silently skips the dig source."""
+    svc = BalanceHistoryService(
+        bet_repo=MagicMock(get_player_bet_history=MagicMock(return_value=[])),
+        match_repo=MagicMock(get_player_bonus_events=MagicMock(return_value=[])),
+        player_repo=MagicMock(
+            get_wheel_spin_history=MagicMock(return_value=[]),
+            get_double_or_nothing_history=MagicMock(return_value=[]),
+        ),
+        prediction_repo=MagicMock(get_player_prediction_history=MagicMock(return_value=[])),
+        disburse_repo=MagicMock(get_recipient_history=MagicMock(return_value=[])),
+        tip_repo=MagicMock(get_all_tips_for_user=MagicMock(return_value=[])),
+        dig_repo=None,
+    )
+    series, totals = svc.get_balance_event_series(discord_id=1, guild_id=123)
+    assert series == []
+    assert totals == {}
 
 
 def test_cumulative_series_starts_at_zero_and_sums_correctly():
