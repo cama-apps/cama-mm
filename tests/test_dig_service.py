@@ -2535,6 +2535,30 @@ class TestBossErrors:
         # Balance unchanged — boss boundary bypasses paid dig
         assert player_repository.get_balance(10001, guild_id) == balance_before
 
+    def test_boss_parked_on_cooldown_returns_cooldown_error(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
+    ):
+        """A parked player on active cooldown must not re-summon the boss
+        encounter for free — /dig go should return the cooldown error so the
+        player cannot spam free-fight attempts."""
+        _register_player(player_repository, balance=200)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+        dig_repo.update_tunnel(10001, guild_id, depth=24)
+
+        # Still on cooldown — normal (non-paid) dig should be blocked even
+        # though the player is parked at the boss boundary.
+        monkeypatch.setattr(time, "time", lambda: 1_000_000 + 10)
+        result = dig_service.dig(10001, guild_id)
+        assert result["success"] is False
+        assert result.get("paid_dig_available") is True
+        assert result.get("cooldown_remaining", 0) > 0
+        # Parked paid-dig is free, so the preview cost should be 0.
+        assert result.get("paid_dig_cost") == 0
+        # Boss encounter must not leak into the error payload.
+        assert result.get("boss_encounter") is not True
+
 
 # =============================================================================
 # Tunnel Normalization Tests

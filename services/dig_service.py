@@ -1077,27 +1077,33 @@ class DigService:
 
         depth_before = tunnel.get("depth", 0)
 
-        # 2b. If already at a boss boundary, return boss encounter without
-        #     consuming cooldown or charging for paid dig.
+        # 2b. Detect if parked at a boss boundary — affects paid-dig pricing
+        #     and enables an early return after the cooldown/paid check.
+        parked_at_boss = False
         if not is_first_dig:
-            parked_return = self._build_parked_boss_return(
-                tunnel, discord_id, guild_id, decay_info
+            boss_progress_check = self._get_boss_progress(tunnel)
+            parked_at_boss = (
+                self._at_boss_boundary(depth_before, boss_progress_check) is not None
             )
-            if parked_return is not None:
-                return parked_return
 
-        # 3. Cooldown / paid dig check
+        # 3. Cooldown / paid dig check (runs BEFORE the parked-boss return so
+        #    that cooldown is enforced even while parked — prevents spamming
+        #    /dig go to re-summon the boss encounter view).
         paid_dig_cost = 0
         if not is_first_dig:
             cooldown_remaining = self._get_cooldown_remaining(tunnel)
             if cooldown_remaining > 0:
                 if not paid:
-                    # Calculate cost for informational purposes
-                    pd = tunnel.get("paid_dig_date")
-                    pc = tunnel.get("paid_digs_today") or 0
-                    if pd != today:
-                        pc = 0
-                    preview_cost = self._calculate_paid_dig_cost(tunnel, pc)
+                    # Parked paid-dig costs 0 JC (no advance happens), otherwise
+                    # preview the escalating cost.
+                    if parked_at_boss:
+                        preview_cost = 0
+                    else:
+                        pd = tunnel.get("paid_dig_date")
+                        pc = tunnel.get("paid_digs_today") or 0
+                        if pd != today:
+                            pc = 0
+                        preview_cost = self._calculate_paid_dig_cost(tunnel, pc)
                     return {
                         "success": False,
                         "error": f"Dig on cooldown ({cooldown_remaining}s remaining).",
@@ -1107,27 +1113,40 @@ class DigService:
                     }
 
                 # Paid dig requested
-                paid_date = tunnel.get("paid_dig_date")
-                paid_count = tunnel.get("paid_digs_today") or 0
+                if parked_at_boss:
+                    # No fee while parked: the dig doesn't advance.
+                    paid_dig_cost = 0
+                else:
+                    paid_date = tunnel.get("paid_dig_date")
+                    paid_count = tunnel.get("paid_digs_today") or 0
 
-                if paid_date != today:
-                    paid_count = 0
+                    if paid_date != today:
+                        paid_count = 0
 
-                paid_dig_cost = self._calculate_paid_dig_cost(tunnel, paid_count)
+                    paid_dig_cost = self._calculate_paid_dig_cost(tunnel, paid_count)
 
-                balance = self.player_repo.get_balance(discord_id, guild_id)
-                if balance < paid_dig_cost:
-                    return self._error(
-                        f"Paid dig costs {paid_dig_cost} JC but you only have {balance} JC."
+                    balance = self.player_repo.get_balance(discord_id, guild_id)
+                    if balance < paid_dig_cost:
+                        return self._error(
+                            f"Paid dig costs {paid_dig_cost} JC but you only have {balance} JC."
+                        )
+
+                    # Debit for paid dig
+                    self.player_repo.add_balance(discord_id, guild_id, -paid_dig_cost)
+                    self.dig_repo.update_tunnel(
+                        discord_id, guild_id,
+                        paid_dig_date=today,
+                        paid_digs_today=paid_count + 1,
                     )
 
-                # Debit for paid dig
-                self.player_repo.add_balance(discord_id, guild_id, -paid_dig_cost)
-                self.dig_repo.update_tunnel(
-                    discord_id, guild_id,
-                    paid_dig_date=today,
-                    paid_digs_today=paid_count + 1,
-                )
+        # 3b. If parked at a boss boundary, return boss encounter now — cooldown
+        #     has been respected (or a paid bypass charged) above.
+        if parked_at_boss:
+            parked_return = self._build_parked_boss_return(
+                tunnel, discord_id, guild_id, decay_info
+            )
+            if parked_return is not None:
+                return parked_return
 
         # 4. First dig ever: guaranteed safe, welcome info
         if is_first_dig:
@@ -1757,24 +1776,29 @@ class DigService:
         decay_info = self._apply_lazy_decay(tunnel, guild_id)
         depth_before = tunnel.get("depth", 0)
 
+        # Detect parked-at-boss before the cooldown check so pricing reflects it.
+        parked_at_boss = False
         if not is_first_dig:
-            parked_return = self._build_parked_boss_return(
-                tunnel, discord_id, guild_id, decay_info,
+            boss_progress_check = self._get_boss_progress(tunnel)
+            parked_at_boss = (
+                self._at_boss_boundary(depth_before, boss_progress_check) is not None
             )
-            if parked_return is not None:
-                return parked_return, None
 
-        # Cooldown / paid dig check
+        # Cooldown / paid dig check (runs BEFORE the parked-boss return so a
+        # parked player can't spam /dig go to bypass cooldown).
         paid_dig_cost = 0
         if not is_first_dig:
             cooldown_remaining = self._get_cooldown_remaining(tunnel)
             if cooldown_remaining > 0:
                 if not paid:
-                    pd = tunnel.get("paid_dig_date")
-                    pc = tunnel.get("paid_digs_today") or 0
-                    if pd != today:
-                        pc = 0
-                    preview_cost = self._calculate_paid_dig_cost(tunnel, pc)
+                    if parked_at_boss:
+                        preview_cost = 0
+                    else:
+                        pd = tunnel.get("paid_dig_date")
+                        pc = tunnel.get("paid_digs_today") or 0
+                        if pd != today:
+                            pc = 0
+                        preview_cost = self._calculate_paid_dig_cost(tunnel, pc)
                     return {
                         "success": False,
                         "error": f"Dig on cooldown ({cooldown_remaining}s remaining).",
@@ -1783,22 +1807,32 @@ class DigService:
                         "paid_dig_available": True,
                     }, None
 
-                paid_date = tunnel.get("paid_dig_date")
-                paid_count = tunnel.get("paid_digs_today") or 0
-                if paid_date != today:
-                    paid_count = 0
-                paid_dig_cost = self._calculate_paid_dig_cost(tunnel, paid_count)
-                balance = self.player_repo.get_balance(discord_id, guild_id)
-                if balance < paid_dig_cost:
-                    return self._error(
-                        f"Paid dig costs {paid_dig_cost} JC but you only have {balance} JC."
-                    ), None
-                self.player_repo.add_balance(discord_id, guild_id, -paid_dig_cost)
-                self.dig_repo.update_tunnel(
-                    discord_id, guild_id,
-                    paid_dig_date=today,
-                    paid_digs_today=paid_count + 1,
-                )
+                if parked_at_boss:
+                    paid_dig_cost = 0
+                else:
+                    paid_date = tunnel.get("paid_dig_date")
+                    paid_count = tunnel.get("paid_digs_today") or 0
+                    if paid_date != today:
+                        paid_count = 0
+                    paid_dig_cost = self._calculate_paid_dig_cost(tunnel, paid_count)
+                    balance = self.player_repo.get_balance(discord_id, guild_id)
+                    if balance < paid_dig_cost:
+                        return self._error(
+                            f"Paid dig costs {paid_dig_cost} JC but you only have {balance} JC."
+                        ), None
+                    self.player_repo.add_balance(discord_id, guild_id, -paid_dig_cost)
+                    self.dig_repo.update_tunnel(
+                        discord_id, guild_id,
+                        paid_dig_date=today,
+                        paid_digs_today=paid_count + 1,
+                    )
+
+        if parked_at_boss:
+            parked_return = self._build_parked_boss_return(
+                tunnel, discord_id, guild_id, decay_info,
+            )
+            if parked_return is not None:
+                return parked_return, None
 
         if is_first_dig:
             return self._execute_first_dig(
@@ -3575,7 +3609,7 @@ class DigService:
             # Full victory (or phase 2 already cleared)
             new_depth = at_boss
             echo_payout_mult = 0.7 if echo_applied else 1.0
-            base_jc = int(wager * multiplier) if wager > 0 else random.randint(5, 15)
+            base_jc = int(wager * multiplier) if wager > 0 else random.randint(8, 18)
             jc_delta = int(base_jc * boss_payout_mult * echo_payout_mult)
 
             boss_progress[str(at_boss)] = "defeated"
