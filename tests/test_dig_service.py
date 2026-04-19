@@ -2476,8 +2476,9 @@ class TestBossErrors:
         balance = player_repository.get_balance(10001, guild_id)
         assert balance <= 10 + 10  # initial 10 + at most some JC from first dig
 
-    def test_boss_boundary_skips_cooldown(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """Digging at boss boundary doesn't consume cooldown."""
+    def test_boss_boundary_allows_dig_after_cooldown(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+        """Once cooldown has elapsed, digging while parked at a boss boundary
+        returns the boss encounter and refreshes ``last_dig_at``."""
         _register_player(player_repository, balance=200)
         first_dig_time = 1_000_000
         monkeypatch.setattr(time, "time", lambda: first_dig_time)
@@ -2558,6 +2559,28 @@ class TestBossErrors:
         assert result.get("paid_dig_cost") == 0
         # Boss encounter must not leak into the error payload.
         assert result.get("boss_encounter") is not True
+
+    def test_boss_parked_on_cooldown_blocks_preconditions_path(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
+    ):
+        """Mirror of the cooldown-bypass fix for the DM-mode entry point:
+        ``dig_with_preconditions`` must also enforce cooldown before returning
+        the parked-boss terminal result."""
+        _register_player(player_repository, balance=200)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+        dig_repo.update_tunnel(10001, guild_id, depth=24)
+
+        monkeypatch.setattr(time, "time", lambda: 1_000_000 + 10)
+        terminal, precond = dig_service.dig_with_preconditions(10001, guild_id)
+        assert precond is None
+        assert terminal is not None
+        assert terminal.get("success") is False
+        assert terminal.get("paid_dig_available") is True
+        assert terminal.get("cooldown_remaining", 0) > 0
+        assert terminal.get("paid_dig_cost") == 0
+        assert terminal.get("boss_encounter") is not True
 
 
 # =============================================================================
