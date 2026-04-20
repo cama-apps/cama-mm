@@ -3,7 +3,6 @@ Valve Steam Web API integration for fetching Dota 2 match data.
 API Documentation: https://wiki.teamfortress.com/wiki/WebAPI#Dota_2
 """
 
-import json
 import logging
 import os
 import threading
@@ -12,6 +11,8 @@ import time
 import requests
 
 from config import ENRICHMENT_RETRY_DELAYS
+from utils.http_safety import DEFAULT_MAX_BYTES as _MAX_RESPONSE_BYTES
+from utils.http_safety import parse_json_bounded, retry_after_seconds
 
 logger = logging.getLogger("cama_bot.steam_api")
 
@@ -79,8 +80,11 @@ class SteamAPI:
         Make a rate-limited request to the Steam API with retry on transient errors.
 
         Retries on 429 and 5xx responses using ``ENRICHMENT_RETRY_DELAYS`` for
-        backoff. 4xx (other than 429) and malformed-JSON responses are not
-        retried.
+        backoff. A 429 response with a ``Retry-After`` header longer than the
+        configured backoff uses the server hint instead. 4xx (other than 429)
+        and malformed-JSON responses are not retried. Successful responses are
+        decoded through :func:`utils.http_safety.parse_json_bounded`, which
+        enforces a post-hoc body-size ceiling and catches malformed JSON.
 
         Args:
             endpoint: API endpoint (e.g., "GetMatchDetails/v1")
@@ -124,6 +128,13 @@ class SteamAPI:
                     )
                     return None
                 delay = delays[attempt]
+                # Honor an upstream-supplied Retry-After (common on 429). If it
+                # is larger than our configured backoff, wait the longer
+                # duration so we don't stomp on a rate-limit ban.
+                if response.status_code == 429:
+                    server_hint = retry_after_seconds(response)
+                    if server_hint is not None:
+                        delay = max(delay, server_hint)
                 logger.info(
                     f"Steam API request to {endpoint} returned {response.status_code}; "
                     f"retrying in {delay}s (attempt {attempt + 1}/{len(delays)})"
@@ -133,13 +144,12 @@ class SteamAPI:
 
             try:
                 response.raise_for_status()
-                return response.json()
             except requests.exceptions.RequestException as e:
                 logger.error(f"Steam API request failed: {e}")
                 return None
-            except (requests.exceptions.JSONDecodeError, json.JSONDecodeError, ValueError) as e:
-                logger.error(f"Steam API returned malformed JSON for {endpoint}: {e}")
-                return None
+            return parse_json_bounded(
+                response, f"steam endpoint {endpoint}", max_bytes=_MAX_RESPONSE_BYTES
+            )
 
         return None
 
