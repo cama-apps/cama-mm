@@ -87,6 +87,10 @@ class TestSteamAPIClient:
         """Test successful match details fetch."""
         mock_response = Mock()
         mock_response.status_code = 200
+        # parse_json_bounded inspects .headers / .content; set them to real
+        # values so the body-size check doesn't trip on a Mock.
+        mock_response.headers = {}
+        mock_response.content = b"{}"
         mock_response.json.return_value = {
             "result": {
                 "match_id": 8181518332,
@@ -115,6 +119,8 @@ class TestSteamAPIClient:
         """Test match details fetch with error response."""
         mock_response = Mock()
         mock_response.status_code = 200
+        mock_response.headers = {}
+        mock_response.content = b"{}"
         mock_response.json.return_value = {"result": {"error": "Match not found"}}
 
         api = SteamAPI(api_key="test_key")
@@ -139,6 +145,8 @@ class TestSteamAPIClient:
         """Test match history fetch."""
         mock_response = Mock()
         mock_response.status_code = 200
+        mock_response.headers = {}
+        mock_response.content = b"{}"
         mock_response.json.return_value = {
             "result": {
                 "status": 1,

@@ -27,7 +27,7 @@ from steam_api import SteamAPI
 
 
 def _make_response(status_code: int, *, json_body=None, text: str | None = None,
-                   content_length: str | None = None):
+                   content_length: str | None = None, retry_after: str | None = None):
     """Build a lightweight fake requests.Response suitable for session.get mocks."""
     resp = MagicMock(spec=requests.Response)
     resp.status_code = status_code
@@ -41,6 +41,8 @@ def _make_response(status_code: int, *, json_body=None, text: str | None = None,
     headers = {}
     if content_length is not None:
         headers["Content-Length"] = content_length
+    if retry_after is not None:
+        headers["Retry-After"] = retry_after
     resp.headers = headers
 
     if json_body is not None:
@@ -325,3 +327,169 @@ class TestSteamAPIHardening:
         assert result is None
         # 3 configured retries + 1 initial = 4 attempts
         assert call_count["n"] == 4
+
+    def test_steam_rejects_oversized_content_length(self):
+        """Steam endpoints should share the same 5 MB body cap as OpenDota."""
+        api = SteamAPI(api_key="test_key")
+        huge = _make_response(
+            200,
+            json_body={"result": {"match_id": 1}},
+            content_length=str(10 * 1024 * 1024),  # 10 MB > 5 MB cap
+        )
+
+        with patch.object(api.session, "get", return_value=huge):
+            result = api.get_match_details(1)
+
+        assert result is None
+
+
+# =============================================================================
+# Retry-After honoring (shared helper)
+# =============================================================================
+
+
+class TestRetryAfterHonoring:
+    """Verify Retry-After is honored when it exceeds the configured backoff."""
+
+    def test_opendota_honors_retry_after_larger_than_delay(self, monkeypatch):
+        """When Retry-After > configured delay, sleep for Retry-After."""
+        api = OpenDotaAPI(api_key="test")
+        sleeps: list[float] = []
+
+        # Capture actual sleep requests from the OpenDota retry loop.
+        monkeypatch.setattr(
+            opendota_integration.time,
+            "sleep",
+            lambda s: sleeps.append(s),
+        )
+
+        responses = [
+            _make_response(429, retry_after="60"),
+            _make_response(200, json_body={"profile": {"personaname": "pf"}}),
+        ]
+        call_count = {"n": 0}
+
+        def _get(url, params=None, timeout=None):
+            idx = call_count["n"]
+            call_count["n"] += 1
+            return responses[min(idx, len(responses) - 1)]
+
+        with patch.object(api.session, "get", side_effect=_get):
+            result = api.get_player_data(12345)
+
+        assert result == {"profile": {"personaname": "pf"}}
+        # The _fast_retry_delays fixture sets delays to [0, 0, 0]; a 60s
+        # Retry-After should win and we should sleep for 60s exactly once.
+        assert 60 in sleeps
+
+    def test_opendota_ignores_retry_after_smaller_than_delay(self, monkeypatch):
+        """A tiny Retry-After shouldn't shorten our own backoff below it."""
+        api = OpenDotaAPI(api_key="test")
+
+        # Override delays to a non-trivial value so Retry-After: 1 doesn't win.
+        monkeypatch.setattr(opendota_integration, "ENRICHMENT_RETRY_DELAYS", [30, 30, 30])
+        sleeps: list[float] = []
+        monkeypatch.setattr(
+            opendota_integration.time,
+            "sleep",
+            lambda s: sleeps.append(s),
+        )
+
+        responses = [
+            _make_response(429, retry_after="1"),
+            _make_response(200, json_body={"profile": {}}),
+        ]
+        call_count = {"n": 0}
+
+        def _get(url, params=None, timeout=None):
+            idx = call_count["n"]
+            call_count["n"] += 1
+            return responses[min(idx, len(responses) - 1)]
+
+        with patch.object(api.session, "get", side_effect=_get):
+            api.get_player_data(12345)
+
+        # We should not have slept for 1s; the configured 30s delay wins.
+        assert 1 not in sleeps
+        assert 30 in sleeps
+
+    def test_opendota_tolerates_malformed_retry_after(self, monkeypatch):
+        """An unparseable Retry-After falls back to configured delay."""
+        api = OpenDotaAPI(api_key="test")
+        sleeps: list[float] = []
+        monkeypatch.setattr(
+            opendota_integration.time,
+            "sleep",
+            lambda s: sleeps.append(s),
+        )
+
+        responses = [
+            _make_response(429, retry_after="not-a-number"),
+            _make_response(200, json_body={"profile": {}}),
+        ]
+        call_count = {"n": 0}
+
+        def _get(url, params=None, timeout=None):
+            idx = call_count["n"]
+            call_count["n"] += 1
+            return responses[min(idx, len(responses) - 1)]
+
+        with patch.object(api.session, "get", side_effect=_get):
+            result = api.get_player_data(12345)
+
+        # Falls back to configured backoff (0 from the fixture) and still
+        # succeeds on the retry.
+        assert result == {"profile": {}}
+
+    def test_steam_honors_retry_after_larger_than_delay(self, monkeypatch):
+        """Steam should apply the same Retry-After preference as OpenDota."""
+        api = SteamAPI(api_key="test_key")
+        sleeps: list[float] = []
+        monkeypatch.setattr(
+            steam_api.time,
+            "sleep",
+            lambda s: sleeps.append(s),
+        )
+
+        responses = [
+            _make_response(429, retry_after="60"),
+            _make_response(200, json_body={"result": {"match_id": 42}}),
+        ]
+        call_count = {"n": 0}
+
+        def _get(url, params=None, timeout=None):
+            idx = call_count["n"]
+            call_count["n"] += 1
+            return responses[min(idx, len(responses) - 1)]
+
+        with patch.object(api.session, "get", side_effect=_get):
+            result = api.get_match_details(42)
+
+        assert result == {"match_id": 42}
+        assert 60 in sleeps
+
+
+class TestOpenDotaGetPlayerRolesNoneCheck:
+    """Verify get_player_roles propagates None from the JSON parse helper."""
+
+    def test_get_player_roles_returns_none_on_malformed_json(self):
+        api = OpenDotaAPI(api_key="test")
+        bad = _make_response(200, text="<html>not json</html>")
+
+        with patch.object(api.session, "get", return_value=bad):
+            result = api.get_player_roles(12345)
+
+        assert result is None
+
+    def test_get_player_roles_returns_none_on_oversized_body(self):
+        api = OpenDotaAPI(api_key="test")
+        huge = _make_response(
+            200,
+            json_body=[{"hero_id": 1}],
+            content_length=str(10 * 1024 * 1024),
+        )
+
+        with patch.object(api.session, "get", return_value=huge):
+            result = api.get_player_roles(12345)
+
+        assert result is None

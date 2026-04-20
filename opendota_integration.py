@@ -3,7 +3,6 @@ OpenDota API integration for fetching player data.
 OpenDota API: https://docs.opendota.com/
 """
 
-import json
 import logging
 import os
 import re
@@ -13,6 +12,8 @@ import time
 import requests
 
 from config import ENRICHMENT_RETRY_DELAYS
+from utils.http_safety import DEFAULT_MAX_BYTES as _MAX_RESPONSE_BYTES
+from utils.http_safety import parse_json_bounded, retry_after_seconds
 
 logger = logging.getLogger("cama_bot.opendota")
 
@@ -21,10 +22,6 @@ _REQUEST_TIMEOUT = 30
 
 # Status codes that are worth retrying (429 rate-limit + transient 5xx).
 _RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
-
-# Cap on response body size for unbounded endpoints (bytes).
-# 5 MB is generous for JSON but protects us from pathological replies.
-_MAX_RESPONSE_BYTES = 5 * 1024 * 1024
 
 
 class RateLimiter:
@@ -184,6 +181,13 @@ class OpenDotaAPI:
                 return response
 
             delay = delays[attempt]
+            # Honor an upstream-supplied Retry-After (common on 429). If it is
+            # larger than our configured backoff, wait the longer duration so
+            # we don't stomp on a rate-limit ban.
+            if response.status_code == 429:
+                server_hint = retry_after_seconds(response)
+                if server_hint is not None:
+                    delay = max(delay, server_hint)
             logger.info(
                 f"OpenDota request to {url} returned {response.status_code}; "
                 f"retrying in {delay}s (attempt {attempt + 1}/{len(delays)})"
@@ -223,36 +227,15 @@ class OpenDotaAPI:
         """Parse a JSON response body, returning None on malformed JSON or
         oversized payloads instead of raising.
 
-        Enforces a sane cap (``_MAX_RESPONSE_BYTES``) on response size. This
-        matters for unbounded endpoints like ``/players/{id}/matches`` where
-        OpenDota can return very large arrays.
+        Enforces a post-hoc ceiling (``_MAX_RESPONSE_BYTES``) on response size
+        by inspecting the fully-buffered body. This is not a true streaming
+        bound — by the time we call ``.content`` the body is already in memory
+        — but it still protects downstream JSON decoding and any later consumers
+        from pathologically large replies on unbounded endpoints like
+        ``/players/{id}/matches``. Implementation lives in
+        :mod:`utils.http_safety` so ``steam_api`` can apply the same cap.
         """
-        content_length = response.headers.get("Content-Length")
-        if content_length is not None:
-            try:
-                if int(content_length) > _MAX_RESPONSE_BYTES:
-                    logger.warning(
-                        f"OpenDota response for {context} too large "
-                        f"(Content-Length={content_length}); rejecting"
-                    )
-                    return None
-            except ValueError:
-                # Malformed Content-Length header — fall through to body check.
-                pass
-
-        body = response.content
-        if len(body) > _MAX_RESPONSE_BYTES:
-            logger.warning(
-                f"OpenDota response for {context} too large "
-                f"({len(body)} bytes); rejecting"
-            )
-            return None
-
-        try:
-            return response.json()
-        except (requests.exceptions.JSONDecodeError, json.JSONDecodeError, ValueError) as e:
-            logger.error(f"OpenDota returned malformed JSON for {context}: {e}")
-            return None
+        return parse_json_bounded(response, context, max_bytes=_MAX_RESPONSE_BYTES)
 
     def get_player_data(self, steam_id: int) -> dict | None:
         """
@@ -384,6 +367,11 @@ class OpenDotaAPI:
                 return None
             response.raise_for_status()
             heroes_data = self._parse_json_or_none(response, f"player {steam_id} heroes")
+            if heroes_data is None:
+                # _parse_json_or_none already logged the underlying reason
+                # (oversized body / malformed JSON); surface None to match the
+                # contract used by get_player_data / get_match_details.
+                return None
 
             # Analyze heroes to determine preferred roles
             # This is a simplified version - you'd want to map heroes to roles
