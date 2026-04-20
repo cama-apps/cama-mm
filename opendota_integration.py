@@ -3,6 +3,7 @@ OpenDota API integration for fetching player data.
 OpenDota API: https://docs.opendota.com/
 """
 
+import json
 import logging
 import os
 import re
@@ -11,7 +12,19 @@ import time
 
 import requests
 
+from config import ENRICHMENT_RETRY_DELAYS
+
 logger = logging.getLogger("cama_bot.opendota")
+
+# Default timeout for all HTTP calls (seconds). Matches steam_api.py.
+_REQUEST_TIMEOUT = 30
+
+# Status codes that are worth retrying (429 rate-limit + transient 5xx).
+_RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
+
+# Cap on response body size for unbounded endpoints (bytes).
+# 5 MB is generous for JSON but protects us from pathological replies.
+_MAX_RESPONSE_BYTES = 5 * 1024 * 1024
 
 
 class RateLimiter:
@@ -110,14 +123,21 @@ class OpenDotaAPI:
 
     def _make_request(self, url: str, params: dict | None = None) -> requests.Response | None:
         """
-        Make a rate-limited request to the OpenDota API.
+        Make a rate-limited request to the OpenDota API with retry on transient errors.
+
+        Adds:
+        - Explicit ``timeout`` so an unresponsive endpoint can't hang forever.
+        - Exponential backoff on 429/5xx via ``ENRICHMENT_RETRY_DELAYS``. 4xx
+          (other than 429) and network errors returning a response are returned
+          to the caller; connection-level errors propagate after retries.
 
         Args:
             url: Full URL to request
             params: Optional query parameters
 
         Returns:
-            Response object or None if rate limit exceeded
+            Response object, or None if the rate limiter timed out, all retries
+            were exhausted, or a connection error occurred after retries.
         """
         # Wait for rate limiter
         if not OpenDotaAPI._rate_limiter.acquire(timeout=30.0):
@@ -129,7 +149,48 @@ class OpenDotaAPI:
             params = params or {}
             params["api_key"] = self.api_key
 
-        return self.session.get(url, params=params)
+        # Retry loop: first attempt + len(delays) retries on transient failures.
+        delays = list(ENRICHMENT_RETRY_DELAYS) or [0]
+        last_response: requests.Response | None = None
+        for attempt in range(len(delays) + 1):
+            try:
+                response = self.session.get(url, params=params, timeout=_REQUEST_TIMEOUT)
+            except requests.exceptions.RequestException as e:
+                # Connection-level failure (timeout, DNS, etc.) — retry if we
+                # have budget, otherwise surface as None to match the existing
+                # contract.
+                if attempt >= len(delays):
+                    logger.warning(f"OpenDota request to {url} failed after retries: {e}")
+                    return None
+                delay = delays[attempt]
+                logger.info(
+                    f"OpenDota request to {url} failed ({e}); "
+                    f"retrying in {delay}s (attempt {attempt + 1}/{len(delays)})"
+                )
+                time.sleep(delay)
+                continue
+
+            last_response = response
+            if response.status_code not in _RETRYABLE_STATUS_CODES:
+                return response
+
+            if attempt >= len(delays):
+                # Out of retry budget — return the last (retryable) response so
+                # callers can raise_for_status() and log appropriately.
+                logger.warning(
+                    f"OpenDota request to {url} exhausted retries "
+                    f"(last status={response.status_code})"
+                )
+                return response
+
+            delay = delays[attempt]
+            logger.info(
+                f"OpenDota request to {url} returned {response.status_code}; "
+                f"retrying in {delay}s (attempt {attempt + 1}/{len(delays)})"
+            )
+            time.sleep(delay)
+
+        return last_response
 
     def extract_player_id_from_dotabuff(self, dotabuff_url: str) -> int | None:
         """
@@ -157,6 +218,42 @@ class OpenDotaAPI:
 
         return steam_id32
 
+    @staticmethod
+    def _parse_json_or_none(response: requests.Response, context: str):
+        """Parse a JSON response body, returning None on malformed JSON or
+        oversized payloads instead of raising.
+
+        Enforces a sane cap (``_MAX_RESPONSE_BYTES``) on response size. This
+        matters for unbounded endpoints like ``/players/{id}/matches`` where
+        OpenDota can return very large arrays.
+        """
+        content_length = response.headers.get("Content-Length")
+        if content_length is not None:
+            try:
+                if int(content_length) > _MAX_RESPONSE_BYTES:
+                    logger.warning(
+                        f"OpenDota response for {context} too large "
+                        f"(Content-Length={content_length}); rejecting"
+                    )
+                    return None
+            except ValueError:
+                # Malformed Content-Length header — fall through to body check.
+                pass
+
+        body = response.content
+        if len(body) > _MAX_RESPONSE_BYTES:
+            logger.warning(
+                f"OpenDota response for {context} too large "
+                f"({len(body)} bytes); rejecting"
+            )
+            return None
+
+        try:
+            return response.json()
+        except (requests.exceptions.JSONDecodeError, json.JSONDecodeError, ValueError) as e:
+            logger.error(f"OpenDota returned malformed JSON for {context}: {e}")
+            return None
+
     def get_player_data(self, steam_id: int) -> dict | None:
         """
         Get player data from OpenDota.
@@ -174,7 +271,9 @@ class OpenDotaAPI:
                 logger.warning(f"Rate limit prevented fetching player data for Steam ID {steam_id}")
                 return None
             response.raise_for_status()
-            data = response.json()
+            data = self._parse_json_or_none(response, f"player {steam_id}")
+            if data is None:
+                return None
             logger.debug(f"Successfully fetched player data for Steam ID {steam_id}")
             return data
         except requests.exceptions.RequestException as e:
@@ -284,7 +383,7 @@ class OpenDotaAPI:
                 logger.warning(f"Rate limit prevented fetching hero data for Steam ID {steam_id}")
                 return None
             response.raise_for_status()
-            heroes_data = response.json()
+            heroes_data = self._parse_json_or_none(response, f"player {steam_id} heroes")
 
             # Analyze heroes to determine preferred roles
             # This is a simplified version - you'd want to map heroes to roles
@@ -300,7 +399,10 @@ class OpenDotaAPI:
 
         Args:
             steam_id: Steam ID (32-bit)
-            limit: Number of matches to fetch
+            limit: Number of matches to fetch. The OpenDota ``/players/{id}/matches``
+                endpoint is otherwise unbounded, so we always pass a ``limit``
+                query param and additionally enforce a response-size cap in
+                ``_parse_json_or_none``.
 
         Returns:
             List of match data
@@ -313,7 +415,7 @@ class OpenDotaAPI:
                 logger.warning(f"Rate limit prevented fetching matches for Steam ID {steam_id}")
                 return None
             response.raise_for_status()
-            return response.json()
+            return self._parse_json_or_none(response, f"player {steam_id} matches")
         except requests.exceptions.RequestException as e:
             logger.error(f"Error fetching matches: {e}")
             return None
@@ -338,7 +440,9 @@ class OpenDotaAPI:
                 logger.warning(f"Rate limit prevented fetching match {match_id}")
                 return None
             response.raise_for_status()
-            data = response.json()
+            data = self._parse_json_or_none(response, f"match {match_id}")
+            if data is None:
+                return None
 
             # Check if match was found (OpenDota returns empty object or error for missing matches)
             if not data or data.get("error"):

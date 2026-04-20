@@ -3,6 +3,7 @@ Valve Steam Web API integration for fetching Dota 2 match data.
 API Documentation: https://wiki.teamfortress.com/wiki/WebAPI#Dota_2
 """
 
+import json
 import logging
 import os
 import threading
@@ -10,7 +11,15 @@ import time
 
 import requests
 
+from config import ENRICHMENT_RETRY_DELAYS
+
 logger = logging.getLogger("cama_bot.steam_api")
+
+# Default timeout for all HTTP calls (seconds). Matches opendota_integration.py.
+_REQUEST_TIMEOUT = 30
+
+# Status codes worth retrying (429 rate-limit + transient 5xx).
+_RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
 
 
 class SteamAPIRateLimiter:
@@ -67,14 +76,18 @@ class SteamAPI:
 
     def _make_request(self, endpoint: str, params: dict | None = None) -> dict | None:
         """
-        Make a rate-limited request to the Steam API.
+        Make a rate-limited request to the Steam API with retry on transient errors.
+
+        Retries on 429 and 5xx responses using ``ENRICHMENT_RETRY_DELAYS`` for
+        backoff. 4xx (other than 429) and malformed-JSON responses are not
+        retried.
 
         Args:
             endpoint: API endpoint (e.g., "GetMatchDetails/v1")
             params: Query parameters
 
         Returns:
-            Response JSON or None if error
+            Response JSON or None if error / retries exhausted.
         """
         if not self.api_key:
             logger.error("Cannot make Steam API request: no API key configured")
@@ -87,13 +100,48 @@ class SteamAPI:
         params = params or {}
         params["key"] = self.api_key
 
-        try:
-            response = self.session.get(url, params=params, timeout=30)
-            response.raise_for_status()
-            return response.json()
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Steam API request failed: {e}")
-            return None
+        delays = list(ENRICHMENT_RETRY_DELAYS) or [0]
+        for attempt in range(len(delays) + 1):
+            try:
+                response = self.session.get(url, params=params, timeout=_REQUEST_TIMEOUT)
+            except requests.exceptions.RequestException as e:
+                if attempt >= len(delays):
+                    logger.error(f"Steam API request failed after retries: {e}")
+                    return None
+                delay = delays[attempt]
+                logger.info(
+                    f"Steam API request to {endpoint} failed ({e}); "
+                    f"retrying in {delay}s (attempt {attempt + 1}/{len(delays)})"
+                )
+                time.sleep(delay)
+                continue
+
+            if response.status_code in _RETRYABLE_STATUS_CODES:
+                if attempt >= len(delays):
+                    logger.error(
+                        f"Steam API request to {endpoint} exhausted retries "
+                        f"(last status={response.status_code})"
+                    )
+                    return None
+                delay = delays[attempt]
+                logger.info(
+                    f"Steam API request to {endpoint} returned {response.status_code}; "
+                    f"retrying in {delay}s (attempt {attempt + 1}/{len(delays)})"
+                )
+                time.sleep(delay)
+                continue
+
+            try:
+                response.raise_for_status()
+                return response.json()
+            except requests.exceptions.RequestException as e:
+                logger.error(f"Steam API request failed: {e}")
+                return None
+            except (requests.exceptions.JSONDecodeError, json.JSONDecodeError, ValueError) as e:
+                logger.error(f"Steam API returned malformed JSON for {endpoint}: {e}")
+                return None
+
+        return None
 
     def get_match_details(self, match_id: int) -> dict | None:
         """
