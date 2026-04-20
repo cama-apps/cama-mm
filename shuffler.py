@@ -1177,60 +1177,6 @@ class BalancedShuffler:
 
         return best_result
 
-    def shuffle_monte_carlo(self, players: list[Player], top_n: int = 3) -> tuple[Team, Team]:
-        """
-        Monte Carlo approach: find top N teams by value, then select best by role distribution.
-
-        This is the approach suggested by Dane to avoid unfairly punishing certain roles.
-
-        Args:
-            players: List of exactly 10 players
-            top_n: Number of top teams to consider for role optimization
-
-        Returns:
-            Tuple of (Team1, Team2)
-        """
-        if len(players) != 10:
-            raise ValueError(f"Need exactly 10 players, got {len(players)}")
-
-        # Find top N team combinations by value difference
-        team_combinations = []
-
-        for team1_indices in itertools.combinations(range(10), 5):
-            team1_players = [players[i] for i in team1_indices]
-            team2_players = [players[i] for i in range(10) if i not in team1_indices]
-
-            team1 = Team(team1_players)
-            team2 = Team(team2_players)
-            team1.ensure_role_assignments()
-            team2.ensure_role_assignments()
-
-            team1_value = team1.get_team_value(
-                self.use_glicko, self.off_role_multiplier, use_openskill=self.use_openskill, use_jopacoin=self.use_jopacoin
-            )
-            team2_value = team2.get_team_value(
-                self.use_glicko, self.off_role_multiplier, use_openskill=self.use_openskill, use_jopacoin=self.use_jopacoin
-            )
-            value_diff = abs(team1_value - team2_value)
-
-            team_combinations.append((value_diff, team1, team2))
-
-        # Sort by value difference and take top N
-        team_combinations.sort(key=lambda x: x[0])
-        top_teams = team_combinations[:top_n]
-
-        # From top N, select the one with best role distribution
-        best_teams = None
-        best_role_score = float("inf")
-
-        for value_diff, team1, team2 in top_teams:
-            role_score = team1.get_role_balance_score() + team2.get_role_balance_score()
-            if role_score < best_role_score:
-                best_role_score = role_score
-                best_teams = (team1, team2)
-
-        return best_teams
-
     def _score_draft_pool(
         self,
         captain_a: Player,
