@@ -583,106 +583,136 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
 
         with self.atomic_transaction() as conn:
             cursor = conn.cursor()
+            return self._settle_bets_internal(cursor, prediction_id, winning_position)
 
-            # Get guild_id from prediction for player balance operations
-            cursor.execute(
-                "SELECT guild_id FROM predictions WHERE prediction_id = ?",
-                (prediction_id,),
-            )
-            pred_row = cursor.fetchone()
-            pred_guild_id = pred_row["guild_id"] if pred_row else 0
+    def resolve_and_settle_atomic(
+        self, prediction_id: int, outcome: str, resolved_by: int
+    ) -> dict:
+        """Atomically flip status to resolved and settle all bets.
 
-            # Get all bets grouped by user and position
+        Fuses resolve_prediction + settle_prediction_bets inside one
+        BEGIN IMMEDIATE so a crash can't leave a prediction marked resolved
+        with no payouts distributed (or payouts without a status flip).
+        """
+        if outcome not in self.VALID_POSITIONS:
+            raise ValueError(f"Invalid outcome: {outcome}")
+
+        resolved_at = int(time.time())
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
             cursor.execute(
                 """
-                SELECT discord_id, position, SUM(amount) as total_amount
-                FROM prediction_bets
+                UPDATE predictions
+                SET status = 'resolved', outcome = ?, resolved_at = ?, resolved_by = ?
                 WHERE prediction_id = ?
-                GROUP BY discord_id, position
                 """,
-                (prediction_id,),
+                (outcome, resolved_at, resolved_by, prediction_id),
             )
-            bets = [dict(row) for row in cursor.fetchall()]
+            return self._settle_bets_internal(cursor, prediction_id, outcome)
 
-            if not bets:
-                return {"winners": [], "losers": [], "total_pool": 0}
+    def _settle_bets_internal(
+        self, cursor, prediction_id: int, winning_position: str
+    ) -> dict:
+        """Settle bets using an existing cursor inside a caller-owned transaction."""
+        # Get guild_id from prediction for player balance operations
+        cursor.execute(
+            "SELECT guild_id FROM predictions WHERE prediction_id = ?",
+            (prediction_id,),
+        )
+        pred_row = cursor.fetchone()
+        pred_guild_id = pred_row["guild_id"] if pred_row else 0
 
-            total_pool = sum(b["total_amount"] for b in bets)
-            winner_pool = sum(
-                b["total_amount"] for b in bets if b["position"] == winning_position
-            )
+        # Get all bets grouped by user and position
+        cursor.execute(
+            """
+            SELECT discord_id, position, SUM(amount) as total_amount
+            FROM prediction_bets
+            WHERE prediction_id = ?
+            GROUP BY discord_id, position
+            """,
+            (prediction_id,),
+        )
+        bets = [dict(row) for row in cursor.fetchall()]
 
-            winners = []
-            losers = []
-            balance_updates = {}
-            payout_by_user = {}
+        if not bets:
+            return {"winners": [], "losers": [], "total_pool": 0}
 
-            # Edge case: no bets on winning side - refund everyone
-            if winner_pool == 0:
-                for bet in bets:
-                    balance_updates[bet["discord_id"]] = (
-                        balance_updates.get(bet["discord_id"], 0) + bet["total_amount"]
+        total_pool = sum(b["total_amount"] for b in bets)
+        winner_pool = sum(
+            b["total_amount"] for b in bets if b["position"] == winning_position
+        )
+
+        winners = []
+        losers = []
+        balance_updates = {}
+        payout_by_user = {}
+
+        # Edge case: no bets on winning side - refund everyone
+        if winner_pool == 0:
+            for bet in bets:
+                balance_updates[bet["discord_id"]] = (
+                    balance_updates.get(bet["discord_id"], 0) + bet["total_amount"]
+                )
+                losers.append({
+                    "discord_id": bet["discord_id"],
+                    "position": bet["position"],
+                    "amount": bet["total_amount"],
+                    "refunded": True,
+                })
+        else:
+            for bet in bets:
+                if bet["position"] == winning_position:
+                    # Proportional payout
+                    payout = math.ceil(
+                        (bet["total_amount"] / winner_pool) * total_pool
                     )
+                    profit = payout - bet["total_amount"]
+                    balance_updates[bet["discord_id"]] = (
+                        balance_updates.get(bet["discord_id"], 0) + payout
+                    )
+                    payout_by_user[bet["discord_id"]] = payout
+                    winners.append({
+                        "discord_id": bet["discord_id"],
+                        "amount": bet["total_amount"],
+                        "payout": payout,
+                        "profit": profit,
+                    })
+                else:
                     losers.append({
                         "discord_id": bet["discord_id"],
                         "position": bet["position"],
                         "amount": bet["total_amount"],
-                        "refunded": True,
                     })
-            else:
-                for bet in bets:
-                    if bet["position"] == winning_position:
-                        # Proportional payout
-                        payout = math.ceil(
-                            (bet["total_amount"] / winner_pool) * total_pool
-                        )
-                        profit = payout - bet["total_amount"]
-                        balance_updates[bet["discord_id"]] = (
-                            balance_updates.get(bet["discord_id"], 0) + payout
-                        )
-                        payout_by_user[bet["discord_id"]] = payout
-                        winners.append({
-                            "discord_id": bet["discord_id"],
-                            "amount": bet["total_amount"],
-                            "payout": payout,
-                            "profit": profit,
-                        })
-                    else:
-                        losers.append({
-                            "discord_id": bet["discord_id"],
-                            "position": bet["position"],
-                            "amount": bet["total_amount"],
-                        })
 
-            # Update balances
-            for discord_id, delta in balance_updates.items():
-                cursor.execute(
-                    """
-                    UPDATE players
-                    SET jopacoin_balance = COALESCE(jopacoin_balance, 0) + ?,
-                        updated_at = CURRENT_TIMESTAMP
-                    WHERE discord_id = ? AND guild_id = ?
-                    """,
-                    (delta, discord_id, pred_guild_id),
-                )
+        # Update balances
+        for discord_id, delta in balance_updates.items():
+            cursor.execute(
+                """
+                UPDATE players
+                SET jopacoin_balance = COALESCE(jopacoin_balance, 0) + ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE discord_id = ? AND guild_id = ?
+                """,
+                (delta, discord_id, pred_guild_id),
+            )
 
-            # Update payout on winning bets
-            for discord_id, payout in payout_by_user.items():
-                cursor.execute(
-                    """
-                    UPDATE prediction_bets
-                    SET payout = ?
-                    WHERE prediction_id = ? AND discord_id = ? AND position = ?
-                    """,
-                    (payout, prediction_id, discord_id, winning_position),
-                )
+        # Update payout on winning bets
+        for discord_id, payout in payout_by_user.items():
+            cursor.execute(
+                """
+                UPDATE prediction_bets
+                SET payout = ?
+                WHERE prediction_id = ? AND discord_id = ? AND position = ?
+                """,
+                (payout, prediction_id, discord_id, winning_position),
+            )
 
-            return {
-                "winners": winners,
-                "losers": losers,
-                "total_pool": total_pool,
-                "winner_pool": winner_pool,
-            }
+        return {
+            "winners": winners,
+            "losers": losers,
+            "total_pool": total_pool,
+            "winner_pool": winner_pool,
+        }
 
     def refund_prediction_bets(self, prediction_id: int) -> dict:
         """Refund all bets for a cancelled prediction. Returns refund summary."""

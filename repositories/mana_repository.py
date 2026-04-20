@@ -37,6 +37,41 @@ class ManaRepository(BaseRepository, IManaRepository):
                 (discord_id, gid, land, assigned_date),
             )
 
+    def claim_mana_atomic(
+        self, discord_id: int, guild_id: int | None, land: str, assigned_date: str
+    ) -> bool:
+        """Claim today's mana only if not already assigned for ``assigned_date``.
+
+        Runs under BEGIN IMMEDIATE so two concurrent /mana calls can't both
+        pass a pre-check and each roll a different land — the second caller
+        observes the committed row and returns False.
+
+        Returns True if the claim was applied, False if the player already
+        has mana assigned for ``assigned_date``.
+        """
+        gid = self.normalize_guild_id(guild_id)
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT assigned_date FROM player_mana WHERE discord_id = ? AND guild_id = ?",
+                (discord_id, gid),
+            )
+            row = cursor.fetchone()
+            if row and row["assigned_date"] == assigned_date:
+                return False
+            cursor.execute(
+                """
+                INSERT INTO player_mana (discord_id, guild_id, current_land, assigned_date, updated_at)
+                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(discord_id, guild_id) DO UPDATE SET
+                    current_land  = excluded.current_land,
+                    assigned_date = excluded.assigned_date,
+                    updated_at    = CURRENT_TIMESTAMP
+                """,
+                (discord_id, gid, land, assigned_date),
+            )
+            return True
+
     def get_all_mana(self, guild_id: int | None) -> list[dict]:
         """Return all mana rows for the guild, ordered by current_land then discord_id."""
         gid = self.normalize_guild_id(guild_id)

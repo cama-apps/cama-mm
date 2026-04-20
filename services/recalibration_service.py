@@ -179,31 +179,37 @@ class RecalibrationService:
             return {"success": False, **check}
 
         now = int(time.time())
-        state = self.get_state(discord_id, normalized_guild_id)
 
-        # Get current rating to preserve
         old_rating = check["current_rating"]
         old_rd = check["current_rd"]
         old_volatility = check["current_volatility"]
 
-        # Update player's Glicko rating (preserve rating, bump RD to at least 300, reset volatility)
         new_rd = max(300.0, old_rd)
-        self.player_repo.update_glicko_rating(
-            discord_id=discord_id,
-            guild_id=normalized_guild_id,
-            rating=old_rating,
-            rd=new_rd,
-            volatility=self.initial_volatility,
-        )
 
-        # Record recalibration state
-        self.recalibration_repo.upsert_state(
-            discord_id=discord_id,
-            guild_id=normalized_guild_id,
-            last_recalibration_at=now,
-            total_recalibrations=state.total_recalibrations + 1,
-            rating_at_recalibration=old_rating,
-        )
+        # Atomic cooldown check + Glicko update + state bump. Closes the TOCTOU
+        # where two concurrent /recalibrate calls could both pass the check
+        # above and each bump total_recalibrations.
+        try:
+            new_total = self.recalibration_repo.execute_recalibration_atomic(
+                discord_id=discord_id,
+                guild_id=normalized_guild_id,
+                now=now,
+                cooldown_seconds=self.cooldown_seconds,
+                rating=old_rating,
+                new_rd=new_rd,
+                new_volatility=self.initial_volatility,
+            )
+        except ValueError as exc:
+            msg = str(exc)
+            if msg.startswith("ON_COOLDOWN:"):
+                remaining = int(msg.split(":", 1)[1])
+                return {
+                    "success": False,
+                    "allowed": False,
+                    "reason": "on_cooldown",
+                    "cooldown_ends_at": now + remaining,
+                }
+            raise
 
         cooldown_ends_at = now + self.cooldown_seconds
 
@@ -211,7 +217,7 @@ class RecalibrationService:
             f"Player {discord_id} recalibrated: rating={old_rating:.1f}, "
             f"RD {old_rd:.1f} -> {new_rd}, "
             f"volatility {old_volatility:.4f} -> {self.initial_volatility}, "
-            f"total_recalibrations={state.total_recalibrations + 1}"
+            f"total_recalibrations={new_total}"
         )
 
         return {
@@ -221,7 +227,7 @@ class RecalibrationService:
             "old_volatility": old_volatility,
             "new_rd": new_rd,
             "new_volatility": self.initial_volatility,
-            "total_recalibrations": state.total_recalibrations + 1,
+            "total_recalibrations": new_total,
             "cooldown_ends_at": cooldown_ends_at,
         }
 

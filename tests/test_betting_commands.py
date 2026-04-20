@@ -615,10 +615,11 @@ async def test_tip_successful_transfer():
         guild_id=789,
         amount=50,
         fee=1,
+        tithe=0,
     )
 
-    # Should add fee to nonprofit fund
-    loan_service.add_to_nonprofit_fund.assert_called_once_with(789, 1)
+    # Nonprofit credit now happens inside tip_atomic; no separate call
+    loan_service.add_to_nonprofit_fund.assert_not_called()
 
     # Should log the transaction
     tip_service.log_tip.assert_called_once_with(
@@ -944,6 +945,7 @@ async def test_tip_fee_calculation_minimum_1_coin():
         guild_id=792,
         amount=1,
         fee=1,
+        tithe=0,
     )
 
     # Should log with fee=1
@@ -1003,6 +1005,7 @@ async def test_tip_fee_calculation_percentage():
         guild_id=793,
         amount=150,
         fee=2,
+        tithe=0,
     )
 
     # Should log with fee=2
@@ -1069,10 +1072,11 @@ async def test_tip_fee_goes_to_nonprofit():
         guild_id=794,
         amount=100,
         fee=1,
+        tithe=0,
     )
 
-    # Verify fee goes to nonprofit fund
-    loan_service.add_to_nonprofit_fund.assert_called_once_with(794, 1)
+    # Nonprofit credit now happens inside tip_atomic; no separate call
+    loan_service.add_to_nonprofit_fund.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -1125,6 +1129,7 @@ async def test_tip_transaction_logged():
         guild_id=795,
         amount=250,
         fee=3,
+        tithe=0,
     )
 
     # Should log transaction with correct values
@@ -1293,6 +1298,7 @@ async def test_tip_no_loan_service_still_works():
         guild_id=796,
         amount=50,
         fee=1,
+        tithe=0,
     )
     interaction.followup.send.assert_awaited_once()
 

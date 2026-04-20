@@ -277,11 +277,12 @@ class LobbyManagerService:
         guild_id: int | None = None,
     ) -> None:
         normalized = self._normalize_guild_id(guild_id)
-        self.readycheck_message_ids[normalized] = message_id
-        self.readycheck_channel_ids[normalized] = channel_id
-        self.readycheck_lobby_ids[normalized] = lobby_ids
-        self.readycheck_player_data[normalized] = player_data
-        self.readycheck_reacted[normalized] = {}
+        with self._state_lock:
+            self.readycheck_message_ids[normalized] = message_id
+            self.readycheck_channel_ids[normalized] = channel_id
+            self.readycheck_lobby_ids[normalized] = lobby_ids
+            self.readycheck_player_data[normalized] = player_data
+            self.readycheck_reacted[normalized] = {}
 
     def update_readycheck_data(
         self,
@@ -290,37 +291,40 @@ class LobbyManagerService:
         guild_id: int | None = None,
     ) -> None:
         normalized = self._normalize_guild_id(guild_id)
-        self.readycheck_lobby_ids[normalized] = lobby_ids
-        self.readycheck_player_data[normalized] = player_data
-        existing = self.readycheck_reacted.get(normalized, {})
-        self.readycheck_reacted[normalized] = {
-            k: v for k, v in existing.items() if k in lobby_ids
-        }
+        with self._state_lock:
+            self.readycheck_lobby_ids[normalized] = lobby_ids
+            self.readycheck_player_data[normalized] = player_data
+            existing = self.readycheck_reacted.get(normalized, {})
+            self.readycheck_reacted[normalized] = {
+                k: v for k, v in existing.items() if k in lobby_ids
+            }
 
     def add_readycheck_reaction(
         self, discord_id: int, tag: str, guild_id: int | None = None
     ) -> bool:
         """Record a reaction. Returns True if newly added."""
         normalized = self._normalize_guild_id(guild_id)
-        reacted = self.readycheck_reacted.setdefault(normalized, {})
-        lobby_ids = self.readycheck_lobby_ids.get(normalized, set())
-        if discord_id in reacted:
-            return False
-        if discord_id not in lobby_ids:
-            return False
-        reacted[discord_id] = tag
-        return True
+        with self._state_lock:
+            reacted = self.readycheck_reacted.setdefault(normalized, {})
+            lobby_ids = self.readycheck_lobby_ids.get(normalized, set())
+            if discord_id in reacted:
+                return False
+            if discord_id not in lobby_ids:
+                return False
+            reacted[discord_id] = tag
+            return True
 
     def remove_readycheck_reaction(
         self, discord_id: int, guild_id: int | None = None
     ) -> bool:
         """Remove a reaction. Returns True if was present."""
         normalized = self._normalize_guild_id(guild_id)
-        reacted = self.readycheck_reacted.get(normalized)
-        if not reacted or discord_id not in reacted:
-            return False
-        del reacted[discord_id]
-        return True
+        with self._state_lock:
+            reacted = self.readycheck_reacted.get(normalized)
+            if not reacted or discord_id not in reacted:
+                return False
+            del reacted[discord_id]
+            return True
 
     # --- Persistence helpers ---
 

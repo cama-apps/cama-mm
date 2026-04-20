@@ -132,18 +132,21 @@ class ManaService:
     ) -> dict:
         """Assign today's mana land.  Raises ValueError if already assigned today.
 
+        The claim itself is atomic: the pre-check inside ``claim_mana_atomic``
+        runs under BEGIN IMMEDIATE, so two concurrent /mana calls can't both
+        pass the check and each roll a different land.
+
         Returns:
             {"land": str, "color": str, "emoji": str}
         """
-        if self.has_assigned_today(discord_id, guild_id):
-            raise ValueError("Already assigned today")
-
         weights = self.calculate_land_weights(discord_id, guild_id, is_ash_fan=is_ash_fan)
         lands = list(weights.keys())
         w = list(weights.values())
         land = random.choices(lands, weights=w, k=1)[0]
         today = get_today_pst()
-        self.mana_repo.set_mana(discord_id, guild_id, land, today)
+        claimed = self.mana_repo.claim_mana_atomic(discord_id, guild_id, land, today)
+        if not claimed:
+            raise ValueError("Already assigned today")
 
         return {
             "land": land,

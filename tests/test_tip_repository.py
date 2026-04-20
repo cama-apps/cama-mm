@@ -388,8 +388,13 @@ class TestTipAtomic:
         assert result["amount"] == 20
         assert result["fee"] == 2
 
-    def test_tip_atomic_burns_fee(self, player_repo):
-        """Test that the fee is burned (removed from economy)."""
+    def test_tip_atomic_credits_fee_to_nonprofit(self, player_repo):
+        """Fee leaves the players' balances and lands in the nonprofit fund."""
+        from repositories.loan_repository import LoanRepository
+
+        loan_repo = LoanRepository(player_repo.db_path)
+        before_fund = loan_repo.get_nonprofit_fund(TEST_GUILD_ID)
+
         register_player(player_repo, 1, balance=100)
         register_player(player_repo, 2, balance=50)
 
@@ -401,15 +406,14 @@ class TestTipAtomic:
             fee=5,
         )
 
-        # Total economy before: 150
-        # Total economy after: 78 + 70 = 148 (fee of 2 burned... wait let me recalc)
-        # Sender: 100 - 20 - 5 = 75
-        # Recipient: 50 + 20 = 70
-        # Total: 145, burned: 5
         sender = player_repo.get_by_id(1, TEST_GUILD_ID)
         recipient = player_repo.get_by_id(2, TEST_GUILD_ID)
-        total_after = sender.jopacoin_balance + recipient.jopacoin_balance
-        assert total_after == 145  # 150 - 5 fee
+        # Sender paid amount + fee; recipient got only amount
+        assert sender.jopacoin_balance == 75
+        assert recipient.jopacoin_balance == 70
+        # Fee left the players' balances and moved into the nonprofit fund
+        after_fund = loan_repo.get_nonprofit_fund(TEST_GUILD_ID)
+        assert after_fund - before_fund == 5
 
     def test_tip_atomic_insufficient_funds_raises(self, player_repo):
         """Test that insufficient funds raises ValueError."""

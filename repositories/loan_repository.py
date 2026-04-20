@@ -105,10 +105,11 @@ class LoanRepository(BaseRepository, ILoanRepository):
         """
         Add amount to the nonprofit fund.
 
-        Returns the new total.
+        Returns the new total. Runs under BEGIN IMMEDIATE so the SELECT after
+        the UPSERT reflects exactly this call's credit (no interleaved writes).
         """
         normalized_id = self.normalize_guild_id(guild_id)
-        with self.connection() as conn:
+        with self.atomic_transaction() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
@@ -457,6 +458,7 @@ class LoanRepository(BaseRepository, ILoanRepository):
                 "new_balance": balance_before - total_owed,
                 "nonprofit_total": nonprofit_total,
             }
+
 
     def disburse_fund_atomic(
         self,

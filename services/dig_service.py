@@ -3514,32 +3514,23 @@ class DigService:
 
         # Check for active trap
         if target_tunnel.get("trap_active"):
-            # Trap triggered!
             trap_steal = cost * 2
             actor_tunnel = self.dig_repo.get_tunnel(actor_id, guild_id)
-            actor_depth = actor_tunnel["depth"] if actor_tunnel else 0
             actor_loss = random.randint(3, 5)
-            new_actor_depth = max(0, actor_depth - actor_loss)
 
-            # Saboteur pays cost and loses extra
-            self.player_repo.add_balance(actor_id, guild_id, -trap_steal)
-            # Target gains bonus
-            self.player_repo.add_balance(target_id, guild_id, cost)
-
-            # Saboteur loses blocks
-            if actor_tunnel:
-                self.dig_repo.update_tunnel(actor_id, guild_id, depth=new_actor_depth)
-
-            # Clear trap
-            self.dig_repo.update_tunnel(target_id, guild_id, trap_active=0)
-
-            self.dig_repo.log_action(
-                discord_id=actor_id, guild_id=guild_id,
-                action_type="sabotage",
-                details=json.dumps({
+            self.dig_repo.atomic_sabotage(
+                actor_id=actor_id,
+                target_id=target_id,
+                guild_id=guild_id,
+                target_depth_delta=0,
+                actor_jc_cost=trap_steal,
+                target_jc_credit=cost,
+                actor_depth_delta=-actor_loss if actor_tunnel else 0,
+                clear_target_trap=True,
+                log_detail={
                     "target_id": target_id, "trap_triggered": True,
                     "jc_lost": trap_steal, "blocks_lost": actor_loss,
-                }),
+                },
             )
 
             return self._ok(
@@ -3582,20 +3573,12 @@ class DigService:
         total_reduction = min(0.70, total_reduction)
         damage = max(1, int(damage * (1.0 - total_reduction)))
 
-        new_depth = max(0, target_depth - damage)
-
-        # Apply damage
-        self.dig_repo.update_tunnel(target_id, guild_id, depth=new_depth)
-
-        # Debit actor
-        self.player_repo.add_balance(actor_id, guild_id, -cost)
-
-        # Generate clue about saboteur
+        # Generate clue about saboteur (read-only)
         clue_types = ["first_letter", "depth_range", "pickaxe_tier"]
         clue_type = random.choice(clue_types)
         clue = self._generate_clue(actor_id, guild_id, clue_type)
 
-        # Check for escalating reveal (2nd+ sabotage from same actor)
+        # Count prior same-target sabotages (excluding the current one; logged below)
         all_sabotages = self.dig_repo.get_recent_actions(
             actor_id, guild_id, action_type="sabotage", hours=168  # 7 days
         )
@@ -3610,28 +3593,28 @@ class DigService:
 
         is_reveal = same_target_count >= 2
 
-        # Set revenge window on target
         revenge_types = ["discount", "free", "damage"]
         revenge = {
             "type": random.choice(revenge_types),
             "expires_at": now + 3600 * 6,  # 6 hours
             "saboteur_id": actor_id,
         }
-        self.dig_repo.update_tunnel(
-            target_id, guild_id,
-            revenge_target=actor_id,
-            revenge_type=revenge["type"],
-            revenge_until=revenge["expires_at"],
-        )
 
-        # Log action
-        self.dig_repo.log_action(
-            discord_id=actor_id, guild_id=guild_id,
-            action_type="sabotage",
-            details=json.dumps({
+        self.dig_repo.atomic_sabotage(
+            actor_id=actor_id,
+            target_id=target_id,
+            guild_id=guild_id,
+            target_depth_delta=-damage,
+            actor_jc_cost=cost,
+            revenge={
+                "target": actor_id,
+                "type": revenge["type"],
+                "until": revenge["expires_at"],
+            },
+            log_detail={
                 "target_id": target_id, "damage": damage, "cost": cost,
                 "trap_triggered": False,
-            }),
+            },
         )
 
         return self._ok(

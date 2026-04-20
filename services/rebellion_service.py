@@ -206,47 +206,34 @@ class RebellionService:
         """
         Process a DEFEND vote. Costs REBELLION_DEFENDER_STAKE JC.
 
+        Stake debit and vote insert commit together inside one atomic repo
+        call, so a crash between them can no longer burn the stake without
+        recording a vote.
+
         Returns dict with success, duplicate, effective_defend_count, message.
         """
-        import json
+        try:
+            result = self.rebellion_repo.defend_vote_with_stake_atomic(
+                war_id=war_id,
+                discord_id=discord_id,
+                guild_id=guild_id,
+                stake=REBELLION_DEFENDER_STAKE,
+            )
+        except ValueError as exc:
+            return {"success": False, "message": str(exc)}
 
-        war = self.rebellion_repo.get_war(war_id)
-        if not war:
-            return {"success": False, "message": "War not found."}
-        if war["status"] != "voting":
-            return {"success": False, "message": "Voting is no longer open."}
-
-        # Inciter cannot vote DEFEND
-        if discord_id == war["inciter_id"]:
-            return {"success": False, "message": "The inciter cannot defend the Wheel."}
-
-        defend_voters = json.loads(war["defend_voter_ids"])
-        if discord_id in defend_voters:
-            return {"success": False, "duplicate": True, "message": "You already voted DEFEND."}
-
-        # Check balance
-        balance = self.player_repo.get_balance(discord_id, guild_id)
-        if balance < REBELLION_DEFENDER_STAKE:
+        if result.get("duplicate"):
             return {
                 "success": False,
-                "message": f"You need {REBELLION_DEFENDER_STAKE} JC to vote DEFEND (you have {balance}).",
+                "duplicate": True,
+                "message": "You already voted DEFEND.",
             }
-
-        # Record the vote first; if it fails (war missing, duplicate detected
-        # under race) we never charge the stake. Only deduct after the vote
-        # actually lands as a non-duplicate.
-        result = self.rebellion_repo.add_defend_vote(war_id, discord_id)
-        is_duplicate = result.get("duplicate", False)
-        stake_deducted = 0
-        if not is_duplicate:
-            self.player_repo.add_balance(discord_id, guild_id, -REBELLION_DEFENDER_STAKE)
-            stake_deducted = REBELLION_DEFENDER_STAKE
 
         return {
             "success": True,
-            "duplicate": is_duplicate,
+            "duplicate": False,
             "effective_defend_count": result["effective_defend_count"],
-            "stake_deducted": stake_deducted,
+            "stake_deducted": result["stake_deducted"],
         }
 
     # ------------------------------------------------------------------

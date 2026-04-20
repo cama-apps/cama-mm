@@ -106,6 +106,92 @@ class RebellionRepository(BaseRepository, IRebellionRepository):
             )
             return {"effective_attack_count": new_count, "duplicate": False}
 
+    def defend_vote_with_stake_atomic(
+        self,
+        war_id: int,
+        discord_id: int,
+        guild_id: int,
+        stake: int,
+    ) -> dict:
+        """Atomically debit the defender stake and record the defend vote.
+
+        Validates war status, non-inciter, non-duplicate, and sufficient
+        balance inside one ``BEGIN IMMEDIATE`` so a crash can't burn the
+        stake without recording a vote (or double-debit on retry).
+
+        Returns a dict with at least ``effective_defend_count`` and one of:
+          - ``stake_deducted: int`` on success
+          - ``duplicate: True`` if the user already voted defend
+        Raises ``ValueError`` with a user-facing message on any other failure.
+        """
+        normalized_guild = self.normalize_guild_id(guild_id)
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+
+            cursor.execute(
+                """
+                SELECT status, inciter_id, defend_voter_ids, effective_defend_count
+                FROM wheel_wars WHERE war_id = ?
+                """,
+                (war_id,),
+            )
+            row = cursor.fetchone()
+            if not row:
+                raise ValueError("War not found.")
+            if row["status"] != "voting":
+                raise ValueError("Voting is no longer open.")
+            if discord_id == row["inciter_id"]:
+                raise ValueError("The inciter cannot defend the Wheel.")
+
+            voters = safe_json_loads(
+                row["defend_voter_ids"],
+                default=[],
+                context=f"wheel_wars.defend_voter_ids war_id={war_id}",
+            )
+            if discord_id in voters:
+                return {
+                    "effective_defend_count": row["effective_defend_count"],
+                    "duplicate": True,
+                }
+
+            cursor.execute(
+                "SELECT COALESCE(jopacoin_balance, 0) AS balance FROM players WHERE discord_id = ? AND guild_id = ?",
+                (discord_id, normalized_guild),
+            )
+            bal_row = cursor.fetchone()
+            if not bal_row:
+                raise ValueError("Player not found.")
+            balance = int(bal_row["balance"])
+            if balance < stake:
+                raise ValueError(
+                    f"You need {stake} JC to vote DEFEND (you have {balance})."
+                )
+
+            cursor.execute(
+                """
+                UPDATE players
+                SET jopacoin_balance = jopacoin_balance - ?, updated_at = CURRENT_TIMESTAMP
+                WHERE discord_id = ? AND guild_id = ?
+                """,
+                (stake, discord_id, normalized_guild),
+            )
+
+            voters.append(discord_id)
+            new_count = row["effective_defend_count"] + 1.0
+            cursor.execute(
+                """
+                UPDATE wheel_wars
+                SET defend_voter_ids = ?, effective_defend_count = ?
+                WHERE war_id = ?
+                """,
+                (json.dumps(voters), new_count, war_id),
+            )
+            return {
+                "effective_defend_count": new_count,
+                "duplicate": False,
+                "stake_deducted": stake,
+            }
+
     def add_defend_vote(self, war_id: int, discord_id: int) -> dict:
         """Add a defend vote. Returns updated defend count. Stake deducted separately by service."""
         with self.atomic_transaction() as conn:

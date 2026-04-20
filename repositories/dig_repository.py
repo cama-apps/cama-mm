@@ -247,7 +247,6 @@ class DigRepository(BaseRepository, IDigRepository):
                    VALUES (?, ?, ?, ?)""",
                 (gid, game_date, layer_name, weather_id),
             )
-            conn.commit()
 
     # ── Action Logging ───────────────────────────────────────────────────
 
@@ -870,30 +869,91 @@ class DigRepository(BaseRepository, IDigRepository):
         guild_id: int,
         target_depth_delta: int,
         actor_jc_cost: int,
+        *,
+        target_jc_credit: int = 0,
+        actor_depth_delta: int = 0,
+        clear_target_trap: bool = False,
+        revenge: dict | None = None,
+        log_detail: dict | None = None,
+        log_action_type: str = "sabotage",
     ) -> dict:
-        """Atomically debit actor JC, reduce target depth, return updated target tunnel."""
+        """Atomically apply a sabotage outcome across actor, target, and the audit log.
+
+        Writes (all inside one BEGIN IMMEDIATE):
+        - Debit actor balance by ``actor_jc_cost`` (if > 0).
+        - Credit target balance by ``target_jc_credit`` (trap backlash; if > 0).
+        - Adjust target tunnel depth by ``target_depth_delta`` (clamped at 0).
+        - Adjust actor tunnel depth by ``actor_depth_delta`` (clamped at 0).
+        - Clear target's active trap if ``clear_target_trap``.
+        - Set target's revenge window if ``revenge`` is given (keys: target, type, until).
+        - Insert a dig_actions log row if ``log_detail`` is given.
+
+        Returns the updated target tunnel (same shape as get_tunnel).
+        """
         gid = self.normalize_guild_id(guild_id)
         with self.atomic_transaction() as conn:
             cursor = conn.cursor()
 
-            # Debit actor balance
             if actor_jc_cost > 0:
                 cursor.execute(
                     "UPDATE players SET jopacoin_balance = jopacoin_balance - ? WHERE discord_id = ? AND guild_id = ?",
                     (actor_jc_cost, actor_id, gid),
                 )
 
-            # Reduce target depth (clamp to 0)
-            cursor.execute(
-                """
-                UPDATE tunnels
-                SET depth = MAX(0, depth + ?)
-                WHERE discord_id = ? AND guild_id = ?
-                """,
-                (target_depth_delta, target_id, gid),
-            )
+            if target_jc_credit > 0:
+                cursor.execute(
+                    "UPDATE players SET jopacoin_balance = jopacoin_balance + ? WHERE discord_id = ? AND guild_id = ?",
+                    (target_jc_credit, target_id, gid),
+                )
 
-            # Return updated target tunnel
+            if target_depth_delta != 0:
+                cursor.execute(
+                    """
+                    UPDATE tunnels
+                    SET depth = MAX(0, depth + ?)
+                    WHERE discord_id = ? AND guild_id = ?
+                    """,
+                    (target_depth_delta, target_id, gid),
+                )
+
+            if actor_depth_delta != 0:
+                cursor.execute(
+                    """
+                    UPDATE tunnels
+                    SET depth = MAX(0, depth + ?)
+                    WHERE discord_id = ? AND guild_id = ?
+                    """,
+                    (actor_depth_delta, actor_id, gid),
+                )
+
+            if clear_target_trap:
+                cursor.execute(
+                    "UPDATE tunnels SET trap_active = 0 WHERE discord_id = ? AND guild_id = ?",
+                    (target_id, gid),
+                )
+
+            if revenge is not None:
+                cursor.execute(
+                    """
+                    UPDATE tunnels
+                    SET revenge_target = ?, revenge_type = ?, revenge_until = ?
+                    WHERE discord_id = ? AND guild_id = ?
+                    """,
+                    (revenge["target"], revenge["type"], revenge["until"], target_id, gid),
+                )
+
+            if log_detail is not None:
+                cursor.execute(
+                    """
+                    INSERT INTO dig_actions
+                        (guild_id, actor_id, target_id, action_type, depth_before,
+                         depth_after, jc_delta, detail, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (gid, actor_id, target_id, log_action_type, 0, 0, 0,
+                     json.dumps(log_detail), int(time.time())),
+                )
+
             cursor.execute(
                 "SELECT * FROM tunnels WHERE discord_id = ? AND guild_id = ?",
                 (target_id, gid),
@@ -1016,7 +1076,6 @@ class DigRepository(BaseRepository, IDigRepository):
                     now,
                 ),
             )
-            conn.commit()
 
     # ── Social Action Queries ───────────────────────────────────────────
 
