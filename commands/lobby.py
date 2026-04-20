@@ -52,18 +52,18 @@ class LobbyCommands(commands.Cog):
 
     async def _get_lobby_target_channel(
         self, interaction: discord.Interaction
-    ) -> tuple[discord.abc.Messageable | None, bool]:
+    ) -> discord.abc.Messageable | None:
         """
         Get the target channel for lobby embeds.
 
-        Returns:
-            (channel, is_dedicated) tuple:
-            - channel: The channel to post to (dedicated or interaction channel)
-            - is_dedicated: True if posting to dedicated channel, False if fallback
+        Returns the dedicated lobby channel when :data:`LOBBY_CHANNEL_ID` is
+        configured, accessible, and in the same guild as the interaction;
+        otherwise falls back to ``interaction.channel``. Returns ``None`` only
+        if no usable channel could be resolved.
         """
         # If no dedicated channel configured, use interaction channel
         if not LOBBY_CHANNEL_ID:
-            return interaction.channel, False
+            return interaction.channel
 
         try:
             channel = self.bot.get_channel(LOBBY_CHANNEL_ID)
@@ -77,22 +77,22 @@ class LobbyCommands(commands.Cog):
                     logger.warning(
                         f"Dedicated lobby channel {LOBBY_CHANNEL_ID} is in different guild"
                     )
-                    return interaction.channel, False
+                    return interaction.channel
 
                 perms = channel.permissions_for(channel.guild.me)
                 if not perms.send_messages or not perms.create_public_threads:
                     logger.warning(
                         f"Bot lacks permissions in dedicated lobby channel {LOBBY_CHANNEL_ID}"
                     )
-                    return interaction.channel, False
+                    return interaction.channel
 
-            return channel, True
+            return channel
         except (discord.NotFound, discord.Forbidden) as exc:
             logger.warning(f"Cannot access dedicated lobby channel {LOBBY_CHANNEL_ID}: {exc}")
-            return interaction.channel, False
+            return interaction.channel
         except Exception as exc:
             logger.warning(f"Error fetching dedicated lobby channel: {exc}")
-            return interaction.channel, False
+            return interaction.channel
 
     async def _safe_pin(self, message: discord.Message) -> None:
         """Pin the lobby message, logging but not raising on failure (e.g., missing perms)."""
@@ -329,8 +329,9 @@ class LobbyCommands(commands.Cog):
             )
             return
 
-        # Acquire lock to prevent race condition when multiple users call /lobby simultaneously
-        async with self.lobby_service.creation_lock:
+        # Acquire per-guild lock to prevent race condition when multiple users
+        # call /lobby simultaneously in the same guild.
+        async with self.lobby_service.get_creation_lock(guild_id=guild_id):
             lobby = await asyncio.to_thread(
                 functools.partial(
                     self.lobby_service.get_or_create_lobby,
@@ -380,7 +381,7 @@ class LobbyCommands(commands.Cog):
                     pass
 
             # Get target channel (dedicated or fallback to interaction channel)
-            target_channel, is_dedicated = await self._get_lobby_target_channel(interaction)
+            target_channel = await self._get_lobby_target_channel(interaction)
             if not target_channel:
                 await safe_followup(
                     interaction, content="❌ Could not find a valid channel to post the lobby.", ephemeral=True

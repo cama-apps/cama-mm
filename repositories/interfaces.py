@@ -489,6 +489,15 @@ class ILobbyRepository(ABC):
     def load_lobby_state(self, lobby_id: int, guild_id: int | None = None) -> dict | None: ...
 
     @abstractmethod
+    def load_all_lobby_states(self) -> list[dict]:
+        """Return a list of ``{"lobby_id": int, "guild_id": int}`` rows for every persisted lobby.
+
+        Used on startup to rehydrate per-guild lobby state for every guild
+        that had an open lobby before the restart.
+        """
+        ...
+
+    @abstractmethod
     def clear_lobby_state(self, lobby_id: int, guild_id: int | None = None) -> None: ...
 
 

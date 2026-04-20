@@ -17,11 +17,14 @@ class MockLobbyRepository:
     def save_lobby_state(self, **kwargs):
         pass
 
-    def clear_lobby_state(self, lobby_id):
+    def clear_lobby_state(self, lobby_id, guild_id=None):
         pass
 
-    def load_lobby_state(self, lobby_id):
+    def load_lobby_state(self, lobby_id, guild_id=None):
         return None
+
+    def load_all_lobby_states(self):
+        return []
 
 
 @pytest.fixture
@@ -38,7 +41,7 @@ async def test_creation_lock_prevents_race_condition(lobby_manager):
 
     async def simulate_lobby_creation(user_id: int):
         nonlocal creation_count
-        async with lobby_manager.creation_lock:
+        async with lobby_manager.get_creation_lock():
             # Simulate checking if lobby exists
             existing = lobby_manager.get_lobby()
             if existing:
@@ -108,7 +111,7 @@ async def test_lock_serializes_access(lobby_manager):
     order = []
 
     async def access_with_lock(name: str, delay: float):
-        async with lobby_manager.creation_lock:
+        async with lobby_manager.get_creation_lock():
             order.append(f"{name}_start")
             await asyncio.sleep(delay)
             order.append(f"{name}_end")
@@ -126,12 +129,23 @@ async def test_lock_serializes_access(lobby_manager):
 
 @pytest.mark.asyncio
 async def test_lock_property_returns_same_instance(lobby_manager):
-    """Verify the creation_lock property returns the same lock instance."""
-    lock1 = lobby_manager.creation_lock
-    lock2 = lobby_manager.creation_lock
+    """Verify get_creation_lock returns the same lock instance per guild."""
+    lock1 = lobby_manager.get_creation_lock()
+    lock2 = lobby_manager.get_creation_lock()
 
     assert lock1 is lock2
     assert isinstance(lock1, asyncio.Lock)
+
+
+@pytest.mark.asyncio
+async def test_creation_locks_are_per_guild(lobby_manager):
+    """Distinct guilds must get distinct creation locks."""
+    lock_a = lobby_manager.get_creation_lock(guild_id=1)
+    lock_b = lobby_manager.get_creation_lock(guild_id=2)
+
+    assert lock_a is not lock_b
+    # And the lock for guild=1 should be stable across calls.
+    assert lobby_manager.get_creation_lock(guild_id=1) is lock_a
 
 
 @pytest.mark.asyncio
@@ -141,7 +155,7 @@ async def test_multiple_concurrent_calls_only_one_creates(lobby_manager):
 
     async def simulate_lobby_creation(user_id: int):
         nonlocal creation_count
-        async with lobby_manager.creation_lock:
+        async with lobby_manager.get_creation_lock():
             existing = lobby_manager.get_lobby()
             if existing:
                 return "existing"

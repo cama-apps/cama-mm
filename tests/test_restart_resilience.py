@@ -210,9 +210,9 @@ class TestRestartResilience:
         lobby_manager_1.set_lobby_message(message_id=99999, channel_id=88888)
 
         # Verify state
-        assert lobby_manager_1.lobby.get_player_count() == 4
-        assert lobby_manager_1.lobby_message_id == 99999
-        assert lobby_manager_1.lobby_channel_id == 88888
+        assert lobby_manager_1.get_lobby(guild_id=0).get_player_count() == 4
+        assert lobby_manager_1.get_lobby_message_id(guild_id=0) == 99999
+        assert lobby_manager_1.get_lobby_channel_id(guild_id=0) == 88888
 
         # --- Phase 2: Simulate restart ---
         lobby_repo_2 = LobbyRepository(db_path)
@@ -226,8 +226,8 @@ class TestRestartResilience:
         assert set(restored_lobby.players) == set(player_ids)
 
         # Verify message info is restored
-        assert lobby_manager_2.lobby_message_id == 99999
-        assert lobby_manager_2.lobby_channel_id == 88888
+        assert lobby_manager_2.get_lobby_message_id(guild_id=0) == 99999
+        assert lobby_manager_2.get_lobby_channel_id(guild_id=0) == 88888
 
     def test_full_workflow_survives_restart(self, db_path):
         """
@@ -313,7 +313,7 @@ class TestRestartResilience:
         assert match_service_1.get_last_shuffle(guild_id) is not None
         assert len(bet_repo_1.get_player_pending_bets(guild_id, spectator_radiant)) == 1
         assert len(bet_repo_1.get_player_pending_bets(guild_id, spectator_dire)) == 1
-        assert lobby_manager_1.lobby.get_player_count() == 10
+        assert lobby_manager_1.get_lobby(guild_id=0).get_player_count() == 10
 
         # Record balances before restart
         radiant_balance_pre = player_repo_1.get_by_id(spectator_radiant, guild_id).jopacoin_balance

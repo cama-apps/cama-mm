@@ -295,15 +295,30 @@ class SchemaManager:
         )
 
     def _migration_create_lobby_state_table(self, cursor) -> None:
+        # Fresh-install shape matches the final schema after every later
+        # migration has been applied: (lobby_id, guild_id) composite PK plus
+        # the full column set. Subsequent ALTER-column migrations
+        # (``add_lobby_message_columns``, ``add_guild_id_to_lobby_state``,
+        # etc.) are guarded by ``_add_column_if_not_exists`` or PRAGMA checks
+        # so replaying them on a fresh DB is a no-op.
         cursor.execute(
             """
             CREATE TABLE IF NOT EXISTS lobby_state (
-                lobby_id INTEGER PRIMARY KEY,
+                lobby_id INTEGER NOT NULL,
+                guild_id INTEGER NOT NULL DEFAULT 0,
                 players TEXT,
+                conditional_players TEXT DEFAULT '[]',
                 status TEXT,
                 created_by INTEGER,
                 created_at TEXT,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                message_id INTEGER,
+                channel_id INTEGER,
+                thread_id INTEGER,
+                embed_message_id INTEGER,
+                origin_channel_id INTEGER,
+                player_join_times TEXT DEFAULT '{}',
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (lobby_id, guild_id)
             )
             """
         )

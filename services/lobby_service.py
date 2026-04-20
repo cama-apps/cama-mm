@@ -34,10 +34,13 @@ class LobbyService:
         self.bankruptcy_repo = bankruptcy_repo
         self.match_state_service = match_state_service
 
-    @property
-    def creation_lock(self) -> asyncio.Lock:
-        """Lock for protecting the full lobby creation flow."""
-        return self.lobby_manager.creation_lock
+    def get_creation_lock(self, guild_id: int | None = None) -> asyncio.Lock:
+        """Get the per-guild lobby-creation lock.
+
+        Delegates to :meth:`LobbyManagerService.get_creation_lock` so each
+        Discord guild serializes its own /lobby creations independently.
+        """
+        return self.lobby_manager.get_creation_lock(guild_id=guild_id)
 
     def get_or_create_lobby(
         self, creator_id: int | None = None, guild_id: int | None = None

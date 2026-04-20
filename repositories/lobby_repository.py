@@ -108,6 +108,20 @@ class LobbyRepository(BaseRepository, ILobbyRepository):
                 "origin_channel_id": row_dict.get("origin_channel_id"),
             }
 
+    def load_all_lobby_states(self) -> list[dict]:
+        """Return ``{"lobby_id", "guild_id"}`` for every persisted row.
+
+        Used on startup so the LobbyManagerService can rehydrate every guild's
+        open lobby after a restart.
+        """
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT lobby_id, guild_id FROM lobby_state")
+            return [
+                {"lobby_id": row["lobby_id"], "guild_id": row["guild_id"]}
+                for row in cursor.fetchall()
+            ]
+
     def clear_lobby_state(self, lobby_id: int, guild_id: int | None = None) -> None:
         import logging
         normalized_guild = self.normalize_guild_id(guild_id)

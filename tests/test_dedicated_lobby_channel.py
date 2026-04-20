@@ -49,14 +49,14 @@ class TestOriginChannelIdStorage:
             origin_channel_id=333,
         )
 
-        assert manager.origin_channel_id == 333
+        assert manager.get_origin_channel_id(guild_id=0) == 333
 
     def test_origin_channel_id_defaults_to_none(self):
         """Test that origin_channel_id defaults to None."""
         manager = LobbyManager(Database(db_path=":memory:"))
         manager.get_or_create_lobby(creator_id=12345)
 
-        assert manager.origin_channel_id is None
+        assert manager.get_origin_channel_id(guild_id=0) is None
 
     def test_origin_channel_id_not_overwritten_when_not_passed(self):
         """Test that origin_channel_id is preserved when not passed to set_lobby_message."""
@@ -75,7 +75,7 @@ class TestOriginChannelIdStorage:
         )
 
         # origin_channel_id should be preserved
-        assert manager.origin_channel_id == 333
+        assert manager.get_origin_channel_id(guild_id=0) == 333
 
     def test_reset_lobby_clears_origin_channel_id(self):
         """Test that reset_lobby clears origin_channel_id."""
@@ -89,7 +89,7 @@ class TestOriginChannelIdStorage:
 
         manager.reset_lobby()
 
-        assert manager.origin_channel_id is None
+        assert manager.get_origin_channel_id(guild_id=0) is None
 
 
 class TestOriginChannelIdPersistence:
@@ -111,14 +111,14 @@ class TestOriginChannelIdPersistence:
                 origin_channel_id=333,
             )
 
-            assert manager1.origin_channel_id == 333
+            assert manager1.get_origin_channel_id(guild_id=0) == 333
 
             # Simulate restart
             db2 = Database(db_path=db_path)
             manager2 = LobbyManager(db2)
 
             # origin_channel_id should be restored
-            assert manager2.origin_channel_id == 333
+            assert manager2.get_origin_channel_id(guild_id=0) == 333
         finally:
             _cleanup_db_file(db_path)
 
@@ -144,11 +144,11 @@ class TestOriginChannelIdPersistence:
             manager2 = LobbyManager(db2)
 
             # All IDs should be restored
-            assert manager2.lobby_message_id == 111
-            assert manager2.lobby_channel_id == 222
-            assert manager2.lobby_thread_id == 333
-            assert manager2.lobby_embed_message_id == 444
-            assert manager2.origin_channel_id == 555
+            assert manager2.get_lobby_message_id(guild_id=0) == 111
+            assert manager2.get_lobby_channel_id(guild_id=0) == 222
+            assert manager2.get_lobby_thread_id(guild_id=0) == 333
+            assert manager2.get_lobby_embed_message_id(guild_id=0) == 444
+            assert manager2.get_origin_channel_id(guild_id=0) == 555
         finally:
             _cleanup_db_file(db_path)
 
@@ -173,8 +173,8 @@ class TestOriginChannelIdPersistence:
             manager2 = LobbyManager(db2)
 
             # Should be cleared
-            assert manager2.origin_channel_id is None
-            assert manager2.lobby_message_id is None
+            assert manager2.get_origin_channel_id(guild_id=0) is None
+            assert manager2.get_lobby_message_id(guild_id=0) is None
         finally:
             _cleanup_db_file(db_path)
 
@@ -345,10 +345,9 @@ class TestGetLobbyTargetChannelHelper:
         interaction.channel.id = 12345
 
         with patch("commands.lobby.LOBBY_CHANNEL_ID", None):
-            channel, is_dedicated = await cog._get_lobby_target_channel(interaction)
+            channel = await cog._get_lobby_target_channel(interaction)
 
         assert channel == interaction.channel
-        assert is_dedicated is False
 
     @pytest.mark.asyncio
     async def test_returns_dedicated_channel_when_configured(self):
@@ -384,10 +383,9 @@ class TestGetLobbyTargetChannelHelper:
         import discord
         with patch("commands.lobby.LOBBY_CHANNEL_ID", 99999):
             with patch.object(discord, 'TextChannel', type(dedicated_channel)):
-                channel, is_dedicated = await cog._get_lobby_target_channel(interaction)
+                channel = await cog._get_lobby_target_channel(interaction)
 
         assert channel == dedicated_channel
-        assert is_dedicated is True
 
     @pytest.mark.asyncio
     async def test_falls_back_on_permission_error(self):
@@ -423,10 +421,9 @@ class TestGetLobbyTargetChannelHelper:
         import discord
         with patch("commands.lobby.LOBBY_CHANNEL_ID", 99999):
             with patch.object(discord, 'TextChannel', type(dedicated_channel)):
-                channel, is_dedicated = await cog._get_lobby_target_channel(interaction)
+                channel = await cog._get_lobby_target_channel(interaction)
 
         assert channel == interaction.channel
-        assert is_dedicated is False
 
     @pytest.mark.asyncio
     async def test_falls_back_on_channel_not_found(self):
@@ -449,10 +446,9 @@ class TestGetLobbyTargetChannelHelper:
         interaction.channel.id = 11111
 
         with patch("commands.lobby.LOBBY_CHANNEL_ID", 99999):
-            channel, is_dedicated = await cog._get_lobby_target_channel(interaction)
+            channel = await cog._get_lobby_target_channel(interaction)
 
         assert channel == interaction.channel
-        assert is_dedicated is False
 
     @pytest.mark.asyncio
     async def test_falls_back_on_different_guild(self):
@@ -481,10 +477,9 @@ class TestGetLobbyTargetChannelHelper:
         import discord
         with patch("commands.lobby.LOBBY_CHANNEL_ID", 99999):
             with patch.object(discord, 'TextChannel', type(dedicated_channel)):
-                channel, is_dedicated = await cog._get_lobby_target_channel(interaction)
+                channel = await cog._get_lobby_target_channel(interaction)
 
         assert channel == interaction.channel
-        assert is_dedicated is False
 
 
 class TestDedicatedLobbyChannelE2E:
@@ -682,12 +677,11 @@ class TestGetLobbyTargetChannelEdgeCases:
         import discord
         with patch("commands.lobby.LOBBY_CHANNEL_ID", 99999):
             with patch.object(discord, 'TextChannel', type(dedicated_channel)):
-                channel, is_dedicated = await cog._get_lobby_target_channel(interaction)
+                channel = await cog._get_lobby_target_channel(interaction)
 
         # fetch_channel should have been called
         bot.fetch_channel.assert_called_once_with(99999)
         assert channel == dedicated_channel
-        assert is_dedicated is True
 
     @pytest.mark.asyncio
     async def test_dm_context_guild_none(self):
@@ -715,11 +709,10 @@ class TestGetLobbyTargetChannelEdgeCases:
         import discord
         with patch("commands.lobby.LOBBY_CHANNEL_ID", 99999):
             with patch.object(discord, 'TextChannel', type(dedicated_channel)):
-                channel, is_dedicated = await cog._get_lobby_target_channel(interaction)
+                channel = await cog._get_lobby_target_channel(interaction)
 
         # Should still work - guild check is skipped when interaction.guild is None
         assert channel == dedicated_channel
-        assert is_dedicated is True
 
     @pytest.mark.asyncio
     async def test_falls_back_on_missing_thread_permission(self):
@@ -754,10 +747,9 @@ class TestGetLobbyTargetChannelEdgeCases:
         import discord
         with patch("commands.lobby.LOBBY_CHANNEL_ID", 99999):
             with patch.object(discord, 'TextChannel', type(dedicated_channel)):
-                channel, is_dedicated = await cog._get_lobby_target_channel(interaction)
+                channel = await cog._get_lobby_target_channel(interaction)
 
         assert channel == interaction.channel
-        assert is_dedicated is False
 
     @pytest.mark.asyncio
     async def test_falls_back_on_forbidden_exception(self):
@@ -780,10 +772,9 @@ class TestGetLobbyTargetChannelEdgeCases:
         interaction.channel.id = 11111
 
         with patch("commands.lobby.LOBBY_CHANNEL_ID", 99999):
-            channel, is_dedicated = await cog._get_lobby_target_channel(interaction)
+            channel = await cog._get_lobby_target_channel(interaction)
 
         assert channel == interaction.channel
-        assert is_dedicated is False
 
 
 class TestNotifyLobbyRally:

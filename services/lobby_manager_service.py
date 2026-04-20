@@ -40,7 +40,10 @@ class LobbyManagerService:
         self.origin_channel_ids: dict[int, int] = {}
         # Per-guild lobbies
         self.lobbies: dict[int, Lobby] = {}
-        self._creation_lock = asyncio.Lock()
+        # Per-guild creation locks — protects the full lobby creation flow so
+        # concurrent /lobby calls in the *same* guild serialize, while distinct
+        # guilds create their lobbies in parallel.
+        self._creation_locks: dict[int, asyncio.Lock] = {}
         self._state_lock = threading.RLock()  # Protects all in-memory state mutations
         # Readycheck state (in-memory only, cleared on lobby reset) — per guild
         self.readycheck_message_ids: dict[int, int] = {}
@@ -58,86 +61,17 @@ class LobbyManagerService:
         """Normalize None to 0 (mirrors BaseRepository.normalize_guild_id)."""
         return guild_id if guild_id is not None else 0
 
-    @property
-    def creation_lock(self) -> asyncio.Lock:
-        """Lock for protecting the full lobby creation flow."""
-        return self._creation_lock
+    def get_creation_lock(self, guild_id: int | None = None) -> asyncio.Lock:
+        """Get or create the per-guild lobby-creation lock.
 
-    # --- Backward-compatibility shims for pre-multi-guild callers/tests ---
-    #
-    # Older code reads/writes ``manager.lobby`` and ``manager.lobby_message_id``
-    # as plain attributes scoped to a single global lobby. The multi-guild
-    # refactor replaces those with per-guild dicts; these properties keep the
-    # old API working against the default guild bucket (``guild_id=0``) so
-    # that tests and callers that haven't been updated still behave.
-
-    _COMPAT_GUILD_ID = 0
-
-    @property
-    def lobby(self) -> Lobby | None:
-        return self.lobbies.get(self._COMPAT_GUILD_ID)
-
-    @lobby.setter
-    def lobby(self, value: Lobby | None) -> None:
-        if value is None:
-            self.lobbies.pop(self._COMPAT_GUILD_ID, None)
-        else:
-            self.lobbies[self._COMPAT_GUILD_ID] = value
-
-    @property
-    def lobby_message_id(self) -> int | None:
-        return self.lobby_message_ids.get(self._COMPAT_GUILD_ID)
-
-    @lobby_message_id.setter
-    def lobby_message_id(self, value: int | None) -> None:
-        if value is None:
-            self.lobby_message_ids.pop(self._COMPAT_GUILD_ID, None)
-        else:
-            self.lobby_message_ids[self._COMPAT_GUILD_ID] = value
-
-    @property
-    def lobby_channel_id(self) -> int | None:
-        return self.lobby_channel_ids.get(self._COMPAT_GUILD_ID)
-
-    @lobby_channel_id.setter
-    def lobby_channel_id(self, value: int | None) -> None:
-        if value is None:
-            self.lobby_channel_ids.pop(self._COMPAT_GUILD_ID, None)
-        else:
-            self.lobby_channel_ids[self._COMPAT_GUILD_ID] = value
-
-    @property
-    def lobby_thread_id(self) -> int | None:
-        return self.lobby_thread_ids.get(self._COMPAT_GUILD_ID)
-
-    @lobby_thread_id.setter
-    def lobby_thread_id(self, value: int | None) -> None:
-        if value is None:
-            self.lobby_thread_ids.pop(self._COMPAT_GUILD_ID, None)
-        else:
-            self.lobby_thread_ids[self._COMPAT_GUILD_ID] = value
-
-    @property
-    def lobby_embed_message_id(self) -> int | None:
-        return self.lobby_embed_message_ids.get(self._COMPAT_GUILD_ID)
-
-    @lobby_embed_message_id.setter
-    def lobby_embed_message_id(self, value: int | None) -> None:
-        if value is None:
-            self.lobby_embed_message_ids.pop(self._COMPAT_GUILD_ID, None)
-        else:
-            self.lobby_embed_message_ids[self._COMPAT_GUILD_ID] = value
-
-    @property
-    def origin_channel_id(self) -> int | None:
-        return self.origin_channel_ids.get(self._COMPAT_GUILD_ID)
-
-    @origin_channel_id.setter
-    def origin_channel_id(self, value: int | None) -> None:
-        if value is None:
-            self.origin_channel_ids.pop(self._COMPAT_GUILD_ID, None)
-        else:
-            self.origin_channel_ids[self._COMPAT_GUILD_ID] = value
+        Mirrors ``get_shuffle_lock``: lazy-creates one ``asyncio.Lock`` per
+        normalized guild_id so concurrent /lobby calls in the same guild
+        serialize while distinct guilds proceed independently.
+        """
+        normalized = self._normalize_guild_id(guild_id)
+        if normalized not in self._creation_locks:
+            self._creation_locks[normalized] = asyncio.Lock()
+        return self._creation_locks[normalized]
 
     def get_shuffle_lock(self, guild_id: int | None) -> asyncio.Lock:
         """Get or create the shuffle lock for a guild."""
@@ -417,29 +351,29 @@ class LobbyManagerService:
         self.lobby_repo.clear_lobby_state(self.DEFAULT_LOBBY_ID, guild_id=normalized)
 
     def _load_state(self) -> None:
-        # The repo only loads a single lobby at a time by (lobby_id, guild_id).
-        # Restore any persisted rows (one per guild) by scanning the underlying
-        # connection when possible. The abstract ILobbyRepository doesn't
-        # define a bulk-load, so we fall back to a best-effort scan via the
-        # connection helper used by BaseRepository-backed repos.
-        load_all = getattr(self.lobby_repo, "load_all_lobby_states", None)
-        rows: list[dict] = []
-        if callable(load_all):
-            rows = load_all() or []
-        else:
-            # Duck-type: try raw SQL via ``connection`` context manager (works
-            # for both LobbyRepository and Database-based fakes used in tests).
-            try:
-                with self.lobby_repo.connection() as conn:  # type: ignore[attr-defined]
-                    cursor = conn.cursor()
-                    cursor.execute(
-                        "SELECT lobby_id, guild_id FROM lobby_state WHERE lobby_id = ?",
-                        (self.DEFAULT_LOBBY_ID,),
-                    )
-                    for row in cursor.fetchall():
-                        rows.append({"lobby_id": row[0], "guild_id": row[1]})
-            except Exception:
-                rows = []
+        """Rehydrate per-guild lobby state from the repository on startup.
+
+        Reads every persisted ``(lobby_id, guild_id)`` row via
+        :meth:`ILobbyRepository.load_all_lobby_states` and populates the
+        in-memory maps. A missing ``lobby_state`` table on a fresh install is
+        tolerated (logged and treated as "no state"); any other failure
+        propagates so we don't silently drop data.
+        """
+        import sqlite3
+
+        logger = logging.getLogger("cama_bot.services.lobby_manager")
+        try:
+            rows = self.lobby_repo.load_all_lobby_states() or []
+        except sqlite3.OperationalError as exc:
+            # Fresh install before migrations applied: the table doesn't exist
+            # yet. Safe to treat as empty state; the next persist will create
+            # a row after the schema is in place.
+            logger.info(
+                "lobby_state table unavailable during _load_state; "
+                "treating as empty state: %s",
+                exc,
+            )
+            return
 
         for row in rows:
             guild_id = int(row.get("guild_id") or 0)

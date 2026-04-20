@@ -189,12 +189,12 @@ class TestLobbyManager:
         manager = LobbyManager(Database(db_path=":memory:"))
         manager.get_or_create_lobby()
         manager.join_lobby(1001)
-        manager.lobby_message_id = 12345
+        manager.set_lobby_message(message_id=12345, channel_id=None)
 
         manager.reset_lobby()
 
-        assert manager.lobby is None
-        assert manager.lobby_message_id is None
+        assert manager.get_lobby(guild_id=0) is None
+        assert manager.get_lobby_message_id(guild_id=0) is None
 
     def test_reset_lobby_clears_channel_id(self):
         """Test that resetting the lobby also clears channel_id."""
@@ -204,9 +204,9 @@ class TestLobbyManager:
 
         manager.reset_lobby()
 
-        assert manager.lobby is None
-        assert manager.lobby_message_id is None
-        assert manager.lobby_channel_id is None
+        assert manager.get_lobby(guild_id=0) is None
+        assert manager.get_lobby_message_id(guild_id=0) is None
+        assert manager.get_lobby_channel_id(guild_id=0) is None
 
 
 class TestLobbyPersistence:
@@ -228,16 +228,16 @@ class TestLobbyPersistence:
             manager1.set_lobby_message(message_id=111222333, channel_id=444555666)
 
             # Verify IDs are set
-            assert manager1.lobby_message_id == 111222333
-            assert manager1.lobby_channel_id == 444555666
+            assert manager1.get_lobby_message_id(guild_id=0) == 111222333
+            assert manager1.get_lobby_channel_id(guild_id=0) == 444555666
 
             # Simulate restart - create new manager with same DB
             db2 = Database(db_path=db_path)
             manager2 = LobbyManager(db2)
 
             # Verify IDs are restored
-            assert manager2.lobby_message_id == 111222333
-            assert manager2.lobby_channel_id == 444555666
+            assert manager2.get_lobby_message_id(guild_id=0) == 111222333
+            assert manager2.get_lobby_channel_id(guild_id=0) == 444555666
         finally:
             _cleanup_db_file(db_path)
 
@@ -400,8 +400,8 @@ class TestLobbyPersistence:
             # Lobby should not exist
             assert manager2.get_lobby() is None
             # Message IDs should be None since lobby was reset
-            assert manager2.lobby_message_id is None
-            assert manager2.lobby_channel_id is None
+            assert manager2.get_lobby_message_id(guild_id=0) is None
+            assert manager2.get_lobby_channel_id(guild_id=0) is None
         finally:
             _cleanup_db_file(db_path)
 
@@ -423,8 +423,8 @@ class TestLobbyPersistence:
             db2 = Database(db_path=db_path)
             manager2 = LobbyManager(db2)
 
-            assert manager2.lobby_message_id == 111
-            assert manager2.lobby_channel_id is None
+            assert manager2.get_lobby_message_id(guild_id=0) == 111
+            assert manager2.get_lobby_channel_id(guild_id=0) is None
             # Lobby should still be usable
             lobby = manager2.get_lobby()
             assert lobby is not None
@@ -450,8 +450,8 @@ class TestLobbyPersistence:
             db2 = Database(db_path=db_path)
             manager2 = LobbyManager(db2)
 
-            assert manager2.lobby_message_id == 111
-            assert manager2.lobby_channel_id == 222
+            assert manager2.get_lobby_message_id(guild_id=0) == 111
+            assert manager2.get_lobby_channel_id(guild_id=0) == 222
         finally:
             _cleanup_db_file(db_path)
 
@@ -479,8 +479,8 @@ class TestLobbyPersistence:
             db3 = Database(db_path=db_path)
             manager3 = LobbyManager(db3)
 
-            assert manager3.lobby_message_id == 111
-            assert manager3.lobby_channel_id == 222
+            assert manager3.get_lobby_message_id(guild_id=0) == 111
+            assert manager3.get_lobby_channel_id(guild_id=0) == 222
             lobby = manager3.get_lobby()
             assert 1001 in lobby.players
             assert 1002 in lobby.players
@@ -507,8 +507,8 @@ class TestLobbyPersistence:
             db2 = Database(db_path=db_path)
             manager2 = LobbyManager(db2)
 
-            assert manager2.lobby_message_id == 111
-            assert manager2.lobby_channel_id == 222
+            assert manager2.get_lobby_message_id(guild_id=0) == 111
+            assert manager2.get_lobby_channel_id(guild_id=0) == 222
             assert 1001 in manager2.get_lobby().players
         finally:
             _cleanup_db_file(db_path)
@@ -535,8 +535,8 @@ class TestLobbyPersistence:
             db2 = Database(db_path=db_path)
             manager2 = LobbyManager(db2)
 
-            assert manager2.lobby_message_id == 111
-            assert manager2.lobby_channel_id == 222
+            assert manager2.get_lobby_message_id(guild_id=0) == 111
+            assert manager2.get_lobby_channel_id(guild_id=0) == 222
             assert 1001 not in manager2.get_lobby().players
             assert 1002 in manager2.get_lobby().players
         finally:
@@ -562,8 +562,8 @@ class TestLobbyPersistence:
             manager2 = LobbyManager(db2)
 
             # Message IDs should still be there
-            assert manager2.lobby_message_id == 111
-            assert manager2.lobby_channel_id == 222
+            assert manager2.get_lobby_message_id(guild_id=0) == 111
+            assert manager2.get_lobby_channel_id(guild_id=0) == 222
             # Lobby should still exist but be empty
             lobby = manager2.get_lobby()
             assert lobby is not None
@@ -592,8 +592,8 @@ class TestLobbyPersistence:
             manager2 = LobbyManager(db2)
 
             # Should have the new values
-            assert manager2.lobby_message_id == 333
-            assert manager2.lobby_channel_id == 444
+            assert manager2.get_lobby_message_id(guild_id=0) == 333
+            assert manager2.get_lobby_channel_id(guild_id=0) == 444
         finally:
             _cleanup_db_file(db_path)
 

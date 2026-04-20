@@ -19,11 +19,14 @@ class MockLobbyRepo:
     def save_lobby_state(self, **kwargs):
         pass
 
-    def clear_lobby_state(self, lobby_id):
+    def clear_lobby_state(self, lobby_id, guild_id=None):
         pass
 
-    def load_lobby_state(self, lobby_id):
+    def load_lobby_state(self, lobby_id, guild_id=None):
         return None
+
+    def load_all_lobby_states(self):
+        return []
 
 
 @pytest.fixture
