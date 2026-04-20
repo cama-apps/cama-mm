@@ -12,10 +12,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from database import Database
 from repositories.lobby_repository import LobbyRepository
 from services.lobby_manager_service import LobbyManagerService as LobbyManager
 from services.lobby_service import LobbyService
+from tests.fakes.lobby_repo import FakeLobbyRepo
 
 
 def _cleanup_db_file(db_path: str) -> None:
@@ -41,7 +41,7 @@ class TestOriginChannelIdStorage:
 
     def test_set_origin_channel_id(self):
         """Test setting origin_channel_id via set_lobby_message."""
-        manager = LobbyManager(Database(db_path=":memory:"))
+        manager = LobbyManager(FakeLobbyRepo())
         manager.get_or_create_lobby(creator_id=12345)
         manager.set_lobby_message(
             message_id=111,
@@ -53,14 +53,14 @@ class TestOriginChannelIdStorage:
 
     def test_origin_channel_id_defaults_to_none(self):
         """Test that origin_channel_id defaults to None."""
-        manager = LobbyManager(Database(db_path=":memory:"))
+        manager = LobbyManager(FakeLobbyRepo())
         manager.get_or_create_lobby(creator_id=12345)
 
         assert manager.get_origin_channel_id(guild_id=0) is None
 
     def test_origin_channel_id_not_overwritten_when_not_passed(self):
         """Test that origin_channel_id is preserved when not passed to set_lobby_message."""
-        manager = LobbyManager(Database(db_path=":memory:"))
+        manager = LobbyManager(FakeLobbyRepo())
         manager.get_or_create_lobby(creator_id=12345)
         manager.set_lobby_message(
             message_id=111,
@@ -79,7 +79,7 @@ class TestOriginChannelIdStorage:
 
     def test_reset_lobby_clears_origin_channel_id(self):
         """Test that reset_lobby clears origin_channel_id."""
-        manager = LobbyManager(Database(db_path=":memory:"))
+        manager = LobbyManager(FakeLobbyRepo())
         manager.get_or_create_lobby(creator_id=12345)
         manager.set_lobby_message(
             message_id=111,
@@ -102,8 +102,7 @@ class TestOriginChannelIdPersistence:
 
         try:
             # First session - create lobby and set origin_channel_id
-            db1 = Database(db_path=db_path)
-            manager1 = LobbyManager(db1)
+            manager1 = LobbyManager(LobbyRepository(db_path))
             manager1.get_or_create_lobby(creator_id=12345)
             manager1.set_lobby_message(
                 message_id=111,
@@ -114,8 +113,7 @@ class TestOriginChannelIdPersistence:
             assert manager1.get_origin_channel_id(guild_id=0) == 333
 
             # Simulate restart
-            db2 = Database(db_path=db_path)
-            manager2 = LobbyManager(db2)
+            manager2 = LobbyManager(LobbyRepository(db_path))
 
             # origin_channel_id should be restored
             assert manager2.get_origin_channel_id(guild_id=0) == 333
@@ -128,8 +126,7 @@ class TestOriginChannelIdPersistence:
             db_path = f.name
 
         try:
-            db1 = Database(db_path=db_path)
-            manager1 = LobbyManager(db1)
+            manager1 = LobbyManager(LobbyRepository(db_path))
             manager1.get_or_create_lobby(creator_id=12345)
             manager1.set_lobby_message(
                 message_id=111,
@@ -140,8 +137,7 @@ class TestOriginChannelIdPersistence:
             )
 
             # Simulate restart
-            db2 = Database(db_path=db_path)
-            manager2 = LobbyManager(db2)
+            manager2 = LobbyManager(LobbyRepository(db_path))
 
             # All IDs should be restored
             assert manager2.get_lobby_message_id(guild_id=0) == 111
@@ -158,8 +154,7 @@ class TestOriginChannelIdPersistence:
             db_path = f.name
 
         try:
-            db1 = Database(db_path=db_path)
-            manager1 = LobbyManager(db1)
+            manager1 = LobbyManager(LobbyRepository(db_path))
             manager1.get_or_create_lobby(creator_id=12345)
             manager1.set_lobby_message(
                 message_id=111,
@@ -169,8 +164,7 @@ class TestOriginChannelIdPersistence:
             manager1.reset_lobby()
 
             # Simulate restart
-            db2 = Database(db_path=db_path)
-            manager2 = LobbyManager(db2)
+            manager2 = LobbyManager(LobbyRepository(db_path))
 
             # Should be cleared
             assert manager2.get_origin_channel_id(guild_id=0) is None
@@ -274,56 +268,6 @@ class TestLobbyServiceOriginChannelId:
         manager.get_or_create_lobby(creator_id=12345)
 
         assert service.get_origin_channel_id() is None
-
-
-class TestDatabaseOriginChannelId:
-    """Test origin_channel_id in Database class."""
-
-    def test_database_save_and_load_origin_channel_id(self):
-        """Test Database.save_lobby_state and load_lobby_state with origin_channel_id."""
-        db = Database(db_path=":memory:")
-
-        db.save_lobby_state(
-            lobby_id=1,
-            players=[1001, 1002],
-            status="open",
-            created_by=12345,
-            created_at="2024-01-01T00:00:00",
-            message_id=111,
-            channel_id=222,
-            origin_channel_id=333,
-        )
-
-        state = db.load_lobby_state(1)
-        assert state is not None
-        assert state["origin_channel_id"] == 333
-
-    def test_database_origin_channel_id_update_on_conflict(self):
-        """Test that origin_channel_id is updated on conflict."""
-        db = Database(db_path=":memory:")
-
-        # Initial save
-        db.save_lobby_state(
-            lobby_id=1,
-            players=[1001],
-            status="open",
-            created_by=12345,
-            created_at="2024-01-01T00:00:00",
-            origin_channel_id=111,
-        )
-
-        # Update (same lobby_id triggers ON CONFLICT)
-        db.save_lobby_state(
-            lobby_id=1,
-            players=[1001, 1002],
-            status="open",
-            created_by=12345,
-            created_at="2024-01-01T00:00:00",
-            origin_channel_id=222,
-        )
-
-        state = db.load_lobby_state(1)
-        assert state["origin_channel_id"] == 222
 
 
 class TestGetLobbyTargetChannelHelper:
@@ -491,8 +435,7 @@ class TestDedicatedLobbyChannelE2E:
             db_path = f.name
 
         try:
-            # Create lobby service (Database initializes schema, repo uses same path)
-            Database(db_path=db_path)  # Initialize schema
+            # LobbyRepository initializes the schema lazily on first use.
             repo = LobbyRepository(db_path)
             manager = LobbyManager(repo)
             player_repo = MagicMock()
@@ -528,9 +471,7 @@ class TestDedicatedLobbyChannelE2E:
 
     def test_reset_clears_all_channel_ids(self):
         """Test that reset_lobby clears both channel_id and origin_channel_id."""
-        db = Database(db_path=":memory:")
-        # Use the database's connection for the repo
-        manager = LobbyManager(db)
+        manager = LobbyManager(FakeLobbyRepo())
         player_repo = MagicMock()
         service = LobbyService(manager, player_repo)
 
@@ -553,8 +494,7 @@ class TestDedicatedLobbyChannelE2E:
 
     def test_origin_channel_same_as_lobby_channel_when_no_dedicated(self):
         """Test scenario where origin and lobby channel are the same (no dedicated channel)."""
-        db = Database(db_path=":memory:")
-        manager = LobbyManager(db)
+        manager = LobbyManager(FakeLobbyRepo())
         player_repo = MagicMock()
         service = LobbyService(manager, player_repo)
 
@@ -573,8 +513,7 @@ class TestDedicatedLobbyChannelE2E:
 
     def test_origin_channel_different_from_lobby_channel(self):
         """Test scenario with dedicated channel (origin different from lobby channel)."""
-        db = Database(db_path=":memory:")
-        manager = LobbyManager(db)
+        manager = LobbyManager(FakeLobbyRepo())
         player_repo = MagicMock()
         service = LobbyService(manager, player_repo)
 

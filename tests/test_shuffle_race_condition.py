@@ -11,28 +11,13 @@ import time
 import pytest
 
 from services.lobby_manager_service import LobbyManagerService
-
-
-class MockLobbyRepo:
-    """Mock lobby repository for testing."""
-
-    def save_lobby_state(self, **kwargs):
-        pass
-
-    def clear_lobby_state(self, lobby_id, guild_id=None):
-        pass
-
-    def load_lobby_state(self, lobby_id, guild_id=None):
-        return None
-
-    def load_all_lobby_states(self):
-        return []
+from tests.fakes.lobby_repo import FakeLobbyRepo
 
 
 @pytest.fixture
 def lobby_manager():
-    """Create a LobbyManagerService with a mock repository."""
-    return LobbyManagerService(MockLobbyRepo())
+    """Create a LobbyManagerService with an in-memory fake repository."""
+    return LobbyManagerService(FakeLobbyRepo())
 
 
 class TestShuffleLockPreventsRace:

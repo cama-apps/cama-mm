@@ -12,11 +12,11 @@ from unittest.mock import AsyncMock
 import pytest
 
 from commands.lobby import LobbyCommands
-from database import Database
 from domain.models.player import Player
 from services.lobby_manager_service import LobbyManagerService as LobbyManager
 from services.lobby_service import LobbyService
 from tests.conftest import TEST_GUILD_ID
+from tests.fakes.lobby_repo import FakeLobbyRepo
 
 
 class FakeGuild:
@@ -196,8 +196,7 @@ class FakeBot:
 
 def make_services(player_repo=None):
     """Create lobby manager, lobby service, and player service."""
-    db = Database(db_path=":memory:")
-    lobby_manager = LobbyManager(db)
+    lobby_manager = LobbyManager(FakeLobbyRepo())
     player_repo = player_repo or FakePlayerRepo()
     lobby_service = LobbyService(lobby_manager, player_repo)
     player_service = FakePlayerService(player_repo)
