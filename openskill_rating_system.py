@@ -61,10 +61,6 @@ class CamaOpenSkillSystem:
     # FP is a tiny nudge, not a significant factor
     FP_WEIGHT_BLEND = 0.10
 
-    # Per-game mu swing cap (prevents massive rating swings)
-    # 2.0 mu ≈ 100 display rating points
-    MAX_MU_SWING_PER_GAME = 2.0
-
     # Minimum mu floor (display rating 0)
     MIN_MU = 25.0
 
@@ -75,6 +71,12 @@ class CamaOpenSkillSystem:
     # This keeps OpenSkill and Glicko-2 display ratings on the same 0-3000 scale
     # so team-value computations do not inflate OpenSkill-rated players.
     DISPLAY_SCALE = 50.0
+
+    # Per-game mu swing cap (prevents massive rating swings).
+    # In display units this equals DISPLAY_SCALE * MAX_MU_SWING_PER_GAME points
+    # per game (currently 50.0 * 2.0 = 100 display rating points). If you tune
+    # DISPLAY_SCALE, revisit this cap so the effective swing stays on-scale.
+    MAX_MU_SWING_PER_GAME = 2.0
 
     def __init__(self):
         self.model = PlackettLuce(
