@@ -784,7 +784,9 @@ class Database:
         conditional_players: list[int] | None = None,
         origin_channel_id: int | None = None,
         player_join_times: dict[int, float] | None = None,
+        guild_id: int | None = None,
     ) -> None:
+        normalized_guild = self._normalize_guild_id(guild_id)
         payload = json.dumps(players)
         conditional_payload = json.dumps(conditional_players or [])
         join_times_payload = json.dumps(
@@ -794,11 +796,11 @@ class Database:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                INSERT INTO lobby_state (lobby_id, players, conditional_players, status, created_by, created_at,
-                                         message_id, channel_id, thread_id, embed_message_id, origin_channel_id,
-                                         player_join_times)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(lobby_id) DO UPDATE SET
+                INSERT INTO lobby_state (lobby_id, guild_id, players, conditional_players, status, created_by,
+                                         created_at, message_id, channel_id, thread_id, embed_message_id,
+                                         origin_channel_id, player_join_times)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(lobby_id, guild_id) DO UPDATE SET
                     players = excluded.players,
                     conditional_players = excluded.conditional_players,
                     status = excluded.status,
@@ -812,14 +814,19 @@ class Database:
                     player_join_times = excluded.player_join_times,
                     updated_at = CURRENT_TIMESTAMP
             """,
-                (lobby_id, payload, conditional_payload, status, created_by, created_at, message_id, channel_id,
-                 thread_id, embed_message_id, origin_channel_id, join_times_payload),
+                (lobby_id, normalized_guild, payload, conditional_payload, status, created_by,
+                 created_at, message_id, channel_id, thread_id, embed_message_id,
+                 origin_channel_id, join_times_payload),
             )
 
-    def load_lobby_state(self, lobby_id: int) -> dict | None:
+    def load_lobby_state(self, lobby_id: int, guild_id: int | None = None) -> dict | None:
+        normalized_guild = self._normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT * FROM lobby_state WHERE lobby_id = ?", (lobby_id,))
+            cursor.execute(
+                "SELECT * FROM lobby_state WHERE lobby_id = ? AND guild_id = ?",
+                (lobby_id, normalized_guild),
+            )
             row = cursor.fetchone()
             if not row:
                 return None
@@ -828,6 +835,7 @@ class Database:
             join_times = json.loads(raw_join_times) if raw_join_times else {}
             return {
                 "lobby_id": row_dict["lobby_id"],
+                "guild_id": row_dict.get("guild_id", 0),
                 "players": json.loads(row_dict["players"]) if row_dict.get("players") else [],
                 "conditional_players": json.loads(row_dict["conditional_players"]) if row_dict.get("conditional_players") else [],
                 "player_join_times": {int(k): v for k, v in join_times.items()},
@@ -841,10 +849,14 @@ class Database:
                 "origin_channel_id": row_dict.get("origin_channel_id"),
             }
 
-    def clear_lobby_state(self, lobby_id: int) -> None:
+    def clear_lobby_state(self, lobby_id: int, guild_id: int | None = None) -> None:
+        normalized_guild = self._normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("DELETE FROM lobby_state WHERE lobby_id = ?", (lobby_id,))
+            cursor.execute(
+                "DELETE FROM lobby_state WHERE lobby_id = ? AND guild_id = ?",
+                (lobby_id, normalized_guild),
+            )
 
     def _normalize_guild_id(self, guild_id: int | None) -> int:
         return guild_id if guild_id is not None else 0

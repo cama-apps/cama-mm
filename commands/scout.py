@@ -197,7 +197,7 @@ class ScoutCommands(commands.Cog):
                 logger.debug("Failed to check draft state", exc_info=True)
 
         # Priority 3: Active lobby
-        lobby = self.lobby_manager.get_lobby()
+        lobby = self.lobby_manager.get_lobby(guild_id=guild_id)
         if lobby and lobby.players:
             player_ids = list(lobby.players)
             if lobby.conditional_players:

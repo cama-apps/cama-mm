@@ -71,9 +71,11 @@ class MatchCommands(commands.Cog):
         # Track scheduled betting reminder tasks per guild for cleanup
         self._betting_tasks_by_guild = {}
 
-    async def _update_channel_message_closed(self, reason: str = "Match Aborted") -> None:
+    async def _update_channel_message_closed(
+        self, reason: str = "Match Aborted", guild_id: int | None = None
+    ) -> None:
         """Update the channel message embed to show lobby/match is closed."""
-        await update_lobby_message_closed(self.bot, self.lobby_service, reason)
+        await update_lobby_message_closed(self.bot, self.lobby_service, reason, guild_id=guild_id)
 
     async def _lock_lobby_thread(
         self,
@@ -83,7 +85,7 @@ class MatchCommands(commands.Cog):
         pending_match_id: int | None = None,
     ) -> None:
         """Lock the lobby thread when shuffle occurs and post shuffle results."""
-        thread_id = self.lobby_service.get_lobby_thread_id()
+        thread_id = self.lobby_service.get_lobby_thread_id(guild_id=guild_id)
         if not thread_id:
             return
 
@@ -393,7 +395,7 @@ class MatchCommands(commands.Cog):
             await interaction.followup.send(msg, ephemeral=True)
             return None
 
-        lobby = self.lobby_service.get_lobby()
+        lobby = self.lobby_service.get_lobby(guild_id=guild_id)
         if not lobby:
             await interaction.followup.send(
                 "❌ No active lobby. Use `/lobby` to create one!", ephemeral=True
@@ -821,7 +823,7 @@ class MatchCommands(commands.Cog):
     ) -> None:
         """Post the shuffle embed, persist its location, schedule reminders,
         lock the lobby thread, unpin, and reset the lobby."""
-        lobby_channel_id = self.lobby_service.get_lobby_channel_id()
+        lobby_channel_id = self.lobby_service.get_lobby_channel_id(guild_id=guild_id)
         message = None
         if lobby_channel_id:
             try:
@@ -844,7 +846,7 @@ class MatchCommands(commands.Cog):
 
         # Capture origin_channel_id before reset_lobby clears it (betting reminders need it).
         try:
-            origin_channel_id = self.lobby_service.get_origin_channel_id()
+            origin_channel_id = self.lobby_service.get_origin_channel_id(guild_id=guild_id)
             if message or cmd_message:
                 jump_url = message.jump_url if message and hasattr(message, "jump_url") else None
                 self.match_service.set_shuffle_message_info(
@@ -888,7 +890,7 @@ class MatchCommands(commands.Cog):
         else:
             lobby_channel = interaction.channel
         await safe_unpin_all_bot_messages(lobby_channel, self.bot.user)
-        await asyncio.to_thread(self.lobby_service.reset_lobby)
+        await asyncio.to_thread(self.lobby_service.reset_lobby, guild_id)
 
         from bot import clear_lobby_rally_cooldowns
         clear_lobby_rally_cooldowns(guild_id or 0)
@@ -1604,7 +1606,7 @@ class MatchCommands(commands.Cog):
         self._cancel_betting_tasks(guild_id)
 
         # Update channel message to show closed and archive thread
-        await self._update_channel_message_closed("Match Aborted")
+        await self._update_channel_message_closed("Match Aborted", guild_id=guild_id)
         await self._abort_lobby_thread(guild_id, pending_match_id)
 
         # Clear only the specific pending match (not all of them)

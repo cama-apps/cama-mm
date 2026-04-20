@@ -1059,7 +1059,7 @@ class DraftCommands(commands.Cog):
         # so by the time /startdraft is called, all lobby players are guaranteed to be available.
 
         # Check lobby
-        lobby = self.lobby_manager.get_lobby()
+        lobby = self.lobby_manager.get_lobby(guild_id=guild_id)
         if not lobby:
             await interaction.followup.send(
                 "❌ No active lobby. Use `/lobby` to create one first.",
@@ -1837,10 +1837,14 @@ class DraftCommands(commands.Cog):
 
                 # Save thread ID before resetting lobby
                 lobby_service = getattr(self.bot, "lobby_service", None)
-                thread_id = lobby_service.get_lobby_thread_id() if lobby_service else None
+                thread_id = (
+                    lobby_service.get_lobby_thread_id(guild_id=guild_id)
+                    if lobby_service
+                    else None
+                )
 
                 # Reset lobby only after successful match creation
-                await asyncio.to_thread(self.lobby_manager.reset_lobby)
+                await asyncio.to_thread(self.lobby_manager.reset_lobby, guild_id)
 
                 embed = await self._build_draft_complete_embed(interaction.guild, state, pending_state)
                 await interaction.response.edit_message(embed=embed, view=None)

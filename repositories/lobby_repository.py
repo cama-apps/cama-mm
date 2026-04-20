@@ -11,6 +11,10 @@ from repositories.interfaces import ILobbyRepository
 class LobbyRepository(BaseRepository, ILobbyRepository):
     """
     Handles lobby_state persistence.
+
+    Lobby rows are keyed by (lobby_id, guild_id) so each Discord guild has its
+    own independent lobby. Callers that have a ``None`` guild_id (DMs/tests)
+    are normalized to 0 via ``BaseRepository.normalize_guild_id``.
     """
 
     def save_lobby_state(
@@ -27,7 +31,9 @@ class LobbyRepository(BaseRepository, ILobbyRepository):
         conditional_players: list[int] | None = None,
         origin_channel_id: int | None = None,
         player_join_times: dict[int, float] | None = None,
+        guild_id: int | None = None,
     ) -> None:
+        normalized_guild = self.normalize_guild_id(guild_id)
         payload = json.dumps(players)
         conditional_payload = json.dumps(conditional_players or [])
         join_times_payload = json.dumps(
@@ -37,11 +43,11 @@ class LobbyRepository(BaseRepository, ILobbyRepository):
             cursor = conn.cursor()
             cursor.execute(
                 """
-                INSERT INTO lobby_state (lobby_id, players, conditional_players, status, created_by, created_at,
-                                         message_id, channel_id, thread_id, embed_message_id, origin_channel_id,
-                                         player_join_times)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(lobby_id) DO UPDATE SET
+                INSERT INTO lobby_state (lobby_id, guild_id, players, conditional_players, status,
+                                         created_by, created_at, message_id, channel_id, thread_id,
+                                         embed_message_id, origin_channel_id, player_join_times)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(lobby_id, guild_id) DO UPDATE SET
                     players = excluded.players,
                     conditional_players = excluded.conditional_players,
                     status = excluded.status,
@@ -55,14 +61,19 @@ class LobbyRepository(BaseRepository, ILobbyRepository):
                     player_join_times = excluded.player_join_times,
                     updated_at = CURRENT_TIMESTAMP
                 """,
-                (lobby_id, payload, conditional_payload, status, created_by, created_at, message_id, channel_id,
-                 thread_id, embed_message_id, origin_channel_id, join_times_payload),
+                (lobby_id, normalized_guild, payload, conditional_payload, status, created_by,
+                 created_at, message_id, channel_id, thread_id, embed_message_id,
+                 origin_channel_id, join_times_payload),
             )
 
-    def load_lobby_state(self, lobby_id: int) -> dict | None:
+    def load_lobby_state(self, lobby_id: int, guild_id: int | None = None) -> dict | None:
+        normalized_guild = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT * FROM lobby_state WHERE lobby_id = ?", (lobby_id,))
+            cursor.execute(
+                "SELECT * FROM lobby_state WHERE lobby_id = ? AND guild_id = ?",
+                (lobby_id, normalized_guild),
+            )
             row = cursor.fetchone()
             if not row:
                 return None
@@ -75,6 +86,7 @@ class LobbyRepository(BaseRepository, ILobbyRepository):
             )
             return {
                 "lobby_id": lobby_id,
+                "guild_id": row_dict.get("guild_id", 0),
                 "players": safe_json_loads(
                     row_dict.get("players"),
                     default=[],
@@ -96,10 +108,17 @@ class LobbyRepository(BaseRepository, ILobbyRepository):
                 "origin_channel_id": row_dict.get("origin_channel_id"),
             }
 
-    def clear_lobby_state(self, lobby_id: int) -> None:
+    def clear_lobby_state(self, lobby_id: int, guild_id: int | None = None) -> None:
         import logging
+        normalized_guild = self.normalize_guild_id(guild_id)
         logger = logging.getLogger("cama_bot.repositories.lobby")
         with self.connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("DELETE FROM lobby_state WHERE lobby_id = ?", (lobby_id,))
-            logger.info(f"Cleared lobby state for lobby_id={lobby_id}, rows affected={cursor.rowcount}")
+            cursor.execute(
+                "DELETE FROM lobby_state WHERE lobby_id = ? AND guild_id = ?",
+                (lobby_id, normalized_guild),
+            )
+            logger.info(
+                f"Cleared lobby state for lobby_id={lobby_id}, guild_id={normalized_guild}, "
+                f"rows affected={cursor.rowcount}"
+            )

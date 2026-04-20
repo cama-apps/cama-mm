@@ -598,5 +598,115 @@ class TestLobbyPersistence:
             _cleanup_db_file(db_path)
 
 
+class TestLobbyMultiGuildIsolation:
+    """Regression tests: lobbies must be isolated across Discord guilds."""
+
+    def test_lobby_state_is_per_guild(self, repo_db_path):
+        """Two guilds get two independent Lobby instances with distinct players."""
+        from repositories.lobby_repository import LobbyRepository
+        from tests.conftest import TEST_GUILD_ID, TEST_GUILD_ID_SECONDARY
+
+        manager = LobbyManager(LobbyRepository(repo_db_path))
+
+        lobby_a = manager.get_or_create_lobby(
+            creator_id=1001, guild_id=TEST_GUILD_ID
+        )
+        lobby_b = manager.get_or_create_lobby(
+            creator_id=2001, guild_id=TEST_GUILD_ID_SECONDARY
+        )
+
+        # Distinct objects, tagged with their own guild_id
+        assert lobby_a is not lobby_b
+        assert lobby_a.guild_id == TEST_GUILD_ID
+        assert lobby_b.guild_id == TEST_GUILD_ID_SECONDARY
+
+        assert manager.join_lobby(111, guild_id=TEST_GUILD_ID) is True
+        assert manager.join_lobby(222, guild_id=TEST_GUILD_ID) is True
+        assert manager.join_lobby(333, guild_id=TEST_GUILD_ID_SECONDARY) is True
+        assert manager.join_lobby(444, guild_id=TEST_GUILD_ID_SECONDARY) is True
+
+        a = manager.get_lobby(guild_id=TEST_GUILD_ID)
+        b = manager.get_lobby(guild_id=TEST_GUILD_ID_SECONDARY)
+        assert a is not None and b is not None
+
+        # Guild A only sees 111/222; Guild B only sees 333/444
+        assert a.players == {111, 222}
+        assert b.players == {333, 444}
+        # And no cross-leakage
+        assert 333 not in a.players and 444 not in a.players
+        assert 111 not in b.players and 222 not in b.players
+
+    def test_reset_one_guild_leaves_other_alone(self, repo_db_path):
+        """Resetting guild A's lobby must not touch guild B's state."""
+        from repositories.lobby_repository import LobbyRepository
+        from tests.conftest import TEST_GUILD_ID, TEST_GUILD_ID_SECONDARY
+
+        manager = LobbyManager(LobbyRepository(repo_db_path))
+
+        manager.get_or_create_lobby(creator_id=1, guild_id=TEST_GUILD_ID)
+        manager.get_or_create_lobby(creator_id=2, guild_id=TEST_GUILD_ID_SECONDARY)
+        manager.join_lobby(111, guild_id=TEST_GUILD_ID)
+        manager.join_lobby(222, guild_id=TEST_GUILD_ID_SECONDARY)
+        manager.set_lobby_message(
+            message_id=9001, channel_id=9002, guild_id=TEST_GUILD_ID
+        )
+        manager.set_lobby_message(
+            message_id=9101, channel_id=9102, guild_id=TEST_GUILD_ID_SECONDARY
+        )
+
+        manager.reset_lobby(guild_id=TEST_GUILD_ID)
+
+        assert manager.get_lobby(guild_id=TEST_GUILD_ID) is None
+        assert manager.get_lobby_message_id(guild_id=TEST_GUILD_ID) is None
+        assert manager.get_lobby_channel_id(guild_id=TEST_GUILD_ID) is None
+
+        b = manager.get_lobby(guild_id=TEST_GUILD_ID_SECONDARY)
+        assert b is not None
+        assert b.players == {222}
+        assert manager.get_lobby_message_id(guild_id=TEST_GUILD_ID_SECONDARY) == 9101
+        assert manager.get_lobby_channel_id(guild_id=TEST_GUILD_ID_SECONDARY) == 9102
+
+    def test_multi_guild_lobbies_survive_restart(self, repo_db_path):
+        """Both guilds' lobbies persist across a manager restart and stay distinct."""
+        from repositories.lobby_repository import LobbyRepository
+        from tests.conftest import TEST_GUILD_ID, TEST_GUILD_ID_SECONDARY
+
+        repo = LobbyRepository(repo_db_path)
+        manager1 = LobbyManager(repo)
+
+        manager1.get_or_create_lobby(creator_id=1001, guild_id=TEST_GUILD_ID)
+        manager1.get_or_create_lobby(creator_id=2001, guild_id=TEST_GUILD_ID_SECONDARY)
+        manager1.join_lobby(111, guild_id=TEST_GUILD_ID)
+        manager1.join_lobby(222, guild_id=TEST_GUILD_ID)
+        manager1.join_lobby(333, guild_id=TEST_GUILD_ID_SECONDARY)
+
+        # Fresh manager over the same persistent repo
+        manager2 = LobbyManager(repo)
+
+        a = manager2.get_lobby(guild_id=TEST_GUILD_ID)
+        b = manager2.get_lobby(guild_id=TEST_GUILD_ID_SECONDARY)
+        assert a is not None and b is not None
+        assert a.players == {111, 222}
+        assert b.players == {333}
+        assert a.guild_id == TEST_GUILD_ID
+        assert b.guild_id == TEST_GUILD_ID_SECONDARY
+
+    def test_leave_is_scoped_to_guild(self, repo_db_path):
+        """Leaving in guild A must not remove a player from guild B's lobby."""
+        from repositories.lobby_repository import LobbyRepository
+        from tests.conftest import TEST_GUILD_ID, TEST_GUILD_ID_SECONDARY
+
+        manager = LobbyManager(LobbyRepository(repo_db_path))
+        # Same discord id is in both guilds' lobbies
+        manager.join_lobby(555, guild_id=TEST_GUILD_ID)
+        manager.join_lobby(555, guild_id=TEST_GUILD_ID_SECONDARY)
+
+        assert manager.leave_lobby(555, guild_id=TEST_GUILD_ID) is True
+        a = manager.get_lobby(guild_id=TEST_GUILD_ID)
+        b = manager.get_lobby(guild_id=TEST_GUILD_ID_SECONDARY)
+        assert a is not None and 555 not in a.players
+        assert b is not None and 555 in b.players
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

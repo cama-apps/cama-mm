@@ -482,13 +482,14 @@ class ILobbyRepository(ABC):
         conditional_players: list[int] | None = None,
         origin_channel_id: int | None = None,
         player_join_times: dict[int, float] | None = None,
+        guild_id: int | None = None,
     ) -> None: ...
 
     @abstractmethod
-    def load_lobby_state(self, lobby_id: int) -> dict | None: ...
+    def load_lobby_state(self, lobby_id: int, guild_id: int | None = None) -> dict | None: ...
 
     @abstractmethod
-    def clear_lobby_state(self, lobby_id: int) -> None: ...
+    def clear_lobby_state(self, lobby_id: int, guild_id: int | None = None) -> None: ...
 
 
 class IPairingsRepository(ABC):
