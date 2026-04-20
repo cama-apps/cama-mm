@@ -62,11 +62,19 @@ class CamaOpenSkillSystem:
     FP_WEIGHT_BLEND = 0.10
 
     # Per-game mu swing cap (prevents massive rating swings)
-    # 2.0 mu ≈ 150 display rating points
+    # 2.0 mu ≈ 100 display rating points
     MAX_MU_SWING_PER_GAME = 2.0
 
     # Minimum mu floor (display rating 0)
     MIN_MU = 25.0
+
+    # Display scale factor: (mu - MIN_MU) * DISPLAY_SCALE = display rating.
+    # Chosen so that mmr_to_os_mu(MMR_MAX) produces display == Glicko-2 RATING_MAX.
+    # With mmr_to_os_mu(mmr) = 25 + mmr/200 and MMR_MAX=12000 → mu=85, and
+    # Glicko-2 RATING_MAX=3000, we need factor = 3000 / (85 - 25) = 50.
+    # This keeps OpenSkill and Glicko-2 display ratings on the same 0-3000 scale
+    # so team-value computations do not inflate OpenSkill-rated players.
+    DISPLAY_SCALE = 50.0
 
     def __init__(self):
         self.model = PlackettLuce(
@@ -142,7 +150,8 @@ class CamaOpenSkillSystem:
                 raw_weight = self.normalize_fantasy_weight(fp)
 
                 # Step 2: Blend with equal weight
-                # blended = 0.25 * raw_weight + 0.75 * 1.0
+                # blended = FP_WEIGHT_BLEND * raw_weight + (1 - FP_WEIGHT_BLEND) * 1.0
+                # Default FP_WEIGHT_BLEND is 0.10 (10% FP-based, 90% equal weight)
                 blended = self.FP_WEIGHT_BLEND * raw_weight + (1.0 - self.FP_WEIGHT_BLEND) * 1.0
 
                 weights.append(blended)
@@ -157,10 +166,12 @@ class CamaOpenSkillSystem:
         """
         Convert OpenDota MMR to OpenSkill mu.
 
-        Maps MMR to mu such that display rating matches MMR scale:
+        Maps MMR to mu such that the display rating lands on the same 0-3000
+        scale Glicko-2 uses:
         - 0 MMR → mu=25 → display 0
-        - 4000 MMR → mu=45 → display 1500
-        - 8000 MMR → mu=65 → display 3000
+        - 4000 MMR → mu=45 → display 1000
+        - 8000 MMR → mu=65 → display 2000
+        - 12000 MMR → mu=85 → display 3000
 
         Formula: mu = 25 + (mmr / 200)
 
@@ -393,18 +404,24 @@ class CamaOpenSkillSystem:
         """
         return 100.0 - self.get_uncertainty_percentage(sigma)
 
-    @staticmethod
-    def mu_to_display(mu: float) -> int:
+    @classmethod
+    def mu_to_display(cls, mu: float) -> int:
         """
-        Convert mu to a display rating scaled to Dota 2 MMR-like range.
+        Convert mu to a display rating scaled to match Glicko-2's 0-3000 range.
 
-        Maps mu from OpenSkill range (~25-65) to display range (~0-3000).
-        Formula: (mu - 25) * 75 with minimum of 0.
+        Maps mu from OpenSkill range (25-85) to display range (0-3000), which is
+        the same scale Glicko-2 uses (see ``rating_system.CamaRatingSystem.RATING_MAX``).
+        Keeping both systems on an identical scale prevents OpenSkill-weighted
+        players from being overvalued in mixed team-value calculations.
 
-        With fantasy-weighted Plackett-Luce:
-        - New players start at mu=25 → display=0
-        - Average active players ~mu=45 → display=1500
-        - Top players ~mu=65 → display=3000
+        Formula: ``(mu - MIN_MU) * DISPLAY_SCALE`` with a minimum of 0.
+
+        With ``mmr_to_os_mu(mmr) = 25 + mmr/200`` and fantasy-weighted
+        Plackett-Luce updates:
+        - New players start at mu=25 → display=0 (MMR 0)
+        - Average active players ~mu=45 → display=1000 (MMR 4000)
+        - Strong players ~mu=65 → display=2000 (MMR 8000)
+        - Top-end ceiling ~mu=85 → display=3000 (MMR 12000)
 
         Args:
             mu: Skill estimate
@@ -412,9 +429,7 @@ class CamaOpenSkillSystem:
         Returns:
             Display rating (0-3000 range)
         """
-        # OpenSkill mu with fantasy weights ranges from ~25 (new) to ~65 (top)
-        # Map to 0-3000 for familiar MMR-like display and matchmaking compatibility
-        display = max(0, (mu - 25) * 75)
+        display = max(0.0, (mu - cls.MIN_MU) * cls.DISPLAY_SCALE)
         return int(round(display))
 
     def os_predict_win_probability(

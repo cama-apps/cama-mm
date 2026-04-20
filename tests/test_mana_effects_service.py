@@ -125,6 +125,20 @@ class TestManaEffects:
         # Black defaults untouched
         assert e.swamp_bankruptcy_games == 5
 
+    def test_mana_effects_is_frozen(self):
+        """ManaEffects is a pure value object; mutation should raise FrozenInstanceError."""
+        from dataclasses import FrozenInstanceError
+
+        e = ManaEffects.for_color("Red", "Mountain")
+        with pytest.raises(FrozenInstanceError):
+            e.red_10x_leverage = False
+        with pytest.raises(FrozenInstanceError):
+            e.color = "Blue"
+        # Default-constructed instances are also frozen.
+        e2 = ManaEffects()
+        with pytest.raises(FrozenInstanceError):
+            e2.swamp_bankruptcy_games = 1
+
 
 # =============================================================================
 # Fixtures for ManaEffectsService tests
