@@ -8,9 +8,9 @@ from unittest.mock import AsyncMock
 import pytest
 
 from commands.lobby import LobbyCommands
-from database import Database
 from services.lobby_manager_service import LobbyManagerService as LobbyManager
 from services.lobby_service import LobbyService
+from tests.fakes.lobby_repo import FakeLobbyRepo
 
 
 async def invoke_reset(cog: LobbyCommands, interaction):
@@ -65,7 +65,7 @@ class FakeInteraction:
 
 
 def make_lobby_service():
-    lobby_manager = LobbyManager(Database(db_path=":memory:"))
+    lobby_manager = LobbyManager(FakeLobbyRepo())
     player_repo = FakePlayerRepo()
     return lobby_manager, LobbyService(lobby_manager, player_repo)
 

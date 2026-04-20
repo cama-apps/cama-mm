@@ -8,9 +8,10 @@ from datetime import datetime
 
 import pytest
 
-from database import Database
 from domain.models.lobby import Lobby
+from repositories.lobby_repository import LobbyRepository
 from services.lobby_manager_service import LobbyManagerService as LobbyManager
+from tests.fakes.lobby_repo import FakeLobbyRepo
 
 
 def _cleanup_db_file(db_path: str) -> None:
@@ -121,27 +122,27 @@ class TestLobbyManager:
 
     def test_get_or_create_lobby(self):
         """Test getting or creating a lobby."""
-        manager = LobbyManager(Database(db_path=":memory:"))
+        manager = LobbyManager(FakeLobbyRepo())
         lobby = manager.get_or_create_lobby(creator_id=12345)
         assert lobby is not None
         assert lobby.created_by == 12345
 
     def test_get_lobby_none(self):
         """Test getting lobby when none exists."""
-        manager = LobbyManager(Database(db_path=":memory:"))
+        manager = LobbyManager(FakeLobbyRepo())
         lobby = manager.get_lobby()
         assert lobby is None
 
     def test_get_lobby_exists(self):
         """Test getting existing lobby."""
-        manager = LobbyManager(Database(db_path=":memory:"))
+        manager = LobbyManager(FakeLobbyRepo())
         manager.get_or_create_lobby(creator_id=12345)
         lobby = manager.get_lobby()
         assert lobby is not None
 
     def test_get_lobby_closed(self):
         """Test that closed lobbies aren't returned."""
-        manager = LobbyManager(Database(db_path=":memory:"))
+        manager = LobbyManager(FakeLobbyRepo())
         lobby = manager.get_or_create_lobby()
         lobby.status = "closed"
         result = manager.get_lobby()
@@ -149,7 +150,7 @@ class TestLobbyManager:
 
     def test_join_lobby(self):
         """Test joining a lobby."""
-        manager = LobbyManager(Database(db_path=":memory:"))
+        manager = LobbyManager(FakeLobbyRepo())
         result = manager.join_lobby(1001)
         assert result is True
         lobby = manager.get_lobby()
@@ -157,7 +158,7 @@ class TestLobbyManager:
 
     def test_join_lobby_full(self):
         """Test joining a full lobby."""
-        manager = LobbyManager(Database(db_path=":memory:"))
+        manager = LobbyManager(FakeLobbyRepo())
         # Fill lobby to 12 players
         for i in range(12):
             manager.join_lobby(1000 + i)
@@ -171,7 +172,7 @@ class TestLobbyManager:
 
     def test_leave_lobby(self):
         """Test leaving a lobby."""
-        manager = LobbyManager(Database(db_path=":memory:"))
+        manager = LobbyManager(FakeLobbyRepo())
         manager.join_lobby(1001)
         result = manager.leave_lobby(1001)
         assert result is True
@@ -180,13 +181,13 @@ class TestLobbyManager:
 
     def test_leave_lobby_not_in_lobby(self):
         """Test leaving when not in lobby."""
-        manager = LobbyManager(Database(db_path=":memory:"))
+        manager = LobbyManager(FakeLobbyRepo())
         result = manager.leave_lobby(1001)
         assert result is False
 
     def test_reset_lobby(self):
         """Test resetting the lobby."""
-        manager = LobbyManager(Database(db_path=":memory:"))
+        manager = LobbyManager(FakeLobbyRepo())
         manager.get_or_create_lobby()
         manager.join_lobby(1001)
         manager.set_lobby_message(message_id=12345, channel_id=None)
@@ -198,7 +199,7 @@ class TestLobbyManager:
 
     def test_reset_lobby_clears_channel_id(self):
         """Test that resetting the lobby also clears channel_id."""
-        manager = LobbyManager(Database(db_path=":memory:"))
+        manager = LobbyManager(FakeLobbyRepo())
         manager.get_or_create_lobby()
         manager.set_lobby_message(message_id=12345, channel_id=67890)
 
@@ -222,8 +223,7 @@ class TestLobbyPersistence:
 
         try:
             # First "session" - create lobby and set message
-            db1 = Database(db_path=db_path)
-            manager1 = LobbyManager(db1)
+            manager1 = LobbyManager(LobbyRepository(db_path))
             manager1.get_or_create_lobby(creator_id=12345)
             manager1.set_lobby_message(message_id=111222333, channel_id=444555666)
 
@@ -232,8 +232,7 @@ class TestLobbyPersistence:
             assert manager1.get_lobby_channel_id(guild_id=0) == 444555666
 
             # Simulate restart - create new manager with same DB
-            db2 = Database(db_path=db_path)
-            manager2 = LobbyManager(db2)
+            manager2 = LobbyManager(LobbyRepository(db_path))
 
             # Verify IDs are restored
             assert manager2.get_lobby_message_id(guild_id=0) == 111222333
@@ -250,8 +249,7 @@ class TestLobbyPersistence:
 
         try:
             # First session - create lobby and add players
-            db1 = Database(db_path=db_path)
-            manager1 = LobbyManager(db1)
+            manager1 = LobbyManager(LobbyRepository(db_path))
             manager1.get_or_create_lobby(creator_id=12345)
             manager1.join_lobby(1001)
             manager1.join_lobby(1002)
@@ -259,8 +257,7 @@ class TestLobbyPersistence:
             manager1.set_lobby_message(message_id=111, channel_id=222)
 
             # Simulate restart
-            db2 = Database(db_path=db_path)
-            manager2 = LobbyManager(db2)
+            manager2 = LobbyManager(LobbyRepository(db_path))
 
             # Verify players are restored
             lobby = manager2.get_lobby()
@@ -281,15 +278,13 @@ class TestLobbyPersistence:
 
         try:
             # First session
-            db1 = Database(db_path=db_path)
-            manager1 = LobbyManager(db1)
+            manager1 = LobbyManager(LobbyRepository(db_path))
             manager1.get_or_create_lobby(creator_id=12345)
             manager1.join_lobby(1001)
             manager1.set_lobby_message(message_id=111, channel_id=222)
 
             # Simulate restart
-            db2 = Database(db_path=db_path)
-            manager2 = LobbyManager(db2)
+            manager2 = LobbyManager(LobbyRepository(db_path))
 
             # New player joins after restart
             result = manager2.join_lobby(1002)
@@ -311,16 +306,14 @@ class TestLobbyPersistence:
 
         try:
             # First session
-            db1 = Database(db_path=db_path)
-            manager1 = LobbyManager(db1)
+            manager1 = LobbyManager(LobbyRepository(db_path))
             manager1.get_or_create_lobby(creator_id=12345)
             manager1.join_lobby(1001)
             manager1.join_lobby(1002)
             manager1.set_lobby_message(message_id=111, channel_id=222)
 
             # Simulate restart
-            db2 = Database(db_path=db_path)
-            manager2 = LobbyManager(db2)
+            manager2 = LobbyManager(LobbyRepository(db_path))
 
             # Player leaves after restart
             result = manager2.leave_lobby(1001)
@@ -341,14 +334,12 @@ class TestLobbyPersistence:
             db_path = f.name
 
         try:
-            db1 = Database(db_path=db_path)
-            manager1 = LobbyManager(db1)
+            manager1 = LobbyManager(LobbyRepository(db_path))
             manager1.get_or_create_lobby(creator_id=99999)
             manager1.set_lobby_message(message_id=111, channel_id=222)
 
             # Simulate restart
-            db2 = Database(db_path=db_path)
-            manager2 = LobbyManager(db2)
+            manager2 = LobbyManager(LobbyRepository(db_path))
 
             lobby = manager2.get_lobby()
             assert lobby is not None
@@ -364,14 +355,12 @@ class TestLobbyPersistence:
             db_path = f.name
 
         try:
-            db1 = Database(db_path=db_path)
-            manager1 = LobbyManager(db1)
+            manager1 = LobbyManager(LobbyRepository(db_path))
             manager1.get_or_create_lobby(creator_id=12345)
             manager1.set_lobby_message(message_id=111, channel_id=222)
 
             # Simulate restart
-            db2 = Database(db_path=db_path)
-            manager2 = LobbyManager(db2)
+            manager2 = LobbyManager(LobbyRepository(db_path))
 
             lobby = manager2.get_lobby()
             assert lobby is not None
@@ -387,15 +376,13 @@ class TestLobbyPersistence:
             db_path = f.name
 
         try:
-            db1 = Database(db_path=db_path)
-            manager1 = LobbyManager(db1)
+            manager1 = LobbyManager(LobbyRepository(db_path))
             manager1.get_or_create_lobby(creator_id=12345)
             manager1.set_lobby_message(message_id=111, channel_id=222)
             manager1.reset_lobby()  # Close the lobby
 
             # Simulate restart
-            db2 = Database(db_path=db_path)
-            manager2 = LobbyManager(db2)
+            manager2 = LobbyManager(LobbyRepository(db_path))
 
             # Lobby should not exist
             assert manager2.get_lobby() is None
@@ -413,15 +400,13 @@ class TestLobbyPersistence:
             db_path = f.name
 
         try:
-            db1 = Database(db_path=db_path)
-            manager1 = LobbyManager(db1)
+            manager1 = LobbyManager(LobbyRepository(db_path))
             manager1.get_or_create_lobby(creator_id=12345)
             # Set only message_id, not channel_id
             manager1.set_lobby_message(message_id=111, channel_id=None)
 
             # Simulate restart
-            db2 = Database(db_path=db_path)
-            manager2 = LobbyManager(db2)
+            manager2 = LobbyManager(LobbyRepository(db_path))
 
             assert manager2.get_lobby_message_id(guild_id=0) == 111
             assert manager2.get_lobby_channel_id(guild_id=0) is None
@@ -439,16 +424,14 @@ class TestLobbyPersistence:
             db_path = f.name
 
         try:
-            db1 = Database(db_path=db_path)
-            manager1 = LobbyManager(db1)
+            manager1 = LobbyManager(LobbyRepository(db_path))
             manager1.get_or_create_lobby(creator_id=12345)
 
             # Set message IDs
             manager1.set_lobby_message(message_id=111, channel_id=222)
 
             # Immediately create new manager (no explicit save call needed)
-            db2 = Database(db_path=db_path)
-            manager2 = LobbyManager(db2)
+            manager2 = LobbyManager(LobbyRepository(db_path))
 
             assert manager2.get_lobby_message_id(guild_id=0) == 111
             assert manager2.get_lobby_channel_id(guild_id=0) == 222
@@ -464,20 +447,17 @@ class TestLobbyPersistence:
 
         try:
             # First session
-            db1 = Database(db_path=db_path)
-            manager1 = LobbyManager(db1)
+            manager1 = LobbyManager(LobbyRepository(db_path))
             manager1.get_or_create_lobby(creator_id=12345)
             manager1.join_lobby(1001)
             manager1.set_lobby_message(message_id=111, channel_id=222)
 
             # Second session - add more players
-            db2 = Database(db_path=db_path)
-            manager2 = LobbyManager(db2)
+            manager2 = LobbyManager(LobbyRepository(db_path))
             manager2.join_lobby(1002)
 
             # Third session - verify all state preserved
-            db3 = Database(db_path=db_path)
-            manager3 = LobbyManager(db3)
+            manager3 = LobbyManager(LobbyRepository(db_path))
 
             assert manager3.get_lobby_message_id(guild_id=0) == 111
             assert manager3.get_lobby_channel_id(guild_id=0) == 222
@@ -495,8 +475,7 @@ class TestLobbyPersistence:
             db_path = f.name
 
         try:
-            db1 = Database(db_path=db_path)
-            manager1 = LobbyManager(db1)
+            manager1 = LobbyManager(LobbyRepository(db_path))
             manager1.get_or_create_lobby(creator_id=12345)
             manager1.set_lobby_message(message_id=111, channel_id=222)
 
@@ -504,8 +483,7 @@ class TestLobbyPersistence:
             manager1.join_lobby(1001)
 
             # Verify message IDs still persisted
-            db2 = Database(db_path=db_path)
-            manager2 = LobbyManager(db2)
+            manager2 = LobbyManager(LobbyRepository(db_path))
 
             assert manager2.get_lobby_message_id(guild_id=0) == 111
             assert manager2.get_lobby_channel_id(guild_id=0) == 222
@@ -521,8 +499,7 @@ class TestLobbyPersistence:
             db_path = f.name
 
         try:
-            db1 = Database(db_path=db_path)
-            manager1 = LobbyManager(db1)
+            manager1 = LobbyManager(LobbyRepository(db_path))
             manager1.get_or_create_lobby(creator_id=12345)
             manager1.join_lobby(1001)
             manager1.join_lobby(1002)
@@ -532,8 +509,7 @@ class TestLobbyPersistence:
             manager1.leave_lobby(1001)
 
             # Verify message IDs still persisted
-            db2 = Database(db_path=db_path)
-            manager2 = LobbyManager(db2)
+            manager2 = LobbyManager(LobbyRepository(db_path))
 
             assert manager2.get_lobby_message_id(guild_id=0) == 111
             assert manager2.get_lobby_channel_id(guild_id=0) == 222
@@ -550,16 +526,14 @@ class TestLobbyPersistence:
             db_path = f.name
 
         try:
-            db1 = Database(db_path=db_path)
-            manager1 = LobbyManager(db1)
+            manager1 = LobbyManager(LobbyRepository(db_path))
             manager1.get_or_create_lobby(creator_id=12345)
             manager1.join_lobby(1001)
             manager1.set_lobby_message(message_id=111, channel_id=222)
             manager1.leave_lobby(1001)  # Lobby now empty
 
             # Simulate restart
-            db2 = Database(db_path=db_path)
-            manager2 = LobbyManager(db2)
+            manager2 = LobbyManager(LobbyRepository(db_path))
 
             # Message IDs should still be there
             assert manager2.get_lobby_message_id(guild_id=0) == 111
@@ -579,8 +553,7 @@ class TestLobbyPersistence:
             db_path = f.name
 
         try:
-            db1 = Database(db_path=db_path)
-            manager1 = LobbyManager(db1)
+            manager1 = LobbyManager(LobbyRepository(db_path))
             manager1.get_or_create_lobby(creator_id=12345)
             manager1.set_lobby_message(message_id=111, channel_id=222)
 
@@ -588,8 +561,7 @@ class TestLobbyPersistence:
             manager1.set_lobby_message(message_id=333, channel_id=444)
 
             # Simulate restart
-            db2 = Database(db_path=db_path)
-            manager2 = LobbyManager(db2)
+            manager2 = LobbyManager(LobbyRepository(db_path))
 
             # Should have the new values
             assert manager2.get_lobby_message_id(guild_id=0) == 333

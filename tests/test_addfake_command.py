@@ -9,9 +9,9 @@ import pytest
 
 from commands import admin as admin_module
 from commands.admin import AdminCommands
-from database import Database
 from services.lobby_manager_service import LobbyManagerService as LobbyManager
 from services.lobby_service import LobbyService
+from tests.fakes.lobby_repo import FakeLobbyRepo
 
 
 @pytest.fixture(autouse=True)
@@ -86,8 +86,7 @@ class FakeInteraction:
 
 
 def make_services():
-    db = Database(db_path=":memory:")
-    lobby_manager = LobbyManager(db)
+    lobby_manager = LobbyManager(FakeLobbyRepo())
     player_service = FakePlayerService()
     lobby_service = LobbyService(lobby_manager, player_service, max_players=14)
     return lobby_service, player_service
