@@ -1140,6 +1140,17 @@ class IDisburseRepository(ABC):
         ...
 
     @abstractmethod
+    def complete_and_disburse_atomic(
+        self,
+        guild_id: int | None,
+        fund_amount_to_return: int,
+        distributions: list[tuple[int, int]],
+        method: str,
+    ) -> int:
+        """Finalize disbursement (complete proposal + fund moves + history) in one txn."""
+        ...
+
+    @abstractmethod
     def reset_proposal(self, guild_id: int | None) -> bool:
         """Reset (cancel) the active proposal."""
         ...

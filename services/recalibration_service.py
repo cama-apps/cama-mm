@@ -225,28 +225,33 @@ class RecalibrationService:
             "cooldown_ends_at": cooldown_ends_at,
         }
 
-    def reset_cooldown(self, discord_id: int, guild_id: int) -> dict:
+    def reset_cooldown(self, discord_id: int, guild_id: int | None) -> dict:
         """
         Reset recalibration cooldown for a player (admin action).
 
         Returns:
             Dict with success status
         """
-        player = self.player_repo.get_by_id(discord_id, guild_id)
+        # Normalize guild_id (None -> 0) at the service boundary so the player
+        # lookup, state read, and repo reset all key off the same row that
+        # can_recalibrate / recalibrate would touch.
+        normalized_guild_id = self._normalize_guild_id(guild_id)
+
+        player = self.player_repo.get_by_id(discord_id, normalized_guild_id)
         if not player:
             return {
                 "success": False,
                 "reason": "not_registered",
             }
 
-        state = self.get_state(discord_id, guild_id)
+        state = self.get_state(discord_id, normalized_guild_id)
         if state.last_recalibration_at is None:
             return {
                 "success": False,
                 "reason": "no_recalibration_history",
             }
 
-        self.recalibration_repo.reset_cooldown(discord_id, guild_id)
+        self.recalibration_repo.reset_cooldown(discord_id, normalized_guild_id)
 
         logger.info(f"Admin reset recalibration cooldown for player {discord_id}")
 

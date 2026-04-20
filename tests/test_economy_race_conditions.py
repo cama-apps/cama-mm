@@ -104,8 +104,14 @@ def test_fix1_concurrent_execute_disbursement_does_not_double_refund(
     disburse_service, disburse_repo, loan_repo, player_repo
 ):
     """
-    Two concurrent callers invoking execute_disbursement on the same proposal
-    must NOT both return the reserved fund to the pool. The expected accounting:
+    Invariant check (not a race-repro): under two concurrent callers to
+    ``execute_disbursement`` on the same proposal, the service must preserve
+    the accounting invariants below. The per-guild RLock serializes the two
+    threads, so this test passes both before and after the crash-window fix;
+    it's retained to guard against the lock being removed or the in-lock
+    re-check being dropped.
+
+    Invariants (held regardless of scheduling):
     - fund starts at F (fund_amount = F)
     - total_disbursed <= F gets credited to player balances
     - remaining (F - total_disbursed) stays in the nonprofit fund
@@ -564,28 +570,24 @@ def test_fix5_auto_blind_bets_reject_over_debt_even_under_concurrent_balance_dra
     t_drain.join(timeout=10)
     t_blind.join(timeout=10)
 
-    # Invariant: no player may end up below -max_debt due to a successfully
-    # placed blind bet. The drain itself brought them to -900, but the blind
-    # atomic op MUST NOT take them past -max_debt (-500 - 500 = -1000 or worse).
-    # Every placed blind should leave new_balance >= -max_debt; the drain on its
-    # own is not constrained by max_debt (raw add_balance bypasses it), so we
-    # check: post-blind balance >= pre-blind balance - max_debt (approx).
+    # Invariant: no player may end up below -(max_debt + drain_amount) due to
+    # a successfully placed blind bet. place_bet_atomic with allow_negative=True
+    # must enforce new_balance >= -max_debt at the moment of placement, so the
+    # blind can drop the balance to at most -max_debt. The drain (1000 JC) then
+    # adds at most another -1000 to that, giving a tight floor of -(max_debt +
+    # 1000) = -1500 with max_debt=500.
+    #
+    # The prior bound of -2000 was slack: it still passed if a blind landed
+    # after a drain had pushed balance to -900, taking final to -920, which
+    # would violate the atomic check's new_balance >= -max_debt contract.
+    drain_amount = 1000
+    floor = -(service.max_debt + drain_amount)
     for pid in player_ids:
         bal = player_repo.get_balance(pid, TEST_GUILD_ID)
-        # The drain pushed each player to around 100-1000 = -900.
-        # place_bet_atomic with allow_negative=True enforces new_balance >= -max_debt.
-        # That means any successful blind either:
-        #  - happened before the drain (balance was +100 -> +100-X, fine) OR
-        #  - was rejected because -900 - X < -500.
-        # So final balance should be either ~-900 (drain only, blind rejected)
-        # or ~+100 - X (blind placed before drain, drain came later to ~-900 - X).
-        # In either case, NO bet should have been placed that takes balance
-        # from -900 down past -max_debt (i.e. below -500 before the drain would).
-        # The tight invariant is: there is no way to observe bal < -1100 because
-        # the worst non-raced case is -900 - max_blind_sized_bet, which is bounded.
-        assert bal >= -2000, (
-            f"Player {pid} balance {bal} fell below -2000 — blind bet was placed "
-            "after an atomic-rejection-worthy drain."
+        assert bal >= floor, (
+            f"Player {pid} balance {bal} fell below {floor} (max_debt={service.max_debt}, "
+            f"drain={drain_amount}) — an auto-blind was placed against a balance that "
+            "already violated the max-debt constraint."
         )
 
 
@@ -696,3 +698,59 @@ def test_fix6_can_recalibrate_and_recalibrate_agree_on_none_guild(
     second = service.recalibrate(pid, guild_id=None)
     assert second["success"] is False
     assert second["reason"] == "on_cooldown"
+
+
+def test_fix6_reset_cooldown_normalizes_none_guild_to_zero(
+    recalibration_repo, player_repo
+):
+    """
+    reset_cooldown(None) must touch the same recalibration_state row that
+    recalibrate(None) wrote — previously it passed the raw None through, so
+    an admin reset on a DM / single-guild install would silently no-op against
+    guild_id=NULL while the stored row keyed on guild_id=0.
+    """
+    service = RecalibrationService(
+        recalibration_repo,
+        player_repo,
+        cooldown_seconds=3600,
+        initial_rd=350.0,
+        initial_volatility=0.06,
+        min_games=1,
+    )
+
+    pid = 62001
+    player_repo.add(
+        discord_id=pid,
+        discord_username="ResetCalib",
+        guild_id=0,
+        initial_mmr=1500,
+        glicko_rating=1500.0,
+        glicko_rd=200.0,
+        glicko_volatility=0.06,
+    )
+    player_repo.increment_wins(pid, 0)
+
+    # Seed a recalibration under guild_id=None (normalized to 0).
+    result = service.recalibrate(pid, guild_id=None)
+    assert result["success"] is True
+
+    # Cooldown must be active.
+    state_before = service.get_state(pid, guild_id=0)
+    assert state_before.is_on_cooldown is True
+
+    # Admin reset via guild_id=None must normalize to 0 and flip the row.
+    reset_result = service.reset_cooldown(pid, guild_id=None)
+    assert reset_result["success"] is True, (
+        f"reset_cooldown(None) should normalize to guild_id=0 and succeed; got {reset_result}"
+    )
+
+    # Post-reset: the guild_id=0 row is out of cooldown, so a fresh recalibrate
+    # under guild_id=None is allowed again.
+    state_after = service.get_state(pid, guild_id=0)
+    assert state_after.is_on_cooldown is False, (
+        "reset_cooldown(None) did not clear the cooldown on the guild_id=0 row."
+    )
+    redo = service.recalibrate(pid, guild_id=None)
+    assert redo["success"] is True, (
+        f"After reset_cooldown(None), a second recalibrate(None) must succeed; got {redo}"
+    )

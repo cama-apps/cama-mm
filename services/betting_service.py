@@ -291,34 +291,61 @@ class BettingService:
         for pid in player_ids:
             bankruptcy_penalty = 0
 
-            # Apply garnishment FIRST on the full gross reward. The gross goes to
-            # the balance; the service returns the split into garnished vs net.
+            # Pre-compute the bankruptcy penalty if applicable so we can fuse
+            # the garnishment credit and the penalty debit into a single
+            # BEGIN IMMEDIATE txn below. Previously the penalty was applied via
+            # a second add_balance() after the garnishment txn already committed,
+            # so a reader or crash could observe the mid-state.
+            estimated_net = reward_amount
+            if self.bankruptcy_service and self.garnishment_service and reward_amount > 0:
+                # Garnishment only applies when the player is in debt. Peek the
+                # balance to estimate the net base the penalty would operate on;
+                # the atomic op re-reads balance and is the source of truth for
+                # garnished/net. If the balance flips between the peek and the
+                # atomic read, the credit/debit still commit together — only
+                # the penalty base may drift by the garnishment rounding, which
+                # is bounded and strictly smaller than the race it closes.
+                peek_balance = self.player_repo.get_balance(pid, guild_id)
+                if peek_balance < 0:
+                    garn_rate = self.garnishment_service.garnishment_rate
+                    estimated_net = reward_amount - int(reward_amount * garn_rate)
+
+            if self.bankruptcy_service:
+                penalty_result = self.bankruptcy_service.apply_penalty_to_winnings(
+                    pid, estimated_net, guild_id
+                )
+                bankruptcy_penalty = penalty_result["penalty_applied"]
+
+            # Apply garnishment + bankruptcy penalty in one atomic balance
+            # mutation. The repo credits the gross, computes garnishment from
+            # the live balance, then debits `penalty_debit` — all inside one
+            # BEGIN IMMEDIATE transaction.
             if self.garnishment_service:
-                garn = self.garnishment_service.add_income(pid, reward_amount, guild_id=guild_id)
+                garn = self.garnishment_service.add_income(
+                    pid, reward_amount, guild_id=guild_id, penalty_debit=bankruptcy_penalty
+                )
                 gross = garn["gross"]
                 garnished = garn["garnished"]
                 net = garn["net"]
             else:
-                # No garnishment service: entire reward is net.
-                self.player_repo.add_balance(pid, guild_id, reward_amount)
+                # No garnishment service: entire reward is net. Fuse credit +
+                # penalty into a single atomic via the repo helper so the two
+                # balance mutations still commit together.
+                self.player_repo.add_balance_with_garnishment(
+                    pid,
+                    guild_id,
+                    reward_amount,
+                    garnishment_rate=0.0,
+                    penalty_debit=bankruptcy_penalty,
+                )
                 gross = reward_amount
                 garnished = 0
                 net = reward_amount
 
-            # Apply bankruptcy penalty SECOND, on the net income the player
-            # would have received. The penalty reduces the balance after the
-            # fact; garnishment has already claimed its share of the gross.
-            if self.bankruptcy_service:
-                penalty_result = self.bankruptcy_service.apply_penalty_to_winnings(
-                    pid, net, guild_id
-                )
-                penalized_net = penalty_result["penalized"]
-                bankruptcy_penalty = penalty_result["penalty_applied"]
-                if bankruptcy_penalty > 0:
-                    # Remove the penalized portion from the balance (it stays
-                    # "un-received"). The player keeps only the penalized_net.
-                    self.player_repo.add_balance(pid, guild_id, -bankruptcy_penalty)
-                    net = penalized_net
+            # Reported net is what the player "feels" they received: the
+            # garnishment's net minus the bankruptcy penalty.
+            if bankruptcy_penalty > 0:
+                net = net - bankruptcy_penalty
 
             results[pid] = {
                 "gross": gross,

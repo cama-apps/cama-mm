@@ -399,23 +399,17 @@ class DisburseService:
             else:  # neediest
                 distributions = self._calculate_neediest_distribution(fund_amount, debtors)
 
-        # Atomically transition out of 'active' BEFORE touching balances, so a
-        # concurrent caller that manages to slip past the lock (e.g. across
-        # processes) cannot re-execute the same proposal.
-        self.disburse_repo.complete_proposal(guild_id)
-
-        # Return reserved funds, then atomically deduct the actual distribution
-        # amount. Both steps run under the per-guild lock, so no other caller
-        # can observe or modify the half-restored pool state.
-        self.loan_repo.add_to_nonprofit_fund(guild_id, fund_amount)
-        total_disbursed = self.loan_repo.disburse_fund_atomic(guild_id, distributions)
-
-        # Record history
-        self.disburse_repo.record_disbursement(
+        # Finalize everything in one BEGIN IMMEDIATE: complete the proposal,
+        # return the reserve, deduct the distribution total, credit recipients,
+        # and record history. This closes the crash-window where the proposal
+        # was marked complete but a crash between fund-return and distribution
+        # left the pool over-restored and no history recorded. Combined with the
+        # per-guild RLock above, it also blocks in-process races.
+        total_disbursed = self.disburse_repo.complete_and_disburse_atomic(
             guild_id=guild_id,
-            total_amount=total_disbursed,
-            method=method,
+            fund_amount_to_return=fund_amount,
             distributions=distributions,
+            method=method,
         )
 
         return {

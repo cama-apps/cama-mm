@@ -20,7 +20,11 @@ class GarnishmentService:
         )
 
     def add_income(
-        self, discord_id: int, amount: int, guild_id: int | None = None
+        self,
+        discord_id: int,
+        amount: int,
+        guild_id: int | None = None,
+        penalty_debit: int = 0,
     ) -> dict[str, int]:
         """
         Add income to a player, applying garnishment if they have debt.
@@ -33,6 +37,10 @@ class GarnishmentService:
             discord_id: Player's Discord ID
             amount: Income amount (bet winnings, participation reward, etc.)
             guild_id: Guild ID for multi-guild support
+            penalty_debit: Optional post-credit debit applied in the same
+                transaction (e.g. bankruptcy penalty). Forwarded unchanged to
+                ``PlayerRepository.add_balance_with_garnishment`` so callers can
+                fuse garnishment + penalty into a single atomic balance mutation.
 
         Returns:
             Dict with:
@@ -40,9 +48,13 @@ class GarnishmentService:
             - garnished: Amount conceptually going toward debt repayment
             - net: Amount the player "feels" they received
         """
-        if amount <= 0:
+        if amount <= 0 and penalty_debit <= 0:
             return {"gross": amount, "garnished": 0, "net": amount}
 
         return self.player_repo.add_balance_with_garnishment(
-            discord_id, guild_id, amount, self.garnishment_rate
+            discord_id,
+            guild_id,
+            amount,
+            self.garnishment_rate,
+            penalty_debit=penalty_debit,
         )

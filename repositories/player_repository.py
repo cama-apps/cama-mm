@@ -659,7 +659,12 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 )
 
     def add_balance_with_garnishment(
-        self, discord_id: int, guild_id: int, amount: int, garnishment_rate: float
+        self,
+        discord_id: int,
+        guild_id: int,
+        amount: int,
+        garnishment_rate: float,
+        penalty_debit: int = 0,
     ) -> dict[str, int]:
         """
         Add income with garnishment applied if player has debt.
@@ -667,6 +672,16 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         When a player has a negative balance (debt), a portion of their income
         is garnished to pay down the debt. The full amount is credited to the
         balance, but the return value indicates how much was "garnished" vs "net".
+
+        Args:
+            discord_id: Player ID.
+            guild_id: Guild ID (normalized to 0 if None).
+            amount: Gross income to credit.
+            garnishment_rate: Fraction garnished when the player is in debt.
+            penalty_debit: Optional post-credit debit applied inside the same
+                BEGIN IMMEDIATE. Used by the betting service to fuse the
+                garnishment credit with a bankruptcy penalty debit so no
+                reader / crash can observe the mid-state between them.
 
         Returns:
             Dict with 'gross', 'garnished', 'net' amounts.
@@ -676,6 +691,19 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         """
         guild_id = self.normalize_guild_id(guild_id)
         if amount <= 0:
+            # Still apply penalty_debit inside a single txn to preserve the
+            # "credit and penalty commit together or not at all" contract.
+            if penalty_debit > 0:
+                with self.atomic_transaction() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        """
+                        UPDATE players
+                        SET jopacoin_balance = jopacoin_balance - ?, updated_at = CURRENT_TIMESTAMP
+                        WHERE discord_id = ? AND guild_id = ?
+                        """,
+                        (penalty_debit, discord_id, guild_id),
+                    )
             return {"gross": amount, "garnished": 0, "net": amount}
 
         with self.atomic_transaction() as conn:
@@ -701,6 +729,15 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                     """,
                     (amount, discord_id, guild_id),
                 )
+                if penalty_debit > 0:
+                    cursor.execute(
+                        """
+                        UPDATE players
+                        SET jopacoin_balance = jopacoin_balance - ?, updated_at = CURRENT_TIMESTAMP
+                        WHERE discord_id = ? AND guild_id = ?
+                        """,
+                        (penalty_debit, discord_id, guild_id),
+                    )
                 return {"gross": amount, "garnished": 0, "net": amount}
 
             # Player has debt - apply garnishment
@@ -716,6 +753,15 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 """,
                 (amount, discord_id, guild_id),
             )
+            if penalty_debit > 0:
+                cursor.execute(
+                    """
+                    UPDATE players
+                    SET jopacoin_balance = jopacoin_balance - ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE discord_id = ? AND guild_id = ?
+                    """,
+                    (penalty_debit, discord_id, guild_id),
+                )
 
             return {"gross": amount, "garnished": garnished, "net": net}
 

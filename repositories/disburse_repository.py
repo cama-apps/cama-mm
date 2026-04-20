@@ -270,6 +270,126 @@ class DisburseRepository(BaseRepository, IDisburseRepository):
                 (normalized_guild,),
             )
 
+    def complete_and_disburse_atomic(
+        self,
+        guild_id: int | None,
+        fund_amount_to_return: int,
+        distributions: list[tuple[int, int]],
+        method: str,
+    ) -> int:
+        """
+        Atomically finalize a disbursement: mark proposal completed, return the
+        reserved fund to the nonprofit pool, deduct the distribution total, credit
+        players, and insert the history row — all inside one ``BEGIN IMMEDIATE``.
+
+        Previously the disburse service called these four writes as separate
+        repo operations; a process crash between any pair would leave the proposal
+        flagged completed while the fund was silently over-restored or no history
+        was recorded. Folding them into a single transaction closes that window.
+
+        Args:
+            guild_id: Guild ID (``None`` normalized to 0).
+            fund_amount_to_return: The reserve to credit back into the nonprofit
+                fund (typically equal to the proposal's ``fund_amount``).
+            distributions: List of ``(discord_id, amount)`` tuples to credit.
+            method: Disbursement method label for the history row.
+
+        Returns:
+            Total amount actually distributed to players (sum of distribution
+            amounts; 0 if ``distributions`` is empty).
+
+        Raises:
+            ValueError: If the resulting nonprofit fund cannot cover the
+                distribution total (should not happen when ``fund_amount_to_return``
+                equals the proposal's snapshot, but guarded defensively).
+        """
+        normalized_guild = self.normalize_guild_id(guild_id)
+        total = sum(amount for _, amount in distributions)
+        now = int(time.time())
+        recipients_json = json.dumps(distributions)
+
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+
+            # 1) Mark the proposal completed so a concurrent/rerun caller can't
+            #    re-execute it — even cross-process.
+            cursor.execute(
+                """
+                UPDATE disburse_proposals
+                SET status = 'completed'
+                WHERE guild_id = ? AND status = 'active'
+                """,
+                (normalized_guild,),
+            )
+
+            # 2) Return the reserve to the nonprofit fund.
+            if fund_amount_to_return:
+                cursor.execute(
+                    """
+                    INSERT INTO nonprofit_fund (guild_id, total_collected, updated_at)
+                    VALUES (?, ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(guild_id) DO UPDATE SET
+                        total_collected = total_collected + excluded.total_collected,
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    (normalized_guild, fund_amount_to_return),
+                )
+
+            # 3) Deduct the distribution total and credit recipients. We verify
+            #    sufficiency against the post-credit pool so a stale snapshot
+            #    can't over-distribute.
+            if total > 0:
+                cursor.execute(
+                    "SELECT total_collected FROM nonprofit_fund WHERE guild_id = ?",
+                    (normalized_guild,),
+                )
+                row = cursor.fetchone()
+                available = row["total_collected"] if row else 0
+                if available < total:
+                    raise ValueError(
+                        f"Insufficient funds in nonprofit. Available: {available}, needed: {total}"
+                    )
+                cursor.execute(
+                    """
+                    UPDATE nonprofit_fund
+                    SET total_collected = total_collected - ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE guild_id = ?
+                    """,
+                    (total, normalized_guild),
+                )
+                cursor.executemany(
+                    """
+                    UPDATE players
+                    SET jopacoin_balance = jopacoin_balance + ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE discord_id = ? AND guild_id = ?
+                    """,
+                    [
+                        (amount, discord_id, normalized_guild)
+                        for discord_id, amount in distributions
+                    ],
+                )
+
+            # 4) Record history in the same txn — no silent "completed but no log"
+            #    state is possible if this fails, because it rolls the whole op back.
+            if distributions:
+                cursor.execute(
+                    """
+                    INSERT INTO disburse_history
+                        (guild_id, disbursed_at, total_amount, method, recipient_count, recipients)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        normalized_guild,
+                        now,
+                        total,
+                        method,
+                        len(distributions),
+                        recipients_json,
+                    ),
+                )
+
+            return total
+
     def reset_proposal(self, guild_id: int | None) -> bool:
         """
         Reset (cancel) the active proposal.
