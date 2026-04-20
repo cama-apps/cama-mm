@@ -2,7 +2,7 @@
 Tests for SteamAPI client.
 """
 
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, patch
 
 import requests
 
@@ -85,10 +85,10 @@ class TestSteamAPIClient:
     @patch("steam_api.SteamAPI._rate_limiter")
     def test_get_match_details_success(self, mock_limiter):
         """Test successful match details fetch."""
-        mock_response = Mock()
+        mock_response = MagicMock(spec=requests.Response)
         mock_response.status_code = 200
-        # parse_json_bounded inspects .headers / .content; set them to real
-        # values so the body-size check doesn't trip on a Mock.
+        # parse_json_bounded reads these; spec=Response can't synthesize usable
+        # defaults so we seed empty/benign values for the body-size check.
         mock_response.headers = {}
         mock_response.content = b"{}"
         mock_response.json.return_value = {
@@ -117,7 +117,7 @@ class TestSteamAPIClient:
     @patch("steam_api.SteamAPI._rate_limiter")
     def test_get_match_details_error(self, mock_limiter):
         """Test match details fetch with error response."""
-        mock_response = Mock()
+        mock_response = MagicMock(spec=requests.Response)
         mock_response.status_code = 200
         mock_response.headers = {}
         mock_response.content = b"{}"
@@ -143,7 +143,7 @@ class TestSteamAPIClient:
     @patch("steam_api.SteamAPI._rate_limiter")
     def test_get_match_history(self, mock_limiter):
         """Test match history fetch."""
-        mock_response = Mock()
+        mock_response = MagicMock(spec=requests.Response)
         mock_response.status_code = 200
         mock_response.headers = {}
         mock_response.content = b"{}"
