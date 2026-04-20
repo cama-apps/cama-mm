@@ -141,17 +141,20 @@ class TestRecentMatchPenaltyInExclusion:
         recent_names = {sample_players[0].name, sample_players[1].name}
         exclusion_counts = {p.name: 0 for p in sample_players}
 
-        # Run multiple times to verify consistency
+        # Run multiple times to verify consistency. shuffle_from_pool now
+        # uses a fresh RNG by default, so pass a seeded one to keep the
+        # determinism this test relies on.
+        import random as _random
+
         results = []
         for _ in range(5):
             team1, team2, excluded = shuffler.shuffle_from_pool(
-                sample_players, exclusion_counts, recent_names
+                sample_players, exclusion_counts, recent_names, rng=_random.Random(0)
             )
             excluded_names = frozenset(p.name for p in excluded)
             results.append(excluded_names)
 
-        # With zero penalty, results should be deterministic (based on other factors)
-        # All results should be the same
+        # With zero penalty and a fixed RNG, results should be deterministic
         assert len(set(results)) == 1
 
 

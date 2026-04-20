@@ -721,7 +721,7 @@ class BalancedShuffler:
         recent_match_names: set[str] | None = None,
         avoids: list | None = None,
         deals: list | None = None,
-
+        rng: random.Random | None = None,
     ) -> tuple[Team, Team, list[Player]]:
         """
         Shuffle players into two balanced teams when there are more than 10 players.
@@ -770,9 +770,11 @@ class BalancedShuffler:
         pool_max_assignments_per_team = 3  # 3x3=9 role combos per matchup (vs 20x20=400)
         log_top_k = 5
 
-        # Deterministic RNG for any sampling/tie-breaking in pool shuffles.
-        # (Avoid flaky tests and hard-to-reproduce behavior.)
-        pool_rng = random.Random(0)
+        # RNG for sampling/tie-breaking in pool shuffles. Callers that need
+        # reproducibility (tests) can pass an explicit rng; otherwise we use a
+        # fresh system-seeded RNG so consecutive shuffles of the same pool can
+        # explore different candidate sets.
+        pool_rng = rng if rng is not None else random.Random()
 
         def _sample_player_combinations(
             n: int, k: int, max_samples: int
