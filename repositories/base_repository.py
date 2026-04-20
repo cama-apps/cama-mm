@@ -5,6 +5,7 @@ Base repository with common database operations.
 import json
 import logging
 import sqlite3
+import threading
 from abc import ABC
 from contextlib import contextmanager
 from typing import Any
@@ -41,8 +42,11 @@ class BaseRepository(ABC):
     Provides common database connection management and utilities.
     """
 
-    # Track DB paths that have already had schema initialization performed
+    # Track DB paths that have already had schema initialization performed.
+    # Guarded by _schema_init_lock so two threads can't race on the same fresh
+    # path and each kick off a concurrent SchemaManager.initialize() run.
     _schema_initialized_paths = set()
+    _schema_init_lock = threading.Lock()
 
     def __init__(self, db_path: str):
         """
@@ -52,10 +56,12 @@ class BaseRepository(ABC):
             db_path: Path to SQLite database file
         """
         self.db_path = db_path
-        # Ensure schema is initialized for this database path (idempotent)
-        if db_path not in type(self)._schema_initialized_paths:
-            Database(db_path)
-            type(self)._schema_initialized_paths.add(db_path)
+        cls = type(self)
+        if db_path not in cls._schema_initialized_paths:
+            with cls._schema_init_lock:
+                if db_path not in cls._schema_initialized_paths:
+                    Database(db_path)
+                    cls._schema_initialized_paths.add(db_path)
 
     @staticmethod
     def normalize_guild_id(guild_id: int | None) -> int:

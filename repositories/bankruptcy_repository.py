@@ -174,10 +174,12 @@ class BankruptcyRepository(BaseRepository, IBankruptcyRepository):
     ) -> int:
         """Add ``delta`` to ``penalty_games_remaining`` (clamped to >= 0).
 
-        Returns the resulting total. Use a negative delta to subtract.
+        Returns the resulting total. Runs under BEGIN IMMEDIATE so the SELECT
+        after UPDATE observes exactly this call's write — a concurrent writer
+        can't interleave and make the returned value misrepresent "my new count".
         """
         normalized_id = self.normalize_guild_id(guild_id)
-        with self.connection() as conn:
+        with self.atomic_transaction() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
@@ -199,10 +201,11 @@ class BankruptcyRepository(BaseRepository, IBankruptcyRepository):
         """
         Decrement penalty games remaining by 1 if > 0.
 
-        Returns the new count.
+        Returns the new count. Runs under BEGIN IMMEDIATE so the SELECT after
+        UPDATE observes exactly this call's decrement.
         """
         normalized_id = self.normalize_guild_id(guild_id)
-        with self.connection() as conn:
+        with self.atomic_transaction() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
@@ -219,6 +222,7 @@ class BankruptcyRepository(BaseRepository, IBankruptcyRepository):
             )
             row = cursor.fetchone()
             return row["penalty_games_remaining"] if row else 0
+
 
     def get_penalty_games(self, discord_id: int, guild_id: int | None = None) -> int:
         """Get the number of penalty games remaining for a player."""

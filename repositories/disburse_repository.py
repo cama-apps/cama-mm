@@ -397,60 +397,37 @@ class DisburseRepository(BaseRepository, IDisburseRepository):
         Returns:
             True if a proposal was reset, False if no active proposal
         """
-        normalized_guild = self.normalize_guild_id(guild_id)
-        with self.connection() as conn:
-            cursor = conn.cursor()
-            # Get proposal_id first
-            cursor.execute(
-                "SELECT proposal_id FROM disburse_proposals WHERE guild_id = ? AND status = 'active'",
-                (normalized_guild,),
-            )
-            row = cursor.fetchone()
-            if not row:
-                return False
-
-            proposal_id = row["proposal_id"]
-
-            # Mark as reset
-            cursor.execute(
-                """
-                UPDATE disburse_proposals
-                SET status = 'reset'
-                WHERE guild_id = ? AND status = 'active'
-                """,
-                (normalized_guild,),
-            )
-
-            # Delete votes for this proposal
-            cursor.execute(
-                "DELETE FROM disburse_votes WHERE guild_id = ? AND proposal_id = ?",
-                (normalized_guild, proposal_id),
-            )
-
-            return True
+        return self._reset_proposal_atomic(guild_id, fund_amount_to_return=0) is not None
 
     def reset_and_return_fund_atomic(
-        self, guild_id: int | None, fund_amount: int
+        self, guild_id: int | None, fund_amount_to_return: int
     ) -> bool:
-        """
-        Atomically reset the active proposal and credit ``fund_amount`` back to
-        the nonprofit fund — all in one ``BEGIN IMMEDIATE``. Mirrors
-        ``complete_and_disburse_atomic`` for the cancel/reset path so a crash
-        between status flip and fund credit cannot strand the reserve.
+        """Atomically mark the active proposal 'reset' and return its reserve.
 
-        Returns True if a proposal was reset, False if none was active.
+        Folds the status flip, the vote cleanup, and the nonprofit-fund credit
+        into one ``BEGIN IMMEDIATE`` so a crash between the two steps can't
+        leak the reserve (old flow: ``reset_proposal`` then
+        ``add_to_nonprofit_fund`` as separate txns).
+        """
+        return self._reset_proposal_atomic(guild_id, fund_amount_to_return) is not None
+
+    def _reset_proposal_atomic(
+        self, guild_id: int | None, fund_amount_to_return: int
+    ) -> int | None:
+        """Shared impl for reset_proposal and reset_and_return_fund_atomic.
+
+        Returns the reset proposal_id on success, None if no active proposal.
         """
         normalized_guild = self.normalize_guild_id(guild_id)
         with self.atomic_transaction() as conn:
             cursor = conn.cursor()
-
             cursor.execute(
                 "SELECT proposal_id FROM disburse_proposals WHERE guild_id = ? AND status = 'active'",
                 (normalized_guild,),
             )
             row = cursor.fetchone()
             if not row:
-                return False
+                return None
 
             proposal_id = row["proposal_id"]
 
@@ -468,7 +445,7 @@ class DisburseRepository(BaseRepository, IDisburseRepository):
                 (normalized_guild, proposal_id),
             )
 
-            if fund_amount:
+            if fund_amount_to_return:
                 cursor.execute(
                     """
                     INSERT INTO nonprofit_fund (guild_id, total_collected, updated_at)
@@ -477,10 +454,10 @@ class DisburseRepository(BaseRepository, IDisburseRepository):
                         total_collected = total_collected + excluded.total_collected,
                         updated_at = CURRENT_TIMESTAMP
                     """,
-                    (normalized_guild, fund_amount),
+                    (normalized_guild, fund_amount_to_return),
                 )
 
-            return True
+            return proposal_id
 
     def record_disbursement(
         self,

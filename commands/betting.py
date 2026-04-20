@@ -3052,14 +3052,24 @@ class BettingCommands(commands.Cog):
             fee = 0
         else:
             fee = max(1, math.ceil(amount * TIP_FEE_RATE))
-        total_cost = amount + fee
+
+        # Plains tithe: extra debit on sender, also to nonprofit. Folded into
+        # tip_atomic so the sender debit and nonprofit credit commit together.
+        tithe = 0
+        if effects and effects.plains_tithe_rate > 0:
+            tithe = max(1, int(amount * effects.plains_tithe_rate))
+
+        total_cost = amount + fee + tithe
 
         # Check sender balance first (most fundamental constraint)
         sender_balance = await asyncio.to_thread(self.player_service.get_balance, interaction.user.id, guild_id)
         if sender_balance < total_cost:
+            cost_breakdown = f"{amount} tip + {fee} fee"
+            if tithe:
+                cost_breakdown += f" + {tithe} tithe"
             await interaction.followup.send(
                 f"Insufficient balance. You need {total_cost} {JOPACOIN_EMOTE} "
-                f"({amount} tip + {fee} fee). You have {sender_balance} {JOPACOIN_EMOTE}.",
+                f"({cost_breakdown}). You have {sender_balance} {JOPACOIN_EMOTE}.",
                 ephemeral=True,
             )
             return
@@ -3075,7 +3085,8 @@ class BettingCommands(commands.Cog):
                 )
                 return
 
-        # Perform atomic transfer (fee goes to nonprofit)
+        # Atomic transfer: sender debit + recipient credit + nonprofit credit
+        # (fee + tithe) all commit together.
         try:
             await asyncio.to_thread(
                 functools.partial(
@@ -3085,27 +3096,19 @@ class BettingCommands(commands.Cog):
                     guild_id=guild_id,
                     amount=amount,
                     fee=fee,
+                    tithe=tithe,
                 )
             )
         except ValueError as exc:
-            # Transfer failed - user error (insufficient funds, not found, etc.)
             await interaction.followup.send(f"{exc}", ephemeral=True)
             return
         except Exception as exc:
-            # Unexpected error during transfer
             logger.error(f"Failed to process tip transfer: {exc}", exc_info=True)
             await interaction.followup.send(
                 "Failed to process tip. Please try again.",
                 ephemeral=True,
             )
             return
-
-        # Add fee to nonprofit fund (non-critical - failure here doesn't affect the tip)
-        if self.loan_service and fee > 0:
-            try:
-                await asyncio.to_thread(self.loan_service.add_to_nonprofit_fund, guild_id, fee)
-            except Exception as nonprofit_exc:
-                logger.warning(f"Failed to add tip fee to nonprofit fund: {nonprofit_exc}")
 
         # Mana post-effects on tip
         mana_notes = []
@@ -3126,16 +3129,7 @@ class BettingCommands(commands.Cog):
                 if siphon:
                     mana_notes.append(f"🌿 Siphon: +{siphon['amount']}")
 
-            # Plains tithe on the tip received
-            if effects.plains_tithe_rate > 0:
-                tithe = max(1, int(amount * effects.plains_tithe_rate))
-                await asyncio.to_thread(self.player_service.adjust_balance, interaction.user.id, guild_id, -tithe)
-                # Add tithe to nonprofit
-                if self.loan_service:
-                    try:
-                        await asyncio.to_thread(self.loan_service.add_to_nonprofit_fund, guild_id, tithe)
-                    except Exception:
-                        pass
+            if tithe:
                 mana_notes.append(f"🌾 Tithe: -{tithe}")
 
         mana_suffix = ""

@@ -20,17 +20,31 @@ class SchemaManager:
         self.use_uri = use_uri
 
     def initialize(self) -> None:
-        """Create base schema and apply migrations."""
+        """Create base schema and apply migrations.
+
+        Each migration runs inside its own BEGIN IMMEDIATE / COMMIT so that a
+        crash mid-migration rolls back both the DDL body and the
+        ``schema_migrations`` insert together. Without this, a mixed DDL + DML
+        migration that failed during the backfill step could leave the schema
+        partially mutated while ``schema_migrations`` either over- or
+        under-represented what was actually applied.
+        """
         logger.info(f"Initializing database schema: {self.db_path}")
-        with self._connect() as conn:
+        conn = self._connect()
+        try:
             cursor = conn.cursor()
             self._create_base_schema(cursor)
             self._create_schema_migrations_table(cursor)
             self._run_migrations(cursor)
-            conn.commit()
+        finally:
+            conn.close()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, uri=self.use_uri)
+        # isolation_level=None → autocommit mode. We manage transactions
+        # explicitly via BEGIN IMMEDIATE/COMMIT around migrations so that DDL
+        # inside a migration body does not implicitly commit the transaction
+        # (Python's default legacy isolation mode commits before DDL).
+        conn = sqlite3.connect(self.db_path, uri=self.use_uri, isolation_level=None)
         conn.row_factory = sqlite3.Row
         if not self.use_uri:  # Skip WAL for in-memory databases
             conn.execute("PRAGMA journal_mode=WAL")
@@ -132,10 +146,11 @@ class SchemaManager:
     # --- Migration helpers ---
 
     def _add_column_if_not_exists(self, cursor, table: str, column: str, column_type: str) -> None:
-        try:
-            cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
-        except sqlite3.OperationalError:
-            pass
+        cursor.execute(f"PRAGMA table_info({table})")
+        existing = {row["name"] for row in cursor.fetchall()}
+        if column in existing:
+            return
+        cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
 
     def _create_schema_migrations_table(self, cursor) -> None:
         cursor.execute(
@@ -166,11 +181,22 @@ class SchemaManager:
             if name in applied:
                 continue
             logger.info(f"Applying migration: {name}")
-            action(cursor)
-            cursor.execute(
-                "INSERT INTO schema_migrations (name) VALUES (?)",
-                (name,),
-            )
+            cursor.execute("BEGIN IMMEDIATE")
+            try:
+                action(cursor)
+                cursor.execute(
+                    "INSERT INTO schema_migrations (name) VALUES (?)",
+                    (name,),
+                )
+                cursor.execute("COMMIT")
+            except Exception:
+                try:
+                    cursor.execute("ROLLBACK")
+                except sqlite3.Error as rollback_exc:
+                    logger.error(
+                        "Rollback failed during migration %s: %s", name, rollback_exc
+                    )
+                raise
 
     def _get_migrations(self):
         return [

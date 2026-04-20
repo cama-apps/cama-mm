@@ -159,13 +159,7 @@ class LoanService(ILoanService):
         Raises:
             ValueError: If insufficient funds
         """
-        if amount <= 0:
-            raise ValueError("Amount must be positive")
-        current = self.get_nonprofit_fund(guild_id)
-        if current < amount:
-            raise ValueError(f"Insufficient funds. Available: {current}, requested: {amount}")
-        # Use negative amount to subtract
-        return self.loan_repo.add_to_nonprofit_fund(guild_id, -amount)
+        return self.loan_repo.deduct_from_nonprofit_fund(guild_id, amount)
 
     def reset_loan_cooldown(self, discord_id: int, guild_id: int | None) -> None:
         """

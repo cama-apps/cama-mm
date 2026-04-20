@@ -883,38 +883,49 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         guild_id: int,
         amount: int,
         fee: int,
+        tithe: int = 0,
     ) -> dict[str, int]:
         """
-        Atomically transfer jopacoin from one player to another with a fee.
+        Atomically transfer jopacoin from sender to recipient, crediting the
+        fee (and any tithe) to the nonprofit fund in the same transaction.
 
-        The fee is sent to the nonprofit fund. Sender pays amount + fee,
-        recipient receives only amount.
+        Sender pays ``amount + fee + tithe``; recipient receives ``amount``;
+        nonprofit fund receives ``fee + tithe``. Folding the nonprofit credit
+        into this txn closes a window where the sender debit committed but a
+        separate post-commit ``add_to_nonprofit_fund`` call silently failed
+        and burned the fee.
 
         Args:
             from_discord_id: Player sending the tip
             to_discord_id: Player receiving the tip
             guild_id: Guild ID
-            amount: Amount to transfer to recipient
-            fee: Fee for nonprofit fund (sender pays this on top of amount)
+            amount: Amount to transfer to recipient (must be positive)
+            fee: Tip fee credited to nonprofit (>= 0)
+            tithe: Extra amount debited from sender and credited to nonprofit
+                (e.g. Plains-mana tithe). Defaults to 0.
 
         Returns:
-            Dict with 'amount', 'fee', 'from_new_balance', 'to_new_balance'
+            Dict with 'amount', 'fee', 'tithe', 'from_new_balance',
+            'to_new_balance', 'nonprofit_credit'.
 
         Raises:
             ValueError if insufficient funds or player not found
         """
         guild_id = self.normalize_guild_id(guild_id)
-        total_cost = amount + fee
 
         if amount <= 0:
             raise ValueError("Amount must be positive.")
         if fee < 0:
             raise ValueError("Fee cannot be negative.")
+        if tithe < 0:
+            raise ValueError("Tithe cannot be negative.")
+
+        nonprofit_credit = fee + tithe
+        total_cost = amount + nonprofit_credit
 
         with self.atomic_transaction() as conn:
             cursor = conn.cursor()
 
-            # Get sender balance
             cursor.execute(
                 "SELECT COALESCE(jopacoin_balance, 0) as balance FROM players WHERE discord_id = ? AND guild_id = ?",
                 (from_discord_id, guild_id),
@@ -926,11 +937,11 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
             from_balance = int(from_row["balance"])
             if from_balance < total_cost:
                 raise ValueError(
-                    f"Insufficient balance. You need {total_cost} (tip: {amount}, fee: {fee}). "
-                    f"You have {from_balance}."
+                    f"Insufficient balance. You need {total_cost} (tip: {amount}, fee: {fee}"
+                    + (f", tithe: {tithe}" if tithe else "")
+                    + f"). You have {from_balance}."
                 )
 
-            # Check recipient exists
             cursor.execute(
                 "SELECT COALESCE(jopacoin_balance, 0) as balance FROM players WHERE discord_id = ? AND guild_id = ?",
                 (to_discord_id, guild_id),
@@ -941,7 +952,6 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
 
             to_balance = int(to_row["balance"])
 
-            # Deduct from sender (amount + fee)
             cursor.execute(
                 """
                 UPDATE players
@@ -951,7 +961,6 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 (total_cost, from_discord_id, guild_id),
             )
 
-            # Add to recipient (only amount, fee is burned)
             cursor.execute(
                 """
                 UPDATE players
@@ -961,7 +970,6 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 (amount, to_discord_id, guild_id),
             )
 
-            # Track lowest balance for sender
             new_from_balance = from_balance - total_cost
             cursor.execute(
                 """
@@ -973,9 +981,23 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 (new_from_balance, from_discord_id, guild_id, new_from_balance),
             )
 
+            if nonprofit_credit > 0:
+                cursor.execute(
+                    """
+                    INSERT INTO nonprofit_fund (guild_id, total_collected, updated_at)
+                    VALUES (?, ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(guild_id) DO UPDATE SET
+                        total_collected = total_collected + excluded.total_collected,
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    (guild_id, nonprofit_credit),
+                )
+
             return {
                 "amount": amount,
                 "fee": fee,
+                "tithe": tithe,
+                "nonprofit_credit": nonprofit_credit,
                 "from_new_balance": new_from_balance,
                 "to_new_balance": to_balance + amount,
             }
@@ -1312,20 +1334,20 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         """Swap win/loss counts for match correction.
 
         Old winners get wins--, losses++. Old losers get losses--, wins++.
+        Runs under BEGIN IMMEDIATE so concurrent readers see a consistent
+        snapshot across both sides of the swap.
         """
         normalized_guild = self.normalize_guild_id(guild_id)
-        with self.connection() as conn:
+        with self.atomic_transaction() as conn:
             cursor = conn.cursor()
-            for pid in old_winner_ids:
-                cursor.execute(
-                    "UPDATE players SET wins = wins - 1, losses = losses + 1 WHERE discord_id = ? AND guild_id = ?",
-                    (pid, normalized_guild),
-                )
-            for pid in old_loser_ids:
-                cursor.execute(
-                    "UPDATE players SET losses = losses - 1, wins = wins + 1 WHERE discord_id = ? AND guild_id = ?",
-                    (pid, normalized_guild),
-                )
+            cursor.executemany(
+                "UPDATE players SET wins = wins - 1, losses = losses + 1 WHERE discord_id = ? AND guild_id = ?",
+                [(pid, normalized_guild) for pid in old_winner_ids],
+            )
+            cursor.executemany(
+                "UPDATE players SET losses = losses - 1, wins = wins + 1 WHERE discord_id = ? AND guild_id = ?",
+                [(pid, normalized_guild) for pid in old_loser_ids],
+            )
 
     def apply_match_outcome(self, winning_ids: list[int], losing_ids: list[int], guild_id: int) -> None:
         """

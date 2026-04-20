@@ -720,6 +720,13 @@ class IPredictionRepository(ABC):
         ...
 
     @abstractmethod
+    def resolve_and_settle_atomic(
+        self, prediction_id: int, outcome: str, resolved_by: int
+    ) -> dict:
+        """Atomically mark resolved and settle bets in one transaction."""
+        ...
+
+    @abstractmethod
     def refund_prediction_bets(self, prediction_id: int) -> dict:
         """Refund all bets for a cancelled prediction. Returns refund summary."""
         ...
@@ -864,6 +871,20 @@ class IRecalibrationRepository(ABC):
     @abstractmethod
     def reset_cooldown(self, discord_id: int, guild_id: int) -> None:
         """Reset recalibration cooldown by setting last_recalibration_at to 0."""
+        ...
+
+    @abstractmethod
+    def execute_recalibration_atomic(
+        self,
+        discord_id: int,
+        guild_id: int,
+        now: int,
+        cooldown_seconds: int,
+        rating: float,
+        new_rd: float,
+        new_volatility: float,
+    ) -> int:
+        """Atomically enforce cooldown, apply Glicko update, bump state."""
         ...
 
 
@@ -1164,6 +1185,13 @@ class ILoanRepository(ABC):
     ) -> dict: ...
 
     @abstractmethod
+    def execute_repayment_atomic(
+        self,
+        discord_id: int,
+        guild_id: int | None,
+    ) -> dict | None: ...
+
+    @abstractmethod
     def disburse_fund_atomic(
         self,
         guild_id: int | None,
@@ -1198,6 +1226,17 @@ class IBankruptcyRepository(ABC):
 
     @abstractmethod
     def decrement_penalty_games(self, discord_id: int, guild_id: int | None = None) -> int: ...
+
+    @abstractmethod
+    def execute_bankruptcy_atomic(
+        self,
+        discord_id: int,
+        guild_id: int | None,
+        now: int,
+        cooldown_seconds: int,
+        fresh_start_balance: int,
+        penalty_games: int,
+    ) -> dict: ...
 
     @abstractmethod
     def get_penalty_games(self, discord_id: int, guild_id: int | None = None) -> int: ...
@@ -1282,6 +1321,13 @@ class IDisburseRepository(ABC):
         ...
 
     @abstractmethod
+    def reset_and_return_fund_atomic(
+        self, guild_id: int | None, fund_amount_to_return: int
+    ) -> bool:
+        """Atomically reset the active proposal and return its reserve."""
+        ...
+
+    @abstractmethod
     def record_disbursement(
         self,
         guild_id: int | None,
@@ -1309,6 +1355,13 @@ class IManaRepository(ABC):
     @abstractmethod
     def set_mana(self, discord_id: int, guild_id: int | None, land: str, assigned_date: str) -> None:
         """Upsert today's mana for the player."""
+        ...
+
+    @abstractmethod
+    def claim_mana_atomic(
+        self, discord_id: int, guild_id: int | None, land: str, assigned_date: str
+    ) -> bool:
+        """Atomically claim today's mana if not yet assigned for assigned_date."""
         ...
 
     @abstractmethod
@@ -1349,6 +1402,13 @@ class IRebellionRepository(ABC):
     @abstractmethod
     def add_defend_vote(self, war_id: int, discord_id: int) -> dict:
         """Add a defend vote (deducts stake from player balance). Returns updated counts."""
+        ...
+
+    @abstractmethod
+    def defend_vote_with_stake_atomic(
+        self, war_id: int, discord_id: int, guild_id: int, stake: int
+    ) -> dict:
+        """Atomically debit stake and record a defend vote."""
         ...
 
     @abstractmethod
@@ -1595,7 +1655,21 @@ class IDigRepository(ABC):
 
     # Atomic Operations
     @abstractmethod
-    def atomic_sabotage(self, actor_id: int, target_id: int, guild_id: int, target_depth_delta: int, actor_jc_cost: int) -> dict: ...
+    def atomic_sabotage(
+        self,
+        actor_id: int,
+        target_id: int,
+        guild_id: int,
+        target_depth_delta: int,
+        actor_jc_cost: int,
+        *,
+        target_jc_credit: int = 0,
+        actor_depth_delta: int = 0,
+        clear_target_trap: bool = False,
+        revenge: dict | None = None,
+        log_detail: dict | None = None,
+        log_action_type: str = "sabotage",
+    ) -> dict: ...
 
     # Engine mode
     @abstractmethod

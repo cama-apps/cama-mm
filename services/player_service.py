@@ -456,25 +456,26 @@ class PlayerService:
         guild_id: int,
         amount: int,
         fee: int,
+        tithe: int = 0,
     ) -> dict[str, int]:
         """
-        Atomically transfer jopacoin from one player to another with a fee.
-
-        The fee is sent to the nonprofit fund. Sender pays amount + fee,
-        recipient receives only amount.
+        Atomically transfer jopacoin from sender to recipient; fee and any
+        tithe are credited to the nonprofit fund in the same transaction.
 
         Args:
             from_discord_id: Player sending the tip
             to_discord_id: Player receiving the tip
             guild_id: Guild ID
             amount: Amount to transfer (recipient receives this)
-            fee: Fee to charge (goes to nonprofit fund)
+            fee: Tip fee (goes to nonprofit fund)
+            tithe: Optional extra amount debited from sender and credited to
+                nonprofit (e.g. Plains-mana tithe).
 
         Returns:
             Dict with transfer details
         """
         return self.player_repo.tip_atomic(
-            from_discord_id, to_discord_id, guild_id, amount, fee
+            from_discord_id, to_discord_id, guild_id, amount, fee, tithe
         )
 
     def pay_debt_atomic(
