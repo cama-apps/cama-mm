@@ -664,47 +664,44 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
         guild_id: int,
         amount: int,
         garnishment_rate: float,
-        penalty_debit: int = 0,
+        bankruptcy_penalty_rate: float = 0.0,
     ) -> dict[str, int]:
         """
-        Add income with garnishment applied if player has debt.
+        Add income with garnishment (and optional bankruptcy penalty) in one atomic op.
 
-        When a player has a negative balance (debt), a portion of their income
-        is garnished to pay down the debt. The full amount is credited to the
-        balance, but the return value indicates how much was "garnished" vs "net".
+        When a player has a negative balance (debt), ``garnishment_rate`` fraction
+        of the gross is "garnished" toward the debt. The full gross is still
+        credited to the balance; the return value reports the split.
+
+        When ``bankruptcy_penalty_rate > 0``, a bankruptcy penalty is debited in
+        the same ``BEGIN IMMEDIATE`` txn. The penalty is computed from the
+        post-garnishment ``net`` (the portion the player "feels"), using the
+        live balance read inside this transaction — so the penalty base cannot
+        drift under a concurrent balance flip.
 
         Args:
             discord_id: Player ID.
             guild_id: Guild ID (normalized to 0 if None).
             amount: Gross income to credit.
             garnishment_rate: Fraction garnished when the player is in debt.
-            penalty_debit: Optional post-credit debit applied inside the same
-                BEGIN IMMEDIATE. Used by the betting service to fuse the
-                garnishment credit with a bankruptcy penalty debit so no
-                reader / crash can observe the mid-state between them.
+            bankruptcy_penalty_rate: When > 0, the repo computes
+                ``penalty = net - int(net * bankruptcy_penalty_rate)`` inside
+                this atomic txn and debits it, fusing garnishment credit and
+                penalty debit. Pass 0.0 (default) to skip the penalty.
 
         Returns:
-            Dict with 'gross', 'garnished', 'net' amounts.
+            Dict with 'gross', 'garnished', 'net', 'bankruptcy_penalty'.
             - gross: The original income amount
             - garnished: Amount that went toward debt repayment
-            - net: Amount the player "feels" they received (gross - garnished)
+            - net: Amount the player "feels" (gross - garnished - bankruptcy_penalty)
+            - bankruptcy_penalty: Amount debited for the bankruptcy penalty (0 if
+              ``bankruptcy_penalty_rate`` was 0 or nothing to penalize)
         """
         guild_id = self.normalize_guild_id(guild_id)
         if amount <= 0:
-            # Still apply penalty_debit inside a single txn to preserve the
-            # "credit and penalty commit together or not at all" contract.
-            if penalty_debit > 0:
-                with self.atomic_transaction() as conn:
-                    cursor = conn.cursor()
-                    cursor.execute(
-                        """
-                        UPDATE players
-                        SET jopacoin_balance = jopacoin_balance - ?, updated_at = CURRENT_TIMESTAMP
-                        WHERE discord_id = ? AND guild_id = ?
-                        """,
-                        (penalty_debit, discord_id, guild_id),
-                    )
-            return {"gross": amount, "garnished": 0, "net": amount}
+            # Nothing to credit => nothing to garnish and no "net" to base a
+            # penalty on. Callers shouldn't be requesting a penalty here.
+            return {"gross": amount, "garnished": 0, "net": amount, "bankruptcy_penalty": 0}
 
         with self.atomic_transaction() as conn:
             cursor = conn.cursor()
@@ -721,30 +718,15 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
 
             if current_balance >= 0:
                 # No debt, full amount credited without garnishment
-                cursor.execute(
-                    """
-                    UPDATE players
-                    SET jopacoin_balance = jopacoin_balance + ?, updated_at = CURRENT_TIMESTAMP
-                    WHERE discord_id = ? AND guild_id = ?
-                    """,
-                    (amount, discord_id, guild_id),
-                )
-                if penalty_debit > 0:
-                    cursor.execute(
-                        """
-                        UPDATE players
-                        SET jopacoin_balance = jopacoin_balance - ?, updated_at = CURRENT_TIMESTAMP
-                        WHERE discord_id = ? AND guild_id = ?
-                        """,
-                        (penalty_debit, discord_id, guild_id),
-                    )
-                return {"gross": amount, "garnished": 0, "net": amount}
+                garnished = 0
+                net_before_penalty = amount
+            else:
+                # Player has debt - apply garnishment
+                garnished = int(amount * garnishment_rate)
+                net_before_penalty = amount - garnished
 
-            # Player has debt - apply garnishment
-            garnished = int(amount * garnishment_rate)
-            net = amount - garnished
-
-            # Full amount goes to balance (paying down debt + net income)
+            # Full gross is credited to the balance (garnishment is a
+            # bookkeeping split, not a separate debit).
             cursor.execute(
                 """
                 UPDATE players
@@ -753,17 +735,30 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                 """,
                 (amount, discord_id, guild_id),
             )
-            if penalty_debit > 0:
+
+            # Bankruptcy penalty (if requested) is computed against the live
+            # post-garnishment net and debited in the same txn.
+            if bankruptcy_penalty_rate > 0 and net_before_penalty > 0:
+                penalty = net_before_penalty - int(net_before_penalty * bankruptcy_penalty_rate)
+            else:
+                penalty = 0
+
+            if penalty > 0:
                 cursor.execute(
                     """
                     UPDATE players
                     SET jopacoin_balance = jopacoin_balance - ?, updated_at = CURRENT_TIMESTAMP
                     WHERE discord_id = ? AND guild_id = ?
                     """,
-                    (penalty_debit, discord_id, guild_id),
+                    (penalty, discord_id, guild_id),
                 )
 
-            return {"gross": amount, "garnished": garnished, "net": net}
+            return {
+                "gross": amount,
+                "garnished": garnished,
+                "net": net_before_penalty - penalty,
+                "bankruptcy_penalty": penalty,
+            }
 
     def pay_debt_atomic(
         self, from_discord_id: int, to_discord_id: int, guild_id: int, amount: int

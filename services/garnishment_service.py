@@ -24,7 +24,7 @@ class GarnishmentService:
         discord_id: int,
         amount: int,
         guild_id: int | None = None,
-        penalty_debit: int = 0,
+        bankruptcy_penalty_rate: float = 0.0,
     ) -> dict[str, int]:
         """
         Add income to a player, applying garnishment if they have debt.
@@ -37,24 +37,28 @@ class GarnishmentService:
             discord_id: Player's Discord ID
             amount: Income amount (bet winnings, participation reward, etc.)
             guild_id: Guild ID for multi-guild support
-            penalty_debit: Optional post-credit debit applied in the same
-                transaction (e.g. bankruptcy penalty). Forwarded unchanged to
-                ``PlayerRepository.add_balance_with_garnishment`` so callers can
-                fuse garnishment + penalty into a single atomic balance mutation.
+            bankruptcy_penalty_rate: When > 0, the repo fuses a bankruptcy
+                penalty debit into the same atomic txn, computing the penalty
+                from the live post-garnishment net. Pass 0.0 (default) to
+                skip. Callers must decide whether the player is *eligible*
+                for a penalty (e.g. ``penalty_games > 0``) and pass the rate
+                only when they are — this service is policy-agnostic about
+                eligibility and just forwards the coefficient.
 
         Returns:
             Dict with:
             - gross: Original income amount
             - garnished: Amount conceptually going toward debt repayment
-            - net: Amount the player "feels" they received
+            - net: Amount the player "feels" (gross - garnished - penalty)
+            - bankruptcy_penalty: Amount debited for the penalty (0 if none)
         """
-        if amount <= 0 and penalty_debit <= 0:
-            return {"gross": amount, "garnished": 0, "net": amount}
+        if amount <= 0:
+            return {"gross": amount, "garnished": 0, "net": amount, "bankruptcy_penalty": 0}
 
         return self.player_repo.add_balance_with_garnishment(
             discord_id,
             guild_id,
             amount,
             self.garnishment_rate,
-            penalty_debit=penalty_debit,
+            bankruptcy_penalty_rate=bankruptcy_penalty_rate,
         )

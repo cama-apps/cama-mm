@@ -12,6 +12,7 @@ Covered:
 - Fix 4: BettingService._award_with_penalties ordering (garnishment before penalty)
 - Fix 5: BettingService.create_auto_blind_bets() balance TOCTOU
 - Fix 6: RecalibrationService guild_id normalization parity
+- Fix 7: _award_with_penalties penalty-base peek vs. atomic drift
 """
 
 from __future__ import annotations
@@ -753,4 +754,251 @@ def test_fix6_reset_cooldown_normalizes_none_guild_to_zero(
     redo = service.recalibrate(pid, guild_id=None)
     assert redo["success"] is True, (
         f"After reset_cooldown(None), a second recalibrate(None) must succeed; got {redo}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Fix 7: penalty-base peek-vs-atomic drift
+# ---------------------------------------------------------------------------
+
+
+def test_fix7_penalty_base_matches_live_garnishment_under_balance_flip(
+    bet_repo, player_repo, bankruptcy_repo
+):
+    """
+    Before Fix 7, _award_with_penalties pre-peeked the balance to estimate the
+    penalty base (post-garnishment net). If a concurrent writer flipped the
+    balance between that peek and the atomic add_balance_with_garnishment,
+    the penalty amount debited could desync from the garnishment that
+    actually happened:
+
+      - Peek sees debt -> estimated_net = gross - garn
+        Atomic sees no debt -> actual garnished = 0, actual net = gross
+        Penalty was debited based on the SMALLER estimated_net -> under-penalty.
+
+    After Fix 7, the repo computes garnishment and the penalty inside the
+    same BEGIN IMMEDIATE, so the penalty base is ALWAYS the live post-
+    garnishment net. Invariant asserted here:
+
+        bankruptcy_penalty == net_after_garnishment - int(net_after_garnishment * penalty_rate)
+
+    where net_after_garnishment = gross - garnished, both from the SAME
+    returned result dict. No matter how the balance flips concurrently,
+    this relation cannot be violated.
+    """
+    garnishment_service = GarnishmentService(player_repo, garnishment_rate=0.5)
+    penalty_rate = 0.5
+    bankruptcy_service = BankruptcyService(
+        bankruptcy_repo=bankruptcy_repo,
+        player_repo=player_repo,
+        cooldown_seconds=604800,
+        penalty_games=100,  # ample so the penalty stays active across the test
+        penalty_rate=penalty_rate,
+    )
+    service = BettingService(
+        bet_repo=bet_repo,
+        player_repo=player_repo,
+        garnishment_service=garnishment_service,
+        bankruptcy_service=bankruptcy_service,
+    )
+
+    # Two bankrupt players: start one in debt, one positive. Thread B will
+    # concurrently flip their balances (debt -> positive and vice versa).
+    pid_debt_start = 71001
+    pid_pos_start = 71002
+    player_repo.add(
+        discord_id=pid_debt_start,
+        discord_username="DebtStart",
+        guild_id=TEST_GUILD_ID,
+        initial_mmr=1500,
+    )
+    player_repo.add(
+        discord_id=pid_pos_start,
+        discord_username="PosStart",
+        guild_id=TEST_GUILD_ID,
+        initial_mmr=1500,
+    )
+    player_repo.update_balance(pid_debt_start, TEST_GUILD_ID, -100)
+    player_repo.update_balance(pid_pos_start, TEST_GUILD_ID, 100)
+
+    for pid in (pid_debt_start, pid_pos_start):
+        bankruptcy_repo.upsert_state(
+            discord_id=pid,
+            guild_id=TEST_GUILD_ID,
+            last_bankruptcy_at=int(time.time()),
+            penalty_games_remaining=50,
+        )
+
+    # Many awards over a large gross so integer rounding bites: gross=10,
+    # garn_rate=0.5 -> garnished is either 0 or 5, net is either 10 or 5,
+    # penalty is either 5 or 3. The award thread repeatedly hits both
+    # players; the flip thread toggles balances between runs.
+    gross = 10
+    num_awards = 40
+    all_results: list[tuple[int, dict[str, int]]] = []
+    results_lock = threading.Lock()
+    stop_flipper = threading.Event()
+
+    def award_loop() -> None:
+        try:
+            for _ in range(num_awards):
+                res = service._award_with_penalties(
+                    [pid_debt_start, pid_pos_start], gross, guild_id=TEST_GUILD_ID
+                )
+                with results_lock:
+                    for pid, info in res.items():
+                        all_results.append((pid, info))
+        finally:
+            stop_flipper.set()
+
+    def flip_loop() -> None:
+        # Keep pushing balances back and forth so the award loop observes
+        # both sides of the in-debt boundary at various points.
+        while not stop_flipper.is_set():
+            # Force each player deep into debt, then back out.
+            player_repo.update_balance(pid_debt_start, TEST_GUILD_ID, -500)
+            player_repo.update_balance(pid_pos_start, TEST_GUILD_ID, 500)
+            player_repo.update_balance(pid_debt_start, TEST_GUILD_ID, 500)
+            player_repo.update_balance(pid_pos_start, TEST_GUILD_ID, -500)
+
+    random.seed(0xDEADBEEF)
+
+    t_award = threading.Thread(target=award_loop)
+    t_flip = threading.Thread(target=flip_loop)
+    t_award.start()
+    t_flip.start()
+    t_award.join(timeout=15)
+    t_flip.join(timeout=5)
+    assert not t_award.is_alive(), "Award loop hung"
+    assert not t_flip.is_alive(), "Flip loop hung"
+
+    # The invariant we're defending: each returned result dict is internally
+    # consistent. garnished is a function of the balance at atomic time, and
+    # bankruptcy_penalty is a function of (gross - garnished) via penalty_rate.
+    # Both come from the SAME atomic txn in the repo, so no concurrent balance
+    # flip can drift them.
+    assert all_results, "Award loop produced no results"
+    for pid, info in all_results:
+        assert info["gross"] == gross
+        # garnished must be either 0 (no debt at atomic time) or int(gross*rate).
+        assert info["garnished"] in (0, int(gross * 0.5)), (
+            f"Unexpected garnished for {pid}: {info}"
+        )
+        net_after_garnishment = info["gross"] - info["garnished"]
+        expected_penalty = net_after_garnishment - int(net_after_garnishment * penalty_rate)
+        assert info["bankruptcy_penalty"] == expected_penalty, (
+            f"Penalty base drifted for {pid}: gross={info['gross']}, "
+            f"garnished={info['garnished']}, net_after_garn={net_after_garnishment}, "
+            f"expected_penalty={expected_penalty}, got={info['bankruptcy_penalty']}. "
+            "Penalty was NOT computed against the live post-garnishment net — "
+            "the peek-before-atomic race has re-opened."
+        )
+        # And reported net === gross - garnished - penalty (no post-hoc drift).
+        assert info["net"] == info["gross"] - info["garnished"] - info["bankruptcy_penalty"], (
+            f"Reported net is inconsistent for {pid}: {info}"
+        )
+
+
+def test_fix7_penalty_base_cannot_drift_when_balance_flips_debt_to_positive(
+    bet_repo, player_repo, bankruptcy_repo, monkeypatch
+):
+    """
+    Deterministic repro of the peek-vs-atomic race that Fix 7 closed.
+
+    The pre-fix service called ``player_repo.get_balance`` once BEFORE the
+    atomic add_balance_with_garnishment to decide whether to use
+    ``reward_amount`` or ``reward_amount - garn`` as the penalty base. If the
+    balance flipped from debt -> positive between that peek and the atomic
+    op, the atomic op would see no debt and apply no garnishment, but the
+    penalty had already been frozen at the smaller, debt-era estimated_net.
+
+    We simulate the flip deterministically: monkeypatch ``get_balance`` so
+    the service's peek sees a negative balance, and leave the actual DB
+    balance positive so the atomic op inside the repo sees >= 0 and skips
+    garnishment. Under the fixed code, the penalty is computed INSIDE the
+    atomic from the actual (non-garnished) net, so the result dict reports:
+
+        gross=10, garnished=0, net=5, bankruptcy_penalty=5
+
+    Under the buggy pre-fix code, the penalty would have been frozen at
+    ``reward_amount * (1 - penalty_rate) - int(... * penalty_rate)`` = 3,
+    and the DB delta would be +10 - 3 = +7 instead of the correct +5.
+    """
+    garnishment_service = GarnishmentService(player_repo, garnishment_rate=0.5)
+    bankruptcy_service = BankruptcyService(
+        bankruptcy_repo=bankruptcy_repo,
+        player_repo=player_repo,
+        cooldown_seconds=604800,
+        penalty_games=5,
+        penalty_rate=0.5,
+    )
+    service = BettingService(
+        bet_repo=bet_repo,
+        player_repo=player_repo,
+        garnishment_service=garnishment_service,
+        bankruptcy_service=bankruptcy_service,
+    )
+
+    pid = 72001
+    player_repo.add(
+        discord_id=pid,
+        discord_username="FlipMid",
+        guild_id=TEST_GUILD_ID,
+        initial_mmr=1500,
+    )
+    # Actual DB balance: positive. The atomic op inside the repo reads this
+    # and will see >= 0, so it must skip garnishment.
+    player_repo.update_balance(pid, TEST_GUILD_ID, 50)
+    bankruptcy_repo.upsert_state(
+        discord_id=pid,
+        guild_id=TEST_GUILD_ID,
+        last_bankruptcy_at=int(time.time()),
+        penalty_games_remaining=3,
+    )
+
+    # Simulate the race window: any peek from the service layer before the
+    # atomic op sees a negative balance. The pre-fix code called
+    # ``self.player_repo.get_balance(pid, guild_id)`` for exactly that peek.
+    # The post-fix service makes no such peek (it only asks the bankruptcy
+    # service whether a penalty applies, which does not depend on balance),
+    # so this monkeypatch is a no-op for the new code but would have tripped
+    # the old code into computing a smaller penalty base.
+    original_get_balance = player_repo.get_balance
+
+    def poisoned_get_balance(discord_id: int, guild_id=None) -> int:
+        if discord_id == pid:
+            return -999  # pretend the player is deep in debt
+        return original_get_balance(discord_id, guild_id)
+
+    monkeypatch.setattr(player_repo, "get_balance", poisoned_get_balance)
+
+    before = original_get_balance(pid, TEST_GUILD_ID)
+    assert before == 50, "sanity: real DB balance should be 50"
+
+    results = service._award_with_penalties([pid], reward_amount=10, guild_id=TEST_GUILD_ID)
+
+    # Restore for the post-check.
+    monkeypatch.setattr(player_repo, "get_balance", original_get_balance)
+    after = player_repo.get_balance(pid, TEST_GUILD_ID)
+
+    info = results[pid]
+    # The atomic op read the TRUE balance (50, no debt) and skipped
+    # garnishment, so the penalty must be computed against gross=10, not
+    # against a stale "estimated_net" of 5 derived from the poisoned peek.
+    assert info["gross"] == 10
+    assert info["garnished"] == 0, (
+        f"Garnishment must be 0 (atomic sees real balance=50), got {info}. "
+        "If this reads 5, the repo is trusting a stale service-side peek."
+    )
+    assert info["bankruptcy_penalty"] == 5, (
+        f"Penalty must be int(net_after_garn * (1 - rate)) = int(10 * 0.5) = 5, "
+        f"got {info}. If this reads 3, the pre-fix peek-and-estimate path is "
+        "back: penalty is being frozen at an estimated_net that doesn't match "
+        "the atomic op's live garnishment."
+    )
+    assert info["net"] == 5, f"Reported net should be gross - penalty = 5, got {info}"
+    # And the DB delta must reconcile.
+    assert after - before == 5, (
+        f"Balance delta must be +5 (gross 10 - penalty 5); got {after - before}. "
+        f"before={before}, after={after}, info={info}"
     )

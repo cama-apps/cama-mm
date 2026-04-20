@@ -280,6 +280,10 @@ class BettingService:
         first would shrink the pool garnishment sees and effectively over-take
         from debt repayment.
 
+        Both the garnishment-conditional balance read and the bankruptcy-penalty
+        debit now happen inside a single ``BEGIN IMMEDIATE`` in the repo, so a
+        concurrent balance flip between steps can't drift the penalty base.
+
         Shared logic for win bonus, exclusion bonus, and half-exclusion bonus.
 
         Returns dict of {discord_id: {gross, garnished, net, bankruptcy_penalty}}.
@@ -289,69 +293,47 @@ class BettingService:
             return results
 
         for pid in player_ids:
-            bankruptcy_penalty = 0
-
-            # Pre-compute the bankruptcy penalty if applicable so we can fuse
-            # the garnishment credit and the penalty debit into a single
-            # BEGIN IMMEDIATE txn below. Previously the penalty was applied via
-            # a second add_balance() after the garnishment txn already committed,
-            # so a reader or crash could observe the mid-state.
-            estimated_net = reward_amount
-            if self.bankruptcy_service and self.garnishment_service and reward_amount > 0:
-                # Garnishment only applies when the player is in debt. Peek the
-                # balance to estimate the net base the penalty would operate on;
-                # the atomic op re-reads balance and is the source of truth for
-                # garnished/net. If the balance flips between the peek and the
-                # atomic read, the credit/debit still commit together — only
-                # the penalty base may drift by the garnishment rounding, which
-                # is bounded and strictly smaller than the race it closes.
-                peek_balance = self.player_repo.get_balance(pid, guild_id)
-                if peek_balance < 0:
-                    garn_rate = self.garnishment_service.garnishment_rate
-                    estimated_net = reward_amount - int(reward_amount * garn_rate)
-
-            if self.bankruptcy_service:
-                penalty_result = self.bankruptcy_service.apply_penalty_to_winnings(
-                    pid, estimated_net, guild_id
+            # Decide (in service layer, where bankruptcy policy lives) whether
+            # this player is currently under bankruptcy penalty. We only pass a
+            # nonzero rate down to the repo when they are — keeping the repo
+            # layer agnostic to bankruptcy state-tracking. The rate is the
+            # single policy coefficient; the repo applies it to the live
+            # post-garnishment net inside the atomic txn.
+            bankruptcy_penalty_rate = 0.0
+            if self.bankruptcy_service and reward_amount > 0:
+                penalty_info = self.bankruptcy_service.apply_penalty_to_winnings(
+                    pid, reward_amount, guild_id
                 )
-                bankruptcy_penalty = penalty_result["penalty_applied"]
+                if penalty_info["penalty_applied"] > 0:
+                    bankruptcy_penalty_rate = self.bankruptcy_service.penalty_rate
 
             # Apply garnishment + bankruptcy penalty in one atomic balance
-            # mutation. The repo credits the gross, computes garnishment from
-            # the live balance, then debits `penalty_debit` — all inside one
-            # BEGIN IMMEDIATE transaction.
+            # mutation. The repo credits gross, reads balance to decide
+            # garnishment, then (if bankruptcy_penalty_rate > 0) computes and
+            # debits the penalty against the live post-garnishment net — all
+            # inside one BEGIN IMMEDIATE, so no intermediate state is visible
+            # and the penalty base cannot drift from a concurrent balance flip.
             if self.garnishment_service:
                 garn = self.garnishment_service.add_income(
-                    pid, reward_amount, guild_id=guild_id, penalty_debit=bankruptcy_penalty
+                    pid,
+                    reward_amount,
+                    guild_id=guild_id,
+                    bankruptcy_penalty_rate=bankruptcy_penalty_rate,
                 )
-                gross = garn["gross"]
-                garnished = garn["garnished"]
-                net = garn["net"]
             else:
-                # No garnishment service: entire reward is net. Fuse credit +
-                # penalty into a single atomic via the repo helper so the two
-                # balance mutations still commit together.
-                self.player_repo.add_balance_with_garnishment(
+                garn = self.player_repo.add_balance_with_garnishment(
                     pid,
                     guild_id,
                     reward_amount,
                     garnishment_rate=0.0,
-                    penalty_debit=bankruptcy_penalty,
+                    bankruptcy_penalty_rate=bankruptcy_penalty_rate,
                 )
-                gross = reward_amount
-                garnished = 0
-                net = reward_amount
-
-            # Reported net is what the player "feels" they received: the
-            # garnishment's net minus the bankruptcy penalty.
-            if bankruptcy_penalty > 0:
-                net = net - bankruptcy_penalty
 
             results[pid] = {
-                "gross": gross,
-                "garnished": garnished,
-                "net": net,
-                "bankruptcy_penalty": bankruptcy_penalty,
+                "gross": garn["gross"],
+                "garnished": garn["garnished"],
+                "net": garn["net"],
+                "bankruptcy_penalty": garn["bankruptcy_penalty"],
             }
 
         return results
