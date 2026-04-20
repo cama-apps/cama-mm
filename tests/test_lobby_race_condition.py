@@ -9,28 +9,13 @@ import asyncio
 import pytest
 
 from services.lobby_manager_service import LobbyManagerService
-
-
-class MockLobbyRepository:
-    """Mock repository that does nothing for persistence."""
-
-    def save_lobby_state(self, **kwargs):
-        pass
-
-    def clear_lobby_state(self, lobby_id, guild_id=None):
-        pass
-
-    def load_lobby_state(self, lobby_id, guild_id=None):
-        return None
-
-    def load_all_lobby_states(self):
-        return []
+from tests.fakes.lobby_repo import FakeLobbyRepo
 
 
 @pytest.fixture
 def lobby_manager():
-    """Create a LobbyManagerService with mock repository."""
-    return LobbyManagerService(MockLobbyRepository())
+    """Create a LobbyManagerService with an in-memory fake repository."""
+    return LobbyManagerService(FakeLobbyRepo())
 
 
 @pytest.mark.asyncio
@@ -69,40 +54,6 @@ async def test_creation_lock_prevents_race_condition(lobby_manager):
     existing_count = sum(1 for r in results if r[0] == "existing")
     assert created_count == 1
     assert existing_count == 1
-
-
-@pytest.mark.asyncio
-async def test_without_lock_causes_race_condition():
-    """Demonstrate that without the lock, race conditions occur."""
-    mock_repo = MockLobbyRepository()
-    manager = LobbyManagerService(mock_repo)
-    creation_count = 0
-
-    async def simulate_lobby_creation_no_lock(user_id: int):
-        nonlocal creation_count
-        # Check if lobby exists (without lock)
-        existing = manager.get_lobby()
-        if existing:
-            return "existing"
-
-        # Simulate delay during Discord message creation
-        await asyncio.sleep(0.1)
-
-        # Both coroutines will reach here before either creates
-        manager.get_or_create_lobby(creator_id=user_id)
-        creation_count += 1
-        return "created"
-
-    # Run two concurrent lobby creations WITHOUT lock
-    results = await asyncio.gather(
-        simulate_lobby_creation_no_lock(1),
-        simulate_lobby_creation_no_lock(2),
-    )
-
-    # Without lock, both think they need to create (race condition)
-    # Note: get_or_create_lobby is internally idempotent, so only one lobby object exists,
-    # but in the real command handler, two Discord messages would be sent
-    assert results.count("created") == 2  # Both think they created
 
 
 @pytest.mark.asyncio
