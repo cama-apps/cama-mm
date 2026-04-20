@@ -8,12 +8,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
-@dataclass
+@dataclass(frozen=True)
 class ManaEffects:
     """Container for all mana color effects.
 
     Returned by the effects service to inform economy commands
     how a player's active mana color modifies their behavior.
+
+    This is a pure value object — instances are immutable. Construct a new
+    instance (e.g. via ``ManaEffects.for_color`` or ``dataclasses.replace``)
+    rather than mutating attributes in place.
     """
 
     # Identity
@@ -65,35 +69,54 @@ class ManaEffects:
         if color is None:
             return cls()
 
-        base = cls(color=color, land=land)
-
         if color == "Red":
-            base.red_10x_leverage = True
-            base.red_bomb_pot_ante = 30
-            base.red_roll_cost = 2
-            base.red_roll_jackpot = 40
+            return cls(
+                color=color,
+                land=land,
+                red_10x_leverage=True,
+                red_bomb_pot_ante=30,
+                red_roll_cost=2,
+                red_roll_jackpot=40,
+            )
 
-        elif color == "Blue":
-            base.blue_gamba_scrying = True
-            base.blue_gamba_reduction = 0.25
-            base.blue_cashback_rate = 0.05
-            base.blue_tax_rate = 0.05
+        if color == "Blue":
+            return cls(
+                color=color,
+                land=land,
+                blue_gamba_scrying=True,
+                blue_gamba_reduction=0.25,
+                blue_cashback_rate=0.05,
+                blue_tax_rate=0.05,
+            )
 
-        elif color == "Green":
-            base.green_steady_bonus = 1
-            base.green_gain_cap = 50
-            base.green_bankrupt_penalty = -50
-            base.green_max_wheel_win = 60
+        if color == "Green":
+            return cls(
+                color=color,
+                land=land,
+                green_steady_bonus=1,
+                green_gain_cap=50,
+                green_bankrupt_penalty=-50,
+                green_max_wheel_win=60,
+            )
 
-        elif color == "White":
-            base.plains_guardian_aura = True
-            base.plains_max_wheel_win = 50
-            base.plains_tip_fee_rate = 0.0
-            base.plains_tithe_rate = 0.05
+        if color == "White":
+            return cls(
+                color=color,
+                land=land,
+                plains_guardian_aura=True,
+                plains_max_wheel_win=50,
+                plains_tip_fee_rate=0.0,
+                plains_tithe_rate=0.05,
+            )
 
-        elif color == "Black":
-            base.swamp_siphon = True
-            base.swamp_self_tax = 2
-            base.swamp_bankruptcy_games = 3
+        if color == "Black":
+            return cls(
+                color=color,
+                land=land,
+                swamp_siphon=True,
+                swamp_self_tax=2,
+                swamp_bankruptcy_games=3,
+            )
 
-        return base
+        # Unknown color: return defaults with only identity set
+        return cls(color=color, land=land)

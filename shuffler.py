@@ -579,6 +579,8 @@ class BalancedShuffler:
         if best_team1 is None:
             best_team1 = Team(team1_players)
             best_team2 = Team(team2_players)
+            best_team1.ensure_role_assignments()
+            best_team2.ensure_role_assignments()
             best_score = float("inf")
 
         return best_team1, best_team2, best_score
@@ -1198,6 +1200,8 @@ class BalancedShuffler:
 
             team1 = Team(team1_players)
             team2 = Team(team2_players)
+            team1.ensure_role_assignments()
+            team2.ensure_role_assignments()
 
             team1_value = team1.get_team_value(
                 self.use_glicko, self.off_role_multiplier, use_openskill=self.use_openskill, use_jopacoin=self.use_jopacoin

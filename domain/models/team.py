@@ -59,6 +59,31 @@ class Team:
         self.players = list(players)
         self.role_assignments = list(role_assignments) if role_assignments else None
 
+    def ensure_role_assignments(self) -> list[str]:
+        """
+        Ensure ``self.role_assignments`` is populated, computing it if missing.
+
+        Call this explicitly before any method that relies on role assignments
+        (``get_team_value``, ``get_off_role_count``, ``get_player_by_role``).
+        Those methods no longer auto-assign silently — callers must opt in.
+
+        Returns:
+            The role assignments list (same reference as ``self.role_assignments``).
+        """
+        if not self.role_assignments:
+            self.role_assignments = self._assign_roles_optimally()
+        return self.role_assignments
+
+    def _require_role_assignments(self, method_name: str) -> list[str]:
+        """Internal: raise if role assignments are missing."""
+        if not self.role_assignments:
+            raise ValueError(
+                f"Team.{method_name}() requires role_assignments to be set. "
+                "Pass role_assignments to Team(...) or call "
+                "team.ensure_role_assignments() explicitly before this call."
+            )
+        return self.role_assignments
+
     def get_team_value(
         self,
         use_glicko: bool = True,
@@ -77,12 +102,16 @@ class Team:
 
         Returns:
             Sum of all player values adjusted for role assignments
+
+        Raises:
+            ValueError: If ``role_assignments`` has not been set. Callers must
+                pass them to ``Team(...)`` or call ``ensure_role_assignments()``
+                first; auto-assignment as a silent side effect is no longer done.
         """
-        if not self.role_assignments:
-            self.role_assignments = self._assign_roles_optimally()
+        role_assignments = self._require_role_assignments("get_team_value")
 
         total_value = 0
-        for player, assigned_role in zip(self.players, self.role_assignments):
+        for player, assigned_role in zip(self.players, role_assignments):
             base_value = player.get_value(use_glicko, use_openskill=use_openskill, use_jopacoin=use_jopacoin)
 
             if player.preferred_roles and assigned_role in player.preferred_roles:
@@ -93,12 +122,16 @@ class Team:
         return total_value
 
     def get_off_role_count(self) -> int:
-        """Count how many players are on off-role."""
-        if not self.role_assignments:
-            self.role_assignments = self._assign_roles_optimally()
+        """Count how many players are on off-role.
+
+        Raises:
+            ValueError: If ``role_assignments`` has not been set (see
+                ``get_team_value``).
+        """
+        role_assignments = self._require_role_assignments("get_off_role_count")
 
         off_role_count = 0
-        for player, assigned_role in zip(self.players, self.role_assignments):
+        for player, assigned_role in zip(self.players, role_assignments):
             if not player.preferred_roles or assigned_role not in player.preferred_roles:
                 off_role_count += 1
 
@@ -209,12 +242,15 @@ class Team:
 
         Returns:
             Tuple of (player, effective_value)
+
+        Raises:
+            ValueError: If ``role_assignments`` has not been set (see
+                ``get_team_value``).
         """
-        if not self.role_assignments:
-            self.role_assignments = self._assign_roles_optimally()
+        role_assignments = self._require_role_assignments("get_player_by_role")
 
         # Find the player assigned to this role
-        for player, assigned_role in zip(self.players, self.role_assignments):
+        for player, assigned_role in zip(self.players, role_assignments):
             if assigned_role == role:
                 base_value = player.get_value(use_glicko, use_openskill=use_openskill, use_jopacoin=use_jopacoin)
                 if player.preferred_roles and role in player.preferred_roles:

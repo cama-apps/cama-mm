@@ -28,6 +28,37 @@ class TestPlayer:
         player = Player(name="TestPlayer")
         assert player.get_value() == 0
 
+    def test_glicko_and_openskill_values_agree_at_same_mmr(self):
+        """A Glicko-rated player and an OpenSkill-rated player seeded from the
+        same MMR should produce comparable ``get_value`` outputs, proving the
+        two rating systems share a common 0-3000 display scale.
+        """
+        from openskill_rating_system import CamaOpenSkillSystem
+        from rating_system import CamaRatingSystem
+
+        glicko = CamaRatingSystem()
+        os_system = CamaOpenSkillSystem()
+
+        for mmr in (0, 3000, 6000, 9000, 12000):
+            glicko_player = Player(
+                name=f"G{mmr}",
+                mmr=mmr,
+                glicko_rating=glicko.mmr_to_rating(mmr),
+            )
+            os_player = Player(
+                name=f"O{mmr}",
+                mmr=mmr,
+                os_mu=os_system.mmr_to_os_mu(mmr),
+            )
+
+            glicko_value = glicko_player.get_value(use_glicko=True)
+            os_value = os_player.get_value(use_openskill=True)
+
+            assert abs(glicko_value - os_value) <= 1.0, (
+                f"Glicko and OpenSkill values diverge at MMR {mmr}: "
+                f"glicko={glicko_value}, openskill={os_value}"
+            )
+
 
 class TestTeam:
     """Test Team class functionality."""
@@ -43,6 +74,45 @@ class TestTeam:
         players = [Player(name=f"Player{i}", mmr=1500) for i in range(4)]
         with pytest.raises(ValueError):
             Team(players)
+
+    def test_get_team_value_requires_role_assignments(self):
+        """get_team_value must raise when role_assignments were never set."""
+        players = [
+            Player(name="P1", mmr=2000, preferred_roles=["1"]),
+            Player(name="P2", mmr=1800, preferred_roles=["2"]),
+            Player(name="P3", mmr=1600, preferred_roles=["3"]),
+            Player(name="P4", mmr=1400, preferred_roles=["4"]),
+            Player(name="P5", mmr=1200, preferred_roles=["5"]),
+        ]
+        team = Team(players)
+        with pytest.raises(ValueError, match="role_assignments"):
+            team.get_team_value(use_glicko=False)
+        with pytest.raises(ValueError, match="role_assignments"):
+            team.get_off_role_count()
+        with pytest.raises(ValueError, match="role_assignments"):
+            team.get_player_by_role("1", use_glicko=False)
+
+    def test_ensure_role_assignments_populates_and_is_idempotent(self):
+        """ensure_role_assignments fills in optimal assignments the first time
+        and is a no-op afterwards.
+        """
+        players = [
+            Player(name="P1", mmr=2000, preferred_roles=["1"]),
+            Player(name="P2", mmr=1800, preferred_roles=["2"]),
+            Player(name="P3", mmr=1600, preferred_roles=["3"]),
+            Player(name="P4", mmr=1400, preferred_roles=["4"]),
+            Player(name="P5", mmr=1200, preferred_roles=["5"]),
+        ]
+        team = Team(players)
+        first = team.ensure_role_assignments()
+        assert first == team.role_assignments
+        assert set(first) == {"1", "2", "3", "4", "5"}
+
+        # Idempotent: second call should return the same reference without
+        # recomputing (role_assignments is already set).
+        team.role_assignments = ["5", "4", "3", "2", "1"]
+        again = team.ensure_role_assignments()
+        assert again == ["5", "4", "3", "2", "1"]
 
     def test_team_value_all_on_role(self):
         """Test team value when all players are on their preferred roles."""
@@ -111,7 +181,7 @@ class TestTeam:
         ]
         team = Team(players)
         # Should assign roles optimally
-        assignments = team._assign_roles_optimally()
+        assignments = team.ensure_role_assignments()
         assert len(assignments) == 5
         assert set(assignments) == {"1", "2", "3", "4", "5"}
         # Check that off-role count is minimized

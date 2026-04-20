@@ -291,7 +291,7 @@ class TestEqualWeightUpdate:
 
 
 class TestDisplayScaling:
-    """Test that mu_to_display correctly maps to 0-3000 range."""
+    """Test that mu_to_display correctly maps to 0-3000 range matching Glicko-2."""
 
     def test_mu_to_display_floor(self):
         """MIN_MU should map to display 0."""
@@ -299,14 +299,33 @@ class TestDisplayScaling:
         display = system.mu_to_display(system.MIN_MU)
         assert display == 0, f"MIN_MU ({system.MIN_MU}) should map to display 0, got {display}"
 
-    def test_mu_to_display_ceiling(self):
-        """mu=65 should map to display 3000."""
+    def test_mu_to_display_ceiling_at_max_mmr(self):
+        """mu=85 (the mu produced by MMR_MAX=12000) should map to display 3000."""
         system = CamaOpenSkillSystem()
-        display = system.mu_to_display(65.0)
-        assert display == 3000, f"mu=65 should map to display 3000, got {display}"
+        display = system.mu_to_display(85.0)
+        assert display == 3000, f"mu=85 should map to display 3000, got {display}"
 
     def test_mu_to_display_mid(self):
-        """mu=45 should map to display ~1500."""
+        """mu=45 should map to display ~1000 (matches MMR 4000 on the 0-3000 scale)."""
         system = CamaOpenSkillSystem()
         display = system.mu_to_display(45.0)
-        assert 1400 < display < 1600, f"mu=45 should map to ~1500, got {display}"
+        assert 900 < display < 1100, f"mu=45 should map to ~1000, got {display}"
+
+    def test_mu_to_display_matches_glicko_scale_at_max_mmr(self):
+        """mu_to_display(mmr_to_os_mu(MMR_MAX)) must equal Glicko-2's RATING_MAX.
+
+        This is the core invariant: a player with max MMR should have the same
+        display rating under either system, so team-value calculations don't
+        favor one over the other.
+        """
+        from rating_system import CamaRatingSystem
+
+        system = CamaOpenSkillSystem()
+        max_mmr = CamaRatingSystem.MMR_MAX
+        mu_at_max = system.mmr_to_os_mu(max_mmr)
+        os_display = system.mu_to_display(mu_at_max)
+        glicko_display = CamaRatingSystem.RATING_MAX
+        assert os_display == glicko_display, (
+            f"OpenSkill display at max MMR ({os_display}) must equal "
+            f"Glicko-2 RATING_MAX ({glicko_display})"
+        )

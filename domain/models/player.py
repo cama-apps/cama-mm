@@ -63,10 +63,13 @@ class Player:
 
         if use_openskill:
             if self.os_mu is not None:
-                # Convert OpenSkill mu to comparable scale with Glicko/MMR
-                # Fantasy-weighted OpenSkill mu ~25-65 maps to ~0-3000
-                # Formula matches CamaOpenSkillSystem.mu_to_display()
-                return max(0, (self.os_mu - 25) * 75)
+                # Convert OpenSkill mu to a display rating on the same 0-3000
+                # scale as Glicko-2. Constants mirror CamaOpenSkillSystem.MIN_MU
+                # and CamaOpenSkillSystem.DISPLAY_SCALE; if those change, update
+                # this formula to match (tests enforce equivalence).
+                OS_MIN_MU = 25.0
+                OS_DISPLAY_SCALE = 50.0
+                return max(0.0, (self.os_mu - OS_MIN_MU) * OS_DISPLAY_SCALE)
             # No os_mu stored - derive from Glicko or MMR using same scale
             # This ensures consistent balancing when some players lack OpenSkill data
             if self.glicko_rating is not None:
