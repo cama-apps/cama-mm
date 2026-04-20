@@ -93,6 +93,11 @@ class RecalibrationService:
             cooldown_ends_at=cooldown_ends if is_on_cooldown else None,
         )
 
+    @staticmethod
+    def _normalize_guild_id(guild_id: int | None) -> int:
+        """Normalize guild_id at the service boundary (None -> 0)."""
+        return guild_id if guild_id is not None else 0
+
     def can_recalibrate(self, discord_id: int, guild_id: int | None) -> dict:
         """
         Check if a player can recalibrate.
@@ -100,8 +105,8 @@ class RecalibrationService:
         Returns:
             Dict with 'allowed' (bool) and 'reason' (str if not allowed)
         """
-        # Normalize guild_id (None -> 0)
-        normalized_guild_id = guild_id if guild_id is not None else 0
+        # Normalize guild_id (None -> 0) at the entry point.
+        normalized_guild_id = self._normalize_guild_id(guild_id)
 
         # Check if player exists
         player = self.player_repo.get_by_id(discord_id, normalized_guild_id)
@@ -160,10 +165,16 @@ class RecalibrationService:
         Returns:
             Dict with success status and details
         """
-        # Normalize guild_id (None -> 0)
-        normalized_guild_id = guild_id if guild_id is not None else 0
+        # Normalize guild_id (None -> 0) at the entry point so every downstream
+        # call (including can_recalibrate and get_state) sees the same key.
+        # Previously can_recalibrate was called with the raw guild_id, which
+        # itself re-normalized but only for its own scope — later calls to
+        # get_state / update_glicko_rating in this method happened to work
+        # because normalize was also duplicated here, but the two entry points
+        # were subtly inconsistent. Collapse to a single normalization.
+        normalized_guild_id = self._normalize_guild_id(guild_id)
 
-        check = self.can_recalibrate(discord_id, guild_id)
+        check = self.can_recalibrate(discord_id, normalized_guild_id)
         if not check["allowed"]:
             return {"success": False, **check}
 

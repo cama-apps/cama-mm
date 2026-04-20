@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import math
 import random
+import threading
 import time
 from dataclasses import dataclass, field
 
@@ -85,6 +86,25 @@ class DisburseService:
         self.quorum_percentage = (
             quorum_percentage if quorum_percentage is not None else DISBURSE_QUORUM_PERCENTAGE
         )
+        # Per-guild serialization lock for execute/force_execute/reset paths.
+        # Prevents the reserve-then-distribute sequence (add_to_nonprofit_fund
+        # followed by disburse_fund_atomic) from interleaving between two
+        # concurrent callers, which would otherwise over-refund the pool.
+        # Also closes the quorum-check -> execute TOCTOU window: once a caller
+        # holds the lock, a late "cancel" vote cannot change the observed
+        # state between the check and the atomic distribution.
+        self._guild_locks_mutex = threading.Lock()
+        self._guild_locks: dict[int, threading.RLock] = {}
+
+    def _get_guild_lock(self, guild_id: int | None) -> threading.RLock:
+        """Return the (lazily created) lock for a guild, keyed on normalized id."""
+        normalized = guild_id if guild_id is not None else 0
+        with self._guild_locks_mutex:
+            lock = self._guild_locks.get(normalized)
+            if lock is None:
+                lock = threading.RLock()
+                self._guild_locks[normalized] = lock
+            return lock
 
     def can_propose(self, guild_id: int | None) -> tuple[bool, str]:
         """
@@ -261,23 +281,49 @@ class DisburseService:
         """
         Execute the disbursement based on winning method.
 
+        Serialized per-guild to prevent the reserve-restore + distribute race
+        (two concurrent callers returning the reserved fund twice) and the
+        quorum-check TOCTOU window (a late vote changing the observed state
+        between the check and the execution).
+
         Returns:
             dict with disbursement details
         """
-        quorum_reached, method = self.check_quorum(guild_id)
-        if not quorum_reached:
-            raise ValueError("Quorum not reached")
+        with self._get_guild_lock(guild_id):
+            # Re-check quorum INSIDE the lock so a late vote cannot cause a
+            # second caller to re-enter the distribution path after the first
+            # one has already reserved / started executing.
+            quorum_reached, method = self.check_quorum(guild_id)
+            if not quorum_reached:
+                raise ValueError("Quorum not reached")
 
-        proposal = self.get_proposal(guild_id)
-        if not proposal:
-            raise ValueError("No active proposal")
+            proposal = self.get_proposal(guild_id)
+            if not proposal:
+                raise ValueError("No active proposal")
 
+            return self._execute_locked(guild_id, proposal, method, forced=False)
+
+    def _execute_locked(
+        self, guild_id: int | None, proposal: DisburseProposal, method: str, *, forced: bool
+    ) -> dict:
+        """
+        Perform the reserve-restore + distribute sequence under the guild lock.
+
+        Assumes ``self._get_guild_lock(guild_id)`` is already held. Atomically
+        transitions the proposal out of the 'active' state before touching
+        balances so a concurrent caller will find no active proposal to act on.
+        """
         fund_amount = proposal.fund_amount
 
-        # Handle cancel specially - reset proposal instead of distributing
+        # Handle cancel specially - reset proposal instead of distributing.
+        # reset_proposal atomically flips status away from 'active', so the
+        # next concurrent caller's get_proposal() returns None.
         if method == "cancel":
+            was_active = self.disburse_repo.reset_proposal(guild_id)
+            if not was_active:
+                # Another caller already handled this proposal. No-op.
+                raise ValueError("No active proposal")
             self.loan_repo.add_to_nonprofit_fund(guild_id, fund_amount)
-            self.disburse_repo.reset_proposal(guild_id)
             return {
                 "success": True,
                 "method": "cancel",
@@ -285,85 +331,66 @@ class DisburseService:
                 "total_disbursed": 0,
                 "distributions": [],
                 "cancelled": True,
-                "message": "Proposal cancelled by vote. Funds returned to nonprofit.",
+                "message": (
+                    "Proposal cancelled by admin. Funds returned to nonprofit."
+                    if forced
+                    else "Proposal cancelled by vote. Funds returned to nonprofit."
+                ),
             }
 
-        # Handle stimulus separately - different eligibility criteria
+        # Calculate distributions based on winning method
         if method == "stimulus":
             eligible = self.player_repo.get_stimulus_eligible_players(guild_id)
             if not eligible:
-                self.loan_repo.add_to_nonprofit_fund(guild_id, fund_amount)
-                self.disburse_repo.complete_proposal(guild_id)
-                return {
-                    "success": True,
-                    "method": method,
-                    "method_label": self.METHOD_LABELS[method],
-                    "total_disbursed": 0,
-                    "distributions": [],
-                    "message": "No eligible players for stimulus (need 4+ non-debtor players).",
-                }
+                self._finalize_noop(guild_id, fund_amount)
+                return self._empty_result(
+                    method,
+                    message=(
+                        "No eligible players for stimulus."
+                        if forced
+                        else "No eligible players for stimulus (need 4+ non-debtor players)."
+                    ),
+                )
             distributions = self._calculate_stimulus_distribution(fund_amount, eligible)
         elif method == "lottery":
-            # Lottery: pick one random active player, winner takes all
             eligible = self.player_repo.get_all_registered_players_for_lottery(
                 guild_id, activity_days=LOTTERY_ACTIVITY_DAYS
             )
             if not eligible:
-                self.loan_repo.add_to_nonprofit_fund(guild_id, fund_amount)
-                self.disburse_repo.complete_proposal(guild_id)
-                return {
-                    "success": True,
-                    "method": method,
-                    "method_label": self.METHOD_LABELS[method],
-                    "total_disbursed": 0,
-                    "distributions": [],
-                    "message": f"No active players for lottery (must have played in the last {LOTTERY_ACTIVITY_DAYS} days).",
-                }
+                self._finalize_noop(guild_id, fund_amount)
+                return self._empty_result(
+                    method,
+                    message=(
+                        f"No active players for lottery (last {LOTTERY_ACTIVITY_DAYS} days)."
+                        if forced
+                        else f"No active players for lottery (must have played in the last {LOTTERY_ACTIVITY_DAYS} days)."
+                    ),
+                )
             distributions = self._calculate_lottery_distribution(fund_amount, eligible)
         elif method == "social_security":
-            # Social security: distribute proportional to games played
             eligible = self.player_repo.get_players_by_games_played(guild_id)
             if not eligible:
-                self.loan_repo.add_to_nonprofit_fund(guild_id, fund_amount)
-                self.disburse_repo.complete_proposal(guild_id)
-                return {
-                    "success": True,
-                    "method": method,
-                    "method_label": self.METHOD_LABELS[method],
-                    "total_disbursed": 0,
-                    "distributions": [],
-                    "message": "No players with games played for social security.",
-                }
+                self._finalize_noop(guild_id, fund_amount)
+                return self._empty_result(
+                    method, message="No players with games played for social security."
+                )
             distributions = self._calculate_social_security_distribution(fund_amount, eligible)
         elif method == "richest":
-            # Richest: all funds to the richest player
             richest = self.player_repo.get_richest_player(guild_id)
             if not richest:
-                self.loan_repo.add_to_nonprofit_fund(guild_id, fund_amount)
-                self.disburse_repo.complete_proposal(guild_id)
-                return {
-                    "success": True,
-                    "method": method,
-                    "method_label": self.METHOD_LABELS[method],
-                    "total_disbursed": 0,
-                    "distributions": [],
-                    "message": "No players found for richest distribution.",
-                }
+                self._finalize_noop(guild_id, fund_amount)
+                return self._empty_result(
+                    method, message="No players found for richest distribution."
+                )
             distributions = self._calculate_richest_distribution(fund_amount, richest)
         else:
             # Debtor-based methods: even, proportional, neediest
             debtors = self.player_repo.get_players_with_negative_balance(guild_id)
             if not debtors:
-                self.loan_repo.add_to_nonprofit_fund(guild_id, fund_amount)
-                self.disburse_repo.complete_proposal(guild_id)
-                return {
-                    "success": True,
-                    "method": method,
-                    "method_label": self.METHOD_LABELS[method],
-                    "total_disbursed": 0,
-                    "distributions": [],
-                    "message": "No players with negative balance to receive funds.",
-                }
+                self._finalize_noop(guild_id, fund_amount)
+                return self._empty_result(
+                    method, message="No players with negative balance to receive funds."
+                )
 
             if method == "even":
                 distributions = self._calculate_even_distribution(fund_amount, debtors)
@@ -372,8 +399,14 @@ class DisburseService:
             else:  # neediest
                 distributions = self._calculate_neediest_distribution(fund_amount, debtors)
 
-        # Return reserved funds, then atomically deduct the actual distribution amount.
-        # Net effect: fund decreases by total_disbursed; any leftover stays in fund.
+        # Atomically transition out of 'active' BEFORE touching balances, so a
+        # concurrent caller that manages to slip past the lock (e.g. across
+        # processes) cannot re-execute the same proposal.
+        self.disburse_repo.complete_proposal(guild_id)
+
+        # Return reserved funds, then atomically deduct the actual distribution
+        # amount. Both steps run under the per-guild lock, so no other caller
+        # can observe or modify the half-restored pool state.
         self.loan_repo.add_to_nonprofit_fund(guild_id, fund_amount)
         total_disbursed = self.loan_repo.disburse_fund_atomic(guild_id, distributions)
 
@@ -385,9 +418,6 @@ class DisburseService:
             distributions=distributions,
         )
 
-        # Mark proposal as completed
-        self.disburse_repo.complete_proposal(guild_id)
-
         return {
             "success": True,
             "method": method,
@@ -395,6 +425,21 @@ class DisburseService:
             "total_disbursed": total_disbursed,
             "distributions": distributions,
             "recipient_count": len(distributions),
+        }
+
+    def _finalize_noop(self, guild_id: int | None, fund_amount: int) -> None:
+        """Return reserved fund to pool and mark proposal complete (empty distribution)."""
+        self.disburse_repo.complete_proposal(guild_id)
+        self.loan_repo.add_to_nonprofit_fund(guild_id, fund_amount)
+
+    def _empty_result(self, method: str, *, message: str) -> dict:
+        return {
+            "success": True,
+            "method": method,
+            "method_label": self.METHOD_LABELS[method],
+            "total_disbursed": 0,
+            "distributions": [],
+            "message": message,
         }
 
     def force_execute(self, guild_id: int | None) -> dict:
@@ -403,128 +448,26 @@ class DisburseService:
 
         Bypasses quorum requirement. Requires at least one vote.
 
+        Serialized per-guild (shares the lock with ``execute_disbursement`` and
+        ``reset_proposal``) so admin force-execute cannot race vote-triggered
+        execution on the same proposal.
+
         Returns:
             dict with disbursement details (same format as execute_disbursement)
 
         Raises:
             ValueError if no active proposal or no votes cast
         """
-        proposal = self.get_proposal(guild_id)
-        if not proposal:
-            raise ValueError("No active proposal")
+        with self._get_guild_lock(guild_id):
+            proposal = self.get_proposal(guild_id)
+            if not proposal:
+                raise ValueError("No active proposal")
 
-        method = self._determine_winner(proposal.votes)
-        if not method:
-            raise ValueError("No votes have been cast yet")
+            method = self._determine_winner(proposal.votes)
+            if not method:
+                raise ValueError("No votes have been cast yet")
 
-        # Temporarily set quorum to 0 so execute_disbursement passes the check,
-        # or just inline the execution logic. Cleaner to just call the execution
-        # path directly with the known method.
-        fund_amount = proposal.fund_amount
-
-        # Handle cancel specially
-        if method == "cancel":
-            self.loan_repo.add_to_nonprofit_fund(guild_id, fund_amount)
-            self.disburse_repo.reset_proposal(guild_id)
-            return {
-                "success": True,
-                "method": "cancel",
-                "method_label": "Cancel",
-                "total_disbursed": 0,
-                "distributions": [],
-                "cancelled": True,
-                "message": "Proposal cancelled by admin. Funds returned to nonprofit.",
-            }
-
-        # Calculate distributions based on winning method
-        if method == "stimulus":
-            eligible = self.player_repo.get_stimulus_eligible_players(guild_id)
-            if not eligible:
-                self.loan_repo.add_to_nonprofit_fund(guild_id, fund_amount)
-                self.disburse_repo.complete_proposal(guild_id)
-                return {
-                    "success": True, "method": method,
-                    "method_label": self.METHOD_LABELS[method],
-                    "total_disbursed": 0, "distributions": [],
-                    "message": "No eligible players for stimulus.",
-                }
-            distributions = self._calculate_stimulus_distribution(fund_amount, eligible)
-        elif method == "lottery":
-            eligible = self.player_repo.get_all_registered_players_for_lottery(
-                guild_id, activity_days=LOTTERY_ACTIVITY_DAYS
-            )
-            if not eligible:
-                self.loan_repo.add_to_nonprofit_fund(guild_id, fund_amount)
-                self.disburse_repo.complete_proposal(guild_id)
-                return {
-                    "success": True, "method": method,
-                    "method_label": self.METHOD_LABELS[method],
-                    "total_disbursed": 0, "distributions": [],
-                    "message": f"No active players for lottery (last {LOTTERY_ACTIVITY_DAYS} days).",
-                }
-            distributions = self._calculate_lottery_distribution(fund_amount, eligible)
-        elif method == "social_security":
-            eligible = self.player_repo.get_players_by_games_played(guild_id)
-            if not eligible:
-                self.loan_repo.add_to_nonprofit_fund(guild_id, fund_amount)
-                self.disburse_repo.complete_proposal(guild_id)
-                return {
-                    "success": True, "method": method,
-                    "method_label": self.METHOD_LABELS[method],
-                    "total_disbursed": 0, "distributions": [],
-                    "message": "No players with games played for social security.",
-                }
-            distributions = self._calculate_social_security_distribution(fund_amount, eligible)
-        elif method == "richest":
-            richest = self.player_repo.get_richest_player(guild_id)
-            if not richest:
-                self.loan_repo.add_to_nonprofit_fund(guild_id, fund_amount)
-                self.disburse_repo.complete_proposal(guild_id)
-                return {
-                    "success": True, "method": method,
-                    "method_label": self.METHOD_LABELS[method],
-                    "total_disbursed": 0, "distributions": [],
-                    "message": "No players found for richest distribution.",
-                }
-            distributions = self._calculate_richest_distribution(fund_amount, richest)
-        else:
-            debtors = self.player_repo.get_players_with_negative_balance(guild_id)
-            if not debtors:
-                self.loan_repo.add_to_nonprofit_fund(guild_id, fund_amount)
-                self.disburse_repo.complete_proposal(guild_id)
-                return {
-                    "success": True, "method": method,
-                    "method_label": self.METHOD_LABELS[method],
-                    "total_disbursed": 0, "distributions": [],
-                    "message": "No players with negative balance to receive funds.",
-                }
-            if method == "even":
-                distributions = self._calculate_even_distribution(fund_amount, debtors)
-            elif method == "proportional":
-                distributions = self._calculate_proportional_distribution(fund_amount, debtors)
-            else:
-                distributions = self._calculate_neediest_distribution(fund_amount, debtors)
-
-        # Return reserved funds, then atomically distribute
-        self.loan_repo.add_to_nonprofit_fund(guild_id, fund_amount)
-        total_disbursed = self.loan_repo.disburse_fund_atomic(guild_id, distributions)
-
-        self.disburse_repo.record_disbursement(
-            guild_id=guild_id,
-            total_amount=total_disbursed,
-            method=method,
-            distributions=distributions,
-        )
-        self.disburse_repo.complete_proposal(guild_id)
-
-        return {
-            "success": True,
-            "method": method,
-            "method_label": self.METHOD_LABELS[method],
-            "total_disbursed": total_disbursed,
-            "distributions": distributions,
-            "recipient_count": len(distributions),
-        }
+            return self._execute_locked(guild_id, proposal, method, forced=True)
 
     def reset_proposal(self, guild_id: int | None) -> bool:
         """
@@ -532,17 +475,23 @@ class DisburseService:
 
         Returns reserved funds to the nonprofit fund.
 
+        Serialized per-guild so admin reset cannot race vote-triggered
+        execution on the same proposal (which would double-refund the reserve).
+
         Returns:
             True if a proposal was reset, False if none active
         """
-        proposal_data = self.disburse_repo.get_active_proposal(guild_id)
-        if not proposal_data:
-            return False
-        fund_amount = proposal_data["fund_amount"]
-        result = self.disburse_repo.reset_proposal(guild_id)
-        if result:
-            self.loan_repo.add_to_nonprofit_fund(guild_id, fund_amount)
-        return result
+        with self._get_guild_lock(guild_id):
+            proposal_data = self.disburse_repo.get_active_proposal(guild_id)
+            if not proposal_data:
+                return False
+            fund_amount = proposal_data["fund_amount"]
+            # reset_proposal atomically transitions status away from 'active',
+            # so a concurrent caller observing via get_active_proposal sees None.
+            result = self.disburse_repo.reset_proposal(guild_id)
+            if result:
+                self.loan_repo.add_to_nonprofit_fund(guild_id, fund_amount)
+            return result
 
     def get_last_disbursement(self, guild_id: int | None) -> dict | None:
         """Get the most recent disbursement for display in /nonprofit."""

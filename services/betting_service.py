@@ -161,20 +161,21 @@ class BettingService:
                 results[pid] = {"gross": 0, "garnished": 0, "net": 0, "bomb_pot_bonus": 0}
             return results
 
-        # If garnishment service is available, use it for individual processing
-        if self.garnishment_service:
-            for pid in player_ids:
-                result = self.garnishment_service.add_income(pid, total_reward, guild_id=guild_id)
-                result["bomb_pot_bonus"] = bomb_pot_bonus
-                results[pid] = result
-            return results
-
-        # Otherwise, bulk add without garnishment tracking
-        deltas = dict.fromkeys(player_ids, total_reward)
-        self.player_repo.add_balance_many(deltas, guild_id=guild_id)
-
+        # Always credit each player atomically. When a garnishment service is
+        # injected we delegate to it (which uses the atomic add_balance_with_garnishment
+        # path under the hood). When no service is injected we still use the
+        # atomic player_repo path with a zero garnishment rate, so the reported
+        # result dict cannot diverge from the actual DB mutation even under
+        # concurrent balance writes.
         for pid in player_ids:
-            results[pid] = {"gross": total_reward, "garnished": 0, "net": total_reward, "bomb_pot_bonus": bomb_pot_bonus}
+            if self.garnishment_service:
+                result = self.garnishment_service.add_income(pid, total_reward, guild_id=guild_id)
+            else:
+                result = self.player_repo.add_balance_with_garnishment(
+                    pid, guild_id, total_reward, 0.0
+                )
+            result["bomb_pot_bonus"] = bomb_pot_bonus
+            results[pid] = result
         return results
 
     def settle_bets(
@@ -270,7 +271,14 @@ class BettingService:
         self, player_ids: list[int], reward_amount: int, guild_id: int | None = None
     ) -> dict[int, dict[str, int]]:
         """
-        Award jopacoins to players, applying bankruptcy penalty and garnishment.
+        Award jopacoins to players, applying garnishment then bankruptcy penalty.
+
+        Ordering matters: garnishment runs first so it operates on the full gross
+        reward (and the full gross gets credited to the balance, paying down debt
+        as intended). The bankruptcy penalty then applies to whatever the player
+        would have "felt" as net income after garnishment. Applying the penalty
+        first would shrink the pool garnishment sees and effectively over-take
+        from debt repayment.
 
         Shared logic for win bonus, exclusion bonus, and half-exclusion bonus.
 
@@ -281,31 +289,43 @@ class BettingService:
             return results
 
         for pid in player_ids:
-            reward = reward_amount
             bankruptcy_penalty = 0
 
-            # Apply bankruptcy penalty if applicable
+            # Apply garnishment FIRST on the full gross reward. The gross goes to
+            # the balance; the service returns the split into garnished vs net.
+            if self.garnishment_service:
+                garn = self.garnishment_service.add_income(pid, reward_amount, guild_id=guild_id)
+                gross = garn["gross"]
+                garnished = garn["garnished"]
+                net = garn["net"]
+            else:
+                # No garnishment service: entire reward is net.
+                self.player_repo.add_balance(pid, guild_id, reward_amount)
+                gross = reward_amount
+                garnished = 0
+                net = reward_amount
+
+            # Apply bankruptcy penalty SECOND, on the net income the player
+            # would have received. The penalty reduces the balance after the
+            # fact; garnishment has already claimed its share of the gross.
             if self.bankruptcy_service:
                 penalty_result = self.bankruptcy_service.apply_penalty_to_winnings(
-                    pid, reward, guild_id
+                    pid, net, guild_id
                 )
-                reward = penalty_result["penalized"]
+                penalized_net = penalty_result["penalized"]
                 bankruptcy_penalty = penalty_result["penalty_applied"]
+                if bankruptcy_penalty > 0:
+                    # Remove the penalized portion from the balance (it stays
+                    # "un-received"). The player keeps only the penalized_net.
+                    self.player_repo.add_balance(pid, guild_id, -bankruptcy_penalty)
+                    net = penalized_net
 
-            # Apply garnishment if player has debt
-            if self.garnishment_service:
-                result = self.garnishment_service.add_income(pid, reward, guild_id=guild_id)
-                result["bankruptcy_penalty"] = bankruptcy_penalty
-                result["gross"] = reward_amount
-                results[pid] = result
-            else:
-                self.player_repo.add_balance(pid, guild_id, reward)
-                results[pid] = {
-                    "gross": reward_amount,
-                    "garnished": 0,
-                    "net": reward,
-                    "bankruptcy_penalty": bankruptcy_penalty,
-                }
+            results[pid] = {
+                "gross": gross,
+                "garnished": garnished,
+                "net": net,
+                "bankruptcy_penalty": bankruptcy_penalty,
+            }
 
         return results
 
@@ -446,6 +466,12 @@ class BettingService:
         for team, player_ids in [("radiant", radiant_ids), ("dire", dire_ids)]:
             for discord_id in player_ids:
                 try:
+                    # Read balance immediately before computing amount + placing
+                    # the bet. ``place_bet_atomic`` re-reads the balance under
+                    # BEGIN IMMEDIATE and will reject if the player has flipped
+                    # negative past ``max_debt`` between the read here and the
+                    # atomic placement — so the atomic op is the source of truth
+                    # and this read is only used to size the bet.
                     balance = self.player_repo.get_balance(discord_id, guild_id)
 
                     if is_bomb_pot:
@@ -493,7 +519,14 @@ class BettingService:
                         # First bet on this team - no meaningful odds yet
                         odds_at_placement = None
 
-                    # Place the blind bet
+                    # Place the blind bet. ``place_bet_atomic`` re-reads balance
+                    # inside a BEGIN IMMEDIATE transaction and enforces:
+                    #   - bomb pot: new_balance >= -max_debt
+                    #   - normal:   balance >= 0 AND balance >= amount
+                    # So if the balance has flipped past max_debt between our
+                    # read above and this call, the atomic op raises and the
+                    # bet lands in ``skipped`` — no over-leveraged blind is
+                    # ever placed.
                     self.bet_repo.place_bet_atomic(
                         guild_id=guild_id,
                         discord_id=discord_id,
