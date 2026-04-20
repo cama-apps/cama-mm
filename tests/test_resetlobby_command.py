@@ -81,7 +81,7 @@ def make_bot(match_service=None):
 @pytest.mark.asyncio
 async def test_resetlobby_allows_admin(monkeypatch):
     lobby_manager, lobby_service = make_lobby_service()
-    lobby = lobby_service.get_or_create_lobby(creator_id=99)
+    lobby = lobby_service.get_or_create_lobby(creator_id=99, guild_id=123)
     lobby.add_player(42)
     interaction = FakeInteraction(user_id=1)
 
@@ -91,7 +91,7 @@ async def test_resetlobby_allows_admin(monkeypatch):
     cog = LobbyCommands(make_bot(match_service=None), lobby_service, FakePlayerService())
     await invoke_reset(cog, interaction)
 
-    assert lobby_service.get_lobby() is None
+    assert lobby_service.get_lobby(guild_id=123) is None
     assert interaction.followup.messages
     assert "Lobby reset" in interaction.followup.messages[0]["content"]
 
@@ -99,7 +99,7 @@ async def test_resetlobby_allows_admin(monkeypatch):
 @pytest.mark.asyncio
 async def test_resetlobby_allows_creator(monkeypatch):
     lobby_manager, lobby_service = make_lobby_service()
-    lobby = lobby_service.get_or_create_lobby(creator_id=7)
+    lobby = lobby_service.get_or_create_lobby(creator_id=7, guild_id=123)
     lobby.add_player(7)
     interaction = FakeInteraction(user_id=7)
 
@@ -109,7 +109,7 @@ async def test_resetlobby_allows_creator(monkeypatch):
     cog = LobbyCommands(make_bot(match_service=None), lobby_service, FakePlayerService())
     await invoke_reset(cog, interaction)
 
-    assert lobby_service.get_lobby() is None
+    assert lobby_service.get_lobby(guild_id=123) is None
     assert interaction.followup.messages
     assert "Lobby reset" in interaction.followup.messages[0]["content"]
 
@@ -121,7 +121,7 @@ async def test_resetlobby_blocks_pending_match(monkeypatch):
             return {"shuffle_message_jump_url": "http://example.com"}
 
     lobby_manager, lobby_service = make_lobby_service()
-    lobby_service.get_or_create_lobby(creator_id=99)
+    lobby_service.get_or_create_lobby(creator_id=99, guild_id=123)
     interaction = FakeInteraction(user_id=1)
 
     monkeypatch.setattr("commands.lobby.safe_defer", AsyncMock(return_value=True))
@@ -132,7 +132,7 @@ async def test_resetlobby_blocks_pending_match(monkeypatch):
     )
     await invoke_reset(cog, interaction)
 
-    assert lobby_service.get_lobby() is not None, "Should not reset when a match is pending"
+    assert lobby_service.get_lobby(guild_id=123) is not None, "Should not reset when a match is pending"
     assert interaction.followup.messages
     assert "pending match" in interaction.followup.messages[0]["content"]
 
@@ -140,7 +140,7 @@ async def test_resetlobby_blocks_pending_match(monkeypatch):
 @pytest.mark.asyncio
 async def test_resetlobby_denies_non_admin_non_creator(monkeypatch):
     lobby_manager, lobby_service = make_lobby_service()
-    lobby = lobby_service.get_or_create_lobby(creator_id=5)
+    lobby = lobby_service.get_or_create_lobby(creator_id=5, guild_id=123)
     lobby.add_player(5)
     interaction = FakeInteraction(user_id=6)
 
@@ -150,7 +150,7 @@ async def test_resetlobby_denies_non_admin_non_creator(monkeypatch):
     cog = LobbyCommands(make_bot(match_service=None), lobby_service, FakePlayerService())
     await invoke_reset(cog, interaction)
 
-    assert lobby_service.get_lobby() is not None, "Lobby should remain when permission denied"
+    assert lobby_service.get_lobby(guild_id=123) is not None, "Lobby should remain when permission denied"
     assert interaction.followup.messages
     assert "Permission denied" in interaction.followup.messages[0]["content"]
 
@@ -161,10 +161,10 @@ async def test_resetlobby_new_lobby_is_empty(monkeypatch):
     lobby_manager, lobby_service = make_lobby_service()
 
     # Create lobby and add players
-    lobby = lobby_service.get_or_create_lobby(creator_id=99)
-    lobby_service.join_lobby(1, 0)
-    lobby_service.join_lobby(2, 0)
-    lobby_service.join_lobby(3, 0)
+    lobby = lobby_service.get_or_create_lobby(creator_id=99, guild_id=123)
+    lobby_service.join_lobby(1, 123)
+    lobby_service.join_lobby(2, 123)
+    lobby_service.join_lobby(3, 123)
     assert lobby.get_player_count() == 3
 
     interaction = FakeInteraction(user_id=99)
@@ -175,10 +175,10 @@ async def test_resetlobby_new_lobby_is_empty(monkeypatch):
     await invoke_reset(cog, interaction)
 
     # After reset, get_lobby should be None
-    assert lobby_service.get_lobby() is None
+    assert lobby_service.get_lobby(guild_id=123) is None
 
     # Create a new lobby
-    new_lobby = lobby_service.get_or_create_lobby(creator_id=99)
+    new_lobby = lobby_service.get_or_create_lobby(creator_id=99, guild_id=123)
 
     # New lobby should have 0 players, not the old 3
     assert new_lobby.get_player_count() == 0, "New lobby should be empty after reset"

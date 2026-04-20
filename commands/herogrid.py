@@ -37,7 +37,7 @@ class HeroGridCommands(commands.Cog):
             return [p["discord_id"] for p in enriched_players], None
 
         # Priority 1: Active lobby
-        lobby = self.lobby_manager.get_lobby()
+        lobby = self.lobby_manager.get_lobby(guild_id=guild_id)
         if lobby and lobby.players:
             player_ids = list(lobby.players)
             if lobby.conditional_players:

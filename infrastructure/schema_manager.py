@@ -269,6 +269,8 @@ class SchemaManager:
             ("dig_personality_table", self._migration_dig_personality_table),
             ("dig_miner_profile_columns", self._migration_dig_miner_profile),
             ("create_dig_boss_echoes", self._migration_create_dig_boss_echoes),
+            # Multi-guild lobby isolation
+            ("add_guild_id_to_lobby_state", self._migration_add_guild_id_to_lobby_state),
         ]
 
     # --- Migrations ---
@@ -2044,3 +2046,70 @@ class SchemaManager:
             )
             """
         )
+
+    def _migration_add_guild_id_to_lobby_state(self, cursor) -> None:
+        """
+        Add guild_id to lobby_state, changing the primary key to (lobby_id, guild_id).
+
+        Lobbies are now per-guild so every guild has its own independent lobby.
+        Existing rows are backfilled with guild_id = 0 (normalized None).
+
+        SQLite doesn't support altering primary keys, so we rebuild the table.
+        """
+        cursor.execute("PRAGMA table_info(lobby_state)")
+        columns = {row[1] for row in cursor.fetchall()}
+        if "guild_id" in columns:
+            return
+
+        cursor.execute(
+            """
+            CREATE TABLE lobby_state_new (
+                lobby_id INTEGER NOT NULL,
+                guild_id INTEGER NOT NULL DEFAULT 0,
+                players TEXT,
+                conditional_players TEXT DEFAULT '[]',
+                status TEXT,
+                created_by INTEGER,
+                created_at TEXT,
+                message_id INTEGER,
+                channel_id INTEGER,
+                thread_id INTEGER,
+                embed_message_id INTEGER,
+                origin_channel_id INTEGER,
+                player_join_times TEXT DEFAULT '{}',
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (lobby_id, guild_id)
+            )
+            """
+        )
+
+        # Copy existing rows; backfill guild_id = 0 for pre-migration lobbies
+        # so the legacy single-guild state keeps working.
+        cursor.execute(
+            """
+            INSERT INTO lobby_state_new (
+                lobby_id, guild_id, players, conditional_players, status,
+                created_by, created_at, message_id, channel_id, thread_id,
+                embed_message_id, origin_channel_id, player_join_times, updated_at
+            )
+            SELECT
+                lobby_id,
+                0,
+                players,
+                COALESCE(conditional_players, '[]'),
+                status,
+                created_by,
+                created_at,
+                message_id,
+                channel_id,
+                thread_id,
+                embed_message_id,
+                origin_channel_id,
+                COALESCE(player_join_times, '{}'),
+                updated_at
+            FROM lobby_state
+            """
+        )
+
+        cursor.execute("DROP TABLE lobby_state")
+        cursor.execute("ALTER TABLE lobby_state_new RENAME TO lobby_state")

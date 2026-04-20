@@ -16,6 +16,7 @@ class Lobby:
     lobby_id: int
     created_by: int  # Discord ID of creator
     created_at: datetime
+    guild_id: int = 0  # Normalized guild id; 0 for DMs or single-guild tests
     players: set[int] = field(default_factory=set)
     conditional_players: set[int] = field(default_factory=set)  # "Frogling" players
     player_join_times: dict[int, float] = field(default_factory=dict)  # discord_id -> unix timestamp
@@ -97,6 +98,7 @@ class Lobby:
     def to_dict(self) -> dict:
         return {
             "lobby_id": self.lobby_id,
+            "guild_id": self.guild_id,
             "created_by": self.created_by,
             "created_at": self.created_at.isoformat(),
             "players": list(self.players),
@@ -114,6 +116,7 @@ class Lobby:
         player_join_times = {int(k): v for k, v in data.get("player_join_times", {}).items()}
         return cls(
             lobby_id=data.get("lobby_id", 1),
+            guild_id=data.get("guild_id", 0),
             created_by=data.get("created_by", 0),
             created_at=created_at_dt,
             players=players,

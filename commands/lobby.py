@@ -41,12 +41,12 @@ class LobbyCommands(commands.Cog):
         self.lobby_service = lobby_service
         self.player_service = player_service
 
-    def rebuild_readycheck_embed(self) -> discord.Embed | None:
+    def rebuild_readycheck_embed(self, guild_id: int | None = None) -> discord.Embed | None:
         """Rebuild the readycheck embed from stored data. Used by bot.py reaction handler."""
-        player_data = self.lobby_service.get_readycheck_player_data()
+        player_data = self.lobby_service.get_readycheck_player_data(guild_id=guild_id)
         if not player_data:
             return None
-        reacted = self.lobby_service.get_readycheck_reacted()
+        reacted = self.lobby_service.get_readycheck_reacted(guild_id=guild_id)
         embed, _ = build_readycheck_embed(player_data, reacted)
         return embed
 
@@ -104,10 +104,14 @@ class LobbyCommands(commands.Cog):
             logger.warning(f"Failed to pin lobby message: {exc}")
 
 
-    async def _remove_user_lobby_reactions(self, user: discord.User | discord.Member) -> None:
+    async def _remove_user_lobby_reactions(
+        self,
+        user: discord.User | discord.Member,
+        guild_id: int | None = None,
+    ) -> None:
         """Remove a user's lobby reactions (sword and frogling) from the channel lobby message."""
-        message_id = self.lobby_service.get_lobby_message_id()
-        channel_id = self.lobby_service.get_lobby_channel_id()
+        message_id = self.lobby_service.get_lobby_message_id(guild_id=guild_id)
+        channel_id = self.lobby_service.get_lobby_channel_id(guild_id=guild_id)
         if not message_id or not channel_id:
             return
 
@@ -133,13 +137,13 @@ class LobbyCommands(commands.Cog):
             logger.warning(f"Failed to remove user lobby reactions: {exc}")
 
     async def _update_lobby_message(self, interaction: discord.Interaction, lobby) -> None:
-        message_id = self.lobby_service.get_lobby_message_id()
+        guild_id = interaction.guild.id if interaction.guild else None
+        message_id = self.lobby_service.get_lobby_message_id(guild_id=guild_id)
         if not message_id:
             return
         try:
             channel = interaction.channel
             message = await channel.fetch_message(message_id)
-            guild_id = interaction.guild.id if interaction.guild else None
             embed = await asyncio.to_thread(self.lobby_service.build_lobby_embed, lobby, guild_id)
             if embed:
                 await message.edit(embed=embed, allowed_mentions=discord.AllowedMentions.none())
@@ -151,8 +155,8 @@ class LobbyCommands(commands.Cog):
         embed = await asyncio.to_thread(self.lobby_service.build_lobby_embed, lobby, guild_id)
 
         # Update channel message - this also updates the thread starter view
-        message_id = self.lobby_service.get_lobby_message_id()
-        channel_id = self.lobby_service.get_lobby_channel_id()
+        message_id = self.lobby_service.get_lobby_message_id(guild_id=guild_id)
+        channel_id = self.lobby_service.get_lobby_channel_id(guild_id=guild_id)
         if message_id and channel_id:
             try:
                 channel = self.bot.get_channel(channel_id)
@@ -166,8 +170,8 @@ class LobbyCommands(commands.Cog):
 
     async def _update_thread_embed(self, lobby, embed=None, guild_id: int | None = None) -> None:
         """Update the pinned embed in the lobby thread."""
-        thread_id = self.lobby_service.get_lobby_thread_id()
-        embed_message_id = self.lobby_service.get_lobby_embed_message_id()
+        thread_id = self.lobby_service.get_lobby_thread_id(guild_id=guild_id)
+        embed_message_id = self.lobby_service.get_lobby_embed_message_id(guild_id=guild_id)
 
         if not thread_id or not embed_message_id:
             return
@@ -208,13 +212,17 @@ class LobbyCommands(commands.Cog):
         except Exception as exc:
             logger.warning(f"Failed to post leave activity: {exc}")
 
-    async def _update_channel_message_closed(self, reason: str = "Lobby Closed") -> None:
+    async def _update_channel_message_closed(
+        self, reason: str = "Lobby Closed", guild_id: int | None = None
+    ) -> None:
         """Update the channel message embed to show lobby is closed."""
-        await update_lobby_message_closed(self.bot, self.lobby_service, reason)
+        await update_lobby_message_closed(self.bot, self.lobby_service, reason, guild_id=guild_id)
 
-    async def _archive_lobby_thread(self, reason: str = "Lobby Reset") -> None:
+    async def _archive_lobby_thread(
+        self, reason: str = "Lobby Reset", guild_id: int | None = None
+    ) -> None:
         """Lock and archive the lobby thread with a status message."""
-        thread_id = self.lobby_service.get_lobby_thread_id()
+        thread_id = self.lobby_service.get_lobby_thread_id(guild_id=guild_id)
         if not thread_id:
             return
 
@@ -275,20 +283,20 @@ class LobbyCommands(commands.Cog):
             return False, None
 
         # Refresh lobby state
-        lobby = self.lobby_service.get_lobby()
+        lobby = self.lobby_service.get_lobby(guild_id=guild_id)
 
         # Update displays
         await self._sync_lobby_displays(lobby, guild_id)
 
         # Post join activity in thread
-        thread_id = self.lobby_service.get_lobby_thread_id()
+        thread_id = self.lobby_service.get_lobby_thread_id(guild_id=guild_id)
         if thread_id:
             await self._post_join_activity(thread_id, interaction.user)
 
         # Rally/ready notifications
         from bot import notify_lobby_rally, notify_lobby_ready
 
-        channel_id = self.lobby_service.get_lobby_channel_id()
+        channel_id = self.lobby_service.get_lobby_channel_id(guild_id=guild_id)
         if channel_id and thread_id:
             try:
                 channel = self.bot.get_channel(channel_id)
@@ -324,18 +332,22 @@ class LobbyCommands(commands.Cog):
         # Acquire lock to prevent race condition when multiple users call /lobby simultaneously
         async with self.lobby_service.creation_lock:
             lobby = await asyncio.to_thread(
-                functools.partial(self.lobby_service.get_or_create_lobby, creator_id=interaction.user.id)
+                functools.partial(
+                    self.lobby_service.get_or_create_lobby,
+                    creator_id=interaction.user.id,
+                    guild_id=guild_id,
+                )
             )
             embed = await asyncio.to_thread(self.lobby_service.build_lobby_embed, lobby, guild_id)
 
             # If message/thread already exists, refresh it; otherwise create new
-            message_id = self.lobby_service.get_lobby_message_id()
-            thread_id = self.lobby_service.get_lobby_thread_id()
+            message_id = self.lobby_service.get_lobby_message_id(guild_id=guild_id)
+            thread_id = self.lobby_service.get_lobby_thread_id(guild_id=guild_id)
 
             if message_id and thread_id:
                 try:
                     # Fetch message from the dedicated/lobby channel (not necessarily interaction channel)
-                    lobby_channel_id = self.lobby_service.get_lobby_channel_id()
+                    lobby_channel_id = self.lobby_service.get_lobby_channel_id(guild_id=guild_id)
                     if lobby_channel_id:
                         channel = self.bot.get_channel(lobby_channel_id)
                         if not channel:
@@ -348,7 +360,10 @@ class LobbyCommands(commands.Cog):
                     joined, warning = await self._auto_join_lobby(interaction, lobby)
 
                     # Refresh embed after potential join
-                    await self._update_thread_embed(self.lobby_service.get_lobby(), guild_id=guild_id)
+                    await self._update_thread_embed(
+                        self.lobby_service.get_lobby(guild_id=guild_id),
+                        guild_id=guild_id,
+                    )
 
                     # Build response based on join result
                     if joined:
@@ -411,6 +426,7 @@ class LobbyCommands(commands.Cog):
                         thread_id=thread.id,
                         embed_message_id=channel_msg.id,  # The channel msg IS the embed in thread
                         origin_channel_id=origin_channel_id,  # Where /lobby was run (for rally)
+                        guild_id=guild_id,
                     )
                 )
 
@@ -455,7 +471,7 @@ class LobbyCommands(commands.Cog):
             return
 
         guild_id = interaction.guild.id if interaction.guild else None
-        lobby = self.lobby_service.get_lobby()
+        lobby = self.lobby_service.get_lobby(guild_id=guild_id)
         if not lobby:
             await safe_followup(interaction, content="⚠️ No active lobby.", ephemeral=True)
             return
@@ -488,9 +504,13 @@ class LobbyCommands(commands.Cog):
 
         # Remove from whichever set they're in
         if in_regular:
-            removed = await asyncio.to_thread(self.lobby_service.leave_lobby, player.id)
+            removed = await asyncio.to_thread(
+                self.lobby_service.leave_lobby, player.id, guild_id
+            )
         else:
-            removed = await asyncio.to_thread(self.lobby_service.leave_lobby_conditional, player.id)
+            removed = await asyncio.to_thread(
+                self.lobby_service.leave_lobby_conditional, player.id, guild_id
+            )
         if removed:
             await safe_followup(
                 interaction, content=f"✅ Kicked {player.mention} from the lobby.", ephemeral=True
@@ -500,10 +520,10 @@ class LobbyCommands(commands.Cog):
             await self._sync_lobby_displays(lobby, guild_id)
 
             # Remove kicked player's lobby reactions (sword and frogling)
-            await self._remove_user_lobby_reactions(player)
+            await self._remove_user_lobby_reactions(player, guild_id=guild_id)
 
             # Post kick activity in thread
-            thread_id = self.lobby_service.get_lobby_thread_id()
+            thread_id = self.lobby_service.get_lobby_thread_id(guild_id=guild_id)
             if thread_id:
                 try:
                     thread = self.bot.get_channel(thread_id)
@@ -550,7 +570,7 @@ class LobbyCommands(commands.Cog):
             return
 
         # Check lobby exists
-        lobby = self.lobby_service.get_lobby()
+        lobby = self.lobby_service.get_lobby(guild_id=guild_id)
         if not lobby:
             await safe_followup(
                 interaction, content="⚠️ No active lobby. Use `/lobby` to create one.", ephemeral=True
@@ -578,18 +598,18 @@ class LobbyCommands(commands.Cog):
             return
 
         # Refresh lobby state after join
-        lobby = self.lobby_service.get_lobby()
+        lobby = self.lobby_service.get_lobby(guild_id=guild_id)
 
         # Update displays and post activity
         await self._sync_lobby_displays(lobby, guild_id)
-        thread_id = self.lobby_service.get_lobby_thread_id()
+        thread_id = self.lobby_service.get_lobby_thread_id(guild_id=guild_id)
         if thread_id:
             await self._post_join_activity(thread_id, interaction.user)
 
         # Rally/ready notifications
         from bot import notify_lobby_rally, notify_lobby_ready
 
-        channel_id = self.lobby_service.get_lobby_channel_id()
+        channel_id = self.lobby_service.get_lobby_channel_id(guild_id=guild_id)
         if channel_id and thread_id:
             try:
                 channel = self.bot.get_channel(channel_id)
@@ -617,7 +637,7 @@ class LobbyCommands(commands.Cog):
                     interaction.user.id, guild_id, queue_position
                 )
                 if neon_result and (neon_result.text_block or neon_result.footer_text):
-                    channel_id = self.lobby_service.get_lobby_channel_id()
+                    channel_id = self.lobby_service.get_lobby_channel_id(guild_id=guild_id)
                     if channel_id:
                         channel = self.bot.get_channel(channel_id)
                         if channel:
@@ -634,7 +654,7 @@ class LobbyCommands(commands.Cog):
             return
 
         guild_id = interaction.guild.id if interaction.guild else None
-        lobby = self.lobby_service.get_lobby()
+        lobby = self.lobby_service.get_lobby(guild_id=guild_id)
         if not lobby:
             await safe_followup(interaction, content="⚠️ No active lobby.", ephemeral=True)
             return
@@ -648,18 +668,22 @@ class LobbyCommands(commands.Cog):
 
         # Remove from appropriate queue
         if in_regular:
-            await asyncio.to_thread(self.lobby_service.leave_lobby, interaction.user.id)
+            await asyncio.to_thread(
+                self.lobby_service.leave_lobby, interaction.user.id, guild_id
+            )
         else:
-            await asyncio.to_thread(self.lobby_service.leave_lobby_conditional, interaction.user.id)
+            await asyncio.to_thread(
+                self.lobby_service.leave_lobby_conditional, interaction.user.id, guild_id
+            )
 
         # Update displays
         await self._sync_lobby_displays(lobby, guild_id)
 
         # Remove user's reactions
-        await self._remove_user_lobby_reactions(interaction.user)
+        await self._remove_user_lobby_reactions(interaction.user, guild_id=guild_id)
 
         # Post leave activity in thread
-        thread_id = self.lobby_service.get_lobby_thread_id()
+        thread_id = self.lobby_service.get_lobby_thread_id(guild_id=guild_id)
         if thread_id:
             await self._post_leave_activity(thread_id, interaction.user)
 
@@ -691,7 +715,7 @@ class LobbyCommands(commands.Cog):
                     await safe_followup(interaction, content=message_text, ephemeral=True)
                 return
 
-        lobby = self.lobby_service.get_lobby()
+        lobby = self.lobby_service.get_lobby(guild_id=guild_id)
         if not lobby:
             if can_respond:
                 await safe_followup(interaction, content="⚠️ No active lobby.", ephemeral=True)
@@ -719,11 +743,11 @@ class LobbyCommands(commands.Cog):
             return
 
         # Update channel message to show closed and archive thread
-        await self._update_channel_message_closed("Lobby Reset")
-        await self._archive_lobby_thread("Lobby Reset")
+        await self._update_channel_message_closed("Lobby Reset", guild_id=guild_id)
+        await self._archive_lobby_thread("Lobby Reset", guild_id=guild_id)
 
         # Unpin from the lobby channel (may be dedicated channel, not interaction channel)
-        lobby_channel_id = self.lobby_service.get_lobby_channel_id()
+        lobby_channel_id = self.lobby_service.get_lobby_channel_id(guild_id=guild_id)
         lobby_channel = None
         if lobby_channel_id:
             try:
@@ -735,7 +759,7 @@ class LobbyCommands(commands.Cog):
         else:
             lobby_channel = interaction.channel
         await safe_unpin_all_bot_messages(lobby_channel, self.bot.user)
-        await asyncio.to_thread(self.lobby_service.reset_lobby)
+        await asyncio.to_thread(self.lobby_service.reset_lobby, guild_id)
 
         # Clear lobby rally cooldowns
         from bot import clear_lobby_rally_cooldowns
@@ -814,7 +838,7 @@ class LobbyCommands(commands.Cog):
             cooldown            -> {"retry_after_seconds": int}
             (others)            -> {}
         """
-        lobby = self.lobby_service.get_lobby()
+        lobby = self.lobby_service.get_lobby(guild_id=guild_id)
         if not lobby:
             return "no_lobby", {}
 
@@ -906,8 +930,8 @@ class LobbyCommands(commands.Cog):
             }
 
         # Check if refreshing an existing readycheck
-        existing_msg_id = self.lobby_service.get_readycheck_message_id()
-        existing_channel_id = self.lobby_service.get_readycheck_channel_id()
+        existing_msg_id = self.lobby_service.get_readycheck_message_id(guild_id=guild_id)
+        existing_channel_id = self.lobby_service.get_readycheck_channel_id(guild_id=guild_id)
         is_refresh = False
         msg = None
 
@@ -923,15 +947,21 @@ class LobbyCommands(commands.Cog):
 
         # On refresh: update data + prune reacted. On new: store fresh.
         if is_refresh:
-            self.lobby_service.update_readycheck_data(current_lobby_set, player_data)
-        reacted = self.lobby_service.get_readycheck_reacted() if is_refresh else {}
+            self.lobby_service.update_readycheck_data(
+                current_lobby_set, player_data, guild_id=guild_id
+            )
+        reacted = (
+            self.lobby_service.get_readycheck_reacted(guild_id=guild_id)
+            if is_refresh
+            else {}
+        )
 
         # Build embed from stored data (excludes reacted from Active/AFK)
         embed, mention_ids = build_readycheck_embed(player_data, reacted)
 
         # Resolve target channel - lobby thread only
         target_channel = None
-        lobby_thread_id = self.lobby_service.get_lobby_thread_id()
+        lobby_thread_id = self.lobby_service.get_lobby_thread_id(guild_id=guild_id)
         if lobby_thread_id:
             try:
                 target_channel = self.bot.get_channel(lobby_thread_id)
@@ -954,7 +984,9 @@ class LobbyCommands(commands.Cog):
 
         if is_refresh and msg:
             await msg.edit(embed=embed)
-            self.lobby_service.update_readycheck_data(current_lobby_set, player_data)
+            self.lobby_service.update_readycheck_data(
+                current_lobby_set, player_data, guild_id=guild_id
+            )
             if ping_content:
                 await msg.channel.send(ping_content, allowed_mentions=allowed_mentions)
             return "ok", {"message_jump_url": msg.jump_url, "is_refresh": True}
@@ -969,7 +1001,7 @@ class LobbyCommands(commands.Cog):
             await target_channel.send(ping_content, allowed_mentions=allowed_mentions)
 
         self.lobby_service.set_readycheck_state(
-            msg.id, msg.channel.id, current_lobby_set, player_data
+            msg.id, msg.channel.id, current_lobby_set, player_data, guild_id=guild_id
         )
         return "ok", {"message_jump_url": msg.jump_url, "is_refresh": False}
 

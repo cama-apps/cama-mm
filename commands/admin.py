@@ -123,7 +123,12 @@ class AdminCommands(commands.Cog):
                 )
             return
 
-        lobby = await asyncio.to_thread(self.lobby_service.get_or_create_lobby)
+        # guild_id for fake users - use None for global (they're not guild-specific)
+        addfake_guild_id = interaction.guild.id if interaction.guild else None
+
+        lobby = await asyncio.to_thread(
+            functools.partial(self.lobby_service.get_or_create_lobby, guild_id=addfake_guild_id)
+        )
         current = lobby.get_player_count()
         if current + count > self.lobby_service.max_players:
             if can_respond:
@@ -139,13 +144,10 @@ class AdminCommands(commands.Cog):
 
         role_choices = list(ROLE_EMOJIS.keys())
 
-        # guild_id for fake users - use None for global (they're not guild-specific)
-        addfake_guild_id = interaction.guild.id if interaction.guild else None
-
         def _add_fake_users():
             fake_users_added = []
             # Find highest existing fake user index to continue from there
-            lobby_snap = self.lobby_service.get_lobby()
+            lobby_snap = self.lobby_service.get_lobby(guild_id=addfake_guild_id)
             existing_fake_ids = [pid for pid in lobby_snap.players if pid < 0]
             next_index = max([-pid for pid in existing_fake_ids], default=0) + 1
 
@@ -187,9 +189,9 @@ class AdminCommands(commands.Cog):
         fake_users_added = await asyncio.to_thread(_add_fake_users)
 
         # Update lobby message if it exists
-        lobby = self.lobby_service.get_lobby()  # In-memory read
-        message_id = self.lobby_service.get_lobby_message_id()
-        channel_id = self.lobby_service.get_lobby_channel_id()
+        lobby = self.lobby_service.get_lobby(guild_id=addfake_guild_id)  # In-memory read
+        message_id = self.lobby_service.get_lobby_message_id(guild_id=addfake_guild_id)
+        channel_id = self.lobby_service.get_lobby_channel_id(guild_id=addfake_guild_id)
         if message_id and channel_id and lobby:
             try:
                 channel = self.bot.get_channel(channel_id)
@@ -235,7 +237,12 @@ class AdminCommands(commands.Cog):
 
         await interaction.response.defer(ephemeral=True)
 
-        lobby = await asyncio.to_thread(self.lobby_service.get_or_create_lobby)
+        # guild_id for fake users
+        fill_guild_id = interaction.guild.id if interaction.guild else None
+
+        lobby = await asyncio.to_thread(
+            functools.partial(self.lobby_service.get_or_create_lobby, guild_id=fill_guild_id)
+        )
         current = lobby.get_player_count()
         ready_threshold = self.lobby_service.ready_threshold
 
@@ -252,9 +259,6 @@ class AdminCommands(commands.Cog):
             needed = 10  # Cap at 10 per call for safety
 
         role_choices = list(ROLE_EMOJIS.keys())
-
-        # guild_id for fake users
-        fill_guild_id = interaction.guild.id if interaction.guild else None
 
         def _fill_lobby():
             fake_users_added = []
@@ -297,22 +301,22 @@ class AdminCommands(commands.Cog):
                     import time as _time
                     offsets = [60, 5 * 60, 15 * 60, 30 * 60, 3600, 2 * 3600, 4 * 3600, 8 * 3600, 12 * 3600, 86400]
                     offset = offsets[(len(fake_users_added) - 1) % len(offsets)]
-                    lobby_ref = self.lobby_service.get_lobby()
+                    lobby_ref = self.lobby_service.get_lobby(guild_id=fill_guild_id)
                     if lobby_ref and fake_id in lobby_ref.player_join_times:
                         lobby_ref.player_join_times[fake_id] = _time.time() - offset
 
             # Persist backdated join times to DB
             if fake_users_added:
-                self.lobby_service.lobby_manager._persist_lobby()
+                self.lobby_service.lobby_manager._persist_lobby(fill_guild_id)
 
             return [name for name, _ in fake_users_added]
 
         fake_users_added = await asyncio.to_thread(_fill_lobby)
 
         # Update lobby message if it exists
-        lobby = self.lobby_service.get_lobby()  # In-memory read
-        message_id = self.lobby_service.get_lobby_message_id()
-        channel_id = self.lobby_service.get_lobby_channel_id()
+        lobby = self.lobby_service.get_lobby(guild_id=fill_guild_id)  # In-memory read
+        message_id = self.lobby_service.get_lobby_message_id(guild_id=fill_guild_id)
+        channel_id = self.lobby_service.get_lobby_channel_id(guild_id=fill_guild_id)
         if message_id and channel_id and lobby:
             try:
                 channel = self.bot.get_channel(channel_id)

@@ -108,7 +108,7 @@ async def invoke_addfake(cog, interaction, count):
 async def test_addfake_adds_users_to_lobby(monkeypatch):
     """Test that addfake actually adds fake users to the lobby."""
     lobby_service, player_service = make_services()
-    lobby = lobby_service.get_or_create_lobby(creator_id=99)
+    lobby = lobby_service.get_or_create_lobby(creator_id=99, guild_id=123)
 
     interaction = FakeInteraction(user_id=1)
     monkeypatch.setattr("commands.admin.safe_defer", AsyncMock(return_value=True))
@@ -129,7 +129,7 @@ async def test_addfake_adds_users_to_lobby(monkeypatch):
 async def test_addfake_works_when_defer_fails(monkeypatch):
     """Critical: addfake should still add users even when Discord interaction times out."""
     lobby_service, player_service = make_services()
-    lobby = lobby_service.get_or_create_lobby(creator_id=99)
+    lobby = lobby_service.get_or_create_lobby(creator_id=99, guild_id=123)
 
     interaction = FakeInteraction(user_id=1)
     # Simulate defer failing (Discord timeout)
@@ -153,7 +153,7 @@ async def test_addfake_works_when_defer_fails(monkeypatch):
 async def test_addfake_continues_numbering(monkeypatch):
     """Test that subsequent addfake calls continue from the highest index."""
     lobby_service, player_service = make_services()
-    lobby = lobby_service.get_or_create_lobby(creator_id=99)
+    lobby = lobby_service.get_or_create_lobby(creator_id=99, guild_id=123)
 
     interaction = FakeInteraction(user_id=1)
     monkeypatch.setattr("commands.admin.safe_defer", AsyncMock(return_value=True))

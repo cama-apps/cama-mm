@@ -266,15 +266,27 @@ async def notify_lobby_ready(channel, lobby, guild_id: int = 0):
         )
 
         # Add jump link to lobby embed
-        lobby_message_id = bot.lobby_service.get_lobby_message_id() if bot.lobby_service else None
-        lobby_channel_id = bot.lobby_service.get_lobby_channel_id() if bot.lobby_service else None
+        lobby_message_id = (
+            bot.lobby_service.get_lobby_message_id(guild_id=guild_id)
+            if bot.lobby_service
+            else None
+        )
+        lobby_channel_id = (
+            bot.lobby_service.get_lobby_channel_id(guild_id=guild_id)
+            if bot.lobby_service
+            else None
+        )
         if lobby_message_id and lobby_channel_id:
             jump_guild_id = channel.guild.id if channel.guild else guild_id
             jump_url = f"https://discord.com/channels/{jump_guild_id}/{lobby_channel_id}/{lobby_message_id}"
             embed.add_field(name="", value=f"[Jump to Lobby]({jump_url})", inline=False)
 
         # Use origin channel if available (where /lobby was run), otherwise fallback to reaction channel
-        origin_channel_id = bot.lobby_service.get_origin_channel_id() if bot.lobby_service else None
+        origin_channel_id = (
+            bot.lobby_service.get_origin_channel_id(guild_id=guild_id)
+            if bot.lobby_service
+            else None
+        )
         target_channel = channel  # Default to reaction channel
 
         if origin_channel_id and origin_channel_id != channel.id:
@@ -322,14 +334,26 @@ async def notify_lobby_rally(channel, thread, lobby, guild_id: int) -> bool:
         )
 
         # Add jump link to lobby embed
-        lobby_message_id = bot.lobby_service.get_lobby_message_id() if bot.lobby_service else None
-        lobby_channel_id = bot.lobby_service.get_lobby_channel_id() if bot.lobby_service else None
+        lobby_message_id = (
+            bot.lobby_service.get_lobby_message_id(guild_id=guild_id)
+            if bot.lobby_service
+            else None
+        )
+        lobby_channel_id = (
+            bot.lobby_service.get_lobby_channel_id(guild_id=guild_id)
+            if bot.lobby_service
+            else None
+        )
         if lobby_message_id and lobby_channel_id:
             jump_url = f"https://discord.com/channels/{guild_id}/{lobby_channel_id}/{lobby_message_id}"
             embed.add_field(name="", value=f"[Jump to Lobby]({jump_url})", inline=False)
 
         # Use origin channel if available (where /lobby was run), otherwise fallback to reaction channel
-        origin_channel_id = bot.lobby_service.get_origin_channel_id() if bot.lobby_service else None
+        origin_channel_id = (
+            bot.lobby_service.get_origin_channel_id(guild_id=guild_id)
+            if bot.lobby_service
+            else None
+        )
         target_channel = channel  # Default to reaction channel
 
         if origin_channel_id and origin_channel_id != channel.id:
@@ -470,15 +494,20 @@ async def on_raw_reaction_add(payload):
     # Handle readycheck ✅ reactions
     if payload.emoji.name == "✅":
         _init_services()
-        rc_msg_id = bot.lobby_service.get_readycheck_message_id()
+        payload_guild_id = payload.guild_id
+        rc_msg_id = bot.lobby_service.get_readycheck_message_id(guild_id=payload_guild_id)
         if rc_msg_id and payload.message_id == rc_msg_id:
             try:
                 added = bot.lobby_service.add_readycheck_reaction(
-                    payload.user_id, f"<@{payload.user_id}>"
+                    payload.user_id, f"<@{payload.user_id}>", guild_id=payload_guild_id
                 )
                 if added:
                     cog = bot.get_cog("LobbyCommands")
-                    embed = cog.rebuild_readycheck_embed() if cog else None
+                    embed = (
+                        cog.rebuild_readycheck_embed(guild_id=payload_guild_id)
+                        if cog
+                        else None
+                    )
                     if embed:
                         channel = bot.get_channel(payload.channel_id)
                         if not channel:
@@ -492,7 +521,7 @@ async def on_raw_reaction_add(payload):
     # Handle 🔔 readycheck-shortcut reactions on the lobby embed
     if payload.emoji.name == "🔔":
         _init_services()
-        if payload.message_id != bot.lobby_service.get_lobby_message_id():
+        if payload.message_id != bot.lobby_service.get_lobby_message_id(guild_id=payload.guild_id):
             return
         cog = bot.get_cog("LobbyCommands")
         if not cog:
@@ -527,15 +556,16 @@ async def on_raw_reaction_add(payload):
 
     _init_services()  # Ensure services are initialized
     try:
+        payload_guild_id = payload.guild_id
         channel = bot.get_channel(payload.channel_id)
         if not channel:
             channel = await bot.fetch_channel(payload.channel_id)
 
         message = await channel.fetch_message(payload.message_id)
-        if message.id != bot.lobby_service.get_lobby_message_id():
+        if message.id != bot.lobby_service.get_lobby_message_id(guild_id=payload_guild_id):
             return
 
-        lobby = bot.lobby_service.get_lobby()
+        lobby = bot.lobby_service.get_lobby(guild_id=payload_guild_id)
         if not lobby or lobby.status != "open":
             return
 
@@ -546,7 +576,7 @@ async def on_raw_reaction_add(payload):
             # Only ping if user is NOT already in the lobby (regular or conditional)
             already_in_lobby = payload.user_id in lobby.players or payload.user_id in lobby.conditional_players
             if not already_in_lobby:
-                thread_id = bot.lobby_service.get_lobby_thread_id()
+                thread_id = bot.lobby_service.get_lobby_thread_id(guild_id=payload_guild_id)
                 if thread_id:
                     try:
                         thread = bot.get_channel(thread_id)
@@ -667,7 +697,7 @@ async def on_raw_reaction_add(payload):
         await update_lobby_message(message, lobby, payload.guild_id)
 
         # Mention user in thread to subscribe them
-        thread_id = bot.lobby_service.get_lobby_thread_id()
+        thread_id = bot.lobby_service.get_lobby_thread_id(guild_id=payload_guild_id)
         thread = None
         if thread_id:
             try:
@@ -700,13 +730,20 @@ async def on_raw_reaction_remove(payload):
     # Handle readycheck ✅ un-reaction
     if payload.emoji.name == "✅":
         _init_services()
-        rc_msg_id = bot.lobby_service.get_readycheck_message_id()
+        payload_guild_id = payload.guild_id
+        rc_msg_id = bot.lobby_service.get_readycheck_message_id(guild_id=payload_guild_id)
         if rc_msg_id and payload.message_id == rc_msg_id:
             try:
-                removed = bot.lobby_service.remove_readycheck_reaction(payload.user_id)
+                removed = bot.lobby_service.remove_readycheck_reaction(
+                    payload.user_id, guild_id=payload_guild_id
+                )
                 if removed:
                     cog = bot.get_cog("LobbyCommands")
-                    embed = cog.rebuild_readycheck_embed() if cog else None
+                    embed = (
+                        cog.rebuild_readycheck_embed(guild_id=payload_guild_id)
+                        if cog
+                        else None
+                    )
                     if embed:
                         channel = bot.get_channel(payload.channel_id)
                         if not channel:
@@ -725,28 +762,33 @@ async def on_raw_reaction_remove(payload):
 
     _init_services()  # Ensure services are initialized
     try:
+        payload_guild_id = payload.guild_id
         channel = bot.get_channel(payload.channel_id)
         if not channel:
             channel = await bot.fetch_channel(payload.channel_id)
         message = await channel.fetch_message(payload.message_id)
-        if message.id != bot.lobby_service.get_lobby_message_id():
+        if message.id != bot.lobby_service.get_lobby_message_id(guild_id=payload_guild_id):
             return
 
-        lobby = bot.lobby_service.get_lobby()
+        lobby = bot.lobby_service.get_lobby(guild_id=payload_guild_id)
         if not lobby or lobby.status != "open":
             return
 
         # Remove from appropriate set based on which emoji was removed
         if is_sword:
-            left = await asyncio.to_thread(bot.lobby_service.leave_lobby, payload.user_id)
+            left = await asyncio.to_thread(
+                bot.lobby_service.leave_lobby, payload.user_id, payload_guild_id
+            )
         else:
-            left = await asyncio.to_thread(bot.lobby_service.leave_lobby_conditional, payload.user_id)
+            left = await asyncio.to_thread(
+                bot.lobby_service.leave_lobby_conditional, payload.user_id, payload_guild_id
+            )
 
         if left:
             await update_lobby_message(message, lobby, payload.guild_id)
 
             # Post leave message in thread
-            thread_id = bot.lobby_service.get_lobby_thread_id()
+            thread_id = bot.lobby_service.get_lobby_thread_id(guild_id=payload_guild_id)
             if thread_id:
                 try:
                     thread = bot.get_channel(thread_id)

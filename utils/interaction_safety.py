@@ -147,14 +147,14 @@ async def safe_followup(
 
 
 async def update_lobby_message_closed(
-    bot, lobby_service, reason: str = "Lobby Closed"
+    bot, lobby_service, reason: str = "Lobby Closed", guild_id: int | None = None
 ) -> None:
     """Update the channel message embed to show lobby/match is closed.
 
     Shared between match and lobby commands to avoid duplication.
     """
-    message_id = lobby_service.get_lobby_message_id()
-    channel_id = lobby_service.get_lobby_channel_id()
+    message_id = lobby_service.get_lobby_message_id(guild_id=guild_id)
+    channel_id = lobby_service.get_lobby_channel_id(guild_id=guild_id)
     if not message_id or not channel_id:
         return
 
