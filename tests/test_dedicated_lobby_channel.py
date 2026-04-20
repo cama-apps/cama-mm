@@ -95,30 +95,24 @@ class TestOriginChannelIdStorage:
 class TestOriginChannelIdPersistence:
     """Test origin_channel_id persistence across bot restarts."""
 
-    def test_origin_channel_id_persists_across_restart(self):
+    def test_origin_channel_id_persists_across_restart(self, repo_db_path):
         """Test that origin_channel_id is restored after restart."""
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".db") as f:
-            db_path = f.name
+        # First session - create lobby and set origin_channel_id
+        manager1 = LobbyManager(LobbyRepository(repo_db_path))
+        manager1.get_or_create_lobby(creator_id=12345)
+        manager1.set_lobby_message(
+            message_id=111,
+            channel_id=222,
+            origin_channel_id=333,
+        )
 
-        try:
-            # First session - create lobby and set origin_channel_id
-            manager1 = LobbyManager(LobbyRepository(db_path))
-            manager1.get_or_create_lobby(creator_id=12345)
-            manager1.set_lobby_message(
-                message_id=111,
-                channel_id=222,
-                origin_channel_id=333,
-            )
+        assert manager1.get_origin_channel_id(guild_id=0) == 333
 
-            assert manager1.get_origin_channel_id(guild_id=0) == 333
+        # Simulate restart
+        manager2 = LobbyManager(LobbyRepository(repo_db_path))
 
-            # Simulate restart
-            manager2 = LobbyManager(LobbyRepository(db_path))
-
-            # origin_channel_id should be restored
-            assert manager2.get_origin_channel_id(guild_id=0) == 333
-        finally:
-            _cleanup_db_file(db_path)
+        # origin_channel_id should be restored
+        assert manager2.get_origin_channel_id(guild_id=0) == 333
 
     def test_origin_channel_id_persists_with_all_ids(self):
         """Test that origin_channel_id persists alongside other IDs."""

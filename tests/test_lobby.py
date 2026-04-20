@@ -213,32 +213,23 @@ class TestLobbyManager:
 class TestLobbyPersistence:
     """Test lobby state persistence across bot restarts."""
 
-    def test_message_and_channel_ids_persist_across_restart(self):
+    def test_message_and_channel_ids_persist_across_restart(self, repo_db_path):
         """Test that message_id and channel_id are restored after restart."""
-        # Use a file-based DB to persist across manager instances
-        import tempfile
+        # First "session" - create lobby and set message
+        manager1 = LobbyManager(LobbyRepository(repo_db_path))
+        manager1.get_or_create_lobby(creator_id=12345)
+        manager1.set_lobby_message(message_id=111222333, channel_id=444555666)
 
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".db") as f:
-            db_path = f.name
+        # Verify IDs are set
+        assert manager1.get_lobby_message_id(guild_id=0) == 111222333
+        assert manager1.get_lobby_channel_id(guild_id=0) == 444555666
 
-        try:
-            # First "session" - create lobby and set message
-            manager1 = LobbyManager(LobbyRepository(db_path))
-            manager1.get_or_create_lobby(creator_id=12345)
-            manager1.set_lobby_message(message_id=111222333, channel_id=444555666)
+        # Simulate restart - create new manager with same DB
+        manager2 = LobbyManager(LobbyRepository(repo_db_path))
 
-            # Verify IDs are set
-            assert manager1.get_lobby_message_id(guild_id=0) == 111222333
-            assert manager1.get_lobby_channel_id(guild_id=0) == 444555666
-
-            # Simulate restart - create new manager with same DB
-            manager2 = LobbyManager(LobbyRepository(db_path))
-
-            # Verify IDs are restored
-            assert manager2.get_lobby_message_id(guild_id=0) == 111222333
-            assert manager2.get_lobby_channel_id(guild_id=0) == 444555666
-        finally:
-            _cleanup_db_file(db_path)
+        # Verify IDs are restored
+        assert manager2.get_lobby_message_id(guild_id=0) == 111222333
+        assert manager2.get_lobby_channel_id(guild_id=0) == 444555666
 
     def test_players_persist_across_restart(self):
         """Test that lobby players are restored after restart."""

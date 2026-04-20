@@ -50,8 +50,7 @@ class TestDomainLayerConstraints:
         root = get_project_root()
         domain_models = root / "domain" / "models"
 
-        if not domain_models.exists():
-            return
+        assert domain_models.is_dir(), f"expected {domain_models} to exist"
 
         for file_path in get_all_python_files(domain_models):
             imports = get_imports_from_file(file_path)
@@ -69,8 +68,7 @@ class TestDomainLayerConstraints:
         root = get_project_root()
         domain_models = root / "domain" / "models"
 
-        if not domain_models.exists():
-            return
+        assert domain_models.is_dir(), f"expected {domain_models} to exist"
 
         for file_path in get_all_python_files(domain_models):
             imports = get_imports_from_file(file_path)
@@ -88,8 +86,7 @@ class TestDomainLayerConstraints:
         root = get_project_root()
         domain_models = root / "domain" / "models"
 
-        if not domain_models.exists():
-            return
+        assert domain_models.is_dir(), f"expected {domain_models} to exist"
 
         for file_path in get_all_python_files(domain_models):
             imports = get_imports_from_file(file_path)
@@ -107,8 +104,7 @@ class TestDomainLayerConstraints:
         root = get_project_root()
         domain_services = root / "domain" / "services"
 
-        if not domain_services.exists():
-            return
+        assert domain_services.is_dir(), f"expected {domain_services} to exist"
 
         for file_path in get_all_python_files(domain_services):
             imports = get_imports_from_file(file_path)
@@ -130,8 +126,7 @@ class TestCommandLayerConstraints:
         root = get_project_root()
         commands_dir = root / "commands"
 
-        if not commands_dir.exists():
-            return
+        assert commands_dir.is_dir(), f"expected {commands_dir} to exist"
 
         # These are allowed repository imports (TYPE_CHECKING only is OK)
         allowed_patterns = ["interfaces"]
@@ -207,8 +202,7 @@ class TestRepositoryLayerConstraints:
         root = get_project_root()
         repos_dir = root / "repositories"
 
-        if not repos_dir.exists():
-            return
+        assert repos_dir.is_dir(), f"expected {repos_dir} to exist"
 
         for file_path in get_all_python_files(repos_dir):
             if file_path.name in ("__init__.py", "base_repository.py", "interfaces.py"):
@@ -237,8 +231,7 @@ class TestRepositoryLayerConstraints:
         root = get_project_root()
         repos_dir = root / "repositories"
 
-        if not repos_dir.exists():
-            return
+        assert repos_dir.is_dir(), f"expected {repos_dir} to exist"
 
         for file_path in get_all_python_files(repos_dir):
             if file_path.name == "base_repository.py":
@@ -258,8 +251,7 @@ class TestRepositoryLayerConstraints:
         root = get_project_root()
         repos_dir = root / "repositories"
 
-        if not repos_dir.exists():
-            return
+        assert repos_dir.is_dir(), f"expected {repos_dir} to exist"
 
         for file_path in get_all_python_files(repos_dir):
             if file_path.name == "base_repository.py":
@@ -283,8 +275,7 @@ class TestServiceLayerConstraints:
         root = get_project_root()
         services_dir = root / "services"
 
-        if not services_dir.exists():
-            return
+        assert services_dir.is_dir(), f"expected {services_dir} to exist"
 
         for file_path in get_all_python_files(services_dir):
             imports = get_imports_from_file(file_path)
