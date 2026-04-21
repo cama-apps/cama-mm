@@ -502,8 +502,8 @@ BOSS_DUEL_STATS: dict[str, dict[str, float]] = {
 
 BOSS_HP_PER_40_DEPTH: int = 1                     # boss HP bonus per 40 depth
 BOSS_HP_PER_PRESTIGE: int = 1                     # boss HP bonus per prestige level
-PLAYER_HIT_PENALTY_PER_25_DEPTH: float = 0.02     # -2% player hit per 25 depth
-PLAYER_HIT_PENALTY_PER_PRESTIGE: float = 0.02     # -2% player hit per prestige level
+PLAYER_HIT_PENALTY_PER_25_DEPTH: float = 0.01     # -1% player hit per 25 depth
+PLAYER_HIT_PENALTY_PER_PRESTIGE: float = 0.01     # -1% player hit per prestige level
 PLAYER_HIT_FLOOR: float = 0.05                     # hard floor so Reckless remains playable
 PLAYER_HIT_CEILING: float = 0.95                   # hard ceiling even with max cheers
 BOSS_FREE_FIGHT_ACCURACY_MOD: float = 0.6          # multiplied into player_hit when wager == 0
@@ -513,13 +513,13 @@ BOSS_ROUND_CAP: int = 20                           # safety valve against infini
 # Flatter and harder than the pre-nerf table; the old exponential growth at
 # top-end depths was the main jopacoin inflation source.
 BOSS_PAYOUTS: dict[int, tuple[float, float, float]] = {
-    25:  (1.0, 1.6, 2.8),
-    50:  (1.2, 2.2, 3.8),
-    75:  (1.4, 2.8, 4.8),
-    100: (1.6, 3.2, 5.6),
-    150: (1.9, 3.8, 6.5),
-    200: (2.2, 4.4, 7.5),
-    275: (2.4, 5.2, 8.0),
+    25:  (1.2, 1.9, 3.4),
+    50:  (1.4, 2.6, 4.6),
+    75:  (1.7, 3.4, 5.8),
+    100: (1.9, 3.8, 6.7),
+    150: (2.3, 4.6, 7.8),
+    200: (2.6, 5.3, 9.0),
+    275: (2.9, 6.2, 9.6),
 }
 
 

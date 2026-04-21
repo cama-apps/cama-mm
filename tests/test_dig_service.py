@@ -2698,9 +2698,9 @@ class TestAscensionSystem:
         dig_service.dig(10001, guild_id)
         dig_repo.update_tunnel(10001, guild_id, depth=24, prestige_level=4)
 
-        # Cautious @ depth 25, P4 with wager=10: player_hit 0.60 − 0.02 − 0.08
-        # = 0.50 (no free-fight mod). boss_hit=0.30. A roll of 0.35 hits for
-        # the player (<0.50) and misses for the boss (>0.30), so the duel
+        # Cautious @ depth 25, P4 with wager=10: player_hit 0.60 − 0.01 − 0.04
+        # = 0.55 (no free-fight mod). boss_hit=0.30. A roll of 0.35 hits for
+        # the player (<0.55) and misses for the boss (>0.30), so the duel
         # resolves deterministically against an 8-HP boss.
         monkeypatch.setattr(random, "random", lambda: 0.35)
         result = dig_service.fight_boss(10001, guild_id, "cautious", wager=10)
@@ -2724,8 +2724,8 @@ class TestAscensionSystem:
         dig_repo.update_tunnel(10001, guild_id, depth=24, prestige_level=3)
 
         # Same rationale as test_boss_phase2_at_prestige_4 but P3 so
-        # prestige penalty is 0.06. player_hit = 0.60 − 0.02 − 0.06 = 0.52
-        # with wager=10. roll=0.35 hits player (<0.52), misses boss (>0.30).
+        # prestige penalty is 0.03. player_hit = 0.60 − 0.01 − 0.03 = 0.56
+        # with wager=10. roll=0.35 hits player (<0.56), misses boss (>0.30).
         monkeypatch.setattr(random, "random", lambda: 0.35)
         result = dig_service.fight_boss(10001, guild_id, "cautious", wager=10)
         assert result["success"]
