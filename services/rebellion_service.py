@@ -285,7 +285,11 @@ class RebellionService:
         """
         Handle a fizzled rebellion.
           - Refund defender stakes
+          - Mark war fizzled
           - Apply inciter cooldown
+
+        All writes commit together so a crash can't partially refund stakes
+        or leave the war stuck in 'voting' after some money moved.
         """
         import json
 
@@ -295,17 +299,16 @@ class RebellionService:
 
         now = int(time.time())
         defend_voters = json.loads(war["defend_voter_ids"])
-
-        # Refund defender stakes
-        for did in defend_voters:
-            self.player_repo.add_balance(did, guild_id, REBELLION_DEFENDER_STAKE)
-
-        # Apply inciter cooldown
         cooldown_until = now + REBELLION_INCITER_COOLDOWN_SECONDS
-        self.rebellion_repo.set_inciter_cooldown(
-            war_id, war["inciter_id"], guild_id, cooldown_until
+
+        self.rebellion_repo.atomic_resolve_fizzle(
+            war_id=war_id,
+            guild_id=guild_id,
+            defender_ids=defend_voters,
+            defender_stake=REBELLION_DEFENDER_STAKE,
+            inciter_cooldown_until=cooldown_until,
+            resolved_at=now,
         )
-        self.rebellion_repo.set_fizzled(war_id, resolved_at=now)
 
         return {
             "inciter_id": war["inciter_id"],
@@ -355,6 +358,8 @@ class RebellionService:
 
         defenders_win = battle_roll >= victory_threshold
 
+        cooldown_until = now + REBELLION_INCITER_COOLDOWN_SECONDS
+
         if defenders_win:
             outcome = "defenders_win"
             result = self._resolve_defenders_win(
@@ -366,6 +371,7 @@ class RebellionService:
                 battle_roll=battle_roll,
                 victory_threshold=victory_threshold,
                 now=now,
+                cooldown_until=cooldown_until,
             )
         else:
             outcome = "attackers_win"
@@ -378,15 +384,12 @@ class RebellionService:
                 battle_roll=battle_roll,
                 victory_threshold=victory_threshold,
                 now=now,
+                cooldown_until=cooldown_until,
             )
 
         result["outcome"] = outcome
         result["battle_roll"] = battle_roll
         result["victory_threshold"] = victory_threshold
-
-        # Set inciter cooldown
-        cooldown_until = now + REBELLION_INCITER_COOLDOWN_SECONDS
-        self.rebellion_repo.set_inciter_cooldown(war_id, inciter_id, guild_id, cooldown_until)
 
         return result
 
@@ -400,35 +403,26 @@ class RebellionService:
         battle_roll: int,
         victory_threshold: int,
         now: int,
+        cooldown_until: int,
     ) -> dict:
-        """Handle defender victory outcome."""
-        # Inciter: +1 penalty game
-        self.bankruptcy_repo.upsert_state(
-            discord_id=inciter_id,
-            guild_id=guild_id,
-            last_bankruptcy_at=self._get_last_bankruptcy_at(inciter_id, guild_id),
-            penalty_games_remaining=self._get_penalty_games(inciter_id, guild_id) + 1,
-        )
-
-        # Attackers: +48h gamba cooldown (done in command layer via player_service)
-        # Defenders: stake back + REBELLION_DEFENDER_WIN_REWARD each
-        for did in defend_discord_ids:
-            self.player_repo.add_balance(did, guild_id, REBELLION_DEFENDER_STAKE + REBELLION_DEFENDER_WIN_REWARD)
-
-        # First defender bonus
+        """Handle defender victory outcome atomically (defender payouts +
+        inciter penalty bump + war status flip + inciter cooldown all in
+        one BEGIN IMMEDIATE). A retry after a mid-flight crash can no longer
+        double-pay the defenders; the status flip commits with the payouts.
+        """
         first_defender_id = defend_discord_ids[0] if defend_discord_ids else None
-        if first_defender_id:
-            self.player_repo.add_balance(first_defender_id, guild_id, REBELLION_FIRST_DEFENDER_BONUS)
-
-        # Wheel effects: WAR TROPHY, RETRIBUTION, BANKRUPT +50%
-        self.rebellion_repo.set_war_outcome(
+        self.rebellion_repo.atomic_resolve_defenders_win(
             war_id=war_id,
-            outcome="defenders_win",
+            guild_id=guild_id,
+            inciter_id=inciter_id,
+            defender_ids=defend_discord_ids,
+            first_defender_id=first_defender_id,
+            per_defender_credit=REBELLION_DEFENDER_STAKE + REBELLION_DEFENDER_WIN_REWARD,
+            first_defender_bonus=REBELLION_FIRST_DEFENDER_BONUS,
             battle_roll=battle_roll,
             victory_threshold=victory_threshold,
-            wheel_effect_spins_remaining=REBELLION_WHEEL_EFFECT_SPINS,
-            war_scar_wedge_label=None,  # No scar on defender win
-            celebration_spin_expires_at=None,
+            wheel_effect_spins=REBELLION_WHEEL_EFFECT_SPINS,
+            inciter_cooldown_until=cooldown_until,
             resolved_at=now,
         )
 
@@ -450,46 +444,37 @@ class RebellionService:
         battle_roll: int,
         victory_threshold: int,
         now: int,
+        cooldown_until: int,
     ) -> dict:
-        """Handle attacker victory outcome."""
-        # Inciter: +30 JC + cut penalty in half
-        self.player_repo.add_balance(inciter_id, guild_id, REBELLION_INCITER_FLAT_REWARD)
-        current_penalty = self._get_penalty_games(inciter_id, guild_id)
-        new_penalty = current_penalty // 2
-        if current_penalty > 0:
-            self.bankruptcy_repo.upsert_state(
-                discord_id=inciter_id,
-                guild_id=guild_id,
-                last_bankruptcy_at=self._get_last_bankruptcy_at(inciter_id, guild_id),
-                penalty_games_remaining=new_penalty,
-            )
-
-        # All attackers: flat 15 JC + equal share of defender stakes
+        """Handle attacker victory outcome atomically (inciter reward +
+        halve penalty + per-attacker credit + war status flip + inciter
+        cooldown all in one BEGIN IMMEDIATE).
+        """
         defender_stake_pool = len(defend_discord_ids) * REBELLION_DEFENDER_STAKE
         stake_share = defender_stake_pool // len(attack_discord_ids) if attack_discord_ids else 0
-        for did in attack_discord_ids:
-            self.player_repo.add_balance(did, guild_id, REBELLION_ATTACKER_FLAT_REWARD + stake_share)
-
-        # Pick a positive wedge to scar
         war_scar_label = self._pick_war_scar_wedge()
-
-        # Wheel effects: WAR SCAR, BANKRUPT -25%, free celebration spins
         celebration_expires = now + REBELLION_CELEBRATION_SPIN_WINDOW
-        self.rebellion_repo.set_war_outcome(
+
+        penalty_info = self.rebellion_repo.atomic_resolve_attackers_win(
             war_id=war_id,
-            outcome="attackers_win",
+            guild_id=guild_id,
+            inciter_id=inciter_id,
+            attacker_ids=attack_discord_ids,
+            per_attacker_credit=REBELLION_ATTACKER_FLAT_REWARD + stake_share,
+            inciter_flat_reward=REBELLION_INCITER_FLAT_REWARD,
             battle_roll=battle_roll,
             victory_threshold=victory_threshold,
-            wheel_effect_spins_remaining=REBELLION_WHEEL_EFFECT_SPINS,
-            war_scar_wedge_label=war_scar_label,
-            celebration_spin_expires_at=celebration_expires,
+            wheel_effect_spins=REBELLION_WHEEL_EFFECT_SPINS,
+            war_scar_label=war_scar_label,
+            celebration_expires_at=celebration_expires,
+            inciter_cooldown_until=cooldown_until,
             resolved_at=now,
         )
 
         return {
             "inciter_reward": REBELLION_INCITER_FLAT_REWARD,
-            "inciter_penalty_before": current_penalty,
-            "inciter_penalty_after": new_penalty,
+            "inciter_penalty_before": penalty_info["inciter_penalty_before"],
+            "inciter_penalty_after": penalty_info["inciter_penalty_after"],
             "attacker_flat_reward": REBELLION_ATTACKER_FLAT_REWARD,
             "attacker_stake_share": stake_share,
             "defender_stake_pool": defender_stake_pool,

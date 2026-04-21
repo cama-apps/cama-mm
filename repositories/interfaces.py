@@ -1534,6 +1534,61 @@ class IRebellionRepository(ABC):
         ...
 
     @abstractmethod
+    def atomic_resolve_fizzle(
+        self,
+        *,
+        war_id: int,
+        guild_id: int,
+        defender_ids: list[int],
+        defender_stake: int,
+        inciter_cooldown_until: int,
+        resolved_at: int,
+    ) -> None:
+        """Atomically refund defender stakes, mark war fizzled, set cooldown."""
+        ...
+
+    @abstractmethod
+    def atomic_resolve_defenders_win(
+        self,
+        *,
+        war_id: int,
+        guild_id: int,
+        inciter_id: int,
+        defender_ids: list[int],
+        first_defender_id: int | None,
+        per_defender_credit: int,
+        first_defender_bonus: int,
+        battle_roll: int,
+        victory_threshold: int,
+        wheel_effect_spins: int,
+        inciter_cooldown_until: int,
+        resolved_at: int,
+    ) -> None:
+        """Atomically credit defenders, bump inciter penalty, flip war outcome."""
+        ...
+
+    @abstractmethod
+    def atomic_resolve_attackers_win(
+        self,
+        *,
+        war_id: int,
+        guild_id: int,
+        inciter_id: int,
+        attacker_ids: list[int],
+        per_attacker_credit: int,
+        inciter_flat_reward: int,
+        battle_roll: int,
+        victory_threshold: int,
+        wheel_effect_spins: int,
+        war_scar_label: str,
+        celebration_expires_at: int,
+        inciter_cooldown_until: int,
+        resolved_at: int,
+    ) -> dict:
+        """Atomically credit attackers, halve inciter penalty, flip war outcome."""
+        ...
+
+    @abstractmethod
     def get_active_war_effect(self, guild_id: int) -> dict | None:
         """Get the most recent war with active wheel effects (spins_remaining > 0)."""
         ...

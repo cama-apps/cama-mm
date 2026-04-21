@@ -232,6 +232,250 @@ class RebellionRepository(BaseRepository, IRebellionRepository):
                 (status, war_id),
             )
 
+    def atomic_resolve_fizzle(
+        self,
+        *,
+        war_id: int,
+        guild_id: int,
+        defender_ids: list[int],
+        defender_stake: int,
+        inciter_cooldown_until: int,
+        resolved_at: int,
+    ) -> None:
+        """Refund defender stakes and mark the war fizzled in one txn.
+
+        Without this, a crash between refunding stake N and stake N+1 would
+        leave some stakes burned and the war stuck in 'voting'; a retry would
+        double-refund the stakes that already committed.
+        """
+        normalized_guild = self.normalize_guild_id(guild_id)
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            if defender_ids:
+                cursor.executemany(
+                    """
+                    UPDATE players
+                    SET jopacoin_balance = jopacoin_balance + ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE discord_id = ? AND guild_id = ?
+                    """,
+                    [(defender_stake, did, normalized_guild) for did in defender_ids],
+                )
+            cursor.execute(
+                """
+                UPDATE wheel_wars
+                SET status = 'fizzled', outcome = 'fizzled',
+                    resolved_at = ?, inciter_cooldown_until = ?
+                WHERE war_id = ?
+                """,
+                (resolved_at, inciter_cooldown_until, war_id),
+            )
+
+    def atomic_resolve_defenders_win(
+        self,
+        *,
+        war_id: int,
+        guild_id: int,
+        inciter_id: int,
+        defender_ids: list[int],
+        first_defender_id: int | None,
+        per_defender_credit: int,
+        first_defender_bonus: int,
+        battle_roll: int,
+        victory_threshold: int,
+        wheel_effect_spins: int,
+        inciter_cooldown_until: int,
+        resolved_at: int,
+    ) -> None:
+        """Apply the full defenders-win outcome atomically.
+
+        Credits every defender by ``per_defender_credit``, adds the extra
+        ``first_defender_bonus`` to ``first_defender_id``, bumps the inciter's
+        penalty_games_remaining by +1 (preserving the upsert_state increment
+        of bankruptcy_count for bug-compat), and flips wheel_wars to
+        resolved/defenders_win with the wheel-effect spins, resolved_at, and
+        inciter cooldown — all inside one BEGIN IMMEDIATE.
+        """
+        normalized_guild = self.normalize_guild_id(guild_id)
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+
+            if defender_ids:
+                cursor.executemany(
+                    """
+                    UPDATE players
+                    SET jopacoin_balance = jopacoin_balance + ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE discord_id = ? AND guild_id = ?
+                    """,
+                    [(per_defender_credit, did, normalized_guild) for did in defender_ids],
+                )
+            if first_defender_id is not None and first_defender_bonus > 0:
+                cursor.execute(
+                    """
+                    UPDATE players
+                    SET jopacoin_balance = jopacoin_balance + ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE discord_id = ? AND guild_id = ?
+                    """,
+                    (first_defender_bonus, first_defender_id, normalized_guild),
+                )
+
+            cursor.execute(
+                """
+                SELECT last_bankruptcy_at,
+                       COALESCE(penalty_games_remaining, 0) AS penalty_games_remaining
+                FROM bankruptcy_state
+                WHERE discord_id = ? AND guild_id = ?
+                """,
+                (inciter_id, normalized_guild),
+            )
+            row = cursor.fetchone()
+            current_last_at = row["last_bankruptcy_at"] if row else None
+            current_penalty = row["penalty_games_remaining"] if row else 0
+
+            cursor.execute(
+                """
+                INSERT INTO bankruptcy_state (
+                    discord_id, guild_id, last_bankruptcy_at,
+                    penalty_games_remaining, bankruptcy_count, updated_at
+                )
+                VALUES (?, ?, ?, ?, 1, CURRENT_TIMESTAMP)
+                ON CONFLICT(discord_id, guild_id) DO UPDATE SET
+                    last_bankruptcy_at = excluded.last_bankruptcy_at,
+                    penalty_games_remaining = excluded.penalty_games_remaining,
+                    bankruptcy_count = COALESCE(bankruptcy_state.bankruptcy_count, 0) + 1,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (inciter_id, normalized_guild, current_last_at, current_penalty + 1),
+            )
+
+            cursor.execute(
+                """
+                UPDATE wheel_wars SET
+                    status = 'resolved',
+                    outcome = 'defenders_win',
+                    battle_roll = ?,
+                    victory_threshold = ?,
+                    wheel_effect_spins_remaining = ?,
+                    war_scar_wedge_label = NULL,
+                    celebration_spin_expires_at = NULL,
+                    resolved_at = ?,
+                    inciter_cooldown_until = ?
+                WHERE war_id = ?
+                """,
+                (
+                    battle_roll, victory_threshold, wheel_effect_spins,
+                    resolved_at, inciter_cooldown_until, war_id,
+                ),
+            )
+
+    def atomic_resolve_attackers_win(
+        self,
+        *,
+        war_id: int,
+        guild_id: int,
+        inciter_id: int,
+        attacker_ids: list[int],
+        per_attacker_credit: int,
+        inciter_flat_reward: int,
+        battle_roll: int,
+        victory_threshold: int,
+        wheel_effect_spins: int,
+        war_scar_label: str,
+        celebration_expires_at: int,
+        inciter_cooldown_until: int,
+        resolved_at: int,
+    ) -> dict:
+        """Apply the full attackers-win outcome atomically.
+
+        Credits the inciter (+ ``inciter_flat_reward``), credits each attacker
+        by ``per_attacker_credit``, halves the inciter's
+        penalty_games_remaining if > 0 (preserving upsert_state's
+        bankruptcy_count bump for bug-compat), and flips wheel_wars to
+        resolved/attackers_win with war_scar, celebration_spin, and inciter
+        cooldown — all inside one BEGIN IMMEDIATE.
+
+        Returns ``{"inciter_penalty_before": int, "inciter_penalty_after": int}``
+        so the service can build its response payload.
+        """
+        normalized_guild = self.normalize_guild_id(guild_id)
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+
+            cursor.execute(
+                """
+                UPDATE players
+                SET jopacoin_balance = jopacoin_balance + ?, updated_at = CURRENT_TIMESTAMP
+                WHERE discord_id = ? AND guild_id = ?
+                """,
+                (inciter_flat_reward, inciter_id, normalized_guild),
+            )
+
+            if attacker_ids:
+                cursor.executemany(
+                    """
+                    UPDATE players
+                    SET jopacoin_balance = jopacoin_balance + ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE discord_id = ? AND guild_id = ?
+                    """,
+                    [(per_attacker_credit, did, normalized_guild) for did in attacker_ids],
+                )
+
+            cursor.execute(
+                """
+                SELECT last_bankruptcy_at,
+                       COALESCE(penalty_games_remaining, 0) AS penalty_games_remaining
+                FROM bankruptcy_state
+                WHERE discord_id = ? AND guild_id = ?
+                """,
+                (inciter_id, normalized_guild),
+            )
+            row = cursor.fetchone()
+            inciter_penalty_before = row["penalty_games_remaining"] if row else 0
+            new_penalty = inciter_penalty_before // 2
+
+            if inciter_penalty_before > 0:
+                last_at = row["last_bankruptcy_at"]
+                cursor.execute(
+                    """
+                    INSERT INTO bankruptcy_state (
+                        discord_id, guild_id, last_bankruptcy_at,
+                        penalty_games_remaining, bankruptcy_count, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, 1, CURRENT_TIMESTAMP)
+                    ON CONFLICT(discord_id, guild_id) DO UPDATE SET
+                        last_bankruptcy_at = excluded.last_bankruptcy_at,
+                        penalty_games_remaining = excluded.penalty_games_remaining,
+                        bankruptcy_count = COALESCE(bankruptcy_state.bankruptcy_count, 0) + 1,
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    (inciter_id, normalized_guild, last_at, new_penalty),
+                )
+
+            cursor.execute(
+                """
+                UPDATE wheel_wars SET
+                    status = 'resolved',
+                    outcome = 'attackers_win',
+                    battle_roll = ?,
+                    victory_threshold = ?,
+                    wheel_effect_spins_remaining = ?,
+                    war_scar_wedge_label = ?,
+                    celebration_spin_expires_at = ?,
+                    resolved_at = ?,
+                    inciter_cooldown_until = ?
+                WHERE war_id = ?
+                """,
+                (
+                    battle_roll, victory_threshold, wheel_effect_spins,
+                    war_scar_label, celebration_expires_at,
+                    resolved_at, inciter_cooldown_until, war_id,
+                ),
+            )
+
+            return {
+                "inciter_penalty_before": inciter_penalty_before,
+                "inciter_penalty_after": new_penalty,
+            }
+
     def set_inciter_veteran_weight(
         self,
         war_id: int,
