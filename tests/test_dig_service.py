@@ -2476,28 +2476,29 @@ class TestBossErrors:
         balance = player_repository.get_balance(10001, guild_id)
         assert balance <= 10 + 10  # initial 10 + at most some JC from first dig
 
-    def test_boss_boundary_allows_dig_after_cooldown(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """Once cooldown has elapsed, digging while parked at a boss boundary
-        returns the boss encounter and refreshes ``last_dig_at``."""
+    def test_boss_boundary_preserves_last_dig_at(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+        """Parked /dig go must not reset ``last_dig_at`` — the cooldown timer
+        should keep ticking from the last real dig so re-opening the boss view
+        can't be used to stall/reset cooldown."""
         _register_player(player_repository, balance=200)
         first_dig_time = 1_000_000
         monkeypatch.setattr(time, "time", lambda: first_dig_time)
         monkeypatch.setattr(random, "random", lambda: 0.99)
         dig_service.dig(10001, guild_id)
+        original_last_dig_at = dig_repo.get_tunnel(10001, guild_id)["last_dig_at"]
 
         # Place at boss boundary
         dig_repo.update_tunnel(10001, guild_id, depth=24)
 
-        # Dig again after cooldown
-        dig_time = first_dig_time + FREE_DIG_COOLDOWN_SECONDS + 1
-        monkeypatch.setattr(time, "time", lambda: dig_time)
+        # Re-open the parked boss view — should surface encounter but leave
+        # last_dig_at alone.
+        monkeypatch.setattr(time, "time", lambda: first_dig_time + FREE_DIG_COOLDOWN_SECONDS + 1)
         result = dig_service.dig(10001, guild_id)
         assert result["success"]
         assert result.get("boss_encounter") is True
 
-        # last_dig_at SHOULD be updated to prevent stale decay on next dig
         tunnel = dig_repo.get_tunnel(10001, guild_id)
-        assert tunnel["last_dig_at"] == dig_time
+        assert tunnel["last_dig_at"] == original_last_dig_at
 
     def test_boss_boundary_returns_full_info(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
         """Boss encounter from dig includes dialogue and ascii_art."""
@@ -2519,53 +2520,76 @@ class TestBossErrors:
         assert "name" in boss_info
         assert boss_info["boundary"] == 25
 
-    def test_paid_dig_at_boss_boundary_not_charged(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """Paid dig at boss boundary should not charge the player."""
-        _register_player(player_repository, balance=200)
-        monkeypatch.setattr(time, "time", lambda: 1_000_000)
-        monkeypatch.setattr(random, "random", lambda: 0.99)
-        dig_service.dig(10001, guild_id)
-        dig_repo.update_tunnel(10001, guild_id, depth=24)
-
-        balance_before = player_repository.get_balance(10001, guild_id)
-        # Still on cooldown, request paid dig
-        monkeypatch.setattr(time, "time", lambda: 1_000_000 + 10)
-        result = dig_service.dig(10001, guild_id, paid=True)
-        assert result["success"]
-        assert result.get("boss_encounter") is True
-        # Balance unchanged — boss boundary bypasses paid dig
-        assert player_repository.get_balance(10001, guild_id) == balance_before
-
-    def test_boss_parked_on_cooldown_returns_cooldown_error(
+    def test_parked_dig_ignores_cooldown(
         self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
     ):
-        """A parked player on active cooldown must not re-summon the boss
-        encounter for free — /dig go should return the cooldown error so the
-        player cannot spam free-fight attempts."""
+        """A player parked at a boss boundary must be able to reach the
+        BossEncounterView via /dig go regardless of cooldown — the cooldown
+        gate would otherwise hide the Fight button behind a paid-dig dialog."""
         _register_player(player_repository, balance=200)
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
         monkeypatch.setattr(random, "random", lambda: 0.99)
         dig_service.dig(10001, guild_id)
         dig_repo.update_tunnel(10001, guild_id, depth=24)
+        balance_before = player_repository.get_balance(10001, guild_id)
 
-        # Still on cooldown — normal (non-paid) dig should be blocked even
-        # though the player is parked at the boss boundary.
+        # Still on cooldown — parked /dig go must surface the encounter anyway.
         monkeypatch.setattr(time, "time", lambda: 1_000_000 + 10)
         result = dig_service.dig(10001, guild_id)
-        assert result["success"] is False
-        assert result.get("paid_dig_available") is True
-        assert result.get("cooldown_remaining", 0) > 0
-        # Parked paid-dig is free, so the preview cost should be 0.
-        assert result.get("paid_dig_cost") == 0
-        # Boss encounter must not leak into the error payload.
-        assert result.get("boss_encounter") is not True
+        assert result["success"] is True
+        assert result.get("boss_encounter") is True
+        assert result.get("boss_info", {}).get("boundary") == 25
+        assert not result.get("paid_dig_available")
+        # No JC awarded for re-opening the view.
+        assert result.get("jc_earned", 0) == 0
+        assert result.get("advance", 0) == 0
+        # Balance untouched.
+        assert player_repository.get_balance(10001, guild_id) == balance_before
 
-    def test_boss_parked_on_cooldown_blocks_preconditions_path(
+    def test_parked_dig_ignores_paid_flag(
         self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
     ):
-        """Mirror of the cooldown-bypass fix for the DM-mode entry point:
-        ``dig_with_preconditions`` must also enforce cooldown before returning
-        the parked-boss terminal result."""
+        """Paid=True while parked should not debit — the parked short-circuit
+        runs before the paid-dig code path."""
+        _register_player(player_repository, balance=200)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+        dig_repo.update_tunnel(10001, guild_id, depth=24)
+        balance_before = player_repository.get_balance(10001, guild_id)
+
+        monkeypatch.setattr(time, "time", lambda: 1_000_000 + 10)
+        result = dig_service.dig(10001, guild_id, paid=True)
+        assert result["success"] is True
+        assert result.get("boss_encounter") is True
+        assert player_repository.get_balance(10001, guild_id) == balance_before
+
+    def test_parked_dig_awards_no_jc_on_reopen(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
+    ):
+        """Hitting the parked short-circuit repeatedly must never award JC or
+        advance — otherwise the view becomes a JC farm."""
+        _register_player(player_repository, balance=200)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+        dig_repo.update_tunnel(10001, guild_id, depth=24)
+        balance_before = player_repository.get_balance(10001, guild_id)
+
+        for offset in (10, 20, 30):
+            monkeypatch.setattr(time, "time", lambda o=offset: 1_000_000 + o)
+            result = dig_service.dig(10001, guild_id)
+            assert result.get("boss_encounter") is True
+            assert result.get("jc_earned", 0) == 0
+            assert result.get("advance", 0) == 0
+        assert player_repository.get_balance(10001, guild_id) == balance_before
+
+    def test_parked_dig_ignores_cooldown_preconditions_path(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
+    ):
+        """DM-mode entry point (dig_with_preconditions) mirrors the same
+        parked short-circuit — terminal result is the boss encounter, not a
+        cooldown/paid-dig error."""
         _register_player(player_repository, balance=200)
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
         monkeypatch.setattr(random, "random", lambda: 0.99)
@@ -2576,11 +2600,9 @@ class TestBossErrors:
         terminal, precond = dig_service.dig_with_preconditions(10001, guild_id)
         assert precond is None
         assert terminal is not None
-        assert terminal.get("success") is False
-        assert terminal.get("paid_dig_available") is True
-        assert terminal.get("cooldown_remaining", 0) > 0
-        assert terminal.get("paid_dig_cost") == 0
-        assert terminal.get("boss_encounter") is not True
+        assert terminal.get("success") is True
+        assert terminal.get("boss_encounter") is True
+        assert not terminal.get("paid_dig_available")
 
 
 # =============================================================================
