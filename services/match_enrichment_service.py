@@ -272,19 +272,6 @@ class MatchEnrichmentService:
                     "players_not_found": [],
                 }
 
-        # Update match-level data
-        self.match_repo.update_match_enrichment(
-            match_id=internal_match_id,
-            valve_match_id=dota_match_id,
-            duration_seconds=match_data.get("duration", 0),
-            radiant_score=match_data.get("radiant_score", 0),
-            dire_score=match_data.get("dire_score", 0),
-            game_mode=match_data.get("game_mode", 0),
-            enrichment_data=json.dumps(match_data),
-            enrichment_source=source,
-            enrichment_confidence=confidence,
-        )
-
         # Build account_id -> player data mapping from OpenDota response
         opendota_players = {p["account_id"]: p for p in match_data.get("players", [])}
 
@@ -292,7 +279,7 @@ class MatchEnrichmentService:
         players_not_found = []
         radiant_fantasy = 0.0
         dire_fantasy = 0.0
-        participant_updates = []  # Collect updates for bulk operation
+        participant_updates = []  # Collected first; applied atomically with match-level data below
 
         # Match each participant - try all their steam_ids
         for participant in participants:
@@ -358,9 +345,21 @@ class MatchEnrichmentService:
             })
             players_enriched += 1
 
-        # Bulk update all participant stats in a single transaction
-        if participant_updates:
-            self.match_repo.update_participant_stats_bulk(internal_match_id, participant_updates)
+        # Atomic enrichment write: match-level fields + all participant rows
+        # commit together so we can't persist valve_match_id/duration without
+        # the matching hero/KDA/fantasy data (or vice versa).
+        self.match_repo.apply_enrichment_atomic(
+            match_id=internal_match_id,
+            valve_match_id=dota_match_id,
+            duration_seconds=match_data.get("duration", 0),
+            radiant_score=match_data.get("radiant_score", 0),
+            dire_score=match_data.get("dire_score", 0),
+            game_mode=match_data.get("game_mode", 0),
+            enrichment_data=json.dumps(match_data),
+            enrichment_source=source,
+            enrichment_confidence=confidence,
+            participant_updates=participant_updates,
+        )
 
         logger.info(
             f"Enrichment complete: {players_enriched} players enriched, "

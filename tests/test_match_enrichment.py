@@ -79,9 +79,9 @@ class TestMatchEnrichmentService:
         assert result["radiant_win"] is True
         assert result["fantasy_points_calculated"] is True
 
-        # Verify update calls
-        match_repo.update_match_enrichment.assert_called_once()
-        match_repo.update_participant_stats_bulk.assert_called_once()
+        # Match-level enrichment + per-participant stats now commit together
+        # via apply_enrichment_atomic (single call instead of two).
+        match_repo.apply_enrichment_atomic.assert_called_once()
 
     def test_enrich_match_api_failure(self, mock_repos, mock_opendota_api):
         """Test enrichment when OpenDota API fails."""

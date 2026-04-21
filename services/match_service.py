@@ -1123,11 +1123,11 @@ class MatchService:
                 "players_skipped": 0,
             }
 
-        # Persist updated ratings
+        # Persist ratings + rating_history together so a crash can't leave
+        # players.os_* updated without the matching rating_history row
+        # (or vice versa). Fantasy weights must track the OS values we just
+        # committed to players.
         updates = [(pid, mu, sigma) for pid, (mu, sigma, _) in results.items()]
-        updated_count = self.player_repo.update_openskill_ratings_bulk(updates, guild_id)
-
-        # Record in rating history (bulk update existing entries for this match)
         history_updates = []
         for pid, (new_mu, new_sigma, fantasy_weight) in results.items():
             old_mu, old_sigma = os_ratings.get(pid, (None, None))
@@ -1140,14 +1140,19 @@ class MatchService:
                 "fantasy_weight": fantasy_weight,
             })
 
-        if history_updates:
-            history_updated = self.match_repo.update_rating_history_openskill_bulk(
-                match_id, history_updates
+        result = self.match_repo.apply_openskill_phase2_atomic(
+            match_id=match_id,
+            guild_id=guild_id,
+            player_updates=updates,
+            history_updates=history_updates,
+        )
+        updated_count = result["players_updated"]
+        history_updated = result["history_updated"]
+
+        if history_updates and history_updated < len(history_updates):
+            logger.warning(
+                f"Only {history_updated}/{len(history_updates)} rating_history entries found for match {match_id}"
             )
-            if history_updated < len(history_updates):
-                logger.warning(
-                    f"Only {history_updated}/{len(history_updates)} rating_history entries found for match {match_id}"
-                )
 
         logger.info(
             f"OpenSkill update complete for match {match_id}: {updated_count} players updated"

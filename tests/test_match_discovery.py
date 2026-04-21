@@ -166,8 +166,9 @@ class TestMatchDiscoveryService:
         service = MatchDiscoveryService(match_repo, player_repo, mock_opendota_api)
         result = service._discover_single_match(1, TEST_GUILD_ID, dry_run=True)
 
-        # In dry run, match_repo.update_match_enrichment should NOT be called
+        # In dry run, no enrichment writes should fire.
         match_repo.update_match_enrichment.assert_not_called()
+        match_repo.apply_enrichment_atomic.assert_not_called()
 
         assert result["status"] == "discovered"
 
@@ -458,9 +459,9 @@ class TestEnrichmentServiceSource:
         # Use skip_validation since this test is checking source/confidence, not validation
         service.enrich_match(1, 99999, skip_validation=True)
 
-        # Check that update_match_enrichment was called with source='manual'
-        match_repo.update_match_enrichment.assert_called_once()
-        call_kwargs = match_repo.update_match_enrichment.call_args[1]
+        # Check that apply_enrichment_atomic was called with source='manual'
+        match_repo.apply_enrichment_atomic.assert_called_once()
+        call_kwargs = match_repo.apply_enrichment_atomic.call_args[1]
         assert call_kwargs["enrichment_source"] == "manual"
         assert call_kwargs["enrichment_confidence"] is None
 
@@ -489,7 +490,7 @@ class TestEnrichmentServiceSource:
         # Use skip_validation since this test is checking source/confidence, not validation
         service.enrich_match(1, 99999, source="auto", confidence=0.9, skip_validation=True)
 
-        call_kwargs = match_repo.update_match_enrichment.call_args[1]
+        call_kwargs = match_repo.apply_enrichment_atomic.call_args[1]
         assert call_kwargs["enrichment_source"] == "auto"
         assert call_kwargs["enrichment_confidence"] == 0.9
 

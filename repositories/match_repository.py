@@ -1394,6 +1394,187 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 ),
             )
 
+    def apply_enrichment_atomic(
+        self,
+        *,
+        match_id: int,
+        valve_match_id: int,
+        duration_seconds: int,
+        radiant_score: int,
+        dire_score: int,
+        game_mode: int,
+        enrichment_data: str | None,
+        enrichment_source: str | None,
+        enrichment_confidence: float | None,
+        participant_updates: list[dict],
+    ) -> int:
+        """Apply match-level enrichment and per-participant stats in one txn.
+
+        Folds update_match_enrichment + update_participant_stats_bulk into a
+        single BEGIN IMMEDIATE so a crash can't leave ``valve_match_id`` /
+        duration / scores set on the match with no corresponding per-player
+        hero/KDA/fantasy rows (the state the existing two-txn flow could
+        produce). Returns the number of participant rows updated.
+        """
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE matches
+                SET valve_match_id = ?,
+                    duration_seconds = ?,
+                    radiant_score = ?,
+                    dire_score = ?,
+                    game_mode = ?,
+                    enrichment_data = ?,
+                    enrichment_source = ?,
+                    enrichment_confidence = ?
+                WHERE match_id = ?
+                """,
+                (
+                    valve_match_id,
+                    duration_seconds,
+                    radiant_score,
+                    dire_score,
+                    game_mode,
+                    enrichment_data,
+                    enrichment_source,
+                    enrichment_confidence,
+                    match_id,
+                ),
+            )
+
+            if not participant_updates:
+                return 0
+
+            cursor.executemany(
+                """
+                UPDATE match_participants
+                SET hero_id = ?,
+                    kills = ?,
+                    deaths = ?,
+                    assists = ?,
+                    gpm = ?,
+                    xpm = ?,
+                    hero_damage = ?,
+                    tower_damage = ?,
+                    last_hits = ?,
+                    denies = ?,
+                    net_worth = ?,
+                    hero_healing = ?,
+                    lane_role = ?,
+                    lane_efficiency = ?,
+                    towers_killed = ?,
+                    roshans_killed = ?,
+                    teamfight_participation = ?,
+                    obs_placed = ?,
+                    sen_placed = ?,
+                    camps_stacked = ?,
+                    rune_pickups = ?,
+                    firstblood_claimed = ?,
+                    stuns = ?,
+                    fantasy_points = ?
+                WHERE match_id = ? AND discord_id = ?
+                """,
+                [
+                    (
+                        u.get("hero_id"),
+                        u.get("kills"),
+                        u.get("deaths"),
+                        u.get("assists"),
+                        u.get("gpm"),
+                        u.get("xpm"),
+                        u.get("hero_damage"),
+                        u.get("tower_damage"),
+                        u.get("last_hits"),
+                        u.get("denies"),
+                        u.get("net_worth"),
+                        u.get("hero_healing"),
+                        u.get("lane_role"),
+                        u.get("lane_efficiency"),
+                        u.get("towers_killed"),
+                        u.get("roshans_killed"),
+                        u.get("teamfight_participation"),
+                        u.get("obs_placed"),
+                        u.get("sen_placed"),
+                        u.get("camps_stacked"),
+                        u.get("rune_pickups"),
+                        u.get("firstblood_claimed"),
+                        u.get("stuns"),
+                        u.get("fantasy_points"),
+                        match_id,
+                        u["discord_id"],
+                    )
+                    for u in participant_updates
+                ],
+            )
+            return cursor.rowcount
+
+    def apply_openskill_phase2_atomic(
+        self,
+        *,
+        match_id: int,
+        guild_id: int,
+        player_updates: list[tuple[int, float, float]],
+        history_updates: list[dict],
+    ) -> dict:
+        """Apply Phase 2 OpenSkill ratings + rating_history update atomically.
+
+        Fuses ``players.os_mu/os_sigma`` update with the matching
+        ``rating_history.os_*_after`` + ``fantasy_weight`` update for this
+        match in one BEGIN IMMEDIATE, so a crash can't leave the two tables
+        disagreeing on whose OS rating reflects fantasy weighting.
+
+        Returns ``{"players_updated": int, "history_updated": int}``.
+        """
+        normalized_guild = self.normalize_guild_id(guild_id)
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+
+            players_updated = 0
+            if player_updates:
+                cursor.executemany(
+                    """
+                    UPDATE players
+                    SET os_mu = ?, os_sigma = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE discord_id = ? AND guild_id = ?
+                    """,
+                    [(mu, sigma, pid, normalized_guild) for pid, mu, sigma in player_updates],
+                )
+                players_updated = cursor.rowcount
+
+            history_updated = 0
+            if history_updates:
+                cursor.executemany(
+                    """
+                    UPDATE rating_history
+                    SET os_mu_before = ?,
+                        os_mu_after = ?,
+                        os_sigma_before = ?,
+                        os_sigma_after = ?,
+                        fantasy_weight = ?
+                    WHERE match_id = ? AND discord_id = ?
+                    """,
+                    [
+                        (
+                            u.get("os_mu_before"),
+                            u.get("os_mu_after"),
+                            u.get("os_sigma_before"),
+                            u.get("os_sigma_after"),
+                            u.get("fantasy_weight"),
+                            match_id,
+                            u["discord_id"],
+                        )
+                        for u in history_updates
+                    ],
+                )
+                history_updated = cursor.rowcount
+
+            return {
+                "players_updated": players_updated,
+                "history_updated": history_updated,
+            }
+
     def update_participant_stats_bulk(self, match_id: int, updates: list[dict]) -> int:
         """
         Update all participants in a single transaction.
