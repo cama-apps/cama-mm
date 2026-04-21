@@ -416,6 +416,32 @@ class IMatchRepository(ABC):
     ) -> int | None: ...
 
     @abstractmethod
+    def apply_enrichment_atomic(
+        self,
+        *,
+        match_id: int,
+        valve_match_id: int,
+        duration_seconds: int,
+        radiant_score: int,
+        dire_score: int,
+        game_mode: int,
+        enrichment_data: str | None,
+        enrichment_source: str | None,
+        enrichment_confidence: float | None,
+        participant_updates: list[dict],
+    ) -> int: ...
+
+    @abstractmethod
+    def apply_openskill_phase2_atomic(
+        self,
+        *,
+        match_id: int,
+        guild_id: int,
+        player_updates: list[tuple[int, float, float]],
+        history_updates: list[dict],
+    ) -> dict: ...
+
+    @abstractmethod
     def get_match(self, match_id: int, guild_id: int | None = None): ...
 
     @abstractmethod
