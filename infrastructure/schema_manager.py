@@ -357,6 +357,7 @@ class SchemaManager:
             # Cheer cooldown decoupled from free-dig cooldown.
             ("add_last_cheer_at_to_tunnels", self._migration_add_last_cheer_at_to_tunnels),
             ("create_reminder_preferences_table", self._migration_create_reminder_preferences_table),
+            ("add_dig_enabled_to_reminder_preferences", self._migration_add_dig_enabled_to_reminder_preferences),
         ]
 
     # --- Migrations ---
@@ -2820,4 +2821,13 @@ class SchemaManager:
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_reminder_prefs_betting "
             "ON reminder_preferences(guild_id, betting_enabled)"
+        )
+
+    def _migration_add_dig_enabled_to_reminder_preferences(self, cursor) -> None:
+        self._add_column_if_not_exists(
+            cursor, "reminder_preferences", "dig_enabled", "INTEGER NOT NULL DEFAULT 0"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_reminder_prefs_dig "
+            "ON reminder_preferences(guild_id, dig_enabled)"
         )

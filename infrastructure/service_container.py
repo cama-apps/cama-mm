@@ -413,6 +413,7 @@ class ServiceContainer:
         c["reminder_service"] = ReminderService(
             notification_repo=c["notification_repo"],
             player_repo=c["player_repo"],
+            dig_repo=c["dig_repo"],
         )
 
     # ------------------------------------------------------------------

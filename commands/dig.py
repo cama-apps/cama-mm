@@ -2332,6 +2332,13 @@ class DigCommands(commands.Cog):
             )
             return
 
+        reminder_svc = getattr(self.bot, "reminder_service", None)
+        if reminder_svc:
+            from services.dig_constants import FREE_DIG_COOLDOWN_SECONDS
+            reminder_svc.schedule_dig_reminder(
+                self.bot, interaction.user.id, guild_id, int(time.time()) + FREE_DIG_COOLDOWN_SECONDS
+            )
+
         # Dispatch by result shape. Each branch handles its own reply + reactions.
         if getattr(result, "is_first_dig", False):
             await self._send_first_dig_welcome(interaction)

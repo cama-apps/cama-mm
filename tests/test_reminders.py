@@ -45,7 +45,7 @@ def mock_bot():
 class TestNotificationRepository:
     def test_defaults_when_no_row(self, notification_repo):
         prefs = notification_repo.get_preferences(9001, TEST_GUILD_ID)
-        assert prefs == {"wheel_enabled": False, "trivia_enabled": False, "betting_enabled": False}
+        assert prefs == {"wheel_enabled": False, "trivia_enabled": False, "betting_enabled": False, "dig_enabled": False}
 
     def test_set_wheel_preference(self, notification_repo):
         notification_repo.set_preference(1, TEST_GUILD_ID, "wheel", True)
@@ -222,3 +222,77 @@ class TestReminderServiceBetting:
                 await asyncio.sleep(0)
 
         assert set(sent_to) == {1, 2}
+
+
+# ---------------------------------------------------------------------------
+# Dig reminder
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def dig_repo_mock():
+    mock = MagicMock()
+    mock.get_tunnel.return_value = None
+    return mock
+
+
+@pytest.fixture
+def reminder_service_with_dig(notification_repo, player_repo_mock, dig_repo_mock):
+    return ReminderService(
+        notification_repo=notification_repo,
+        player_repo=player_repo_mock,
+        dig_repo=dig_repo_mock,
+    )
+
+
+class TestDigReminder:
+    def test_dig_preference_default_false(self, notification_repo):
+        prefs = notification_repo.get_preferences(1, TEST_GUILD_ID)
+        assert prefs.get("dig_enabled") is False
+
+    def test_dig_preference_toggle(self, notification_repo):
+        notification_repo.set_preference(1, TEST_GUILD_ID, "dig", True)
+        assert notification_repo.get_preferences(1, TEST_GUILD_ID)["dig_enabled"] is True
+
+    @pytest.mark.asyncio
+    async def test_dig_schedule_creates_task_when_enabled(
+        self, reminder_service_with_dig, mock_bot
+    ):
+        reminder_service_with_dig.toggle_preference(1, TEST_GUILD_ID, "dig")
+        future_time = int(time.time()) + 3600
+        reminder_service_with_dig.schedule_dig_reminder(mock_bot, 1, TEST_GUILD_ID, future_time)
+        assert (1, TEST_GUILD_ID, "dig") in reminder_service_with_dig._tasks
+        reminder_service_with_dig._cancel_task(1, TEST_GUILD_ID, "dig")
+
+    def test_dig_no_task_when_disabled(self, reminder_service_with_dig, mock_bot):
+        future_time = int(time.time()) + 3600
+        reminder_service_with_dig.schedule_dig_reminder(mock_bot, 1, TEST_GUILD_ID, future_time)
+        assert (1, TEST_GUILD_ID, "dig") not in reminder_service_with_dig._tasks
+
+    @pytest.mark.asyncio
+    async def test_reschedule_dig_active_cooldown(
+        self, reminder_service_with_dig, dig_repo_mock, mock_bot
+    ):
+        reminder_service_with_dig.toggle_preference(1, TEST_GUILD_ID, "dig")
+        dig_repo_mock.get_tunnel.return_value = {"last_dig_at": int(time.time()) - 100}
+        await reminder_service_with_dig.reschedule_all(mock_bot, [TEST_GUILD_ID])
+        assert (1, TEST_GUILD_ID, "dig") in reminder_service_with_dig._tasks
+        reminder_service_with_dig._cancel_task(1, TEST_GUILD_ID, "dig")
+
+    @pytest.mark.asyncio
+    async def test_reschedule_dig_skips_none_tunnel(
+        self, reminder_service_with_dig, dig_repo_mock, mock_bot
+    ):
+        reminder_service_with_dig.toggle_preference(1, TEST_GUILD_ID, "dig")
+        dig_repo_mock.get_tunnel.return_value = None
+        await reminder_service_with_dig.reschedule_all(mock_bot, [TEST_GUILD_ID])
+        assert (1, TEST_GUILD_ID, "dig") not in reminder_service_with_dig._tasks
+
+    @pytest.mark.asyncio
+    async def test_reschedule_dig_skips_expired_cooldown(
+        self, reminder_service_with_dig, dig_repo_mock, mock_bot
+    ):
+        reminder_service_with_dig.toggle_preference(1, TEST_GUILD_ID, "dig")
+        dig_repo_mock.get_tunnel.return_value = {"last_dig_at": int(time.time()) - 200000}
+        await reminder_service_with_dig.reschedule_all(mock_bot, [TEST_GUILD_ID])
+        assert (1, TEST_GUILD_ID, "dig") not in reminder_service_with_dig._tasks
