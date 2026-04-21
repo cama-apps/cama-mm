@@ -373,6 +373,49 @@ class IMatchRepository(ABC):
     ) -> None: ...
 
     @abstractmethod
+    def record_match_core_atomic(
+        self,
+        *,
+        team1_ids: list[int],
+        team2_ids: list[int],
+        winning_team: int,
+        guild_id: int,
+        dotabuff_match_id: str | None,
+        lobby_type: str,
+        balancing_rating_system: str,
+        betting_mode: str = "pool",
+        winning_ids: list[int],
+        losing_ids: list[int],
+        glicko_updates: list[tuple[int, float, float, float]],
+        openskill_updates: list[tuple[int, float, float]],
+        rating_history_rows: list[dict],
+        match_prediction: dict,
+        last_match_date_iso: str,
+        first_calibration_ids: list[int],
+        first_calibration_unix: int,
+        effective_avoid_ids: list[int],
+        effective_deal_ids: list[int],
+    ) -> int: ...
+
+    @abstractmethod
+    def correct_match_result_atomic(
+        self,
+        *,
+        match_id: int,
+        guild_id: int,
+        old_winning_team: int,
+        new_winning_team: int,
+        old_winner_ids: list[int],
+        old_loser_ids: list[int],
+        radiant_ids: list[int],
+        dire_ids: list[int],
+        glicko_updates: list[tuple[int, float, float, float]],
+        openskill_updates: list[tuple[int, float, float]],
+        rating_history_updates: list[dict],
+        corrected_by: int | None,
+    ) -> int | None: ...
+
+    @abstractmethod
     def get_match(self, match_id: int, guild_id: int | None = None): ...
 
     @abstractmethod

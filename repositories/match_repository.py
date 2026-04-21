@@ -4,6 +4,7 @@ Repository for match data access.
 
 import json
 import logging
+import time
 
 from repositories.base_repository import BaseRepository
 from repositories.interfaces import IMatchRepository
@@ -101,6 +102,322 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     VALUES (?, ?, ?, 2, ?, ?)
                 """,
                     (match_id, player_id, guild_id, not team1_won, "dire"),
+                )
+
+            return match_id
+
+    def record_match_core_atomic(
+        self,
+        *,
+        team1_ids: list[int],
+        team2_ids: list[int],
+        winning_team: int,
+        guild_id: int,
+        dotabuff_match_id: str | None,
+        lobby_type: str,
+        balancing_rating_system: str,
+        betting_mode: str = "pool",
+        winning_ids: list[int],
+        losing_ids: list[int],
+        glicko_updates: list[tuple[int, float, float, float]],
+        openskill_updates: list[tuple[int, float, float]],
+        rating_history_rows: list[dict],
+        match_prediction: dict,
+        last_match_date_iso: str,
+        first_calibration_ids: list[int],
+        first_calibration_unix: int,
+        effective_avoid_ids: list[int],
+        effective_deal_ids: list[int],
+    ) -> int:
+        """Record a match and all dependent rating/pairings/consumable writes
+        atomically.
+
+        Fuses the full set of match-invariant writes into one BEGIN IMMEDIATE
+        so a crash mid-flight cannot leave a ``matches`` row without matching
+        rating updates, rating_history entries, or pairings — the invariant
+        every downstream consumer (leaderboards, prediction stats, rating
+        graphs) relies on.
+
+        The ``players`` balance side (bet settlement, loan repayment) is NOT
+        included: those writes have independent recovery paths (a pending bet
+        stays pending until settled; an outstanding loan stays outstanding
+        until repaid on the next recorded match) and keeping them outside
+        this txn avoids locking the money tables for the duration of match
+        recording.
+
+        Returns the new match_id.
+        """
+        normalized_guild = self.normalize_guild_id(guild_id)
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+
+            # 1. matches row
+            cursor.execute(
+                """
+                INSERT INTO matches (
+                    guild_id, team1_players, team2_players, winning_team,
+                    dotabuff_match_id, lobby_type, balancing_rating_system,
+                    betting_mode
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    normalized_guild,
+                    json.dumps(team1_ids),
+                    json.dumps(team2_ids),
+                    winning_team,
+                    dotabuff_match_id,
+                    lobby_type,
+                    balancing_rating_system,
+                    betting_mode,
+                ),
+            )
+            match_id = cursor.lastrowid
+
+            # 2. match_participants (team1=radiant, team2=dire)
+            team1_won = winning_team == 1
+            if team1_ids:
+                cursor.executemany(
+                    """
+                    INSERT INTO match_participants (
+                        match_id, discord_id, guild_id, team_number, won, side
+                    ) VALUES (?, ?, ?, 1, ?, 'radiant')
+                    """,
+                    [(match_id, pid, normalized_guild, team1_won) for pid in team1_ids],
+                )
+            if team2_ids:
+                cursor.executemany(
+                    """
+                    INSERT INTO match_participants (
+                        match_id, discord_id, guild_id, team_number, won, side
+                    ) VALUES (?, ?, ?, 2, ?, 'dire')
+                    """,
+                    [(match_id, pid, normalized_guild, not team1_won) for pid in team2_ids],
+                )
+
+            # 3. win/loss counters
+            if winning_ids:
+                cursor.executemany(
+                    """
+                    UPDATE players SET wins = wins + 1, updated_at = CURRENT_TIMESTAMP
+                    WHERE discord_id = ? AND guild_id = ?
+                    """,
+                    [(pid, normalized_guild) for pid in winning_ids],
+                )
+            if losing_ids:
+                cursor.executemany(
+                    """
+                    UPDATE players SET losses = losses + 1, updated_at = CURRENT_TIMESTAMP
+                    WHERE discord_id = ? AND guild_id = ?
+                    """,
+                    [(pid, normalized_guild) for pid in losing_ids],
+                )
+
+            # 4. Glicko updates
+            if glicko_updates:
+                cursor.executemany(
+                    """
+                    UPDATE players
+                    SET glicko_rating = ?, glicko_rd = ?, glicko_volatility = ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE discord_id = ? AND guild_id = ?
+                    """,
+                    [
+                        (rating, rd, vol, pid, normalized_guild)
+                        for pid, rating, rd, vol in glicko_updates
+                    ],
+                )
+
+            # 5. OpenSkill updates (Phase 1 equal-weight)
+            if openskill_updates:
+                cursor.executemany(
+                    """
+                    UPDATE players
+                    SET os_mu = ?, os_sigma = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE discord_id = ? AND guild_id = ?
+                    """,
+                    [(mu, sigma, pid, normalized_guild) for pid, mu, sigma in openskill_updates],
+                )
+
+            # 6. last_match_date for all participants
+            all_ids = set(team1_ids) | set(team2_ids)
+            if all_ids:
+                cursor.executemany(
+                    """
+                    UPDATE players
+                    SET last_match_date = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE discord_id = ? AND guild_id = ?
+                    """,
+                    [(last_match_date_iso, pid, normalized_guild) for pid in all_ids],
+                )
+
+            # 7. first_calibrated_at for players who just became calibrated
+            if first_calibration_ids:
+                cursor.executemany(
+                    """
+                    UPDATE players
+                    SET first_calibrated_at = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE discord_id = ? AND guild_id = ? AND first_calibrated_at IS NULL
+                    """,
+                    [
+                        (first_calibration_unix, pid, normalized_guild)
+                        for pid in first_calibration_ids
+                    ],
+                )
+
+            # 8. match_predictions snapshot
+            cursor.execute(
+                """
+                INSERT INTO match_predictions (
+                    match_id, radiant_rating, dire_rating, radiant_rd, dire_rd,
+                    expected_radiant_win_prob
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(match_id) DO UPDATE SET
+                    radiant_rating = excluded.radiant_rating,
+                    dire_rating = excluded.dire_rating,
+                    radiant_rd = excluded.radiant_rd,
+                    dire_rd = excluded.dire_rd,
+                    expected_radiant_win_prob = excluded.expected_radiant_win_prob,
+                    timestamp = CURRENT_TIMESTAMP
+                """,
+                (
+                    match_id,
+                    match_prediction["radiant_rating"],
+                    match_prediction["dire_rating"],
+                    match_prediction["radiant_rd"],
+                    match_prediction["dire_rd"],
+                    match_prediction["expected_radiant_win_prob"],
+                ),
+            )
+
+            # 9. rating_history rows (one per participant)
+            if rating_history_rows:
+                cursor.executemany(
+                    """
+                    INSERT INTO rating_history (
+                        discord_id, guild_id, rating, rating_before,
+                        rd_before, rd_after, volatility_before, volatility_after,
+                        expected_team_win_prob, team_number, won, match_id,
+                        os_mu_before, os_mu_after, os_sigma_before, os_sigma_after,
+                        fantasy_weight, streak_length, streak_multiplier
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (
+                            row["discord_id"],
+                            normalized_guild,
+                            row["rating"],
+                            row.get("rating_before"),
+                            row.get("rd_before"),
+                            row.get("rd_after"),
+                            row.get("volatility_before"),
+                            row.get("volatility_after"),
+                            row.get("expected_team_win_prob"),
+                            row.get("team_number"),
+                            row.get("won"),
+                            match_id,
+                            row.get("os_mu_before"),
+                            row.get("os_mu_after"),
+                            row.get("os_sigma_before"),
+                            row.get("os_sigma_after"),
+                            row.get("fantasy_weight"),
+                            row.get("streak_length"),
+                            row.get("streak_multiplier"),
+                        )
+                        for row in rating_history_rows
+                    ],
+                )
+
+            # 10. player_pairings — teammates + opponents
+            def canonical(a: int, b: int) -> tuple[int, int]:
+                return (a, b) if a < b else (b, a)
+
+            team2_won = not team1_won
+
+            teammate_rows: list[tuple] = []
+            for idx, p1 in enumerate(team1_ids):
+                for p2 in team1_ids[idx + 1:]:
+                    c1, c2 = canonical(p1, p2)
+                    w = 1 if team1_won else 0
+                    teammate_rows.append(
+                        (normalized_guild, c1, c2, w, match_id, w, match_id)
+                    )
+            for idx, p1 in enumerate(team2_ids):
+                for p2 in team2_ids[idx + 1:]:
+                    c1, c2 = canonical(p1, p2)
+                    w = 1 if team2_won else 0
+                    teammate_rows.append(
+                        (normalized_guild, c1, c2, w, match_id, w, match_id)
+                    )
+            if teammate_rows:
+                cursor.executemany(
+                    """
+                    INSERT INTO player_pairings (
+                        guild_id, player1_id, player2_id,
+                        games_together, wins_together, last_match_id
+                    ) VALUES (?, ?, ?, 1, ?, ?)
+                    ON CONFLICT(guild_id, player1_id, player2_id) DO UPDATE SET
+                        games_together = games_together + 1,
+                        wins_together = wins_together + ?,
+                        last_match_id = ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    teammate_rows,
+                )
+
+            opponent_rows: list[tuple] = []
+            for p1 in team1_ids:
+                for p2 in team2_ids:
+                    c1, c2 = canonical(p1, p2)
+                    # In canonical order, does player1 (c1) match the team1 player?
+                    p1_is_canonical_first = (p1 == c1)
+                    # player1_wins_against tracks c1's wins. c1 is on team1 if
+                    # p1_is_canonical_first, else on team2.
+                    c1_won = team1_won if p1_is_canonical_first else team2_won
+                    w = 1 if c1_won else 0
+                    opponent_rows.append(
+                        (normalized_guild, c1, c2, w, match_id, w, match_id)
+                    )
+            if opponent_rows:
+                cursor.executemany(
+                    """
+                    INSERT INTO player_pairings (
+                        guild_id, player1_id, player2_id,
+                        games_against, player1_wins_against, last_match_id
+                    ) VALUES (?, ?, ?, 1, ?, ?)
+                    ON CONFLICT(guild_id, player1_id, player2_id) DO UPDATE SET
+                        games_against = games_against + 1,
+                        player1_wins_against = player1_wins_against + ?,
+                        last_match_id = ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    opponent_rows,
+                )
+
+            # 11. Decrement consumables (soft avoids + package deals)
+            if effective_avoid_ids:
+                placeholders = ",".join("?" * len(effective_avoid_ids))
+                now_unix = int(time.time())
+                cursor.execute(
+                    f"""
+                    UPDATE soft_avoids
+                    SET games_remaining = games_remaining - 1, updated_at = ?
+                    WHERE guild_id = ? AND id IN ({placeholders}) AND games_remaining > 0
+                    """,
+                    (now_unix, normalized_guild, *effective_avoid_ids),
+                )
+            if effective_deal_ids:
+                placeholders = ",".join("?" * len(effective_deal_ids))
+                now_unix = int(time.time())
+                cursor.execute(
+                    f"""
+                    UPDATE package_deals
+                    SET games_remaining = games_remaining - 1, updated_at = ?
+                    WHERE guild_id = ? AND id IN ({placeholders}) AND games_remaining > 0
+                    """,
+                    (now_unix, normalized_guild, *effective_deal_ids),
                 )
 
             return match_id
@@ -2078,6 +2395,201 @@ class MatchRepository(BaseRepository, IMatchRepository):
             )
             rows = cursor.fetchall()
             return [dict(row) for row in rows]
+
+    def correct_match_result_atomic(
+        self,
+        *,
+        match_id: int,
+        guild_id: int,
+        old_winning_team: int,
+        new_winning_team: int,
+        old_winner_ids: list[int],
+        old_loser_ids: list[int],
+        radiant_ids: list[int],
+        dire_ids: list[int],
+        glicko_updates: list[tuple[int, float, float, float]],
+        openskill_updates: list[tuple[int, float, float]],
+        rating_history_updates: list[dict],
+        corrected_by: int | None,
+    ) -> int | None:
+        """Apply a match result correction atomically.
+
+        Folds win/loss swap, Glicko + OpenSkill updates, rating_history
+        correction, matches.winning_team + match_participants.won flip,
+        pairings reverse-and-reapply, and the correction audit row into a
+        single BEGIN IMMEDIATE. A crash can no longer leave the corrected
+        match's ratings desynced from its winning_team or its pairings.
+
+        ``rating_history_updates`` items carry:
+        ``{discord_id, new_rating, new_rd, new_volatility, new_won,
+           new_os_mu (optional), new_os_sigma (optional)}``.
+
+        Returns the correction_id if ``corrected_by`` was provided, else None.
+        Bet payout reversal/re-apply is NOT included here — it runs in its
+        own transactions around this call because pending bet settlement has
+        its own recovery path.
+        """
+        normalized_guild = self.normalize_guild_id(guild_id)
+
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+
+            # 1. Swap win/loss counters (old winners become losers, vice versa).
+            if old_winner_ids:
+                cursor.executemany(
+                    """
+                    UPDATE players SET wins = wins - 1, losses = losses + 1,
+                                       updated_at = CURRENT_TIMESTAMP
+                    WHERE discord_id = ? AND guild_id = ?
+                    """,
+                    [(pid, normalized_guild) for pid in old_winner_ids],
+                )
+            if old_loser_ids:
+                cursor.executemany(
+                    """
+                    UPDATE players SET losses = losses - 1, wins = wins + 1,
+                                       updated_at = CURRENT_TIMESTAMP
+                    WHERE discord_id = ? AND guild_id = ?
+                    """,
+                    [(pid, normalized_guild) for pid in old_loser_ids],
+                )
+
+            # 2. Apply new Glicko ratings.
+            if glicko_updates:
+                cursor.executemany(
+                    """
+                    UPDATE players
+                    SET glicko_rating = ?, glicko_rd = ?, glicko_volatility = ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE discord_id = ? AND guild_id = ?
+                    """,
+                    [
+                        (rating, rd, vol, pid, normalized_guild)
+                        for pid, rating, rd, vol in glicko_updates
+                    ],
+                )
+
+            # 3. Apply new OpenSkill ratings.
+            if openskill_updates:
+                cursor.executemany(
+                    """
+                    UPDATE players
+                    SET os_mu = ?, os_sigma = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE discord_id = ? AND guild_id = ?
+                    """,
+                    [(mu, sigma, pid, normalized_guild) for pid, mu, sigma in openskill_updates],
+                )
+
+            # 4. Update rating_history 'after' values to match the new result.
+            if rating_history_updates:
+                cursor.executemany(
+                    """
+                    UPDATE rating_history
+                    SET rating = ?,
+                        rd_after = ?,
+                        volatility_after = ?,
+                        won = ?,
+                        os_mu_after = COALESCE(?, os_mu_after),
+                        os_sigma_after = COALESCE(?, os_sigma_after)
+                    WHERE match_id = ? AND discord_id = ?
+                    """,
+                    [
+                        (
+                            u["new_rating"],
+                            u["new_rd"],
+                            u["new_volatility"],
+                            u["new_won"],
+                            u.get("new_os_mu"),
+                            u.get("new_os_sigma"),
+                            match_id,
+                            u["discord_id"],
+                        )
+                        for u in rating_history_updates
+                    ],
+                )
+
+            # 5. Flip matches.winning_team and match_participants.won.
+            cursor.execute(
+                "UPDATE matches SET winning_team = ? WHERE match_id = ?",
+                (new_winning_team, match_id),
+            )
+            cursor.execute(
+                """
+                UPDATE match_participants
+                SET won = CASE WHEN team_number = ? THEN 1 ELSE 0 END
+                WHERE match_id = ?
+                """,
+                (new_winning_team, match_id),
+            )
+
+            # 6. Pairings: net-delta approach. The only thing that flipped is
+            # which team won; games_together / games_against counts are
+            # unchanged. For each teammate pair, wins_together shifts by
+            # (new_side_won - old_side_won) ∈ {-1, +1}. For each opponent
+            # pair, player1_wins_against shifts by the same delta applied to
+            # whichever side player1 (in canonical order) is on.
+            def canonical(a: int, b: int) -> tuple[int, int]:
+                return (a, b) if a < b else (b, a)
+
+            new_team1_won = new_winning_team == 1
+            old_team1_won = old_winning_team == 1
+
+            teammate_rows: list[tuple] = []
+            for idx, p1 in enumerate(radiant_ids):
+                for p2 in radiant_ids[idx + 1:]:
+                    c1, c2 = canonical(p1, p2)
+                    delta = (1 if new_team1_won else 0) - (1 if old_team1_won else 0)
+                    teammate_rows.append((delta, normalized_guild, c1, c2))
+            for idx, p1 in enumerate(dire_ids):
+                for p2 in dire_ids[idx + 1:]:
+                    c1, c2 = canonical(p1, p2)
+                    delta = (1 if not new_team1_won else 0) - (1 if not old_team1_won else 0)
+                    teammate_rows.append((delta, normalized_guild, c1, c2))
+            if teammate_rows:
+                cursor.executemany(
+                    """
+                    UPDATE player_pairings
+                    SET wins_together = wins_together + ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE guild_id = ? AND player1_id = ? AND player2_id = ?
+                    """,
+                    teammate_rows,
+                )
+
+            opponent_rows: list[tuple] = []
+            for p1 in radiant_ids:
+                for p2 in dire_ids:
+                    c1, c2 = canonical(p1, p2)
+                    p1_is_canonical_first = (p1 == c1)
+                    c1_old_won = old_team1_won if p1_is_canonical_first else not old_team1_won
+                    c1_new_won = new_team1_won if p1_is_canonical_first else not new_team1_won
+                    delta = (1 if c1_new_won else 0) - (1 if c1_old_won else 0)
+                    opponent_rows.append((delta, normalized_guild, c1, c2))
+            if opponent_rows:
+                cursor.executemany(
+                    """
+                    UPDATE player_pairings
+                    SET player1_wins_against = player1_wins_against + ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE guild_id = ? AND player1_id = ? AND player2_id = ?
+                    """,
+                    opponent_rows,
+                )
+
+            # 7. Insert the correction audit row.
+            correction_id: int | None = None
+            if corrected_by is not None:
+                cursor.execute(
+                    """
+                    INSERT INTO match_corrections
+                    (match_id, old_winning_team, new_winning_team, corrected_by)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (match_id, old_winning_team, new_winning_team, corrected_by),
+                )
+                correction_id = cursor.lastrowid
+
+            return correction_id
 
     def update_match_result(self, match_id: int, new_winning_team: int) -> None:
         """
