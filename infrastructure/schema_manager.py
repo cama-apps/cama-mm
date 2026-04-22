@@ -271,6 +271,11 @@ class SchemaManager:
             ("create_dig_boss_echoes", self._migration_create_dig_boss_echoes),
             # Multi-guild lobby isolation
             ("add_guild_id_to_lobby_state", self._migration_add_guild_id_to_lobby_state),
+            # Multi-boss tiers + reactive mid-fight prompts (feat/dig-multi-boss-tiers)
+            ("create_dig_active_duels", self._migration_create_dig_active_duels),
+            ("upgrade_boss_progress_json", self._migration_upgrade_boss_progress_json),
+            ("rekey_dig_boss_echoes_by_boss_id", self._migration_rekey_dig_boss_echoes_by_boss_id),
+            ("add_stinger_curse_to_tunnels", self._migration_add_stinger_curse_to_tunnels),
         ]
 
     # --- Migrations ---
@@ -2061,6 +2066,164 @@ class SchemaManager:
             )
             """
         )
+
+    def _migration_create_dig_active_duels(self, cursor) -> None:
+        """Per-player mid-fight duel state for boss fights.
+
+        Rows exist only while a duel is paused awaiting a mid-fight prompt
+        response. ``start_boss_duel`` inserts the row when the rolled mechanic
+        triggers; ``resume_boss_duel`` reads it, applies the player's choice,
+        continues the duel, and deletes the row on final resolution. Survives
+        bot restarts so in-flight fights don't drop.
+        """
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS dig_active_duels (
+                discord_id INTEGER NOT NULL,
+                guild_id INTEGER NOT NULL,
+                boss_id TEXT NOT NULL,
+                tier INTEGER NOT NULL,
+                mechanic_id TEXT NOT NULL,
+                risk_tier TEXT NOT NULL,
+                wager INTEGER NOT NULL,
+                player_hp INTEGER NOT NULL,
+                boss_hp INTEGER NOT NULL,
+                round_num INTEGER NOT NULL,
+                round_log TEXT NOT NULL DEFAULT '[]',
+                pending_prompt TEXT,
+                rng_state TEXT NOT NULL,
+                status_effects TEXT NOT NULL DEFAULT '{}',
+                echo_applied INTEGER NOT NULL DEFAULT 0,
+                echo_killer_id INTEGER,
+                player_hit REAL NOT NULL,
+                player_dmg INTEGER NOT NULL,
+                boss_hit REAL NOT NULL,
+                boss_dmg INTEGER NOT NULL,
+                created_at INTEGER NOT NULL,
+                last_interaction_at INTEGER NOT NULL,
+                PRIMARY KEY (discord_id, guild_id)
+            )
+            """
+        )
+
+    def _migration_upgrade_boss_progress_json(self, cursor) -> None:
+        """Migrate ``tunnels.boss_progress`` JSON to the new {boss_id, status} shape.
+
+        Old shape:  ``{"25": "active"|"phase1_defeated"|"defeated"}``
+        New shape:  ``{"25": {"boss_id": "grothak", "status": "active"}}``
+
+        Backfills each existing depth entry with the grandfathered boss id so
+        players who were in the middle of a pre-feature run keep their locked
+        boss.
+        """
+        import json as _json
+
+        legacy_boss_ids = {
+            25: "grothak",
+            50: "crystalia",
+            75: "magmus_rex",
+            100: "void_warden",
+            150: "sporeling_sovereign",
+            200: "chronofrost",
+            275: "nameless_depth",
+        }
+
+        cursor.execute(
+            "SELECT discord_id, guild_id, boss_progress FROM tunnels "
+            "WHERE boss_progress IS NOT NULL AND boss_progress != ''"
+        )
+        for row in cursor.fetchall():
+            discord_id = row[0]
+            guild_id = row[1]
+            raw = row[2]
+            try:
+                data = _json.loads(raw)
+            except Exception:
+                continue
+            if not isinstance(data, dict):
+                continue
+            changed = False
+            upgraded: dict = {}
+            for depth_key, val in data.items():
+                if isinstance(val, str):
+                    # Legacy shape — upgrade.
+                    try:
+                        depth_int = int(depth_key)
+                    except (TypeError, ValueError):
+                        upgraded[depth_key] = val
+                        continue
+                    upgraded[depth_key] = {
+                        "boss_id": legacy_boss_ids.get(depth_int, ""),
+                        "status": val,
+                    }
+                    changed = True
+                else:
+                    upgraded[depth_key] = val
+            if changed:
+                cursor.execute(
+                    "UPDATE tunnels SET boss_progress = ? "
+                    "WHERE discord_id = ? AND guild_id = ?",
+                    (_json.dumps(upgraded), discord_id, guild_id),
+                )
+
+    def _migration_rekey_dig_boss_echoes_by_boss_id(self, cursor) -> None:
+        """Re-key ``dig_boss_echoes`` from (guild_id, depth) to (guild_id, boss_id).
+
+        With multiple bosses per tier, killing one boss at a depth should only
+        weaken that specific boss for guildmates — not every boss at the tier.
+        Backfills existing rows with the grandfathered boss id for that depth.
+        """
+        cursor.execute("PRAGMA table_info(dig_boss_echoes)")
+        columns = {row[1] for row in cursor.fetchall()}
+        if "boss_id" in columns:
+            return  # Already rekeyed.
+
+        legacy_boss_ids = {
+            25: "grothak",
+            50: "crystalia",
+            75: "magmus_rex",
+            100: "void_warden",
+            150: "sporeling_sovereign",
+            200: "chronofrost",
+            275: "nameless_depth",
+        }
+
+        cursor.execute("ALTER TABLE dig_boss_echoes RENAME TO dig_boss_echoes_old")
+        cursor.execute(
+            """
+            CREATE TABLE dig_boss_echoes (
+                guild_id INTEGER NOT NULL,
+                boss_id TEXT NOT NULL,
+                depth INTEGER NOT NULL,
+                killer_discord_id INTEGER NOT NULL,
+                weakened_until INTEGER NOT NULL,
+                PRIMARY KEY (guild_id, boss_id)
+            )
+            """
+        )
+        cursor.execute(
+            "SELECT guild_id, depth, killer_discord_id, weakened_until "
+            "FROM dig_boss_echoes_old"
+        )
+        for row in cursor.fetchall():
+            guild_id = row[0]
+            depth = int(row[1])
+            killer = row[2]
+            weakened = row[3]
+            boss_id = legacy_boss_ids.get(depth, f"depth_{depth}")
+            cursor.execute(
+                """
+                INSERT OR REPLACE INTO dig_boss_echoes
+                    (guild_id, boss_id, depth, killer_discord_id, weakened_until)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (guild_id, boss_id, depth, killer, weakened),
+            )
+        cursor.execute("DROP TABLE dig_boss_echoes_old")
+
+    def _migration_add_stinger_curse_to_tunnels(self, cursor) -> None:
+        """Add ``stinger_curse`` JSON column to tunnels for persistent loss debuffs."""
+        self._add_column_if_not_exists(cursor, "tunnels", "stinger_curse", "TEXT")
 
     def _migration_add_guild_id_to_lobby_state(self, cursor) -> None:
         """

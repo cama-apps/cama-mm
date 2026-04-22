@@ -234,7 +234,9 @@ class TestBossEchoWeakening:
         result = dig_service.fight_boss(10001, TEST_GUILD_ID, "reckless", wager=10)
         assert result["won"] is True
         assert result.get("echo_applied") is False
-        row = dig_repo.get_active_boss_echo(TEST_GUILD_ID, 25)
+        # _at_boss leaves boss_progress unset so the locked boss falls back to
+        # the grandfathered "grothak" at tier 25.
+        row = dig_repo.get_active_boss_echo(TEST_GUILD_ID, "grothak")
         assert row is not None
         assert row["killer_discord_id"] == 10001
 
@@ -286,7 +288,7 @@ class TestBossEchoWeakening:
         _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
         monkeypatch.setattr(random, "random", lambda: 0.0)
         dig_service.fight_boss(10001, TEST_GUILD_ID, "reckless", wager=10)
-        assert dig_repo.get_active_boss_echo(TEST_GUILD_ID, 25)["killer_discord_id"] == 10001
+        assert dig_repo.get_active_boss_echo(TEST_GUILD_ID, "grothak")["killer_discord_id"] == 10001
 
         # Second digger arrives under the echo and wins.
         _register(player_repository, discord_id=10002, balance=500)
@@ -301,7 +303,7 @@ class TestBossEchoWeakening:
         assert result["won"] is True
         assert result["echo_applied"] is True
         # After the beneficiary's clear, the echo's killer is now 10002.
-        row = dig_repo.get_active_boss_echo(TEST_GUILD_ID, 25)
+        row = dig_repo.get_active_boss_echo(TEST_GUILD_ID, "grothak")
         assert row is not None
         assert row["killer_discord_id"] == 10002
 
@@ -309,7 +311,9 @@ class TestBossEchoWeakening:
         # _at_boss pins time.time() to 1_000_000; record the echo AFTER that
         # pin so its weakened_until is in the pinned-clock frame.
         _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
-        dig_repo.record_boss_echo(TEST_GUILD_ID, 25, killer_discord_id=9999, window_seconds=60)
+        dig_repo.record_boss_echo(
+            TEST_GUILD_ID, "grothak", 25, killer_discord_id=9999, window_seconds=60,
+        )
         # Jump far past the 60-second echo window AND the fight cooldown.
         monkeypatch.setattr(time, "time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 3600)
         monkeypatch.setattr(random, "random", lambda: 0.0)

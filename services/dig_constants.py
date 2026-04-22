@@ -342,6 +342,9 @@ class BossDef:
     title: str
     ascii_art: str
     dialogue: list[str]             # 5 stages: threatening -> absurd
+    boss_id: str = ""               # stable unique identifier (e.g. "grothak", "pudge")
+    mechanic_pool: tuple[str, ...] = ()  # keys into MECHANIC_REGISTRY; one rolled per fight
+    stinger_id: str = ""            # key into STINGER_REGISTRY; fires on player loss
 
 
 BOSSES: dict[int, BossDef] = {
@@ -367,6 +370,9 @@ BOSSES: dict[int, BossDef] = {
             "YOU AGAIN?! I literally just sat down!",
             "Fine. Hit me. I can't feel anything below the waist anyway.",
         ],
+        boss_id="grothak",
+        mechanic_pool=("grothak_earthquake",),
+        stinger_id="grothak_crumble",
     ),
     50: BossDef(
         depth=50,
@@ -386,6 +392,9 @@ BOSSES: dict[int, BossDef] = {
             "YOU AGAIN?! Do you know how long it took to re-align these crystals?!",
             "I give up. Nothing is symmetrical anymore. Not even my will to fight.",
         ],
+        boss_id="crystalia",
+        mechanic_pool=("crystalia_prism",),
+        stinger_id="crystalia_shard",
     ),
     75: BossDef(
         depth=75,
@@ -405,6 +414,9 @@ BOSSES: dict[int, BossDef] = {
             "YOU AGAIN?! I was literally packing my bags for Bali!",
             "I'm just gonna lie here. Lava is basically a hot tub, right? ...right?",
         ],
+        boss_id="magmus_rex",
+        mechanic_pool=("magmus_eruption",),
+        stinger_id="magmus_burn",
     ),
     100: BossDef(
         depth=100,
@@ -424,6 +436,9 @@ BOSSES: dict[int, BossDef] = {
             "YOU AGAIN?! Is this all there is? Darkness and... diggers?",
             "You know what? Take the void. I'm going to go find myself.",
         ],
+        boss_id="void_warden",
+        mechanic_pool=("voidwarden_collapse",),
+        stinger_id="void_collapse",
     ),
     150: BossDef(
         depth=150,
@@ -443,6 +458,9 @@ BOSSES: dict[int, BossDef] = {
             "YOU AGAIN. We were in the middle of photosynthesis. ...Wait. We don't do that.",
             "Fine. We yield. Would you like a mushroom recipe? We have thousands.",
         ],
+        boss_id="sporeling_sovereign",
+        mechanic_pool=("sporeling_cloud",),
+        stinger_id="sporeling_rot",
     ),
     200: BossDef(
         depth=200,
@@ -462,6 +480,9 @@ BOSSES: dict[int, BossDef] = {
             "YOU AGAIN. Or is it still? Time is a suggestion down here.",
             "Go. I've seen every possible outcome and in most of them you win anyway.",
         ],
+        boss_id="chronofrost",
+        mechanic_pool=("chronofrost_still",),
+        stinger_id="chronofrost_still",
     ),
     275: BossDef(
         depth=275,
@@ -481,8 +502,369 @@ BOSSES: dict[int, BossDef] = {
             "YOU AGAIN. Or am I you again? The distinction stopped mattering at depth 250.",
             "Take the hollow. It was always yours. I was just keeping it warm.",
         ],
+        boss_id="nameless_depth",
+        mechanic_pool=("nameless_whisper",),
+        stinger_id="nameless_erase",
     ),
 }
+
+
+# ---------------------------------------------------------------------------
+# New Dota-themed bosses (2 per tier, sharing each tier with 1 grandfathered
+# boss). A tunnel rolls one boss per tier when it first crosses the milestone
+# and locks that pick for the run (see boss_progress JSON shape on the
+# tunnels table).
+# ---------------------------------------------------------------------------
+
+_DOTA_BOSSES: dict[str, BossDef] = {
+    "pudge": BossDef(
+        depth=25,
+        boss_id="pudge",
+        name="Pudge the Butcher",
+        title="Stitched-Together Hooker",
+        ascii_art=(
+            "   _____\n"
+            "  /     \\\n"
+            " | X o X |~~===>\n"
+            "  \\_____/   (hook)\n"
+            "   /|||\\\n"
+        ),
+        dialogue=[
+            "FRESH MEAT!",
+            "Oh, you came back. The last one tasted like regret.",
+            "I skipped lunch for this. You'd better be worth it.",
+            "YOU AGAIN?! My hook is blunt from you alone.",
+            "Fine. Walk past. I'm too tired to even taunt.",
+        ],
+        mechanic_pool=("pudge_hook",),
+        stinger_id="pudge_drag",
+    ),
+    "ogre_magi": BossDef(
+        depth=25,
+        boss_id="ogre_magi",
+        name="Ogre Magi",
+        title="Two Heads, Zero Plans",
+        ascii_art=(
+            "   (o)(o)\n"
+            "  /      \\\n"
+            " |  urrrk |\n"
+            "  \\      /\n"
+            "   \\____/\n"
+            "    ||||\n"
+        ),
+        dialogue=[
+            "One of us casts! The other forgets!",
+            "We saw you yesterday. We forgot you today. Hi again!",
+            "Left head wants to fight. Right head wants nachos.",
+            "YOU AGAIN! ...who? Oh right. YOU.",
+            "Both heads tired. Both heads say: yield.",
+        ],
+        mechanic_pool=("ogre_multicast",),
+        stinger_id="ogre_blast",
+    ),
+    "crystal_maiden": BossDef(
+        depth=50,
+        boss_id="crystal_maiden",
+        name="Crystal Maiden",
+        title="Cold in the Best Way",
+        ascii_art=(
+            "    ,-'-.\n"
+            "   ( *.* )\n"
+            "  /~|\"|~\\\n"
+            " / brrrr \\\n"
+            "   | | |\n"
+        ),
+        dialogue=[
+            "Stay a while. You'll be cold forever.",
+            "You came back? My mana hasn't even regenerated.",
+            "Okay, listen. I just did my hair. Please die quickly.",
+            "YOU AGAIN?! I was literally mid-ult.",
+            "Okay fine, I'll come quietly. But stop ganking me.",
+        ],
+        mechanic_pool=("cm_frostbite",),
+        stinger_id="cm_freeze",
+    ),
+    "tusk": BossDef(
+        depth=50,
+        boss_id="tusk",
+        name="Tusk",
+        title="The Walrus With A Plan",
+        ascii_art=(
+            "   .---.\n"
+            "  ( o o )\n"
+            " / |===| \\\n"
+            " \\_______/\n"
+            "  ~~~snow~~~\n"
+        ),
+        dialogue=[
+            "You ever been yeeted by a walrus? You're about to.",
+            "Snowball's out. Good luck.",
+            "I will kick you so hard you forget your own depth.",
+            "YOU AGAIN?! I'm out of snow. Give me a minute.",
+            "Fine. Go. Tell your friends a walrus sent you.",
+        ],
+        mechanic_pool=("tusk_snowball",),
+        stinger_id="tusk_kick",
+    ),
+    "lina": BossDef(
+        depth=75,
+        boss_id="lina",
+        name="Lina the Slayer",
+        title="She Who Brings the Heat",
+        ascii_art=(
+            "   ~*~*~\n"
+            "   (` )\n"
+            "   /\\_/\\\n"
+            "  ( >_< )\n"
+            "   /   \\\n"
+        ),
+        dialogue=[
+            "Laguna Blade's warming up. Say goodbye.",
+            "Oh look, you. Again. I'll try to kill you differently this time.",
+            "I'm low-key tired. Let's just one-shot this.",
+            "YOU AGAIN?! My mana bar has trust issues.",
+            "Ugh. Fine. Take the depth. My hair's frizzed anyway.",
+        ],
+        mechanic_pool=("lina_laguna",),
+        stinger_id="lina_scorch",
+    ),
+    "doom": BossDef(
+        depth=75,
+        boss_id="doom",
+        name="Doom",
+        title="Lord of the Avernus",
+        ascii_art=(
+            "   .---.\n"
+            "  /X X X\\\n"
+            " |  ___  |\n"
+            "  \\_____/\n"
+            "   ||||| \n"
+        ),
+        dialogue=[
+            "Silence. Doom approaches.",
+            "Doom recognizes you. Doom is unimpressed.",
+            "Every one of your digs extends my work week.",
+            "YOU AGAIN. Doom is burnt out.",
+            "Go. Doom needs a holiday.",
+        ],
+        mechanic_pool=("doom_mark",),
+        stinger_id="doom_mark",
+    ),
+    "spectre": BossDef(
+        depth=100,
+        boss_id="spectre",
+        name="Spectre",
+        title="The Dagger in the Dark",
+        ascii_art=(
+            "   _____\n"
+            "  /     \\\n"
+            " |  o o  |\n"
+            "  \\  V  /\n"
+            "   \\___/\n"
+            "    ~||~\n"
+        ),
+        dialogue=[
+            "I have already struck you. You just haven't noticed.",
+            "You keep returning. I never actually leave.",
+            "We are the same wound.",
+            "YOU AGAIN. I am, as ever.",
+            "Go. My work is never done anyway.",
+        ],
+        mechanic_pool=("spectre_haunt",),
+        stinger_id="spectre_haunt",
+    ),
+    "void_spirit": BossDef(
+        depth=100,
+        boss_id="void_spirit",
+        name="Void Spirit",
+        title="Dimensional Tourist",
+        ascii_art=(
+            "    .\" \".\n"
+            "   ( *.* )\n"
+            "    \\=|=/\n"
+            "  ~~/   \\~~\n"
+            "    /   \\\n"
+        ),
+        dialogue=[
+            "I stepped sideways through space to kill you. Worth it.",
+            "Back from a different dimension. You still here?",
+            "I know seven of your tunnels. Yours is the worst one.",
+            "YOU AGAIN?! I am literally everywhere else.",
+            "Fine. I'll take this dimension off.",
+        ],
+        mechanic_pool=("void_spirit_step",),
+        stinger_id="void_spirit_exile",
+    ),
+    "treant_protector": BossDef(
+        depth=150,
+        boss_id="treant_protector",
+        name="Treant Protector",
+        title="Old Growth, Old Grudges",
+        ascii_art=(
+            "      /\\\n"
+            "     /  \\\n"
+            "    /\\/\\ \\\n"
+            "    /   \\ \\\n"
+            "   / (0) \\\n"
+            "    | | |\n"
+        ),
+        dialogue=[
+            "You dig. I grow. One of us is patient.",
+            "Again. Trees have long memories.",
+            "Every time you return I have more rings.",
+            "YOU AGAIN. I am older than your tunnel.",
+            "Go. Even trees can grow tired.",
+        ],
+        mechanic_pool=("treant_overgrowth",),
+        stinger_id="treant_entangle",
+    ),
+    "broodmother": BossDef(
+        depth=150,
+        boss_id="broodmother",
+        name="Broodmother",
+        title="Nine Hundred Hungry Children",
+        ascii_art=(
+            "    /\\ /\\\n"
+            "   (oOOo)\n"
+            "  / '--' \\\n"
+            " ~~~webs~~~\n"
+            "    \\\\||//\n"
+        ),
+        dialogue=[
+            "My children are hungry. Please don't run.",
+            "You keep bringing yourself back. Thoughtful of you.",
+            "I still haven't named half of them. Want to help?",
+            "YOU AGAIN?! I was in the middle of spinning.",
+            "Fine. Go. Leave us to our weaving.",
+        ],
+        mechanic_pool=("broodmother_spawn",),
+        stinger_id="broodmother_web",
+    ),
+    "faceless_void": BossDef(
+        depth=200,
+        boss_id="faceless_void",
+        name="Faceless Void",
+        title="There Is No Timing Like His Timing",
+        ascii_art=(
+            "   _______\n"
+            "  /       \\\n"
+            " |   _ _   |\n"
+            "  \\  /-\\  /\n"
+            "   \\_____/\n"
+            "    time\n"
+        ),
+        dialogue=[
+            "I saw this coming. Literally.",
+            "You again. I was expecting you five seconds ago.",
+            "I'll chronosphere and walk away. Have fun.",
+            "YOU AGAIN. My cooldown is up, regrettably.",
+            "Go. You were going to win this one anyway.",
+        ],
+        mechanic_pool=("faceless_void_chrono",),
+        stinger_id="void_chrono",
+    ),
+    "weaver": BossDef(
+        depth=200,
+        boss_id="weaver",
+        name="Weaver",
+        title="The One Who Unpicks",
+        ascii_art=(
+            "   .-.\n"
+            "  ( ^ )\n"
+            "  /|X|\\\n"
+            " / | | \\\n"
+            "  ~===~\n"
+        ),
+        dialogue=[
+            "I will pull one thread. You will unravel.",
+            "Oh. You. Again. I hadn't even finished stitching.",
+            "Time-lapse away now and we both save energy.",
+            "YOU AGAIN?! I reset my own timeline to rest.",
+            "Take the depth. I'll weave it back later.",
+        ],
+        mechanic_pool=("weaver_timelapse",),
+        stinger_id="weaver_unmake",
+    ),
+    "oracle": BossDef(
+        depth=275,
+        boss_id="oracle",
+        name="Oracle",
+        title="Seer of Bad Bets",
+        ascii_art=(
+            "   .-\"\"\"-.\n"
+            "  / ? ? ? \\\n"
+            " | o . o |\n"
+            "  \\_=_=_/\n"
+            "    |||\n"
+        ),
+        dialogue=[
+            "I have already decided which one of us wins.",
+            "You? Again? I foresaw it. And still find it tedious.",
+            "Let's flip for it. Pick a side. Both sides lose.",
+            "YOU AGAIN. I predicted this too.",
+            "Go. The coin is tired.",
+        ],
+        mechanic_pool=("oracle_fortune",),
+        stinger_id="oracle_fate",
+    ),
+    "terrorblade": BossDef(
+        depth=275,
+        boss_id="terrorblade",
+        name="Terrorblade",
+        title="Betrayer and Sunderer",
+        ascii_art=(
+            "     /\\_/\\\n"
+            "    ( >_< )\n"
+            "   _/|'-'|\\_\n"
+            "  |__|---|__|\n"
+            "     /|v|\\\n"
+        ),
+        dialogue=[
+            "I will trade lives with you. You will not like yours.",
+            "You returned. Willingly. I admire the theater.",
+            "One more Sunder. Then we talk severance.",
+            "YOU AGAIN?! My mirror image is tired.",
+            "Take the hollow. Sunder yourself out of it.",
+        ],
+        mechanic_pool=("terrorblade_sunder",),
+        stinger_id="terrorblade_sunder",
+    ),
+}
+
+
+# BOSSES_BY_TIER: new canonical per-tier grouping. The first entry per tier
+# is the grandfathered fantasy boss (preserved from ``BOSSES``); the remaining
+# entries are the Dota-themed additions. All gameplay code that selects
+# which boss a tunnel faces should go through this table via
+# ``get_boss_pool_for_tier`` or ``get_boss_by_id``.
+BOSSES_BY_TIER: dict[int, list[BossDef]] = {
+    25:  [BOSSES[25],  _DOTA_BOSSES["pudge"],            _DOTA_BOSSES["ogre_magi"]],
+    50:  [BOSSES[50],  _DOTA_BOSSES["crystal_maiden"],   _DOTA_BOSSES["tusk"]],
+    75:  [BOSSES[75],  _DOTA_BOSSES["lina"],             _DOTA_BOSSES["doom"]],
+    100: [BOSSES[100], _DOTA_BOSSES["spectre"],          _DOTA_BOSSES["void_spirit"]],
+    150: [BOSSES[150], _DOTA_BOSSES["treant_protector"], _DOTA_BOSSES["broodmother"]],
+    200: [BOSSES[200], _DOTA_BOSSES["faceless_void"],    _DOTA_BOSSES["weaver"]],
+    275: [BOSSES[275], _DOTA_BOSSES["oracle"],           _DOTA_BOSSES["terrorblade"]],
+}
+
+
+# BOSSES_BY_ID: flat lookup, boss_id -> BossDef.
+BOSSES_BY_ID: dict[str, BossDef] = {
+    boss.boss_id: boss
+    for tier_list in BOSSES_BY_TIER.values()
+    for boss in tier_list
+}
+
+
+def get_boss_pool_for_tier(tier: int) -> list[BossDef]:
+    """Return the list of candidate BossDefs for the given tier depth."""
+    return BOSSES_BY_TIER.get(tier, [])
+
+
+def get_boss_by_id(boss_id: str) -> BossDef | None:
+    """Return the BossDef with the given boss_id, or None."""
+    return BOSSES_BY_ID.get(boss_id)
+
 
 # Boss fight mechanics ────────────────────────────────────────────
 # Bosses are resolved as a multi-round HP duel: player and boss alternate

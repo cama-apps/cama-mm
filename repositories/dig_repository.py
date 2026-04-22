@@ -878,14 +878,19 @@ class DigRepository(BaseRepository, IDigRepository):
     def record_boss_echo(
         self,
         guild_id: int | None,
+        boss_id: str,
         depth: int,
         killer_discord_id: int,
         window_seconds: int,
     ) -> None:
-        """Upsert the echo row for (guild, depth) with a fresh window.
+        """Upsert the echo row for (guild, boss_id) with a fresh window.
 
-        A BEGIN IMMEDIATE write lock is used so simultaneous kills at the
-        same boundary don't race; last writer wins.
+        With multiple bosses per tier, the echo is keyed by boss_id so killing
+        one boss at a depth only weakens that specific boss for guildmates.
+        ``depth`` is persisted alongside purely for reporting / queries.
+
+        A BEGIN IMMEDIATE write lock is used so simultaneous kills of the
+        same boss don't race; last writer wins.
         """
         gid = self.normalize_guild_id(guild_id)
         weakened_until = int(time.time()) + int(window_seconds)
@@ -894,30 +899,146 @@ class DigRepository(BaseRepository, IDigRepository):
             cursor.execute(
                 """
                 INSERT INTO dig_boss_echoes
-                    (guild_id, depth, killer_discord_id, weakened_until)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(guild_id, depth) DO UPDATE SET
+                    (guild_id, boss_id, depth, killer_discord_id, weakened_until)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(guild_id, boss_id) DO UPDATE SET
+                    depth             = excluded.depth,
                     killer_discord_id = excluded.killer_discord_id,
                     weakened_until    = excluded.weakened_until
                 """,
-                (gid, int(depth), int(killer_discord_id), weakened_until),
+                (gid, boss_id, int(depth), int(killer_discord_id), weakened_until),
             )
 
     def get_active_boss_echo(
-        self, guild_id: int | None, depth: int,
+        self, guild_id: int | None, boss_id: str,
     ) -> dict | None:
-        """Return the active echo row for (guild, depth) or None if expired."""
+        """Return the active echo row for (guild, boss_id) or None if expired."""
         gid = self.normalize_guild_id(guild_id)
         now = int(time.time())
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                SELECT killer_discord_id, weakened_until
+                SELECT boss_id, depth, killer_discord_id, weakened_until
                 FROM dig_boss_echoes
-                WHERE guild_id = ? AND depth = ? AND weakened_until > ?
+                WHERE guild_id = ? AND boss_id = ? AND weakened_until > ?
                 """,
-                (gid, int(depth), now),
+                (gid, boss_id, now),
             )
             row = cursor.fetchone()
             return dict(row) if row else None
+
+    # ── Active boss-duel state (mid-fight prompt persistence) ────────────
+
+    _DUEL_COLUMNS = (
+        "boss_id", "tier", "mechanic_id", "risk_tier", "wager",
+        "player_hp", "boss_hp", "round_num", "round_log", "pending_prompt",
+        "rng_state", "status_effects", "echo_applied", "echo_killer_id",
+        "player_hit", "player_dmg", "boss_hit", "boss_dmg",
+        "created_at", "last_interaction_at",
+    )
+
+    def get_active_duel(
+        self, discord_id: int, guild_id: int | None,
+    ) -> dict | None:
+        """Return the paused mid-duel state row for a player, or None."""
+        gid = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM dig_active_duels WHERE discord_id = ? AND guild_id = ?",
+                (int(discord_id), gid),
+            )
+            row = cursor.fetchone()
+            return dict(row) if row else None
+
+    def save_active_duel(
+        self, discord_id: int, guild_id: int | None, state: dict,
+    ) -> None:
+        """Upsert the duel state row (one per player per guild).
+
+        State dict keys should align with ``_DUEL_COLUMNS``. Missing keys fall
+        back to current-row values (for partial updates); unknown keys are
+        ignored. Wrapped in BEGIN IMMEDIATE so prompt-click races can't
+        corrupt the row.
+        """
+        gid = self.normalize_guild_id(guild_id)
+        now = int(time.time())
+        values: dict = {}
+        for col in self._DUEL_COLUMNS:
+            if col in state:
+                values[col] = state[col]
+        values.setdefault("created_at", now)
+        values["last_interaction_at"] = now
+
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            # Check existence for upsert semantics
+            cursor.execute(
+                "SELECT 1 FROM dig_active_duels WHERE discord_id = ? AND guild_id = ?",
+                (int(discord_id), gid),
+            )
+            exists = cursor.fetchone() is not None
+
+            if not exists:
+                # Full insert — require core fields
+                required = (
+                    "boss_id", "tier", "mechanic_id", "risk_tier", "wager",
+                    "player_hp", "boss_hp", "round_num", "rng_state",
+                    "player_hit", "player_dmg", "boss_hit", "boss_dmg",
+                )
+                missing = [k for k in required if k not in values]
+                if missing:
+                    raise ValueError(f"save_active_duel insert missing: {missing}")
+                values.setdefault("round_log", "[]")
+                values.setdefault("status_effects", "{}")
+                values.setdefault("echo_applied", 0)
+                values.setdefault("echo_killer_id", None)
+                cols = ["discord_id", "guild_id", *self._DUEL_COLUMNS]
+                placeholders = ",".join("?" for _ in cols)
+                cursor.execute(
+                    f"INSERT INTO dig_active_duels ({','.join(cols)}) VALUES ({placeholders})",
+                    (int(discord_id), gid, *(values.get(c) for c in self._DUEL_COLUMNS)),
+                )
+            else:
+                # Update only provided columns (excluding created_at)
+                updatable = [c for c in values if c != "created_at"]
+                if not updatable:
+                    return
+                set_clause = ",".join(f"{c} = ?" for c in updatable)
+                cursor.execute(
+                    f"UPDATE dig_active_duels SET {set_clause} "
+                    "WHERE discord_id = ? AND guild_id = ?",
+                    (*(values[c] for c in updatable), int(discord_id), gid),
+                )
+
+    def clear_active_duel(
+        self, discord_id: int, guild_id: int | None,
+    ) -> None:
+        """Delete the paused duel row after final resolution."""
+        gid = self.normalize_guild_id(guild_id)
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "DELETE FROM dig_active_duels WHERE discord_id = ? AND guild_id = ?",
+                (int(discord_id), gid),
+            )
+
+    # ── Great Lantern ownership check ───────────────────────────────────
+
+    def has_great_lantern(
+        self, discord_id: int, guild_id: int | None,
+    ) -> bool:
+        """True if the player owns a 'great_lantern' item (persistent gear)."""
+        gid = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT 1 FROM dig_inventory
+                WHERE discord_id = ? AND guild_id = ? AND item_type = 'great_lantern'
+                LIMIT 1
+                """,
+                (int(discord_id), gid),
+            )
+            return cursor.fetchone() is not None

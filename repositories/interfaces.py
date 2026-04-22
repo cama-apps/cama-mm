@@ -1468,14 +1468,35 @@ class IDigRepository(ABC):
     @abstractmethod
     def get_recent_social_actions(self, discord_id: int, guild_id: int, hours: int = 48) -> list[dict]: ...
 
-    # Boss echoes (post-kill weakening window)
+    # Boss echoes (post-kill weakening window, keyed by boss_id)
     @abstractmethod
     def record_boss_echo(
-        self, guild_id: int | None, depth: int,
+        self, guild_id: int | None, boss_id: str, depth: int,
         killer_discord_id: int, window_seconds: int,
     ) -> None: ...
 
     @abstractmethod
     def get_active_boss_echo(
-        self, guild_id: int | None, depth: int,
+        self, guild_id: int | None, boss_id: str,
     ) -> dict | None: ...
+
+    # Active boss-duel state (mid-fight prompt persistence)
+    @abstractmethod
+    def get_active_duel(
+        self, discord_id: int, guild_id: int | None,
+    ) -> dict | None: ...
+
+    @abstractmethod
+    def save_active_duel(
+        self, discord_id: int, guild_id: int | None, state: dict,
+    ) -> None: ...
+
+    @abstractmethod
+    def clear_active_duel(
+        self, discord_id: int, guild_id: int | None,
+    ) -> None: ...
+
+    @abstractmethod
+    def has_great_lantern(
+        self, discord_id: int, guild_id: int | None,
+    ) -> bool: ...

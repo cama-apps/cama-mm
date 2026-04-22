@@ -530,10 +530,16 @@ class DigService:
         return [{"type": i.get("item_type"), "id": i.get("id")} for i in items]
 
     def _get_boss_progress(self, tunnel: dict) -> dict:
-        """Get boss defeat state, merged with canonical boss list.
+        """Get boss defeat state as a flat ``{depth_str: status_str}`` dict.
 
-        Ensures all bosses from BOSS_BOUNDARIES are present — any missing
-        keys are treated as "active" (prevents prestige with only old bosses).
+        Normalizes BOTH the legacy string-status shape
+        (``{"25": "active"}``) and the new ``{"boss_id", "status"}`` shape
+        (``{"25": {"boss_id": "grothak", "status": "active"}}``) down to a
+        plain status-only dict, so existing callers that branch on status
+        keep working regardless of which format the JSON is in.
+
+        Missing keys default to "active" (prevents prestige with only old
+        bosses).
         """
         canonical = {str(b): "active" for b in BOSS_BOUNDARIES}
         raw = tunnel.get("boss_progress")
@@ -543,9 +549,81 @@ class DigService:
             stored = json.loads(raw)
         except (json.JSONDecodeError, TypeError):
             return canonical
-        # Merge: stored values override, but missing bosses stay "active"
-        canonical.update(stored)
+        normalized: dict = {}
+        for key, val in stored.items():
+            if isinstance(val, dict):
+                normalized[key] = val.get("status", "active")
+            else:
+                normalized[key] = val
+        canonical.update(normalized)
         return canonical
+
+    def _get_locked_boss_id(self, tunnel: dict, depth: int) -> str:
+        """Return the locked boss_id for this tunnel at this depth.
+
+        Reads the ``boss_progress`` JSON for a ``{"boss_id", "status"}``
+        entry. Falls back to the grandfathered boss (first entry in
+        ``BOSSES_BY_TIER[depth]``) if not yet locked, matching the pre-feature
+        behaviour so display paths don't break during partial rollouts.
+        """
+        raw = tunnel.get("boss_progress")
+        if raw:
+            try:
+                stored = json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                stored = {}
+            entry = stored.get(str(depth))
+            if isinstance(entry, dict):
+                bid = entry.get("boss_id")
+                if bid:
+                    return bid
+        from services.dig_constants import get_boss_pool_for_tier as _pool
+        pool = _pool(depth)
+        return pool[0].boss_id if pool else ""
+
+    def _ensure_boss_locked(
+        self, discord_id: int, guild_id, tunnel: dict, depth: int,
+    ):
+        """Roll + persist the tunnel's boss at this tier, or return existing.
+
+        Called from the mid-fight state machine entry points. Safe to call
+        repeatedly: once a boss is locked the same BossDef is returned. The
+        locked boss_id is written into ``tunnels.boss_progress`` under the
+        depth key, alongside the current status.
+        """
+        from services.dig_constants import (
+            BOSSES_BY_ID as _BOSSES_BY_ID,
+        )
+        from services.dig_constants import (
+            get_boss_pool_for_tier as _pool,
+        )
+        raw = tunnel.get("boss_progress")
+        try:
+            progress = json.loads(raw) if raw else {}
+        except (json.JSONDecodeError, TypeError):
+            progress = {}
+        entry = progress.get(str(depth))
+        if isinstance(entry, dict):
+            bid = entry.get("boss_id")
+            if bid and bid in _BOSSES_BY_ID:
+                return _BOSSES_BY_ID[bid]
+
+        pool = _pool(depth)
+        if not pool:
+            raise ValueError(f"No boss pool for tier {depth}")
+        boss = random.Random().choice(pool)
+        status = (
+            entry.get("status", "active")
+            if isinstance(entry, dict)
+            else (entry if isinstance(entry, str) else "active")
+        )
+        progress[str(depth)] = {"boss_id": boss.boss_id, "status": status}
+        self.dig_repo.update_tunnel(
+            discord_id, guild_id,
+            boss_progress=json.dumps(progress),
+        )
+        tunnel["boss_progress"] = json.dumps(progress)
+        return boss
 
     def _get_cheers(self, tunnel: dict) -> list[dict]:
         """Get boss fight cheer data."""
@@ -3473,7 +3551,9 @@ class DigService:
         # Echo weakening: if another guildmate has killed this boss within
         # the last 24h, the boss comes in at -25% HP and pays -30%. The
         # original killer is exempt so re-runs can't farm their own discount.
-        active_echo = self.dig_repo.get_active_boss_echo(guild_id, at_boss)
+        # Keyed by boss_id now that each tier has multiple possible bosses.
+        active_boss_id = self._get_locked_boss_id(tunnel, at_boss)
+        active_echo = self.dig_repo.get_active_boss_echo(guild_id, active_boss_id)
         echo_applied = bool(
             active_echo
             and active_echo.get("killer_discord_id") != discord_id
@@ -3609,6 +3689,7 @@ class DigService:
             # as the attributed killer.
             self.dig_repo.record_boss_echo(
                 guild_id=guild_id,
+                boss_id=active_boss_id,
                 depth=at_boss,
                 killer_discord_id=discord_id,
                 window_seconds=24 * 3600,
@@ -3706,6 +3787,730 @@ class DigService:
                 echo_killer_id=active_echo.get("killer_discord_id") if echo_applied else None,
             )
 
+    # =====================================================================
+    # Multi-boss tier state machine — reactive mid-fight prompts
+    # =====================================================================
+    # ``start_boss_duel`` is the entry point for the new mid-fight-prompt
+    # flow. It does everything ``fight_boss`` does up to the auto-round loop,
+    # but if the boss's rolled mechanic (drawn from ``BossDef.mechanic_pool``)
+    # is scheduled to trigger this fight, it pauses at the trigger round,
+    # persists duel state to ``dig_active_duels``, and returns a
+    # ``pending_prompt`` for the UI to render.
+    #
+    # ``resume_boss_duel`` is called when the player clicks one of the three
+    # reactive option buttons. It loads the paused state, rolls the option's
+    # outcome distribution, applies the result to the duel, continues the
+    # auto-rounds to final resolution, and clears the paused state row.
+    #
+    # The legacy ``fight_boss`` entry point remains synchronous and does NOT
+    # trigger mid-fight prompts — it's used by tests and by any caller that
+    # wants a one-shot resolution. The new UI paths use ``start_boss_duel``
+    # and ``resume_boss_duel``.
+    # =====================================================================
+
+    def start_boss_duel(
+        self, discord_id: int, guild_id, risk_tier: str, wager: int = 0,
+    ) -> dict:
+        """Start a boss duel. Pauses at the rolled mechanic's trigger round."""
+        from domain.models.boss_mechanics import (
+            get_mechanic as _get_mechanic,
+        )
+
+        tunnel = self.dig_repo.get_tunnel(discord_id, guild_id)
+        if tunnel is None:
+            return self._error("You don't have a tunnel.")
+        tunnel = dict(tunnel)
+        tunnel["discord_id"] = discord_id
+
+        boss_progress = self._get_boss_progress(tunnel)
+        depth = tunnel.get("depth", 0)
+        at_boss = self._at_boss_boundary(depth, boss_progress)
+        if at_boss is None:
+            return self._error("You're not at a boss boundary.")
+        if risk_tier not in ("cautious", "bold", "reckless"):
+            return self._error("Invalid risk tier. Choose: cautious, bold, reckless.")
+        if wager < 0:
+            return self._error("Wager must be non-negative.")
+        if wager > 0:
+            balance = self.player_repo.get_balance(discord_id, guild_id)
+            if balance < wager:
+                return self._error(f"You only have {balance} JC (wager: {wager}).")
+
+        # Ensure a specific boss is locked for this tunnel at this tier.
+        boss = self._ensure_boss_locked(discord_id, guild_id, tunnel, at_boss)
+
+        # Pick which mechanic fires this fight (variance on what prompt fires).
+        mechanic_id = ""
+        if boss.mechanic_pool:
+            mechanic_id = random.Random().choice(list(boss.mechanic_pool))
+        mechanic = _get_mechanic(mechanic_id) if mechanic_id else None
+
+        # Stats build — mirrors fight_boss lines 3516-3572.
+        stats = BOSS_DUEL_STATS.get(risk_tier, BOSS_DUEL_STATS["bold"])
+        tier_index = {"cautious": 0, "bold": 1, "reckless": 2}.get(risk_tier, 1)
+        payouts = BOSS_PAYOUTS.get(at_boss, (2.0, 3.0, 6.0))
+        multiplier = payouts[tier_index] if tier_index < len(payouts) else 2.0
+
+        prestige_level = tunnel.get("prestige_level", 0) or 0
+        cheers = self._get_cheers(tunnel)
+        now = int(time.time())
+        active_cheers = [c for c in cheers if c.get("expires_at", 0) > now]
+        cheer_bonus = min(0.15, len(active_cheers) * 0.05)
+
+        phase2_penalty = 0.0
+        if (boss_progress.get(str(at_boss)) == "phase1_defeated"
+                and at_boss in BOSS_PHASE2):
+            phase2_penalty = abs(BOSS_PHASE2[at_boss].win_odds_penalty)
+
+        depth_hit_penalty = (at_boss // 25) * PLAYER_HIT_PENALTY_PER_25_DEPTH
+        prestige_hit_penalty = prestige_level * PLAYER_HIT_PENALTY_PER_PRESTIGE
+        player_hit = (
+            stats["player_hit"] - depth_hit_penalty - prestige_hit_penalty
+            - phase2_penalty + cheer_bonus
+        )
+        if wager == 0:
+            player_hit *= BOSS_FREE_FIGHT_ACCURACY_MOD
+        player_hit = max(PLAYER_HIT_FLOOR, min(PLAYER_HIT_CEILING, player_hit))
+
+        player_hp = int(stats["player_hp"])
+        boss_hp = (int(stats["boss_hp"])
+                   + (at_boss // 40) * BOSS_HP_PER_40_DEPTH
+                   + prestige_level * BOSS_HP_PER_PRESTIGE)
+        player_dmg = int(stats["player_dmg"])
+        boss_hit_chance = float(stats["boss_hit"])
+        boss_dmg = int(stats["boss_dmg"])
+
+        active_echo = self.dig_repo.get_active_boss_echo(guild_id, boss.boss_id)
+        echo_applied = bool(
+            active_echo
+            and active_echo.get("killer_discord_id") != discord_id
+        )
+        if echo_applied:
+            boss_hp = max(1, int(round(boss_hp * 0.75)))
+
+        win_chance = _approx_duel_win_prob(
+            player_hp=player_hp,
+            boss_hp=boss_hp,
+            player_hit=player_hit,
+            player_dmg=player_dmg,
+            boss_hit=boss_hit_chance,
+            boss_dmg=boss_dmg,
+        )
+        attempts = (tunnel.get("boss_attempts", 0) or 0) + 1
+
+        # Run auto-rounds until trigger or resolution.
+        round_log: list[dict] = []
+        status_effects: dict = {}
+        won: bool | None = None
+        for round_num in range(1, BOSS_ROUND_CAP + 1):
+            # If a mechanic is scheduled for THIS round, pause and persist.
+            if (mechanic is not None
+                    and round_num == mechanic.trigger_round
+                    and player_hp > 0 and boss_hp > 0):
+                state = {
+                    "boss_id": boss.boss_id,
+                    "tier": at_boss,
+                    "mechanic_id": mechanic_id,
+                    "risk_tier": risk_tier,
+                    "wager": wager,
+                    "player_hp": player_hp,
+                    "boss_hp": boss_hp,
+                    "round_num": round_num,
+                    "round_log": json.dumps(round_log),
+                    "pending_prompt": json.dumps(
+                        self._serialize_prompt(mechanic)
+                    ),
+                    "rng_state": "",
+                    "status_effects": json.dumps({
+                        **status_effects,
+                        "attempts_this_fight": attempts,
+                        "initial_win_chance": win_chance,
+                        "multiplier": multiplier,
+                    }),
+                    "echo_applied": 1 if echo_applied else 0,
+                    "echo_killer_id": (
+                        active_echo.get("killer_discord_id")
+                        if echo_applied and active_echo else None
+                    ),
+                    "player_hit": player_hit,
+                    "player_dmg": player_dmg,
+                    "boss_hit": boss_hit_chance,
+                    "boss_dmg": boss_dmg,
+                }
+                self.dig_repo.save_active_duel(discord_id, guild_id, state)
+                return self._ok(
+                    pending_prompt=self._serialize_prompt(mechanic),
+                    boss_id=boss.boss_id,
+                    boss_name=boss.name,
+                    mechanic_id=mechanic_id,
+                    boundary=at_boss,
+                    risk_tier=risk_tier,
+                    wager=wager,
+                    player_hp=player_hp,
+                    boss_hp=boss_hp,
+                    round_num=round_num,
+                    round_log=round_log,
+                    win_chance=round(win_chance, 2),
+                    echo_applied=echo_applied,
+                    echo_killer_id=(
+                        active_echo.get("killer_discord_id")
+                        if echo_applied and active_echo else None
+                    ),
+                )
+
+            entry, player_hp, boss_hp, terminal = self._run_one_round(
+                round_num=round_num,
+                player_hp=player_hp, boss_hp=boss_hp,
+                player_hit=player_hit, player_dmg=player_dmg,
+                boss_hit=boss_hit_chance, boss_dmg=boss_dmg,
+                status_effects=status_effects,
+            )
+            round_log.append(entry)
+            if terminal is True:
+                won = True
+                break
+            if terminal is False:
+                won = False
+                break
+        if won is None:
+            # Round cap hit.
+            won = False
+
+        # Auto-resolve without a prompt firing.
+        return self._resolve_duel_outcome(
+            discord_id=discord_id, guild_id=guild_id,
+            tunnel=tunnel, boss=boss, at_boss=at_boss,
+            risk_tier=risk_tier, wager=wager,
+            won=won, round_log=round_log,
+            echo_applied=echo_applied, active_echo=active_echo,
+            win_chance=win_chance,
+            multiplier=multiplier, prestige_level=prestige_level,
+            attempts=attempts, boss_progress=dict(boss_progress),
+            depth=depth,
+        )
+
+    def resume_boss_duel(
+        self, discord_id: int, guild_id, option_idx: int,
+    ) -> dict:
+        """Resume a paused duel after the player picks a reactive option."""
+        from domain.models.boss_mechanics import get_mechanic as _get_mechanic
+        from services.dig_constants import get_boss_by_id as _get_boss
+
+        state_row = self.dig_repo.get_active_duel(discord_id, guild_id)
+        if state_row is None:
+            return self._error("No active duel to resume.")
+
+        boss = _get_boss(state_row["boss_id"])
+        if boss is None:
+            self.dig_repo.clear_active_duel(discord_id, guild_id)
+            return self._error("Duel references an unknown boss; cleared.")
+
+        mechanic = _get_mechanic(state_row["mechanic_id"])
+        if mechanic is None:
+            self.dig_repo.clear_active_duel(discord_id, guild_id)
+            return self._error("Duel references an unknown mechanic; cleared.")
+
+        try:
+            status_effects = json.loads(state_row["status_effects"] or "{}")
+        except (json.JSONDecodeError, TypeError):
+            status_effects = {}
+        try:
+            round_log = json.loads(state_row["round_log"] or "[]")
+        except (json.JSONDecodeError, TypeError):
+            round_log = []
+
+        if not 0 <= option_idx < len(mechanic.options):
+            option_idx = mechanic.safe_option_idx
+        option = mechanic.options[option_idx]
+
+        # Roll the option's distribution and apply deltas.
+        player_hp = int(state_row["player_hp"])
+        boss_hp = int(state_row["boss_hp"])
+        round_num = int(state_row["round_num"])
+
+        narrative, player_hp, boss_hp, status_effects = (
+            self._apply_option_outcome_to_state(
+                option=option,
+                player_hp=player_hp,
+                boss_hp=boss_hp,
+                status_effects=status_effects,
+            )
+        )
+        round_log.append({
+            "round": round_num,
+            "mechanic_id": state_row["mechanic_id"],
+            "option_idx": option_idx,
+            "option_label": option.label,
+            "narrative": narrative,
+            "player_hp": max(0, player_hp),
+            "boss_hp": max(0, boss_hp),
+        })
+
+        # Immediate HP check after option outcome.
+        won: bool | None = None
+        if boss_hp <= 0:
+            won = True
+        elif player_hp <= 0:
+            won = False
+
+        # Re-load tunnel for fresh state (caller may have dug, etc.).
+        tunnel = self.dig_repo.get_tunnel(discord_id, guild_id)
+        if tunnel is None:
+            self.dig_repo.clear_active_duel(discord_id, guild_id)
+            return self._error("Tunnel disappeared during duel.")
+        tunnel = dict(tunnel)
+        tunnel["discord_id"] = discord_id
+        depth = tunnel.get("depth", 0)
+
+        player_hit = float(state_row["player_hit"])
+        player_dmg = int(state_row["player_dmg"])
+        boss_hit = float(state_row["boss_hit"])
+        boss_dmg = int(state_row["boss_dmg"])
+
+        at_boss = int(state_row["tier"])
+
+        # Continue remaining auto-rounds if duel hasn't resolved on the option.
+        if won is None:
+            for r in range(round_num + 1, BOSS_ROUND_CAP + 1):
+                entry, player_hp, boss_hp, terminal = self._run_one_round(
+                    round_num=r,
+                    player_hp=player_hp, boss_hp=boss_hp,
+                    player_hit=player_hit, player_dmg=player_dmg,
+                    boss_hit=boss_hit, boss_dmg=boss_dmg,
+                    status_effects=status_effects,
+                )
+                round_log.append(entry)
+                if terminal is True:
+                    won = True
+                    break
+                if terminal is False:
+                    won = False
+                    break
+            if won is None:
+                won = False  # round cap
+
+        # Reconstruct active_echo-ish info for reporting.
+        active_echo = None
+        if int(state_row["echo_applied"] or 0):
+            active_echo = {
+                "killer_discord_id": state_row.get("echo_killer_id"),
+            }
+        echo_applied = bool(state_row["echo_applied"])
+
+        multiplier = float(status_effects.get(
+            "multiplier",
+            BOSS_PAYOUTS.get(at_boss, (2.0, 3.0, 6.0))[
+                {"cautious": 0, "bold": 1, "reckless": 2}.get(state_row["risk_tier"], 1)
+            ],
+        ))
+        win_chance = float(status_effects.get("initial_win_chance", 0.0))
+        attempts = int(
+            status_effects.get("attempts_this_fight")
+            or ((tunnel.get("boss_attempts", 0) or 0) + 1)
+        )
+        prestige_level = tunnel.get("prestige_level", 0) or 0
+        boss_progress = self._get_boss_progress_entries(tunnel)
+
+        self.dig_repo.clear_active_duel(discord_id, guild_id)
+
+        return self._resolve_duel_outcome(
+            discord_id=discord_id, guild_id=guild_id,
+            tunnel=tunnel, boss=boss, at_boss=at_boss,
+            risk_tier=state_row["risk_tier"],
+            wager=int(state_row["wager"]),
+            won=won, round_log=round_log,
+            echo_applied=echo_applied, active_echo=active_echo,
+            win_chance=win_chance,
+            multiplier=multiplier, prestige_level=prestige_level,
+            attempts=attempts, boss_progress=boss_progress,
+            depth=depth,
+        )
+
+    # --- helpers --------------------------------------------------------
+
+    def _serialize_prompt(self, mechanic) -> dict:
+        """Turn a BossMechanic into a JSON-safe dict for persistence / UI."""
+        return {
+            "mechanic_id": mechanic.id,
+            "archetype": mechanic.archetype,
+            "prompt_title": mechanic.prompt_title,
+            "prompt_description": mechanic.prompt_description,
+            "options": [
+                {"option_idx": i, "label": opt.label}
+                for i, opt in enumerate(mechanic.options)
+            ],
+            "safe_option_idx": mechanic.safe_option_idx,
+        }
+
+    def _run_one_round(
+        self,
+        *,
+        round_num: int,
+        player_hp: int, boss_hp: int,
+        player_hit: float, player_dmg: int,
+        boss_hit: float, boss_dmg: int,
+        status_effects: dict,
+    ) -> tuple[dict, int, int, bool | None]:
+        """Run one auto-round. Returns (entry, player_hp, boss_hp, terminal).
+
+        ``terminal`` is True if player won (boss at 0), False if lost
+        (player at 0), None if neither. Mutates ``status_effects`` in-place
+        to decrement DOTs and clear one-shot effects.
+        """
+        entry: dict = {"round": round_num}
+
+        # Start-of-round effects
+        if status_effects.get("boss_exposed_next_round"):
+            boss_hp -= 1
+            status_effects.pop("boss_exposed_next_round", None)
+        burn = int(status_effects.get("burn_rounds_remaining", 0))
+        if burn > 0:
+            player_hp -= 1
+            status_effects["burn_rounds_remaining"] = burn - 1
+        bleed = int(status_effects.get("bleed_rounds_remaining", 0))
+        if bleed > 0:
+            player_hp -= 1
+            status_effects["bleed_rounds_remaining"] = bleed - 1
+        if boss_hp <= 0:
+            entry["boss_hp"] = 0
+            entry["player_hp"] = max(0, player_hp)
+            return entry, player_hp, boss_hp, True
+        if player_hp <= 0:
+            entry["player_hp"] = 0
+            entry["boss_hp"] = max(0, boss_hp)
+            return entry, player_hp, boss_hp, False
+
+        skip = status_effects.pop("skip_next_round_for", None)
+        silenced = status_effects.pop("silenced_next_round", False)
+        frost = status_effects.pop("frostbite_next_round", False)
+
+        # Player swing
+        if skip != "player":
+            effective_player_hit = 0.0 if silenced else player_hit
+            player_roll = random.random() < effective_player_hit
+            if player_roll:
+                boss_hp -= player_dmg
+            entry["player_hit"] = player_roll
+            entry["boss_hp"] = max(0, boss_hp)
+        else:
+            entry["player_hit"] = False
+            entry["boss_hp"] = max(0, boss_hp)
+            entry["skipped_player"] = True
+
+        if boss_hp <= 0:
+            return entry, player_hp, boss_hp, True
+
+        # Boss swing
+        if skip != "boss":
+            boss_roll = random.random() < boss_hit
+            if boss_roll:
+                actual_dmg = boss_dmg + (1 if frost else 0)
+                player_hp -= actual_dmg
+            entry["boss_hit"] = boss_roll
+            entry["player_hp"] = max(0, player_hp)
+        else:
+            entry["boss_hit"] = False
+            entry["player_hp"] = max(0, player_hp)
+            entry["skipped_boss"] = True
+
+        if player_hp <= 0:
+            return entry, player_hp, boss_hp, False
+
+        return entry, player_hp, boss_hp, None
+
+    def _apply_option_outcome_to_state(
+        self, *, option, player_hp: int, boss_hp: int, status_effects: dict,
+    ) -> tuple[str, int, int, dict]:
+        """Roll the option's distribution, apply deltas, return (narrative, hp, hp, effects)."""
+        from domain.models.boss_mechanics import EFFECT_APPLIERS as _EFFS
+
+        roll_val = random.random()
+        cum = 0.0
+        chosen = option.outcome_rolls[-1]
+        for o in option.outcome_rolls:
+            cum += o.probability
+            if roll_val < cum:
+                chosen = o
+                break
+
+        new_status = dict(status_effects)
+        player_hp += chosen.player_hp_delta
+        boss_hp += chosen.boss_hp_delta
+        if chosen.skip_next_round_for:
+            new_status["skip_next_round_for"] = chosen.skip_next_round_for
+        if chosen.status_effect and chosen.status_effect in _EFFS:
+            # Appliers mutate a state-like dict in the same shape.
+            fake_state = {"status_effects": new_status}
+            _EFFS[chosen.status_effect](fake_state)
+            new_status = fake_state.get("status_effects") or new_status
+        return chosen.narrative, player_hp, boss_hp, new_status
+
+    def _get_boss_progress_entries(self, tunnel: dict) -> dict:
+        """Return the boss_progress JSON as {depth_str: entry_dict_or_str}."""
+        raw = tunnel.get("boss_progress")
+        if not raw:
+            return {str(b): "active" for b in BOSS_BOUNDARIES}
+        try:
+            stored = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return {str(b): "active" for b in BOSS_BOUNDARIES}
+        canonical = {str(b): "active" for b in BOSS_BOUNDARIES}
+        canonical.update(stored)
+        return canonical
+
+    def _apply_stinger_on_loss(
+        self, discord_id: int, guild_id, tunnel: dict, boss,
+    ) -> tuple[int, int]:
+        """Apply the boss's stinger effect. Returns (extra_knockback, extra_cooldown_s)."""
+        from domain.models.boss_stingers import STINGER_REGISTRY as _STS
+
+        stinger_id = getattr(boss, "stinger_id", "")
+        if not stinger_id or stinger_id not in _STS:
+            return 0, 0
+        stinger = _STS[stinger_id]
+
+        # Write cursed_status JSON onto the tunnel if present.
+        if stinger.cursed_status:
+            curse_raw = tunnel.get("stinger_curse")
+            try:
+                curse = json.loads(curse_raw) if curse_raw else {}
+            except (json.JSONDecodeError, TypeError):
+                curse = {}
+            curse[stinger.cursed_status] = True
+            curse["_boss_id"] = boss.boss_id
+            self.dig_repo.update_tunnel(
+                discord_id, guild_id, stinger_curse=json.dumps(curse),
+            )
+        return int(stinger.extra_knockback or 0), int(stinger.extended_cooldown_s or 0)
+
+    def _resolve_duel_outcome(
+        self, *, discord_id, guild_id, tunnel, boss, at_boss,
+        risk_tier, wager, won, round_log, echo_applied, active_echo,
+        win_chance, multiplier, prestige_level, attempts,
+        boss_progress, depth,
+    ) -> dict:
+        """Apply the win-branch or loss-branch post-processing and return the result dict.
+
+        Mirrors ``fight_boss``'s win (lines 3613-3742) and loss (3743-3786)
+        blocks; extended with per-boss stinger on loss.
+        """
+        now = int(time.time())
+        boss_name = boss.name if boss is not None else BOSS_NAMES.get(at_boss, "Unknown Boss")
+
+        ascension = self._get_ascension_effects(prestige_level)
+        boss_payout_mult = 1.0 + ascension.get("boss_payout_multiplier", 0)
+
+        if won:
+            current_entry = boss_progress.get(str(at_boss), "active")
+            current_status = (
+                current_entry.get("status", "active")
+                if isinstance(current_entry, dict)
+                else current_entry
+            )
+            needs_phase2 = (
+                ascension.get("boss_phase2", False)
+                and at_boss in BOSS_PHASE2
+                and current_status == "active"
+            )
+
+            if needs_phase2:
+                # Phase 1 victory: mark phase1_defeated, don't advance depth.
+                if isinstance(current_entry, dict):
+                    current_entry["status"] = "phase1_defeated"
+                    boss_progress[str(at_boss)] = current_entry
+                else:
+                    boss_progress[str(at_boss)] = {
+                        "boss_id": boss.boss_id if boss else "",
+                        "status": "phase1_defeated",
+                    }
+                self.dig_repo.update_tunnel(
+                    discord_id, guild_id,
+                    boss_progress=json.dumps(boss_progress),
+                    boss_attempts=attempts,
+                    last_dig_at=now,
+                )
+                phase2 = BOSS_PHASE2[at_boss]
+                p2_dialogue = phase2.dialogue[min(attempts - 1, len(phase2.dialogue) - 1)]
+                self.dig_repo.log_action(
+                    discord_id=discord_id, guild_id=guild_id,
+                    action_type="boss_fight",
+                    details=json.dumps({
+                        "boundary": at_boss, "won": True, "risk": risk_tier,
+                        "phase": 1, "wager": wager, "rounds": round_log,
+                    }),
+                )
+                return self._ok(
+                    won=True, phase=1, phase2_incoming=True,
+                    boss_name=boss_name, boss_id=boss.boss_id if boss else "",
+                    phase2_name=phase2.name, phase2_title=phase2.title,
+                    boundary=at_boss, risk_tier=risk_tier,
+                    win_chance=round(win_chance, 2),
+                    jc_delta=0, payout=0,
+                    new_depth=depth,
+                    dialogue=p2_dialogue,
+                    achievements=[],
+                    round_log=round_log,
+                    echo_applied=echo_applied,
+                    echo_killer_id=(
+                        active_echo.get("killer_discord_id")
+                        if echo_applied and active_echo else None
+                    ),
+                )
+
+            # Full victory
+            new_depth = at_boss
+            echo_payout_mult = 0.7 if echo_applied else 1.0
+            base_jc = int(wager * multiplier) if wager > 0 else random.randint(8, 18)
+            # Honor drain_next_reward curse: -25% on this reward.
+            curse_raw = tunnel.get("stinger_curse")
+            drain_applied = False
+            try:
+                curse = json.loads(curse_raw) if curse_raw else {}
+            except (json.JSONDecodeError, TypeError):
+                curse = {}
+            if curse.get("drain_next_reward"):
+                base_jc = int(round(base_jc * 0.75))
+                drain_applied = True
+                curse.pop("drain_next_reward", None)
+                # Persist cleared curse flag (keep other curses intact)
+                self.dig_repo.update_tunnel(
+                    discord_id, guild_id,
+                    stinger_curse=(json.dumps(curse) if curse else None),
+                )
+            jc_delta = int(base_jc * boss_payout_mult * echo_payout_mult)
+
+            # Mark defeated in the {boss_id, status} shape.
+            existing_entry = boss_progress.get(str(at_boss))
+            if isinstance(existing_entry, dict):
+                existing_entry["status"] = "defeated"
+                boss_progress[str(at_boss)] = existing_entry
+            else:
+                boss_progress[str(at_boss)] = {
+                    "boss_id": boss.boss_id if boss else "",
+                    "status": "defeated",
+                }
+            stat_point_awarded = self._award_boss_stat_point_if_first(
+                discord_id, guild_id, tunnel, at_boss,
+            )
+            prev_max_depth = tunnel.get("max_depth", 0) or 0
+            self.dig_repo.update_tunnel(
+                discord_id, guild_id,
+                depth=new_depth,
+                max_depth=max(prev_max_depth, new_depth),
+                boss_progress=json.dumps(boss_progress),
+                boss_attempts=0,
+                cheer_data=None,
+                last_dig_at=now,
+            )
+            self.dig_repo.record_boss_echo(
+                guild_id=guild_id,
+                boss_id=boss.boss_id if boss else "",
+                depth=at_boss,
+                killer_discord_id=discord_id,
+                window_seconds=24 * 3600,
+            )
+            if wager > 0:
+                self.player_repo.add_balance(
+                    discord_id, guild_id,
+                    int(wager * (multiplier * boss_payout_mult * echo_payout_mult - 1))
+                    - (int(round(wager * multiplier * 0.25)) if drain_applied else 0),
+                )
+            else:
+                self.player_repo.add_balance(discord_id, guild_id, jc_delta)
+
+            achievements = self.check_achievements(
+                discord_id, guild_id,
+                {**tunnel, "depth": new_depth},
+                {"action": "boss_win", "boundary": at_boss, "boss_progress": boss_progress},
+            )
+            dialogue_list = (
+                boss.dialogue if (boss is not None and boss.dialogue)
+                else BOSS_DIALOGUE.get(at_boss, ["..."])
+            )
+            defeat_msg = dialogue_list[-1] if dialogue_list else "Defeated!"
+            self.dig_repo.log_action(
+                discord_id=discord_id, guild_id=guild_id,
+                action_type="boss_fight",
+                details=json.dumps({
+                    "boundary": at_boss, "won": True, "risk": risk_tier,
+                    "wager": wager, "jc_delta": jc_delta,
+                    "stat_point_awarded": stat_point_awarded,
+                    "echo_applied": echo_applied,
+                    "rounds": round_log,
+                }),
+            )
+            return self._ok(
+                won=True,
+                phase=(2 if current_status == "phase1_defeated" else None),
+                boss_name=boss_name,
+                boss_id=boss.boss_id if boss else "",
+                boundary=at_boss,
+                risk_tier=risk_tier,
+                win_chance=round(win_chance, 2),
+                jc_delta=jc_delta, payout=jc_delta,
+                new_depth=new_depth,
+                dialogue=defeat_msg,
+                achievements=achievements,
+                stat_point_awarded=stat_point_awarded,
+                round_log=round_log,
+                echo_applied=echo_applied,
+                echo_killer_id=(
+                    active_echo.get("killer_discord_id")
+                    if echo_applied and active_echo else None
+                ),
+            )
+
+        # Loss branch
+        knockback = random.randint(5, 10)
+        extra_kb, extra_cd = self._apply_stinger_on_loss(
+            discord_id, guild_id, tunnel, boss,
+        )
+        knockback += extra_kb
+        new_depth = max(0, depth - knockback)
+        jc_delta = -wager if wager > 0 else 0
+        last_dig_effective = now + extra_cd  # extended cooldown pushes the timer forward
+        self.dig_repo.update_tunnel(
+            discord_id, guild_id,
+            depth=new_depth,
+            boss_attempts=attempts,
+            cheer_data=None,
+            last_dig_at=last_dig_effective,
+        )
+        if wager > 0:
+            self.player_repo.add_balance(discord_id, guild_id, -wager)
+        self.dig_repo.log_action(
+            discord_id=discord_id, guild_id=guild_id,
+            action_type="boss_fight",
+            details=json.dumps({
+                "boundary": at_boss, "won": False, "risk": risk_tier,
+                "wager": wager, "knockback": knockback,
+                "extra_knockback": extra_kb,
+                "extra_cooldown_s": extra_cd,
+                "rounds": round_log,
+            }),
+        )
+        return self._ok(
+            won=False,
+            boss_name=boss_name,
+            boss_id=boss.boss_id if boss else "",
+            boundary=at_boss,
+            risk_tier=risk_tier,
+            win_chance=round(win_chance, 2),
+            jc_delta=jc_delta,
+            knockback=knockback,
+            extra_knockback=extra_kb,
+            extra_cooldown_s=extra_cd,
+            new_depth=new_depth,
+            dialogue=f"{boss_name} sends you flying back {knockback} blocks!",
+            achievements=[],
+            round_log=round_log,
+            echo_applied=echo_applied,
+            echo_killer_id=(
+                active_echo.get("killer_discord_id")
+                if echo_applied and active_echo else None
+            ),
+        )
+
     def retreat_boss(self, discord_id: int, guild_id) -> dict:
         """Retreat from boss. Lose 1-3 blocks."""
         tunnel = self.dig_repo.get_tunnel(discord_id, guild_id)
@@ -3751,14 +4556,18 @@ class DigService:
         if at_boss is None:
             return self._error("You're not at a boss boundary.")
 
-        # Check for lantern
+        # Great Lantern is persistent gear — owning one gives the enhanced
+        # scout (mechanic pool + stinger warning) and skips lantern consumption.
+        has_great_lantern = self.dig_repo.has_great_lantern(discord_id, guild_id)
         inventory = self.dig_repo.get_inventory(discord_id, guild_id)
         has_lantern = any(i.get("item_type") == "lantern" for i in inventory)
-        if not has_lantern:
+        if not (has_great_lantern or has_lantern):
             return self._error("You need a Lantern to scout the boss.")
 
-        # Consume lantern
-        self.dig_repo.remove_inventory_item(discord_id, guild_id, "lantern")
+        enhanced = has_great_lantern
+        if not enhanced:
+            # Base lantern is single-use; Great Lantern is persistent.
+            self.dig_repo.remove_inventory_item(discord_id, guild_id, "lantern")
 
         # Calculate odds for all tiers using the HP-duel model.
         prestige_level = tunnel.get("prestige_level", 0) or 0
@@ -3772,7 +4581,8 @@ class DigService:
 
         payouts = BOSS_PAYOUTS.get(at_boss, (2.0, 3.0, 6.0))
 
-        active_echo = self.dig_repo.get_active_boss_echo(guild_id, at_boss)
+        scout_boss_id = self._get_locked_boss_id(tunnel, at_boss)
+        active_echo = self.dig_repo.get_active_boss_echo(guild_id, scout_boss_id)
         echo_applied = bool(
             active_echo
             and active_echo.get("killer_discord_id") != discord_id
@@ -3820,12 +4630,47 @@ class DigService:
                 "multiplier": round(base_multiplier * payout_mult, 2),
             }
 
+        # Resolve the locked boss for richer scout output (and Great Lantern tier).
+        from domain.models.boss_mechanics import MECHANIC_REGISTRY as _MECHS
+        from domain.models.boss_stingers import STINGER_REGISTRY as _STS
+        from services.dig_constants import get_boss_by_id as _get_boss
+
+        boss = _get_boss(scout_boss_id) if scout_boss_id else None
+        boss_name = boss.name if boss else BOSS_NAMES.get(at_boss, "Unknown Boss")
+
+        mechanic_pool_preview = None
+        stinger_preview = None
+        if enhanced and boss is not None:
+            mechanic_pool_preview = []
+            for mid in boss.mechanic_pool:
+                mech = _MECHS.get(mid)
+                if mech is None:
+                    continue
+                mechanic_pool_preview.append({
+                    "id": mid,
+                    "archetype": mech.archetype,
+                    "prompt_title": mech.prompt_title,
+                })
+            if boss.stinger_id and boss.stinger_id in _STS:
+                st = _STS[boss.stinger_id]
+                stinger_preview = {
+                    "id": st.id,
+                    "flavor_on_loss": st.flavor_on_loss,
+                    "extra_knockback": st.extra_knockback,
+                    "extended_cooldown_s": st.extended_cooldown_s,
+                    "cursed_status": st.cursed_status,
+                }
+
         return self._ok(
             boundary=at_boss,
-            boss_name=BOSS_NAMES.get(at_boss, "Unknown Boss"),
+            boss_name=boss_name,
+            boss_id=scout_boss_id,
             odds=odds,
             echo_applied=echo_applied,
             echo_killer_id=active_echo.get("killer_discord_id") if echo_applied else None,
+            enhanced=enhanced,
+            mechanic_pool=mechanic_pool_preview,
+            stinger=stinger_preview,
         )
 
     def cheer_boss(self, cheerer_id: int, target_id: int, guild_id) -> dict:

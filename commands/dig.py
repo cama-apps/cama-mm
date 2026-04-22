@@ -410,7 +410,7 @@ class BossWagerModal(discord.ui.Modal):
         await interaction.response.defer()
         try:
             self.result = _wrap(await asyncio.to_thread(
-                self.dig_service.fight_boss,
+                self.dig_service.start_boss_duel,
                 self.user_id,
                 self.guild_id,
                 tier,
@@ -425,6 +425,25 @@ class BossWagerModal(discord.ui.Modal):
                     color=0xFFA500,
                 )
                 await interaction.followup.send(embed=embed, ephemeral=True)
+                return
+
+            # Mid-fight prompt: boss's rolled mechanic triggered at its round.
+            # Hand off to the BossDuelView so the player picks one of 3
+            # reactive options before the duel resumes.
+            if getattr(self.result, "pending_prompt", None):
+                view = BossDuelView(
+                    dig_service=self.dig_service,
+                    user_id=self.user_id,
+                    guild_id=self.guild_id,
+                    initial_result=self.result,
+                    risk_tier=tier,
+                    wager=amount,
+                    dig_llm_service=self.dig_llm_service,
+                )
+                embed = _build_duel_prompt_embed(self.result)
+                msg = await interaction.followup.send(embed=embed, view=view, wait=True)
+                view.message = msg
+                self.stop()
                 return
 
             # Phase 2 incoming — fake victory then reveal transform
@@ -562,6 +581,221 @@ class BossWagerModal(discord.ui.Modal):
         except Exception as e:
             logger.error("Boss fight error: %s", e, exc_info=True)
             await interaction.followup.send("Boss fight failed. Try again.", ephemeral=True)
+
+
+def _build_duel_prompt_embed(result) -> discord.Embed:
+    """Embed rendered alongside a BossDuelView's three reactive option buttons.
+
+    Accepts either the raw dict returned by ``start_boss_duel`` /
+    ``resume_boss_duel`` or a ``_wrap``'d object.
+    """
+    raw = result._d if hasattr(result, "_d") else (result if isinstance(result, dict) else {})
+    pp = raw.get("pending_prompt") or {}
+    boss_name = raw.get("boss_name") or "the boss"
+    player_hp = raw.get("player_hp", 0)
+    boss_hp = raw.get("boss_hp", 0)
+    round_num = raw.get("round_num", 0)
+
+    title = pp.get("prompt_title") or f"{boss_name} acts"
+    description = pp.get("prompt_description") or ""
+
+    embed = discord.Embed(
+        title=f"{boss_name} — Round {round_num}",
+        description=f"**{title}**\n*{description}*",
+        color=0xFFD700,
+    )
+    embed.add_field(
+        name="State",
+        value=f"You: **{player_hp}** HP  |  {boss_name}: **{boss_hp}** HP",
+        inline=False,
+    )
+    opts = pp.get("options") or []
+    if opts:
+        lines = [f"**{o['option_idx'] + 1}.** {o['label']}" for o in opts]
+        embed.add_field(
+            name="Your choice",
+            value=(
+                "\n".join(lines)
+                + "\n\n*(120s before the safe option is auto-picked.)*"
+            ),
+            inline=False,
+        )
+    return embed
+
+
+def _build_boss_fight_result_embed(*, result, risk_tier: str, amount: int) -> discord.Embed:
+    """Shared post-duel result embed — used by the modal's no-prompt path and
+    by ``BossDuelView`` after the final option click / timeout."""
+    won = getattr(result, "won", False)
+    boss_name = getattr(result, "boss_name", "the boss")
+    win_chance = getattr(result, "win_chance", 0) or 0
+    embed = discord.Embed(
+        title="Boss Fight Result",
+        color=0x00FF00 if won else 0xFF0000,
+    )
+    if won:
+        payout = getattr(result, "payout", 0) or getattr(result, "jc_delta", 0)
+        embed.description = (
+            f"Victory! You defeated **{boss_name}** and earned "
+            f"**{payout}** {JOPACOIN_EMOTE}!"
+        )
+        if getattr(result, "stat_point_awarded", False):
+            embed.add_field(
+                name="S Point Earned",
+                value="First clear bonus: use `/dig miner build` to allocate it.",
+                inline=False,
+            )
+    else:
+        loss = abs(getattr(result, "jc_delta", 0)) or amount
+        knockback = getattr(result, "knockback", 0)
+        embed.description = (
+            f"Defeat! **{boss_name}** overpowered you. "
+            f"You lost **{loss}** {JOPACOIN_EMOTE} and were knocked back {knockback} blocks."
+        )
+        extra_kb = getattr(result, "extra_knockback", 0)
+        extra_cd = getattr(result, "extra_cooldown_s", 0)
+        if extra_kb or extra_cd:
+            parts = []
+            if extra_kb:
+                parts.append(f"+{extra_kb} extra knockback")
+            if extra_cd:
+                parts.append(f"+{extra_cd // 60}m extra cooldown")
+            embed.add_field(
+                name="Boss Stinger", value="; ".join(parts), inline=False,
+            )
+    embed.add_field(
+        name="Details",
+        value=f"Risk: {risk_tier.title()} | Win chance: {int(win_chance * 100)}%",
+        inline=False,
+    )
+    if getattr(result, "echo_applied", False):
+        killer_id = getattr(result, "echo_killer_id", None)
+        killer_mention = f"<@{killer_id}>" if killer_id else "a guildmate"
+        embed.add_field(
+            name="Echoing in the Tunnels",
+            value=(
+                f"{killer_mention} killed this boss recently. "
+                "It came in weakened (-25% HP, -30% payout)."
+            ),
+            inline=False,
+        )
+    return embed
+
+
+class BossDuelView(discord.ui.View):
+    """Interactive view for a paused boss duel.
+
+    Rendered when ``start_boss_duel`` (or ``resume_boss_duel``) returns a
+    ``pending_prompt``. Creates one button per option in the mechanic's
+    three-reactive-option prompt. Click rolls the option's distribution and
+    resumes the duel. Timeout (120s) auto-picks the mechanic's designated
+    safe option.
+    """
+
+    def __init__(
+        self,
+        *,
+        dig_service: DigService,
+        user_id: int,
+        guild_id: int | None,
+        initial_result,
+        risk_tier: str,
+        wager: int,
+        dig_llm_service=None,
+    ):
+        super().__init__(timeout=120)
+        self.dig_service = dig_service
+        self.user_id = user_id
+        self.guild_id = guild_id
+        self.risk_tier = risk_tier
+        self.wager = wager
+        self.dig_llm_service = dig_llm_service
+        self.message: discord.Message | None = None
+        self._resolved = False
+
+        raw = (
+            initial_result._d if hasattr(initial_result, "_d")
+            else (initial_result if isinstance(initial_result, dict) else {})
+        )
+        pp = raw.get("pending_prompt") or {}
+        self._safe_option_idx = int(pp.get("safe_option_idx", 0))
+        for opt in pp.get("options", []):
+            idx = int(opt.get("option_idx", 0))
+            label = (opt.get("label") or f"Option {idx + 1}")[:80]
+            btn = discord.ui.Button(
+                label=label,
+                style=discord.ButtonStyle.primary,
+                custom_id=f"duel_opt_{idx}",
+            )
+            btn.callback = self._make_callback(idx)
+            self.add_item(btn)
+
+    def _make_callback(self, option_idx: int):
+        async def callback(interaction: discord.Interaction):
+            if interaction.user.id != self.user_id:
+                await interaction.response.send_message(
+                    "Only the duelist can choose.", ephemeral=True,
+                )
+                return
+            await interaction.response.defer()
+            await self._submit(option_idx)
+        return callback
+
+    async def on_timeout(self):
+        if self._resolved:
+            return
+        await self._submit(self._safe_option_idx)
+
+    async def _submit(self, option_idx: int) -> None:
+        if self._resolved:
+            return
+        self._resolved = True
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                child.disabled = True
+        try:
+            result = _wrap(await asyncio.to_thread(
+                self.dig_service.resume_boss_duel,
+                self.user_id, self.guild_id, option_idx,
+            ))
+        except Exception as e:
+            logger.error("Boss duel resume failed: %s", e, exc_info=True)
+            await self._edit_message(content="Duel resume failed.", embed=None, view=None)
+            return
+        if not getattr(result, "success", True):
+            err = getattr(result, "error", "Duel resume failed.")
+            await self._edit_message(content=err, embed=None, view=None)
+            return
+
+        # Follow-up prompt (multi-prompt future-proofing; not v1 content).
+        if getattr(result, "pending_prompt", None):
+            new_view = BossDuelView(
+                dig_service=self.dig_service,
+                user_id=self.user_id, guild_id=self.guild_id,
+                initial_result=result,
+                risk_tier=self.risk_tier, wager=self.wager,
+                dig_llm_service=self.dig_llm_service,
+            )
+            embed = _build_duel_prompt_embed(result)
+            await self._edit_message(embed=embed, view=new_view)
+            new_view.message = self.message
+            self.stop()
+            return
+
+        # Resolved — render the final outcome.
+        embed = _build_boss_fight_result_embed(
+            result=result, risk_tier=self.risk_tier, amount=self.wager,
+        )
+        await self._edit_message(embed=embed, view=None)
+        self.stop()
+
+    async def _edit_message(self, **kwargs) -> None:
+        if self.message is None:
+            return
+        try:
+            await self.message.edit(**kwargs)
+        except Exception as e:
+            logger.debug("BossDuelView message edit failed: %s", e)
 
 
 class EventEncounterView(discord.ui.View):
@@ -909,8 +1143,36 @@ class BossEncounterView(discord.ui.View):
                     )
             else:
                 lines.append("Could not read odds data.")
+
+            # Great Lantern tier: additionally show the mechanic pool + stinger
+            # warning so the player can plan counters and inventory.
+            enhanced = getattr(info, "enhanced", False)
+            mech_pool = getattr(info, "mechanic_pool", None)
+            stinger = getattr(info, "stinger", None)
+            if enhanced and (mech_pool or stinger):
+                lines.append("\n_Great Lantern reveal_")
+                if mech_pool:
+                    lines.append("**Possible mid-fight mechanics** (one rolls per fight):")
+                    for m in mech_pool:
+                        lines.append(f"  • _{m.get('prompt_title', m.get('id', ''))}_")
+                if stinger:
+                    kb = stinger.get("extra_knockback", 0)
+                    cd = stinger.get("extended_cooldown_s", 0)
+                    curse = stinger.get("cursed_status")
+                    bits = []
+                    if kb:
+                        bits.append(f"+{kb} extra knockback")
+                    if cd:
+                        bits.append(f"+{cd // 60}m extra cooldown")
+                    if curse:
+                        bits.append(f"curse: `{curse}`")
+                    tail = f" ({'; '.join(bits)})" if bits else ""
+                    lines.append(
+                        "**On-loss stinger:** "
+                        f"_{stinger.get('flavor_on_loss', '')}_" + tail
+                    )
             embed = discord.Embed(
-                title="Boss Scouted",
+                title="Boss Scouted" + (" (Great Lantern)" if enhanced else ""),
                 description="\n".join(lines),
                 color=0xFFD700,
             )
