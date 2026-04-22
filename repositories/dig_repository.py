@@ -862,6 +862,201 @@ class DigRepository(BaseRepository, IDigRepository):
 
     # ── Atomic Operations ────────────────────────────────────────────────
 
+    def atomic_tunnel_balance_update(
+        self,
+        discord_id: int,
+        guild_id: int,
+        *,
+        balance_delta: int = 0,
+        tunnel_updates: dict | None = None,
+        add_inventory_item: str | None = None,
+        log_detail: dict | None = None,
+        log_action_type: str = "dig_action",
+    ) -> int | None:
+        """Apply a balance delta + tunnel update + optional inventory add +
+        optional audit log in one BEGIN IMMEDIATE.
+
+        Covers the common "debit balance, then mutate the actor's tunnel
+        row" two-step pattern (upgrade_pickaxe, set_trap, buy_insurance,
+        buy_item). Without this, a crash between the balance debit and the
+        tunnel mutation leaves the player with coins deducted and nothing
+        to show for it.
+
+        Returns the ``id`` of the newly inserted inventory row (when
+        ``add_inventory_item`` is given), else None.
+        """
+        if tunnel_updates:
+            unknown = set(tunnel_updates) - self._TUNNEL_UPDATABLE_COLUMNS
+            if unknown:
+                raise ValueError(
+                    f"atomic_tunnel_balance_update got unknown tunnel columns: {sorted(unknown)}."
+                )
+
+        gid = self.normalize_guild_id(guild_id)
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+
+            if balance_delta != 0:
+                cursor.execute(
+                    """
+                    UPDATE players
+                    SET jopacoin_balance = jopacoin_balance + ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE discord_id = ? AND guild_id = ?
+                    """,
+                    (balance_delta, discord_id, gid),
+                )
+
+            if tunnel_updates:
+                set_clauses = ", ".join(f"{col} = ?" for col in tunnel_updates)
+                cursor.execute(
+                    f"UPDATE tunnels SET {set_clauses} WHERE discord_id = ? AND guild_id = ?",
+                    (*tunnel_updates.values(), discord_id, gid),
+                )
+
+            inventory_id: int | None = None
+            if add_inventory_item is not None:
+                cursor.execute(
+                    """
+                    INSERT INTO dig_inventory (discord_id, guild_id, item_type, queued, created_at)
+                    VALUES (?, ?, ?, 0, ?)
+                    """,
+                    (discord_id, gid, add_inventory_item, int(time.time())),
+                )
+                inventory_id = cursor.lastrowid
+
+            if log_detail is not None:
+                cursor.execute(
+                    """
+                    INSERT INTO dig_actions
+                        (guild_id, actor_id, target_id, action_type, depth_before,
+                         depth_after, jc_delta, detail, created_at)
+                    VALUES (?, ?, NULL, ?, 0, 0, ?, ?, ?)
+                    """,
+                    (
+                        gid, discord_id, log_action_type,
+                        balance_delta, json.dumps(log_detail), int(time.time()),
+                    ),
+                )
+
+            return inventory_id
+
+    def atomic_help_tunnel(
+        self,
+        *,
+        helper_id: int,
+        target_id: int,
+        guild_id: int,
+        new_target_depth: int,
+        helper_last_dig_at: int,
+        helper_reward: int,
+        create_helper_tunnel_name: str | None,
+        log_detail: dict,
+    ) -> None:
+        """Apply a help-tunnel outcome atomically.
+
+        Sets the target's new depth, optionally creates a minimal tunnel row
+        for the helper (when ``create_helper_tunnel_name`` is given) so their
+        cooldown can be tracked, bumps the helper's ``last_dig_at``, credits
+        the helper's JC reward, and writes the audit log — all inside one
+        BEGIN IMMEDIATE.
+        """
+        gid = self.normalize_guild_id(guild_id)
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+
+            cursor.execute(
+                "UPDATE tunnels SET depth = ? WHERE discord_id = ? AND guild_id = ?",
+                (new_target_depth, target_id, gid),
+            )
+
+            if create_helper_tunnel_name is not None:
+                cursor.execute(
+                    """
+                    INSERT OR IGNORE INTO tunnels (
+                        discord_id, guild_id, depth, max_depth, total_digs,
+                        total_jc_earned, last_dig_at, streak_days, streak_last_date,
+                        pickaxe_tier, prestige_level, prestige_perks, tunnel_name,
+                        boss_progress, boss_attempts, trap_active, trap_free_today,
+                        trap_date, insured_until, reinforced_until, injury_state,
+                        paid_digs_today, paid_dig_date, revenge_target, revenge_type,
+                        revenge_until, created_at, hard_hat_charges, void_bait_digs, cheer_data
+                    )
+                    VALUES (?, ?, 0, 0, 0, 0, NULL, 0, NULL, 0, 0, NULL, ?, NULL, NULL, 0, 1,
+                            NULL, NULL, NULL, NULL, 0, NULL, NULL, NULL, NULL, ?, 0, 0, NULL)
+                    """,
+                    (helper_id, gid, create_helper_tunnel_name, int(time.time())),
+                )
+
+            cursor.execute(
+                "UPDATE tunnels SET last_dig_at = ? WHERE discord_id = ? AND guild_id = ?",
+                (helper_last_dig_at, helper_id, gid),
+            )
+
+            if helper_reward != 0:
+                cursor.execute(
+                    """
+                    UPDATE players
+                    SET jopacoin_balance = jopacoin_balance + ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE discord_id = ? AND guild_id = ?
+                    """,
+                    (helper_reward, helper_id, gid),
+                )
+
+            cursor.execute(
+                """
+                INSERT INTO dig_actions
+                    (guild_id, actor_id, target_id, action_type, depth_before,
+                     depth_after, jc_delta, detail, created_at)
+                VALUES (?, ?, ?, 'help', 0, ?, ?, ?, ?)
+                """,
+                (
+                    gid, helper_id, target_id, new_target_depth,
+                    helper_reward, json.dumps(log_detail), int(time.time()),
+                ),
+            )
+
+    def atomic_gift_relic(
+        self,
+        *,
+        giver_id: int,
+        receiver_id: int,
+        guild_id: int,
+        artifact_db_id: int,
+        artifact_id: str,
+        unequip_artifact_db_ids: list[int],
+    ) -> None:
+        """Transfer a relic from giver to receiver atomically.
+
+        Removes the artifact row from the giver, inserts a fresh
+        ``is_relic=1`` row on the receiver, and unequips any equipped
+        instances on the giver — all in one BEGIN IMMEDIATE so a crash
+        can't leave the artifact duplicated or destroyed.
+        """
+        gid = self.normalize_guild_id(guild_id)
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+
+            cursor.execute(
+                "DELETE FROM dig_artifacts WHERE id = ?",
+                (artifact_db_id,),
+            )
+
+            cursor.execute(
+                """
+                INSERT INTO dig_artifacts
+                    (discord_id, guild_id, artifact_id, found_at, is_relic, equipped)
+                VALUES (?, ?, ?, ?, 1, 0)
+                """,
+                (receiver_id, gid, artifact_id, int(time.time())),
+            )
+
+            if unequip_artifact_db_ids:
+                placeholders = ",".join("?" * len(unequip_artifact_db_ids))
+                cursor.execute(
+                    f"UPDATE dig_artifacts SET equipped = 0 WHERE id IN ({placeholders})",
+                    tuple(unequip_artifact_db_ids),
+                )
+
     def atomic_sabotage(
         self,
         actor_id: int,

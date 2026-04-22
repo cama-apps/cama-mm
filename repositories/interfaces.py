@@ -1779,6 +1779,45 @@ class IDigRepository(ABC):
 
     # Atomic Operations
     @abstractmethod
+    def atomic_tunnel_balance_update(
+        self,
+        discord_id: int,
+        guild_id: int,
+        *,
+        balance_delta: int = 0,
+        tunnel_updates: dict | None = None,
+        add_inventory_item: str | None = None,
+        log_detail: dict | None = None,
+        log_action_type: str = "dig_action",
+    ) -> int | None: ...
+
+    @abstractmethod
+    def atomic_help_tunnel(
+        self,
+        *,
+        helper_id: int,
+        target_id: int,
+        guild_id: int,
+        new_target_depth: int,
+        helper_last_dig_at: int,
+        helper_reward: int,
+        create_helper_tunnel_name: str | None,
+        log_detail: dict,
+    ) -> None: ...
+
+    @abstractmethod
+    def atomic_gift_relic(
+        self,
+        *,
+        giver_id: int,
+        receiver_id: int,
+        guild_id: int,
+        artifact_db_id: int,
+        artifact_id: str,
+        unequip_artifact_db_ids: list[int],
+    ) -> None: ...
+
+    @abstractmethod
     def atomic_sabotage(
         self,
         actor_id: int,

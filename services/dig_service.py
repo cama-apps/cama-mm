@@ -3369,11 +3369,17 @@ class DigService:
         if balance < cost:
             return self._error(f"Costs {cost} JC but you only have {balance} JC.")
 
-        # Apply upgrade — write to legacy column AND dig_gear so equipped
-        # weapon stays in sync. Unequip whatever weapon is currently
-        # equipped, then add+equip the new tier.
-        self.player_repo.add_balance(discord_id, guild_id, -cost)
-        self.dig_repo.update_tunnel(discord_id, guild_id, pickaxe_tier=next_tier_idx)
+        # Debit + tunnel pickaxe_tier flip commit together so a crash between
+        # the two cannot charge the player with no upgrade applied.
+        self.dig_repo.atomic_tunnel_balance_update(
+            discord_id, guild_id,
+            balance_delta=-cost,
+            tunnel_updates={"pickaxe_tier": next_tier_idx},
+        )
+        # Mirror the upgrade into dig_gear so equipped weapon stays in sync.
+        # These writes are not folded into the atomic block above: the gear
+        # tables have their own equip-uniqueness invariants and at most we
+        # leak an unequipped weapon row on a crash here, which is harmless.
         equipped = self.dig_repo.get_equipped_gear(discord_id, guild_id)
         old_weapon = equipped.get("weapon")
         if old_weapon is not None:
@@ -3439,30 +3445,23 @@ class DigService:
 
         new_depth = target_depth + advance
 
-        # Apply advance to target
-        self.dig_repo.update_tunnel(target_id, guild_id, depth=new_depth)
-
-        # Set helper cooldown
+        # Target depth + helper cooldown + helper reward + audit log commit
+        # together. The old flow committed each step individually and could
+        # leave the target advanced with no cooldown tracked, or the helper
+        # credited with no cooldown set.
         now = int(time.time())
-        if helper_tunnel:
-            self.dig_repo.update_tunnel(helper_id, guild_id, last_dig_at=now)
-        else:
-            # Create a minimal tunnel for the helper so cooldown is tracked
-            name = self.generate_tunnel_name()
-            self.dig_repo.create_tunnel(helper_id, guild_id, name=name)
-            self.dig_repo.update_tunnel(helper_id, guild_id, last_dig_at=now)
-
-        # Helper earns 1 JC
-        self.player_repo.add_balance(helper_id, guild_id, 1)
-
-        # Log help action
-        self.dig_repo.log_action(
-            discord_id=helper_id, guild_id=guild_id,
-            action_type="help",
-            details=json.dumps({
+        self.dig_repo.atomic_help_tunnel(
+            helper_id=helper_id,
+            target_id=target_id,
+            guild_id=guild_id,
+            new_target_depth=new_depth,
+            helper_last_dig_at=now,
+            helper_reward=1,
+            create_helper_tunnel_name=None if helper_tunnel else self.generate_tunnel_name(),
+            log_detail={
                 "target_id": target_id, "advance": advance,
                 "target_depth_before": target_depth, "target_depth_after": new_depth,
-            }),
+            },
         )
 
         return self._ok(
@@ -5343,8 +5342,13 @@ class DigService:
         if balance < price:
             return self._error(f"Costs {price} JC but you only have {balance} JC.")
 
-        self.player_repo.add_balance(discord_id, guild_id, -price)
-        item_id = self.dig_repo.add_inventory_item(discord_id, guild_id, item_type)
+        # Debit + inventory insert commit together so a crash can't leave
+        # the player charged with no item added to inventory.
+        item_id = self.dig_repo.atomic_tunnel_balance_update(
+            discord_id, guild_id,
+            balance_delta=-price,
+            add_inventory_item=item_type,
+        )
 
         item_name = CONSUMABLE_ITEMS.get(item_type, {}).get("name", item_type)
 
@@ -5409,13 +5413,16 @@ class DigService:
             balance = self.player_repo.get_balance(discord_id, guild_id)
             if balance < cost:
                 return self._error(f"Trap costs {cost} JC but you only have {balance} JC.")
-            self.player_repo.add_balance(discord_id, guild_id, -cost)
 
-        self.dig_repo.update_tunnel(
+        # Debit (if any) + trap fields commit together.
+        self.dig_repo.atomic_tunnel_balance_update(
             discord_id, guild_id,
-            trap_active=1,
-            trap_free_today=trap_free_today + 1,
-            trap_date=today,
+            balance_delta=-cost if cost else 0,
+            tunnel_updates={
+                "trap_active": 1,
+                "trap_free_today": trap_free_today + 1,
+                "trap_date": today,
+            },
         )
 
         return self._ok(cost=cost, message="Trap set!")
@@ -5433,10 +5440,12 @@ class DigService:
             return self._error(f"Insurance costs {cost} JC but you only have {balance} JC.")
 
         now = int(time.time())
-        self.player_repo.add_balance(discord_id, guild_id, -cost)
-        self.dig_repo.update_tunnel(
+        # Debit + insurance window set together: the old two-step flow could
+        # leave the player charged with no insurance applied.
+        self.dig_repo.atomic_tunnel_balance_update(
             discord_id, guild_id,
-            insured_until=now + 86400,  # 24h
+            balance_delta=-cost,
+            tunnel_updates={"insured_until": now + 86400},  # 24h
         )
 
         return self._ok(cost=cost, expires_at=now + 86400)
@@ -5553,19 +5562,24 @@ class DigService:
         if receiver_tunnel is None:
             return self._error("Receiver doesn't have a tunnel.")
 
-        # Transfer
-        self.dig_repo.remove_artifact(target_artifact["id"])
-        self.dig_repo.add_artifact(
-            receiver_id, guild_id,
-            target_artifact["artifact_id"],
-            is_relic=True,
-        )
-
-        # If was equipped on giver, unequip
+        # Compute which of the giver's equipped rows to unequip before the
+        # atomic transfer (read-only; safe outside BEGIN IMMEDIATE).
         relics = self._get_equipped_relics_for_player(giver_id, guild_id)
-        for r in relics:
-            if r.get("artifact_id") == target_artifact.get("artifact_id"):
-                self.dig_repo.unequip_relic(r["id"])
+        unequip_ids = [
+            r["id"] for r in relics
+            if r.get("artifact_id") == target_artifact.get("artifact_id")
+        ]
+
+        # Remove from giver + insert on receiver + unequip giver copies all
+        # commit together — no duplication or destruction mid-flight.
+        self.dig_repo.atomic_gift_relic(
+            giver_id=giver_id,
+            receiver_id=receiver_id,
+            guild_id=guild_id,
+            artifact_db_id=target_artifact["id"],
+            artifact_id=target_artifact["artifact_id"],
+            unequip_artifact_db_ids=unequip_ids,
+        )
 
         return self._ok(
             artifact_id=artifact_id,
