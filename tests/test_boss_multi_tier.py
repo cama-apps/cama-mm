@@ -21,12 +21,10 @@ from services.dig_constants import (
     BOSSES_BY_ID,
     BOSSES_BY_TIER,
     FREE_DIG_COOLDOWN_SECONDS,
-    get_boss_by_id,
     get_boss_pool_for_tier,
 )
 from services.dig_service import DigService
 from tests.conftest import TEST_GUILD_ID
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -429,10 +427,11 @@ class TestEchoPerBossId:
         progress = json.dumps({"25": {"boss_id": "pudge", "status": "active"}})
         dig_repo.update_tunnel(10001, TEST_GUILD_ID, boss_progress=progress)
 
-        # Force a win, avoiding the mid-fight prompt on round 3 by using the
-        # resume-with-safe-option auto path.
+        # Cautious gives enough HP headroom that even a bad prompt roll on the
+        # safe option doesn't lose the fight. We pin random.random=0.0 so every
+        # hit lands and every probability distribution picks its first branch.
         monkeypatch.setattr(random, "random", lambda: 0.0)
-        result = dig_service.start_boss_duel(10001, TEST_GUILD_ID, "reckless", wager=10)
+        result = dig_service.start_boss_duel(10001, TEST_GUILD_ID, "cautious", wager=10)
         if result.get("pending_prompt"):
             safe = result["pending_prompt"]["safe_option_idx"]
             result = dig_service.resume_boss_duel(10001, TEST_GUILD_ID, option_idx=safe)

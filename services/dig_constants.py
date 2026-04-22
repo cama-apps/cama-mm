@@ -371,7 +371,7 @@ BOSSES: dict[int, BossDef] = {
             "Fine. Hit me. I can't feel anything below the waist anyway.",
         ],
         boss_id="grothak",
-        mechanic_pool=("grothak_earthquake",),
+        mechanic_pool=("grothak_earthquake", "grothak_crumble_wall"),
         stinger_id="grothak_crumble",
     ),
     50: BossDef(
@@ -393,7 +393,7 @@ BOSSES: dict[int, BossDef] = {
             "I give up. Nothing is symmetrical anymore. Not even my will to fight.",
         ],
         boss_id="crystalia",
-        mechanic_pool=("crystalia_prism",),
+        mechanic_pool=("crystalia_prism", "crystalia_shatter"),
         stinger_id="crystalia_shard",
     ),
     75: BossDef(
@@ -415,7 +415,7 @@ BOSSES: dict[int, BossDef] = {
             "I'm just gonna lie here. Lava is basically a hot tub, right? ...right?",
         ],
         boss_id="magmus_rex",
-        mechanic_pool=("magmus_eruption",),
+        mechanic_pool=("magmus_eruption", "magmus_meteor"),
         stinger_id="magmus_burn",
     ),
     100: BossDef(
@@ -437,7 +437,7 @@ BOSSES: dict[int, BossDef] = {
             "You know what? Take the void. I'm going to go find myself.",
         ],
         boss_id="void_warden",
-        mechanic_pool=("voidwarden_collapse",),
+        mechanic_pool=("voidwarden_collapse", "voidwarden_silence"),
         stinger_id="void_collapse",
     ),
     150: BossDef(
@@ -459,7 +459,7 @@ BOSSES: dict[int, BossDef] = {
             "Fine. We yield. Would you like a mushroom recipe? We have thousands.",
         ],
         boss_id="sporeling_sovereign",
-        mechanic_pool=("sporeling_cloud",),
+        mechanic_pool=("sporeling_cloud", "sporeling_roots"),
         stinger_id="sporeling_rot",
     ),
     200: BossDef(
@@ -481,7 +481,7 @@ BOSSES: dict[int, BossDef] = {
             "Go. I've seen every possible outcome and in most of them you win anyway.",
         ],
         boss_id="chronofrost",
-        mechanic_pool=("chronofrost_still",),
+        mechanic_pool=("chronofrost_still", "chronofrost_rewind"),
         stinger_id="chronofrost_still",
     ),
     275: BossDef(
@@ -503,7 +503,7 @@ BOSSES: dict[int, BossDef] = {
             "Take the hollow. It was always yours. I was just keeping it warm.",
         ],
         boss_id="nameless_depth",
-        mechanic_pool=("nameless_whisper",),
+        mechanic_pool=("nameless_whisper", "nameless_silence"),
         stinger_id="nameless_erase",
     ),
 }
@@ -536,7 +536,7 @@ _DOTA_BOSSES: dict[str, BossDef] = {
             "YOU AGAIN?! My hook is blunt from you alone.",
             "Fine. Walk past. I'm too tired to even taunt.",
         ],
-        mechanic_pool=("pudge_hook",),
+        mechanic_pool=("pudge_hook", "pudge_rot"),
         stinger_id="pudge_drag",
     ),
     "ogre_magi": BossDef(
@@ -559,7 +559,7 @@ _DOTA_BOSSES: dict[str, BossDef] = {
             "YOU AGAIN! ...who? Oh right. YOU.",
             "Both heads tired. Both heads say: yield.",
         ],
-        mechanic_pool=("ogre_multicast",),
+        mechanic_pool=("ogre_multicast", "ogre_fireblast"),
         stinger_id="ogre_blast",
     ),
     "crystal_maiden": BossDef(
@@ -581,7 +581,7 @@ _DOTA_BOSSES: dict[str, BossDef] = {
             "YOU AGAIN?! I was literally mid-ult.",
             "Okay fine, I'll come quietly. But stop ganking me.",
         ],
-        mechanic_pool=("cm_frostbite",),
+        mechanic_pool=("cm_frostbite", "cm_freezing_field"),
         stinger_id="cm_freeze",
     ),
     "tusk": BossDef(
@@ -603,7 +603,7 @@ _DOTA_BOSSES: dict[str, BossDef] = {
             "YOU AGAIN?! I'm out of snow. Give me a minute.",
             "Fine. Go. Tell your friends a walrus sent you.",
         ],
-        mechanic_pool=("tusk_snowball",),
+        mechanic_pool=("tusk_snowball", "tusk_walrus_punch"),
         stinger_id="tusk_kick",
     ),
     "lina": BossDef(
@@ -625,7 +625,7 @@ _DOTA_BOSSES: dict[str, BossDef] = {
             "YOU AGAIN?! My mana bar has trust issues.",
             "Ugh. Fine. Take the depth. My hair's frizzed anyway.",
         ],
-        mechanic_pool=("lina_laguna",),
+        mechanic_pool=("lina_laguna", "lina_dragon_slave"),
         stinger_id="lina_scorch",
     ),
     "doom": BossDef(
@@ -647,7 +647,7 @@ _DOTA_BOSSES: dict[str, BossDef] = {
             "YOU AGAIN. Doom is burnt out.",
             "Go. Doom needs a holiday.",
         ],
-        mechanic_pool=("doom_mark",),
+        mechanic_pool=("doom_mark", "doom_scorched_earth"),
         stinger_id="doom_mark",
     ),
     "spectre": BossDef(
@@ -670,7 +670,7 @@ _DOTA_BOSSES: dict[str, BossDef] = {
             "YOU AGAIN. I am, as ever.",
             "Go. My work is never done anyway.",
         ],
-        mechanic_pool=("spectre_haunt",),
+        mechanic_pool=("spectre_haunt", "spectre_dagger"),
         stinger_id="spectre_haunt",
     ),
     "void_spirit": BossDef(
@@ -692,7 +692,7 @@ _DOTA_BOSSES: dict[str, BossDef] = {
             "YOU AGAIN?! I am literally everywhere else.",
             "Fine. I'll take this dimension off.",
         ],
-        mechanic_pool=("void_spirit_step",),
+        mechanic_pool=("void_spirit_step", "void_spirit_aether"),
         stinger_id="void_spirit_exile",
     ),
     "treant_protector": BossDef(
@@ -715,7 +715,7 @@ _DOTA_BOSSES: dict[str, BossDef] = {
             "YOU AGAIN. I am older than your tunnel.",
             "Go. Even trees can grow tired.",
         ],
-        mechanic_pool=("treant_overgrowth",),
+        mechanic_pool=("treant_overgrowth", "treant_leech_seed"),
         stinger_id="treant_entangle",
     ),
     "broodmother": BossDef(
@@ -737,7 +737,7 @@ _DOTA_BOSSES: dict[str, BossDef] = {
             "YOU AGAIN?! I was in the middle of spinning.",
             "Fine. Go. Leave us to our weaving.",
         ],
-        mechanic_pool=("broodmother_spawn",),
+        mechanic_pool=("broodmother_spawn", "broodmother_web"),
         stinger_id="broodmother_web",
     ),
     "faceless_void": BossDef(
@@ -760,7 +760,7 @@ _DOTA_BOSSES: dict[str, BossDef] = {
             "YOU AGAIN. My cooldown is up, regrettably.",
             "Go. You were going to win this one anyway.",
         ],
-        mechanic_pool=("faceless_void_chrono",),
+        mechanic_pool=("faceless_void_chrono", "faceless_void_backtrack"),
         stinger_id="void_chrono",
     ),
     "weaver": BossDef(
@@ -782,7 +782,7 @@ _DOTA_BOSSES: dict[str, BossDef] = {
             "YOU AGAIN?! I reset my own timeline to rest.",
             "Take the depth. I'll weave it back later.",
         ],
-        mechanic_pool=("weaver_timelapse",),
+        mechanic_pool=("weaver_timelapse", "weaver_shukuchi"),
         stinger_id="weaver_unmake",
     ),
     "oracle": BossDef(
@@ -804,7 +804,7 @@ _DOTA_BOSSES: dict[str, BossDef] = {
             "YOU AGAIN. I predicted this too.",
             "Go. The coin is tired.",
         ],
-        mechanic_pool=("oracle_fortune",),
+        mechanic_pool=("oracle_fortune", "oracle_false_promise"),
         stinger_id="oracle_fate",
     ),
     "terrorblade": BossDef(
@@ -826,7 +826,7 @@ _DOTA_BOSSES: dict[str, BossDef] = {
             "YOU AGAIN?! My mirror image is tired.",
             "Take the hollow. Sunder yourself out of it.",
         ],
-        mechanic_pool=("terrorblade_sunder",),
+        mechanic_pool=("terrorblade_sunder", "terrorblade_metamorphosis"),
         stinger_id="terrorblade_sunder",
     ),
 }

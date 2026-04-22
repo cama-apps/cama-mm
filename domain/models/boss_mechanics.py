@@ -246,6 +246,112 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
         safe_option_idx=0,
     ),
 
+    "grothak_crumble_wall": BossMechanic(
+        id="grothak_crumble_wall",
+        archetype="channel_aoe",
+        trigger_round=4,
+        prompt_title="Grothak headbutts the cavern wall",
+        prompt_description="The wall cracks. A ton of rock starts sliding down.",
+        options=(
+            MechanicOption(
+                label="Shoulder-check him into it",
+                flavor="Return his gift.",
+                outcome_rolls=(
+                    OutcomeRoll(0.40, -1, -3, None, None, "You ram him into the slide — rocks bury his leg."),
+                    OutcomeRoll(0.45, -2, -1, None, None, "You both catch stone. He gets the worst of it."),
+                    OutcomeRoll(0.15, -3,  0, "player", None, "He doesn't budge. You bounce off and get buried."),
+                ),
+            ),
+            MechanicOption(
+                label="Dive under a ledge",
+                flavor="You flatten against the floor.",
+                outcome_rolls=(
+                    OutcomeRoll(0.70,  0, 0, None, None, "Rocks pile on the ledge above you. You crawl out clean."),
+                    OutcomeRoll(0.30, -2, 0, "player", None, "The ledge gives out. You're pinned for the round."),
+                ),
+            ),
+            MechanicOption(
+                label="Sprint straight through the slide",
+                flavor="Outrun the landslide.",
+                outcome_rolls=(
+                    OutcomeRoll(0.35,  0, -1, None, None, "You clear it; a loose rock thwacks Grothak on the way."),
+                    OutcomeRoll(0.65, -3,  0, None, "bleed", "You trip. A cascade of rock rolls over your back."),
+                ),
+            ),
+        ),
+        safe_option_idx=1,
+    ),
+
+    "pudge_rot": BossMechanic(
+        id="pudge_rot",
+        archetype="dot_debuff",
+        trigger_round=2,
+        prompt_title="Pudge belches a cloud of rot",
+        prompt_description="A green miasma rolls off his belly toward you.",
+        options=(
+            MechanicOption(
+                label="Back off through it",
+                flavor="Retreat on foot.",
+                outcome_rolls=(
+                    OutcomeRoll(0.55, -1, 0, None, None,    "You cough your way out. Mostly clear."),
+                    OutcomeRoll(0.45, -2, 0, None, "bleed", "The rot eats through your gloves."),
+                ),
+            ),
+            MechanicOption(
+                label="Push into the cloud",
+                flavor="He can't rot himself.",
+                outcome_rolls=(
+                    OutcomeRoll(0.45, -1, -2, None, None,    "He flinches from his own stench; you land a hit."),
+                    OutcomeRoll(0.55, -2,  0, None, "bleed", "Wrong — he loves his stench. You take the brunt."),
+                ),
+            ),
+            MechanicOption(
+                label="Ignite the cloud",
+                flavor="Toss a torch.",
+                outcome_rolls=(
+                    OutcomeRoll(0.30,  0, -3, None, None,   "Whoof. The cloud lights up and blasts Pudge back."),
+                    OutcomeRoll(0.70, -3,  0, None, "burn", "It wasn't flammable. You were. Somehow."),
+                ),
+            ),
+        ),
+        safe_option_idx=0,
+    ),
+
+    "ogre_fireblast": BossMechanic(
+        id="ogre_fireblast",
+        archetype="channel_big_hit",
+        trigger_round=3,
+        prompt_title="Ogre Magi chants fireblast, slowly",
+        prompt_description="Left head counts down. Right head forgot the number.",
+        options=(
+            MechanicOption(
+                label="Slap the left head",
+                flavor="Interrupt the smart one.",
+                outcome_rolls=(
+                    OutcomeRoll(0.50,  0, -2, None, None,      "Left head loses count. The spell fizzles on him."),
+                    OutcomeRoll(0.50, -2,  0, None, "silence", "Right head finishes the chant anyway."),
+                ),
+            ),
+            MechanicOption(
+                label="Confuse both heads",
+                flavor="Shout nonsense at them.",
+                outcome_rolls=(
+                    OutcomeRoll(0.60, -1, -1, None, None,    "They argue mid-cast; you both eat a weak spark."),
+                    OutcomeRoll(0.40, -2,  0, None, "burn",  "They ignore you. Fireblast lands."),
+                ),
+            ),
+            MechanicOption(
+                label="Stand in front and grin",
+                flavor="Bet on the miscast.",
+                outcome_rolls=(
+                    OutcomeRoll(0.25, +1, -3, None, None,   "Right head casts backwards. Ogre lights himself up."),
+                    OutcomeRoll(0.75, -3,  0, None, "burn", "They both cast correctly for once. Disaster."),
+                ),
+            ),
+        ),
+        safe_option_idx=0,
+    ),
+
     # ================================================================
     # TIER 50
     # ================================================================
@@ -348,6 +454,113 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
                 outcome_rolls=(
                     OutcomeRoll(0.30,  0, -3, None, None, "You surf the ball straight into Tusk — perfect hit."),
                     OutcomeRoll(0.70, -3,  0, None, None, "You slip off; the ball rolls over you."),
+                ),
+            ),
+        ),
+        safe_option_idx=0,
+    ),
+
+    "crystalia_shatter": BossMechanic(
+        id="crystalia_shatter",
+        archetype="charge_telegraph",
+        trigger_round=4,
+        prompt_title="Crystalia grows a barrage of shards",
+        prompt_description="A ring of dagger-like crystals levitates, tips pointed at you.",
+        options=(
+            MechanicOption(
+                label="Dive between the shards",
+                flavor="Thread the needle.",
+                outcome_rolls=(
+                    OutcomeRoll(0.55, -1, 0, None, None,   "You weave through; one grazes your ribs."),
+                    OutcomeRoll(0.45, -2, 0, None, "bleed", "One catches you high on the shoulder."),
+                ),
+            ),
+            MechanicOption(
+                label="Shatter a shard mid-flight",
+                flavor="Knock one into the others.",
+                outcome_rolls=(
+                    OutcomeRoll(0.40, -1, -2, None, None,   "Chain reaction — shards redirect into her flank."),
+                    OutcomeRoll(0.50, -2,  0, None, "bleed", "You crack one; the rest still find you."),
+                    OutcomeRoll(0.10,  0, -3, None, None,   "Perfect shot. The whole barrage ricochets home."),
+                ),
+            ),
+            MechanicOption(
+                label="Mirror the barrage back",
+                flavor="Pickaxe as shield.",
+                outcome_rolls=(
+                    OutcomeRoll(0.25,  0, -3, None, None,   "A flawless reflection. She staggers."),
+                    OutcomeRoll(0.75, -3,  0, None, "bleed", "The pick can't hold. Shards sheer through it."),
+                ),
+            ),
+        ),
+        safe_option_idx=0,
+    ),
+
+    "cm_freezing_field": BossMechanic(
+        id="cm_freezing_field",
+        archetype="channel_multi",
+        trigger_round=5,
+        prompt_title="Crystal Maiden unleashes Freezing Field",
+        prompt_description="Ice bombs detonate randomly in a wide ring around her.",
+        options=(
+            MechanicOption(
+                label="Stay at the outer edge",
+                flavor="Dance the perimeter.",
+                outcome_rolls=(
+                    OutcomeRoll(0.55, -1, 0, None, None,        "You ride the edge; only the shockwaves clip you."),
+                    OutcomeRoll(0.45, -2, 0, None, "frostbite", "An outer bomb catches your heel."),
+                ),
+            ),
+            MechanicOption(
+                label="Zigzag toward her",
+                flavor="Commit to the kill.",
+                outcome_rolls=(
+                    OutcomeRoll(0.35, -1, -3, None, None,        "You reach her through the barrage — big crack to the jaw."),
+                    OutcomeRoll(0.65, -3,  0, None, "frostbite", "Two bombs land close. You go face-first into slush."),
+                ),
+            ),
+            MechanicOption(
+                label="Hug her — bombs miss point-blank",
+                flavor="Into her bubble.",
+                outcome_rolls=(
+                    OutcomeRoll(0.30,  0, -2, None, None,      "No bomb lands inside. She panics and flails."),
+                    OutcomeRoll(0.70, -2,  0, "player", None, "The bubble shifts. You end up in a crater."),
+                ),
+            ),
+        ),
+        safe_option_idx=0,
+    ),
+
+    "tusk_walrus_punch": BossMechanic(
+        id="tusk_walrus_punch",
+        archetype="charge_telegraph",
+        trigger_round=3,
+        prompt_title="Tusk cocks back a Walrus Punch",
+        prompt_description="His whole body winds up. His fist glows cyan.",
+        options=(
+            MechanicOption(
+                label="Duck the uppercut",
+                flavor="Hit the deck.",
+                outcome_rolls=(
+                    OutcomeRoll(0.65,  0, 0, None, None,    "You drop under it. His arm whiffs overhead."),
+                    OutcomeRoll(0.35, -2, 0, None, None,    "His follow-through catches your back."),
+                ),
+            ),
+            MechanicOption(
+                label="Counter-punch his chin",
+                flavor="Fist meets fist.",
+                outcome_rolls=(
+                    OutcomeRoll(0.35,  0, -3, None, None,   "You rock him first. He crumples."),
+                    OutcomeRoll(0.55, -3,  0, None, None,   "He wins the exchange, brutally."),
+                    OutcomeRoll(0.10, -1, -1, None, None,   "Clash. You both stagger."),
+                ),
+            ),
+            MechanicOption(
+                label="Let him connect, ride it",
+                flavor="Roll with the hit.",
+                outcome_rolls=(
+                    OutcomeRoll(0.40, -1, 0, None, None,       "You turn with it. Barely a scratch."),
+                    OutcomeRoll(0.60, -2, 0, "player", None,   "He launches you skyward. You land wrong."),
                 ),
             ),
         ),
@@ -462,6 +675,112 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
         safe_option_idx=0,
     ),
 
+    "magmus_meteor": BossMechanic(
+        id="magmus_meteor",
+        archetype="mark_delayed",
+        trigger_round=4,
+        prompt_title="Magmus Rex marks you for a meteor",
+        prompt_description="A red crosshair paints the ground at your feet.",
+        options=(
+            MechanicOption(
+                label="Sprint out of the circle",
+                flavor="Full sprint sideways.",
+                outcome_rolls=(
+                    OutcomeRoll(0.60,  0, 0, None, None,    "You clear it. The meteor cratrs empty ground."),
+                    OutcomeRoll(0.40, -2, 0, None, "burn", "Close call — the shockwave scorches your flank."),
+                ),
+            ),
+            MechanicOption(
+                label="Drag him into the circle",
+                flavor="Bait his own rock.",
+                outcome_rolls=(
+                    OutcomeRoll(0.35, -2, -3, None, None,   "Both of you eat it. He takes far worse."),
+                    OutcomeRoll(0.50, -3,  0, None, "burn", "He doesn't budge. You eat the meteor."),
+                    OutcomeRoll(0.15,  0, -4, None, None,   "He stumbles in. Direct hit. He's stunned."),
+                ),
+            ),
+            MechanicOption(
+                label="Meet it with your pick raised",
+                flavor="Block the sky.",
+                outcome_rolls=(
+                    OutcomeRoll(0.20, +1, -2, None, None,   "You split the meteor. Chunks tag him."),
+                    OutcomeRoll(0.80, -3,  0, None, "burn", "The pick vaporizes. So does much of you."),
+                ),
+            ),
+        ),
+        safe_option_idx=0,
+    ),
+
+    "lina_dragon_slave": BossMechanic(
+        id="lina_dragon_slave",
+        archetype="channel_aoe",
+        trigger_round=3,
+        prompt_title="Lina conjures a Dragon Slave",
+        prompt_description="A wave of dragon-shaped fire rolls down the corridor.",
+        options=(
+            MechanicOption(
+                label="Flatten against the floor",
+                flavor="Hug the ground.",
+                outcome_rolls=(
+                    OutcomeRoll(0.60, -1, 0, None, None,   "The fire passes over. You get a bit singed."),
+                    OutcomeRoll(0.40, -2, 0, None, "burn", "It dips low at the wrong moment."),
+                ),
+            ),
+            MechanicOption(
+                label="Leap over the wave",
+                flavor="Time the jump.",
+                outcome_rolls=(
+                    OutcomeRoll(0.45,  0, -1, None, None,   "You clear it clean and clip Lina on the landing."),
+                    OutcomeRoll(0.55, -3,  0, None, "burn", "Mistimed. The dragon's mouth catches you mid-air."),
+                ),
+            ),
+            MechanicOption(
+                label="Redirect with a swing",
+                flavor="Bat the fire back.",
+                outcome_rolls=(
+                    OutcomeRoll(0.25,  0, -3, None, None,   "Impossibly, it works. Lina gets scorched."),
+                    OutcomeRoll(0.75, -3,  0, None, "burn", "Fire doesn't care about your pickaxe."),
+                ),
+            ),
+        ),
+        safe_option_idx=0,
+    ),
+
+    "doom_scorched_earth": BossMechanic(
+        id="doom_scorched_earth",
+        archetype="dot_debuff",
+        trigger_round=4,
+        prompt_title="Doom bathes the floor in infernal flame",
+        prompt_description="Everywhere you step burns. He alone is untouched.",
+        options=(
+            MechanicOption(
+                label="Keep moving — never stand still",
+                flavor="Hot feet.",
+                outcome_rolls=(
+                    OutcomeRoll(0.55, -1, -1, None, None,   "You trade sparks with him in motion."),
+                    OutcomeRoll(0.45, -2,  0, None, "burn", "He catches you on a pivot. Whole boot lights up."),
+                ),
+            ),
+            MechanicOption(
+                label="Stand on a rock pillar",
+                flavor="Find a dry spot.",
+                outcome_rolls=(
+                    OutcomeRoll(0.60, -1, 0, None, None,    "You perch. The flame licks but doesn't climb."),
+                    OutcomeRoll(0.40, -2, 0, "player", None, "Doom kicks the pillar. You tumble into the fire."),
+                ),
+            ),
+            MechanicOption(
+                label="Roll through and tackle him",
+                flavor="Eat floor on the way.",
+                outcome_rolls=(
+                    OutcomeRoll(0.30, -1, -3, None, None,   "You drag him down. Roll him through his own flame."),
+                    OutcomeRoll(0.70, -3,  0, None, "burn", "You roll into his boot. He was ready for that."),
+                ),
+            ),
+        ),
+        safe_option_idx=0,
+    ),
+
     # ================================================================
     # TIER 100
     # ================================================================
@@ -568,6 +887,112 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
             ),
         ),
         safe_option_idx=1,
+    ),
+
+    "voidwarden_silence": BossMechanic(
+        id="voidwarden_silence",
+        archetype="bind_debuff",
+        trigger_round=3,
+        prompt_title="The Void Warden drops a silent bubble",
+        prompt_description="Inside the sphere, no sound exists. Your pick makes no impact.",
+        options=(
+            MechanicOption(
+                label="Fight without sound",
+                flavor="Feel the hits.",
+                outcome_rolls=(
+                    OutcomeRoll(0.45, -1, -2, None, None,      "You land two blind hits. One is very solid."),
+                    OutcomeRoll(0.55, -2,  0, None, "silence", "You swing at echoes and miss."),
+                ),
+            ),
+            MechanicOption(
+                label="Step out of the sphere",
+                flavor="Back to noise.",
+                outcome_rolls=(
+                    OutcomeRoll(0.65, -1, 0, None, None,       "You escape the bubble clean."),
+                    OutcomeRoll(0.35, -2, 0, "player", None,   "The sphere drags with you. You're pinned half-in."),
+                ),
+            ),
+            MechanicOption(
+                label="Scream into the silence",
+                flavor="Will sound into being.",
+                outcome_rolls=(
+                    OutcomeRoll(0.25,  0, -3, None, "reveal", "Your voice cracks the bubble. He's exposed."),
+                    OutcomeRoll(0.75, -3,  0, None, "silence", "The sphere swallows your scream. You're left gasping."),
+                ),
+            ),
+        ),
+        safe_option_idx=1,
+    ),
+
+    "spectre_dagger": BossMechanic(
+        id="spectre_dagger",
+        archetype="stealth_strike",
+        trigger_round=2,
+        prompt_title="Spectre throws a Spectral Dagger",
+        prompt_description="A trail of shadow ink marks the dagger's flight.",
+        options=(
+            MechanicOption(
+                label="Follow the trail back at her",
+                flavor="Run the line.",
+                outcome_rolls=(
+                    OutcomeRoll(0.50, -1, -2, None, None,    "You sprint the trail and crash into her."),
+                    OutcomeRoll(0.50, -2,  0, None, "bleed", "She vanishes mid-trail. You hit empty ink."),
+                ),
+            ),
+            MechanicOption(
+                label="Catch the dagger",
+                flavor="Pluck it from the air.",
+                outcome_rolls=(
+                    OutcomeRoll(0.30, -1, -3, None, None,    "You grab it and throw it back, clean."),
+                    OutcomeRoll(0.60, -2,  0, None, "bleed", "It slices your palm open."),
+                    OutcomeRoll(0.10,  0, -2, None, None,    "The dagger hangs in air; you steal it mid-flight."),
+                ),
+            ),
+            MechanicOption(
+                label="Let the trail pass over you",
+                flavor="Accept the slow.",
+                outcome_rolls=(
+                    OutcomeRoll(0.55, -2, 0, None, None,    "The ink clings. You move slow but the dagger missed."),
+                    OutcomeRoll(0.45, -2, 0, "player", "bleed", "The trail loops back. You're glued to the spot."),
+                ),
+            ),
+        ),
+        safe_option_idx=2,
+    ),
+
+    "void_spirit_aether": BossMechanic(
+        id="void_spirit_aether",
+        archetype="reality_warp",
+        trigger_round=4,
+        prompt_title="Void Spirit folds aether around you",
+        prompt_description="A sphere of compressed dimension pins you in place.",
+        options=(
+            MechanicOption(
+                label="Push the sphere's walls out",
+                flavor="Widen the cage.",
+                outcome_rolls=(
+                    OutcomeRoll(0.55, -1, -1, None, None,     "You stretch it. You both take bruises."),
+                    OutcomeRoll(0.45, -2,  0, "player", None, "You overextend. The sphere snaps back hard."),
+                ),
+            ),
+            MechanicOption(
+                label="Collapse the sphere inward",
+                flavor="Let it crush.",
+                outcome_rolls=(
+                    OutcomeRoll(0.35, -2, -3, None, None,   "You drag him in. The collapse hurts you both; him more."),
+                    OutcomeRoll(0.65, -3,  0, None, None,   "Only you were inside. Compression costs you dearly."),
+                ),
+            ),
+            MechanicOption(
+                label="Stand still and meditate",
+                flavor="Refuse the warp.",
+                outcome_rolls=(
+                    OutcomeRoll(0.50,  0, 0, None, "reveal", "Your stillness destabilizes it. He flickers."),
+                    OutcomeRoll(0.50, -2, 0, None, None,    "The sphere tightens. Your ribs disagree."),
+                ),
+            ),
+        ),
+        safe_option_idx=2,
     ),
 
     # ================================================================
@@ -678,6 +1103,111 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
         safe_option_idx=0,
     ),
 
+    "sporeling_roots": BossMechanic(
+        id="sporeling_roots",
+        archetype="bind_debuff",
+        trigger_round=4,
+        prompt_title="Sporeling Sovereign threads mycelium around your ankles",
+        prompt_description="White fungal threads braid up your legs, tightening fast.",
+        options=(
+            MechanicOption(
+                label="Rip the threads with brute force",
+                flavor="Muscle through.",
+                outcome_rolls=(
+                    OutcomeRoll(0.55, -1, 0, None, None,     "You tear free; skin goes with it."),
+                    OutcomeRoll(0.45, -2, 0, None, "bleed",  "The threads hook barbs in. They don't let go clean."),
+                ),
+            ),
+            MechanicOption(
+                label="Cut the mycelium at the source",
+                flavor="Chop its root.",
+                outcome_rolls=(
+                    OutcomeRoll(0.40, -1, -2, None, None,    "You sever the main trunk. Sovereign howls."),
+                    OutcomeRoll(0.60, -2,  0, "player", None, "The trunk regrows. You spend the round hacking."),
+                ),
+            ),
+            MechanicOption(
+                label="Let it grow — become rooted",
+                flavor="Dig in.",
+                outcome_rolls=(
+                    OutcomeRoll(0.30, +1, -1, None, None,    "You anchor and swing from stability. Clean hit."),
+                    OutcomeRoll(0.70, -3,  0, "player", "bleed", "The roots drink from you. You become garden."),
+                ),
+            ),
+        ),
+        safe_option_idx=0,
+    ),
+
+    "treant_leech_seed": BossMechanic(
+        id="treant_leech_seed",
+        archetype="dot_debuff",
+        trigger_round=4,
+        prompt_title="Treant Protector plants a Leech Seed in you",
+        prompt_description="A hot bead burrows under your skin and starts drinking.",
+        options=(
+            MechanicOption(
+                label="Dig the seed out",
+                flavor="Knifepoint surgery.",
+                outcome_rolls=(
+                    OutcomeRoll(0.55, -2, 0, None, None,    "You pry it out. It stung, but you're clean."),
+                    OutcomeRoll(0.45, -3, 0, None, "bleed", "You cut too deep. The seed hangs on anyway."),
+                ),
+            ),
+            MechanicOption(
+                label="Feed it with a hit to Treant",
+                flavor="Spread the drain.",
+                outcome_rolls=(
+                    OutcomeRoll(0.40,  0, -2, None, None,   "The seed's tether reverses — he drinks from himself."),
+                    OutcomeRoll(0.60, -2,  0, None, "bleed", "Your contact strengthens the bond. Bad trade."),
+                ),
+            ),
+            MechanicOption(
+                label="Ignore it and fight",
+                flavor="Not his tempo.",
+                outcome_rolls=(
+                    OutcomeRoll(0.30, -1, -3, None, None,   "You outdamage the drain this round."),
+                    OutcomeRoll(0.70, -3,  0, None, "bleed", "The seed drinks as you swing. You weaken fast."),
+                ),
+            ),
+        ),
+        safe_option_idx=0,
+    ),
+
+    "broodmother_web": BossMechanic(
+        id="broodmother_web",
+        archetype="bind_debuff",
+        trigger_round=3,
+        prompt_title="Broodmother spins a web trap",
+        prompt_description="Sticky silk criss-crosses the cavern at knee height.",
+        options=(
+            MechanicOption(
+                label="Burn the web",
+                flavor="Torch it.",
+                outcome_rolls=(
+                    OutcomeRoll(0.55, -1, -1, None, None,  "The web goes up. A flaming strand catches her too."),
+                    OutcomeRoll(0.45, -2,  0, None, "burn", "The silk is oiled. You light yourself up."),
+                ),
+            ),
+            MechanicOption(
+                label="Crawl under on your belly",
+                flavor="Go low.",
+                outcome_rolls=(
+                    OutcomeRoll(0.65,  0, 0, "player", None, "You slither out. You spent the round on the ground."),
+                    OutcomeRoll(0.35, -2, 0, None,     None, "A lower strand catches your neck."),
+                ),
+            ),
+            MechanicOption(
+                label="Swing on a strand",
+                flavor="Tarzan the web.",
+                outcome_rolls=(
+                    OutcomeRoll(0.30,  0, -3, None, None,    "You swing right into Broodmother. Terrifying for her."),
+                    OutcomeRoll(0.70, -3,  0, None, "bleed", "The strand snaps. Silk and fangs everywhere."),
+                ),
+            ),
+        ),
+        safe_option_idx=1,
+    ),
+
     # ================================================================
     # TIER 200
     # ================================================================
@@ -786,6 +1316,111 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
         safe_option_idx=1,
     ),
 
+    "chronofrost_rewind": BossMechanic(
+        id="chronofrost_rewind",
+        archetype="rewind",
+        trigger_round=5,
+        prompt_title="Chronofrost rewinds his own wounds",
+        prompt_description="Every scar on him un-stitches and vanishes.",
+        options=(
+            MechanicOption(
+                label="Strike the seam of his rewind",
+                flavor="Find the join.",
+                outcome_rolls=(
+                    OutcomeRoll(0.40, -1, -3, None, None,        "You hit the seam. His heal rebounds."),
+                    OutcomeRoll(0.60, -3,  0, None, "frostbite", "You strike empty air. The rewind catches you instead."),
+                ),
+            ),
+            MechanicOption(
+                label="Force your own rewind",
+                flavor="Ride the wave.",
+                outcome_rolls=(
+                    OutcomeRoll(0.30, +2, 0, None, None,        "Your wounds un-happen. You heal on his tick."),
+                    OutcomeRoll(0.70, -2, 0, None, "frostbite", "You can't catch the thread. You age instead."),
+                ),
+            ),
+            MechanicOption(
+                label="Let him heal, swing anyway",
+                flavor="Start fresh.",
+                outcome_rolls=(
+                    OutcomeRoll(0.55, -1, -2, None, None, "You don't interrupt; you just keep hitting him."),
+                    OutcomeRoll(0.45, -2,  0, None, None, "He finishes the rewind and parries."),
+                ),
+            ),
+        ),
+        safe_option_idx=2,
+    ),
+
+    "faceless_void_backtrack": BossMechanic(
+        id="faceless_void_backtrack",
+        archetype="rewind",
+        trigger_round=3,
+        prompt_title="Faceless Void Backtracks your attack",
+        prompt_description="He rewinds a half-second. Your last swing un-happens.",
+        options=(
+            MechanicOption(
+                label="Swing again harder",
+                flavor="Twice the effort.",
+                outcome_rolls=(
+                    OutcomeRoll(0.45,  0, -2, None, None, "The second swing lands, past his rewind window."),
+                    OutcomeRoll(0.55, -2,  0, None, None, "He backtracks again. You've wasted two rounds."),
+                ),
+            ),
+            MechanicOption(
+                label="Wait out the rewind",
+                flavor="Let him run dry.",
+                outcome_rolls=(
+                    OutcomeRoll(0.60, -1, 0, None, None, "He backtracks into nothing. You breathe easy."),
+                    OutcomeRoll(0.40, -2, 0, "player", None, "He uses the free second to gut-punch you."),
+                ),
+            ),
+            MechanicOption(
+                label="Feint and follow through",
+                flavor="Bait the rewind.",
+                outcome_rolls=(
+                    OutcomeRoll(0.35, -1, -3, None, None, "He backtracks the feint. The real swing lands clean."),
+                    OutcomeRoll(0.65, -3,  0, None, None, "He saw the feint coming because of course he did."),
+                ),
+            ),
+        ),
+        safe_option_idx=1,
+    ),
+
+    "weaver_shukuchi": BossMechanic(
+        id="weaver_shukuchi",
+        archetype="stealth_strike",
+        trigger_round=3,
+        prompt_title="Weaver vanishes into Shukuchi",
+        prompt_description="He phases invisible. Tiny mandibles click somewhere in the dark.",
+        options=(
+            MechanicOption(
+                label="Swing where you heard the click",
+                flavor="Ear target.",
+                outcome_rolls=(
+                    OutcomeRoll(0.40, -1, -2, None, None,     "Blind hit. He shimmers into view, bleeding."),
+                    OutcomeRoll(0.60, -2,  0, None, None,     "You hit air. The clicks were a trick."),
+                ),
+            ),
+            MechanicOption(
+                label="Set the floor on fire",
+                flavor="He has to step somewhere.",
+                outcome_rolls=(
+                    OutcomeRoll(0.55, -1, -2, None, "reveal", "He steps into flame; Shukuchi breaks."),
+                    OutcomeRoll(0.45, -2,  0, None, "burn",   "He phased over. You scorched yourself."),
+                ),
+            ),
+            MechanicOption(
+                label="Stand dead still and listen",
+                flavor="Make him come to you.",
+                outcome_rolls=(
+                    OutcomeRoll(0.50, -1, 0, None, "reveal",   "He brushes past; you feel the draft. He's exposed."),
+                    OutcomeRoll(0.50, -3, 0, "player", "bleed", "He phases through your back. Vicious."),
+                ),
+            ),
+        ),
+        safe_option_idx=2,
+    ),
+
     # ================================================================
     # TIER 275
     # ================================================================
@@ -891,6 +1526,112 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
             ),
         ),
         safe_option_idx=0,
+    ),
+
+    "nameless_silence": BossMechanic(
+        id="nameless_silence",
+        archetype="bind_debuff",
+        trigger_round=4,
+        prompt_title="The Nameless Depth drinks all sound",
+        prompt_description="Your heartbeat is inaudible. Even your thoughts dim.",
+        options=(
+            MechanicOption(
+                label="Hum a childhood song",
+                flavor="Hold onto something familiar.",
+                outcome_rolls=(
+                    OutcomeRoll(0.55, -1, -1, None, None,      "The hum holds. You both feel small."),
+                    OutcomeRoll(0.45, -2,  0, None, "silence", "It takes the song too. You forget the tune."),
+                ),
+            ),
+            MechanicOption(
+                label="Shout your own name",
+                flavor="Reassert you exist.",
+                outcome_rolls=(
+                    OutcomeRoll(0.40,  0, -2, None, "reveal",  "The Depth flinches; it cannot unknow you."),
+                    OutcomeRoll(0.60, -2,  0, None, "silence", "It swallowed the name before you finished it."),
+                ),
+            ),
+            MechanicOption(
+                label="Stay silent and listen",
+                flavor="Hear what it hears.",
+                outcome_rolls=(
+                    OutcomeRoll(0.35, -1, -2, None, None,      "You catch its rhythm. Your pick finds the gap."),
+                    OutcomeRoll(0.65, -3,  0, "player", "silence", "You lose your voice entirely for a round."),
+                ),
+            ),
+        ),
+        safe_option_idx=0,
+    ),
+
+    "oracle_false_promise": BossMechanic(
+        id="oracle_false_promise",
+        archetype="gamble",
+        trigger_round=5,
+        prompt_title="Oracle places a False Promise on you",
+        prompt_description="For a moment all damage is suspended. When it ends — everything resolves.",
+        options=(
+            MechanicOption(
+                label="Attack recklessly during the promise",
+                flavor="Nothing can hurt you... yet.",
+                outcome_rolls=(
+                    OutcomeRoll(0.45, -2, -3, None, None, "You land huge hits. The promise ends. You pay some cost."),
+                    OutcomeRoll(0.40, -3, -2, None, None, "Your damage taken accumulated. Still a decent trade."),
+                    OutcomeRoll(0.15, -4,  0, None, None, "She extended the promise's back-end. It all hits you."),
+                ),
+            ),
+            MechanicOption(
+                label="Heal during the promise",
+                flavor="Bank the hit points.",
+                outcome_rolls=(
+                    OutcomeRoll(0.55, +2, 0, None, None, "You pour potion into your wounds; they hold."),
+                    OutcomeRoll(0.45, -2, 0, None, None, "The heal was promised away. You end worse."),
+                ),
+            ),
+            MechanicOption(
+                label="Refuse to act at all",
+                flavor="Wait it out.",
+                outcome_rolls=(
+                    OutcomeRoll(0.60, -1, 0, None, None,       "The promise lapses. You take a small tax."),
+                    OutcomeRoll(0.40, -2, 0, "player", None,   "She extends it. You're locked a round."),
+                ),
+            ),
+        ),
+        safe_option_idx=2,
+    ),
+
+    "terrorblade_metamorphosis": BossMechanic(
+        id="terrorblade_metamorphosis",
+        archetype="charge_telegraph",
+        trigger_round=3,
+        prompt_title="Terrorblade enters Metamorphosis",
+        prompt_description="His wings unfurl. His next three swings will be ranged and devastating.",
+        options=(
+            MechanicOption(
+                label="Close the distance immediately",
+                flavor="Get inside his reach.",
+                outcome_rolls=(
+                    OutcomeRoll(0.45, -1, -2, None, None,    "Inside his range, his power drops. You trade well."),
+                    OutcomeRoll(0.55, -3,  0, None, "bleed", "He swats you before you reach him."),
+                ),
+            ),
+            MechanicOption(
+                label="Hide behind cover",
+                flavor="Wait out the duration.",
+                outcome_rolls=(
+                    OutcomeRoll(0.60, -1, 0, None, None,       "Two bolts miss. One scrapes the rock."),
+                    OutcomeRoll(0.40, -3, 0, "player", None,   "The bolts punch through cover. You curl up."),
+                ),
+            ),
+            MechanicOption(
+                label="Counter with your own pick throw",
+                flavor="Range vs range.",
+                outcome_rolls=(
+                    OutcomeRoll(0.30, -1, -3, None, None,   "Your throw catches him mid-bolt. Big dent."),
+                    OutcomeRoll(0.70, -3,  0, None, None,   "He out-ranges you effortlessly."),
+                ),
+            ),
+        ),
+        safe_option_idx=1,
     ),
 }
 
