@@ -5717,19 +5717,29 @@ class DigService:
         if LUMINOSITY_PITCH_FORCE_RISKY and luminosity <= LUMINOSITY_PITCH_BLACK and choice == "safe" and event.get("risky_option"):
             choice = "risky"
 
-        # Handle boon choice — apply selected buff
+        # Handle boon choice — apply selected buff atomically with the
+        # audit log so a crash can't record the buff without logging (or
+        # vice versa).
         if choice.startswith("boon_") and event.get("boon_options"):
             boon_idx = int(choice.split("_")[1]) if choice.split("_")[1].isdigit() else 0
             boons = event["boon_options"]
             if boon_idx >= len(boons):
                 return self._error("Invalid boon selection.")
             boon = boons[boon_idx]
-            # Apply buff
-            self.set_temp_buff(discord_id, guild_id, boon)
-            self.dig_repo.log_action(
-                discord_id=discord_id, guild_id=guild_id,
-                action_type="event",
-                details=json.dumps({"event_id": event_id, "choice": choice, "boon": boon.get("name", boon.get("id"))}),
+            buff_payload = {
+                "id": boon.get("id", "unknown"),
+                "name": boon.get("name", "Unknown Buff"),
+                "digs_remaining": boon.get("duration_digs", 1),
+                "effect": boon.get("effect", {}),
+            }
+            self.dig_repo.atomic_tunnel_balance_update(
+                discord_id, guild_id,
+                tunnel_updates={"temp_buffs": json.dumps(buff_payload)},
+                log_detail={
+                    "event_id": event_id, "choice": choice,
+                    "boon": boon.get("name", boon.get("id")),
+                },
+                log_action_type="event",
             )
             return self._ok(
                 event_name=event.get("name", "Unknown Event"),
@@ -5759,10 +5769,11 @@ class DigService:
             jc_delta = 0
             depth_delta = 0
             message = outcome.get("message", "Nothing happened.")
+            tunnel_updates: dict = {}
+
             if "jc" in outcome:
                 jc_range = outcome["jc"]
                 jc_delta = random.randint(jc_range[0], jc_range[1]) if isinstance(jc_range, list) else jc_range
-                self.player_repo.add_balance(discord_id, guild_id, jc_delta)
             if "depth" in outcome:
                 depth_range = outcome["depth"]
                 depth_delta = random.randint(depth_range[0], depth_range[1]) if isinstance(depth_range, list) else depth_range
@@ -5775,13 +5786,19 @@ class DigService:
                         boss_info = self._build_boss_info(
                             discord_id, guild_id, tunnel, next_boss,
                         )
-                new_depth = max(0, depth + depth_delta)
-                self.dig_repo.update_tunnel(discord_id, guild_id, depth=new_depth)
+                tunnel_updates["depth"] = max(0, depth + depth_delta)
 
-            self.dig_repo.log_action(
-                discord_id=discord_id, guild_id=guild_id,
-                action_type="event",
-                details=json.dumps({"event_id": event_id, "choice": choice, "jc_delta": jc_delta, "depth_delta": depth_delta}),
+            # JC + depth + audit log commit together so a crash can't credit
+            # JC without the depth move (or vice versa).
+            self.dig_repo.atomic_tunnel_balance_update(
+                discord_id, guild_id,
+                balance_delta=jc_delta,
+                tunnel_updates=tunnel_updates or None,
+                log_detail={
+                    "event_id": event_id, "choice": choice,
+                    "jc_delta": jc_delta, "depth_delta": depth_delta,
+                },
+                log_action_type="event",
             )
             return self._ok(event_name=event.get("name", "Unknown Event"), choice=choice,
                             jc_delta=jc_delta, depth_delta=depth_delta, message=message,
@@ -5799,14 +5816,15 @@ class DigService:
         if choice == "safe" and cruel_fail > 0 and option.get("failure") is not None:
             success_chance = min(success_chance, 1.0 - cruel_fail)
         elif choice == "safe" and cruel_fail > 0 and option.get("failure") is None and random.random() < cruel_fail:
-            # Safe options with no failure defined — cruel echoes creates one
+            # Safe options with no failure defined — cruel echoes creates one.
+            # Depth decrement + JC loss + audit log commit together.
             new_depth = max(0, depth - 1)
-            self.dig_repo.update_tunnel(discord_id, guild_id, depth=new_depth)
-            self.player_repo.add_balance(discord_id, guild_id, -1)
-            self.dig_repo.log_action(
-                discord_id=discord_id, guild_id=guild_id,
-                action_type="event",
-                details=json.dumps({"event_id": event_id, "choice": choice, "cruel_echoes": True}),
+            self.dig_repo.atomic_tunnel_balance_update(
+                discord_id, guild_id,
+                balance_delta=-1,
+                tunnel_updates={"depth": new_depth},
+                log_detail={"event_id": event_id, "choice": choice, "cruel_echoes": True},
+                log_action_type="event",
             )
             return self._ok(
                 event_name=event.get("name", "Unknown Event"), choice=choice,
@@ -5841,25 +5859,28 @@ class DigService:
                     discord_id, guild_id, tunnel, next_boss,
                 )
 
-        # Apply depth change
+        # Build the tunnel update dict: depth shift + optional temp buff
+        # applied on risky/desperate success. Folding them together lets the
+        # atomic block touch the tunnel row just once.
         new_depth = max(0, depth + advance)
+        tunnel_updates: dict = {}
         if advance != 0:
-            self.dig_repo.update_tunnel(discord_id, guild_id, depth=new_depth)
+            tunnel_updates["depth"] = new_depth
 
-        # Apply JC change
-        if jc != 0:
-            self.player_repo.add_balance(discord_id, guild_id, jc)
-
-        # Apply buff if risky/desperate success
         buff_applied = None
         if succeeded and choice in ("risky", "desperate") and event.get("buff_on_success"):
             buff_data = event["buff_on_success"]
-            self.set_temp_buff(discord_id, guild_id, buff_data)
+            buff_payload = {
+                "id": buff_data.get("id", "unknown"),
+                "name": buff_data.get("name", "Unknown Buff"),
+                "digs_remaining": buff_data.get("duration_digs", 1),
+                "effect": buff_data.get("effect", {}),
+            }
+            tunnel_updates["temp_buffs"] = json.dumps(buff_payload)
             buff_applied = buff_data
 
-        # Splash: event may burn JC from other players in the guild when the
-        # configured trigger outcome fires. Splash events are wired on risky
-        # outcomes only (safe options never splash).
+        # Splash burns JC from OTHER players; it writes to their rows, not
+        # the actor's, so it runs in its own txns around the atomic block.
         splash_result = None
         splash_cfg = event.get("splash")
         if (
@@ -5882,17 +5903,22 @@ class DigService:
                 mode=splash_cfg.get("mode", "burn"),
             )
 
-        self.dig_repo.log_action(
-            discord_id=discord_id, guild_id=guild_id,
-            action_type="event",
-            details=json.dumps({
+        # Depth shift + JC credit/debit + optional buff + audit log commit
+        # together, so the actor can't be paid without the depth/buff
+        # applied (or vice versa).
+        self.dig_repo.atomic_tunnel_balance_update(
+            discord_id, guild_id,
+            balance_delta=jc,
+            tunnel_updates=tunnel_updates or None,
+            log_detail={
                 "event_id": event_id, "choice": choice, "succeeded": succeeded,
                 "advance": advance, "jc": jc, "cave_in": cave_in,
                 "splash_victims": (
                     [{"id": vid, "amount": amt} for vid, amt in splash_result.victims]
                     if splash_result else None
                 ),
-            }),
+            },
+            log_action_type="event",
         )
 
         # Check for event chaining (P7+)
