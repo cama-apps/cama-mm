@@ -3932,26 +3932,25 @@ class DigService:
                             and current_status == "active")
 
             if needs_phase2:
-                # Phase 1 victory — boss transforms, fight again
+                # Phase 1 victory — boss transforms, fight again. Tunnel
+                # update + audit log commit together.
                 boss_progress[str(at_boss)] = "phase1_defeated"
-                self.dig_repo.update_tunnel(
+                self.dig_repo.atomic_tunnel_balance_update(
                     discord_id, guild_id,
-                    boss_progress=json.dumps(boss_progress),
-                    boss_attempts=attempts,
-                    last_dig_at=now,
+                    tunnel_updates={
+                        "boss_progress": json.dumps(boss_progress),
+                        "boss_attempts": attempts,
+                        "last_dig_at": now,
+                    },
+                    log_detail={
+                        "boundary": at_boss, "won": True, "risk": risk_tier,
+                        "phase": 1, "wager": wager, "rounds": round_log,
+                    },
+                    log_action_type="boss_fight",
                 )
 
                 phase2 = BOSS_PHASE2[at_boss]
                 p2_dialogue = phase2.dialogue[min(attempts - 1, len(phase2.dialogue) - 1)]
-
-                self.dig_repo.log_action(
-                    discord_id=discord_id, guild_id=guild_id,
-                    action_type="boss_fight",
-                    details=json.dumps({
-                        "boundary": at_boss, "won": True, "risk": risk_tier,
-                        "phase": 1, "wager": wager, "rounds": round_log,
-                    }),
-                )
 
                 return self._ok(
                     won=True,
@@ -3982,42 +3981,62 @@ class DigService:
             jc_delta = int(base_jc * boss_payout_mult * echo_payout_mult)
 
             boss_progress[str(at_boss)] = "defeated"
-            stat_point_awarded = self._award_boss_stat_point_if_first(
-                discord_id, guild_id, tunnel, at_boss
-            )
             prev_max_depth = tunnel.get("max_depth", 0) or 0
-            self.dig_repo.update_tunnel(
-                discord_id, guild_id,
-                depth=new_depth,
-                max_depth=max(prev_max_depth, new_depth),
-                boss_progress=json.dumps(boss_progress),
-                boss_attempts=0,
-                cheer_data=None,  # Clear cheers
-                last_dig_at=now,
-            )
 
-            # Record the echo window so subsequent guildmates find this boss
-            # weakened. Every full kill (including a beneficiary who then
-            # achieves their own clear, and re-kills by the registered
-            # killer) refreshes the 24h window under the current fighter
-            # as the attributed killer.
-            self.dig_repo.record_boss_echo(
-                guild_id=guild_id,
-                boss_id=active_boss_id,
-                depth=at_boss,
-                killer_discord_id=discord_id,
-                window_seconds=24 * 3600,
-            )
+            # Compute stat point award (pure) so it can fold into the atomic
+            # tunnel write instead of being a second UPDATE.
+            tunnel_updates = {
+                "depth": new_depth,
+                "max_depth": max(prev_max_depth, new_depth),
+                "boss_progress": json.dumps(boss_progress),
+                "boss_attempts": 0,
+                "cheer_data": None,  # Clear cheers
+                "last_dig_at": now,
+            }
+            awarded_bosses = self._get_stat_boss_awards(tunnel)
+            stat_point_awarded = at_boss not in awarded_bosses
+            if stat_point_awarded:
+                new_awarded = sorted(set(awarded_bosses + [at_boss]))
+                current_points = max(
+                    DIG_STARTING_STAT_POINTS,
+                    int(tunnel.get("stat_points") or DIG_STARTING_STAT_POINTS),
+                )
+                tunnel_updates["stat_points"] = current_points + DIG_BOSS_STAT_POINT_BONUS
+                tunnel_updates["stat_boss_awards"] = json.dumps(new_awarded)
+                # Keep the in-memory tunnel dict consistent for downstream
+                # achievement checks that pass ``{**tunnel, ...}``.
+                tunnel["stat_points"] = tunnel_updates["stat_points"]
+                tunnel["stat_boss_awards"] = tunnel_updates["stat_boss_awards"]
 
             if wager > 0:
-                self.player_repo.add_balance(
-                    discord_id, guild_id,
-                    int(wager * (multiplier * boss_payout_mult * echo_payout_mult - 1)),
-                )
+                payout_delta = int(wager * (multiplier * boss_payout_mult * echo_payout_mult - 1))
             else:
-                self.player_repo.add_balance(discord_id, guild_id, jc_delta)
+                payout_delta = jc_delta
 
-            # Check Boss Slayer achievement
+            # Tunnel flip + JC payout + boss-echo refresh + audit log all
+            # commit in one BEGIN IMMEDIATE. A crash can no longer pay out
+            # without clearing the boss (or vice versa).
+            self.dig_repo.atomic_boss_full_victory(
+                discord_id=discord_id,
+                guild_id=guild_id,
+                jc_delta=payout_delta,
+                tunnel_updates=tunnel_updates,
+                boss_echo_boss_id=active_boss_id,
+                boss_echo_depth=at_boss,
+                boss_echo_window_seconds=24 * 3600,
+                log_detail={
+                    "boundary": at_boss, "won": True, "risk": risk_tier,
+                    "wager": wager, "jc_delta": jc_delta,
+                    "stat_point_awarded": stat_point_awarded,
+                    "echo_applied": echo_applied,
+                    "rounds": round_log,
+                },
+            )
+
+            # Achievement check runs in its own txns (reads + conditional
+            # inserts + own JC rewards). A failure here leaves the boss
+            # cleared but the achievement row not inserted; it can be
+            # awarded on the next relevant check.
             achievements = self.check_achievements(
                 discord_id, guild_id,
                 {**tunnel, "depth": new_depth},
@@ -4031,17 +4050,6 @@ class DigService:
             # do NOT roll — only completed kills.
             gear_drop = self._maybe_drop_gear(discord_id, guild_id, at_boss)
 
-            self.dig_repo.log_action(
-                discord_id=discord_id, guild_id=guild_id,
-                action_type="boss_fight",
-                details=json.dumps({
-                    "boundary": at_boss, "won": True, "risk": risk_tier,
-                    "wager": wager, "jc_delta": jc_delta,
-                    "stat_point_awarded": stat_point_awarded,
-                    "echo_applied": echo_applied,
-                    "rounds": round_log,
-                }),
-            )
 
             return self._ok(
                 won=True,
@@ -4067,25 +4075,24 @@ class DigService:
             new_depth = max(0, depth - knockback)
             jc_delta = -wager if wager > 0 else 0
 
-            self.dig_repo.update_tunnel(
+            # Tunnel knockback + wager forfeit + audit log commit together.
+            # The old flow could forfeit the wager without recording the
+            # knockback (or vice versa) on a crash.
+            self.dig_repo.atomic_tunnel_balance_update(
                 discord_id, guild_id,
-                depth=new_depth,
-                boss_attempts=attempts,
-                cheer_data=None,     # clear cheers on defeat
-                last_dig_at=now,
-            )
-
-            if wager > 0:
-                self.player_repo.add_balance(discord_id, guild_id, -wager)
-
-            self.dig_repo.log_action(
-                discord_id=discord_id, guild_id=guild_id,
-                action_type="boss_fight",
-                details=json.dumps({
+                balance_delta=-wager if wager > 0 else 0,
+                tunnel_updates={
+                    "depth": new_depth,
+                    "boss_attempts": attempts,
+                    "cheer_data": None,     # clear cheers on defeat
+                    "last_dig_at": now,
+                },
+                log_detail={
                     "boundary": at_boss, "won": False, "risk": risk_tier,
                     "wager": wager, "knockback": knockback,
                     "rounds": round_log,
-                }),
+                },
+                log_action_type="boss_fight",
             )
 
             return self._ok(
@@ -5112,25 +5119,22 @@ class DigService:
         if len(active_cheers) >= 3:
             return self._error("This player already has maximum cheers (3).")
 
-        # Apply
-        self.player_repo.add_balance(cheerer_id, guild_id, -cost)
-
-        # Set cheerer cooldown
-        if cheerer_tunnel:
-            self.dig_repo.update_tunnel(cheerer_id, guild_id, last_dig_at=now)
-        else:
-            name = self.generate_tunnel_name()
-            self.dig_repo.create_tunnel(cheerer_id, guild_id, name=name)
-            self.dig_repo.update_tunnel(cheerer_id, guild_id, last_dig_at=now)
-
-        # Add cheer
+        # Debit cheerer + cheerer cooldown (optional create) + target cheer
+        # data commit together. The old flow could charge the cheerer with
+        # no cheer actually recorded on the target, or leave the cheerer on
+        # no cooldown.
         active_cheers.append({
             "cheerer_id": cheerer_id,
             "expires_at": now + 3600,  # 1h
         })
-        self.dig_repo.update_tunnel(
-            target_id, guild_id,
-            cheer_data=json.dumps(active_cheers),
+        self.dig_repo.atomic_cheer_boss(
+            cheerer_id=cheerer_id,
+            target_id=target_id,
+            guild_id=guild_id,
+            cost=cost,
+            cheerer_last_dig_at=now,
+            create_cheerer_tunnel_name=None if cheerer_tunnel else self.generate_tunnel_name(),
+            target_cheer_data_json=json.dumps(active_cheers),
         )
 
         boost = min(0.15, len(active_cheers) * 0.05)
@@ -5999,25 +6003,24 @@ class DigService:
             return self._error("You can only abandon once every 24 hours.")
 
         refund = int(depth * 0.1)
-
-        # Reset tunnel (keep prestige, pickaxe, name)
         boss_progress = {str(b): "active" for b in BOSS_BOUNDARIES}
-        self.dig_repo.update_tunnel(
+
+        # Reset tunnel + refund + audit log commit together. The old flow
+        # could leave the tunnel reset with no refund paid (or vice versa)
+        # on a mid-flight crash.
+        self.dig_repo.atomic_tunnel_balance_update(
             discord_id, guild_id,
-            depth=0,
-            boss_progress=json.dumps(boss_progress),
-            boss_attempts=0,
-            injury_state=None,
-            cheer_data=None,
-            streak_days=0,
-        )
-
-        self.player_repo.add_balance(discord_id, guild_id, refund)
-
-        self.dig_repo.log_action(
-            discord_id=discord_id, guild_id=guild_id,
-            action_type="abandon",
-            details=json.dumps({"depth": depth, "refund": refund}),
+            balance_delta=refund,
+            tunnel_updates={
+                "depth": 0,
+                "boss_progress": json.dumps(boss_progress),
+                "boss_attempts": 0,
+                "injury_state": None,
+                "cheer_data": None,
+                "streak_days": 0,
+            },
+            log_detail={"depth": depth, "refund": refund},
+            log_action_type="abandon",
         )
 
         return self._ok(

@@ -940,6 +940,142 @@ class DigRepository(BaseRepository, IDigRepository):
 
             return inventory_id
 
+    def atomic_boss_full_victory(
+        self,
+        *,
+        discord_id: int,
+        guild_id: int,
+        jc_delta: int,
+        tunnel_updates: dict,
+        boss_echo_boss_id: str,
+        boss_echo_depth: int,
+        boss_echo_window_seconds: int,
+        log_detail: dict,
+    ) -> None:
+        """Apply a full boss victory atomically.
+
+        Fuses the tunnel-state flip (depth, max_depth, boss_progress,
+        cleared cheers, optional stat-point award), the JC payout, the
+        guild-wide boss-echo upsert (keyed by ``boss_id`` so each boss in
+        a multi-boss tier tracks its own echo window), and the audit log
+        into one BEGIN IMMEDIATE so a crash can't award the JC without
+        clearing the boss, or flip boss_progress without paying out.
+        """
+        unknown = set(tunnel_updates) - self._TUNNEL_UPDATABLE_COLUMNS
+        if unknown:
+            raise ValueError(
+                f"atomic_boss_full_victory got unknown tunnel columns: {sorted(unknown)}."
+            )
+
+        gid = self.normalize_guild_id(guild_id)
+        now = int(time.time())
+        weakened_until = now + int(boss_echo_window_seconds)
+
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+
+            if tunnel_updates:
+                set_clauses = ", ".join(f"{col} = ?" for col in tunnel_updates)
+                cursor.execute(
+                    f"UPDATE tunnels SET {set_clauses} WHERE discord_id = ? AND guild_id = ?",
+                    (*tunnel_updates.values(), discord_id, gid),
+                )
+
+            if jc_delta != 0:
+                cursor.execute(
+                    """
+                    UPDATE players
+                    SET jopacoin_balance = jopacoin_balance + ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE discord_id = ? AND guild_id = ?
+                    """,
+                    (jc_delta, discord_id, gid),
+                )
+
+            cursor.execute(
+                """
+                INSERT INTO dig_boss_echoes
+                    (guild_id, boss_id, depth, killer_discord_id, weakened_until)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(guild_id, boss_id) DO UPDATE SET
+                    killer_discord_id = excluded.killer_discord_id,
+                    weakened_until    = excluded.weakened_until,
+                    depth             = excluded.depth
+                """,
+                (gid, boss_echo_boss_id, int(boss_echo_depth), discord_id, weakened_until),
+            )
+
+            cursor.execute(
+                """
+                INSERT INTO dig_actions
+                    (guild_id, actor_id, target_id, action_type, depth_before,
+                     depth_after, jc_delta, detail, created_at)
+                VALUES (?, ?, NULL, 'boss_fight', 0, 0, ?, ?, ?)
+                """,
+                (gid, discord_id, jc_delta, json.dumps(log_detail), now),
+            )
+
+    def atomic_cheer_boss(
+        self,
+        *,
+        cheerer_id: int,
+        target_id: int,
+        guild_id: int,
+        cost: int,
+        cheerer_last_dig_at: int,
+        create_cheerer_tunnel_name: str | None,
+        target_cheer_data_json: str,
+    ) -> None:
+        """Apply a cheer-boss outcome atomically.
+
+        Debits the cheerer's JC, optionally creates a minimal tunnel row for
+        the cheerer (when ``create_cheerer_tunnel_name`` is given) so their
+        cooldown can be tracked, bumps the cheerer's ``last_dig_at``, and
+        writes the target's updated ``cheer_data`` JSON — all inside one
+        BEGIN IMMEDIATE so the cheerer can't be charged without the cheer
+        actually landing on the target.
+        """
+        gid = self.normalize_guild_id(guild_id)
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+
+            if cost != 0:
+                cursor.execute(
+                    """
+                    UPDATE players
+                    SET jopacoin_balance = jopacoin_balance - ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE discord_id = ? AND guild_id = ?
+                    """,
+                    (cost, cheerer_id, gid),
+                )
+
+            if create_cheerer_tunnel_name is not None:
+                cursor.execute(
+                    """
+                    INSERT OR IGNORE INTO tunnels (
+                        discord_id, guild_id, depth, max_depth, total_digs,
+                        total_jc_earned, last_dig_at, streak_days, streak_last_date,
+                        pickaxe_tier, prestige_level, prestige_perks, tunnel_name,
+                        boss_progress, boss_attempts, trap_active, trap_free_today,
+                        trap_date, insured_until, reinforced_until, injury_state,
+                        paid_digs_today, paid_dig_date, revenge_target, revenge_type,
+                        revenge_until, created_at, hard_hat_charges, void_bait_digs, cheer_data
+                    )
+                    VALUES (?, ?, 0, 0, 0, 0, NULL, 0, NULL, 0, 0, NULL, ?, NULL, NULL, 0, 1,
+                            NULL, NULL, NULL, NULL, 0, NULL, NULL, NULL, NULL, ?, 0, 0, NULL)
+                    """,
+                    (cheerer_id, gid, create_cheerer_tunnel_name, int(time.time())),
+                )
+
+            cursor.execute(
+                "UPDATE tunnels SET last_dig_at = ? WHERE discord_id = ? AND guild_id = ?",
+                (cheerer_last_dig_at, cheerer_id, gid),
+            )
+
+            cursor.execute(
+                "UPDATE tunnels SET cheer_data = ? WHERE discord_id = ? AND guild_id = ?",
+                (target_cheer_data_json, target_id, gid),
+            )
+
     def atomic_help_tunnel(
         self,
         *,

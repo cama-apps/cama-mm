@@ -1806,6 +1806,33 @@ class IDigRepository(ABC):
     ) -> None: ...
 
     @abstractmethod
+    def atomic_cheer_boss(
+        self,
+        *,
+        cheerer_id: int,
+        target_id: int,
+        guild_id: int,
+        cost: int,
+        cheerer_last_dig_at: int,
+        create_cheerer_tunnel_name: str | None,
+        target_cheer_data_json: str,
+    ) -> None: ...
+
+    @abstractmethod
+    def atomic_boss_full_victory(
+        self,
+        *,
+        discord_id: int,
+        guild_id: int,
+        jc_delta: int,
+        tunnel_updates: dict,
+        boss_echo_boss_id: str,
+        boss_echo_depth: int,
+        boss_echo_window_seconds: int,
+        log_detail: dict,
+    ) -> None: ...
+
+    @abstractmethod
     def atomic_gift_relic(
         self,
         *,
