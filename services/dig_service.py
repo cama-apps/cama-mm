@@ -1491,12 +1491,16 @@ class DigService:
                         f"Paid dig costs {paid_dig_cost} JC but you only have {balance} JC."
                     )
 
-                # Debit for paid dig
-                self.player_repo.add_balance(discord_id, guild_id, -paid_dig_cost)
-                self.dig_repo.update_tunnel(
+                # Debit for paid dig: balance + paid-day counter commit
+                # together so a crash can't take the cost without
+                # incrementing paid_digs_today (or vice versa).
+                self.dig_repo.atomic_tunnel_balance_update(
                     discord_id, guild_id,
-                    paid_dig_date=today,
-                    paid_digs_today=paid_count + 1,
+                    balance_delta=-paid_dig_cost,
+                    tunnel_updates={
+                        "paid_dig_date": today,
+                        "paid_digs_today": paid_count + 1,
+                    },
                 )
 
         # 4. First dig ever: guaranteed safe, welcome info
@@ -1721,9 +1725,19 @@ class DigService:
                 block_loss = max(1, block_loss - 1)
             new_depth = max(0, depth_before - block_loss)
 
-            # Mutation: thick_skin — record shield used
+            # Accumulate all cave-in writes into one atomic commit:
+            # thick_skin_date, second_wind buff, injury_state, depth delta,
+            # counter bump, last_dig_at, cave-in loot credit, medical bill
+            # debit, and the audit log all flip together.
+            cave_in_tunnel_updates: dict = {
+                "depth": new_depth,
+                "total_digs": (tunnel.get("total_digs", 0) or 0) + 1,
+                "last_dig_at": now,
+            }
+            cave_in_balance_delta = 0
+
             if thick_skin_saved:
-                self.dig_repo.update_tunnel(discord_id, guild_id, thick_skin_date=today)
+                cave_in_tunnel_updates["thick_skin_date"] = today
 
             # Mutation: cave_in_loot — chance to drop JC on cave-in
             cave_in_jc = 0
@@ -1732,18 +1746,15 @@ class DigService:
                 loot_min = int(mutation_fx.get("cave_in_loot_min", 1))
                 loot_max = int(mutation_fx.get("cave_in_loot_max", 3))
                 cave_in_jc = random.randint(loot_min, loot_max)
-                self.player_repo.add_balance(discord_id, guild_id, cave_in_jc)
+                cave_in_balance_delta += cave_in_jc
 
             # Mutation: second_wind — flag for next dig advance bonus
             if mutation_fx.get("post_cave_in_advance"):
-                self.dig_repo.update_tunnel(
-                    discord_id, guild_id,
-                    temp_buffs=json.dumps({
-                        "id": "second_wind", "name": "Second Wind",
-                        "digs_remaining": 1,
-                        "effect": {"advance_bonus": int(mutation_fx["post_cave_in_advance"])},
-                    }),
-                )
+                cave_in_tunnel_updates["temp_buffs"] = json.dumps({
+                    "id": "second_wind", "name": "Second Wind",
+                    "digs_remaining": 1,
+                    "effect": {"advance_bonus": int(mutation_fx["post_cave_in_advance"])},
+                })
 
             # Random additional consequence
             # Mutation: fragile — injuries last longer
@@ -1756,9 +1767,8 @@ class DigService:
                     "block_loss": block_loss,
                     "message": f"Cave-in! Lost {block_loss} blocks and you're stunned.",
                 }
-                injury = {"type": "slower_cooldown", "digs_remaining": 2 + injury_bonus}
-                self.dig_repo.update_tunnel(
-                    discord_id, guild_id, injury_state=json.dumps(injury)
+                cave_in_tunnel_updates["injury_state"] = json.dumps(
+                    {"type": "slower_cooldown", "digs_remaining": 2 + injury_bonus}
                 )
             elif consequence_roll < 0.6:
                 # Injury: reduced advance
@@ -1767,17 +1777,15 @@ class DigService:
                     "block_loss": block_loss,
                     "message": f"Cave-in! Lost {block_loss} blocks and you're injured (reduced digging for {3 + injury_bonus} digs).",
                 }
-                injury = {"type": "reduced_advance", "digs_remaining": 3 + injury_bonus}
-                self.dig_repo.update_tunnel(
-                    discord_id, guild_id, injury_state=json.dumps(injury)
+                cave_in_tunnel_updates["injury_state"] = json.dumps(
+                    {"type": "reduced_advance", "digs_remaining": 3 + injury_bonus}
                 )
             else:
                 # Medical bill (capped at current balance to prevent negative)
                 med_cost = random.randint(3, 9)
                 balance = self.player_repo.get_balance(discord_id, guild_id)
                 med_cost = min(med_cost, max(0, balance))
-                if med_cost > 0:
-                    self.player_repo.add_balance(discord_id, guild_id, -med_cost)
+                cave_in_balance_delta -= med_cost
                 cave_in_detail = {
                     "type": "medical_bill",
                     "block_loss": block_loss,
@@ -1785,20 +1793,16 @@ class DigService:
                     "message": f"Cave-in! Lost {block_loss} blocks and paid {med_cost} JC in medical bills.",
                 }
 
-            self.dig_repo.update_tunnel(
+            self.dig_repo.atomic_tunnel_balance_update(
                 discord_id, guild_id,
-                depth=new_depth,
-                total_digs=(tunnel.get("total_digs", 0) or 0) + 1,
-                last_dig_at=now,
-            )
-            self.dig_repo.log_action(
-                discord_id=discord_id, guild_id=guild_id,
-                action_type="dig",
-                details=json.dumps({
+                balance_delta=cave_in_balance_delta,
+                tunnel_updates=cave_in_tunnel_updates,
+                log_detail={
                     "cave_in": True, "block_loss": block_loss,
                     "detail": cave_in_detail,
                     "depth_before": depth_before, "depth_after": new_depth,
-                }),
+                },
+                log_action_type="dig",
             )
 
             achievements = self.check_achievements(
@@ -1975,14 +1979,13 @@ class DigService:
             event_chance *= LUMINOSITY_DARK_EVENT_MULTIPLIER
         elif luminosity < LUMINOSITY_BRIGHT:
             event_chance *= LUMINOSITY_DIM_EVENT_MULTIPLIER
-        # Void Bait: double event chance while charges remain
+        # Void Bait: double event chance while charges remain. Decrement is
+        # folded into the final atomic commit below so a crash can't burn a
+        # void-bait charge without the dig committing.
         void_bait_digs = tunnel.get("void_bait_digs", 0) or 0
-        if void_bait_digs > 0:
+        void_bait_charge_used = void_bait_digs > 0
+        if void_bait_charge_used:
             event_chance *= 2.0
-            self.dig_repo.update_tunnel(
-                discord_id, guild_id,
-                void_bait_digs=void_bait_digs - 1,
-            )
         event_chance = min(event_chance, 0.75)
         # Admin force-event override
         force_key = (discord_id, guild_id)
@@ -2014,38 +2017,42 @@ class DigService:
             {"action": "dig", "advance": advance, "boss_encounter": boss_encounter},
         )
 
-        # 19. Update tunnel in DB (including run counters)
+        # 19. Final commit: tunnel state flip (incl. void-bait decrement if
+        # applicable, depth, max_depth, counters, streak, run counters) +
+        # JC credit + audit log — one BEGIN IMMEDIATE. A crash can no
+        # longer move the player's depth without crediting the JC (or vice
+        # versa), and the void-bait charge can't be burned without a dig
+        # committing.
         run_jc = (tunnel.get("current_run_jc", 0) or 0) + jc_earned
         run_artifacts = (tunnel.get("current_run_artifacts", 0) or 0) + (1 if artifact else 0)
         run_events_count = (tunnel.get("current_run_events", 0) or 0) + (1 if event else 0)
-        self.dig_repo.update_tunnel(
+        final_tunnel_updates: dict = {
+            "depth": new_depth,
+            "max_depth": max(prev_max_depth, new_depth),
+            "total_digs": total_digs,
+            "last_dig_at": now,
+            "total_jc_earned": (tunnel.get("total_jc_earned", 0) or 0) + jc_earned,
+            "streak_days": streak,
+            "streak_last_date": today,
+            "current_run_jc": run_jc,
+            "current_run_artifacts": run_artifacts,
+            "current_run_events": run_events_count,
+        }
+        if void_bait_charge_used:
+            final_tunnel_updates["void_bait_digs"] = void_bait_digs - 1
+
+        self.dig_repo.atomic_tunnel_balance_update(
             discord_id, guild_id,
-            depth=new_depth,
-            max_depth=max(prev_max_depth, new_depth),
-            total_digs=total_digs,
-            last_dig_at=now,
-            total_jc_earned=(tunnel.get("total_jc_earned", 0) or 0) + jc_earned,
-            streak_days=streak,
-            streak_last_date=today,
-            current_run_jc=run_jc,
-            current_run_artifacts=run_artifacts,
-            current_run_events=run_events_count,
-        )
-
-        # 20. Update player balance
-        self.player_repo.add_balance(discord_id, guild_id, jc_earned)
-
-        # 21. Log action
-        self.dig_repo.log_action(
-            discord_id=discord_id, guild_id=guild_id,
-            action_type="dig",
-            details=json.dumps({
+            balance_delta=jc_earned,
+            tunnel_updates=final_tunnel_updates,
+            log_detail={
                 "advance": advance, "jc": jc_earned,
                 "depth_before": depth_before, "depth_after": new_depth,
                 "boss_encounter": boss_encounter,
                 "cave_in": False,
                 "corruption": corruption["id"] if corruption else None,
-            }),
+            },
+            log_action_type="dig",
         )
 
         # 22. Return result
