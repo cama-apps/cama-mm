@@ -106,6 +106,8 @@ class DigRepository(BaseRepository, IDigRepository):
         # dig_miner_profile_columns migration
         "miner_origin", "miner_about", "stat_strength", "stat_smarts",
         "stat_stamina", "stat_points", "stat_boss_awards",
+        # add_stinger_curse_to_tunnels migration (multi-boss tiers)
+        "stinger_curse",
     })
 
     def update_tunnel(self, discord_id: int, guild_id: int, **kwargs) -> None:
