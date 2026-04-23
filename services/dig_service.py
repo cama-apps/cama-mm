@@ -650,16 +650,24 @@ class DigService:
                 return b
         return None
 
-    def _build_boss_info(self, tunnel: dict, boundary: int) -> dict:
-        """Build the standard boss encounter payload for a boundary."""
-        boss_name = BOSS_NAMES.get(boundary, "Unknown Boss")
+    def _build_boss_info(
+        self, discord_id: int, guild_id, tunnel: dict, boundary: int,
+    ) -> dict:
+        """Build the boss encounter payload for a boundary.
+
+        Locks a specific boss for this tunnel at this tier (idempotent), then
+        uses that boss's name/dialogue/ascii. The returned ``boss_id`` flows
+        through to the UI so ``get_boss_art`` resolves the correct PNG.
+        """
+        boss = self._ensure_boss_locked(discord_id, guild_id, tunnel, boundary)
         attempts = tunnel.get("boss_attempts", 0) or 0
-        dialogue_list = BOSS_DIALOGUE.get(boundary, ["..."])
+        dialogue_list = boss.dialogue or BOSS_DIALOGUE.get(boundary, ["..."])
         return {
             "boundary": boundary,
-            "name": boss_name,
+            "boss_id": boss.boss_id,
+            "name": boss.name,
             "dialogue": dialogue_list[min(attempts, len(dialogue_list) - 1)],
-            "ascii_art": BOSS_ASCII.get(boundary, ""),
+            "ascii_art": boss.ascii_art or BOSS_ASCII.get(boundary, ""),
         }
 
     def _pick_tip(self, depth: int) -> str:
@@ -5359,7 +5367,9 @@ class DigService:
                     if next_boss is not None and depth + depth_delta >= next_boss:
                         depth_delta = max(0, next_boss - 1 - depth)
                         boss_encounter = True
-                        boss_info = self._build_boss_info(tunnel, next_boss)
+                        boss_info = self._build_boss_info(
+                            discord_id, guild_id, tunnel, next_boss,
+                        )
                 new_depth = max(0, depth + depth_delta)
                 self.dig_repo.update_tunnel(discord_id, guild_id, depth=new_depth)
 
@@ -5422,7 +5432,9 @@ class DigService:
             if next_boss is not None and depth + advance >= next_boss:
                 advance = max(0, next_boss - 1 - depth)
                 boss_encounter = True
-                boss_info = self._build_boss_info(tunnel, next_boss)
+                boss_info = self._build_boss_info(
+                    discord_id, guild_id, tunnel, next_boss,
+                )
 
         # Apply depth change
         new_depth = max(0, depth + advance)

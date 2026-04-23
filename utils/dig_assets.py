@@ -36,11 +36,47 @@ LAYER_SLUGS: dict[str, str] = {
     "The Hollow": "the_hollow",
 }
 
-#: Asset-filename slug for each boss depth boundary. Lives here (not in
-#: ``services.dig_constants``) so the utils → services layering stays clean.
-BOSS_SLUGS: dict[int, str] = {
-    25: "grothak", 50: "crystalia", 75: "magmus",
-    100: "void_warden", 150: "sporeling", 200: "chronofrost", 275: "nameless",
+#: Asset-filename slug per ``BossDef.boss_id``. Grandfathered bosses keep
+#: their short historical slugs (``magmus`` for ``magmus_rex``, etc.) so
+#: existing PNGs on disk don't need renaming. New Dota-themed bosses use
+#: their boss_id verbatim.
+BOSS_SLUGS: dict[str, str] = {
+    # Grandfathered fantasy bosses — slug preserves historical filenames.
+    "grothak": "grothak",
+    "crystalia": "crystalia",
+    "magmus_rex": "magmus",
+    "void_warden": "void_warden",
+    "sporeling_sovereign": "sporeling",
+    "chronofrost": "chronofrost",
+    "nameless_depth": "nameless",
+    # Dota-themed roster — slug == boss_id.
+    "pudge": "pudge",
+    "ogre_magi": "ogre_magi",
+    "crystal_maiden": "crystal_maiden",
+    "tusk": "tusk",
+    "lina": "lina",
+    "doom": "doom",
+    "spectre": "spectre",
+    "void_spirit": "void_spirit",
+    "treant_protector": "treant_protector",
+    "broodmother": "broodmother",
+    "faceless_void": "faceless_void",
+    "weaver": "weaver",
+    "oracle": "oracle",
+    "terrorblade": "terrorblade",
+}
+
+# Legacy depth → boss_id fallback so a caller with only the boundary depth
+# (no locked boss_id yet) still resolves to the grandfathered boss art,
+# matching the pre-multi-boss behaviour.
+_LEGACY_DEPTH_TO_BOSS_ID: dict[int, str] = {
+    25: "grothak",
+    50: "crystalia",
+    75: "magmus_rex",
+    100: "void_warden",
+    150: "sporeling_sovereign",
+    200: "chronofrost",
+    275: "nameless_depth",
 }
 
 #: Asset-filename slug for each pickaxe tier index (0 = wooden, 6 = void_touched).
@@ -96,15 +132,23 @@ def _file_from_buf(buf: io.BytesIO, filename: str) -> discord.File:
 # ---------------------------------------------------------------------------
 
 def get_boss_art(
-    boundary: int,
+    boss_id: str | int,
     scene: str,
     layer_name: str,
 ) -> discord.File | None:
     """Return a discord.File for boss art (encounter / victory / defeat).
 
+    ``boss_id`` is the stable string identifier from ``BossDef.boss_id``
+    (e.g. ``"pudge"``, ``"grothak"``). For backward compatibility with the
+    pre-multi-boss-tier callers, an int boundary (25, 50, …) still resolves
+    to the grandfathered boss at that depth.
+
     Fallback chain: custom file on disk → PIL pixel art → None.
     """
-    slug = BOSS_SLUGS.get(boundary)
+    # Back-compat: accept the old depth-boundary int form.
+    if isinstance(boss_id, int):
+        boss_id = _LEGACY_DEPTH_TO_BOSS_ID.get(boss_id, "")
+    slug = BOSS_SLUGS.get(boss_id or "")
     if not slug:
         return None
 

@@ -474,16 +474,18 @@ class BossWagerModal(discord.ui.Modal):
                 )
                 phase2_embed.set_footer(text="Use /dig go to encounter the boss again")
 
-                # Try to load phase 2 boss art
+                # Try to load phase 2 boss art — prefer the locked boss_id,
+                # fall back to the depth boundary for the grandfathered slug.
                 p2_file = None
                 boundary = getattr(self.result, "boundary", None)
-                if boundary:
+                boss_id = getattr(self.result, "boss_id", "") or boundary
+                if boss_id:
                     try:
                         from utils.dig_assets import get_boss_art
                         new_depth = getattr(self.result, "new_depth", 0)
                         ld = get_layer_def(new_depth or boundary)
                         ln = ld.name if ld else "Dirt"
-                        p2_file = await asyncio.to_thread(get_boss_art, boundary, "phase2", ln)
+                        p2_file = await asyncio.to_thread(get_boss_art, boss_id, "phase2", ln)
                     except Exception:
                         pass
 
@@ -558,18 +560,20 @@ class BossWagerModal(discord.ui.Modal):
                     inline=False,
                 )
 
-            # Try to load boss fight result art
+            # Try to load boss fight result art — prefer the locked boss_id,
+            # fall back to the depth boundary for the grandfathered slug.
             boss_file = None
             boundary = getattr(self.result, "boundary", None)
+            boss_id = getattr(self.result, "boss_id", "") or boundary
             won = getattr(self.result, "won", False)
-            if boundary:
+            if boss_id:
                 try:
                     from utils.dig_assets import get_boss_art
                     new_depth = getattr(self.result, "new_depth", 0)
                     ld = get_layer_def(new_depth or boundary)
                     ln = ld.name if ld else "Dirt"
                     scene = "victory" if won else "defeat"
-                    boss_file = await asyncio.to_thread(get_boss_art, boundary, scene, ln)
+                    boss_file = await asyncio.to_thread(get_boss_art, boss_id, scene, ln)
                 except Exception as e:
                     logger.debug("Boss fight art failed: %s", e)
 
@@ -1738,13 +1742,14 @@ class DigCommands(commands.Cog):
 
         boss_file = None
         boundary = getattr(boss_info, "boundary", None)
-        if boundary:
+        boss_id = getattr(boss_info, "boss_id", "") or boundary
+        if boss_id:
             try:
                 from utils.dig_assets import get_boss_art
                 depth = getattr(result, "depth", 0) or getattr(result, "depth_after", 0)
                 ld = get_layer_def(depth or boundary)
                 ln = ld.name if ld else "Dirt"
-                boss_file = await asyncio.to_thread(get_boss_art, boundary, "encounter", ln)
+                boss_file = await asyncio.to_thread(get_boss_art, boss_id, "encounter", ln)
             except Exception as e:
                 logger.debug("Boss encounter art failed: %s", e)
 

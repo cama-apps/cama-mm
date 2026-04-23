@@ -145,18 +145,27 @@ class TestLoadCachedBytes:
 class TestGetBossArt:
     """Tests for boss art loading with fallback chain."""
 
-    def test_falls_back_to_pil_when_no_file(self):
-        """With no custom art on disk for boundary 9999, falls back to PIL."""
-        result = get_boss_art(25, "encounter", "Dirt")
-        # Should return a discord.File (PIL fallback) or None
-        # Since PIL is available and "grothak" is a valid slug for boundary 25,
-        # this should succeed
+    def test_resolves_grandfathered_boss_by_id(self):
+        """Grandfathered boss slug resolves on-disk PNG or PIL fallback."""
+        result = get_boss_art("grothak", "encounter", "Dirt")
         assert result is not None
         assert hasattr(result, "filename")
 
-    def test_returns_none_for_unknown_boundary(self):
-        result = get_boss_art(9999, "encounter", "Dirt")
-        assert result is None
+    def test_resolves_dota_boss_by_id(self):
+        """New Dota boss_ids resolve their per-boss slug."""
+        result = get_boss_art("pudge", "encounter", "Dirt")
+        assert result is not None
+        assert hasattr(result, "filename")
+
+    def test_legacy_depth_int_still_resolves(self):
+        """Backward-compat: an int boundary routes to the grandfathered boss."""
+        result = get_boss_art(25, "encounter", "Dirt")
+        assert result is not None
+        assert hasattr(result, "filename")
+
+    def test_returns_none_for_unknown_boss(self):
+        assert get_boss_art("not_a_boss", "encounter", "Dirt") is None
+        assert get_boss_art(9999, "encounter", "Dirt") is None
 
 
 class TestGetLayerThumbnail:
