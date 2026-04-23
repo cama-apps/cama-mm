@@ -4293,7 +4293,14 @@ class DigService:
 
         Mirrors ``fight_boss``'s win (lines 3613-3742) and loss (3743-3786)
         blocks; extended with per-boss stinger on loss.
+
+        Defensively clears any ``dig_active_duels`` row regardless of which
+        upstream path arrived here (``start_boss_duel`` auto-resolve,
+        ``resume_boss_duel`` continuation, or a future admin/debug entry).
+        The delete is idempotent so the auto-resolve path that never saved
+        a row is cheap.
         """
+        self.dig_repo.clear_active_duel(discord_id, guild_id)
         now = int(time.time())
         boss_name = boss.name if boss is not None else BOSS_NAMES.get(at_boss, "Unknown Boss")
 

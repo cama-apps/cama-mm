@@ -790,12 +790,32 @@ class BossDuelView(discord.ui.View):
         self.stop()
 
     async def _edit_message(self, **kwargs) -> None:
+        """Edit the duel's original message, falling back to channel.send().
+
+        The timeout path fires after Discord's interaction token is already
+        expired (>15 min), at which point ``message.edit`` raises
+        ``discord.HTTPException``. Without the fallback the user sees stale
+        buttons forever. Logged at WARNING so recurring failures are visible.
+        """
         if self.message is None:
             return
         try:
             await self.message.edit(**kwargs)
+            return
         except Exception as e:
-            logger.debug("BossDuelView message edit failed: %s", e)
+            logger.warning("BossDuelView message edit failed: %s", e)
+        channel = getattr(self.message, "channel", None)
+        if channel is None:
+            return
+        embed = kwargs.get("embed")
+        content = kwargs.get("content")
+        try:
+            if embed is not None:
+                await channel.send(embed=embed)
+            elif content:
+                await channel.send(content=content)
+        except Exception as e:
+            logger.warning("BossDuelView channel fallback also failed: %s", e)
 
 
 class EventEncounterView(discord.ui.View):

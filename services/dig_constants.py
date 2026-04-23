@@ -482,7 +482,7 @@ BOSSES: dict[int, BossDef] = {
         ],
         boss_id="chronofrost",
         mechanic_pool=("chronofrost_still", "chronofrost_rewind"),
-        stinger_id="chronofrost_still",
+        stinger_id="chronofrost_stillness",
     ),
     275: BossDef(
         depth=275,
@@ -648,7 +648,7 @@ _DOTA_BOSSES: dict[str, BossDef] = {
             "Go. Doom needs a holiday.",
         ],
         mechanic_pool=("doom_mark", "doom_scorched_earth"),
-        stinger_id="doom_mark",
+        stinger_id="doom_brand",
     ),
     "spectre": BossDef(
         depth=100,
@@ -671,7 +671,7 @@ _DOTA_BOSSES: dict[str, BossDef] = {
             "Go. My work is never done anyway.",
         ],
         mechanic_pool=("spectre_haunt", "spectre_dagger"),
-        stinger_id="spectre_haunt",
+        stinger_id="spectre_haunting",
     ),
     "void_spirit": BossDef(
         depth=100,
@@ -738,7 +738,7 @@ _DOTA_BOSSES: dict[str, BossDef] = {
             "Fine. Go. Leave us to our weaving.",
         ],
         mechanic_pool=("broodmother_spawn", "broodmother_web"),
-        stinger_id="broodmother_web",
+        stinger_id="broodmother_webbing",
     ),
     "faceless_void": BossDef(
         depth=200,
@@ -827,7 +827,7 @@ _DOTA_BOSSES: dict[str, BossDef] = {
             "Take the hollow. Sunder yourself out of it.",
         ],
         mechanic_pool=("terrorblade_sunder", "terrorblade_metamorphosis"),
-        stinger_id="terrorblade_sunder",
+        stinger_id="terrorblade_sundering",
     ),
 }
 

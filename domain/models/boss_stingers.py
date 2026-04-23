@@ -94,8 +94,8 @@ STINGER_REGISTRY: dict[str, StingerEffect] = {
         cursed_status=CURSE_DRAIN_NEXT_REWARD,
         flavor_on_loss="Lina's fire leaves scars that ache every payday.",
     ),
-    "doom_mark": StingerEffect(
-        id="doom_mark",
+    "doom_brand": StingerEffect(
+        id="doom_brand",
         extra_knockback=5,
         extended_cooldown_s=0,
         cursed_status=CURSE_HALVE_NEXT_WAGER,
@@ -109,8 +109,8 @@ STINGER_REGISTRY: dict[str, StingerEffect] = {
         cursed_status=None,
         flavor_on_loss="The Void Warden folds the tunnel behind you.",
     ),
-    "spectre_haunt": StingerEffect(
-        id="spectre_haunt",
+    "spectre_haunting": StingerEffect(
+        id="spectre_haunting",
         extra_knockback=0,
         extended_cooldown_s=0,
         cursed_status=CURSE_NO_SCOUT_NEXT_DIG,
@@ -138,16 +138,16 @@ STINGER_REGISTRY: dict[str, StingerEffect] = {
         cursed_status=None,
         flavor_on_loss="Roots bind your boots. Hard to pick up the pace.",
     ),
-    "broodmother_web": StingerEffect(
-        id="broodmother_web",
+    "broodmother_webbing": StingerEffect(
+        id="broodmother_webbing",
         extra_knockback=0,
         extended_cooldown_s=0,
         cursed_status=CURSE_HALVE_NEXT_WAGER,
         flavor_on_loss="You rip out of the web, leaving too much coin behind.",
     ),
     # -------------------------- Tier 200 --------------------------
-    "chronofrost_still": StingerEffect(
-        id="chronofrost_still",
+    "chronofrost_stillness": StingerEffect(
+        id="chronofrost_stillness",
         extra_knockback=0,
         extended_cooldown_s=1800,
         cursed_status=None,
@@ -182,8 +182,8 @@ STINGER_REGISTRY: dict[str, StingerEffect] = {
         cursed_status=CURSE_HALVE_NEXT_WAGER,
         flavor_on_loss="Oracle showed you a bad future. Your hand is shaking.",
     ),
-    "terrorblade_sunder": StingerEffect(
-        id="terrorblade_sunder",
+    "terrorblade_sundering": StingerEffect(
+        id="terrorblade_sundering",
         extra_knockback=5,
         extended_cooldown_s=600,
         cursed_status=CURSE_DRAIN_NEXT_REWARD,

@@ -2172,11 +2172,25 @@ class SchemaManager:
         With multiple bosses per tier, killing one boss at a depth should only
         weaken that specific boss for guildmates — not every boss at the tier.
         Backfills existing rows with the grandfathered boss id for that depth.
+
+        Crash-safe against a mid-migration interruption: if a previous run
+        RENAMEd the original to ``dig_boss_echoes_old`` but died before
+        creating the new table, this method detects ``_old`` still exists
+        and resumes from the create step.
         """
-        cursor.execute("PRAGMA table_info(dig_boss_echoes)")
-        columns = {row[1] for row in cursor.fetchall()}
-        if "boss_id" in columns:
-            return  # Already rekeyed.
+        cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name IN ('dig_boss_echoes', 'dig_boss_echoes_old')"
+        )
+        present = {row[0] for row in cursor.fetchall()}
+        has_live = "dig_boss_echoes" in present
+        has_old = "dig_boss_echoes_old" in present
+
+        if has_live:
+            cursor.execute("PRAGMA table_info(dig_boss_echoes)")
+            columns = {row[1] for row in cursor.fetchall()}
+            if "boss_id" in columns and not has_old:
+                return  # Fully migrated already.
 
         legacy_boss_ids = {
             25: "grothak",
@@ -2188,10 +2202,13 @@ class SchemaManager:
             275: "nameless_depth",
         }
 
-        cursor.execute("ALTER TABLE dig_boss_echoes RENAME TO dig_boss_echoes_old")
+        # Normal path: rename live → _old so we can rebuild. Skipped if a
+        # prior crashed run already did the rename.
+        if has_live and not has_old:
+            cursor.execute("ALTER TABLE dig_boss_echoes RENAME TO dig_boss_echoes_old")
         cursor.execute(
             """
-            CREATE TABLE dig_boss_echoes (
+            CREATE TABLE IF NOT EXISTS dig_boss_echoes (
                 guild_id INTEGER NOT NULL,
                 boss_id TEXT NOT NULL,
                 depth INTEGER NOT NULL,
@@ -2201,25 +2218,31 @@ class SchemaManager:
             )
             """
         )
+        # Copy rows from the legacy table. ``INSERT OR REPLACE`` makes the
+        # copy idempotent so a mid-migration retry doesn't double-apply rows.
         cursor.execute(
-            "SELECT guild_id, depth, killer_discord_id, weakened_until "
-            "FROM dig_boss_echoes_old"
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='dig_boss_echoes_old'"
         )
-        for row in cursor.fetchall():
-            guild_id = row[0]
-            depth = int(row[1])
-            killer = row[2]
-            weakened = row[3]
-            boss_id = legacy_boss_ids.get(depth, f"depth_{depth}")
+        if cursor.fetchone() is not None:
             cursor.execute(
-                """
-                INSERT OR REPLACE INTO dig_boss_echoes
-                    (guild_id, boss_id, depth, killer_discord_id, weakened_until)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (guild_id, boss_id, depth, killer, weakened),
+                "SELECT guild_id, depth, killer_discord_id, weakened_until "
+                "FROM dig_boss_echoes_old"
             )
-        cursor.execute("DROP TABLE dig_boss_echoes_old")
+            for row in cursor.fetchall():
+                guild_id = row[0]
+                depth = int(row[1])
+                killer = row[2]
+                weakened = row[3]
+                boss_id = legacy_boss_ids.get(depth, f"depth_{depth}")
+                cursor.execute(
+                    """
+                    INSERT OR REPLACE INTO dig_boss_echoes
+                        (guild_id, boss_id, depth, killer_discord_id, weakened_until)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (guild_id, boss_id, depth, killer, weakened),
+                )
+            cursor.execute("DROP TABLE dig_boss_echoes_old")
 
     def _migration_add_stinger_curse_to_tunnels(self, cursor) -> None:
         """Add ``stinger_curse`` JSON column to tunnels for persistent loss debuffs."""

@@ -42,6 +42,79 @@ def dig_service(dig_repo, player_repository, monkeypatch):
     return svc
 
 
+@pytest.fixture
+def deterministic_rng(monkeypatch):
+    """Force the mechanic pool and boss pool to pick index 0 deterministically.
+
+    Patches ``random.Random`` so ``Random().choice(seq)`` always returns
+    ``seq[0]``. Combined with ``monkeypatch.setattr(random, "random", ...)``
+    in the test body this gives fully deterministic state-machine behaviour:
+    the grandfathered boss is locked, the first pool mechanic fires, and
+    per-round / per-option rolls use the pinned value.
+    """
+    class _FakeRandom:
+        def __init__(self, seed=None):
+            pass
+
+        def choice(self, seq):
+            return seq[0] if seq else None
+
+        def random(self):
+            return 0.0
+
+        def getstate(self):
+            return ()
+
+        def setstate(self, state):
+            pass
+
+    monkeypatch.setattr(random, "Random", _FakeRandom)
+
+
+def _seed_paused_duel(
+    dig_repo, discord_id, guild_id, *,
+    boss_id="grothak", tier=25, mechanic_id="grothak_earthquake",
+    risk_tier="cautious", wager=10, player_hp=3, boss_hp=3, round_num=3,
+    player_hit=0.60, player_dmg=1, boss_hit=0.30, boss_dmg=1,
+    round_log=None, pending_prompt=None,
+):
+    """Seed a mid-duel row directly (bypasses ``start_boss_duel`` timing).
+
+    Used by tests that want to drive ``resume_boss_duel`` without depending on
+    the mechanic-trigger RNG alignment.
+    """
+    from domain.models.boss_mechanics import MECHANIC_REGISTRY as _MECHS
+    mech = _MECHS[mechanic_id]
+    pp = pending_prompt or {
+        "mechanic_id": mechanic_id,
+        "prompt_title": mech.prompt_title,
+        "prompt_description": mech.prompt_description,
+        "options": [
+            {"option_idx": i, "label": o.label}
+            for i, o in enumerate(mech.options)
+        ],
+        "safe_option_idx": mech.safe_option_idx,
+    }
+    state = {
+        "boss_id": boss_id, "tier": tier, "mechanic_id": mechanic_id,
+        "risk_tier": risk_tier, "wager": wager,
+        "player_hp": player_hp, "boss_hp": boss_hp,
+        "round_num": round_num,
+        "round_log": json.dumps(round_log or []),
+        "pending_prompt": json.dumps(pp),
+        "rng_state": "",
+        "status_effects": json.dumps({
+            "attempts_this_fight": 1,
+            "initial_win_chance": 0.5,
+            "multiplier": 2.0,
+        }),
+        "echo_applied": 0, "echo_killer_id": None,
+        "player_hit": player_hit, "player_dmg": player_dmg,
+        "boss_hit": boss_hit, "boss_dmg": boss_dmg,
+    }
+    dig_repo.save_active_duel(discord_id, guild_id, state)
+
+
 def _register(player_repo, discord_id=10001, balance=500):
     player_repo.add(
         discord_id=discord_id,
@@ -155,10 +228,16 @@ class TestBossLocking:
         assert boss1.boss_id == boss2.boss_id
 
     def test_distribution_across_many_tunnels(self, repo_db_path, player_repository, monkeypatch):
-        """Over many fresh tunnels, all 3 tier-25 bosses get rolled at least once."""
+        """Over many fresh tunnels, all 3 tier-25 bosses get rolled at least once.
+
+        120 iterations keeps the probability that one of 3 equiprobable bosses
+        is never drawn at ``3 × (2/3)**120 ≈ 1.6 × 10⁻²⁰`` — safely below any
+        realistic flake budget. Early-exits on first complete set, so runtime
+        is ~3 iterations in expectation.
+        """
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
         seen = set()
-        for i in range(60):
+        for i in range(120):
             dig_repo = DigRepository(repo_db_path)
             svc = DigService(dig_repo, player_repository)
             monkeypatch.setattr(svc, "_get_weather_effects", lambda guild_id, layer_name: {})
@@ -248,15 +327,17 @@ class TestStartBossDuel:
     def test_resume_clears_state_row(
         self, dig_service, dig_repo, player_repository, monkeypatch,
     ):
+        """Seed a paused duel directly so the test doesn't depend on RNG
+        aligning the mechanic trigger with fight pacing."""
         _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
-        monkeypatch.setattr(random, "random", lambda: 0.5)
-        start = dig_service.start_boss_duel(10001, TEST_GUILD_ID, "cautious", wager=10)
-        if not start.get("pending_prompt"):
-            pytest.skip("Fight resolved before a prompt fired; can't test resume")
-
+        # Lock Grothak, seed a paused duel at round 3 with the earthquake mechanic.
+        progress = json.dumps({"25": {"boss_id": "grothak", "status": "active"}})
+        dig_repo.update_tunnel(10001, TEST_GUILD_ID, boss_progress=progress)
+        _seed_paused_duel(dig_repo, 10001, TEST_GUILD_ID)
         assert dig_repo.get_active_duel(10001, TEST_GUILD_ID) is not None
-        safe_idx = start["pending_prompt"]["safe_option_idx"]
-        result = dig_service.resume_boss_duel(10001, TEST_GUILD_ID, option_idx=safe_idx)
+
+        monkeypatch.setattr(random, "random", lambda: 0.0)  # deterministic rolls
+        result = dig_service.resume_boss_duel(10001, TEST_GUILD_ID, option_idx=0)
         assert result["success"]
         assert "won" in result
         assert dig_repo.get_active_duel(10001, TEST_GUILD_ID) is None
@@ -282,12 +363,20 @@ class TestStartBossDuel:
             is False
         )
 
-    def test_pending_prompt_shape(self, dig_service, dig_repo, player_repository, monkeypatch):
+    def test_pending_prompt_shape(
+        self, dig_service, dig_repo, player_repository, monkeypatch, deterministic_rng,
+    ):
+        """With ``deterministic_rng`` (``Random().choice`` always returns
+        ``seq[0]``) and pinned ``random.random=0.5``, the first boss in tier
+        25 (Grothak) is locked and its first pool mechanic (earthquake,
+        trigger_round=3) always fires. Player_hit=0.60 cautious + pinned 0.5
+        = hit; boss_hit=0.30 + pinned 0.5 = miss. Fight pauses at round 3."""
         _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
         monkeypatch.setattr(random, "random", lambda: 0.5)
         start = dig_service.start_boss_duel(10001, TEST_GUILD_ID, "cautious", wager=10)
-        if not start.get("pending_prompt"):
-            pytest.skip("Fight resolved before a prompt fired")
+        assert start.get("pending_prompt"), (
+            f"Expected a mid-fight prompt to fire; got {start}"
+        )
         pp = start["pending_prompt"]
         assert {"mechanic_id", "prompt_title", "options", "safe_option_idx"}.issubset(pp)
         assert len(pp["options"]) == 3
@@ -351,22 +440,24 @@ class TestStingers:
     def test_extra_knockback_widens_loss(
         self, dig_service, dig_repo, player_repository, monkeypatch,
     ):
+        """Seed a paused Pudge duel at 1 HP and resume with pinned-miss rolls so
+        the loss branch deterministically fires pudge_drag (+5 knockback)."""
         _at_boss(dig_service, dig_repo, player_repository, monkeypatch, depth=50)
-        # Pin depth to lock pudge (tier 25 grandfathered, extra_knockback=5).
-        # Force a loss by preventing player from landing any hit.
-        monkeypatch.setattr(random, "random", lambda: 0.999)
-        # Lock pudge explicitly for deterministic stinger.
         progress = json.dumps({"25": {"boss_id": "pudge", "status": "active"}})
         dig_repo.update_tunnel(10001, TEST_GUILD_ID, boss_progress=progress, depth=24)
-
-        result = dig_service.start_boss_duel(10001, TEST_GUILD_ID, "cautious", wager=10)
-        # Auto-resolve path (no prompt fired on the losing tail for a cautious fight
-        # with pinned 0.999 rolls — rounds hit the cap).
-        # Pudge's stinger = pudge_drag, extra_knockback=5.
-        if result.get("pending_prompt"):
-            pytest.skip("Pudge's prompt fired; manual resume path not exercised here")
+        _seed_paused_duel(
+            dig_repo, 10001, TEST_GUILD_ID,
+            boss_id="pudge", mechanic_id="pudge_hook",
+            player_hp=1, boss_hp=4, round_num=3,
+        )
+        # option_idx=2 (Grab the hook): first branch (0.25 prob, narrative
+        # "massive hit") requires roll < 0.25; pin random.random() = 0.99 so
+        # the second branch (-3 player HP) fires, killing the player from 1 HP
+        # and forcing the loss branch + stinger.
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        result = dig_service.resume_boss_duel(10001, TEST_GUILD_ID, option_idx=2)
         assert result["won"] is False
-        assert result["extra_knockback"] == 5
+        assert result["extra_knockback"] == 5  # pudge_drag stinger
 
     def test_cursed_status_written_on_loss(
         self, dig_service, dig_repo, player_repository, monkeypatch,

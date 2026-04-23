@@ -1003,7 +1003,7 @@ class DigRepository(BaseRepository, IDigRepository):
                     (int(discord_id), gid, *(values.get(c) for c in self._DUEL_COLUMNS)),
                 )
             else:
-                # Update only provided columns (excluding created_at)
+                # Update only provided columns (excluding created_at).
                 updatable = [c for c in values if c != "created_at"]
                 if not updatable:
                     return
@@ -1013,6 +1013,16 @@ class DigRepository(BaseRepository, IDigRepository):
                     "WHERE discord_id = ? AND guild_id = ?",
                     (*(values[c] for c in updatable), int(discord_id), gid),
                 )
+                # Defensive: if rowcount is 0 the row was cleared between the
+                # existence check and this UPDATE (e.g. a concurrent
+                # clear_active_duel won the BEGIN IMMEDIATE). Raising here
+                # surfaces the lost-write instead of silently dropping state.
+                if cursor.rowcount == 0:
+                    raise RuntimeError(
+                        "save_active_duel: UPDATE affected 0 rows — "
+                        f"(discord_id={discord_id}, guild_id={gid}) was cleared "
+                        "between existence check and update."
+                    )
 
     def clear_active_duel(
         self, discord_id: int, guild_id: int | None,
