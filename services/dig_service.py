@@ -28,6 +28,8 @@ from services.dig_constants import (
     BOSS_PAYOUTS,
     BOSS_PHASE2,
     BOSS_ROUND_CAP,
+    CAVE_IN_BLOCK_LOSS_MAX,
+    CAVE_IN_BLOCK_LOSS_MIN,
     CONSUMABLE_ITEMS,
     CORRUPTION_BAD,
     CORRUPTION_WEIRD,
@@ -995,10 +997,7 @@ class DigService:
 
         inv = self.dig_repo.get_inventory(discord_id, guild_id)
         has_lantern_early = any(i.get("item_type") == "lantern" for i in inv)
-        boss_name = BOSS_NAMES.get(at_boss_early, "Unknown Boss")
-        attempts = tunnel.get("boss_attempts", 0) or 0
-        dialogue_list = BOSS_DIALOGUE.get(at_boss_early, ["..."])
-        dialogue = dialogue_list[min(attempts, len(dialogue_list) - 1)]
+        boss_info = self._build_boss_info(discord_id, guild_id, tunnel, at_boss_early)
         return self._ok(
             tunnel_name=tunnel.get("tunnel_name") or "Unknown Tunnel",
             depth_before=depth_before,
@@ -1010,12 +1009,7 @@ class DigService:
             cave_in=False,
             cave_in_detail=None,
             boss_encounter=True,
-            boss_info={
-                "boundary": at_boss_early,
-                "name": boss_name,
-                "dialogue": dialogue,
-                "ascii_art": BOSS_ASCII.get(at_boss_early, ""),
-            },
+            boss_info=boss_info,
             has_lantern=has_lantern_early,
             event=None,
             artifact=None,
@@ -1425,7 +1419,7 @@ class DigService:
 
         if cave_in:
             # 10. Cave-in consequences
-            block_loss = random.randint(3, 8)
+            block_loss = random.randint(CAVE_IN_BLOCK_LOSS_MIN, CAVE_IN_BLOCK_LOSS_MAX)
             # Weather: cap on block loss (e.g. Mudslide Warning)
             weather_loss_cap = weather_fx.get("cave_in_loss_cap")
             if weather_loss_cap is not None:
@@ -1494,7 +1488,7 @@ class DigService:
                 )
             else:
                 # Medical bill (capped at current balance to prevent negative)
-                med_cost = random.randint(2, 6)
+                med_cost = random.randint(3, 9)
                 balance = self.player_repo.get_balance(discord_id, guild_id)
                 med_cost = min(med_cost, max(0, balance))
                 if med_cost > 0:
@@ -1605,15 +1599,7 @@ class DigService:
             # Cap advance to boundary - 1
             advance = max(0, next_boss - 1 - depth_before)
             boss_encounter = True
-            boss_name = BOSS_NAMES.get(next_boss, "Unknown Boss")
-            attempts = tunnel.get("boss_attempts", 0) or 0
-            dialogue_list = BOSS_DIALOGUE.get(next_boss, ["..."])
-            boss_info = {
-                "boundary": next_boss,
-                "name": boss_name,
-                "dialogue": dialogue_list[min(attempts, len(dialogue_list) - 1)],
-                "ascii_art": BOSS_ASCII.get(next_boss, ""),
-            }
+            boss_info = self._build_boss_info(discord_id, guild_id, tunnel, next_boss)
 
         new_depth = depth_before + advance
 
@@ -2301,7 +2287,7 @@ class DigService:
         cave_in_detail = None
 
         if cave_in:
-            block_loss = random.randint(3, 8)
+            block_loss = random.randint(CAVE_IN_BLOCK_LOSS_MIN, CAVE_IN_BLOCK_LOSS_MAX)
             weather_loss_cap = p["weather_fx"].get("cave_in_loss_cap")
             if weather_loss_cap is not None:
                 block_loss = min(block_loss, int(weather_loss_cap))
@@ -2354,7 +2340,7 @@ class DigService:
                 injury = {"type": "reduced_advance", "digs_remaining": 3 + injury_bonus}
                 self.dig_repo.update_tunnel(discord_id, guild_id, injury_state=json.dumps(injury))
             else:
-                med_cost = random.randint(2, 6)
+                med_cost = random.randint(3, 9)
                 balance = self.player_repo.get_balance(discord_id, guild_id)
                 med_cost = min(med_cost, max(0, balance))
                 if med_cost > 0:
@@ -2450,14 +2436,7 @@ class DigService:
         if next_boss is not None and depth_before + advance >= next_boss:
             advance = max(0, next_boss - 1 - depth_before)
             boss_encounter = True
-            boss_name = BOSS_NAMES.get(next_boss, "Unknown Boss")
-            attempts = tunnel.get("boss_attempts", 0) or 0
-            dialogue_list = BOSS_DIALOGUE.get(next_boss, ["..."])
-            boss_info = {
-                "boundary": next_boss, "name": boss_name,
-                "dialogue": dialogue_list[min(attempts, len(dialogue_list) - 1)],
-                "ascii_art": BOSS_ASCII.get(next_boss, ""),
-            }
+            boss_info = self._build_boss_info(discord_id, guild_id, tunnel, next_boss)
         new_depth = depth_before + advance
 
         # JC loot
@@ -2681,7 +2660,7 @@ class DigService:
                     ),
                 )
             else:  # medical_bill
-                med_cost = outcome.get("cave_in_jc_lost", 3)
+                med_cost = outcome.get("cave_in_jc_lost", 5)
                 balance = self.player_repo.get_balance(discord_id, guild_id)
                 med_cost = min(med_cost, max(0, balance))
                 if med_cost > 0:
@@ -2762,14 +2741,7 @@ class DigService:
             if next_boss is not None and depth_before + advance >= next_boss:
                 advance = max(0, next_boss - 1 - depth_before)
                 boss_encounter = True
-                boss_name = BOSS_NAMES.get(next_boss, "Unknown Boss")
-                attempts = tunnel.get("boss_attempts", 0) or 0
-                dialogue_list = BOSS_DIALOGUE.get(next_boss, ["..."])
-                boss_info = {
-                    "boundary": next_boss, "name": boss_name,
-                    "dialogue": dialogue_list[min(attempts, len(dialogue_list) - 1)],
-                    "ascii_art": BOSS_ASCII.get(next_boss, ""),
-                }
+                boss_info = self._build_boss_info(discord_id, guild_id, tunnel, next_boss)
             new_depth = depth_before + advance
 
             jc_earned = outcome.get("jc_earned", 0)
@@ -3471,20 +3443,15 @@ class DigService:
         if at_boss is None:
             return self._error("You're not at a boss boundary.")
 
-        boss_name = BOSS_NAMES.get(at_boss, "Unknown Boss")
+        boss_info = self._build_boss_info(discord_id, guild_id, tunnel, at_boss)
         attempts = tunnel.get("boss_attempts", 0) or 0
-
-        # Get dialogue based on attempt count
-        dialogue_list = BOSS_DIALOGUE.get(at_boss, ["..."])
-        dialogue = dialogue_list[min(attempts, len(dialogue_list) - 1)]
-
-        ascii_art = BOSS_ASCII.get(at_boss, "")
 
         return self._ok(
             boundary=at_boss,
-            boss_name=boss_name,
-            dialogue=dialogue,
-            ascii_art=ascii_art,
+            boss_id=boss_info["boss_id"],
+            boss_name=boss_info["name"],
+            dialogue=boss_info["dialogue"],
+            ascii_art=boss_info["ascii_art"],
             attempts=attempts,
             options=["cautious", "bold", "reckless"],
         )
@@ -3751,10 +3718,7 @@ class DigService:
                 echo_killer_id=active_echo.get("killer_discord_id") if echo_applied else None,
             )
         else:
-            # Lose: forfeit wager + a small depth knockback. The nerf's main
-            # EV lever is the wager forfeit plus reduced payouts on wins —
-            # knockback stays modest so a loss isn't a run-ending setback.
-            knockback = random.randint(5, 10)
+            knockback = random.randint(8, 16)
             new_depth = max(0, depth - knockback)
             jc_delta = -wager if wager > 0 else 0
 
@@ -4476,7 +4440,7 @@ class DigService:
             )
 
         # Loss branch
-        knockback = random.randint(5, 10)
+        knockback = random.randint(8, 16)
         extra_kb, extra_cd = self._apply_stinger_on_loss(
             discord_id, guild_id, tunnel, boss,
         )

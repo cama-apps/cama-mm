@@ -410,7 +410,7 @@ class TestCaveIn:
     """Tests for cave-in mechanics."""
 
     def test_cave_in_reduces_depth(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """Cave-in removes 3-8 blocks."""
+        """Cave-in block_loss respects the configured range."""
         _register_player(player_repository, balance=200)
         # Set up tunnel with some depth first
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
@@ -424,8 +424,9 @@ class TestCaveIn:
         monkeypatch.setattr(random, "random", lambda: 0.001)  # force cave-in (below 5%)
         result = dig_service.dig(10001, guild_id)
         assert result.get("cave_in")
-        if "cave_in_loss" in result:
-            assert CAVE_IN_BLOCK_LOSS_MIN <= result["cave_in_loss"] <= CAVE_IN_BLOCK_LOSS_MAX
+        detail = result.get("cave_in_detail") or {}
+        block_loss = int(detail.get("block_loss", -1))
+        assert CAVE_IN_BLOCK_LOSS_MIN <= block_loss <= CAVE_IN_BLOCK_LOSS_MAX
 
     def test_cave_in_depth_min_zero(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
         """Depth never goes below 0 after cave-in."""
@@ -996,7 +997,7 @@ class TestBoss:
         assert result.get("payout", 0) > 0
 
     def test_boss_fight_lose(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """Lose forfeits the wager and applies a small 5-10 block knockback."""
+        """Lose forfeits the wager and applies a depth knockback."""
         _register_player(player_repository, balance=200)
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
         monkeypatch.setattr(random, "random", lambda: 0.99)
@@ -1010,7 +1011,7 @@ class TestBoss:
         assert result["success"]
         assert not result.get("won")
         assert player_repository.get_balance(10001, guild_id) == balance_before - 10
-        assert 5 <= result.get("knockback", 0) <= 10
+        assert 8 <= result.get("knockback", 0) <= 16
         tunnel = dig_repo.get_tunnel(10001, guild_id)
         assert tunnel["depth"] < 24
 

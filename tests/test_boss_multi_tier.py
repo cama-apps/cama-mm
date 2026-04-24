@@ -441,7 +441,7 @@ class TestStingers:
         self, dig_service, dig_repo, player_repository, monkeypatch,
     ):
         """Seed a paused Pudge duel at 1 HP and resume with pinned-miss rolls so
-        the loss branch deterministically fires pudge_drag (+5 knockback)."""
+        the loss branch deterministically fires the expected stinger."""
         _at_boss(dig_service, dig_repo, player_repository, monkeypatch, depth=50)
         progress = json.dumps({"25": {"boss_id": "pudge", "status": "active"}})
         dig_repo.update_tunnel(10001, TEST_GUILD_ID, boss_progress=progress, depth=24)
@@ -457,7 +457,8 @@ class TestStingers:
         monkeypatch.setattr(random, "random", lambda: 0.99)
         result = dig_service.resume_boss_duel(10001, TEST_GUILD_ID, option_idx=2)
         assert result["won"] is False
-        assert result["extra_knockback"] == 5  # pudge_drag stinger
+        from domain.models.boss_stingers import STINGER_REGISTRY
+        assert result["extra_knockback"] == STINGER_REGISTRY["pudge_drag"].extra_knockback
 
     def test_cursed_status_written_on_loss(
         self, dig_service, dig_repo, player_repository, monkeypatch,
@@ -472,8 +473,9 @@ class TestStingers:
             safe = result["pending_prompt"]["safe_option_idx"]
             result = dig_service.resume_boss_duel(10001, TEST_GUILD_ID, option_idx=safe)
         assert result["won"] is False
-        # ogre_blast stinger: extended_cooldown_s=600, no cursed_status, no extra_kb.
-        assert result["extra_cooldown_s"] == 600
+        # ogre_blast stinger sets extended_cooldown_s only (no curse, no extra_kb).
+        from domain.models.boss_stingers import STINGER_REGISTRY
+        assert result["extra_cooldown_s"] == STINGER_REGISTRY["ogre_blast"].extended_cooldown_s
         fresh = dict(dig_repo.get_tunnel(10001, TEST_GUILD_ID))
         # No curse column set since ogre_blast has cursed_status=None.
         assert fresh.get("stinger_curse") in (None, "", "null")

@@ -6,7 +6,7 @@ on top of the baseline wager forfeit + depth knockback applied by
 by ``stinger_id`` on the ``BossDef``).
 
 Effects supported:
-    - ``extra_knockback``: additional depth lost on top of the base 5-10 roll.
+    - ``extra_knockback``: additional depth lost on top of the base 8-16 roll.
     - ``extended_cooldown_s``: seconds added to the dig cooldown for the next dig.
     - ``cursed_status``: a string key written into ``tunnels.stinger_curse`` that
       other systems check (e.g. ``halve_next_wager`` is checked at wager time).
@@ -38,14 +38,14 @@ STINGER_REGISTRY: dict[str, StingerEffect] = {
     # -------------------------- Tier 25 --------------------------
     "grothak_crumble": StingerEffect(
         id="grothak_crumble",
-        extra_knockback=3,
+        extra_knockback=4,
         extended_cooldown_s=0,
         cursed_status=None,
         flavor_on_loss="Grothak slams a boulder down behind you as you flee.",
     ),
     "pudge_drag": StingerEffect(
         id="pudge_drag",
-        extra_knockback=5,
+        extra_knockback=8,
         extended_cooldown_s=0,
         cursed_status=None,
         flavor_on_loss="The Butcher drags you back toward his pile of meat.",
@@ -53,7 +53,7 @@ STINGER_REGISTRY: dict[str, StingerEffect] = {
     "ogre_blast": StingerEffect(
         id="ogre_blast",
         extra_knockback=0,
-        extended_cooldown_s=600,
+        extended_cooldown_s=900,
         cursed_status=None,
         flavor_on_loss="Your ears ring for hours after the twin-skulled bellow.",
     ),
@@ -74,7 +74,7 @@ STINGER_REGISTRY: dict[str, StingerEffect] = {
     ),
     "tusk_kick": StingerEffect(
         id="tusk_kick",
-        extra_knockback=7,
+        extra_knockback=10,
         extended_cooldown_s=0,
         cursed_status=None,
         flavor_on_loss="The warlord's tusked kick launches you a long way back.",
@@ -83,20 +83,20 @@ STINGER_REGISTRY: dict[str, StingerEffect] = {
     "magmus_burn": StingerEffect(
         id="magmus_burn",
         extra_knockback=0,
-        extended_cooldown_s=900,
+        extended_cooldown_s=1350,
         cursed_status=None,
         flavor_on_loss="Your gear smolders long after you escape the heat.",
     ),
     "lina_scorch": StingerEffect(
         id="lina_scorch",
         extra_knockback=0,
-        extended_cooldown_s=600,
+        extended_cooldown_s=900,
         cursed_status=CURSE_DRAIN_NEXT_REWARD,
         flavor_on_loss="The scorchwitch's fire leaves scars that ache every payday.",
     ),
     "doom_brand": StingerEffect(
         id="doom_brand",
-        extra_knockback=5,
+        extra_knockback=8,
         extended_cooldown_s=0,
         cursed_status=CURSE_HALVE_NEXT_WAGER,
         flavor_on_loss="The deathbringer's brand refuses to fade. You dig scared.",
@@ -104,7 +104,7 @@ STINGER_REGISTRY: dict[str, StingerEffect] = {
     # -------------------------- Tier 100 --------------------------
     "void_collapse": StingerEffect(
         id="void_collapse",
-        extra_knockback=8,
+        extra_knockback=12,
         extended_cooldown_s=0,
         cursed_status=None,
         flavor_on_loss="The Void Warden folds the tunnel behind you.",
@@ -118,8 +118,8 @@ STINGER_REGISTRY: dict[str, StingerEffect] = {
     ),
     "void_spirit_exile": StingerEffect(
         id="void_spirit_exile",
-        extra_knockback=10,
-        extended_cooldown_s=300,
+        extra_knockback=15,
+        extended_cooldown_s=450,
         cursed_status=None,
         flavor_on_loss="You're dimensionally mispunched and come out several floors up.",
     ),
@@ -127,14 +127,14 @@ STINGER_REGISTRY: dict[str, StingerEffect] = {
     "sporeling_rot": StingerEffect(
         id="sporeling_rot",
         extra_knockback=0,
-        extended_cooldown_s=1200,
+        extended_cooldown_s=1800,
         cursed_status=None,
         flavor_on_loss="Spores colonize your lungs. You cough for a long while.",
     ),
     "treant_entangle": StingerEffect(
         id="treant_entangle",
-        extra_knockback=3,
-        extended_cooldown_s=600,
+        extra_knockback=4,
+        extended_cooldown_s=900,
         cursed_status=None,
         flavor_on_loss="Roots bind your boots. Hard to pick up the pace.",
     ),
@@ -149,7 +149,7 @@ STINGER_REGISTRY: dict[str, StingerEffect] = {
     "chronofrost_stillness": StingerEffect(
         id="chronofrost_stillness",
         extra_knockback=0,
-        extended_cooldown_s=1800,
+        extended_cooldown_s=2700,
         cursed_status=None,
         flavor_on_loss="Time stuck to you on the way out. You move slow for a while.",
     ),
@@ -184,8 +184,8 @@ STINGER_REGISTRY: dict[str, StingerEffect] = {
     ),
     "terrorblade_sundering": StingerEffect(
         id="terrorblade_sundering",
-        extra_knockback=5,
-        extended_cooldown_s=600,
+        extra_knockback=8,
+        extended_cooldown_s=900,
         cursed_status=CURSE_DRAIN_NEXT_REWARD,
         flavor_on_loss="The sundered prince swaps something of yours for something of his. You don't want to know what.",
     ),

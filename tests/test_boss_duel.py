@@ -78,7 +78,7 @@ class TestDuelDeterministicOutcomes:
         monkeypatch.setattr(random, "random", lambda: 0.999)
         result = dig_service.fight_boss(10001, TEST_GUILD_ID, "cautious", wager=10)
         assert result["won"] is False
-        assert 5 <= result["knockback"] <= 10
+        assert 8 <= result["knockback"] <= 16
         assert player_repository.get_balance(10001, TEST_GUILD_ID) == balance_before_fight - 10
 
     def test_player_first_one_shot_boss_never_swings(self, dig_service, dig_repo, player_repository, monkeypatch):
@@ -157,7 +157,7 @@ class TestDuelPayout:
         assert player_repository.get_balance(10001, TEST_GUILD_ID) == balance_before + expected_profit
 
     def test_loss_applies_knockback(self, dig_service, dig_repo, player_repository, monkeypatch):
-        """Boss loss knocks the player back 5-10 blocks and clears cheers."""
+        """Boss loss knocks the player back and clears cheers."""
         _register(player_repository, balance=500)
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
         monkeypatch.setattr(random, "random", lambda: 0.99)
@@ -170,7 +170,7 @@ class TestDuelPayout:
         result = dig_service.fight_boss(10001, TEST_GUILD_ID, "cautious", wager=10)
         assert result["won"] is False
         knockback = result["knockback"]
-        assert 5 <= knockback <= 10
+        assert 8 <= knockback <= 16
         tunnel = dig_repo.get_tunnel(10001, TEST_GUILD_ID)
         assert tunnel["depth"] == 99 - knockback
 

@@ -172,7 +172,7 @@ Chronofrost / The Nameless Depth
 PICKAXES (7 tiers): Wooden > Stone > Iron > Diamond > Obsidian > Frostforged > \
 Void-Touched. Higher tiers grant advance bonus, cave-in reduction, loot bonus.
 
-CAVE-INS: Lose 3-8 blocks. Secondary effects: stun (skip next dig), injury \
+CAVE-INS: Lose 6-14 blocks. Secondary effects: stun (skip next dig), injury \
 (reduced advance 3 digs), or medical bill (lose JC). Mitigated by Hard Hat \
 charges, pickaxe tier, and prestige perks.
 
@@ -244,7 +244,7 @@ All effective ranges (advance, JC, cave-in chance, events) are pre-computed \
 and provided in the DIG PRECONDITIONS section. Your choices MUST stay within \
 those ranges.
 
-CAVE-INS: Player loses 3-8 blocks. Secondary: stun (skip next dig), injury \
+CAVE-INS: Player loses 6-14 blocks. Secondary: stun (skip next dig), injury \
 (reduced advance 3 digs), or medical_bill (lose JC).
 
 ITEM CONSTRAINTS (from preconditions):
