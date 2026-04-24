@@ -48,14 +48,14 @@ STINGER_REGISTRY: dict[str, StingerEffect] = {
         extra_knockback=5,
         extended_cooldown_s=0,
         cursed_status=None,
-        flavor_on_loss="Pudge drags you back toward his pile of meat.",
+        flavor_on_loss="The Butcher drags you back toward his pile of meat.",
     ),
     "ogre_blast": StingerEffect(
         id="ogre_blast",
         extra_knockback=0,
         extended_cooldown_s=600,
         cursed_status=None,
-        flavor_on_loss="Your ears ring for hours after Ogre's bellow.",
+        flavor_on_loss="Your ears ring for hours after the twin-skulled bellow.",
     ),
     # -------------------------- Tier 50 --------------------------
     "crystalia_shard": StingerEffect(
@@ -77,7 +77,7 @@ STINGER_REGISTRY: dict[str, StingerEffect] = {
         extra_knockback=7,
         extended_cooldown_s=0,
         cursed_status=None,
-        flavor_on_loss="Tusk's walrus kick launches you a long way back.",
+        flavor_on_loss="The warlord's tusked kick launches you a long way back.",
     ),
     # -------------------------- Tier 75 --------------------------
     "magmus_burn": StingerEffect(
@@ -92,14 +92,14 @@ STINGER_REGISTRY: dict[str, StingerEffect] = {
         extra_knockback=0,
         extended_cooldown_s=600,
         cursed_status=CURSE_DRAIN_NEXT_REWARD,
-        flavor_on_loss="Lina's fire leaves scars that ache every payday.",
+        flavor_on_loss="The scorchwitch's fire leaves scars that ache every payday.",
     ),
     "doom_brand": StingerEffect(
         id="doom_brand",
         extra_knockback=5,
         extended_cooldown_s=0,
         cursed_status=CURSE_HALVE_NEXT_WAGER,
-        flavor_on_loss="Doom's brand refuses to fade. You dig scared.",
+        flavor_on_loss="The deathbringer's brand refuses to fade. You dig scared.",
     ),
     # -------------------------- Tier 100 --------------------------
     "void_collapse": StingerEffect(
@@ -158,14 +158,14 @@ STINGER_REGISTRY: dict[str, StingerEffect] = {
         extra_knockback=0,
         extended_cooldown_s=0,
         cursed_status=CURSE_NO_SCOUT_NEXT_DIG,
-        flavor_on_loss="Faceless Void rewinds the last few minutes — you forget the way down.",
+        flavor_on_loss="The timeless one rewinds the last few minutes — you forget the way down.",
     ),
     "weaver_unmake": StingerEffect(
         id="weaver_unmake",
         extra_knockback=0,
         extended_cooldown_s=0,
         cursed_status=CURSE_DRAIN_NEXT_REWARD,
-        flavor_on_loss="Weaver pulled a thread from your timeline. Your next prize is thinner.",
+        flavor_on_loss="The skitterwing pulled a thread from your timeline. Your next prize is thinner.",
     ),
     # -------------------------- Tier 275 --------------------------
     "nameless_erase": StingerEffect(
@@ -180,14 +180,14 @@ STINGER_REGISTRY: dict[str, StingerEffect] = {
         extra_knockback=0,
         extended_cooldown_s=0,
         cursed_status=CURSE_HALVE_NEXT_WAGER,
-        flavor_on_loss="Oracle showed you a bad future. Your hand is shaking.",
+        flavor_on_loss="The blindfolded seer showed you a bad future. Your hand is shaking.",
     ),
     "terrorblade_sundering": StingerEffect(
         id="terrorblade_sundering",
         extra_knockback=5,
         extended_cooldown_s=600,
         cursed_status=CURSE_DRAIN_NEXT_REWARD,
-        flavor_on_loss="Terrorblade swaps something of yours for something of his. You don't want to know what.",
+        flavor_on_loss="The sundered prince swaps something of yours for something of his. You don't want to know what.",
     ),
 }
 

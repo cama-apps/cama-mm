@@ -180,7 +180,7 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
         id="pudge_hook",
         archetype="hook_pull",
         trigger_round=3,
-        prompt_title="Pudge winds up the hook",
+        prompt_title="The Butcher winds up the hook",
         prompt_description="The chain rattles. His arm cocks back.",
         options=(
             MechanicOption(
@@ -203,8 +203,8 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
                 label="Grab the hook",
                 flavor="You lunge for the chain.",
                 outcome_rolls=(
-                    OutcomeRoll(0.25,  0, -4, None, None, "You yank Pudge off balance — massive hit!"),
-                    OutcomeRoll(0.75, -3,  0, None, None, "Pudge pulls harder — you take the weight."),
+                    OutcomeRoll(0.25,  0, -4, None, None, "You yank The Butcher off balance — massive hit!"),
+                    OutcomeRoll(0.75, -3,  0, None, None, "The Butcher pulls harder — you take the weight."),
                 ),
             ),
         ),
@@ -215,7 +215,7 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
         id="ogre_multicast",
         archetype="channel_multi",
         trigger_round=4,
-        prompt_title="Ogre Magi's club glows purple",
+        prompt_title="The Twin-Skulled's club glows purple",
         prompt_description="He chants. Three orbs of lightning spark at the tip.",
         options=(
             MechanicOption(
@@ -239,7 +239,7 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
                 flavor="You plant your feet.",
                 outcome_rolls=(
                     OutcomeRoll(0.30, -1, -3, None, None, "Burned but clear-headed, you punish him."),
-                    OutcomeRoll(0.70, -3,  0, None, None, "The multicast lands — all three."),
+                    OutcomeRoll(0.70, -3,  0, None, None, "The triple-cast lands — all three."),
                 ),
             ),
         ),
@@ -286,7 +286,7 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
         id="pudge_rot",
         archetype="dot_debuff",
         trigger_round=2,
-        prompt_title="Pudge belches a cloud of rot",
+        prompt_title="The Butcher belches a cloud of rot",
         prompt_description="A green miasma rolls off his belly toward you.",
         options=(
             MechanicOption(
@@ -309,7 +309,7 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
                 label="Ignite the cloud",
                 flavor="Toss a torch.",
                 outcome_rolls=(
-                    OutcomeRoll(0.30,  0, -3, None, None,   "Whoof. The cloud lights up and blasts Pudge back."),
+                    OutcomeRoll(0.30,  0, -3, None, None,   "Whoof. The cloud lights up and blasts The Butcher back."),
                     OutcomeRoll(0.70, -3,  0, None, "burn", "It wasn't flammable. You were. Somehow."),
                 ),
             ),
@@ -321,7 +321,7 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
         id="ogre_fireblast",
         archetype="channel_big_hit",
         trigger_round=3,
-        prompt_title="Ogre Magi chants fireblast, slowly",
+        prompt_title="The Twin-Skulled chants a slow fire blast",
         prompt_description="Left head counts down. Right head forgot the number.",
         options=(
             MechanicOption(
@@ -337,7 +337,7 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
                 flavor="Shout nonsense at them.",
                 outcome_rolls=(
                     OutcomeRoll(0.60, -1, -1, None, None,    "They argue mid-cast; you both eat a weak spark."),
-                    OutcomeRoll(0.40, -2,  0, None, "burn",  "They ignore you. Fireblast lands."),
+                    OutcomeRoll(0.40, -2,  0, None, "burn",  "They ignore you. The blast lands."),
                 ),
             ),
             MechanicOption(
@@ -394,7 +394,7 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
         id="cm_frostbite",
         archetype="dot_debuff",
         trigger_round=2,
-        prompt_title="Crystal Maiden chants a frostbite",
+        prompt_title="The Frostbinder chants a frostbite",
         prompt_description="Ice crawls up your boots. Your breath fogs.",
         options=(
             MechanicOption(
@@ -429,7 +429,7 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
         id="tusk_snowball",
         archetype="charge_telegraph",
         trigger_round=4,
-        prompt_title="Tusk packs a snowball the size of a bison",
+        prompt_title="the Warlord packs a snowball the size of a bison",
         prompt_description="He's rolling it faster than should be possible.",
         options=(
             MechanicOption(
@@ -444,7 +444,7 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
                 label="Smash the ball",
                 flavor="You swing for a split.",
                 outcome_rolls=(
-                    OutcomeRoll(0.45, -1, -2, None, None, "Ice explodes; you tag Tusk through the spray."),
+                    OutcomeRoll(0.45, -1, -2, None, None, "Ice explodes; you tag the Warlord through the spray."),
                     OutcomeRoll(0.55, -2,  0, None, None, "Ball holds together. It hits you like a truck."),
                 ),
             ),
@@ -452,7 +452,7 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
                 label="Ride the ball",
                 flavor="You leap on top.",
                 outcome_rolls=(
-                    OutcomeRoll(0.30,  0, -3, None, None, "You surf the ball straight into Tusk — perfect hit."),
+                    OutcomeRoll(0.30,  0, -3, None, None, "You surf the ball straight into the Warlord — perfect hit."),
                     OutcomeRoll(0.70, -3,  0, None, None, "You slip off; the ball rolls over you."),
                 ),
             ),
@@ -500,7 +500,7 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
         id="cm_freezing_field",
         archetype="channel_multi",
         trigger_round=5,
-        prompt_title="Crystal Maiden unleashes Freezing Field",
+        prompt_title="The Frostbinder unleashes Freezing Field",
         prompt_description="Ice bombs detonate randomly in a wide ring around her.",
         options=(
             MechanicOption(
@@ -535,7 +535,7 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
         id="tusk_walrus_punch",
         archetype="charge_telegraph",
         trigger_round=3,
-        prompt_title="Tusk cocks back a Walrus Punch",
+        prompt_title="the Warlord cocks back a tusked strike",
         prompt_description="His whole body winds up. His fist glows cyan.",
         options=(
             MechanicOption(
@@ -609,7 +609,7 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
         id="lina_laguna",
         archetype="channel_big_hit",
         trigger_round=4,
-        prompt_title="Lina charges the Laguna Blade",
+        prompt_title="the Scorchwitch charges a crackling lightning lance",
         prompt_description="Lightning arcs between her fingertips. Her hair lifts.",
         options=(
             MechanicOption(
@@ -644,8 +644,8 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
         id="doom_mark",
         archetype="mark_delayed",
         trigger_round=3,
-        prompt_title="Doom brands you with a black sigil",
-        prompt_description="You feel it burn. He says: 'Silence. Doom approaches.'",
+        prompt_title="The Deathbringer brands you with a black sigil",
+        prompt_description="You feel it burn. He says: 'Silence. The Deathbringer approaches.'",
         options=(
             MechanicOption(
                 label="Attack through it",
@@ -667,8 +667,8 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
                 label="Offer him something in trade",
                 flavor="You toss a JC coin.",
                 outcome_rolls=(
-                    OutcomeRoll(0.25,  0, -3, None, None, "Doom laughs, removes the mark, then hits himself. Weird."),
-                    OutcomeRoll(0.75, -2,  0, "player", None, "Doom accepts. The mark stays."),
+                    OutcomeRoll(0.25,  0, -3, None, None, "The Deathbringer laughs, removes the mark, then hits himself. Weird."),
+                    OutcomeRoll(0.75, -2,  0, "player", None, "The Deathbringer accepts. The mark stays."),
                 ),
             ),
         ),
@@ -715,7 +715,7 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
         id="lina_dragon_slave",
         archetype="channel_aoe",
         trigger_round=3,
-        prompt_title="Lina conjures a Dragon Slave",
+        prompt_title="the Scorchwitch conjures a rolling flame wave",
         prompt_description="A wave of dragon-shaped fire rolls down the corridor.",
         options=(
             MechanicOption(
@@ -730,7 +730,7 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
                 label="Leap over the wave",
                 flavor="Time the jump.",
                 outcome_rolls=(
-                    OutcomeRoll(0.45,  0, -1, None, None,   "You clear it clean and clip Lina on the landing."),
+                    OutcomeRoll(0.45,  0, -1, None, None,   "You clear it clean and clip the Scorchwitch on the landing."),
                     OutcomeRoll(0.55, -3,  0, None, "burn", "Mistimed. The dragon's mouth catches you mid-air."),
                 ),
             ),
@@ -738,7 +738,7 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
                 label="Redirect with a swing",
                 flavor="Bat the fire back.",
                 outcome_rolls=(
-                    OutcomeRoll(0.25,  0, -3, None, None,   "Impossibly, it works. Lina gets scorched."),
+                    OutcomeRoll(0.25,  0, -3, None, None,   "Impossibly, it works. the Scorchwitch gets scorched."),
                     OutcomeRoll(0.75, -3,  0, None, "burn", "Fire doesn't care about your pickaxe."),
                 ),
             ),
@@ -750,7 +750,7 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
         id="doom_scorched_earth",
         archetype="dot_debuff",
         trigger_round=4,
-        prompt_title="Doom bathes the floor in infernal flame",
+        prompt_title="The Deathbringer bathes the floor in infernal flame",
         prompt_description="Everywhere you step burns. He alone is untouched.",
         options=(
             MechanicOption(
@@ -766,7 +766,7 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
                 flavor="Find a dry spot.",
                 outcome_rolls=(
                     OutcomeRoll(0.60, -1, 0, None, None,    "You perch. The flame licks but doesn't climb."),
-                    OutcomeRoll(0.40, -2, 0, "player", None, "Doom kicks the pillar. You tumble into the fire."),
+                    OutcomeRoll(0.40, -2, 0, "player", None, "The Deathbringer kicks the pillar. You tumble into the fire."),
                 ),
             ),
             MechanicOption(
@@ -823,14 +823,14 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
         id="spectre_haunt",
         archetype="stealth_strike",
         trigger_round=3,
-        prompt_title="Spectre splits into copies",
+        prompt_title="The Shade splits into copies",
         prompt_description="Shadow versions of her fan out around you.",
         options=(
             MechanicOption(
                 label="Pick a copy at random",
                 flavor="Full commit.",
                 outcome_rolls=(
-                    OutcomeRoll(0.33, 0, -3, None, None, "Lucky guess. The real Spectre reels."),
+                    OutcomeRoll(0.33, 0, -3, None, None, "Lucky guess. The real The Shade reels."),
                     OutcomeRoll(0.67, -2, 0, None, "bleed", "The copy cuts you as it dissolves."),
                 ),
             ),
@@ -838,7 +838,7 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
                 label="Defensive stance — wait",
                 flavor="Let them strike first.",
                 outcome_rolls=(
-                    OutcomeRoll(0.70, -1, 0, None, "reveal", "The real Spectre's footfall is heavier."),
+                    OutcomeRoll(0.70, -1, 0, None, "reveal", "The real The Shade's footfall is heavier."),
                     OutcomeRoll(0.30, -2, 0, None, "bleed", "They all hit at once. You can't block them all."),
                 ),
             ),
@@ -858,7 +858,7 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
         id="void_spirit_step",
         archetype="stealth_strike",
         trigger_round=3,
-        prompt_title="Void Spirit steps sideways in time",
+        prompt_title="the Astral Echo steps sideways in time",
         prompt_description="He's there. Then he's not. Then he's there.",
         options=(
             MechanicOption(
@@ -928,7 +928,7 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
         id="spectre_dagger",
         archetype="stealth_strike",
         trigger_round=2,
-        prompt_title="Spectre throws a Spectral Dagger",
+        prompt_title="The Shade throws a phantom dagger",
         prompt_description="A trail of shadow ink marks the dagger's flight.",
         options=(
             MechanicOption(
@@ -964,7 +964,7 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
         id="void_spirit_aether",
         archetype="reality_warp",
         trigger_round=4,
-        prompt_title="Void Spirit folds aether around you",
+        prompt_title="the Astral Echo folds aether around you",
         prompt_description="A sphere of compressed dimension pins you in place.",
         options=(
             MechanicOption(
@@ -1037,7 +1037,7 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
         id="treant_overgrowth",
         archetype="bind_debuff",
         trigger_round=3,
-        prompt_title="Treant Protector grows roots around you",
+        prompt_title="the Elder Grove grows roots around you",
         prompt_description="The ground erupts with vines.",
         options=(
             MechanicOption(
@@ -1060,8 +1060,8 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
                 label="Call the roots to yourself",
                 flavor="Bluff mycology.",
                 outcome_rolls=(
-                    OutcomeRoll(0.25,  0, -3, None, "reveal", "The vines bind Treant instead. Confusing but fine."),
-                    OutcomeRoll(0.75, -3, 0, None, None, "Treant does not take kindly to bad mimicry."),
+                    OutcomeRoll(0.25,  0, -3, None, "reveal", "The vines bind the Elder Grove instead. Confusing but fine."),
+                    OutcomeRoll(0.75, -3, 0, None, None, "The Elder Grove does not take kindly to bad mimicry."),
                 ),
             ),
         ),
@@ -1072,7 +1072,7 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
         id="broodmother_spawn",
         archetype="summon_swarm",
         trigger_round=4,
-        prompt_title="Broodmother births a brood of spiderlings",
+        prompt_title="The Nestmother births a brood of spiderlings",
         prompt_description="A dozen fist-sized spiders skitter toward your legs.",
         options=(
             MechanicOption(
@@ -1142,7 +1142,7 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
         id="treant_leech_seed",
         archetype="dot_debuff",
         trigger_round=4,
-        prompt_title="Treant Protector plants a Leech Seed in you",
+        prompt_title="the Elder Grove plants a life seed in you",
         prompt_description="A hot bead burrows under your skin and starts drinking.",
         options=(
             MechanicOption(
@@ -1154,7 +1154,7 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
                 ),
             ),
             MechanicOption(
-                label="Feed it with a hit to Treant",
+                label="Feed it with a hit to the Grove",
                 flavor="Spread the drain.",
                 outcome_rolls=(
                     OutcomeRoll(0.40,  0, -2, None, None,   "The seed's tether reverses — he drinks from himself."),
@@ -1177,7 +1177,7 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
         id="broodmother_web",
         archetype="bind_debuff",
         trigger_round=3,
-        prompt_title="Broodmother spins a web trap",
+        prompt_title="The Nestmother spins a web trap",
         prompt_description="Sticky silk criss-crosses the cavern at knee height.",
         options=(
             MechanicOption(
@@ -1200,7 +1200,7 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
                 label="Swing on a strand",
                 flavor="Tarzan the web.",
                 outcome_rolls=(
-                    OutcomeRoll(0.30,  0, -3, None, None,    "You swing right into Broodmother. Terrifying for her."),
+                    OutcomeRoll(0.30,  0, -3, None, None,    "You swing right into The Nestmother. Terrifying for her."),
                     OutcomeRoll(0.70, -3,  0, None, "bleed", "The strand snaps. Silk and fangs everywhere."),
                 ),
             ),
@@ -1250,7 +1250,7 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
         id="faceless_void_chrono",
         archetype="time_skip",
         trigger_round=5,
-        prompt_title="Faceless Void casts Chronosphere",
+        prompt_title="the Timeless One summons a time sphere",
         prompt_description="A dome of stopped time rises around you both.",
         options=(
             MechanicOption(
@@ -1285,7 +1285,7 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
         id="weaver_timelapse",
         archetype="rewind",
         trigger_round=6,
-        prompt_title="Weaver Time Lapses",
+        prompt_title="the Skitterwing rewinds the moment",
         prompt_description="He phases away and reappears at full HP a moment ago.",
         options=(
             MechanicOption(
@@ -1355,7 +1355,7 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
         id="faceless_void_backtrack",
         archetype="rewind",
         trigger_round=3,
-        prompt_title="Faceless Void Backtracks your attack",
+        prompt_title="the Timeless One Backtracks your attack",
         prompt_description="He rewinds a half-second. Your last swing un-happens.",
         options=(
             MechanicOption(
@@ -1390,7 +1390,7 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
         id="weaver_shukuchi",
         archetype="stealth_strike",
         trigger_round=3,
-        prompt_title="Weaver vanishes into Shukuchi",
+        prompt_title="the Skitterwing flickers out of view",
         prompt_description="He phases invisible. Tiny mandibles click somewhere in the dark.",
         options=(
             MechanicOption(
@@ -1405,7 +1405,7 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
                 label="Set the floor on fire",
                 flavor="He has to step somewhere.",
                 outcome_rolls=(
-                    OutcomeRoll(0.55, -1, -2, None, "reveal", "He steps into flame; Shukuchi breaks."),
+                    OutcomeRoll(0.55, -1, -2, None, "reveal", "He steps into flame; the flicker breaks."),
                     OutcomeRoll(0.45, -2,  0, None, "burn",   "He phased over. You scorched yourself."),
                 ),
             ),
@@ -1463,7 +1463,7 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
         id="oracle_fortune",
         archetype="gamble",
         trigger_round=4,
-        prompt_title="Oracle casts Fortune's End on you",
+        prompt_title="the Seer calls down fate's edge on you",
         prompt_description="A coin spins between you. It is both sides at once.",
         options=(
             MechanicOption(
@@ -1487,7 +1487,7 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
                 flavor="You palm the coin.",
                 outcome_rolls=(
                     OutcomeRoll(0.40, -1, -1, None, None, "She takes a neutral price. Both of you pay."),
-                    OutcomeRoll(0.60, -2, 0, None, None, "Oracle dislikes unresolved fortunes."),
+                    OutcomeRoll(0.60, -2, 0, None, None, "the Seer dislikes unresolved fortunes."),
                 ),
             ),
         ),
@@ -1498,7 +1498,7 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
         id="terrorblade_sunder",
         archetype="hp_swap",
         trigger_round=5,
-        prompt_title="Terrorblade activates Sunder",
+        prompt_title="the Sundered Prince activates Sunder",
         prompt_description="He's at high HP. You are not. He wants to trade.",
         options=(
             MechanicOption(
@@ -1513,7 +1513,7 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
                 flavor="You lunge at him.",
                 outcome_rolls=(
                     OutcomeRoll(0.35, 0, -3, None, None, "You break his concentration."),
-                    OutcomeRoll(0.65, -3, 0, None, None, "Sunder lands and cuts you both. He does better out of it."),
+                    OutcomeRoll(0.65, -3, 0, None, None, "The soul-trade lands and cuts you both. He does better out of it."),
                 ),
             ),
             MechanicOption(
@@ -1521,7 +1521,7 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
                 flavor="Hold up your own pick.",
                 outcome_rolls=(
                     OutcomeRoll(0.25, +2, -3, None, None, "It bounces. He gets sundered by himself. He's displeased."),
-                    OutcomeRoll(0.75, -3, 0, "player", None, "Reflection was a lie. You take it in the chest."),
+                    OutcomeRoll(0.75, -3, 0, "player", None, "The mirror was a lie. You take it in the chest."),
                 ),
             ),
         ),
@@ -1567,7 +1567,7 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
         id="oracle_false_promise",
         archetype="gamble",
         trigger_round=5,
-        prompt_title="Oracle places a False Promise on you",
+        prompt_title="the Seer places a false vow on you",
         prompt_description="For a moment all damage is suspended. When it ends — everything resolves.",
         options=(
             MechanicOption(
@@ -1603,7 +1603,7 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
         id="terrorblade_metamorphosis",
         archetype="charge_telegraph",
         trigger_round=3,
-        prompt_title="Terrorblade enters Metamorphosis",
+        prompt_title="the Sundered Prince enters his demon form",
         prompt_description="His wings unfurl. His next three swings will be ranged and devastating.",
         options=(
             MechanicOption(

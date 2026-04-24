@@ -520,7 +520,7 @@ _DOTA_BOSSES: dict[str, BossDef] = {
     "pudge": BossDef(
         depth=25,
         boss_id="pudge",
-        name="Pudge the Butcher",
+        name="The Butcher",
         title="Stitched-Together Hooker",
         ascii_art=(
             "   _____\n"
@@ -542,7 +542,7 @@ _DOTA_BOSSES: dict[str, BossDef] = {
     "ogre_magi": BossDef(
         depth=25,
         boss_id="ogre_magi",
-        name="Ogre Magi",
+        name="The Twin-Skulled",
         title="Two Heads, Zero Plans",
         ascii_art=(
             "   (o)(o)\n"
@@ -565,7 +565,7 @@ _DOTA_BOSSES: dict[str, BossDef] = {
     "crystal_maiden": BossDef(
         depth=50,
         boss_id="crystal_maiden",
-        name="Crystal Maiden",
+        name="The Frostbinder",
         title="Cold in the Best Way",
         ascii_art=(
             "    ,-'-.\n"
@@ -587,7 +587,7 @@ _DOTA_BOSSES: dict[str, BossDef] = {
     "tusk": BossDef(
         depth=50,
         boss_id="tusk",
-        name="Tusk",
+        name="The Ice Warlord",
         title="The Walrus With A Plan",
         ascii_art=(
             "   .---.\n"
@@ -609,7 +609,7 @@ _DOTA_BOSSES: dict[str, BossDef] = {
     "lina": BossDef(
         depth=75,
         boss_id="lina",
-        name="Lina the Slayer",
+        name="The Scorchwitch",
         title="She Who Brings the Heat",
         ascii_art=(
             "   ~*~*~\n"
@@ -619,7 +619,7 @@ _DOTA_BOSSES: dict[str, BossDef] = {
             "   /   \\\n"
         ),
         dialogue=[
-            "Laguna Blade's warming up. Say goodbye.",
+            "My fingers are warming up. Say goodbye.",
             "Oh look, you. Again. I'll try to kill you differently this time.",
             "I'm low-key tired. Let's just one-shot this.",
             "YOU AGAIN?! My mana bar has trust issues.",
@@ -631,7 +631,7 @@ _DOTA_BOSSES: dict[str, BossDef] = {
     "doom": BossDef(
         depth=75,
         boss_id="doom",
-        name="Doom",
+        name="The Deathbringer",
         title="Lord of the Avernus",
         ascii_art=(
             "   .---.\n"
@@ -641,11 +641,11 @@ _DOTA_BOSSES: dict[str, BossDef] = {
             "   ||||| \n"
         ),
         dialogue=[
-            "Silence. Doom approaches.",
-            "Doom recognizes you. Doom is unimpressed.",
+            "Silence. The end approaches.",
+            "You return. I am unimpressed.",
             "Every one of your digs extends my work week.",
-            "YOU AGAIN. Doom is burnt out.",
-            "Go. Doom needs a holiday.",
+            "YOU AGAIN. Even the damned get tired.",
+            "Go. I need a holiday from you.",
         ],
         mechanic_pool=("doom_mark", "doom_scorched_earth"),
         stinger_id="doom_brand",
@@ -653,7 +653,7 @@ _DOTA_BOSSES: dict[str, BossDef] = {
     "spectre": BossDef(
         depth=100,
         boss_id="spectre",
-        name="Spectre",
+        name="The Dread Shade",
         title="The Dagger in the Dark",
         ascii_art=(
             "   _____\n"
@@ -676,7 +676,7 @@ _DOTA_BOSSES: dict[str, BossDef] = {
     "void_spirit": BossDef(
         depth=100,
         boss_id="void_spirit",
-        name="Void Spirit",
+        name="The Astral Echo",
         title="Dimensional Tourist",
         ascii_art=(
             "    .\" \".\n"
@@ -698,7 +698,7 @@ _DOTA_BOSSES: dict[str, BossDef] = {
     "treant_protector": BossDef(
         depth=150,
         boss_id="treant_protector",
-        name="Treant Protector",
+        name="The Elder Grove",
         title="Old Growth, Old Grudges",
         ascii_art=(
             "      /\\\n"
@@ -721,7 +721,7 @@ _DOTA_BOSSES: dict[str, BossDef] = {
     "broodmother": BossDef(
         depth=150,
         boss_id="broodmother",
-        name="Broodmother",
+        name="The Nestmother",
         title="Nine Hundred Hungry Children",
         ascii_art=(
             "    /\\ /\\\n"
@@ -743,7 +743,7 @@ _DOTA_BOSSES: dict[str, BossDef] = {
     "faceless_void": BossDef(
         depth=200,
         boss_id="faceless_void",
-        name="Faceless Void",
+        name="The Timeless One",
         title="There Is No Timing Like His Timing",
         ascii_art=(
             "   _______\n"
@@ -756,7 +756,7 @@ _DOTA_BOSSES: dict[str, BossDef] = {
         dialogue=[
             "I saw this coming. Literally.",
             "You again. I was expecting you five seconds ago.",
-            "I'll chronosphere and walk away. Have fun.",
+            "I'll freeze the moment and walk away. Have fun.",
             "YOU AGAIN. My cooldown is up, regrettably.",
             "Go. You were going to win this one anyway.",
         ],
@@ -766,7 +766,7 @@ _DOTA_BOSSES: dict[str, BossDef] = {
     "weaver": BossDef(
         depth=200,
         boss_id="weaver",
-        name="Weaver",
+        name="The Skitterwing",
         title="The One Who Unpicks",
         ascii_art=(
             "   .-.\n"
@@ -788,7 +788,7 @@ _DOTA_BOSSES: dict[str, BossDef] = {
     "oracle": BossDef(
         depth=275,
         boss_id="oracle",
-        name="Oracle",
+        name="The Blindfolded Seer",
         title="Seer of Bad Bets",
         ascii_art=(
             "   .-\"\"\"-.\n"
@@ -810,7 +810,7 @@ _DOTA_BOSSES: dict[str, BossDef] = {
     "terrorblade": BossDef(
         depth=275,
         boss_id="terrorblade",
-        name="Terrorblade",
+        name="The Sundered Prince",
         title="Betrayer and Sunderer",
         ascii_art=(
             "     /\\_/\\\n"
@@ -822,9 +822,9 @@ _DOTA_BOSSES: dict[str, BossDef] = {
         dialogue=[
             "I will trade lives with you. You will not like yours.",
             "You returned. Willingly. I admire the theater.",
-            "One more Sunder. Then we talk severance.",
+            "One more trade. Then we talk severance.",
             "YOU AGAIN?! My mirror image is tired.",
-            "Take the hollow. Sunder yourself out of it.",
+            "Take the hollow. Cleave yourself out of it.",
         ],
         mechanic_pool=("terrorblade_sunder", "terrorblade_metamorphosis"),
         stinger_id="terrorblade_sundering",
@@ -2072,7 +2072,7 @@ RANDOM_EVENTS: list[RandomEvent] = [
 
     RandomEvent(
         id="pudge_fishing",
-        name="Pudge's Fishing Hole",
+        name="The Chasm Butcher",
         description=(
             "A butcher on the far side of a chasm is fishing with a meat hook. 'Fresh meat delivery service!' he calls. 'First ride's free.'",
             "A massive butcher stands on the far rim of a chasm, swinging a meat hook over his head. 'FRESH MEAT!' he calls cheerfully. He points at you.",
@@ -2087,14 +2087,14 @@ RANDOM_EVENTS: list[RandomEvent] = [
         risky_option=EventChoice(
             "Grab the hook",
             success=EventOutcome("WHEEE! You arrive covered in something but 6 blocks deeper.", 6, 0, False),
-            failure=EventOutcome("The hook misses. You fall. Pudge waves sadly from above.", -4, -4, True),
+            failure=EventOutcome("The hook misses. You fall. The butcher waves sadly from above.", -4, -4, True),
             success_chance=0.50,
         ),
         rarity="uncommon",
     ),
     RandomEvent(
         id="tinker_workshop",
-        name="Tinker's Abandoned Workshop",
+        name="The Abandoned Workshop",
         description=(
             "A cluttered workshop full of half-finished gadgets. A sign reads: 'Gone to rearm. Back in 5 minutes.' The sign is 400 years old.",
             "A workbench covered in half-built gadgets, gears, and miniature rockets. A note pinned to the wall: 'be right back'. The ink is very, very faded.",
@@ -2613,7 +2613,7 @@ RANDOM_EVENTS: list[RandomEvent] = [
 
     RandomEvent(
         id="roshan_lair",
-        name="Roshan's Lair",
+        name="The Ancient's Lair",
         description=(
             "An ancient pit radiates power that makes your bones vibrate. Something immense stirs in the darkness. It has been here since before the stone was stone.",
             "The tunnel ends at a pit so deep that looking into it makes you nauseous. Something down there is breathing. The walls shake in time with it.",
@@ -3380,22 +3380,22 @@ RANDOM_EVENTS: list[RandomEvent] = [
     ),
     RandomEvent(
         id="aghanim_trial",
-        name="Aghanim's Trial",
+        name="The Arcane Trial",
         description=(
-            "Aghanim materializes in a flash of arcane energy. 'Another one. Let's see what you're made of.'",
-            "A flash of arcane light and a robed figure with a deep hood steps into the tunnel. 'So,' Aghanim says, without enthusiasm. 'Another applicant.'",
+            "An old wizard materializes in a flash of arcane energy. 'Another one. Let's see what you're made of.'",
+            "A flash of arcane light and a robed figure with a deep hood steps into the tunnel. 'So,' the wizard says, without enthusiasm. 'Another applicant.'",
             "The passage fills with light and the smell of burnt ozone. An old wizard crosses his arms and sighs. 'Let's get this over with.'",
         ),
         min_depth=None, max_depth=None,
         safe_option=EventChoice(
             "Decline the trial",
-            success=EventOutcome("Aghanim shrugs. 'Your loss.' He vanishes in a puff of condescension.", 0, 0, False),
+            success=EventOutcome("The wizard shrugs. 'Your loss.' He vanishes in a puff of condescension.", 0, 0, False),
             failure=None, success_chance=1.0,
         ),
         risky_option=EventChoice(
             "Accept the trial",
-            success=EventOutcome("You survive the gauntlet. Aghanim slow-claps. 'Not bad.'", 3, 12, False),
-            failure=EventOutcome("The trial overwhelms you. Aghanim yawns.", -4, 0, False),
+            success=EventOutcome("You survive the gauntlet. He slow-claps. 'Not bad.'", 3, 12, False),
+            failure=EventOutcome("The trial overwhelms you. The wizard yawns.", -4, 0, False),
             success_chance=0.35,
         ),
         desperate_option=EventChoice(
@@ -3405,7 +3405,7 @@ RANDOM_EVENTS: list[RandomEvent] = [
             success_chance=0.10,
         ),
         rarity="rare",
-        buff_on_success=TempBuff("aghanim_blessing", "Aghanim's Blessing", 2, {"advance_bonus": 3, "jc_bonus": 2}),
+        buff_on_success=TempBuff("aghanim_blessing", "Arcane Blessing", 2, {"advance_bonus": 3, "jc_bonus": 2}),
     ),
     RandomEvent(
         id="tormentor_encounter",
