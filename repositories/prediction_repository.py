@@ -1459,9 +1459,20 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
         levels: list[tuple[str, int, int]],
         now_ts: int,
     ) -> None:
-        """Atomically reset the ladder and stamp the new fair / refresh time."""
+        """Atomically reset the ladder and stamp the new fair / refresh time.
+
+        Re-checks status inside the write lock so a concurrent /predict resolve
+        or /predict cancel can't get clobbered by a stale refresh.
+        """
         with self.atomic_transaction() as conn:
             cursor = conn.cursor()
+            cursor.execute(
+                "SELECT status FROM predictions WHERE prediction_id = ?",
+                (prediction_id,),
+            )
+            row = cursor.fetchone()
+            if not row or row["status"] != "open":
+                return  # market was resolved/cancelled while we were processing
             cursor.execute(
                 "DELETE FROM prediction_levels WHERE prediction_id = ?",
                 (prediction_id,),
@@ -1482,12 +1493,15 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                 (new_price, now_ts, prediction_id),
             )
 
-    def settle_prediction_orderbook(self, prediction_id: int, outcome: str) -> dict:
+    def settle_prediction_orderbook(
+        self, prediction_id: int, outcome: str, resolved_by: int | None = None
+    ) -> dict:
         """Atomic resolve: cancel levels, pay winners, mark resolved.
 
         ``outcome`` is 'yes' or 'no'. Pays ``CONTRACT_VALUE = 100`` per winning
         contract; losing contracts pay 0. Cost basis is irrelevant — payout is
-        purely a function of contract count.
+        purely a function of contract count. ``resolved_by`` is recorded for
+        the audit trail.
         """
         if outcome not in self.VALID_POSITIONS:
             raise ValueError(f"Invalid outcome: {outcome}")
@@ -1579,10 +1593,10 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
             cursor.execute(
                 """
                 UPDATE predictions
-                SET status = 'resolved', outcome = ?, resolved_at = ?, resolved_by = NULL
+                SET status = 'resolved', outcome = ?, resolved_at = ?, resolved_by = ?
                 WHERE prediction_id = ?
                 """,
-                (outcome, now, prediction_id),
+                (outcome, now, resolved_by, prediction_id),
             )
 
             cursor.execute(

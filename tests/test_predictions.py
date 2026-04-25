@@ -372,6 +372,40 @@ def test_resolve_marks_status_and_blocks_further_trades(prediction_service, play
         prediction_service.buy_contracts(prediction_id=pid, discord_id=1, side="yes", contracts=1)
 
 
+def test_resolve_records_resolved_by(prediction_service, prediction_repo, player_repository):
+    _add_player(player_repository, 1)
+    pid = prediction_service.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID, creator_id=1, question="market qq?", initial_fair=50,
+    )["prediction_id"]
+    prediction_service.buy_contracts(prediction_id=pid, discord_id=1, side="yes", contracts=1)
+    prediction_service.resolve_orderbook(prediction_id=pid, outcome="yes", resolved_by=12345)
+    pred = prediction_repo.get_prediction(pid)
+    assert pred["resolved_by"] == 12345
+
+
+def test_apply_refresh_skips_resolved_market(prediction_service, prediction_repo, player_repository):
+    _add_player(player_repository, 1)
+    pid = prediction_service.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID, creator_id=1, question="market qr?", initial_fair=50,
+    )["prediction_id"]
+    prediction_service.buy_contracts(prediction_id=pid, discord_id=1, side="yes", contracts=1)
+    prediction_service.resolve_orderbook(prediction_id=pid, outcome="yes")
+    # Refresh worker may still race against a just-resolved market; apply_refresh
+    # should no-op rather than overwrite the terminal state.
+    prediction_repo.apply_refresh(
+        pid,
+        new_price=70,
+        levels=[("yes_ask", 71, 5), ("yes_bid", 69, 5)],
+        now_ts=10**12,
+    )
+    pred = prediction_repo.get_prediction(pid)
+    assert pred["status"] == "resolved"
+    assert pred["current_price"] == 50  # unchanged
+    book = prediction_repo.get_book(pid)
+    assert book["yes_asks"] == []
+    assert book["yes_bids"] == []
+
+
 # --------------------------------------------------------------------------- #
 # Cancel: cost-basis refund
 # --------------------------------------------------------------------------- #
