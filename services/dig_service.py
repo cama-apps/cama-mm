@@ -108,6 +108,7 @@ def _splash_to_dict(result) -> dict | None:
         "event_name": result.event_name,
         "victims": [{"discord_id": vid, "amount": amt} for vid, amt in result.victims],
         "total_burned": result.total_burned,
+        "mode": getattr(result, "mode", "burn"),
     }
 
 
@@ -1673,8 +1674,8 @@ class DigService:
 
         # 17. Roll for random event (layer-specific rates, luminosity, ascension, mutations)
         event_rates = {
-            "Dirt": 0.20, "Stone": 0.20, "Crystal": 0.24, "Magma": 0.24,
-            "Abyss": 0.28, "Fungal Depths": 0.34, "Frozen Core": 0.28, "The Hollow": 0.40,
+            "Dirt": 0.25, "Stone": 0.25, "Crystal": 0.30, "Magma": 0.30,
+            "Abyss": 0.35, "Fungal Depths": 0.42, "Frozen Core": 0.35, "The Hollow": 0.50,
         }
         event_chance = event_rates.get(layer_name, 0.24)
         # Ascension event chance boost
@@ -2093,9 +2094,9 @@ class DigService:
 
         # ── Event chance + eligible events ────────────────────────
         event_rates = {
-            "Dirt": 0.20, "Stone": 0.20, "Crystal": 0.24, "Magma": 0.24,
-            "Abyss": 0.28, "Fungal Depths": 0.34, "Frozen Core": 0.28,
-            "The Hollow": 0.40,
+            "Dirt": 0.25, "Stone": 0.25, "Crystal": 0.30, "Magma": 0.30,
+            "Abyss": 0.35, "Fungal Depths": 0.42, "Frozen Core": 0.35,
+            "The Hollow": 0.50,
         }
         event_chance = event_rates.get(layer_name, 0.24)
         event_chance *= 1.0 + ascension.get("event_chance_multiplier", 0)

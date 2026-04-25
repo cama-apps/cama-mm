@@ -1266,8 +1266,12 @@ class SplashConfig:
         * ``"burn"``  - victims' JC is debited (coins destroyed, deflation lever)
         * ``"grant"`` - targets are credited JC (cooperative splash, e.g.
                         Io tether pact sharing spoils with a partner)
+        * ``"steal"`` - victims' JC is transferred to the digger via
+                        ``steal_atomic`` (no fee, can push victim below 0
+                        down to MAX_DEBT — matches Red/Blue Shell semantics)
 
-    Debits are clamped so a non-negative player is not pushed below 0.
+    For ``"burn"`` debits are clamped so a non-negative player is not pushed
+    below 0. ``"steal"`` is unclamped on the victim side (intentional).
     """
 
     strategy: str
@@ -4225,6 +4229,265 @@ RANDOM_EVENTS: list[RandomEvent] = [
             success_chance=0.22,
         ),
         rarity="legendary",
+    ),
+
+    # ---- Risky cross-player expansion. Mixed flavors: chaos burn, zero-sum
+    # theft (mode="steal"), and digger-pays sacrifice. Spread across all depth
+    # bands so cross-player risk is part of the dig identity from the start.
+    # -------------------------------------------------------------------------
+
+    RandomEvent(
+        id="aegis_whisper",
+        name="Aegis Whisper",
+        description=(
+            "A half-buried shield rim glints in the dirt. The metal hums with an old promise.",
+            "Something circular is pressed into the wall — a shield, ancient, still warm.",
+            "You hear a faint chant from the rock. The stone wants you to make an offering.",
+        ),
+        min_depth=None, max_depth=None,
+        safe_option=EventChoice(
+            "Leave it buried",
+            success=EventOutcome("You walk past. The chant fades.", 0, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Make an offering",
+            success=EventOutcome("The shield drinks your coin and breathes a faint protective glow over you.", 0, -8, False),
+            failure=EventOutcome("Your coin sinks into the dirt. Nothing happens.", 0, -8, False),
+            success_chance=0.50,
+        ),
+        buff_on_success=TempBuff("aegis_aura", "Aegis Aura", 3, {"cave_in_reduction": 0.15}),
+        rarity="uncommon",
+    ),
+    RandomEvent(
+        id="echoing_mime",
+        name="Echoing Mime",
+        description=(
+            "A pale figure performs a silent show in the gloom. Other diggers always seem to stop and watch.",
+            "The mime tilts its head at you. Somewhere in the network, picks go still.",
+            "It bows. A polite, silent invitation to be made a fool of.",
+        ),
+        min_depth=None, max_depth=None,
+        safe_option=EventChoice(
+            "Avert your eyes",
+            success=EventOutcome("You keep digging. The performance ends without applause.", 0, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Mock the mime back",
+            success=EventOutcome("You out-perform it. The mime tips a coin into your palm.", 0, 6, False),
+            failure=EventOutcome("The mime doesn't break character. You feel small.", 0, -3, False),
+            success_chance=0.65,
+        ),
+        rarity="uncommon", social=True,
+        splash=SplashConfig(
+            strategy="active_diggers", victim_count=2, penalty_jc=4,
+            trigger="always", mode="burn",
+        ),
+    ),
+    RandomEvent(
+        id="crow_snipe",
+        name="Crow Snipe",
+        description=(
+            "A delivery crow flaps past, a heavy pouch swinging from its talons.",
+            "A messenger bird overhead — laden, slow, oblivious.",
+            "Something glitters in the bird's grip as it crosses overhead.",
+        ),
+        min_depth=10, max_depth=None,
+        safe_option=EventChoice(
+            "Wave the crow off",
+            success=EventOutcome("The bird carries on its way.", 0, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Snipe it down",
+            success=EventOutcome("The pouch hits the dirt at your feet. Someone wealthy is having a worse day than you.", 0, 0, False),
+            failure=EventOutcome("You miss. A guard's whistle sounds; you pay a fine to slip away.", 0, -6, False),
+            success_chance=0.60,
+        ),
+        rarity="uncommon", social=True,
+        splash=SplashConfig(
+            strategy="richest_n", victim_count=1, penalty_jc=10,
+            trigger="success", mode="steal",
+        ),
+    ),
+    RandomEvent(
+        id="smoke_detour",
+        name="Smoke Detour",
+        description=(
+            "A drifting purple haze hides a shortcut through someone else's tunnel.",
+            "The smoke pools in a side passage. You can almost see through to the other tunnel network.",
+            "A cloaked path opens up. The air tastes like other people's progress.",
+        ),
+        min_depth=26, max_depth=None,
+        safe_option=EventChoice(
+            "Stick to your own tunnel",
+            success=EventOutcome("You stay the course. Steady progress.", 1, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Slip into the smoke",
+            success=EventOutcome("You shortcut clean through and pop out ahead, pockets heavier.", 1, 15, False),
+            failure=EventOutcome("The smoke clears around the wrong people. Two diggers' caches collapse.", 0, -8, False),
+            success_chance=0.55,
+        ),
+        rarity="rare", social=True,
+        splash=SplashConfig(
+            strategy="active_diggers", victim_count=2, penalty_jc=6,
+            trigger="failure", mode="burn",
+        ),
+    ),
+    RandomEvent(
+        id="strangers_lamp",
+        name="Stranger's Lamp",
+        description=(
+            "An ornate brass lamp is wedged into the wall. You feel the urge to rub it.",
+            "The lamp is still warm. Something inside is waiting to be asked for a favor.",
+            "A genie's lamp, half-buried. You half-remember warnings about wishes.",
+        ),
+        min_depth=26, max_depth=None,
+        safe_option=EventChoice(
+            "Leave the lamp alone",
+            success=EventOutcome("You step around it. Some wishes aren't worth making.", 0, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Rub the lamp",
+            success=EventOutcome("The genie grants you riches — and tosses a coin to a stranger for good measure.", 0, 15, False),
+            failure=EventOutcome("The lamp coughs out a puff of soot. You're 5 coin lighter for the trouble.", 0, -5, False),
+            success_chance=0.40,
+        ),
+        rarity="rare", social=True,
+        splash=SplashConfig(
+            strategy="random_active", victim_count=1, penalty_jc=5,
+            trigger="success", mode="grant",
+        ),
+    ),
+    RandomEvent(
+        id="drill_sergeant",
+        name="Drill Sergeant",
+        description=(
+            "A spectral sergeant blocks the passage and starts barking orders.",
+            "DOWN! UP! DOWN! UP! The ghost will not be ignored.",
+            "A phantom drill sergeant materializes, whistle in hand. You stand at attention by reflex.",
+        ),
+        min_depth=26, max_depth=None,
+        safe_option=EventChoice(
+            "Crawl past quietly",
+            success=EventOutcome("You sneak through during a count. The ghost never notices.", 0, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Snap to attention",
+            success=EventOutcome("You complete the drill. The ghost salutes and dissolves; your form has never been better.", 0, -10, False),
+            failure=None, success_chance=1.0,
+        ),
+        buff_on_success=TempBuff("drilled", "Drilled", 4, {"advance_bonus": 2}),
+        rarity="rare",
+    ),
+    RandomEvent(
+        id="pit_lords_toll",
+        name="Pit Lord's Toll",
+        description=(
+            "A massive horned figure looms in the dark, rattling a cup of bone dice.",
+            "A horned silhouette gestures at a pile of skulls. He wants to play.",
+            "The pit lord smiles. The kind of smile that costs other people money.",
+        ),
+        min_depth=51, max_depth=None,
+        safe_option=EventChoice(
+            "Refuse politely",
+            success=EventOutcome("He shrugs and lets you pass. You lose a step backing away.", -1, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Roll the bone dice",
+            success=EventOutcome("The dice land in your favor. The pit lord grins and pays out.", 0, 35, False),
+            failure=EventOutcome("The dice land badly. The pit lord cackles, and three diggers feel the floor drop.", 0, -10, False),
+            success_chance=0.45,
+        ),
+        rarity="legendary", social=True,
+        splash=SplashConfig(
+            strategy="active_diggers", victim_count=3, penalty_jc=8,
+            trigger="failure", mode="burn",
+        ),
+    ),
+    RandomEvent(
+        id="damned_bottle",
+        name="Damned Bottle",
+        description=(
+            "An ornate bottle whispers two names in the dark — yours, and a stranger's.",
+            "The bottle sweats a faint blue light. It is full, and it remembers who filled it.",
+            "A sealed vessel hums. Cork it, the whispers stop. Uncork it, things get interesting.",
+        ),
+        min_depth=76, max_depth=None,
+        safe_option=EventChoice(
+            "Leave it sealed",
+            success=EventOutcome("You walk on. The whispers fade.", 0, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Uncork it",
+            success=EventOutcome("The bottle unfastens itself from another digger's stash. The contents are now yours.", 0, 0, False),
+            failure=EventOutcome("The bottle was a curse. It empties your pockets in answer.", 0, -20, False),
+            success_chance=0.50,
+        ),
+        rarity="legendary", social=True,
+        splash=SplashConfig(
+            strategy="random_active", victim_count=1, penalty_jc=15,
+            trigger="success", mode="steal",
+        ),
+    ),
+    RandomEvent(
+        id="roshpit_gambit",
+        name="Roshpit Gambit",
+        description=(
+            "An ancient pit yawns open. Tribute paid by the wealthy lines its rim.",
+            "A pit older than the mine. Coins from the richest pockets keep washing up at its edge.",
+            "The pit hums at a frequency only large balances can hear.",
+        ),
+        min_depth=76, max_depth=None,
+        safe_option=EventChoice(
+            "Skirt the pit",
+            success=EventOutcome("You give the pit a wide berth. Boring, safe.", 0, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Plunge in",
+            success=EventOutcome("You surface clutching a king's ransom. Two of the richest just felt it leave their stash.", 0, 40, False),
+            failure=EventOutcome("The pit takes its tribute from you instead.", 0, -25, False),
+            success_chance=0.50,
+        ),
+        rarity="legendary", social=True,
+        splash=SplashConfig(
+            strategy="richest_n", victim_count=2, penalty_jc=12,
+            trigger="success", mode="burn",
+        ),
+    ),
+    RandomEvent(
+        id="wilderness_stalker",
+        name="Wilderness Stalker",
+        description=(
+            "A masked figure has been tracking you through the deep tunnels. They are no longer subtle.",
+            "Footprints behind yours. Then closer. Then close enough to hear breathing.",
+            "A stranger steps from the dark, blade drawn. They've been waiting for you.",
+        ),
+        min_depth=101, max_depth=None,
+        safe_option=EventChoice(
+            "Hide and wait them out",
+            success=EventOutcome("You go still until they pass. You lose ground but you keep your purse.", -1, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Strike first",
+            success=EventOutcome("You drop them in one strike and lift their take. Whoever they were, they were carrying.", 0, 0, False),
+            failure=EventOutcome("They were better than you. You drag yourself away wounded and lighter.", -1, -25, False),
+            success_chance=0.65,
+        ),
+        rarity="legendary", social=True,
+        splash=SplashConfig(
+            strategy="active_diggers", victim_count=1, penalty_jc=20,
+            trigger="success", mode="steal",
+        ),
     ),
 ]
 

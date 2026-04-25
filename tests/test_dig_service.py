@@ -2043,25 +2043,25 @@ class TestLuminosity:
 
         cd = FREE_DIG_COOLDOWN_SECONDS
 
-        # Dirt at pitch black: event_chance = min(0.20 * 3.0, 0.75) = 0.60
+        # Dirt at pitch black: event_chance = min(0.25 * 3.0, 0.75) = 0.75 (capped)
         # cave_in_chance = 0.05 + 0.25 = 0.30
         dig_repo.update_tunnel(10001, guild_id, depth=10, luminosity=0)
-        # Roll 0.45: above cave-in (0.30), below event (0.60) -> event triggers
+        # Roll 0.45: above cave-in (0.30), below event (0.75) -> event triggers
         monkeypatch.setattr(time, "time", lambda: 1_000_000 + cd + 1)
         monkeypatch.setattr(ds_mod.random, "random", lambda: 0.45)
         with patch.object(dig_service, "roll_event", wraps=dig_service.roll_event) as spy:
             dig_service.dig(10001, guild_id)
-        assert spy.call_count > 0, "Pitch-black Dirt: roll=0.45 should trigger event (chance=0.60)"
+        assert spy.call_count > 0, "Pitch-black Dirt: roll=0.45 should trigger event (chance=0.75)"
 
-        # Roll 0.65: above event (0.60) -> no event
+        # Roll 0.80: above the 0.75 cap -> no event (proves the cap is enforced)
         dig_repo.update_tunnel(10001, guild_id, depth=10, luminosity=0)
         monkeypatch.setattr(time, "time", lambda: 1_000_000 + 2 * (cd + 1))
-        monkeypatch.setattr(ds_mod.random, "random", lambda: 0.65)
+        monkeypatch.setattr(ds_mod.random, "random", lambda: 0.80)
         with patch.object(dig_service, "roll_event", wraps=dig_service.roll_event) as spy:
             dig_service.dig(10001, guild_id)
-        assert spy.call_count == 0, "Pitch-black Dirt: roll=0.65 should NOT trigger (chance=0.60)"
+        assert spy.call_count == 0, "Pitch-black Dirt: roll=0.80 should NOT trigger (capped chance=0.75)"
 
-        # Abyss at pitch black: event_chance = min(0.28 * 3.0, 0.75) = 0.75 (at the cap)
+        # Abyss at pitch black: event_chance = min(0.35 * 3.0, 0.75) = 0.75 (capped)
         # cave_in_chance = 0.35 + 0.25 = 0.60
         dig_repo.update_tunnel(10001, guild_id, depth=120, luminosity=0,
                                boss_progress=all_bosses_defeated)
