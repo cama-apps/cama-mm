@@ -388,31 +388,47 @@ def post_helper(book):
         yield (("yes_bid", price), size)
 
 
-def test_refresh_deletes_crossing_levels(
+def test_refresh_locked_level_at_top_bid_is_kept(
     prediction_service, prediction_repo, monkeypatch,
 ):
-    """Old levels that would cross the new ladder must be removed before layering.
-
-    Scenario: fair drifts from 50 to 52 on a quiet market.
-    Old asks at 51 would cross the new top bid at 51; old asks at 51 must go.
-    Old asks at 52, 53 are not crossed.
-    """
+    """An old ask at exactly the new top bid is locked, not crossed — keep it."""
     pid = prediction_service.create_orderbook_prediction(
         guild_id=TEST_GUILD_ID, creator_id=1, question="market mx?", initial_fair=50,
     )["prediction_id"]
     pre = dict(post_helper(prediction_repo.get_book(pid)))
-    assert pre[("yes_ask", 51)] == PREDICTION_SIZE_PER_LEVEL  # exists pre-refresh
+    assert pre[("yes_ask", 51)] == PREDICTION_SIZE_PER_LEVEL
 
-    monkeypatch.setattr(random, "randint", lambda lo, hi: 2)  # max drift up
+    monkeypatch.setattr(random, "randint", lambda lo, hi: 2)  # drift +2
     prediction_service.refresh_market(pid)
 
     post = dict(post_helper(prediction_repo.get_book(pid)))
-    # New fair = 52; new ladder asks 53,54,55, bids 51,50,49.
-    # Old ask at 51 would cross new top bid 51 → must be deleted.
-    assert ("yes_ask", 51) not in post
-    # Old asks at 52, 53 stay (52 sits inside new spread but doesn't cross; 53 layers)
+    # New fair = 52; new top bid = 51. Old ask at 51 is at-the-bid (locked, not crossed) — keep.
+    assert post[("yes_ask", 51)] == PREDICTION_SIZE_PER_LEVEL
+    # Old asks at 52, 53 are inside the new spread / overlap with the new ladder.
     assert post[("yes_ask", 52)] == PREDICTION_SIZE_PER_LEVEL
-    assert post[("yes_ask", 53)] == 2 * PREDICTION_SIZE_PER_LEVEL  # old + new
+    assert post[("yes_ask", 53)] == 2 * PREDICTION_SIZE_PER_LEVEL  # old layered with new
+
+
+def test_refresh_truly_crossing_ask_is_deleted(prediction_repo, prediction_service):
+    """An old ask STRICTLY below the new top bid is a true cross — delete it."""
+    pid = prediction_service.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID, creator_id=1, question="market mxc?", initial_fair=50,
+    )["prediction_id"]
+    # Manually inject a stale ask at price 49 (below where the new top bid will land).
+    prediction_repo.replace_levels(
+        pid,
+        levels=[
+            ("yes_ask", 49, 5),
+            ("yes_ask", 51, 5),
+            ("yes_bid", 47, 5),
+        ],
+    )
+    # Refresh with a new ladder around fair=52 -> new top bid = 51.
+    levels_around_52 = PredictionService._build_initial_levels(52)
+    prediction_repo.apply_refresh(pid, new_price=52, levels=levels_around_52, now_ts=10**9)
+    post = dict(post_helper(prediction_repo.get_book(pid)))
+    assert ("yes_ask", 49) not in post  # 49 < 51 → strict cross → deleted
+    assert post[("yes_ask", 51)] == PREDICTION_SIZE_PER_LEVEL  # 51 == 51 → locked, kept
 
 
 def test_set_fair_manual_changes_price_and_layers_ladder(
@@ -459,21 +475,42 @@ def test_set_fair_manual_rejects_resolved_market(prediction_service, player_repo
         prediction_service.set_fair_manual(prediction_id=pid, new_price=60)
 
 
-def test_refresh_deletes_crossing_levels_on_drift_down(
+def test_refresh_locked_bid_at_top_ask_is_kept(
     prediction_service, prediction_repo, monkeypatch,
 ):
-    """Symmetric: when fair drifts down, old bids that cross new top ask must go."""
+    """Symmetric: an old bid at exactly the new top ask is locked, not crossed."""
     pid = prediction_service.create_orderbook_prediction(
         guild_id=TEST_GUILD_ID, creator_id=1, question="market mxd?", initial_fair=50,
     )["prediction_id"]
-    monkeypatch.setattr(random, "randint", lambda lo, hi: -2)  # max drift down
+    monkeypatch.setattr(random, "randint", lambda lo, hi: -2)  # drift -2
     prediction_service.refresh_market(pid)
     post = dict(post_helper(prediction_repo.get_book(pid)))
-    # New fair = 48; new ladder asks 49,50,51, bids 47,46,45.
-    # Old bid at 49 would cross new top ask 49 → deleted.
-    assert ("yes_bid", 49) not in post
-    assert post[("yes_bid", 48)] == PREDICTION_SIZE_PER_LEVEL  # inside new spread, kept
-    assert post[("yes_bid", 47)] == 2 * PREDICTION_SIZE_PER_LEVEL  # old + new layer
+    # New fair = 48; new top ask = 49. Old bid at 49 is at-the-ask (locked, not crossed) — keep.
+    assert post[("yes_bid", 49)] == PREDICTION_SIZE_PER_LEVEL
+    assert post[("yes_bid", 48)] == PREDICTION_SIZE_PER_LEVEL
+    assert post[("yes_bid", 47)] == 2 * PREDICTION_SIZE_PER_LEVEL
+
+
+def test_set_fair_with_open_position_preserves_user_holdings(
+    prediction_service, prediction_repo, player_repository,
+):
+    """An admin set_fair must not touch user contracts or cost basis."""
+    _add_player(player_repository, 1, balance=1000)
+    pid = prediction_service.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID, creator_id=1, question="market sfp?", initial_fair=50,
+    )["prediction_id"]
+    prediction_service.buy_contracts(prediction_id=pid, discord_id=1, side="yes", contracts=3)
+    pos_before = prediction_repo.get_position(pid, 1)
+
+    prediction_service.set_fair_manual(prediction_id=pid, new_price=80)
+    pos_after = prediction_repo.get_position(pid, 1)
+
+    assert pos_after["yes_contracts"] == pos_before["yes_contracts"]
+    assert pos_after["yes_cost_basis_total"] == pos_before["yes_cost_basis_total"]
+    # Mark moves: user's position is now worth more on paper because fair jumped.
+    book = prediction_repo.get_book(pid)
+    new_top_bid = book["yes_bids"][0][0]
+    assert new_top_bid > 50  # mark moved up
 
 
 def test_get_markets_due_for_refresh(prediction_service, prediction_repo):
