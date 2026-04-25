@@ -726,7 +726,9 @@ class PredictionService:
         self, prediction_id: int, outcome: str, resolved_by: int | None = None
     ) -> dict:
         """Atomic settle: cancel levels, pay contract holders, mark resolved."""
-        return self.prediction_repo.settle_prediction_orderbook(prediction_id, outcome)
+        return self.prediction_repo.settle_prediction_orderbook(
+            prediction_id, outcome, resolved_by=resolved_by
+        )
 
     def cancel_orderbook(self, prediction_id: int) -> dict:
         """Cost-basis refund. Same admin gating enforced at the command layer."""

@@ -167,7 +167,7 @@ async def _prediction_digest_loop() -> None:
     logger.info("prediction digest loop started (hour_utc=%s)", PREDICTION_DIGEST_HOUR_UTC)
     while not bot.is_closed():
         try:
-            now = _dt.datetime.utcnow()
+            now = _dt.datetime.now(_dt.UTC)
             target = now.replace(
                 hour=PREDICTION_DIGEST_HOUR_UTC, minute=0, second=0, microsecond=0
             )
