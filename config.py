@@ -294,6 +294,7 @@ PREDICTION_REFRESH_SECONDS = _parse_int("PREDICTION_REFRESH_SECONDS", 86400)    
 PREDICTION_REFRESH_WAKE_SECONDS = _parse_int("PREDICTION_REFRESH_WAKE_SECONDS", 3600)  # how often the worker wakes to scan
 PREDICTION_DRIFT_MIN = _parse_int("PREDICTION_DRIFT_MIN", -2)                    # inclusive uniform integer drift
 PREDICTION_DRIFT_MAX = _parse_int("PREDICTION_DRIFT_MAX", 2)
+PREDICTION_FADE_TICKS = _parse_int("PREDICTION_FADE_TICKS", 5)                   # how far fair fades when one side fully consumed
 PREDICTION_PRICE_LOW = _parse_int("PREDICTION_PRICE_LOW", 4)                     # hard clamp on fair so ladder fits in {1..99}
 PREDICTION_PRICE_HIGH = _parse_int("PREDICTION_PRICE_HIGH", 96)
 PREDICTION_RECENT_TRADES_SHOWN = _parse_int("PREDICTION_RECENT_TRADES_SHOWN", 5)

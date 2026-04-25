@@ -15,6 +15,7 @@ from config import (
     PREDICTION_CONTRACT_VALUE,
     PREDICTION_DRIFT_MAX,
     PREDICTION_DRIFT_MIN,
+    PREDICTION_FADE_TICKS,
     PREDICTION_LEVELS_PER_SIDE,
     PREDICTION_PRICE_HIGH,
     PREDICTION_PRICE_LOW,
@@ -300,20 +301,91 @@ def test_refresh_uses_observed_mid_when_book_intact(prediction_service, predicti
     assert summary["new_price"] == 50
 
 
-def test_refresh_repopulates_ladder(prediction_service, prediction_repo, player_repository, monkeypatch):
+def test_refresh_layers_size_onto_existing_levels(
+    prediction_service, prediction_repo, player_repository, monkeypatch,
+):
+    """Untouched levels accumulate size on each refresh; consumed ones get reseeded."""
     _add_player(player_repository, 1)
     pid = prediction_service.create_orderbook_prediction(
         guild_id=TEST_GUILD_ID, creator_id=1, question="market m?", initial_fair=50,
     )["prediction_id"]
     prediction_service.buy_contracts(prediction_id=pid, discord_id=1, side="yes", contracts=5)
-    pre = prediction_repo.get_book(pid)
-    assert pre["yes_asks"][0][0] == 52  # top ask moved up after sweep
+    # After buy: top ask at 51 was fully consumed and deleted; 52, 53 still at size 5;
+    # all bids untouched at size 5.
 
     monkeypatch.setattr(random, "randint", lambda lo, hi: 0)
     prediction_service.refresh_market(pid)
-    post = prediction_repo.get_book(pid)
-    for _, size in post["yes_asks"] + post["yes_bids"]:
-        assert size == PREDICTION_SIZE_PER_LEVEL
+    post = dict(post_helper(prediction_repo.get_book(pid)))
+
+    # Layering: untouched levels doubled, consumed level reseeded to default
+    assert post[("yes_ask", 51)] == PREDICTION_SIZE_PER_LEVEL
+    assert post[("yes_ask", 52)] == 2 * PREDICTION_SIZE_PER_LEVEL
+    assert post[("yes_ask", 53)] == 2 * PREDICTION_SIZE_PER_LEVEL
+    for price in (49, 48, 47):
+        assert post[("yes_bid", price)] == 2 * PREDICTION_SIZE_PER_LEVEL
+
+
+def test_refresh_quiet_market_accumulates_depth(
+    prediction_service, prediction_repo, monkeypatch,
+):
+    """No trades + multiple refreshes at same fair = depth keeps growing."""
+    pid = prediction_service.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID, creator_id=1, question="market mm?", initial_fair=50,
+    )["prediction_id"]
+    monkeypatch.setattr(random, "randint", lambda lo, hi: 0)
+    for _ in range(3):
+        prediction_service.refresh_market(pid)
+    post = dict(post_helper(prediction_repo.get_book(pid)))
+    # Initial seeding (5) + 3 refreshes (5 each) = 20 at every default-ladder position
+    for price in (51, 52, 53):
+        assert post[("yes_ask", price)] == 4 * PREDICTION_SIZE_PER_LEVEL
+    for price in (49, 48, 47):
+        assert post[("yes_bid", price)] == 4 * PREDICTION_SIZE_PER_LEVEL
+
+
+def test_refresh_fades_up_when_asks_consumed(
+    prediction_service, prediction_repo, player_repository, monkeypatch,
+):
+    """Heavy YES buying drains all asks; refresh fades fair UP by FADE_TICKS."""
+    _add_player(player_repository, 1)
+    pid = prediction_service.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID, creator_id=1, question="market mf?", initial_fair=50,
+    )["prediction_id"]
+    # Drain all 15 asks
+    prediction_service.buy_contracts(prediction_id=pid, discord_id=1, side="yes", contracts=15)
+    book = prediction_repo.get_book(pid)
+    assert book["yes_asks"] == []
+
+    monkeypatch.setattr(random, "randint", lambda lo, hi: 0)
+    summary = prediction_service.refresh_market(pid)
+    # observed_mid = top_bid (49) + FADE_TICKS, drift 0
+    assert summary["new_price"] == 49 + PREDICTION_FADE_TICKS
+
+
+def test_refresh_fades_down_when_bids_consumed(
+    prediction_service, prediction_repo, player_repository, monkeypatch,
+):
+    """Heavy YES selling (or NO buying) drains all bids; refresh fades fair DOWN."""
+    _add_player(player_repository, 1)
+    pid = prediction_service.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID, creator_id=1, question="market mfd?", initial_fair=50,
+    )["prediction_id"]
+    prediction_service.buy_contracts(prediction_id=pid, discord_id=1, side="no", contracts=15)
+    book = prediction_repo.get_book(pid)
+    assert book["yes_bids"] == []
+
+    monkeypatch.setattr(random, "randint", lambda lo, hi: 0)
+    summary = prediction_service.refresh_market(pid)
+    # observed_mid = top_ask (51) - FADE_TICKS, drift 0
+    assert summary["new_price"] == 51 - PREDICTION_FADE_TICKS
+
+
+def post_helper(book):
+    """Flatten a book dict into ((side, price) -> size) entries for assertions."""
+    for price, size in book["yes_asks"]:
+        yield (("yes_ask", price), size)
+    for price, size in book["yes_bids"]:
+        yield (("yes_bid", price), size)
 
 
 def test_get_markets_due_for_refresh(prediction_service, prediction_repo):

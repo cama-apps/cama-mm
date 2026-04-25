@@ -10,6 +10,7 @@ from config import (
     PREDICTION_CONTRACT_VALUE,
     PREDICTION_DRIFT_MAX,
     PREDICTION_DRIFT_MIN,
+    PREDICTION_FADE_TICKS,
     PREDICTION_INITIAL_FAIR_DEFAULT,
     PREDICTION_LEVELS_PER_SIDE,
     PREDICTION_PRICE_HIGH,
@@ -692,6 +693,12 @@ class PredictionService:
         bids = book["yes_bids"]
         if asks and bids:
             observed_mid = (asks[0][0] + bids[0][0]) / 2
+        elif bids and not asks:
+            # Asks fully consumed → heavy YES buying. Fade UP from top bid.
+            observed_mid = bids[0][0] + PREDICTION_FADE_TICKS
+        elif asks and not bids:
+            # Bids fully consumed → heavy YES selling. Fade DOWN from top ask.
+            observed_mid = asks[0][0] - PREDICTION_FADE_TICKS
         else:
             observed_mid = old_price
 

@@ -1459,10 +1459,16 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
         levels: list[tuple[str, int, int]],
         now_ts: int,
     ) -> None:
-        """Atomically reset the ladder and stamp the new fair / refresh time.
+        """Layer fresh size onto the ladder and stamp the new fair / refresh time.
+
+        For each (side, price) in ``levels``: if a matching row already exists,
+        ADD the size to its remaining (this is the 'layering' behavior — quiet
+        markets accumulate depth at unchanged price levels). If no match, insert
+        a fresh level. Old levels at orphan positions (positions not in the new
+        ladder) are left untouched, so the book widens over time as fair drifts.
 
         Re-checks status inside the write lock so a concurrent /predict resolve
-        or /predict cancel can't get clobbered by a stale refresh.
+        or /predict cancel can't be clobbered by a stale refresh.
         """
         with self.atomic_transaction() as conn:
             cursor = conn.cursor()
@@ -1473,21 +1479,37 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
             row = cursor.fetchone()
             if not row or row["status"] != "open":
                 return  # market was resolved/cancelled while we were processing
-            cursor.execute(
-                "DELETE FROM prediction_levels WHERE prediction_id = ?",
-                (prediction_id,),
-            )
+
             for side, price, size in levels:
                 if side not in self.VALID_BOOK_SIDES:
                     raise ValueError(f"Invalid book side: {side}")
                 cursor.execute(
                     """
-                    INSERT INTO prediction_levels
-                        (prediction_id, side, price, remaining_size, posted_at)
-                    VALUES (?, ?, ?, ?, ?)
+                    SELECT level_id, remaining_size FROM prediction_levels
+                    WHERE prediction_id = ? AND side = ? AND price = ?
                     """,
-                    (prediction_id, side, price, size, now_ts),
+                    (prediction_id, side, price),
                 )
+                existing = cursor.fetchone()
+                if existing:
+                    cursor.execute(
+                        """
+                        UPDATE prediction_levels
+                        SET remaining_size = remaining_size + ?, posted_at = ?
+                        WHERE level_id = ?
+                        """,
+                        (size, now_ts, existing["level_id"]),
+                    )
+                else:
+                    cursor.execute(
+                        """
+                        INSERT INTO prediction_levels
+                            (prediction_id, side, price, remaining_size, posted_at)
+                        VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (prediction_id, side, price, size, now_ts),
+                    )
+
             cursor.execute(
                 "UPDATE predictions SET current_price = ?, last_refresh_at = ? WHERE prediction_id = ?",
                 (new_price, now_ts, prediction_id),
