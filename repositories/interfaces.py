@@ -724,6 +724,122 @@ class IPredictionRepository(ABC):
         """Refund all bets for a cancelled prediction. Returns refund summary."""
         ...
 
+    # --- Order-book mechanic (new in feat/predict-orderbook) ---
+
+    @abstractmethod
+    def create_orderbook_prediction(
+        self,
+        guild_id: int,
+        creator_id: int,
+        question: str,
+        initial_fair: int,
+        channel_id: int | None = None,
+    ) -> int:
+        """Create a prediction with the order-book schema (current_price, no closes_at). Returns prediction_id."""
+        ...
+
+    @abstractmethod
+    def replace_levels(
+        self, prediction_id: int, levels: list[tuple[str, int, int]]
+    ) -> None:
+        """Atomically cancel all existing levels for a market and post a fresh ladder.
+
+        ``levels`` is a list of ``(side, price, size)`` tuples where side is
+        ``'yes_ask'`` or ``'yes_bid'``.
+        """
+        ...
+
+    @abstractmethod
+    def get_book(self, prediction_id: int) -> dict:
+        """Return current ladder + price.
+
+        Shape:
+            {
+                "current_price": int | None,
+                "yes_asks": [(price, size), ...],   # ascending by price
+                "yes_bids": [(price, size), ...],   # descending by price
+            }
+        """
+        ...
+
+    @abstractmethod
+    def buy_contracts_atomic(
+        self, prediction_id: int, discord_id: int, side: str, contracts: int
+    ) -> dict:
+        """Atomically buy YES (side='yes') or NO (side='no') contracts.
+
+        Sweeps the relevant book side starting at top-of-book, walks deeper if
+        needed. Rejects atomically (no partial fills) if total available depth
+        is insufficient or user balance < total cost.
+        """
+        ...
+
+    @abstractmethod
+    def sell_contracts_atomic(
+        self, prediction_id: int, discord_id: int, side: str, contracts: int
+    ) -> dict:
+        """Atomically sell YES or NO contracts back to the LP at the current bid side."""
+        ...
+
+    @abstractmethod
+    def get_position(self, prediction_id: int, discord_id: int) -> dict | None:
+        """Return ``{yes_contracts, yes_cost_basis_total, no_contracts, no_cost_basis_total}`` or None."""
+        ...
+
+    @abstractmethod
+    def get_user_open_positions(
+        self, discord_id: int, guild_id: int | None = None
+    ) -> list[dict]:
+        """Return user's open positions across all open markets in a guild (for /predict mine)."""
+        ...
+
+    @abstractmethod
+    def get_recent_trades(self, prediction_id: int, limit: int = 5) -> list[dict]:
+        """Return the most recent ``limit`` trades for the embed's mini tape."""
+        ...
+
+    @abstractmethod
+    def get_trade_summary_since(self, prediction_id: int, since_ts: int) -> dict:
+        """Aggregate trades for the daily-summary message: volume, net flow, biggest."""
+        ...
+
+    @abstractmethod
+    def get_markets_due_for_refresh(
+        self, refresh_interval_seconds: int, now_ts: int
+    ) -> list[dict]:
+        """Return open markets whose ``last_refresh_at`` is older than the cutoff."""
+        ...
+
+    @abstractmethod
+    def apply_refresh(
+        self,
+        prediction_id: int,
+        new_price: int,
+        levels: list[tuple[str, int, int]],
+        now_ts: int,
+    ) -> None:
+        """Atomically: cancel old levels, post new ones, set current_price + last_refresh_at."""
+        ...
+
+    @abstractmethod
+    def settle_prediction_orderbook(self, prediction_id: int, outcome: str) -> dict:
+        """Settle by paying ``contracts × CONTRACT_VALUE`` per winning holder.
+
+        Cancels outstanding levels, marks status='resolved'. Returns winners /
+        losers summary and final lp_pnl.
+        """
+        ...
+
+    @abstractmethod
+    def cancel_orderbook_prediction(self, prediction_id: int) -> dict:
+        """Refund each holder's cost basis (yes + no totals); zero out positions."""
+        ...
+
+    @abstractmethod
+    def get_open_orderbook_predictions(self, guild_id: int) -> list[dict]:
+        """List open markets enriched with current_price, top bid/ask, today's volume."""
+        ...
+
 
 class IRecalibrationRepository(ABC):
     """Repository for recalibration state tracking."""

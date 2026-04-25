@@ -277,6 +277,8 @@ class SchemaManager:
             ("rekey_dig_boss_echoes_by_boss_id", self._migration_rekey_dig_boss_echoes_by_boss_id),
             ("add_stinger_curse_to_tunnels", self._migration_add_stinger_curse_to_tunnels),
             ("clear_active_boss_ids_for_pool_reroll", self._migration_clear_active_boss_ids_for_pool_reroll),
+            # Predictions: continuous-quote order-book rework
+            ("predictions_orderbook_v1", self._migration_predictions_orderbook),
         ]
 
     # --- Migrations ---
@@ -2357,3 +2359,79 @@ class SchemaManager:
 
         cursor.execute("DROP TABLE lobby_state")
         cursor.execute("ALTER TABLE lobby_state_new RENAME TO lobby_state")
+
+    def _migration_predictions_orderbook(self, cursor) -> None:
+        """Add columns + tables for the continuous-quote order-book prediction rework.
+
+        - Adds current_price / initial_fair / last_refresh_at / lp_pnl to ``predictions``
+        - Creates ``prediction_levels`` (the LP's posted ladder, per market)
+        - Creates ``prediction_positions`` (per-user YES/NO holdings + cost basis)
+        - Creates ``prediction_trades`` (every fill, for tape display + stats)
+
+        The legacy ``prediction_bets`` table and ``resolution_votes`` column are left
+        in place but unused by the new code.
+        """
+        # New columns on predictions
+        self._add_column_if_not_exists(cursor, "predictions", "current_price", "INTEGER")
+        self._add_column_if_not_exists(cursor, "predictions", "initial_fair", "INTEGER")
+        self._add_column_if_not_exists(cursor, "predictions", "last_refresh_at", "INTEGER")
+        self._add_column_if_not_exists(cursor, "predictions", "lp_pnl", "INTEGER DEFAULT 0")
+
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS prediction_levels (
+                level_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                prediction_id INTEGER NOT NULL,
+                side TEXT NOT NULL,
+                price INTEGER NOT NULL,
+                remaining_size INTEGER NOT NULL,
+                posted_at INTEGER NOT NULL,
+                FOREIGN KEY (prediction_id) REFERENCES predictions(prediction_id)
+            )
+            """
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_pred_levels_pred_side_price "
+            "ON prediction_levels(prediction_id, side, price)"
+        )
+
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS prediction_positions (
+                prediction_id INTEGER NOT NULL,
+                discord_id INTEGER NOT NULL,
+                yes_contracts INTEGER NOT NULL DEFAULT 0,
+                yes_cost_basis_total INTEGER NOT NULL DEFAULT 0,
+                no_contracts INTEGER NOT NULL DEFAULT 0,
+                no_cost_basis_total INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (prediction_id, discord_id),
+                FOREIGN KEY (prediction_id) REFERENCES predictions(prediction_id),
+                FOREIGN KEY (discord_id) REFERENCES players(discord_id)
+            )
+            """
+        )
+
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS prediction_trades (
+                trade_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                prediction_id INTEGER NOT NULL,
+                discord_id INTEGER NOT NULL,
+                action TEXT NOT NULL,
+                contracts INTEGER NOT NULL,
+                jopacoins INTEGER NOT NULL,
+                vwap_x100 INTEGER NOT NULL,
+                trade_time INTEGER NOT NULL,
+                FOREIGN KEY (prediction_id) REFERENCES predictions(prediction_id),
+                FOREIGN KEY (discord_id) REFERENCES players(discord_id)
+            )
+            """
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_pred_trades_pred "
+            "ON prediction_trades(prediction_id)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_pred_trades_user "
+            "ON prediction_trades(discord_id)"
+        )

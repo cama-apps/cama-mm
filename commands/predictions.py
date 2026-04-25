@@ -1,235 +1,353 @@
 """
-Discord commands for prediction markets.
+Discord commands for prediction markets (continuous-quote order-book mechanic).
+
+Each market has a `current_price` (integer 1..99 = % implied probability), and
+the bot maintains a small ladder of bids and asks around it. Trades sweep the
+relevant book side and lock in at level prices. A periodic refresh worker
+nudges fair toward the observed mid + small uniform drift, then reposts the
+ladder. Settlement pays each winning contract `PREDICTION_CONTRACT_VALUE` jopa.
 """
+
+from __future__ import annotations
 
 import asyncio
 import functools
 import logging
 import re
-import time
+from typing import Any
 
 import discord
 from discord import app_commands
 from discord.ext import commands
 
+from commands.checks import require_gamba_channel
+from config import (
+    PREDICTION_CONTRACT_VALUE,
+    PREDICTION_INITIAL_FAIR_DEFAULT,
+    PREDICTION_PRICE_HIGH,
+    PREDICTION_PRICE_LOW,
+    PREDICTION_RECENT_TRADES_SHOWN,
+)
 from services.permissions import has_admin_permission
 from services.prediction_service import PredictionService
 from utils.formatting import JOPACOIN_EMOTE
 from utils.interaction_safety import safe_defer, safe_followup
-from utils.neon_helpers import get_neon_service
 
 logger = logging.getLogger("cama_bot.commands.predictions")
 
+MARKET_TITLE_PREFIX = "📈 Market #"
+MARKET_TITLE_RE = re.compile(rf"{re.escape(MARKET_TITLE_PREFIX)}(\d+)")
 
-def parse_duration(duration_str: str) -> int:
+
+# --------------------------------------------------------------------------- #
+# Embed rendering
+# --------------------------------------------------------------------------- #
+
+def _format_ladder(book: dict) -> str:
+    """Render the YES order book as a monospaced code block.
+
+    NO is implicit (price is mirrored: NO_ask = 100 - YES_bid).
     """
-    Parse a duration string like "1h", "3d", "30m", "1mo" into seconds from now.
+    asks = book.get("yes_asks", [])
+    bids = book.get("yes_bids", [])
+    current = book.get("current_price")
 
-    Returns Unix timestamp when the duration ends.
-    """
-    duration_str = duration_str.strip().lower()
+    lines = ["```", "ASK"]
+    if asks:
+        for price, size in reversed(asks):  # display deepest -> top
+            lines.append(f"  {price:>3}  x {size}")
+    else:
+        lines.append("  (empty - refreshes daily)")
 
-    # Match patterns like "1h", "3d", "30m", "2w", "1mo"
-    match = re.match(r"^(\d+)\s*(mo|[mhdw])$", duration_str)
-    if not match:
-        raise ValueError(
-            "Invalid duration format. Use: 30m, 1h, 3d, 1w, 1mo (minutes, hours, days, weeks, months)"
-        )
+    mid_label = f"---- mid {current} ----" if current is not None else "----"
+    lines.append(f"  {mid_label}")
 
-    value = int(match.group(1))
-    unit = match.group(2)
-
-    multipliers = {
-        "m": 60,  # minutes
-        "h": 3600,  # hours
-        "d": 86400,  # days
-        "w": 604800,  # weeks
-        "mo": 2592000,  # months (30 days)
-    }
-
-    seconds = value * multipliers[unit]
-
-    # Minimum 1 minute, maximum 6 months
-    if seconds < 60:
-        raise ValueError("Minimum duration is 1 minute.")
-    if seconds > 180 * 86400:
-        raise ValueError("Maximum duration is 6 months.")
-
-    return int(time.time()) + seconds
+    if bids:
+        for price, size in bids:  # already sorted descending
+            lines.append(f"  {price:>3}  x {size}")
+    else:
+        lines.append("  (empty - refreshes daily)")
+    lines.append("BID")
+    lines.append("```")
+    return "\n".join(lines)
 
 
-class PredictionBetModal(discord.ui.Modal):
-    """Modal for entering bet amount on a prediction."""
+def _format_recent_trades(trades: list[dict], cog: PredictionCommands) -> str:
+    """One-line per recent trade. Uses display name when available, falls back to id."""
+    if not trades:
+        return "_no trades yet_"
 
-    amount = discord.ui.TextInput(
-        label="Bet Amount (numbers only)",
-        placeholder="e.g., 10",
+    lines = []
+    for t in trades[:PREDICTION_RECENT_TRADES_SHOWN]:
+        action = t["action"]
+        side_word = "YES" if action.endswith("yes") else "NO"
+        verb = "bought" if action.startswith("buy") else "sold"
+        avg_price = (int(t["vwap_x100"]) + 50) // 100  # rounded display
+        name = cog._display_name_for(int(t["discord_id"]))
+        lines.append(f"  {name} {verb} {t['contracts']} {side_word} @ {avg_price}")
+    return "\n".join(lines)
+
+
+def _format_position_card(pos: dict, book: dict) -> str:
+    """Compact position card for the embed (caller's own holdings)."""
+    yes_c = int(pos.get("yes_contracts", 0))
+    no_c = int(pos.get("no_contracts", 0))
+    if yes_c == 0 and no_c == 0:
+        return ""
+    parts = []
+    if yes_c > 0:
+        avg = int(pos["yes_cost_basis_total"]) / yes_c
+        mark = PredictionService.position_mark(book, "yes")
+        upnl = ((mark - avg) * yes_c) if mark is not None else 0
+        parts.append(f"YES {yes_c} @ avg {avg:.1f} (mark {mark if mark is not None else '-'}, uPnL {int(upnl):+d})")
+    if no_c > 0:
+        avg = int(pos["no_cost_basis_total"]) / no_c
+        mark = PredictionService.position_mark(book, "no")
+        upnl = ((mark - avg) * no_c) if mark is not None else 0
+        parts.append(f"NO  {no_c} @ avg {avg:.1f} (mark {mark if mark is not None else '-'}, uPnL {int(upnl):+d})")
+    return "Your position: " + " | ".join(parts)
+
+
+# --------------------------------------------------------------------------- #
+# Modals
+# --------------------------------------------------------------------------- #
+
+class BuyContractsModal(discord.ui.Modal):
+    contracts = discord.ui.TextInput(
+        label="Contracts to buy (numbers only)",
+        placeholder="e.g. 5",
         min_length=1,
-        max_length=10,
+        max_length=6,
         required=True,
     )
 
     def __init__(
         self,
-        prediction_service: PredictionService,
+        cog: PredictionCommands,
         prediction_id: int,
-        position: str,
+        side: str,
         question: str,
-        current_odds: float,
+        max_available: int,
+        unit_price: int,
         balance: int,
-        cog: "PredictionCommands",
     ):
-        super().__init__(title=f"Bet {position.upper()} ({balance} available)")
-        self.prediction_service = prediction_service
-        self.prediction_id = prediction_id
-        self.position = position
-        self.question = question
-        self.current_odds = current_odds
-        self.balance = balance
+        side_label = side.upper()
+        super().__init__(title=f"Buy {side_label} ({balance} jopa)")
         self.cog = cog
-
-        # Update placeholder with hint
-        self.amount.placeholder = f"Enter 1-{balance}"
+        self.prediction_id = prediction_id
+        self.side = side  # 'yes' or 'no'
+        self.contracts.placeholder = (
+            f"max {max_available} avail @ price {unit_price}"
+        )
+        # keep question for context if we ever need it in followups
+        self._question = question
 
     async def on_submit(self, interaction: discord.Interaction):
         try:
-            amount = int(self.amount.value)
-        except ValueError:
+            qty = int(self.contracts.value)
+        except (TypeError, ValueError):
             await interaction.response.send_message(
-                "Invalid amount. Please enter a number.", ephemeral=True
+                "Invalid number of contracts.", ephemeral=True
+            )
+            return
+        if qty <= 0:
+            await interaction.response.send_message(
+                "Contracts must be positive.", ephemeral=True
             )
             return
 
         try:
-            # Acknowledge the modal first (Discord requires response within 3s)
-            await interaction.response.defer()
-
+            await interaction.response.defer(ephemeral=True)
             result = await asyncio.to_thread(
                 functools.partial(
-                    self.prediction_service.place_bet,
+                    self.cog.prediction_service.buy_contracts,
                     prediction_id=self.prediction_id,
                     discord_id=interaction.user.id,
-                    position=self.position,
-                    amount=amount,
+                    side=self.side,
+                    contracts=qty,
                 )
             )
-
-            # Get prediction for thread posting
-            pred = await asyncio.to_thread(
-                self.prediction_service.get_prediction, self.prediction_id
-            )
-            new_odds = result["odds"][self.position]
-
-            # Post public activity message in thread
-            if pred and pred.get("thread_id"):
-                await self.cog.post_bet_activity(
-                    thread_id=pred["thread_id"],
-                    user=interaction.user,
-                    amount=amount,
-                    position=self.position,
-                    new_odds=new_odds,
-                    is_addition=result.get("bet_count", 1) > 1,
-                )
-
-            # Update the embed
-            if pred and pred.get("embed_message_id") and pred.get("thread_id"):
-                await self.cog.update_prediction_embed(
-                    thread_id=pred["thread_id"],
-                    message_id=pred["embed_message_id"],
-                    prediction_id=self.prediction_id,
-                )
-
         except ValueError as e:
             await interaction.followup.send(f"❌ {e}", ephemeral=True)
+            return
         except Exception as e:
-            logger.exception(f"Error placing prediction bet: {e}")
+            logger.exception(f"Error buying contracts: {e}")
             await interaction.followup.send(
-                "An error occurred while placing your bet.", ephemeral=True
+                "An error occurred placing your order.", ephemeral=True
             )
+            return
+
+        avg_price = (int(result["vwap_x100"]) + 50) // 100
+        await interaction.followup.send(
+            f"✅ Bought **{result['contracts']} {self.side.upper()}** @ avg "
+            f"price **{avg_price}** — paid **{result['total_cost']}** {JOPACOIN_EMOTE}. "
+            f"New balance: **{result['new_balance']}**.",
+            ephemeral=True,
+        )
+
+        await self.cog.refresh_market_embed(self.prediction_id)
 
 
-class PersistentPredictionView(discord.ui.View):
-    """
-    Persistent view that handles all prediction button interactions.
+class SellContractsModal(discord.ui.Modal):
+    contracts = discord.ui.TextInput(
+        label="Contracts to sell (numbers only)",
+        placeholder="e.g. 5",
+        min_length=1,
+        max_length=6,
+        required=True,
+    )
 
-    Registered once on bot startup and handles buttons by parsing custom_id.
-    """
+    def __init__(
+        self,
+        cog: PredictionCommands,
+        prediction_id: int,
+        side: str,
+        held: int,
+        unit_price: int | None,
+    ):
+        super().__init__(title=f"Sell {side.upper()} ({held} held)")
+        self.cog = cog
+        self.prediction_id = prediction_id
+        self.side = side
+        self.contracts.placeholder = (
+            f"max {held}, top bid price {unit_price}"
+            if unit_price is not None
+            else f"max {held}"
+        )
 
-    def __init__(self, cog: "PredictionCommands"):
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            qty = int(self.contracts.value)
+        except (TypeError, ValueError):
+            await interaction.response.send_message(
+                "Invalid number of contracts.", ephemeral=True
+            )
+            return
+        if qty <= 0:
+            await interaction.response.send_message(
+                "Contracts must be positive.", ephemeral=True
+            )
+            return
+
+        try:
+            await interaction.response.defer(ephemeral=True)
+            result = await asyncio.to_thread(
+                functools.partial(
+                    self.cog.prediction_service.sell_contracts,
+                    prediction_id=self.prediction_id,
+                    discord_id=interaction.user.id,
+                    side=self.side,
+                    contracts=qty,
+                )
+            )
+        except ValueError as e:
+            await interaction.followup.send(f"❌ {e}", ephemeral=True)
+            return
+        except Exception as e:
+            logger.exception(f"Error selling contracts: {e}")
+            await interaction.followup.send(
+                "An error occurred selling your contracts.", ephemeral=True
+            )
+            return
+
+        avg_price = (int(result["vwap_x100"]) + 50) // 100
+        await interaction.followup.send(
+            f"✅ Sold **{result['contracts']} {self.side.upper()}** @ avg "
+            f"price **{avg_price}** — received **{result['total_proceeds']}** "
+            f"{JOPACOIN_EMOTE}. New balance: **{result['new_balance']}**.",
+            ephemeral=True,
+        )
+
+        await self.cog.refresh_market_embed(self.prediction_id)
+
+
+# --------------------------------------------------------------------------- #
+# Persistent buy/buy/position view
+# --------------------------------------------------------------------------- #
+
+class PersistentMarketView(discord.ui.View):
+    """Buttons: BUY YES, BUY NO, MY POSITION. SELL lives inside MY POSITION."""
+
+    def __init__(self, cog: PredictionCommands):
         super().__init__(timeout=None)
         self.cog = cog
 
     @discord.ui.button(
-        label="Bet YES",
-        emoji="✅",
+        label="BUY YES",
+        emoji="🟢",
         style=discord.ButtonStyle.success,
-        custom_id="prediction:bet:yes",
+        custom_id="predict:buy:yes",
     )
-    async def bet_yes(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._handle_bet(interaction, "yes")
+    async def buy_yes(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._open_buy_modal(interaction, "yes")
 
     @discord.ui.button(
-        label="Bet NO",
-        emoji="❌",
+        label="BUY NO",
+        emoji="🔴",
         style=discord.ButtonStyle.danger,
-        custom_id="prediction:bet:no",
+        custom_id="predict:buy:no",
     )
-    async def bet_no(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._handle_bet(interaction, "no")
+    async def buy_no(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._open_buy_modal(interaction, "no")
 
     @discord.ui.button(
-        label="My Position",
-        emoji="👤",
+        label="MY POSITION",
+        emoji="📊",
         style=discord.ButtonStyle.secondary,
-        custom_id="prediction:position",
+        custom_id="predict:mypos",
     )
     async def my_position(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._handle_position(interaction)
+        await self._open_position_card(interaction)
 
-    def _get_prediction_id_from_message(self, message: discord.Message) -> int | None:
-        """Extract prediction ID from the embed in the message."""
+    @staticmethod
+    def _extract_prediction_id(message: discord.Message) -> int | None:
         if not message.embeds:
             return None
-        embed = message.embeds[0]
-        if embed.title and "PREDICTION #" in embed.title:
-            # Extract ID from title like "🔮 PREDICTION #42"
-            import re
-            match = re.search(r"#(\d+)", embed.title)
-            if match:
-                return int(match.group(1))
-        return None
+        title = message.embeds[0].title or ""
+        m = MARKET_TITLE_RE.search(title)
+        return int(m.group(1)) if m else None
 
-    async def _handle_bet(self, interaction: discord.Interaction, position: str):
-        """Handle bet button press."""
-        prediction_id = self._get_prediction_id_from_message(interaction.message)
-        if not prediction_id:
+    async def _open_buy_modal(self, interaction: discord.Interaction, side: str):
+        if not await require_gamba_channel(interaction):
+            return
+
+        prediction_id = self._extract_prediction_id(interaction.message)
+        if prediction_id is None:
             await interaction.response.send_message(
-                "Could not find prediction ID.", ephemeral=True
+                "Could not identify market.", ephemeral=True
             )
             return
 
-        pred = await asyncio.to_thread(
-            self.cog.prediction_service.get_prediction, prediction_id
+        view = await asyncio.to_thread(
+            self.cog.prediction_service.get_market_view, prediction_id, interaction.user.id
         )
-        if not pred:
+        if not view or view["status"] != "open":
             await interaction.response.send_message(
-                "Prediction not found.", ephemeral=True
+                "Market is not open for trading.", ephemeral=True
             )
             return
 
-        if pred["status"] != "open":
-            await interaction.response.send_message(
-                "Betting is closed for this prediction.", ephemeral=True
-            )
-            return
-
-        # Check if close time has passed
-        now = int(time.time())
-        if now >= pred["closes_at"]:
-            await interaction.response.send_message(
-                "Betting period has ended.", ephemeral=True
-            )
-            return
+        book = view["book"]
+        if side == "yes":
+            asks = book["yes_asks"]
+            if not asks:
+                await interaction.response.send_message(
+                    "No asks available right now (book consumed). Wait for next refresh.",
+                    ephemeral=True,
+                )
+                return
+            unit_price = asks[0][0]
+            max_avail = sum(size for _, size in asks)
+        else:
+            bids = book["yes_bids"]
+            if not bids:
+                await interaction.response.send_message(
+                    "No NO asks available right now (book consumed). Wait for next refresh.",
+                    ephemeral=True,
+                )
+                return
+            unit_price = 100 - bids[0][0]  # NO ask = 100 - top YES bid
+            max_avail = sum(size for _, size in bids)
 
         guild_id = interaction.guild.id if interaction.guild else None
         player = await asyncio.to_thread(
@@ -237,41 +355,37 @@ class PersistentPredictionView(discord.ui.View):
         )
         if not player:
             await interaction.response.send_message(
-                "You must be registered to bet. Use `/player register` first.",
+                "You must be registered to trade. Use `/player register` first.",
                 ephemeral=True,
             )
             return
 
-        balance = player.jopacoin_balance or 0
+        balance = int(player.jopacoin_balance or 0)
         if balance <= 0:
             await interaction.response.send_message(
-                "You have no jopacoins to bet. Win some matches first!",
-                ephemeral=True,
+                "You have no jopacoins to trade with.", ephemeral=True
             )
             return
 
-        odds_info = await asyncio.to_thread(
-            self.cog.prediction_service.get_odds, prediction_id
-        )
-        current_odds = odds_info["odds"].get(position, 0)
-
-        modal = PredictionBetModal(
-            prediction_service=self.cog.prediction_service,
-            prediction_id=prediction_id,
-            position=position,
-            question=pred["question"],
-            current_odds=current_odds,
-            balance=balance,
+        modal = BuyContractsModal(
             cog=self.cog,
+            prediction_id=prediction_id,
+            side=side,
+            question=view.get("question", ""),
+            max_available=max_avail,
+            unit_price=unit_price,
+            balance=balance,
         )
         await interaction.response.send_modal(modal)
 
-    async def _handle_position(self, interaction: discord.Interaction):
-        """Handle position button press."""
-        prediction_id = self._get_prediction_id_from_message(interaction.message)
-        if not prediction_id:
+    async def _open_position_card(self, interaction: discord.Interaction):
+        if not await require_gamba_channel(interaction):
+            return
+
+        prediction_id = self._extract_prediction_id(interaction.message)
+        if prediction_id is None:
             await interaction.response.send_message(
-                "Could not find prediction ID.", ephemeral=True
+                "Could not identify market.", ephemeral=True
             )
             return
 
@@ -279,32 +393,72 @@ class PersistentPredictionView(discord.ui.View):
             self.cog.prediction_service.get_user_position,
             prediction_id, interaction.user.id,
         )
-
-        if not position:
+        if not position or (
+            int(position["yes_contracts"]) == 0 and int(position["no_contracts"]) == 0
+        ):
             await interaction.response.send_message(
-                "You haven't bet on this prediction yet.", ephemeral=True
+                "You don't hold any contracts in this market.", ephemeral=True
             )
             return
 
-        pred = await asyncio.to_thread(
-            self.cog.prediction_service.get_prediction, prediction_id
-        )
-        odds = pred.get("odds", {}) if pred else {}
-        current_odds = odds.get(position["position"], 0)
-        potential_win = int(position["total_amount"] * current_odds)
-
-        await interaction.response.send_message(
-            f"**Your Position:**\n"
-            f"Side: **{position['position'].upper()}**\n"
-            f"Amount: **{position['total_amount']}** {JOPACOIN_EMOTE}\n"
-            f"Current odds: **{current_odds:.2f}x**\n"
-            f"Potential win: **{potential_win}** {JOPACOIN_EMOTE}",
-            ephemeral=True,
+        book = await asyncio.to_thread(
+            self.cog.prediction_service.prediction_repo.get_book, prediction_id
         )
 
+        embed = self.cog._build_position_embed(prediction_id, position, book)
+        sell_view = PositionEphemeralView(self.cog, prediction_id, position, book)
+        await interaction.response.send_message(embed=embed, view=sell_view, ephemeral=True)
+
+
+class PositionEphemeralView(discord.ui.View):
+    """Ephemeral view shown when the user clicks MY POSITION; offers SELL buttons."""
+
+    def __init__(self, cog: PredictionCommands, prediction_id: int, position: dict, book: dict):
+        super().__init__(timeout=120)
+        self.cog = cog
+        self.prediction_id = prediction_id
+        yes_c = int(position.get("yes_contracts", 0))
+        no_c = int(position.get("no_contracts", 0))
+        if yes_c > 0:
+            self.add_item(_SellButton(cog, prediction_id, "yes", yes_c, book))
+        if no_c > 0:
+            self.add_item(_SellButton(cog, prediction_id, "no", no_c, book))
+
+
+class _SellButton(discord.ui.Button):
+    def __init__(self, cog: PredictionCommands, prediction_id: int, side: str, held: int, book: dict):
+        if side == "yes":
+            unit_price = book["yes_bids"][0][0] if book["yes_bids"] else None
+            label = f"SELL YES ({held})"
+            style = discord.ButtonStyle.success
+        else:
+            unit_price = (100 - book["yes_asks"][0][0]) if book["yes_asks"] else None
+            label = f"SELL NO ({held})"
+            style = discord.ButtonStyle.danger
+        super().__init__(label=label, style=style)
+        self.cog = cog
+        self.prediction_id = prediction_id
+        self.side = side
+        self.held = held
+        self.unit_price = unit_price
+
+    async def callback(self, interaction: discord.Interaction):
+        modal = SellContractsModal(
+            cog=self.cog,
+            prediction_id=self.prediction_id,
+            side=self.side,
+            held=self.held,
+            unit_price=self.unit_price,
+        )
+        await interaction.response.send_modal(modal)
+
+
+# --------------------------------------------------------------------------- #
+# The cog
+# --------------------------------------------------------------------------- #
 
 class PredictionCommands(commands.Cog):
-    """Commands for prediction markets."""
+    """Slash commands for the order-book prediction market."""
 
     predict = app_commands.Group(name="predict", description="Prediction markets")
 
@@ -312,205 +466,208 @@ class PredictionCommands(commands.Cog):
         self,
         bot: commands.Bot,
         prediction_service: PredictionService,
-        player_service,
+        player_service: Any,
     ):
         self.bot = bot
         self.prediction_service = prediction_service
         self.player_service = player_service
+        self._name_cache: dict[int, str] = {}
 
-    async def _create_prediction_embed(self, pred: dict) -> discord.Embed:
-        """Create the embed for a prediction."""
-        status_emoji = {
-            "open": "🔮",
-            "locked": "🔒",
-            "resolved": "✅" if pred.get("outcome") == "yes" else "❌",
-            "cancelled": "🚫",
-        }
+    # -- name caching helper for trade tape ---
 
-        emoji = status_emoji.get(pred["status"], "🔮")
-        title = f"{emoji} PREDICTION #{pred['prediction_id']}"
+    def _display_name_for(self, discord_id: int) -> str:
+        name = self._name_cache.get(discord_id)
+        if name:
+            return name
+        user = self.bot.get_user(discord_id)
+        if user:
+            self._name_cache[discord_id] = user.display_name
+            return user.display_name
+        return f"<@{discord_id}>"
 
-        # Color based on status
-        colors = {
-            "open": 0x3498DB,  # Blue
-            "locked": 0xF39C12,  # Orange
-            "resolved": 0x2ECC71 if pred.get("outcome") == "yes" else 0xE74C3C,
-            "cancelled": 0x95A5A6,  # Gray
-        }
-        color = colors.get(pred["status"], 0x3498DB)
+    # -- embed builders ---
+
+    def _build_market_embed(self, view: dict) -> discord.Embed:
+        question = view.get("question", "")
+        price = view.get("current_price")
+        vol = view.get("volume_since_refresh", 0)
+        book = view.get("book", {"yes_asks": [], "yes_bids": [], "current_price": price})
+        recent = view.get("recent_trades", [])
+        position = view.get("viewer_position")
 
         embed = discord.Embed(
-            title=title,
-            description=f'"{pred["question"]}"',
-            color=color,
+            title=f"{MARKET_TITLE_PREFIX}{view['prediction_id']}",
+            description=f'"{question}"',
+            color=0x3498DB,
         )
-
-        # Creator and timing
         embed.add_field(
-            name="Created by",
-            value=f"<@{pred['creator_id']}>",
-            inline=True,
-        )
-
-        if pred["status"] == "open":
-            embed.add_field(
-                name="Closes",
-                value=f"<t:{pred['closes_at']}:R>",
-                inline=True,
-            )
-        elif pred["status"] == "resolved":
-            outcome = pred.get("outcome", "").upper()
-            embed.add_field(
-                name="Outcome",
-                value=f"**{outcome}**",
-                inline=True,
-            )
-
-        # Odds section
-        yes_total = pred.get("yes_total", 0)
-        no_total = pred.get("no_total", 0)
-        total_pool = yes_total + no_total
-        odds = pred.get("odds", {"yes": 0, "no": 0})
-
-        odds_text = ""
-        if total_pool > 0:
-            yes_odds = odds.get("yes", 0)
-            no_odds = odds.get("no", 0)
-            yes_pct = round(100 * yes_total / total_pool)
-            no_pct = 100 - yes_pct
-            odds_text = (
-                f"✅ **YES**: {yes_pct}% ({yes_odds:.2f}x) — "
-                f"{yes_total} {JOPACOIN_EMOTE}, {pred.get('yes_count', 0)} bettors\n"
-                f"❌ **NO**: {no_pct}% ({no_odds:.2f}x) — "
-                f"{no_total} {JOPACOIN_EMOTE}, {pred.get('no_count', 0)} bettors"
-            )
-        else:
-            odds_text = "No bets yet - be the first!"
-
-        embed.add_field(
-            name="📊 Current Odds",
-            value=odds_text,
+            name="Current",
+            value=(
+                f"price **{price if price is not None else '?'}**\n"
+                f"vol since refresh: **{vol}**"
+            ),
             inline=False,
         )
-
+        embed.add_field(name="Book", value=_format_ladder(book), inline=False)
         embed.add_field(
-            name="Total Pool",
-            value=f"{total_pool} {JOPACOIN_EMOTE}",
-            inline=True,
+            name="Recent",
+            value=_format_recent_trades(recent, self),
+            inline=False,
         )
-
-        # Resolution votes if applicable
-        if pred["status"] == "locked":
-            votes = await asyncio.to_thread(
-                self.prediction_service.get_resolution_votes, pred["prediction_id"]
-            )
-            yes_votes = votes.get("yes", 0)
-            no_votes = votes.get("no", 0)
-            needed = self.prediction_service.MIN_RESOLUTION_VOTES
-
-            if yes_votes > 0 or no_votes > 0:
-                embed.add_field(
-                    name="🗳️ Resolution Votes",
-                    value=(
-                        f"YES: {yes_votes}/{needed} | NO: {no_votes}/{needed}\n"
-                        f"Use `/predict resolve {pred['prediction_id']} <YES|NO>` to vote"
-                    ),
-                    inline=False,
-                )
-
+        if position:
+            position_text = _format_position_card(position, book)
+            if position_text:
+                embed.add_field(name="​", value=position_text, inline=False)
+        embed.set_footer(text=f"{PREDICTION_CONTRACT_VALUE} jopa per winning contract")
         return embed
 
-    def _create_prediction_view(self) -> PersistentPredictionView:
-        """Create the persistent prediction view with betting buttons."""
-        return PersistentPredictionView(self)
+    def _build_resolved_embed(self, view: dict) -> discord.Embed:
+        outcome = (view.get("outcome") or "?").upper()
+        color = 0x2ECC71 if outcome == "YES" else 0xE74C3C
+        embed = discord.Embed(
+            title=f"{MARKET_TITLE_PREFIX}{view['prediction_id']}",
+            description=f'"{view.get("question", "")}"',
+            color=color,
+        )
+        embed.add_field(name="Outcome", value=f"**{outcome}**", inline=False)
+        return embed
 
+    def _build_cancelled_embed(self, view: dict) -> discord.Embed:
+        embed = discord.Embed(
+            title=f"{MARKET_TITLE_PREFIX}{view['prediction_id']}",
+            description=f'"{view.get("question", "")}"',
+            color=0x95A5A6,
+        )
+        embed.add_field(name="Status", value="**CANCELLED** — cost basis refunded.", inline=False)
+        return embed
 
-    async def post_bet_activity(
-        self,
-        thread_id: int,
-        user: discord.User,
-        amount: int,
-        position: str,
-        new_odds: float,
-        is_addition: bool = False,
-    ):
-        """Post bet activity message to thread."""
-        try:
-            thread = self.bot.get_channel(thread_id)
-            if not thread:
-                thread = await self.bot.fetch_channel(thread_id)
-
-            emoji = "✅" if position == "yes" else "❌"
-            action = "added" if is_addition else "bet"
-
-            await thread.send(
-                f"{emoji} **{user.display_name}** {action} **{amount}** {JOPACOIN_EMOTE} "
-                f"on {position.upper()} → odds now {new_odds:.2f}x"
+    def _build_position_embed(self, prediction_id: int, position: dict, book: dict) -> discord.Embed:
+        embed = discord.Embed(
+            title=f"Your position in market #{prediction_id}",
+            color=0x3498DB,
+        )
+        yes_c = int(position.get("yes_contracts", 0))
+        no_c = int(position.get("no_contracts", 0))
+        if yes_c > 0:
+            avg = int(position["yes_cost_basis_total"]) / yes_c
+            mark = PredictionService.position_mark(book, "yes")
+            upnl = ((mark - avg) * yes_c) if mark is not None else 0
+            embed.add_field(
+                name="YES",
+                value=(
+                    f"contracts: **{yes_c}**\n"
+                    f"avg cost: {avg:.1f}\n"
+                    f"mark: {mark if mark is not None else '-'}\n"
+                    f"uPnL: **{int(upnl):+d}**"
+                ),
+                inline=True,
             )
-        except Exception as e:
-            logger.warning(f"Failed to post bet activity: {e}")
-
-    async def update_prediction_embed(
-        self, thread_id: int, message_id: int, prediction_id: int
-    ):
-        """Update the prediction embed in the thread."""
-        try:
-            thread = self.bot.get_channel(thread_id)
-            if not thread:
-                thread = await self.bot.fetch_channel(thread_id)
-
-            message = await thread.fetch_message(message_id)
-
-            pred = await asyncio.to_thread(
-                self.prediction_service.get_prediction, prediction_id
+        if no_c > 0:
+            avg = int(position["no_cost_basis_total"]) / no_c
+            mark = PredictionService.position_mark(book, "no")
+            upnl = ((mark - avg) * no_c) if mark is not None else 0
+            embed.add_field(
+                name="NO",
+                value=(
+                    f"contracts: **{no_c}**\n"
+                    f"avg cost: {avg:.1f}\n"
+                    f"mark: {mark if mark is not None else '-'}\n"
+                    f"uPnL: **{int(upnl):+d}**"
+                ),
+                inline=True,
             )
-            if not pred:
+        return embed
+
+    # -- embed update helpers ---
+
+    async def refresh_market_embed(self, prediction_id: int):
+        """Re-render the market embed in its thread after a state change."""
+        try:
+            view = await asyncio.to_thread(
+                self.prediction_service.get_market_view, prediction_id
+            )
+            if not view:
                 return
+            thread_id = view.get("thread_id")
+            embed_msg_id = view.get("embed_message_id")
+            if not thread_id or not embed_msg_id:
+                return
+            channel = self.bot.get_channel(thread_id) or await self.bot.fetch_channel(thread_id)
+            msg = await channel.fetch_message(embed_msg_id)
 
-            embed = await self._create_prediction_embed(pred)
-            await message.edit(embed=embed)
+            if view["status"] == "resolved":
+                embed = self._build_resolved_embed(view)
+                await msg.edit(embed=embed, view=None)
+            elif view["status"] == "cancelled":
+                embed = self._build_cancelled_embed(view)
+                await msg.edit(embed=embed, view=None)
+            else:
+                embed = self._build_market_embed(view)
+                await msg.edit(embed=embed)
+        except discord.NotFound:
+            logger.debug("Market embed message vanished for %s", prediction_id)
         except Exception as e:
-            logger.warning(f"Failed to update prediction embed: {e}")
+            logger.warning(f"Failed to refresh market embed: {e}")
 
-    @predict.command(name="create", description="Create a new prediction market")
+    # -- guild gamba channel discovery (for digest / announcements) ---
+
+    def _gamba_channel_for_guild(self, guild: discord.Guild) -> discord.TextChannel | None:
+        for ch in guild.text_channels:
+            name = (ch.name or "").lower()
+            if "gamba" in name:
+                return ch
+        return None
+
+    async def announce_to_gamba(self, guild: discord.Guild, content: str) -> None:
+        ch = self._gamba_channel_for_guild(guild)
+        if ch is None:
+            return
+        try:
+            await ch.send(content)
+        except discord.Forbidden:
+            logger.debug("No permission to post in #%s", ch.name)
+        except Exception as e:
+            logger.warning(f"Failed to announce to gamba channel: {e}")
+
+    # -- /predict create ---
+
+    @predict.command(name="create", description="Create a new prediction market (admin)")
     @app_commands.describe(
         question="The question to predict on",
-        closes_in="When betting closes (e.g., 1h, 3d, 1w, 1mo)",
+        initial_fair=f"Starting price (= % implied probability), default {PREDICTION_INITIAL_FAIR_DEFAULT}",
     )
-    async def prediction(
-        self, interaction: discord.Interaction, question: str, closes_in: str
+    async def create(
+        self,
+        interaction: discord.Interaction,
+        question: str,
+        initial_fair: int = PREDICTION_INITIAL_FAIR_DEFAULT,
     ):
-        """Create a new prediction market."""
-        if not await safe_defer(interaction):
+        if not await require_gamba_channel(interaction):
+            return
+        if not has_admin_permission(interaction):
+            await interaction.response.send_message(
+                "Only admins can create prediction markets.", ephemeral=True
+            )
+            return
+        if not (PREDICTION_PRICE_LOW <= initial_fair <= PREDICTION_PRICE_HIGH):
+            await interaction.response.send_message(
+                f"initial_fair must be in [{PREDICTION_PRICE_LOW}, {PREDICTION_PRICE_HIGH}].",
+                ephemeral=True,
+            )
+            return
+
+        if not await safe_defer(interaction, ephemeral=True):
             return
 
         guild_id = interaction.guild.id if interaction.guild else None
-
-        # Check if user is registered
-        player = await asyncio.to_thread(
-            self.player_service.get_player, interaction.user.id, guild_id
-        )
-        if not player:
-            await safe_followup(
-                interaction,
-                content="You must be registered to create predictions. Use `/player register` first.",
-            )
-            return
-
-        try:
-            closes_at = parse_duration(closes_in)
-        except ValueError as e:
-            await safe_followup(interaction, content=f"❌ {e}")
-            return
-
         try:
             result = await asyncio.to_thread(
                 functools.partial(
-                    self.prediction_service.create_prediction,
+                    self.prediction_service.create_orderbook_prediction,
                     guild_id=guild_id,
                     creator_id=interaction.user.id,
                     question=question,
-                    closes_at=closes_at,
+                    initial_fair=initial_fair,
                     channel_id=interaction.channel_id,
                 )
             )
@@ -519,44 +676,32 @@ class PredictionCommands(commands.Cog):
             return
 
         prediction_id = result["prediction_id"]
-
-        # Send acknowledgment via followup (ephemeral)
         await safe_followup(
             interaction,
-            content=f"✅ Prediction #{prediction_id} created! Setting up thread...",
+            content=f"✅ Market #{prediction_id} created at price {initial_fair}.",
             ephemeral=True,
         )
 
-        # Send channel message (regular message has guild info for thread creation)
-        channel_msg = await interaction.channel.send(
-            f"🔮 **New Prediction** by {interaction.user.mention}\n"
-            f'"{question}"\n'
-            f"Closes <t:{closes_at}:R> • Click thread below to bet",
-        )
-
-        # Create thread from message
+        # Channel announcement + thread
         try:
-            thread_name = f"🔮 Prediction: {question[:50]}..." if len(question) > 50 else f"🔮 Prediction: {question}"
+            channel_msg = await interaction.channel.send(
+                f"📈 **New market #{prediction_id}** opened by {interaction.user.mention}\n"
+                f'"{question}" — starting price {initial_fair}',
+            )
+            thread_name = f"Market #{prediction_id}: {question[:60]}"
             thread = await channel_msg.create_thread(name=thread_name)
 
-            # Get prediction with odds
-            pred = await asyncio.to_thread(
-                self.prediction_service.get_prediction, prediction_id
+            view_data = await asyncio.to_thread(
+                self.prediction_service.get_market_view, prediction_id
             )
-
-            # Create and send embed in thread
-            embed = await self._create_prediction_embed(pred)
-            view = self._create_prediction_view()
-
+            embed = self._build_market_embed(view_data)
+            view = PersistentMarketView(self)
             embed_msg = await thread.send(embed=embed, view=view)
-
-            # Try to pin the embed message
             try:
                 await embed_msg.pin()
             except discord.Forbidden:
                 pass
 
-            # Update prediction with Discord IDs
             await asyncio.to_thread(
                 functools.partial(
                     self.prediction_service.update_discord_ids,
@@ -566,21 +711,13 @@ class PredictionCommands(commands.Cog):
                     channel_message_id=channel_msg.id,
                 )
             )
-
-        except discord.Forbidden:
-            await safe_followup(
-                interaction,
-                content="⚠️ Prediction created but couldn't create thread. "
-                "Missing 'Create Public Threads' permission.",
-            )
         except Exception as e:
-            logger.exception(f"Error creating prediction thread: {e}")
+            logger.exception(f"Failed to set up market thread: {e}")
 
-    @predict.command(name="resolve", description="Vote to resolve a prediction")
-    @app_commands.describe(
-        prediction_id="The prediction ID to resolve",
-        outcome="The outcome (YES or NO)",
-    )
+    # -- /predict resolve ---
+
+    @predict.command(name="resolve", description="Resolve a market YES or NO (admin)")
+    @app_commands.describe(prediction_id="Market ID", outcome="YES or NO")
     @app_commands.choices(
         outcome=[
             app_commands.Choice(name="YES", value="yes"),
@@ -593,612 +730,256 @@ class PredictionCommands(commands.Cog):
         prediction_id: int,
         outcome: app_commands.Choice[str],
     ):
-        """Vote to resolve a prediction."""
-        if not await safe_defer(interaction):
+        if not await require_gamba_channel(interaction):
             return
-
-        # Check if user has admin permissions (for immediate resolution)
-        is_admin = has_admin_permission(interaction)
-
-        try:
-            vote_result = await asyncio.to_thread(
-                functools.partial(
-                    self.prediction_service.add_resolution_vote,
-                    prediction_id=prediction_id,
-                    user_id=interaction.user.id,
-                    outcome=outcome.value,
-                    is_admin=is_admin,
-                )
-            )
-        except ValueError as e:
-            await safe_followup(interaction, content=f"❌ {e}")
-            return
-
-        pred = await asyncio.to_thread(
-            self.prediction_service.get_prediction, prediction_id
-        )
-
-        if vote_result["can_resolve"]:
-            # Resolve the prediction
-            try:
-                settlement = await asyncio.to_thread(
-                    functools.partial(
-                        self.prediction_service.resolve,
-                        prediction_id=prediction_id,
-                        outcome=outcome.value,
-                        resolved_by=interaction.user.id,
-                    )
-                )
-
-                # Build resolution message
-                winners = settlement.get("winners", [])
-                losers = settlement.get("losers", [])
-
-                outcome_emoji = "✅" if outcome.value == "yes" else "❌"
-                result_lines = [f"🏆 **Prediction Resolved!**\n{outcome_emoji} **Answer: {outcome.value.upper()}**\n"]
-
-                if winners:
-                    result_lines.append("**Winners:**")
-                    for w in winners[:10]:
-                        result_lines.append(
-                            f"• <@{w['discord_id']}>: +{w['profit']} "
-                            f"(bet {w['amount']}, won {w['payout']})"
-                        )
-                    if len(winners) > 10:
-                        result_lines.append(f"...and {len(winners) - 10} more")
-
-                if losers:
-                    result_lines.append("\n**Losers:**")
-                    for loser in losers[:10]:
-                        result_lines.append(f"• <@{loser['discord_id']}>: -{loser['amount']}")
-                    if len(losers) > 10:
-                        result_lines.append(f"...and {len(losers) - 10} more")
-
-                result_lines.append(
-                    f"\nTotal pool: **{settlement['total_pool']}** {JOPACOIN_EMOTE}"
-                )
-
-                await safe_followup(interaction, content="\n".join(result_lines))
-
-                # Neon Degen Terminal hook (prediction resolved)
-                try:
-                    neon = get_neon_service(self.bot)
-                    if neon:
-                        neon_result = await neon.on_prediction_resolved(
-                            guild_id=interaction.guild.id if interaction.guild else None,
-                            question=pred.get("question", "") if pred else "",
-                            outcome=outcome.value,
-                            total_pool=settlement.get("total_pool", 0),
-                            winner_count=len(winners),
-                            loser_count=len(losers),
-                        )
-                        if neon_result:
-                            msg = None
-                            if neon_result.gif_file:
-                                import discord as _discord
-                                gif_file = _discord.File(neon_result.gif_file, filename="jopat_terminal.gif")
-                                if neon_result.text_block:
-                                    msg = await interaction.channel.send(neon_result.text_block, file=gif_file)
-                                else:
-                                    msg = await interaction.channel.send(file=gif_file)
-                            elif neon_result.text_block:
-                                msg = await interaction.channel.send(neon_result.text_block)
-                            elif neon_result.footer_text:
-                                msg = await interaction.channel.send(neon_result.footer_text)
-                            if msg:
-                                async def _del_neon(m, d):
-                                    try:
-                                        await asyncio.sleep(d)
-                                        await m.delete()
-                                    except Exception as e:
-                                        logger.debug("Failed to delete neon message: %s", e)
-                                asyncio.create_task(_del_neon(msg, 60))
-
-                        # Check for unanimous wrong (90%+ consensus loses)
-                        unanimous_data = settlement.get("unanimous_wrong")
-                        if unanimous_data:
-                            uw_result = await neon.on_unanimous_wrong(
-                                guild_id=interaction.guild.id if interaction.guild else None,
-                                consensus_percentage=unanimous_data["consensus_percentage"],
-                                winning_side=unanimous_data["winning_side"],
-                                loser_count=unanimous_data["loser_count"],
-                            )
-                            if uw_result:
-                                uw_msg = None
-                                if uw_result.gif_file:
-                                    import discord as _discord
-                                    gif_file = _discord.File(uw_result.gif_file, filename="jopat_market_crash.gif")
-                                    if uw_result.text_block:
-                                        uw_msg = await interaction.channel.send(uw_result.text_block, file=gif_file)
-                                    else:
-                                        uw_msg = await interaction.channel.send(file=gif_file)
-                                elif uw_result.text_block:
-                                    uw_msg = await interaction.channel.send(uw_result.text_block)
-                                if uw_msg:
-                                    asyncio.create_task(_del_neon(uw_msg, 120))
-                except Exception as e:
-                    logger.debug("Failed to send prediction settlement neon result: %s", e)
-
-                # Post to thread, lock, and archive
-                if pred and pred.get("thread_id"):
-                    try:
-                        thread = self.bot.get_channel(pred["thread_id"])
-                        if thread:
-                            await thread.send("\n".join(result_lines))
-                            # Lock and archive thread
-                            try:
-                                await thread.edit(locked=True, archived=True)
-                            except discord.Forbidden:
-                                # Missing Manage Threads permission - just archive
-                                await thread.edit(archived=True)
-                            # Update the channel message to show it's resolved
-                            if pred.get("channel_message_id") and thread.parent:
-                                try:
-                                    channel_msg = await thread.parent.fetch_message(
-                                        pred["channel_message_id"]
-                                    )
-                                    outcome_emoji = "✅" if outcome.value == "yes" else "❌"
-                                    await channel_msg.edit(
-                                        content=f"{outcome_emoji} **Prediction Resolved: {outcome.value.upper()}**\n"
-                                        f'"{pred.get("question", "")}"\n'
-                                        f"See thread for results"
-                                    )
-                                except Exception as e:
-                                    logger.warning(f"Failed to update channel message: {e}")
-                            # Update the close message to show voting is complete
-                            if pred.get("close_message_id"):
-                                try:
-                                    close_msg = await thread.fetch_message(
-                                        pred["close_message_id"]
-                                    )
-                                    outcome_emoji = "✅" if outcome.value == "yes" else "❌"
-                                    await close_msg.edit(
-                                        content=f"{outcome_emoji} **Voting complete** — Resolved: **{outcome.value.upper()}**"
-                                    )
-                                except Exception as e:
-                                    logger.warning(f"Failed to update close message: {e}")
-                    except Exception as e:
-                        logger.warning(f"Failed to post resolution to thread: {e}")
-
-                # Update embed
-                if pred and pred.get("embed_message_id") and pred.get("thread_id"):
-                    await self.update_prediction_embed(
-                        thread_id=pred["thread_id"],
-                        message_id=pred["embed_message_id"],
-                        prediction_id=prediction_id,
-                    )
-
-            except ValueError as e:
-                await safe_followup(interaction, content=f"❌ Resolution failed: {e}")
-        else:
-            # Just a vote, not enough to resolve yet
-            count = vote_result.get(f"{outcome.value}_count", 0)
-            needed = vote_result["votes_needed"]
-
-            await safe_followup(
-                interaction,
-                content=f"🗳️ Your vote for **{outcome.value.upper()}** has been recorded!\n"
-                f"Votes for {outcome.value.upper()}: {count}/{needed}",
-            )
-
-            # Update embed with vote counts
-            if pred and pred.get("embed_message_id") and pred.get("thread_id"):
-                await self.update_prediction_embed(
-                    thread_id=pred["thread_id"],
-                    message_id=pred["embed_message_id"],
-                    prediction_id=prediction_id,
-                )
-
-    @predict.command(name="cancel", description="Cancel a prediction (admin only)")
-    @app_commands.describe(prediction_id="The prediction ID to cancel")
-    async def cancel(self, interaction: discord.Interaction, prediction_id: int):
-        """Cancel a prediction and refund all bets (admin only)."""
-        if not await safe_defer(interaction):
-            return
-
-        # Check admin permissions (ADMIN_USER_IDS or Discord Administrator/Manage Server)
         if not has_admin_permission(interaction):
-            await safe_followup(
-                interaction, content="❌ Only admins can cancel predictions."
+            await interaction.response.send_message(
+                "Only admins can resolve markets.", ephemeral=True
             )
+            return
+        if not await safe_defer(interaction):
             return
 
         try:
             result = await asyncio.to_thread(
-                functools.partial(
-                    self.prediction_service.cancel_by_admin,
-                    prediction_id=prediction_id,
-                    admin_id=interaction.user.id,
-                )
+                self.prediction_service.resolve_orderbook,
+                prediction_id, outcome.value, interaction.user.id,
             )
         except ValueError as e:
             await safe_followup(interaction, content=f"❌ {e}")
             return
 
-        refunded = result.get("refunded", [])
-        total = result.get("total_refunded", 0)
-
-        await safe_followup(
-            interaction,
-            content=f"🚫 **Prediction #{prediction_id} cancelled**\n"
-            f"Refunded **{total}** {JOPACOIN_EMOTE} to {len(refunded)} player(s).",
+        winners = result.get("winners", [])
+        biggest = max(winners, key=lambda w: w["payout"], default=None)
+        biggest_str = (
+            f"biggest +{biggest['payout']} to <@{biggest['discord_id']}>"
+            if biggest
+            else "no winners"
         )
+        announce = (
+            f"📈 Market #{prediction_id} resolved **{outcome.value.upper()}** — "
+            f"{len(winners)} winners, {biggest_str}."
+        )
+        await safe_followup(interaction, content=announce)
 
-        # Post to thread, lock, and archive
+        # Update market embed + archive thread
         pred = await asyncio.to_thread(
             self.prediction_service.get_prediction, prediction_id
         )
         if pred and pred.get("thread_id"):
             try:
-                thread = self.bot.get_channel(pred["thread_id"])
-                if thread:
-                    await thread.send(
-                        f"🚫 **CANCELLED** by <@{interaction.user.id}>\n"
-                        f"All bets have been refunded."
-                    )
-                    # Lock and archive thread
-                    try:
-                        await thread.edit(locked=True, archived=True)
-                    except discord.Forbidden:
-                        # Missing Manage Threads permission - just archive
-                        await thread.edit(archived=True)
-                    # Update the channel message to show it's cancelled
-                    if pred.get("channel_message_id") and thread.parent:
-                        try:
-                            channel_msg = await thread.parent.fetch_message(
-                                pred["channel_message_id"]
-                            )
-                            await channel_msg.edit(
-                                content=f"🚫 **Prediction Cancelled**\n"
-                                f'"{pred.get("question", "")}"\n'
-                                f"All bets refunded"
-                            )
-                        except Exception as e:
-                            logger.warning(f"Failed to update channel message: {e}")
+                thread = self.bot.get_channel(pred["thread_id"]) or await self.bot.fetch_channel(pred["thread_id"])
+                await thread.send(announce)
+                await self.refresh_market_embed(prediction_id)
+                try:
+                    await thread.edit(locked=True, archived=True)
+                except discord.Forbidden:
+                    await thread.edit(archived=True)
             except Exception as e:
-                logger.warning(f"Failed to post cancellation to thread: {e}")
+                logger.warning(f"Failed to archive market thread: {e}")
 
-    @predict.command(name="close", description="Close betting early (admin only)")
-    @app_commands.describe(prediction_id="The prediction ID to close")
-    async def closebet(self, interaction: discord.Interaction, prediction_id: int):
-        """Close betting on a prediction early (admin only)."""
+        # Gamba channel announcement
+        if interaction.guild:
+            await self.announce_to_gamba(interaction.guild, announce)
+
+    # -- /predict cancel ---
+
+    @predict.command(name="cancel", description="Cancel a market and refund cost basis (admin)")
+    @app_commands.describe(prediction_id="Market ID to cancel")
+    async def cancel(self, interaction: discord.Interaction, prediction_id: int):
+        if not await require_gamba_channel(interaction):
+            return
+        if not has_admin_permission(interaction):
+            await interaction.response.send_message(
+                "Only admins can cancel markets.", ephemeral=True
+            )
+            return
         if not await safe_defer(interaction):
             return
 
-        if not has_admin_permission(interaction):
-            await safe_followup(
-                interaction, content="❌ Only admins can close betting early."
-            )
-            return
-
         try:
-            await asyncio.to_thread(
-                self.prediction_service.close_betting_early, prediction_id
+            result = await asyncio.to_thread(
+                self.prediction_service.cancel_orderbook, prediction_id
             )
         except ValueError as e:
             await safe_followup(interaction, content=f"❌ {e}")
             return
 
-        votes_needed = self.prediction_service.MIN_RESOLUTION_VOTES
-        await safe_followup(
-            interaction,
-            content=f"🔒 **Betting closed** on prediction #{prediction_id}\n"
-            f"Resolution voting is now open ({votes_needed} votes or 1 admin to resolve).\n"
-            f"Use `/predict resolve {prediction_id} <YES|NO>` to vote.",
+        announce = (
+            f"🚫 Market #{prediction_id} cancelled by <@{interaction.user.id}>. "
+            f"Refunded {result['total_refunded']} {JOPACOIN_EMOTE} across "
+            f"{len(result['refunded'])} holder(s)."
         )
+        await safe_followup(interaction, content=announce)
 
-        # Post to thread and update thread name
         pred = await asyncio.to_thread(
             self.prediction_service.get_prediction, prediction_id
         )
         if pred and pred.get("thread_id"):
             try:
-                thread = self.bot.get_channel(pred["thread_id"])
-                if thread:
-                    close_msg = await thread.send(
-                        f"🔒 **Betting closed early** by <@{interaction.user.id}>\n"
-                        f"Vote to resolve ({votes_needed} votes or 1 admin needed):\n"
-                        f"`/predict resolve {prediction_id} YES` or `/predict resolve {prediction_id} NO`"
-                    )
-                    # Save the close message ID so we can edit it when resolved
-                    await asyncio.to_thread(
-                        functools.partial(
-                            self.prediction_service.update_discord_ids,
-                            prediction_id=prediction_id,
-                            close_message_id=close_msg.id,
-                        )
-                    )
-                    # Update thread name to show it's closed
-                    question = pred.get("question", "")[:40]
-                    await thread.edit(name=f"🔒 Closed: {question}")
-                    # Update the embed
-                    if pred.get("embed_message_id"):
-                        await self.update_prediction_embed(
-                            thread_id=pred["thread_id"],
-                            message_id=pred["embed_message_id"],
-                            prediction_id=prediction_id,
-                        )
-                    # Update the channel message to show it's closed
-                    if pred.get("channel_message_id") and thread.parent:
-                        try:
-                            channel_msg = await thread.parent.fetch_message(
-                                pred["channel_message_id"]
-                            )
-                            await channel_msg.edit(
-                                content=f"🔒 **Prediction Closed** by {interaction.user.mention}\n"
-                                f'"{pred.get("question", "")}"\n'
-                                f"Betting has ended • Resolution voting in progress"
-                            )
-                        except Exception as e:
-                            logger.warning(f"Failed to update channel message: {e}")
+                thread = self.bot.get_channel(pred["thread_id"]) or await self.bot.fetch_channel(pred["thread_id"])
+                await thread.send(announce)
+                await self.refresh_market_embed(prediction_id)
+                try:
+                    await thread.edit(locked=True, archived=True)
+                except discord.Forbidden:
+                    await thread.edit(archived=True)
             except Exception as e:
-                logger.warning(f"Failed to post close message to thread: {e}")
+                logger.warning(f"Failed to archive cancelled thread: {e}")
 
-    @predict.command(name="list", description="List predictions")
+        if interaction.guild:
+            await self.announce_to_gamba(interaction.guild, announce)
+
+    # -- /predict list ---
+
+    @predict.command(name="list", description="List open markets (or all with show_all)")
     @app_commands.describe(
-        show_all="Show all predictions including resolved/cancelled",
-        limit="Number of predictions to show (default 10)",
+        show_all="Include resolved/cancelled markets",
     )
-    async def predictions(
+    async def list_markets(
         self,
         interaction: discord.Interaction,
         show_all: bool = False,
-        limit: int = 10,
     ):
-        """List predictions."""
+        if not await require_gamba_channel(interaction):
+            return
         if not await safe_defer(interaction):
             return
 
         guild_id = interaction.guild.id if interaction.guild else None
-        limit = max(1, min(limit, 25))  # Cap between 1 and 25
-
-        # Always auto-lock expired predictions first
-        await asyncio.to_thread(
-            self.prediction_service.check_and_lock_expired, guild_id
+        open_preds = await asyncio.to_thread(
+            self.prediction_service.list_open_orderbook_markets, guild_id
         )
+
+        lines = []
+        for p in open_preds:
+            top_ask = p.get("top_ask")
+            top_bid = p.get("top_bid")
+            ask_str = str(top_ask) if top_ask is not None else "—"
+            bid_str = str(top_bid) if top_bid is not None else "—"
+            lines.append(
+                f"  #{p['prediction_id']:>3}  price {p.get('current_price','?'):>3}  "
+                f"ask {ask_str:>3} / bid {bid_str:>3}   vol today {p.get('volume_recent', 0)}\n"
+                f"        \"{p['question'][:80]}\""
+            )
 
         if show_all:
-            # Get all predictions
-            all_preds = []
-            for s in ["open", "locked", "resolved", "cancelled"]:
-                status_preds = await asyncio.to_thread(
-                    self.prediction_service.get_predictions_by_status,
-                    guild_id, s,
+            for status in ("resolved", "cancelled"):
+                resolved = await asyncio.to_thread(
+                    self.prediction_service.get_predictions_by_status, guild_id, status
                 )
-                all_preds.extend(status_preds)
-            preds = sorted(all_preds, key=lambda p: p.get("created_at", 0), reverse=True)
-        else:
-            # Active only (open + locked)
-            preds = await asyncio.to_thread(
-                self.prediction_service.get_active_predictions, guild_id
-            )
+                for p in resolved[:10]:
+                    if status == "resolved":
+                        lines.append(
+                            f"  #{p['prediction_id']:>3}  RESOLVED {(p.get('outcome') or '?').upper()} "
+                            f"  \"{p['question'][:60]}\""
+                        )
+                    else:
+                        lines.append(
+                            f"  #{p['prediction_id']:>3}  CANCELLED   \"{p['question'][:60]}\""
+                        )
 
-        # Enrich with odds info
-        for pred in preds:
-            totals = await asyncio.to_thread(
-                self.prediction_service.get_prediction_totals,
-                pred["prediction_id"],
-            )
-            pred.update(totals)
-            pred["odds"] = self.prediction_service.calculate_odds(
-                totals["yes_total"], totals["no_total"]
-            )
-            pred["total_pool"] = totals["yes_total"] + totals["no_total"]
-
-        if not preds:
-            msg = "No predictions found." if show_all else "No active predictions."
-            await safe_followup(interaction, content=msg)
+        if not lines:
+            await safe_followup(interaction, content="No markets to show.")
             return
 
-        title = "🔮 All Predictions" if show_all else "🔮 Active Predictions"
+        body = "```\n" + "\n".join(lines) + "\n```"
         embed = discord.Embed(
-            title=title,
+            title=f"📈 Markets ({len(open_preds)} open)",
+            description=body[:4000],
             color=0x3498DB,
         )
-
-        for pred in preds[:limit]:
-            pool = pred.get('total_pool', 0)
-            yes_total = pred.get("yes_total", 0)
-            odds = pred.get("odds", {})
-
-            if pred["status"] == "resolved":
-                # Resolved predictions - show outcome with winner/loser summary
-                outcome = pred.get("outcome", "?")
-                outcome_emoji = "✅" if outcome == "yes" else "❌"
-
-                # Get resolution summary
-                summary = await asyncio.to_thread(
-                    self.prediction_service.get_resolution_summary,
-                    pred["prediction_id"],
-                )
-                winners = summary["winners"]
-                losers = summary["losers"]
-
-                # Build winner/loser display - show all users
-                if winners:
-                    winner_parts = [f"<@{w['discord_id']}> +{w['profit']}" for w in winners[:5]]
-                    if len(winners) > 5:
-                        winner_parts.append(f"+{len(winners) - 5} more")
-                    winner_text = ", ".join(winner_parts)
-                else:
-                    winner_text = "none"
-
-                if losers:
-                    loser_parts = [f"<@{loser['discord_id']}> -{loser['bet']}" for loser in losers[:5]]
-                    if len(losers) > 5:
-                        loser_parts.append(f"+{len(losers) - 5} more")
-                    loser_text = ", ".join(loser_parts)
-                else:
-                    loser_text = "none"
-
-                value = (
-                    f"{outcome_emoji} **Answer: {outcome.upper()}** | Pool: {pool} {JOPACOIN_EMOTE}\n"
-                    f"🏆 {winner_text}\n💀 {loser_text}"
-                )
-
-                embed.add_field(
-                    name=f"✨ #{pred['prediction_id']}: {pred['question'][:50]}",
-                    value=value,
-                    inline=False,
-                )
-            elif pred["status"] == "cancelled":
-                # Cancelled - show refund info
-                value = "🚫 **Cancelled** | Bets refunded"
-
-                embed.add_field(
-                    name=f"🚫 #{pred['prediction_id']}: {pred['question'][:50]}",
-                    value=value,
-                    inline=False,
-                )
-            elif pred["status"] == "locked":
-                # Locked - awaiting resolution
-                yes_pct = round(100 * yes_total / pool) if pool > 0 else 50
-                no_pct = 100 - yes_pct
-                value = (
-                    f"⏳ **Awaiting resolution** | Pool: {pool} {JOPACOIN_EMOTE}\n"
-                    f"YES {yes_pct}% / NO {no_pct}%"
-                )
-
-                embed.add_field(
-                    name=f"🔒 #{pred['prediction_id']}: {pred['question'][:50]}",
-                    value=value,
-                    inline=False,
-                )
-            elif pred["status"] == "open":
-                # Open - show odds and time
-                yes_pct = round(100 * yes_total / pool) if pool > 0 else 50
-                no_pct = 100 - yes_pct
-                yes_odds = odds.get("yes", 0)
-                no_odds = odds.get("no", 0)
-
-                if pool > 0:
-                    value = (
-                        f"YES {yes_pct}% ({yes_odds:.2f}x) / NO {no_pct}% ({no_odds:.2f}x)\n"
-                        f"Pool: {pool} {JOPACOIN_EMOTE} • Closes <t:{pred['closes_at']}:R>"
-                    )
-                else:
-                    value = f"No bets yet • Closes <t:{pred['closes_at']}:R>"
-
-                embed.add_field(
-                    name=f"🟢 #{pred['prediction_id']}: {pred['question'][:50]}",
-                    value=value,
-                    inline=False,
-                )
-
-        if len(preds) > 10:
-            embed.set_footer(text=f"Showing 10 of {len(preds)} predictions")
-
         await safe_followup(interaction, embed=embed)
 
-    @predict.command(name="mine", description="View your prediction positions")
-    @app_commands.describe(history="Show resolved predictions instead of active ones")
-    async def mypredictions(
-        self,
-        interaction: discord.Interaction,
-        history: bool = False,
-    ):
-        """View user's prediction positions."""
+    # -- /predict view ---
+
+    @predict.command(name="view", description="Show a market's embed (price, ladder, recent trades)")
+    @app_commands.describe(prediction_id="Market ID")
+    async def view(self, interaction: discord.Interaction, prediction_id: int):
+        if not await require_gamba_channel(interaction):
+            return
+        if not await safe_defer(interaction):
+            return
+
+        view_data = await asyncio.to_thread(
+            self.prediction_service.get_market_view,
+            prediction_id, interaction.user.id,
+        )
+        if not view_data:
+            await safe_followup(interaction, content="❌ Market not found.")
+            return
+
+        if view_data["status"] == "resolved":
+            embed = self._build_resolved_embed(view_data)
+        elif view_data["status"] == "cancelled":
+            embed = self._build_cancelled_embed(view_data)
+        else:
+            embed = self._build_market_embed(view_data)
+        await safe_followup(interaction, embed=embed)
+
+    # -- /predict mine ---
+
+    @predict.command(name="mine", description="Your open positions across markets")
+    async def mine(self, interaction: discord.Interaction):
+        if not await require_gamba_channel(interaction):
+            return
         if not await safe_defer(interaction, ephemeral=True):
             return
 
-        if history:
-            guild_id = interaction.guild.id if interaction.guild else None
-            positions = await asyncio.to_thread(
-                self.prediction_service.get_user_resolved_positions,
-                interaction.user.id, guild_id,
+        guild_id = interaction.guild.id if interaction.guild else None
+        positions = await asyncio.to_thread(
+            self.prediction_service.get_user_open_positions,
+            interaction.user.id, guild_id,
+        )
+        if not positions:
+            await safe_followup(interaction, content="You don't hold any open positions.")
+            return
+
+        # Build a code-block table per (market, side) row
+        rows = []
+        rows.append(f"{'Market':<28}{'Side':<5}{'Qty':>5}{'Cost':>7}{'Mark':>6}{'uPnL':>7}")
+        rows.append("-" * 58)
+        total_cost = 0
+        total_mark = 0
+        for p in positions:
+            book = await asyncio.to_thread(
+                self.prediction_service.prediction_repo.get_book, p["prediction_id"]
             )
-
-            if not positions:
-                await safe_followup(
-                    interaction, content="You don't have any resolved predictions yet."
+            question = (p["question"] or "")[:26]
+            for side in ("yes", "no"):
+                qty = int(p[f"{side}_contracts"])
+                if qty == 0:
+                    continue
+                basis = int(p[f"{side}_cost_basis_total"])
+                avg = basis / qty
+                mark_p = PredictionService.position_mark(book, side)
+                mark_value = (mark_p * qty) if mark_p is not None else 0
+                upnl = mark_value - basis
+                total_cost += basis
+                total_mark += mark_value
+                rows.append(
+                    f"{question:<28}{side.upper():<5}{qty:>5}{avg:>7.1f}"
+                    f"{(mark_p if mark_p is not None else 0):>6}{upnl:>+7d}"
                 )
-                return
 
-            embed = discord.Embed(
-                title="🔮 Your Prediction History",
-                color=0x9B59B6,
+        body = "```\n" + "\n".join(rows) + "\n```"
+        total_pnl = total_mark - total_cost
+        embed = discord.Embed(
+            title="📈 Your open positions",
+            description=body,
+            color=0x3498DB,
+        )
+        embed.set_footer(
+            text=(
+                f"Total cost: {total_cost} | mark {total_mark} | uPnL {total_pnl:+d}"
             )
+        )
+        await safe_followup(interaction, embed=embed)
 
-            total_wagered = 0
-            total_profit = 0
 
-            for pos in positions[:15]:
-                bet_emoji = "✅" if pos["position"] == "yes" else "❌"
-                won = pos["position"] == pos["outcome"]
-                result_emoji = "🏆" if won else "💀"
-
-                amount = pos["total_amount"]
-                payout = pos["payout"] or 0
-                profit = payout - amount if won else -amount
-
-                total_wagered += amount
-                total_profit += profit
-
-                profit_str = f"+{profit}" if profit > 0 else str(profit)
-
-                embed.add_field(
-                    name=f"{result_emoji} #{pos['prediction_id']}: {pos['question'][:40]}",
-                    value=(
-                        f"{bet_emoji} Bet **{pos['position'].upper()}** - "
-                        f"{amount} {JOPACOIN_EMOTE} → {profit_str} {JOPACOIN_EMOTE}\n"
-                        f"Outcome: **{pos['outcome'].upper()}** • "
-                        f"<t:{pos['resolved_at']}:R>"
-                    ),
-                    inline=False,
-                )
-
-            # Summary footer
-            profit_str = f"+{total_profit}" if total_profit > 0 else str(total_profit)
-            embed.set_footer(text=f"Total wagered: {total_wagered} | Net P/L: {profit_str}")
-
-            await safe_followup(interaction, embed=embed)
-        else:
-            guild_id = interaction.guild.id if interaction.guild else None
-            positions = await asyncio.to_thread(
-                self.prediction_service.get_user_active_positions,
-                interaction.user.id, guild_id,
-            )
-
-            if not positions:
-                await safe_followup(
-                    interaction,
-                    content="You don't have any active prediction positions.",
-                )
-                return
-
-            embed = discord.Embed(
-                title="🔮 Your Active Positions",
-                color=0x3498DB,
-            )
-
-            for pos in positions[:15]:
-                emoji = "✅" if pos["position"] == "yes" else "❌"
-                status_emoji = {"open": "🟢", "locked": "🔒"}.get(pos["status"], "❓")
-
-                # Get current odds for this prediction
-                odds_info = await asyncio.to_thread(
-                    self.prediction_service.get_odds, pos["prediction_id"]
-                )
-                current_odds = odds_info["odds"].get(pos["position"], 0)
-                pool = odds_info["total_pool"]
-                yes_total = odds_info["yes_total"]
-                pct = round(100 * yes_total / pool) if pool > 0 else 50
-                my_pct = pct if pos["position"] == "yes" else 100 - pct
-
-                potential = int(pos["total_amount"] * current_odds) if current_odds > 0 else 0
-
-                embed.add_field(
-                    name=f"{status_emoji} #{pos['prediction_id']}: {pos['question'][:40]}",
-                    value=(
-                        f"{emoji} **{pos['position'].upper()}** @ {my_pct}% ({current_odds:.2f}x)\n"
-                        f"Stake: {pos['total_amount']} {JOPACOIN_EMOTE} → "
-                        f"Potential: {potential} {JOPACOIN_EMOTE}\n"
-                        f"{'Closes' if pos['status'] == 'open' else 'Closed'} <t:{pos['closes_at']}:R>"
-                    ),
-                    inline=False,
-                )
-
-            await safe_followup(interaction, embed=embed)
+# --------------------------------------------------------------------------- #
+# Cog setup
+# --------------------------------------------------------------------------- #
 
 async def setup(bot: commands.Bot):
     prediction_service = getattr(bot, "prediction_service", None)
@@ -1210,6 +991,4 @@ async def setup(bot: commands.Bot):
 
     cog = PredictionCommands(bot, prediction_service, player_service)
     await bot.add_cog(cog)
-
-    # Register persistent view for prediction buttons
-    bot.add_view(PersistentPredictionView(cog))
+    bot.add_view(PersistentMarketView(cog))

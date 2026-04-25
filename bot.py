@@ -86,6 +86,126 @@ _lobby_rally_cooldowns: dict[tuple[int, int], float] = {}
 _lobby_ready_cooldowns: dict[int, float] = {}
 _lobby_ready_lock = asyncio.Lock()
 
+# Prediction market background task handles
+_prediction_refresh_task: asyncio.Task | None = None
+_prediction_digest_task: asyncio.Task | None = None
+
+
+async def _prediction_refresh_loop() -> None:
+    """Per-market refresh worker.
+
+    Wakes every ``PREDICTION_REFRESH_WAKE_SECONDS`` and processes any open
+    market whose ``last_refresh_at`` is older than ``PREDICTION_REFRESH_SECONDS``.
+    Refresh = drift price + repost ladder. If there were trades since the last
+    refresh, also posts a daily-summary message in the market thread.
+    """
+    from config import PREDICTION_REFRESH_WAKE_SECONDS
+
+    await bot.wait_until_ready()
+    logger.info("prediction refresh loop started (wake=%ss)", PREDICTION_REFRESH_WAKE_SECONDS)
+    while not bot.is_closed():
+        try:
+            now_ts = int(time.time())
+            due = await asyncio.to_thread(
+                bot.prediction_service.get_markets_due_for_refresh, now_ts
+            )
+            for market in due:
+                try:
+                    await _process_one_refresh(market)
+                except Exception as ex:
+                    logger.exception("refresh failed for market %s: %s", market.get("prediction_id"), ex)
+        except Exception as ex:
+            logger.exception("prediction refresh outer loop error: %s", ex)
+        await asyncio.sleep(PREDICTION_REFRESH_WAKE_SECONDS)
+
+
+async def _process_one_refresh(market: dict) -> None:
+    pid = market["prediction_id"]
+    summary = await asyncio.to_thread(bot.prediction_service.refresh_market, pid)
+    if summary.get("skipped"):
+        return
+
+    cog = bot.get_cog("PredictionCommands")
+    if cog is not None:
+        await cog.refresh_market_embed(pid)
+
+    trade_summary = summary.get("trade_summary") or {}
+    if (trade_summary.get("trade_count") or 0) <= 0:
+        return  # quiet day; no thread spam
+
+    thread_id = market.get("thread_id")
+    if not thread_id:
+        return
+    try:
+        thread = bot.get_channel(thread_id) or await bot.fetch_channel(thread_id)
+        biggest = trade_summary.get("biggest_trade")
+        biggest_str = ""
+        if biggest:
+            verb = "bought" if biggest["action"].startswith("buy") else "sold"
+            side = "YES" if biggest["action"].endswith("yes") else "NO"
+            avg = (int(biggest["vwap_x100"]) + 50) // 100
+            biggest_str = (
+                f"\n  biggest: <@{biggest['discord_id']}> {verb} {biggest['contracts']} {side} @ {avg}"
+            )
+        msg = (
+            f"📈 **Daily refresh** — vol {trade_summary.get('total_volume', 0)} "
+            f"({trade_summary.get('yes_volume', 0)} YES / {trade_summary.get('no_volume', 0)} NO)"
+            f", price {summary['old_price']} → {summary['new_price']}{biggest_str}"
+        )
+        await thread.send(msg)
+    except Exception as ex:
+        logger.warning("failed to post daily summary for market %s: %s", pid, ex)
+
+
+async def _prediction_digest_loop() -> None:
+    """Once-a-day digest of open markets, posted to each guild's gamba channel."""
+    import datetime as _dt
+
+    from config import PREDICTION_DIGEST_HOUR_UTC
+
+    await bot.wait_until_ready()
+    logger.info("prediction digest loop started (hour_utc=%s)", PREDICTION_DIGEST_HOUR_UTC)
+    while not bot.is_closed():
+        try:
+            now = _dt.datetime.utcnow()
+            target = now.replace(
+                hour=PREDICTION_DIGEST_HOUR_UTC, minute=0, second=0, microsecond=0
+            )
+            if target <= now:
+                target = target + _dt.timedelta(days=1)
+            wait_s = max(60.0, (target - now).total_seconds())
+            await asyncio.sleep(wait_s)
+            await _post_daily_digest_all_guilds()
+        except Exception as ex:
+            logger.exception("digest outer loop error: %s", ex)
+            await asyncio.sleep(60)
+
+
+async def _post_daily_digest_all_guilds() -> None:
+    cog = bot.get_cog("PredictionCommands")
+    if cog is None:
+        return
+    for guild in bot.guilds:
+        try:
+            opens = await asyncio.to_thread(
+                bot.prediction_service.list_open_orderbook_markets, guild.id
+            )
+            if not opens:
+                continue
+            lines = ["📈 **Daily prediction markets digest**", ""]
+            for p in opens:
+                lines.append(
+                    f"  #{p['prediction_id']:>3} price {p.get('current_price','?'):>3}  "
+                    f"ask {p.get('top_ask') if p.get('top_ask') is not None else '—':>3} "
+                    f"/ bid {p.get('top_bid') if p.get('top_bid') is not None else '—':>3}  "
+                    f"vol {p.get('volume_recent', 0)}  "
+                    f"\"{p['question'][:50]}\""
+                )
+            content = "\n".join(lines)
+            await cog.announce_to_gamba(guild, content)
+        except Exception as ex:
+            logger.warning("digest failed for guild %s: %s", guild.id, ex)
+
 
 def _init_services():
     """Initialize all services via ServiceContainer (lazy, idempotent)."""
@@ -439,6 +559,14 @@ async def on_ready():
         asyncio.ensure_future(asyncio.to_thread(warm_cache))
     except Exception as exc:
         logger.debug(f"Trivia image cache warm failed: {exc}")
+
+    # Start prediction-market background tasks (refresh worker + daily digest).
+    # Both are idempotent: started once, survive reconnects.
+    global _prediction_refresh_task, _prediction_digest_task
+    if _prediction_refresh_task is None or _prediction_refresh_task.done():
+        _prediction_refresh_task = bot.loop.create_task(_prediction_refresh_loop())
+    if _prediction_digest_task is None or _prediction_digest_task.done():
+        _prediction_digest_task = bot.loop.create_task(_prediction_digest_loop())
 
 
 @bot.tree.error

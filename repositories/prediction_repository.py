@@ -903,3 +903,815 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
             bet_stats = dict(cursor.fetchone())
 
             return {**pred_stats, **bet_stats}
+
+    # =========================================================================
+    # Order-book mechanic (feat/predict-orderbook)
+    # =========================================================================
+
+    VALID_BOOK_SIDES = {"yes_ask", "yes_bid"}
+    VALID_TRADE_SIDES = {"yes", "no"}
+
+    def create_orderbook_prediction(
+        self,
+        guild_id: int,
+        creator_id: int,
+        question: str,
+        initial_fair: int,
+        channel_id: int | None = None,
+    ) -> int:
+        """Create a prediction in the new order-book mechanic.
+
+        Stores ``current_price = initial_fair`` and uses ``closes_at = 0``
+        as a sentinel meaning 'no scheduled close' (the legacy NOT NULL column
+        is satisfied; new code never reads it).
+        """
+        normalized_guild = self.normalize_guild_id(guild_id)
+        now = int(time.time())
+
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO predictions (
+                    guild_id, creator_id, question, status, channel_id,
+                    created_at, closes_at,
+                    current_price, initial_fair, last_refresh_at, lp_pnl
+                )
+                VALUES (?, ?, ?, 'open', ?, ?, 0, ?, ?, ?, 0)
+                """,
+                (
+                    normalized_guild,
+                    creator_id,
+                    question,
+                    channel_id,
+                    now,
+                    initial_fair,
+                    initial_fair,
+                    now,
+                ),
+            )
+            return cursor.lastrowid
+
+    def replace_levels(
+        self, prediction_id: int, levels: list[tuple[str, int, int]]
+    ) -> None:
+        """Atomically delete all current levels for a market and insert a fresh ladder."""
+        now = int(time.time())
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "DELETE FROM prediction_levels WHERE prediction_id = ?",
+                (prediction_id,),
+            )
+            for side, price, size in levels:
+                if side not in self.VALID_BOOK_SIDES:
+                    raise ValueError(f"Invalid book side: {side}")
+                cursor.execute(
+                    """
+                    INSERT INTO prediction_levels
+                        (prediction_id, side, price, remaining_size, posted_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (prediction_id, side, price, size, now),
+                )
+
+    def get_book(self, prediction_id: int) -> dict:
+        """Read the current ladder + fair price."""
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT current_price FROM predictions WHERE prediction_id = ?",
+                (prediction_id,),
+            )
+            row = cursor.fetchone()
+            current_price = row["current_price"] if row else None
+
+            cursor.execute(
+                """
+                SELECT side, price, remaining_size FROM prediction_levels
+                WHERE prediction_id = ? AND remaining_size > 0
+                """,
+                (prediction_id,),
+            )
+            asks: list[tuple[int, int]] = []
+            bids: list[tuple[int, int]] = []
+            for r in cursor.fetchall():
+                if r["side"] == "yes_ask":
+                    asks.append((int(r["price"]), int(r["remaining_size"])))
+                elif r["side"] == "yes_bid":
+                    bids.append((int(r["price"]), int(r["remaining_size"])))
+            asks.sort(key=lambda x: x[0])           # ascending price
+            bids.sort(key=lambda x: x[0], reverse=True)  # descending price
+            return {
+                "current_price": current_price,
+                "yes_asks": asks,
+                "yes_bids": bids,
+            }
+
+    def buy_contracts_atomic(
+        self, prediction_id: int, discord_id: int, side: str, contracts: int
+    ) -> dict:
+        """Atomically execute a BUY YES or BUY NO sweep across the book."""
+        if side not in self.VALID_TRADE_SIDES:
+            raise ValueError("side must be 'yes' or 'no'")
+        if contracts <= 0:
+            raise ValueError("contracts must be positive")
+
+        now = int(time.time())
+        # BUY YES consumes the yes_ask side (cheapest first).
+        # BUY NO  consumes the yes_bid side (highest bid first => cheapest NO ask).
+        if side == "yes":
+            book_side = "yes_ask"
+            order_clause = "price ASC"
+        else:
+            book_side = "yes_bid"
+            order_clause = "price DESC"
+
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+
+            cursor.execute(
+                "SELECT status, guild_id FROM predictions WHERE prediction_id = ?",
+                (prediction_id,),
+            )
+            pred = cursor.fetchone()
+            if not pred:
+                raise ValueError("Prediction not found.")
+            if pred["status"] != "open":
+                raise ValueError("Market is not open for trading.")
+            guild_id = pred["guild_id"]
+
+            cursor.execute(
+                f"""
+                SELECT level_id, price, remaining_size FROM prediction_levels
+                WHERE prediction_id = ? AND side = ? AND remaining_size > 0
+                ORDER BY {order_clause}
+                """,
+                (prediction_id, book_side),
+            )
+            levels = [dict(r) for r in cursor.fetchall()]
+
+            remaining = contracts
+            fills: list[tuple[int, int, int]] = []  # (level_id, price, take)
+            for level in levels:
+                if remaining <= 0:
+                    break
+                take = min(remaining, int(level["remaining_size"]))
+                fills.append((int(level["level_id"]), int(level["price"]), take))
+                remaining -= take
+
+            if remaining > 0:
+                available = contracts - remaining
+                raise ValueError(
+                    f"Insufficient depth: only {available} contracts available "
+                    f"(requested {contracts}). Wait for next refresh."
+                )
+
+            if side == "yes":
+                total_cost = sum(price * take for _, price, take in fills)
+            else:  # no — cost per contract = 100 - bid_price
+                total_cost = sum((100 - price) * take for _, price, take in fills)
+
+            cursor.execute(
+                """
+                SELECT COALESCE(jopacoin_balance, 0) AS balance
+                FROM players WHERE discord_id = ? AND guild_id = ?
+                """,
+                (discord_id, guild_id),
+            )
+            player = cursor.fetchone()
+            if not player:
+                raise ValueError("Player not found. Use /player register first.")
+            balance = int(player["balance"])
+            if balance < 0:
+                raise ValueError(
+                    "You cannot trade contracts while in debt. Win some games first."
+                )
+            if balance < total_cost:
+                raise ValueError(
+                    f"Insufficient balance: need {total_cost}, have {balance}."
+                )
+
+            cursor.execute(
+                """
+                UPDATE players
+                SET jopacoin_balance = jopacoin_balance - ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE discord_id = ? AND guild_id = ?
+                """,
+                (total_cost, discord_id, guild_id),
+            )
+
+            for level_id, _, take in fills:
+                cursor.execute(
+                    "UPDATE prediction_levels SET remaining_size = remaining_size - ? WHERE level_id = ?",
+                    (take, level_id),
+                )
+            cursor.execute(
+                "DELETE FROM prediction_levels WHERE prediction_id = ? AND remaining_size <= 0",
+                (prediction_id,),
+            )
+
+            yes_c, yes_t, no_c, no_t = self._read_position(cursor, prediction_id, discord_id)
+            if side == "yes":
+                yes_c += contracts
+                yes_t += total_cost
+            else:
+                no_c += contracts
+                no_t += total_cost
+            self._write_position(cursor, prediction_id, discord_id, yes_c, yes_t, no_c, no_t)
+
+            vwap_x100 = (total_cost * 100) // contracts if contracts > 0 else 0
+            action = "buy_yes" if side == "yes" else "buy_no"
+            cursor.execute(
+                """
+                INSERT INTO prediction_trades
+                    (prediction_id, discord_id, action, contracts, jopacoins, vwap_x100, trade_time)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (prediction_id, discord_id, action, contracts, total_cost, vwap_x100, now),
+            )
+
+            cursor.execute(
+                "UPDATE predictions SET lp_pnl = COALESCE(lp_pnl, 0) + ? WHERE prediction_id = ?",
+                (total_cost, prediction_id),
+            )
+
+            return {
+                "side": side,
+                "contracts": contracts,
+                "total_cost": total_cost,
+                "vwap_x100": vwap_x100,
+                "fills": [(price, take) for _, price, take in fills],
+                "new_balance": balance - total_cost,
+                "yes_contracts": yes_c,
+                "no_contracts": no_c,
+            }
+
+    def sell_contracts_atomic(
+        self, prediction_id: int, discord_id: int, side: str, contracts: int
+    ) -> dict:
+        """Atomically execute a SELL YES or SELL NO sweep against the bids."""
+        if side not in self.VALID_TRADE_SIDES:
+            raise ValueError("side must be 'yes' or 'no'")
+        if contracts <= 0:
+            raise ValueError("contracts must be positive")
+
+        now = int(time.time())
+        # SELL YES consumes yes_bids (highest first; best price for seller).
+        # SELL NO  consumes yes_asks (lowest first => highest NO bid).
+        if side == "yes":
+            book_side = "yes_bid"
+            order_clause = "price DESC"
+        else:
+            book_side = "yes_ask"
+            order_clause = "price ASC"
+
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+
+            cursor.execute(
+                "SELECT status, guild_id FROM predictions WHERE prediction_id = ?",
+                (prediction_id,),
+            )
+            pred = cursor.fetchone()
+            if not pred:
+                raise ValueError("Prediction not found.")
+            if pred["status"] != "open":
+                raise ValueError("Market is not open for trading.")
+            guild_id = pred["guild_id"]
+
+            yes_c, yes_t, no_c, no_t = self._read_position(cursor, prediction_id, discord_id)
+            if side == "yes":
+                if yes_c < contracts:
+                    raise ValueError(
+                        f"You only hold {yes_c} YES contracts (requested to sell {contracts})."
+                    )
+                old_qty = yes_c
+                old_basis = yes_t
+            else:
+                if no_c < contracts:
+                    raise ValueError(
+                        f"You only hold {no_c} NO contracts (requested to sell {contracts})."
+                    )
+                old_qty = no_c
+                old_basis = no_t
+
+            cursor.execute(
+                f"""
+                SELECT level_id, price, remaining_size FROM prediction_levels
+                WHERE prediction_id = ? AND side = ? AND remaining_size > 0
+                ORDER BY {order_clause}
+                """,
+                (prediction_id, book_side),
+            )
+            levels = [dict(r) for r in cursor.fetchall()]
+
+            remaining = contracts
+            fills: list[tuple[int, int, int]] = []
+            for level in levels:
+                if remaining <= 0:
+                    break
+                take = min(remaining, int(level["remaining_size"]))
+                fills.append((int(level["level_id"]), int(level["price"]), take))
+                remaining -= take
+
+            if remaining > 0:
+                available = contracts - remaining
+                raise ValueError(
+                    f"Insufficient depth on the bid side: only {available} contracts "
+                    f"can be sold (requested {contracts}). Wait for next refresh."
+                )
+
+            if side == "yes":
+                total_proceeds = sum(price * take for _, price, take in fills)
+            else:  # NO — proceeds per contract = 100 - ask_price
+                total_proceeds = sum((100 - price) * take for _, price, take in fills)
+
+            cursor.execute(
+                """
+                UPDATE players
+                SET jopacoin_balance = COALESCE(jopacoin_balance, 0) + ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE discord_id = ? AND guild_id = ?
+                """,
+                (total_proceeds, discord_id, guild_id),
+            )
+
+            for level_id, _, take in fills:
+                cursor.execute(
+                    "UPDATE prediction_levels SET remaining_size = remaining_size - ? WHERE level_id = ?",
+                    (take, level_id),
+                )
+            cursor.execute(
+                "DELETE FROM prediction_levels WHERE prediction_id = ? AND remaining_size <= 0",
+                (prediction_id,),
+            )
+
+            # Reduce cost basis proportionally; integer floor.
+            basis_reduction = (old_basis * contracts) // old_qty if old_qty > 0 else 0
+            new_qty = old_qty - contracts
+            new_basis = old_basis - basis_reduction
+            if side == "yes":
+                yes_c, yes_t = new_qty, new_basis
+            else:
+                no_c, no_t = new_qty, new_basis
+            self._write_position(cursor, prediction_id, discord_id, yes_c, yes_t, no_c, no_t)
+
+            vwap_x100 = (total_proceeds * 100) // contracts if contracts > 0 else 0
+            action = "sell_yes" if side == "yes" else "sell_no"
+            cursor.execute(
+                """
+                INSERT INTO prediction_trades
+                    (prediction_id, discord_id, action, contracts, jopacoins, vwap_x100, trade_time)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (prediction_id, discord_id, action, contracts, -total_proceeds, vwap_x100, now),
+            )
+
+            cursor.execute(
+                "UPDATE predictions SET lp_pnl = COALESCE(lp_pnl, 0) - ? WHERE prediction_id = ?",
+                (total_proceeds, prediction_id),
+            )
+
+            cursor.execute(
+                "SELECT COALESCE(jopacoin_balance, 0) AS balance FROM players WHERE discord_id = ? AND guild_id = ?",
+                (discord_id, guild_id),
+            )
+            new_balance = int(cursor.fetchone()["balance"])
+
+            return {
+                "side": side,
+                "contracts": contracts,
+                "total_proceeds": total_proceeds,
+                "vwap_x100": vwap_x100,
+                "fills": [(price, take) for _, price, take in fills],
+                "new_balance": new_balance,
+                "yes_contracts": yes_c,
+                "no_contracts": no_c,
+            }
+
+    def _read_position(self, cursor, prediction_id: int, discord_id: int) -> tuple[int, int, int, int]:
+        """Return (yes_contracts, yes_cost_basis_total, no_contracts, no_cost_basis_total)."""
+        cursor.execute(
+            """
+            SELECT yes_contracts, yes_cost_basis_total, no_contracts, no_cost_basis_total
+            FROM prediction_positions
+            WHERE prediction_id = ? AND discord_id = ?
+            """,
+            (prediction_id, discord_id),
+        )
+        row = cursor.fetchone()
+        if not row:
+            return (0, 0, 0, 0)
+        return (
+            int(row["yes_contracts"]),
+            int(row["yes_cost_basis_total"]),
+            int(row["no_contracts"]),
+            int(row["no_cost_basis_total"]),
+        )
+
+    def _write_position(
+        self, cursor, prediction_id: int, discord_id: int,
+        yes_c: int, yes_t: int, no_c: int, no_t: int,
+    ) -> None:
+        """Upsert position; delete the row when both sides hit 0."""
+        if yes_c == 0 and no_c == 0:
+            cursor.execute(
+                "DELETE FROM prediction_positions WHERE prediction_id = ? AND discord_id = ?",
+                (prediction_id, discord_id),
+            )
+            return
+        cursor.execute(
+            """
+            INSERT INTO prediction_positions
+                (prediction_id, discord_id, yes_contracts, yes_cost_basis_total,
+                 no_contracts, no_cost_basis_total)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(prediction_id, discord_id) DO UPDATE SET
+                yes_contracts = excluded.yes_contracts,
+                yes_cost_basis_total = excluded.yes_cost_basis_total,
+                no_contracts = excluded.no_contracts,
+                no_cost_basis_total = excluded.no_cost_basis_total
+            """,
+            (prediction_id, discord_id, yes_c, yes_t, no_c, no_t),
+        )
+
+    def get_position(self, prediction_id: int, discord_id: int) -> dict | None:
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            yes_c, yes_t, no_c, no_t = self._read_position(cursor, prediction_id, discord_id)
+            if yes_c == 0 and no_c == 0:
+                return None
+            return {
+                "prediction_id": prediction_id,
+                "discord_id": discord_id,
+                "yes_contracts": yes_c,
+                "yes_cost_basis_total": yes_t,
+                "no_contracts": no_c,
+                "no_cost_basis_total": no_t,
+            }
+
+    def get_user_open_positions(
+        self, discord_id: int, guild_id: int | None = None
+    ) -> list[dict]:
+        """Return user's open positions across markets, joined with market metadata."""
+        normalized_guild = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT
+                    pp.prediction_id,
+                    p.question,
+                    p.current_price,
+                    p.status,
+                    pp.yes_contracts,
+                    pp.yes_cost_basis_total,
+                    pp.no_contracts,
+                    pp.no_cost_basis_total
+                FROM prediction_positions pp
+                JOIN predictions p ON pp.prediction_id = p.prediction_id
+                WHERE pp.discord_id = ?
+                  AND p.guild_id = ?
+                  AND p.status = 'open'
+                  AND (pp.yes_contracts > 0 OR pp.no_contracts > 0)
+                ORDER BY p.created_at DESC
+                """,
+                (discord_id, normalized_guild),
+            )
+            return [dict(r) for r in cursor.fetchall()]
+
+    def get_recent_trades(self, prediction_id: int, limit: int = 5) -> list[dict]:
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT discord_id, action, contracts, jopacoins, vwap_x100, trade_time
+                FROM prediction_trades
+                WHERE prediction_id = ?
+                ORDER BY trade_id DESC
+                LIMIT ?
+                """,
+                (prediction_id, limit),
+            )
+            return [dict(r) for r in cursor.fetchall()]
+
+    def get_trade_summary_since(self, prediction_id: int, since_ts: int) -> dict:
+        """Aggregate trades since ``since_ts`` for the daily summary message."""
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT action, contracts, jopacoins, vwap_x100, trade_time, discord_id
+                FROM prediction_trades
+                WHERE prediction_id = ? AND trade_time >= ?
+                ORDER BY trade_id ASC
+                """,
+                (prediction_id, since_ts),
+            )
+            rows = [dict(r) for r in cursor.fetchall()]
+
+            total_volume = 0
+            yes_volume = 0
+            no_volume = 0
+            biggest = None
+            for r in rows:
+                qty = int(r["contracts"])
+                cash = int(r["jopacoins"])
+                total_volume += qty
+                if r["action"] in ("buy_yes", "sell_yes"):
+                    yes_volume += qty
+                else:
+                    no_volume += qty
+                if biggest is None or abs(cash) > abs(int(biggest["jopacoins"])):
+                    biggest = r
+            return {
+                "trade_count": len(rows),
+                "total_volume": total_volume,
+                "yes_volume": yes_volume,
+                "no_volume": no_volume,
+                "biggest_trade": biggest,
+            }
+
+    def get_markets_due_for_refresh(
+        self, refresh_interval_seconds: int, now_ts: int
+    ) -> list[dict]:
+        """Open markets whose ``last_refresh_at`` is older than the cutoff."""
+        cutoff = now_ts - refresh_interval_seconds
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT prediction_id, guild_id, question, current_price, last_refresh_at, thread_id, embed_message_id
+                FROM predictions
+                WHERE status = 'open' AND COALESCE(last_refresh_at, 0) <= ?
+                ORDER BY COALESCE(last_refresh_at, 0) ASC
+                """,
+                (cutoff,),
+            )
+            return [dict(r) for r in cursor.fetchall()]
+
+    def apply_refresh(
+        self,
+        prediction_id: int,
+        new_price: int,
+        levels: list[tuple[str, int, int]],
+        now_ts: int,
+    ) -> None:
+        """Atomically reset the ladder and stamp the new fair / refresh time."""
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "DELETE FROM prediction_levels WHERE prediction_id = ?",
+                (prediction_id,),
+            )
+            for side, price, size in levels:
+                if side not in self.VALID_BOOK_SIDES:
+                    raise ValueError(f"Invalid book side: {side}")
+                cursor.execute(
+                    """
+                    INSERT INTO prediction_levels
+                        (prediction_id, side, price, remaining_size, posted_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (prediction_id, side, price, size, now_ts),
+                )
+            cursor.execute(
+                "UPDATE predictions SET current_price = ?, last_refresh_at = ? WHERE prediction_id = ?",
+                (new_price, now_ts, prediction_id),
+            )
+
+    def settle_prediction_orderbook(self, prediction_id: int, outcome: str) -> dict:
+        """Atomic resolve: cancel levels, pay winners, mark resolved.
+
+        ``outcome`` is 'yes' or 'no'. Pays ``CONTRACT_VALUE = 100`` per winning
+        contract; losing contracts pay 0. Cost basis is irrelevant — payout is
+        purely a function of contract count.
+        """
+        if outcome not in self.VALID_POSITIONS:
+            raise ValueError(f"Invalid outcome: {outcome}")
+        from config import PREDICTION_CONTRACT_VALUE
+
+        now = int(time.time())
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+
+            cursor.execute(
+                "SELECT status, guild_id FROM predictions WHERE prediction_id = ?",
+                (prediction_id,),
+            )
+            pred = cursor.fetchone()
+            if not pred:
+                raise ValueError("Prediction not found.")
+            if pred["status"] != "open":
+                raise ValueError(
+                    f"Cannot settle market in status '{pred['status']}'."
+                )
+            guild_id = int(pred["guild_id"])
+
+            cursor.execute(
+                "DELETE FROM prediction_levels WHERE prediction_id = ?",
+                (prediction_id,),
+            )
+
+            cursor.execute(
+                """
+                SELECT discord_id, yes_contracts, yes_cost_basis_total,
+                       no_contracts, no_cost_basis_total
+                FROM prediction_positions
+                WHERE prediction_id = ?
+                """,
+                (prediction_id,),
+            )
+            positions = [dict(r) for r in cursor.fetchall()]
+
+            winners: list[dict] = []
+            losers: list[dict] = []
+            total_payout = 0
+
+            for p in positions:
+                yes_c = int(p["yes_contracts"])
+                no_c = int(p["no_contracts"])
+                yes_t = int(p["yes_cost_basis_total"])
+                no_t = int(p["no_cost_basis_total"])
+                if outcome == "yes":
+                    payout = yes_c * PREDICTION_CONTRACT_VALUE
+                    losing_basis = no_t
+                    winning_qty = yes_c
+                    losing_qty = no_c
+                else:
+                    payout = no_c * PREDICTION_CONTRACT_VALUE
+                    losing_basis = yes_t
+                    winning_qty = no_c
+                    losing_qty = yes_c
+
+                if payout > 0:
+                    cursor.execute(
+                        """
+                        UPDATE players
+                        SET jopacoin_balance = COALESCE(jopacoin_balance, 0) + ?,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE discord_id = ? AND guild_id = ?
+                        """,
+                        (payout, p["discord_id"], guild_id),
+                    )
+                    total_payout += payout
+                    winning_basis = yes_t if outcome == "yes" else no_t
+                    winners.append({
+                        "discord_id": int(p["discord_id"]),
+                        "contracts": winning_qty,
+                        "payout": payout,
+                        "profit": payout - winning_basis,
+                    })
+                if losing_qty > 0:
+                    losers.append({
+                        "discord_id": int(p["discord_id"]),
+                        "contracts": losing_qty,
+                        "loss": losing_basis,
+                    })
+
+            cursor.execute(
+                "UPDATE predictions SET lp_pnl = COALESCE(lp_pnl, 0) - ? WHERE prediction_id = ?",
+                (total_payout, prediction_id),
+            )
+
+            cursor.execute(
+                """
+                UPDATE predictions
+                SET status = 'resolved', outcome = ?, resolved_at = ?, resolved_by = NULL
+                WHERE prediction_id = ?
+                """,
+                (outcome, now, prediction_id),
+            )
+
+            cursor.execute(
+                "SELECT lp_pnl FROM predictions WHERE prediction_id = ?",
+                (prediction_id,),
+            )
+            lp_pnl = int(cursor.fetchone()["lp_pnl"] or 0)
+
+            return {
+                "prediction_id": prediction_id,
+                "outcome": outcome,
+                "winners": winners,
+                "losers": losers,
+                "total_payout": total_payout,
+                "lp_pnl": lp_pnl,
+            }
+
+    def cancel_orderbook_prediction(self, prediction_id: int) -> dict:
+        """Refund each holder's cost basis (yes + no totals); zero out positions."""
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+
+            cursor.execute(
+                "SELECT status, guild_id FROM predictions WHERE prediction_id = ?",
+                (prediction_id,),
+            )
+            pred = cursor.fetchone()
+            if not pred:
+                raise ValueError("Prediction not found.")
+            if pred["status"] != "open":
+                raise ValueError(f"Cannot cancel market in status '{pred['status']}'.")
+            guild_id = int(pred["guild_id"])
+
+            cursor.execute(
+                "DELETE FROM prediction_levels WHERE prediction_id = ?",
+                (prediction_id,),
+            )
+
+            cursor.execute(
+                """
+                SELECT discord_id, yes_cost_basis_total, no_cost_basis_total
+                FROM prediction_positions
+                WHERE prediction_id = ?
+                """,
+                (prediction_id,),
+            )
+            holders = [dict(r) for r in cursor.fetchall()]
+
+            refunded: list[dict] = []
+            total_refunded = 0
+            for h in holders:
+                refund = int(h["yes_cost_basis_total"]) + int(h["no_cost_basis_total"])
+                if refund > 0:
+                    cursor.execute(
+                        """
+                        UPDATE players
+                        SET jopacoin_balance = COALESCE(jopacoin_balance, 0) + ?,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE discord_id = ? AND guild_id = ?
+                        """,
+                        (refund, h["discord_id"], guild_id),
+                    )
+                    total_refunded += refund
+                refunded.append({
+                    "discord_id": int(h["discord_id"]),
+                    "refund": refund,
+                })
+
+            cursor.execute(
+                "DELETE FROM prediction_positions WHERE prediction_id = ?",
+                (prediction_id,),
+            )
+
+            cursor.execute(
+                "UPDATE predictions SET status = 'cancelled' WHERE prediction_id = ?",
+                (prediction_id,),
+            )
+
+            return {
+                "prediction_id": prediction_id,
+                "refunded": refunded,
+                "total_refunded": total_refunded,
+            }
+
+    def get_open_orderbook_predictions(self, guild_id: int) -> list[dict]:
+        """List open markets in a guild, enriched with current_price + top-of-book + today vol."""
+        from config import PREDICTION_REFRESH_SECONDS
+
+        normalized_guild = self.normalize_guild_id(guild_id)
+        now = int(time.time())
+        since = now - PREDICTION_REFRESH_SECONDS
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT prediction_id, question, creator_id, current_price,
+                       last_refresh_at, created_at, thread_id, channel_id,
+                       embed_message_id
+                FROM predictions
+                WHERE guild_id = ? AND status = 'open'
+                ORDER BY created_at DESC
+                """,
+                (normalized_guild,),
+            )
+            preds = [dict(r) for r in cursor.fetchall()]
+
+            for pred in preds:
+                pid = pred["prediction_id"]
+                book = self._book_summary(cursor, pid)
+                pred["top_ask"] = book["top_ask"]
+                pred["top_bid"] = book["top_bid"]
+                cursor.execute(
+                    "SELECT COALESCE(SUM(contracts), 0) AS vol FROM prediction_trades WHERE prediction_id = ? AND trade_time >= ?",
+                    (pid, since),
+                )
+                pred["volume_recent"] = int(cursor.fetchone()["vol"])
+            return preds
+
+    def _book_summary(self, cursor, prediction_id: int) -> dict:
+        cursor.execute(
+            """
+            SELECT side, MIN(CASE WHEN side='yes_ask' THEN price END) AS top_ask,
+                         MAX(CASE WHEN side='yes_bid' THEN price END) AS top_bid
+            FROM prediction_levels
+            WHERE prediction_id = ? AND remaining_size > 0
+            """,
+            (prediction_id,),
+        )
+        row = cursor.fetchone()
+        if not row:
+            return {"top_ask": None, "top_bid": None}
+        return {"top_ask": row["top_ask"], "top_bid": row["top_bid"]}

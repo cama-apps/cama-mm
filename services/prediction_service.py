@@ -2,9 +2,23 @@
 Handles prediction market business logic.
 """
 
+import random
 import time
 from typing import Any
 
+from config import (
+    PREDICTION_CONTRACT_VALUE,
+    PREDICTION_DRIFT_MAX,
+    PREDICTION_DRIFT_MIN,
+    PREDICTION_INITIAL_FAIR_DEFAULT,
+    PREDICTION_LEVELS_PER_SIDE,
+    PREDICTION_PRICE_HIGH,
+    PREDICTION_PRICE_LOW,
+    PREDICTION_REFRESH_SECONDS,
+    PREDICTION_SIZE_PER_LEVEL,
+    PREDICTION_SPREAD_TICKS,
+    PREDICTION_TICK_SIZE,
+)
 from repositories.interfaces import IPredictionRepository
 from repositories.player_repository import PlayerRepository
 
@@ -196,10 +210,6 @@ class PredictionService:
                 "total_pool": totals["yes_total"] + totals["no_total"],
             })
         return result
-
-    def get_user_position(self, prediction_id: int, discord_id: int) -> dict | None:
-        """Get user's position on a prediction."""
-        return self.prediction_repo.get_user_bet_on_prediction(prediction_id, discord_id)
 
     def get_user_active_positions(self, discord_id: int, guild_id: int | None = None) -> list[dict]:
         """Get all active positions for a user."""
@@ -542,3 +552,201 @@ class PredictionService:
             Dict with vote counts and voters
         """
         return self.prediction_repo.get_resolution_summary(prediction_id)
+
+    # =========================================================================
+    # Order-book mechanic (feat/predict-orderbook)
+    # =========================================================================
+
+    @staticmethod
+    def _build_initial_levels(fair: int) -> list[tuple[str, int, int]]:
+        """Construct the ladder of asks and bids around ``fair``.
+
+        Top-of-book offset is ``PREDICTION_SPREAD_TICKS``; subsequent levels
+        step by ``PREDICTION_TICK_SIZE`` outward. Levels outside ``{1..99}``
+        are dropped (the price clamp prevents this in practice).
+        """
+        levels: list[tuple[str, int, int]] = []
+        spread = PREDICTION_SPREAD_TICKS
+        for k in range(0, PREDICTION_LEVELS_PER_SIDE):
+            ask_price = fair + (spread + k) * PREDICTION_TICK_SIZE
+            bid_price = fair - (spread + k) * PREDICTION_TICK_SIZE
+            if 1 <= ask_price <= 99:
+                levels.append(("yes_ask", ask_price, PREDICTION_SIZE_PER_LEVEL))
+            if 1 <= bid_price <= 99:
+                levels.append(("yes_bid", bid_price, PREDICTION_SIZE_PER_LEVEL))
+        return levels
+
+    @staticmethod
+    def clamp_price(price: int) -> int:
+        return max(PREDICTION_PRICE_LOW, min(PREDICTION_PRICE_HIGH, price))
+
+    def create_orderbook_prediction(
+        self,
+        guild_id: int,
+        creator_id: int,
+        question: str,
+        initial_fair: int | None = None,
+        channel_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Create a new order-book market and post the initial ladder."""
+        if not question or len(question.strip()) < 5:
+            raise ValueError("Question must be at least 5 characters.")
+        if initial_fair is None:
+            initial_fair = PREDICTION_INITIAL_FAIR_DEFAULT
+        if not (PREDICTION_PRICE_LOW <= initial_fair <= PREDICTION_PRICE_HIGH):
+            raise ValueError(
+                f"initial_fair must be in [{PREDICTION_PRICE_LOW}, {PREDICTION_PRICE_HIGH}]."
+            )
+
+        prediction_id = self.prediction_repo.create_orderbook_prediction(
+            guild_id=guild_id,
+            creator_id=creator_id,
+            question=question.strip(),
+            initial_fair=initial_fair,
+            channel_id=channel_id,
+        )
+
+        levels = self._build_initial_levels(initial_fair)
+        self.prediction_repo.replace_levels(prediction_id, levels)
+
+        return {
+            "prediction_id": prediction_id,
+            "question": question.strip(),
+            "creator_id": creator_id,
+            "initial_fair": initial_fair,
+            "current_price": initial_fair,
+        }
+
+    def buy_contracts(
+        self, prediction_id: int, discord_id: int, side: str, contracts: int
+    ) -> dict[str, Any]:
+        return self.prediction_repo.buy_contracts_atomic(
+            prediction_id=prediction_id,
+            discord_id=discord_id,
+            side=side,
+            contracts=contracts,
+        )
+
+    def sell_contracts(
+        self, prediction_id: int, discord_id: int, side: str, contracts: int
+    ) -> dict[str, Any]:
+        return self.prediction_repo.sell_contracts_atomic(
+            prediction_id=prediction_id,
+            discord_id=discord_id,
+            side=side,
+            contracts=contracts,
+        )
+
+    def get_market_view(
+        self, prediction_id: int, viewer_id: int | None = None
+    ) -> dict | None:
+        """Bundle everything the embed / view command needs.
+
+        Returns: prediction row + book + recent trades + (optional) viewer position.
+        """
+        pred = self.prediction_repo.get_prediction(prediction_id)
+        if not pred:
+            return None
+        book = self.prediction_repo.get_book(prediction_id)
+        recent = self.prediction_repo.get_recent_trades(prediction_id, limit=5)
+        position = (
+            self.prediction_repo.get_position(prediction_id, viewer_id)
+            if viewer_id is not None
+            else None
+        )
+        # Volume since last refresh window
+        since = pred.get("last_refresh_at") or 0
+        summary = self.prediction_repo.get_trade_summary_since(prediction_id, since)
+        return {
+            **pred,
+            "book": book,
+            "recent_trades": recent,
+            "viewer_position": position,
+            "volume_since_refresh": summary.get("total_volume", 0),
+        }
+
+    def get_user_position(self, prediction_id: int, discord_id: int) -> dict | None:
+        return self.prediction_repo.get_position(prediction_id, discord_id)
+
+    def get_user_open_positions(
+        self, discord_id: int, guild_id: int | None = None
+    ) -> list[dict]:
+        return self.prediction_repo.get_user_open_positions(discord_id, guild_id)
+
+    def list_open_orderbook_markets(self, guild_id: int) -> list[dict]:
+        return self.prediction_repo.get_open_orderbook_predictions(guild_id)
+
+    def refresh_market(self, prediction_id: int) -> dict:
+        """Drift fair toward observed mid + small uniform integer drift; repost ladder.
+
+        Returns the refresh summary plus the trade aggregation since last refresh
+        so the caller can post the daily-summary message.
+        """
+        pred = self.prediction_repo.get_prediction(prediction_id)
+        if not pred or pred["status"] != "open":
+            return {"skipped": True, "reason": "not open"}
+
+        book = self.prediction_repo.get_book(prediction_id)
+        old_price = int(pred.get("current_price") or PREDICTION_INITIAL_FAIR_DEFAULT)
+        asks = book["yes_asks"]
+        bids = book["yes_bids"]
+        if asks and bids:
+            observed_mid = (asks[0][0] + bids[0][0]) / 2
+        else:
+            observed_mid = old_price
+
+        drift = random.randint(PREDICTION_DRIFT_MIN, PREDICTION_DRIFT_MAX)
+        new_price = self.clamp_price(round(observed_mid) + drift)
+
+        levels = self._build_initial_levels(new_price)
+        now = int(time.time())
+        self.prediction_repo.apply_refresh(prediction_id, new_price, levels, now)
+
+        prev_refresh = int(pred.get("last_refresh_at") or 0)
+        summary = self.prediction_repo.get_trade_summary_since(
+            prediction_id, prev_refresh
+        )
+        return {
+            "skipped": False,
+            "prediction_id": prediction_id,
+            "old_price": old_price,
+            "new_price": new_price,
+            "drift": drift,
+            "trade_summary": summary,
+        }
+
+    def get_markets_due_for_refresh(self, now_ts: int | None = None) -> list[dict]:
+        if now_ts is None:
+            now_ts = int(time.time())
+        return self.prediction_repo.get_markets_due_for_refresh(
+            PREDICTION_REFRESH_SECONDS, now_ts
+        )
+
+    def resolve_orderbook(
+        self, prediction_id: int, outcome: str, resolved_by: int | None = None
+    ) -> dict:
+        """Atomic settle: cancel levels, pay contract holders, mark resolved."""
+        return self.prediction_repo.settle_prediction_orderbook(prediction_id, outcome)
+
+    def cancel_orderbook(self, prediction_id: int) -> dict:
+        """Cost-basis refund. Same admin gating enforced at the command layer."""
+        return self.prediction_repo.cancel_orderbook_prediction(prediction_id)
+
+    @staticmethod
+    def position_mark(book: dict, side: str) -> int | None:
+        """Compute the mark price for a held position.
+
+        YES holdings are marked at the top YES bid (what you'd net selling now).
+        NO holdings are marked at ``100 - top YES ask`` (the top NO bid).
+        """
+        if side == "yes":
+            bids = book.get("yes_bids", [])
+            return bids[0][0] if bids else None
+        if side == "no":
+            asks = book.get("yes_asks", [])
+            return (100 - asks[0][0]) if asks else None
+        raise ValueError("side must be 'yes' or 'no'")
+
+    @staticmethod
+    def contract_value() -> int:
+        return PREDICTION_CONTRACT_VALUE
