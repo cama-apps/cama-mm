@@ -1480,6 +1480,25 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
             if not row or row["status"] != "open":
                 return  # market was resolved/cancelled while we were processing
 
+            # Cross-prevention: delete any old resting levels that would cross
+            # the new ladder. An old ask at or below the new top bid would be a
+            # crossed book; same for an old bid at or above the new top ask.
+            new_ask_prices = [p for s, p, _ in levels if s == "yes_ask"]
+            new_bid_prices = [p for s, p, _ in levels if s == "yes_bid"]
+            if new_ask_prices and new_bid_prices:
+                top_new_ask = min(new_ask_prices)
+                top_new_bid = max(new_bid_prices)
+                cursor.execute(
+                    "DELETE FROM prediction_levels "
+                    "WHERE prediction_id = ? AND side = 'yes_ask' AND price <= ?",
+                    (prediction_id, top_new_bid),
+                )
+                cursor.execute(
+                    "DELETE FROM prediction_levels "
+                    "WHERE prediction_id = ? AND side = 'yes_bid' AND price >= ?",
+                    (prediction_id, top_new_ask),
+                )
+
             for side, price, size in levels:
                 if side not in self.VALID_BOOK_SIDES:
                     raise ValueError(f"Invalid book side: {side}")

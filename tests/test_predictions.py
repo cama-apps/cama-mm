@@ -388,6 +388,50 @@ def post_helper(book):
         yield (("yes_bid", price), size)
 
 
+def test_refresh_deletes_crossing_levels(
+    prediction_service, prediction_repo, monkeypatch,
+):
+    """Old levels that would cross the new ladder must be removed before layering.
+
+    Scenario: fair drifts from 50 to 52 on a quiet market.
+    Old asks at 51 would cross the new top bid at 51; old asks at 51 must go.
+    Old asks at 52, 53 are not crossed.
+    """
+    pid = prediction_service.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID, creator_id=1, question="market mx?", initial_fair=50,
+    )["prediction_id"]
+    pre = dict(post_helper(prediction_repo.get_book(pid)))
+    assert pre[("yes_ask", 51)] == PREDICTION_SIZE_PER_LEVEL  # exists pre-refresh
+
+    monkeypatch.setattr(random, "randint", lambda lo, hi: 2)  # max drift up
+    prediction_service.refresh_market(pid)
+
+    post = dict(post_helper(prediction_repo.get_book(pid)))
+    # New fair = 52; new ladder asks 53,54,55, bids 51,50,49.
+    # Old ask at 51 would cross new top bid 51 → must be deleted.
+    assert ("yes_ask", 51) not in post
+    # Old asks at 52, 53 stay (52 sits inside new spread but doesn't cross; 53 layers)
+    assert post[("yes_ask", 52)] == PREDICTION_SIZE_PER_LEVEL
+    assert post[("yes_ask", 53)] == 2 * PREDICTION_SIZE_PER_LEVEL  # old + new
+
+
+def test_refresh_deletes_crossing_levels_on_drift_down(
+    prediction_service, prediction_repo, monkeypatch,
+):
+    """Symmetric: when fair drifts down, old bids that cross new top ask must go."""
+    pid = prediction_service.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID, creator_id=1, question="market mxd?", initial_fair=50,
+    )["prediction_id"]
+    monkeypatch.setattr(random, "randint", lambda lo, hi: -2)  # max drift down
+    prediction_service.refresh_market(pid)
+    post = dict(post_helper(prediction_repo.get_book(pid)))
+    # New fair = 48; new ladder asks 49,50,51, bids 47,46,45.
+    # Old bid at 49 would cross new top ask 49 → deleted.
+    assert ("yes_bid", 49) not in post
+    assert post[("yes_bid", 48)] == PREDICTION_SIZE_PER_LEVEL  # inside new spread, kept
+    assert post[("yes_bid", 47)] == 2 * PREDICTION_SIZE_PER_LEVEL  # old + new layer
+
+
 def test_get_markets_due_for_refresh(prediction_service, prediction_repo):
     pid = prediction_service.create_orderbook_prediction(
         guild_id=TEST_GUILD_ID, creator_id=1, question="market n?", initial_fair=50,
