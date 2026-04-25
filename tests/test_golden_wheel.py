@@ -58,7 +58,7 @@ class TestGoldenWheelWedges:
 
     def test_golden_wheel_ev_approximately_correct(self):
         """
-        compute_live_golden_wedges pins EV to WHEEL_GOLDEN_TARGET_EV (-10) for any
+        compute_live_golden_wedges pins EV to WHEEL_GOLDEN_TARGET_EV for any
         server state. Verify with representative inputs by recomputing the full EV
         (int wedges + estimated special-wedge EVs) the same way the function calibrates.
         """
@@ -87,12 +87,12 @@ class TestGoldenWheelWedges:
         live_evs = {
             "RED_SHELL": config.WHEEL_RED_SHELL_EST_EV,
             "BLUE_SHELL": config.WHEEL_BLUE_SHELL_EST_EV,
-            "HEIST": float(sum(max(1, int(b * 0.055)) for b in bottom_player_balances)),
-            "MARKET_CRASH": float(sum(max(1, int(b * 0.075)) for b in other_top_balances)),
+            "HEIST": float(sum(max(1, int(b * 0.085)) for b in bottom_player_balances)),
+            "MARKET_CRASH": float(sum(max(1, int(b * 0.115)) for b in other_top_balances)),
             "COMPOUND_INTEREST": float(max(5, min(150, int(spinner_balance * 0.08)))),
             "TRICKLE_DOWN": float(int(max(0, total_positive_balance - spinner_balance) * avg_trickle)),
             "DIVIDEND": float(max(10, int(total_positive_balance * 0.005))),
-            "HOSTILE_TAKEOVER": float(max(1, int(rank_next_balance * 0.075))),
+            "HOSTILE_TAKEOVER": float(max(1, int(rank_next_balance * 0.115))),
         }
 
         int_sum = sum(v for _, v, _ in wedges if isinstance(v, int))
@@ -125,11 +125,6 @@ class TestGoldenWheelWedges:
         # The business logic (bankrupt > golden) is enforced in commands/betting.py, not wheel_drawing.py.
         result = get_wheel_wedges(is_bankrupt=True, is_golden=False)
         assert result is BANKRUPT_WHEEL_WEDGES
-
-    def test_get_wedge_at_index_for_player_golden(self):
-        from utils.wheel_drawing import GOLDEN_WHEEL_WEDGES, get_wedge_at_index_for_player
-        wedge = get_wedge_at_index_for_player(0, is_golden=True)
-        assert wedge == GOLDEN_WHEEL_WEDGES[0]
 
     def test_heist_appears_twice(self):
         from utils.wheel_drawing import GOLDEN_WHEEL_WEDGES

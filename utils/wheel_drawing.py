@@ -607,12 +607,12 @@ def compute_live_golden_wedges(
 
     avg_trickle_pct = (LIGHTNING_BOLT_PCT_MIN + LIGHTNING_BOLT_PCT_MAX) / 2.0
 
-    # HEIST: steal 3-8% (avg 5.5%, min 1) from each of the bottom 30 players
-    heist_ev = float(sum(max(1, int(b * 0.055)) for b in bottom_player_balances))
+    # HEIST: steal 5-12% (avg 8.5%, min 1) from each of the bottom 30 players
+    heist_ev = float(sum(max(1, int(b * 0.085)) for b in bottom_player_balances))
 
-    # MARKET_CRASH: tax other top-N players 5-10% (avg 7.5%); fallback 25 if solo
+    # MARKET_CRASH: tax other top-N players 8-15% (avg 11.5%); fallback 25 if solo
     if other_top_balances:
-        market_crash_ev = float(sum(max(1, int(b * 0.075)) for b in other_top_balances))
+        market_crash_ev = float(sum(max(1, int(b * 0.115)) for b in other_top_balances))
     else:
         market_crash_ev = 25.0
 
@@ -626,9 +626,9 @@ def compute_live_golden_wedges(
     # DIVIDEND: 0.5% of total guild positive balance, min 10
     dividend_ev = float(max(10, int(total_positive_balance * 0.005)))
 
-    # HOSTILE_TAKEOVER: steal 5-10% (avg 7.5%) from rank N+1; fallback 40
+    # HOSTILE_TAKEOVER: steal 8-15% (avg 11.5%) from rank N+1; fallback 40
     if rank_next_balance:
-        hostile_ev = float(max(1, int(rank_next_balance * 0.075)))
+        hostile_ev = float(max(1, int(rank_next_balance * 0.115)))
     else:
         hostile_ev = 40.0
 
@@ -680,14 +680,6 @@ def get_wheel_wedges(is_bankrupt: bool = False, is_golden: bool = False, mana_co
     if is_golden:
         return GOLDEN_WHEEL_WEDGES
     return BANKRUPT_WHEEL_WEDGES if is_bankrupt else WHEEL_WEDGES
-
-
-def get_wedge_at_index_for_player(
-    idx: int, is_bankrupt: bool = False, is_golden: bool = False
-) -> tuple[str, int | str, str]:
-    """Get wedge info at given index for the appropriate wheel type."""
-    wedges = get_wheel_wedges(is_bankrupt, is_golden)
-    return wedges[idx % len(wedges)]
 
 
 def apply_war_effects(

@@ -1387,31 +1387,6 @@ def test_get_wheel_wedges_returns_correct_wheel():
     assert len(bankrupt) == 24, "Bankrupt wheel should have 24 wedges"
 
 
-def test_get_wedge_at_index_for_player_returns_correct_wedge():
-    """get_wedge_at_index_for_player() should return wedge from correct wheel."""
-    from utils.wheel_drawing import (
-        BANKRUPT_WHEEL_WEDGES,
-        WHEEL_WEDGES,
-        get_wedge_at_index_for_player,
-    )
-
-    # Index 0 on normal wheel
-    normal_wedge = get_wedge_at_index_for_player(0, is_bankrupt=False)
-    assert normal_wedge == WHEEL_WEDGES[0]
-
-    # Index 0 on bankrupt wheel
-    bankrupt_wedge = get_wedge_at_index_for_player(0, is_bankrupt=True)
-    assert bankrupt_wedge == BANKRUPT_WHEEL_WEDGES[0]
-
-    # Index wrapping for normal wheel (24 wedges)
-    wrapped_normal = get_wedge_at_index_for_player(24, is_bankrupt=False)
-    assert wrapped_normal == WHEEL_WEDGES[0]
-
-    # Index wrapping for bankrupt wheel (24 wedges)
-    wrapped_bankrupt = get_wedge_at_index_for_player(24, is_bankrupt=True)
-    assert wrapped_bankrupt == BANKRUPT_WHEEL_WEDGES[0]
-
-
 def test_bankrupt_wheel_bankrupt_value_recalculated():
     """BANKRUPT wedges should have recalculated value on the bankrupt wheel."""
     from utils.wheel_drawing import BANKRUPT_WHEEL_WEDGES, WHEEL_WEDGES
