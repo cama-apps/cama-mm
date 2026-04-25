@@ -782,6 +782,54 @@ class PredictionCommands(commands.Cog):
         if interaction.guild:
             await self.announce_to_gamba(interaction.guild, announce)
 
+    # -- /predict set_fair ---
+
+    @predict.command(
+        name="set_fair",
+        description="Manually override a market's fair price (admin)",
+    )
+    @app_commands.describe(
+        prediction_id="Market ID",
+        new_price=f"New fair price, integer in [{PREDICTION_PRICE_LOW}, {PREDICTION_PRICE_HIGH}]",
+    )
+    async def set_fair(
+        self, interaction: discord.Interaction, prediction_id: int, new_price: int,
+    ):
+        if not await require_gamba_channel(interaction):
+            return
+        if not has_admin_permission(interaction):
+            await interaction.response.send_message(
+                "Only admins can override the fair price.", ephemeral=True
+            )
+            return
+        if not await safe_defer(interaction):
+            return
+
+        try:
+            result = await asyncio.to_thread(
+                self.prediction_service.set_fair_manual, prediction_id, new_price,
+            )
+        except ValueError as e:
+            await safe_followup(interaction, content=f"❌ {e}")
+            return
+
+        announce = (
+            f"📈 Market #{prediction_id} fair manually set by <@{interaction.user.id}>: "
+            f"{result['old_price']} → {result['new_price']}"
+        )
+        await safe_followup(interaction, content=announce)
+
+        pred = await asyncio.to_thread(
+            self.prediction_service.get_prediction, prediction_id
+        )
+        if pred and pred.get("thread_id"):
+            try:
+                thread = self.bot.get_channel(pred["thread_id"]) or await self.bot.fetch_channel(pred["thread_id"])
+                await thread.send(announce)
+            except Exception as e:
+                logger.warning(f"Failed to post set_fair announcement: {e}")
+        await self.refresh_market_embed(prediction_id)
+
     # -- /predict cancel ---
 
     @predict.command(name="cancel", description="Cancel a market and refund cost basis (admin)")

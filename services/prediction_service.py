@@ -741,6 +741,34 @@ class PredictionService:
         """Cost-basis refund. Same admin gating enforced at the command layer."""
         return self.prediction_repo.cancel_orderbook_prediction(prediction_id)
 
+    def set_fair_manual(self, prediction_id: int, new_price: int) -> dict:
+        """Admin override: stamp a new fair and layer a fresh ladder around it.
+
+        Skips the random drift / observed-mid logic of the daily refresh — admin
+        is explicitly saying "the market should be at this price now". Uses the
+        same `apply_refresh` path so layering + cross-prevention apply.
+        """
+        if not (PREDICTION_PRICE_LOW <= new_price <= PREDICTION_PRICE_HIGH):
+            raise ValueError(
+                f"new_price must be in [{PREDICTION_PRICE_LOW}, {PREDICTION_PRICE_HIGH}]."
+            )
+        pred = self.prediction_repo.get_prediction(prediction_id)
+        if not pred:
+            raise ValueError("Prediction not found.")
+        if pred.get("status") != "open":
+            raise ValueError(
+                f"Cannot set fair on a {pred.get('status')} market."
+            )
+        old_price = int(pred.get("current_price") or PREDICTION_INITIAL_FAIR_DEFAULT)
+        levels = self._build_initial_levels(new_price)
+        now = int(time.time())
+        self.prediction_repo.apply_refresh(prediction_id, new_price, levels, now)
+        return {
+            "prediction_id": prediction_id,
+            "old_price": old_price,
+            "new_price": new_price,
+        }
+
     @staticmethod
     def position_mark(book: dict, side: str) -> int | None:
         """Compute the mark price for a held position.
