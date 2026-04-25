@@ -2,9 +2,10 @@
 
 When a tagged dig event fires its splash outcome, jopacoin is either
 **burned** from a pool of other players in the guild (default, a true
-deflation lever since coins are destroyed not transferred) or
+deflation lever since coins are destroyed not transferred),
 **granted** to a cooperative target (positive splash, e.g. the Io
-tether pact sharing spoils with a partner).
+tether pact sharing spoils with a partner), or **stolen** from victims
+and transferred to the digger (zero-sum, via ``steal_atomic``).
 
 Three victim pools are supported (see :class:`SplashConfig`):
 
@@ -15,9 +16,12 @@ Three victim pools are supported (see :class:`SplashConfig`):
 
 For ``mode="burn"`` the resolver clamps each victim's debit so
 non-debtors cannot be pushed below zero. For ``mode="grant"`` the
-credit is unclamped (adds JC to the recipient). Every actual balance
-change is recorded as a ``splash_victim`` row in ``dig_actions`` for
-auditing.
+credit is unclamped (adds JC to the recipient). For ``mode="steal"``
+the resolver calls ``player_repo.steal_atomic`` per victim, which
+transfers the amount to the digger and may push the victim below 0
+down to ``MAX_DEBT`` (intentional, matches Red/Blue Shell semantics).
+Every actual balance change is recorded as a ``splash_victim`` row in
+``dig_actions`` for auditing.
 """
 
 from __future__ import annotations
@@ -38,10 +42,12 @@ class SplashResult:
 
     ``victims`` is a list of ``(discord_id, amount)`` tuples. For
     ``mode="burn"`` amount is the positive integer actually debited;
-    for ``mode="grant"`` it is the positive integer credited.
+    for ``mode="grant"`` it is the positive integer credited; for
+    ``mode="steal"`` it is the positive integer transferred from the
+    victim to the digger.
     ``total_burned`` is the sum (regardless of mode — it's the
     magnitude moved). ``mode`` is copied in so the broadcast layer
-    can render either "coins burned" or "coins shared" flavor.
+    can render "burned", "shared", or "stolen" flavor.
     """
 
     strategy: str
@@ -153,6 +159,39 @@ def resolve_splash(
                 discord_id=vid,
                 guild_id=guild_id,
                 action_type="splash_victim",
+                jc_delta=actual,
+                details=audit_detail,
+            )
+            victims.append((vid, actual))
+            continue
+        if mode == "steal":
+            actual = int(penalty_jc)
+            try:
+                player_repo.steal_atomic(
+                    thief_discord_id=digger_id,
+                    victim_discord_id=vid,
+                    guild_id=guild_id,
+                    amount=actual,
+                )
+            except ValueError:
+                logger.exception(
+                    "Splash steal: steal_atomic failed for victim %s in guild %s", vid, guild_id,
+                )
+                continue
+            dig_repo.log_action(
+                discord_id=vid,
+                guild_id=guild_id,
+                action_type="splash_victim",
+                jc_delta=-actual,
+                details=audit_detail,
+            )
+            # Also log the digger-side credit so the audit trail attributes the
+            # JC the thief gained to this splash event (steal_atomic itself only
+            # touches balances).
+            dig_repo.log_action(
+                discord_id=digger_id,
+                guild_id=guild_id,
+                action_type="splash_thief",
                 jc_delta=actual,
                 details=audit_detail,
             )

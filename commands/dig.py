@@ -43,8 +43,10 @@ def _splash_aftermath_lines(splash: dict) -> list[str]:
     public broadcast vs. the digger's private reply.
     """
     victims = splash.get("victims", []) if splash else []
+    mode = (splash.get("mode") or "burn") if splash else "burn"
+    sign = "+" if mode == "grant" else "-"
     return [
-        f"<@{v['discord_id']}>: -{v['amount']} {JOPACOIN_EMOTE}"
+        f"<@{v['discord_id']}>: {sign}{v['amount']} {JOPACOIN_EMOTE}"
         for v in victims
     ]
 
@@ -53,17 +55,37 @@ def _build_splash_broadcast_embed(splash: dict, digger_id: int) -> discord.Embed
     """Build the public Discord embed announcing a splash event's collateral damage."""
     event_name = splash.get("event_name", "Event")
     total = splash.get("total_burned", 0)
-    embed = discord.Embed(
-        title=f"\u26a0\ufe0f Splash Event: {event_name}",
-        description=(
+    mode = splash.get("mode") or "burn"
+    if mode == "steal":
+        title_prefix = "\U0001f5e1\ufe0f Splash Event"
+        flavor = (
+            f"<@{digger_id}>'s dig stole **{total} {JOPACOIN_EMOTE}** "
+            f"from other players."
+        )
+        field_name = "Lifted from"
+    elif mode == "grant":
+        title_prefix = "\u2728 Splash Event"
+        flavor = (
+            f"<@{digger_id}>'s dig shared **{total} {JOPACOIN_EMOTE}** "
+            f"with other players."
+        )
+        field_name = "Received a share"
+    else:
+        title_prefix = "\u26a0\ufe0f Splash Event"
+        flavor = (
             f"<@{digger_id}>'s dig rippled through the tunnel network. "
             f"**{total} {JOPACOIN_EMOTE}** was lost to the collapse."
-        ),
-        color=0xC23B22,
+        )
+        field_name = "Caught in the cave-in"
+    color = 0x7B68EE if mode == "steal" else (0x4FC3F7 if mode == "grant" else 0xC23B22)
+    embed = discord.Embed(
+        title=f"{title_prefix}: {event_name}",
+        description=flavor,
+        color=color,
     )
     lines = _splash_aftermath_lines(splash)
     if lines:
-        embed.add_field(name="Caught in the cave-in", value="\n".join(lines), inline=False)
+        embed.add_field(name=field_name, value="\n".join(lines), inline=False)
     return embed
 
 
