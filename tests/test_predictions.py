@@ -415,6 +415,50 @@ def test_refresh_deletes_crossing_levels(
     assert post[("yes_ask", 53)] == 2 * PREDICTION_SIZE_PER_LEVEL  # old + new
 
 
+def test_set_fair_manual_changes_price_and_layers_ladder(
+    prediction_service, prediction_repo,
+):
+    pid = prediction_service.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID, creator_id=1, question="market sf?", initial_fair=50,
+    )["prediction_id"]
+    result = prediction_service.set_fair_manual(prediction_id=pid, new_price=60)
+    assert result["old_price"] == 50
+    assert result["new_price"] == 60
+    pred = prediction_repo.get_prediction(pid)
+    assert pred["current_price"] == 60
+    book = prediction_repo.get_book(pid)
+    # New ladder around 60: asks 61,62,63 / bids 59,58,57
+    ask_prices = sorted(p for p, _ in book["yes_asks"])
+    bid_prices = sorted((p for p, _ in book["yes_bids"]), reverse=True)
+    assert 61 in ask_prices and 62 in ask_prices and 63 in ask_prices
+    assert 59 in bid_prices and 58 in bid_prices and 57 in bid_prices
+    # Old asks at 51..53 all crossed (price <= new top bid 59), so they're deleted.
+    assert 51 not in ask_prices and 52 not in ask_prices and 53 not in ask_prices
+    # Old bids at 47,48,49 don't cross new asks (61), so they survive.
+    assert 47 in bid_prices and 48 in bid_prices and 49 in bid_prices
+
+
+def test_set_fair_manual_rejects_out_of_range(prediction_service):
+    pid = prediction_service.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID, creator_id=1, question="market sfo?", initial_fair=50,
+    )["prediction_id"]
+    with pytest.raises(ValueError, match="new_price"):
+        prediction_service.set_fair_manual(prediction_id=pid, new_price=99)
+    with pytest.raises(ValueError, match="new_price"):
+        prediction_service.set_fair_manual(prediction_id=pid, new_price=2)
+
+
+def test_set_fair_manual_rejects_resolved_market(prediction_service, player_repository):
+    _add_player(player_repository, 1)
+    pid = prediction_service.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID, creator_id=1, question="market sfr?", initial_fair=50,
+    )["prediction_id"]
+    prediction_service.buy_contracts(prediction_id=pid, discord_id=1, side="yes", contracts=1)
+    prediction_service.resolve_orderbook(prediction_id=pid, outcome="yes")
+    with pytest.raises(ValueError, match="resolved"):
+        prediction_service.set_fair_manual(prediction_id=pid, new_price=60)
+
+
 def test_refresh_deletes_crossing_levels_on_drift_down(
     prediction_service, prediction_repo, monkeypatch,
 ):
