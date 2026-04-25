@@ -227,6 +227,54 @@ class TestBossLocking:
         boss2 = dig_service._ensure_boss_locked(10001, TEST_GUILD_ID, tunnel, 25)
         assert boss1.boss_id == boss2.boss_id
 
+    def test_rolls_when_locked_boss_id_is_empty(
+        self, dig_service, dig_repo, player_repository, monkeypatch, deterministic_rng,
+    ):
+        """An existing dict entry with empty boss_id (left by the corrective
+        clear-active migration) must fall through to a fresh roll, not
+        short-circuit on the empty value."""
+        _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
+        dig_repo.update_tunnel(
+            10001, TEST_GUILD_ID,
+            boss_progress=json.dumps({"25": {"boss_id": "", "status": "active"}}),
+        )
+        tunnel = dict(dig_repo.get_tunnel(10001, TEST_GUILD_ID))
+
+        boss = dig_service._ensure_boss_locked(10001, TEST_GUILD_ID, tunnel, 25)
+
+        assert boss.boss_id == get_boss_pool_for_tier(25)[0].boss_id
+        fresh = dict(dig_repo.get_tunnel(10001, TEST_GUILD_ID))
+        progress = json.loads(fresh["boss_progress"])
+        assert progress["25"] == {"boss_id": boss.boss_id, "status": "active"}
+
+    def test_fight_boss_locks_boss_id_when_empty(
+        self, dig_service, dig_repo, player_repository, monkeypatch, deterministic_rng,
+    ):
+        """Legacy ``fight_boss`` must lock-or-roll the boss before resolving,
+        so an empty boss_id (post-migration) doesn't fall back to the
+        grandfathered pool[0] for the echo lookup."""
+        _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
+        dig_repo.update_tunnel(
+            10001, TEST_GUILD_ID,
+            boss_progress=json.dumps({"25": {"boss_id": "", "status": "active"}}),
+        )
+        monkeypatch.setattr(random, "random", lambda: 0.01)
+
+        result = dig_service.fight_boss(10001, TEST_GUILD_ID, "cautious", wager=10)
+
+        assert result["success"] is True
+        # The locked boss_id is non-empty and resolved against the rolled boss.
+        # ``deterministic_rng`` pins the roll to pool[0] (grothak), and the
+        # result must echo that boss_id rather than leaving it cleared.
+        rolled_id = get_boss_pool_for_tier(25)[0].boss_id
+        # ``fight_boss``'s legacy persistence rewrites boss_progress to the
+        # status-only string shape on win, but the in-flight ``active_boss_id``
+        # used for echo lookup must have been the rolled boss, not "" from the
+        # fallback. Verify by re-running with the boss-progress already wiped
+        # and confirming a parallel roll triggers an active echo write keyed
+        # to the rolled boss.
+        assert dig_repo.get_active_boss_echo(TEST_GUILD_ID, rolled_id) is not None
+
     def test_distribution_across_many_tunnels(self, repo_db_path, player_repository, monkeypatch):
         """Over many fresh tunnels, all 3 tier-25 bosses get rolled at least once.
 

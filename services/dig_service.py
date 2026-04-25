@@ -3527,7 +3527,10 @@ class DigService:
         # the last 24h, the boss comes in at -25% HP and pays -30%. The
         # original killer is exempt so re-runs can't farm their own discount.
         # Keyed by boss_id now that each tier has multiple possible bosses.
-        active_boss_id = self._get_locked_boss_id(tunnel, at_boss)
+        # Lock-or-resolve the boss first so the echo lookup can't fall back to
+        # the grandfathered pool[0] for an unlocked-but-active entry.
+        boss_def = self._ensure_boss_locked(discord_id, guild_id, tunnel, at_boss)
+        active_boss_id = boss_def.boss_id
         active_echo = self.dig_repo.get_active_boss_echo(guild_id, active_boss_id)
         echo_applied = bool(
             active_echo
@@ -4560,7 +4563,12 @@ class DigService:
 
         payouts = BOSS_PAYOUTS.get(at_boss, (2.0, 3.0, 6.0))
 
-        scout_boss_id = self._get_locked_boss_id(tunnel, at_boss)
+        # Lock the boss before reading boss_id — handles the post-migration
+        # case where boss_progress[depth] still has an empty boss_id (the
+        # encounter view that normally locks it may be skipped if a caller
+        # invokes scout directly).
+        scout_boss = self._ensure_boss_locked(discord_id, guild_id, tunnel, at_boss)
+        scout_boss_id = scout_boss.boss_id
         active_echo = self.dig_repo.get_active_boss_echo(guild_id, scout_boss_id)
         echo_applied = bool(
             active_echo

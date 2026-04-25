@@ -47,12 +47,21 @@ def _register(player_repo, discord_id=10001, balance=200):
 
 
 def _at_boss(dig_service, dig_repo, player_repository, monkeypatch, *, depth=24, prestige=0):
-    """Place a fresh player one block before the depth-25 boss boundary."""
+    """Place a fresh player one block before the depth-25 boss boundary.
+
+    Pre-locks the tier-25 boss to ``grothak`` so legacy ``fight_boss`` runs
+    deterministically — without this, ``_ensure_boss_locked`` rolls
+    randomly across the 3-boss tier pool.
+    """
     _register(player_repository, balance=200)
     monkeypatch.setattr(time, "time", lambda: 1_000_000)
     monkeypatch.setattr(random, "random", lambda: 0.99)
     dig_service.dig(10001, TEST_GUILD_ID)
-    dig_repo.update_tunnel(10001, TEST_GUILD_ID, depth=depth, prestige_level=prestige)
+    dig_repo.update_tunnel(
+        10001, TEST_GUILD_ID,
+        depth=depth, prestige_level=prestige,
+        boss_progress=json.dumps({"25": {"boss_id": "grothak", "status": "active"}}),
+    )
     monkeypatch.setattr(time, "time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1)
 
 
@@ -251,7 +260,10 @@ class TestBossEchoWeakening:
         monkeypatch.setattr(time, "time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 10)
         monkeypatch.setattr(random, "random", lambda: 0.99)
         dig_service.dig(10002, TEST_GUILD_ID)
-        dig_repo.update_tunnel(10002, TEST_GUILD_ID, depth=24)
+        dig_repo.update_tunnel(
+            10002, TEST_GUILD_ID, depth=24,
+            boss_progress=json.dumps({"25": {"boss_id": "grothak", "status": "active"}}),
+        )
         monkeypatch.setattr(time, "time", lambda: 1_000_000 + 2 * FREE_DIG_COOLDOWN_SECONDS + 10)
         balance_before = player_repository.get_balance(10002, TEST_GUILD_ID)
         monkeypatch.setattr(random, "random", lambda: 0.0)
@@ -272,7 +284,7 @@ class TestBossEchoWeakening:
         dig_service.fight_boss(10001, TEST_GUILD_ID, "reckless", wager=10)
 
         # Same killer comes back to the same boundary
-        bp = json.dumps({"25": "active"})  # reset boss status for re-fight
+        bp = json.dumps({"25": {"boss_id": "grothak", "status": "active"}})
         dig_repo.update_tunnel(10001, TEST_GUILD_ID, depth=24, boss_progress=bp)
         monkeypatch.setattr(time, "time", lambda: 1_000_000 + 2 * FREE_DIG_COOLDOWN_SECONDS + 10)
 
@@ -295,7 +307,10 @@ class TestBossEchoWeakening:
         monkeypatch.setattr(time, "time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 10)
         monkeypatch.setattr(random, "random", lambda: 0.99)
         dig_service.dig(10002, TEST_GUILD_ID)
-        dig_repo.update_tunnel(10002, TEST_GUILD_ID, depth=24)
+        dig_repo.update_tunnel(
+            10002, TEST_GUILD_ID, depth=24,
+            boss_progress=json.dumps({"25": {"boss_id": "grothak", "status": "active"}}),
+        )
         monkeypatch.setattr(time, "time", lambda: 1_000_000 + 2 * FREE_DIG_COOLDOWN_SECONDS + 10)
         monkeypatch.setattr(random, "random", lambda: 0.0)
         result = dig_service.fight_boss(10002, TEST_GUILD_ID, "cautious", wager=10)

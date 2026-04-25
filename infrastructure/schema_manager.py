@@ -276,6 +276,7 @@ class SchemaManager:
             ("upgrade_boss_progress_json", self._migration_upgrade_boss_progress_json),
             ("rekey_dig_boss_echoes_by_boss_id", self._migration_rekey_dig_boss_echoes_by_boss_id),
             ("add_stinger_curse_to_tunnels", self._migration_add_stinger_curse_to_tunnels),
+            ("clear_active_boss_ids_for_pool_reroll", self._migration_clear_active_boss_ids_for_pool_reroll),
         ]
 
     # --- Migrations ---
@@ -2153,7 +2154,7 @@ class SchemaManager:
                         upgraded[depth_key] = val
                         continue
                     upgraded[depth_key] = {
-                        "boss_id": legacy_boss_ids.get(depth_int, ""),
+                        "boss_id": legacy_boss_ids.get(depth_int, "") if val != "active" else "",
                         "status": val,
                     }
                     changed = True
@@ -2247,6 +2248,48 @@ class SchemaManager:
     def _migration_add_stinger_curse_to_tunnels(self, cursor) -> None:
         """Add ``stinger_curse`` JSON column to tunnels for persistent loss debuffs."""
         self._add_column_if_not_exists(cursor, "tunnels", "stinger_curse", "TEXT")
+
+    def _migration_clear_active_boss_ids_for_pool_reroll(self, cursor) -> None:
+        """Clear locked boss_id on still-active boss_progress entries.
+
+        The earlier ``upgrade_boss_progress_json`` migration backfilled the
+        grandfathered boss_id for every depth — including depths the player
+        had not yet engaged. That permanently locked those depths out of the
+        multi-boss pool because ``_ensure_boss_locked`` short-circuits when a
+        boss_id is already present. This migration clears boss_id on entries
+        whose status is still ``"active"``, letting the next encounter roll
+        fresh from the tier pool. Defeated and phase1_defeated entries are
+        preserved verbatim — they are historical kills and rewriting them
+        would falsify stat-points and dig_boss_echoes records.
+        """
+        import json as _json
+        cursor.execute(
+            "SELECT discord_id, guild_id, boss_progress FROM tunnels "
+            "WHERE boss_progress IS NOT NULL AND boss_progress != ''"
+        )
+        for row in cursor.fetchall():
+            discord_id, guild_id, raw = row[0], row[1], row[2]
+            try:
+                data = _json.loads(raw)
+            except Exception:
+                continue
+            if not isinstance(data, dict):
+                continue
+            changed = False
+            for val in data.values():
+                if (
+                    isinstance(val, dict)
+                    and val.get("status") == "active"
+                    and val.get("boss_id")
+                ):
+                    val["boss_id"] = ""
+                    changed = True
+            if changed:
+                cursor.execute(
+                    "UPDATE tunnels SET boss_progress = ? "
+                    "WHERE discord_id = ? AND guild_id = ?",
+                    (_json.dumps(data), discord_id, guild_id),
+                )
 
     def _migration_add_guild_id_to_lobby_state(self, cursor) -> None:
         """

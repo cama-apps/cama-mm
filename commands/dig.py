@@ -665,7 +665,7 @@ def _build_boss_fight_result_embed(*, result, risk_tier: str, amount: int) -> di
             if extra_cd:
                 parts.append(f"+{extra_cd // 60}m extra cooldown")
             embed.add_field(
-                name="Boss Stinger", value="; ".join(parts), inline=False,
+                name="Loss Penalty", value="; ".join(parts), inline=False,
             )
     embed.add_field(
         name="Details",
