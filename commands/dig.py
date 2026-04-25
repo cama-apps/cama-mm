@@ -627,6 +627,37 @@ def _build_duel_prompt_embed(result) -> discord.Embed:
     return embed
 
 
+async def _load_boss_result_art(result) -> discord.File | None:
+    """Resolve the victory/defeat art for a boss-fight result, or None.
+
+    Mirrors the boss_id → boundary fallback used elsewhere so grandfathered
+    bosses without a locked id still resolve their slug.
+    """
+    boundary = getattr(result, "boundary", None)
+    boss_id = getattr(result, "boss_id", "") or boundary
+    if not boss_id:
+        return None
+    try:
+        from utils.dig_assets import get_boss_art
+        # boss_progress JSON keys are stored as strings; coerce so
+        # get_layer_def's int comparison doesn't blow up on a "25"-shaped
+        # boundary and silently fall back to no art.
+        try:
+            depth_for_layer = (
+                int(getattr(result, "new_depth", 0) or 0)
+                or int(boundary or 0)
+            )
+        except (TypeError, ValueError):
+            depth_for_layer = 0
+        ld = get_layer_def(depth_for_layer)
+        ln = ld.name if ld else "Dirt"
+        scene = "victory" if getattr(result, "won", False) else "defeat"
+        return await asyncio.to_thread(get_boss_art, boss_id, scene, ln)
+    except Exception as e:
+        logger.debug("Boss fight art failed: %s", e)
+        return None
+
+
 def _build_boss_fight_result_embed(*, result, risk_tier: str, amount: int) -> discord.Embed:
     """Shared post-duel result embed — used by the modal's no-prompt path and
     by ``BossDuelView`` after the final option click / timeout."""
@@ -790,7 +821,12 @@ class BossDuelView(discord.ui.View):
         embed = _build_boss_fight_result_embed(
             result=result, risk_tier=self.risk_tier, amount=self.wager,
         )
-        await self._edit_message(embed=embed, view=None)
+        boss_file = await _load_boss_result_art(result)
+        if boss_file:
+            embed.set_image(url=f"attachment://{boss_file.filename}")
+            await self._edit_message(embed=embed, view=None, attachments=[boss_file])
+        else:
+            await self._edit_message(embed=embed, view=None)
         self.stop()
 
     async def _edit_message(self, **kwargs) -> None:
@@ -813,9 +849,14 @@ class BossDuelView(discord.ui.View):
             return
         embed = kwargs.get("embed")
         content = kwargs.get("content")
+        attachments = kwargs.get("attachments") or []
+        files = [a for a in attachments if isinstance(a, discord.File)]
         try:
             if embed is not None:
-                await channel.send(embed=embed)
+                if files:
+                    await channel.send(embed=embed, files=files)
+                else:
+                    await channel.send(embed=embed)
             elif content:
                 await channel.send(content=content)
         except Exception as e:
