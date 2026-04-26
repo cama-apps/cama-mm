@@ -997,7 +997,7 @@ class DigService:
         before = luminosity
         drain = LUMINOSITY_DRAIN_PER_DIG.get(layer_name, 0)
         # Frostforged / Void-Touched pickaxe: -25% luminosity drain
-        pickaxe_tier = tunnel.get("pickaxe_tier", 0) or 0
+        pickaxe_tier = self._get_active_pickaxe_tier(discord_id, guild_id, tunnel)
         if pickaxe_tier >= 5:  # Frostforged or better
             drain = max(0, drain - drain // 4)
         luminosity = max(0, luminosity - drain)
@@ -1293,7 +1293,7 @@ class DigService:
             is_first_dig=False,
             items_used=[],
             items_used_ids=[],
-            pickaxe_tier=tunnel.get("pickaxe_tier", 0) or 0,
+            pickaxe_tier=self._get_active_pickaxe_tier(discord_id, guild_id, tunnel),
             tip="A boss blocks your path!",
             decay_info=decay_info,
             luminosity_info=None,
@@ -1625,7 +1625,7 @@ class DigService:
             lum_info["drained"] += bonus_drain
             self.dig_repo.update_tunnel(discord_id, guild_id, luminosity=luminosity)
 
-        pickaxe_tier = tunnel.get("pickaxe_tier", 0) or 0
+        pickaxe_tier = self._get_active_pickaxe_tier(discord_id, guild_id, tunnel)
         pickaxe_data = PICKAXE_TIERS[pickaxe_tier] if pickaxe_tier < len(PICKAXE_TIERS) else {}
         pickaxe_advance_bonus = pickaxe_data.get("advance_bonus", 0)
         pickaxe_cavein_reduction = pickaxe_data.get("cave_in_reduction", 0)
@@ -2269,7 +2269,7 @@ class DigService:
             lum_info["drained"] += bonus_drain
             self.dig_repo.update_tunnel(discord_id, guild_id, luminosity=luminosity)
 
-        pickaxe_tier = tunnel.get("pickaxe_tier", 0) or 0
+        pickaxe_tier = self._get_active_pickaxe_tier(discord_id, guild_id, tunnel)
         pickaxe_data = PICKAXE_TIERS[pickaxe_tier] if pickaxe_tier < len(PICKAXE_TIERS) else {}
         pickaxe_advance_bonus = pickaxe_data.get("advance_bonus", 0)
         pickaxe_cavein_reduction = pickaxe_data.get("cave_in_reduction", 0)
@@ -3190,7 +3190,7 @@ class DigService:
         tunnel = self.dig_repo.get_tunnel(discord_id, guild_id)
         current_tier = 0
         if tunnel:
-            current_tier = dict(tunnel).get("pickaxe_tier", 0)
+            current_tier = self._get_active_pickaxe_tier(discord_id, guild_id, dict(tunnel))
 
         pickaxe_upgrades = []
         for i in range(current_tier + 1, len(PICKAXE_TIERS)):
@@ -3215,7 +3215,7 @@ class DigService:
             return self._ok(current_tier="Wooden", current_tier_index=0, next_tier=None, eligible=False)
 
         tunnel = dict(tunnel)
-        current_idx = tunnel.get("pickaxe_tier", 0)
+        current_idx = self._get_active_pickaxe_tier(discord_id, guild_id, tunnel)
         current_name = PICKAXE_TIERS[current_idx]["name"] if current_idx < len(PICKAXE_TIERS) else "Unknown"
 
         if current_idx >= len(PICKAXE_TIERS) - 1:
@@ -3292,13 +3292,18 @@ class DigService:
         return relics
 
     def upgrade_pickaxe(self, discord_id: int, guild_id) -> dict:
-        """Upgrade pickaxe to next tier if requirements met."""
+        """Upgrade pickaxe to next tier if requirements met.
+
+        Writes to BOTH the legacy ``tunnels.pickaxe_tier`` column and the new
+        ``dig_gear`` Weapon row so older read-paths (e.g. saboteur clue,
+        leaderboard rendering) keep working through the migration window.
+        """
         tunnel = self.dig_repo.get_tunnel(discord_id, guild_id)
         if tunnel is None:
             return self._error("You don't have a tunnel.")
 
         tunnel = dict(tunnel)
-        current_tier = tunnel.get("pickaxe_tier", 0)
+        current_tier = self._get_active_pickaxe_tier(discord_id, guild_id, tunnel)
 
         if current_tier >= len(PICKAXE_TIERS) - 1:
             return self._error("Already at max pickaxe tier.")
@@ -3324,9 +3329,19 @@ class DigService:
         if balance < cost:
             return self._error(f"Costs {cost} JC but you only have {balance} JC.")
 
-        # Apply upgrade
+        # Apply upgrade — write to legacy column AND dig_gear so equipped
+        # weapon stays in sync. Unequip whatever weapon is currently
+        # equipped, then add+equip the new tier.
         self.player_repo.add_balance(discord_id, guild_id, -cost)
         self.dig_repo.update_tunnel(discord_id, guild_id, pickaxe_tier=next_tier_idx)
+        equipped = self.dig_repo.get_equipped_gear(discord_id, guild_id)
+        old_weapon = equipped.get("weapon")
+        if old_weapon is not None:
+            self.dig_repo.unequip_gear(int(old_weapon["id"]))
+        new_id = self.dig_repo.add_gear(
+            discord_id, guild_id, "weapon", next_tier_idx, source="shop",
+        )
+        self.dig_repo.equip_gear(new_id, discord_id, guild_id, "weapon")
 
         return self._ok(
             tier=next_tier_idx,
@@ -3604,7 +3619,10 @@ class DigService:
             high = low + 10
             return {"type": "depth_range", "hint": f"Saboteur is between depth {low}-{high}"}
         elif clue_type == "pickaxe_tier":
-            tier = actor_tunnel.get("pickaxe_tier", 0) if actor_tunnel else 0
+            tier = (
+                self._get_active_pickaxe_tier(actor_id, guild_id, dict(actor_tunnel))
+                if actor_tunnel else 0
+            )
             tier_name = PICKAXE_TIERS[tier]["name"] if tier < len(PICKAXE_TIERS) else "Basic"
             return {"type": "pickaxe_tier", "hint": f"Saboteur uses a {tier_name} pickaxe"}
         return {"type": "unknown", "hint": "No clue available."}
