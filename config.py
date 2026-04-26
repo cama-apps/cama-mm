@@ -287,9 +287,12 @@ REBELLION_GAMBA_COOLDOWN_PENALTY = _parse_int("REBELLION_GAMBA_COOLDOWN_PENALTY"
 # Prediction market (order-book mechanic) configuration
 PREDICTION_CONTRACT_VALUE = _parse_int("PREDICTION_CONTRACT_VALUE", 100)         # jopa paid per winning contract
 PREDICTION_TICK_SIZE = _parse_int("PREDICTION_TICK_SIZE", 1)                     # jopa per price tick (= 1% probability)
-PREDICTION_LEVELS_PER_SIDE = _parse_int("PREDICTION_LEVELS_PER_SIDE", 3)         # ladder depth each side
-PREDICTION_SIZE_PER_LEVEL = _parse_int("PREDICTION_SIZE_PER_LEVEL", 5)           # contracts per level (uniform)
-PREDICTION_SPREAD_TICKS = _parse_int("PREDICTION_SPREAD_TICKS", 1)               # top-of-book offset from mid
+PREDICTION_LEVELS_PER_SIDE = _parse_int("PREDICTION_LEVELS_PER_SIDE", 3)         # ladder depth each side (initial seed)
+PREDICTION_SIZE_PER_LEVEL = _parse_int("PREDICTION_SIZE_PER_LEVEL", 5)           # contracts per level (initial seed)
+PREDICTION_SPREAD_TICKS = _parse_int("PREDICTION_SPREAD_TICKS", 1)               # top-of-book offset from mid (initial seed)
+PREDICTION_REFRESH_LEVELS_PER_SIDE = _parse_int("PREDICTION_REFRESH_LEVELS_PER_SIDE", 2)  # daily-refresh ladder depth
+PREDICTION_REFRESH_SIZE_PER_LEVEL = _parse_int("PREDICTION_REFRESH_SIZE_PER_LEVEL", 3)    # daily-refresh contracts/level
+PREDICTION_REFRESH_SPREAD_TICKS = _parse_int("PREDICTION_REFRESH_SPREAD_TICKS", 2)        # daily-refresh top-of-book offset (wider than seed)
 PREDICTION_REFRESH_SECONDS = _parse_int("PREDICTION_REFRESH_SECONDS", 86400)     # per-market refresh interval (~daily)
 PREDICTION_REFRESH_WAKE_SECONDS = _parse_int("PREDICTION_REFRESH_WAKE_SECONDS", 3600)  # how often the worker wakes to scan
 PREDICTION_DRIFT_MIN = _parse_int("PREDICTION_DRIFT_MIN", -2)                    # inclusive uniform integer drift

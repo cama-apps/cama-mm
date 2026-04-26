@@ -15,7 +15,10 @@ from config import (
     PREDICTION_LEVELS_PER_SIDE,
     PREDICTION_PRICE_HIGH,
     PREDICTION_PRICE_LOW,
+    PREDICTION_REFRESH_LEVELS_PER_SIDE,
     PREDICTION_REFRESH_SECONDS,
+    PREDICTION_REFRESH_SIZE_PER_LEVEL,
+    PREDICTION_REFRESH_SPREAD_TICKS,
     PREDICTION_SIZE_PER_LEVEL,
     PREDICTION_SPREAD_TICKS,
     PREDICTION_TICK_SIZE,
@@ -559,22 +562,39 @@ class PredictionService:
     # =========================================================================
 
     @staticmethod
-    def _build_initial_levels(fair: int) -> list[tuple[str, int, int]]:
-        """Construct the ladder of asks and bids around ``fair``.
+    def _build_initial_levels(
+        fair: int,
+        *,
+        levels_per_side: int | None = None,
+        size_per_level: int | None = None,
+        spread_ticks: int | None = None,
+    ) -> list[tuple[str, int, int]]:
+        """Construct a ladder of asks and bids around ``fair``.
 
-        Top-of-book offset is ``PREDICTION_SPREAD_TICKS``; subsequent levels
-        step by ``PREDICTION_TICK_SIZE`` outward. Levels outside ``{1..99}``
-        are dropped (the price clamp prevents this in practice).
+        Defaults to the *initial-seed* params (`PREDICTION_LEVELS_PER_SIDE`,
+        `_SIZE_PER_LEVEL`, `_SPREAD_TICKS`). Pass overrides to use the *refresh*
+        params (smaller and wider) — the daily-refresh worker calls with those
+        so the layered depth sits further from fair than the initial book.
+        Levels outside ``{1..99}`` are dropped (the price clamp prevents this
+        in practice).
         """
+        n_levels = (
+            levels_per_side if levels_per_side is not None else PREDICTION_LEVELS_PER_SIDE
+        )
+        size = (
+            size_per_level if size_per_level is not None else PREDICTION_SIZE_PER_LEVEL
+        )
+        spread = (
+            spread_ticks if spread_ticks is not None else PREDICTION_SPREAD_TICKS
+        )
         levels: list[tuple[str, int, int]] = []
-        spread = PREDICTION_SPREAD_TICKS
-        for k in range(0, PREDICTION_LEVELS_PER_SIDE):
+        for k in range(0, n_levels):
             ask_price = fair + (spread + k) * PREDICTION_TICK_SIZE
             bid_price = fair - (spread + k) * PREDICTION_TICK_SIZE
             if 1 <= ask_price <= 99:
-                levels.append(("yes_ask", ask_price, PREDICTION_SIZE_PER_LEVEL))
+                levels.append(("yes_ask", ask_price, size))
             if 1 <= bid_price <= 99:
-                levels.append(("yes_bid", bid_price, PREDICTION_SIZE_PER_LEVEL))
+                levels.append(("yes_bid", bid_price, size))
         return levels
 
     @staticmethod
@@ -705,7 +725,15 @@ class PredictionService:
         drift = random.randint(PREDICTION_DRIFT_MIN, PREDICTION_DRIFT_MAX)
         new_price = self.clamp_price(round(observed_mid) + drift)
 
-        levels = self._build_initial_levels(new_price)
+        # Daily refresh layers thinner / wider than the initial seed: fewer
+        # levels, smaller per-level size, larger spread offset. Initial book
+        # stays untouched at top of book; the layered refresh sits behind it.
+        levels = self._build_initial_levels(
+            new_price,
+            levels_per_side=PREDICTION_REFRESH_LEVELS_PER_SIDE,
+            size_per_level=PREDICTION_REFRESH_SIZE_PER_LEVEL,
+            spread_ticks=PREDICTION_REFRESH_SPREAD_TICKS,
+        )
         now = int(time.time())
         self.prediction_repo.apply_refresh(prediction_id, new_price, levels, now)
 
