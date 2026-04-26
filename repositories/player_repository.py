@@ -627,6 +627,41 @@ class PlayerRepository(BaseRepository, IPlayerRepository):
                     (discord_id, guild_id),
                 )
 
+    def try_debit(self, discord_id: int, guild_id: int, amount: int) -> bool:
+        """Atomically debit ``amount`` JC if and only if the player has enough.
+
+        Returns True on success, False if the balance was insufficient. Uses
+        a conditional UPDATE so the check and the debit happen in a single
+        statement — no TOCTOU window between callers racing on the balance.
+        """
+        if amount <= 0:
+            return True
+        guild_id = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE players
+                SET jopacoin_balance = COALESCE(jopacoin_balance, 0) - ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE discord_id = ? AND guild_id = ?
+                  AND COALESCE(jopacoin_balance, 0) >= ?
+                """,
+                (amount, discord_id, guild_id, amount),
+            )
+            if cursor.rowcount == 0:
+                return False
+            cursor.execute(
+                """
+                UPDATE players
+                SET lowest_balance_ever = jopacoin_balance
+                WHERE discord_id = ? AND guild_id = ?
+                  AND (lowest_balance_ever IS NULL OR jopacoin_balance < lowest_balance_ever)
+                """,
+                (discord_id, guild_id),
+            )
+            return True
+
     def add_balance_many(self, deltas_by_discord_id: dict[int, int], guild_id: int) -> None:
         """
         Apply multiple balance deltas in a single transaction.

@@ -246,3 +246,52 @@ class TestBuyGear:
         r = svc.buy_gear(player, 0, "armor", 1)
         assert not r["success"]
         assert "JC" in r["error"]
+
+
+class TestAtomicDebit:
+    """Confirm the repair flows can't drive balance negative under a race."""
+
+    def test_repair_succeeds_when_just_funded(self, svc, player):
+        """``try_debit`` is a single conditional UPDATE — if it succeeds the
+        balance is debited atomically by exactly ``cost`` JC."""
+        # Buy Diamond Plate (180 JC) while flush, then drain balance to 100
+        # and damage the piece. Diamond repair = 90 JC, so 100 is enough.
+        gid = svc.buy_gear(player, 0, "armor", 3)["gear_id"]
+        svc.player_repo.add_balance(player, 0, -(svc.player_repo.get_balance(player, 0) - 100))
+        svc.dig_repo.repair_gear(gid, 5)
+        assert svc.player_repo.get_balance(player, 0) == 100
+        r = svc.repair_gear(player, 0, gid)
+        assert r["success"]
+        assert svc.player_repo.get_balance(player, 0) == 10
+
+    def test_repair_does_not_charge_on_insufficient_balance(self, svc, player):
+        gid = svc.buy_gear(player, 0, "armor", 3)["gear_id"]
+        # Drain to 5 JC (Diamond repair would cost 90)
+        svc.player_repo.add_balance(player, 0, -(svc.player_repo.get_balance(player, 0) - 5))
+        svc.dig_repo.repair_gear(gid, 5)
+        bal_before = svc.player_repo.get_balance(player, 0)
+        r = svc.repair_gear(player, 0, gid)
+        assert not r["success"]
+        # Balance unchanged — try_debit was a no-op when the WHERE clause failed.
+        assert svc.player_repo.get_balance(player, 0) == bal_before
+
+
+class TestTryDebit:
+    """Direct coverage on PlayerRepository.try_debit."""
+
+    def test_succeeds_when_funded(self, svc, player):
+        starting = svc.player_repo.get_balance(player, 0)
+        ok = svc.player_repo.try_debit(player, 0, 100)
+        assert ok is True
+        assert svc.player_repo.get_balance(player, 0) == starting - 100
+
+    def test_fails_when_short_and_does_not_charge(self, svc, player):
+        starting = svc.player_repo.get_balance(player, 0)
+        ok = svc.player_repo.try_debit(player, 0, starting + 1)
+        assert ok is False
+        assert svc.player_repo.get_balance(player, 0) == starting
+
+    def test_zero_amount_is_a_noop_success(self, svc, player):
+        starting = svc.player_repo.get_balance(player, 0)
+        assert svc.player_repo.try_debit(player, 0, 0) is True
+        assert svc.player_repo.get_balance(player, 0) == starting

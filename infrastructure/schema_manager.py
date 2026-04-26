@@ -149,7 +149,20 @@ class SchemaManager:
 
     def _run_migrations(self, cursor) -> None:
         applied = {row["name"] for row in cursor.execute("SELECT name FROM schema_migrations")}
-        for name, action in self._get_migrations():
+        pending = [(name, action) for name, action in self._get_migrations() if name not in applied]
+        if not pending:
+            return
+        # Take an exclusive write lock for the duration of the unapplied
+        # migrations so two bot instances starting against the same SQLite
+        # file can't both observe the same migration as un-applied and
+        # double-execute it (which would, for example, double-backfill
+        # dig_gear weapon rows). The first instance commits and registers
+        # the migration name; the second wakes up, sees it applied, skips.
+        cursor.execute("BEGIN IMMEDIATE")
+        # Re-read applied inside the lock — another instance may have
+        # finished while we were waiting on the busy_timeout.
+        applied = {row["name"] for row in cursor.execute("SELECT name FROM schema_migrations")}
+        for name, action in pending:
             if name in applied:
                 continue
             logger.info(f"Applying migration: {name}")
