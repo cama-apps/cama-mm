@@ -2841,6 +2841,18 @@ class DigCommands(commands.Cog):
             )
             embed.add_field(name="Pickaxe Upgrades", value=upg_text, inline=False)
 
+        # Boss-combat gear (Armor / Boots; weapons are the pickaxe row above)
+        gear_for_sale = getattr(shop, "gear_for_sale", [])
+        if gear_for_sale:
+            gear_text = "\n".join(
+                f"**{g.get('name', '?')}** — {g.get('price', '?')} {JOPACOIN_EMOTE} "
+                f"(Depth {g.get('depth_req', '?')}"
+                + (f", Prestige {g.get('prestige_req', 0)}" if g.get('prestige_req', 0) else "")
+                + ")"
+                for g in gear_for_sale
+            )
+            embed.add_field(name="Boss Gear", value=gear_text, inline=False)
+
         # Inventory count
         inv_count = getattr(shop, "inventory_count", 0)
         embed.set_footer(text=f"Your inventory: {inv_count}/{MAX_INVENTORY_SLOTS} items | Use /dig buy <item> to purchase, /dig use <item> to queue")
@@ -2871,6 +2883,12 @@ class DigCommands(commands.Cog):
         app_commands.Choice(name="Sonar Pulse (8 JC)", value="sonar_pulse"),
         app_commands.Choice(name="Depth Charge (15 JC)", value="depth_charge"),
         app_commands.Choice(name="Void Bait (20 JC)", value="void_bait"),
+        app_commands.Choice(name="Stone Plate (20 JC)",   value="armor:1"),
+        app_commands.Choice(name="Iron Plate (60 JC)",    value="armor:2"),
+        app_commands.Choice(name="Diamond Plate (180 JC)", value="armor:3"),
+        app_commands.Choice(name="Stone Boots (25 JC)",   value="boots:1"),
+        app_commands.Choice(name="Iron Boots (70 JC)",    value="boots:2"),
+        app_commands.Choice(name="Diamond Boots (200 JC)", value="boots:3"),
     ])
     async def dig_buy(self, interaction: discord.Interaction, item: str):
         if not await require_gamba_channel(interaction):
@@ -2883,6 +2901,43 @@ class DigCommands(commands.Cog):
         await safe_defer(interaction, ephemeral=True)
 
         guild_id = interaction.guild.id if interaction.guild else None
+
+        # Gear choice values are encoded as "<slot>:<tier>"; route them to
+        # the gear-buy path. Everything else is a consumable.
+        if ":" in item:
+            slot, _, tier_str = item.partition(":")
+            try:
+                tier = int(tier_str)
+            except ValueError:
+                tier = -1
+            try:
+                result = _wrap(await asyncio.to_thread(
+                    self.dig_service.buy_gear,
+                    interaction.user.id, guild_id, slot, tier,
+                ))
+            except Exception as e:
+                logger.error("Dig buy_gear error: %s", e)
+                await safe_followup(interaction, content="Purchase failed.", ephemeral=True)
+                return
+            if not getattr(result, "success", False):
+                await safe_followup(
+                    interaction,
+                    content=getattr(result, "error", "Purchase failed."),
+                    ephemeral=True,
+                )
+                return
+            name = getattr(result, "name", item)
+            cost = getattr(result, "cost", 0)
+            await safe_followup(
+                interaction,
+                content=(
+                    f"Bought **{name}** for **{cost}** {JOPACOIN_EMOTE}.\n"
+                    f"Equip it via `/dig gear`."
+                ),
+                ephemeral=True,
+            )
+            return
+
         try:
             result = _wrap(await asyncio.to_thread(
                 self.dig_service.buy_item, interaction.user.id, guild_id, item

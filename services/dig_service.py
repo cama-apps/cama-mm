@@ -3177,7 +3177,7 @@ class DigService:
         return result.get("amount", 0)
 
     def get_shop(self, discord_id: int, guild_id) -> dict:
-        """Return shop data: consumables, pickaxe upgrades, and inventory count."""
+        """Return shop data: consumables, pickaxe upgrades, gear, inventory count."""
         inventory = self.dig_repo.get_inventory(discord_id, guild_id)
         inv_count = len(inventory) if inventory else 0
 
@@ -3202,9 +3202,30 @@ class DigService:
                 "prestige_req": t.get("prestige_required", 0),
             })
 
+        # Show shop-buyable boss gear (tiers 0..3 — Wooden/Stone/Iron/Diamond
+        # for armor and boots; weapons remain on the pickaxe ladder above).
+        gear_for_sale: list[dict] = []
+        for slot_enum, table in GEAR_TIER_TABLES.items():
+            if slot_enum == GearSlot.WEAPON:
+                continue  # weapons sell via the pickaxe upgrade row
+            for tier_idx, td in enumerate(table):
+                if tier_idx > 3:
+                    continue  # Obsidian+ are drop-only
+                if td.shop_price <= 0:
+                    continue  # tier 0 is the free starter — never in the shop
+                gear_for_sale.append({
+                    "slot": slot_enum.value,
+                    "tier": tier_idx,
+                    "name": td.name,
+                    "price": td.shop_price,
+                    "depth_req": td.depth_required,
+                    "prestige_req": td.prestige_required,
+                })
+
         return self._ok(
             consumables=consumables,
             pickaxe_upgrades=pickaxe_upgrades,
+            gear_for_sale=gear_for_sale,
             inventory_count=inv_count,
         )
 
