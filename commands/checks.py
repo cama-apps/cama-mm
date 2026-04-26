@@ -8,15 +8,22 @@ import discord
 
 
 async def require_gamba_channel(interaction: discord.Interaction) -> bool:
-    """Return True if the channel name contains 'gamba'.
+    """Return True if the channel (or its parent, for threads) contains 'gamba'.
 
-    Otherwise charge 1 JC and send a cryptic ephemeral error.
-    Must be called **before** deferring so we can use response.send_message.
+    Threads inherit their parent's gamba-status — a button clicked inside a
+    market thread under #gamba should pass even though the thread's own name
+    doesn't contain 'gamba'. Otherwise charge 1 JC and send a cryptic ephemeral
+    error. Must be called **before** deferring so we can use response.send_message.
     """
     channel = interaction.channel
-    channel_name = getattr(channel, "name", "") or ""
-    if "gamba" in channel_name.lower():
+    channel_name = (getattr(channel, "name", "") or "").lower()
+    if "gamba" in channel_name:
         return True
+    parent = getattr(channel, "parent", None)
+    if parent is not None:
+        parent_name = (getattr(parent, "name", "") or "").lower()
+        if "gamba" in parent_name:
+            return True
 
     # Charge 1 JC
     user_id = interaction.user.id
