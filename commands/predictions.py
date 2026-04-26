@@ -44,30 +44,36 @@ MARKET_TITLE_RE = re.compile(rf"{re.escape(MARKET_TITLE_PREFIX)}(\d+)")
 # --------------------------------------------------------------------------- #
 
 def _format_ladder(book: dict) -> str:
-    """Render the YES order book as a monospaced code block.
+    """Render the book in user-action terms: Buy/Sell YES/NO with prices.
 
-    NO is implicit (price is mirrored: NO_ask = 100 - YES_bid).
+    Drops bid/ask jargon — many users don't have that vocabulary; the
+    Polymarket-style "Buy YES at X / Buy NO at Y" framing is more direct.
+    Both sides of the same physical book are surfaced explicitly here so
+    users can see what each action costs without mentally inverting prices.
     """
-    asks = book.get("yes_asks", [])
-    bids = book.get("yes_bids", [])
+    asks = book.get("yes_asks", [])  # cheapest first
+    bids = book.get("yes_bids", [])  # highest first
     current = book.get("current_price")
 
-    lines = ["```", "ASK"]
-    if asks:
-        for price, size in reversed(asks):  # display deepest -> top
-            lines.append(f"  {price:>3}  x {size}")
-    else:
-        lines.append("  (empty - refreshes daily)")
+    def _fmt_row(label: str, level_strs: list[str]) -> str:
+        joined = "   ".join(level_strs) if level_strs else "(none)"
+        return f"  {label:<10} {joined}"
 
-    mid_label = f"---- mid {current} ----" if current is not None else "----"
-    lines.append(f"  {mid_label}")
+    buy_yes = [f"{p} x{s}" for p, s in asks]                  # YES asks, cheapest first
+    buy_no = [f"{100 - p} x{s}" for p, s in bids]             # NO ask = 100 - top YES bid
+    sell_yes = [f"{p} x{s}" for p, s in bids]                 # YES bids, highest first
+    sell_no = [f"{100 - p} x{s}" for p, s in asks]            # NO bid = 100 - top YES ask
 
-    if bids:
-        for price, size in bids:  # already sorted descending
-            lines.append(f"  {price:>3}  x {size}")
-    else:
-        lines.append("  (empty - refreshes daily)")
-    lines.append("BID")
+    lines = ["```"]
+    lines.append(f"  price: {current if current is not None else '?'}")
+    lines.append("")
+    lines.append("  --- Open positions ---")
+    lines.append(_fmt_row("Buy YES:", buy_yes))
+    lines.append(_fmt_row("Buy NO:", buy_no))
+    lines.append("")
+    lines.append("  --- Close positions ---")
+    lines.append(_fmt_row("Sell YES:", sell_yes))
+    lines.append(_fmt_row("Sell NO:", sell_no))
     lines.append("```")
     return "\n".join(lines)
 
@@ -964,6 +970,49 @@ class PredictionCommands(commands.Cog):
         else:
             embed = self._build_market_embed(view_data)
         await safe_followup(interaction, embed=embed)
+
+    # -- /predict help ---
+
+    @predict.command(
+        name="help",
+        description="Explainer: how prediction markets work in this bot",
+    )
+    async def help_cmd(self, interaction: discord.Interaction):
+        if not await require_gamba_channel(interaction):
+            return
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+
+        body = (
+            "**How prediction markets work here**\n\n"
+            "Each market is a YES/NO question. Each *contract* pays "
+            f"**{PREDICTION_CONTRACT_VALUE} jopa** if your side wins, **0** if it loses.\n\n"
+            "**Price = probability.** A YES priced at 17 means the market thinks "
+            "YES has a 17% chance. NO priced at 84 means NO has ~84%. They sum to ~100 "
+            "(plus a tiny LP spread).\n\n"
+            "**Buying** (open a position):\n"
+            "• Buy YES at the YES price → win 100 if YES, 0 if NO.\n"
+            "• Buy NO at the NO price → win 100 if NO, 0 if YES.\n\n"
+            "**Example.** \"Will Luke hit immortal?\" market price 17 (~17% YES).\n"
+            "• Buy YES @ 18 → if Luke makes it, +82. If not, −18.\n"
+            "• Buy NO @ 84 → if Luke fails, +16. If he makes it, −84.\n\n"
+            "**Selling** (close a position): you can sell back any time before the market "
+            "resolves, at the current sell price. Cuts losses or banks profits early.\n\n"
+            "**The bot is your counterparty** for every trade (call it the Cama central bank). "
+            "It posts a small ladder of prices each day; trades sweep top-of-book first. "
+            "Price drifts daily based on order flow + a small random walk. If one side gets "
+            "fully bought out, the price fades toward that side on the next refresh.\n\n"
+            "**Admins** create markets and resolve them. Anyone can trade. "
+            "Use `/predict list` for open markets, `/predict view <id>` for a specific market, "
+            "and `/predict mine` for your positions."
+        )
+
+        embed = discord.Embed(
+            title="📈 Prediction markets — quick guide",
+            description=body,
+            color=0x3498DB,
+        )
+        await safe_followup(interaction, embed=embed, ephemeral=True)
 
     # -- /predict mine ---
 
