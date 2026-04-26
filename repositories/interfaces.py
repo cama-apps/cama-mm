@@ -1542,6 +1542,34 @@ class IDigRepository(ABC):
     @abstractmethod
     def has_artifact(self, discord_id: int, guild_id: int, artifact_id: str) -> bool: ...
 
+    # Boss-combat Gear (Weapon / Armor / Boots slots)
+    @abstractmethod
+    def add_gear(
+        self, discord_id: int, guild_id: int, slot: str, tier: int,
+        source: str = "shop", durability: int | None = None,
+    ) -> int: ...
+
+    @abstractmethod
+    def get_gear(self, discord_id: int, guild_id: int) -> list[dict]: ...
+
+    @abstractmethod
+    def get_equipped_gear(self, discord_id: int, guild_id: int) -> dict[str, dict]: ...
+
+    @abstractmethod
+    def get_gear_by_id(self, gear_id: int) -> dict | None: ...
+
+    @abstractmethod
+    def equip_gear(self, gear_id: int, discord_id: int, guild_id: int, slot: str) -> None: ...
+
+    @abstractmethod
+    def unequip_gear(self, gear_id: int) -> None: ...
+
+    @abstractmethod
+    def tick_gear_durability(self, discord_id: int, guild_id: int) -> list[int]: ...
+
+    @abstractmethod
+    def repair_gear(self, gear_id: int, to_durability: int) -> None: ...
+
     # Artifact Registry
     @abstractmethod
     def register_artifact_find(self, artifact_id: str, guild_id: int, finder_id: int, found_at: int) -> bool: ...
