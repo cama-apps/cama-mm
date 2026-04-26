@@ -986,12 +986,14 @@ class PredictionCommands(commands.Cog):
 
         embed = discord.Embed(title=title, color=0x3498DB)
 
-        # Discord caps an embed at 25 fields.
+        # Discord caps an embed at 25 fields. Reserve one slot for resolved/cancelled
+        # entries when show_all is on; otherwise use the full 25 for open markets.
         FIELD_CAP = 25
+        open_slot_cap = FIELD_CAP - 1 if show_all else FIELD_CAP
         added = 0
         skipped_open = 0
         for p in open_preds:
-            if added >= FIELD_CAP - 1:
+            if added >= open_slot_cap:
                 skipped_open = len(open_preds) - added
                 break
             name, value = _format_market_field(p, with_delta=False)

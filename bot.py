@@ -202,7 +202,7 @@ async def _post_daily_digest_all_guilds() -> None:
             )
             FIELD_CAP = 25
             for added, p in enumerate(opens):
-                if added >= FIELD_CAP - 1:
+                if added >= FIELD_CAP:
                     embed.set_footer(
                         text=f"+{len(opens) - added} more — use /predict list"
                     )
