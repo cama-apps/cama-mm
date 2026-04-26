@@ -280,6 +280,8 @@ class SchemaManager:
             # Predictions: continuous-quote order-book rework
             ("predictions_orderbook_v1", self._migration_predictions_orderbook),
             ("predictions_prev_price_v1", self._migration_predictions_prev_price),
+            # Dig boss-gear: persistent equipment with durability + relic equip wiring
+            ("create_dig_gear_system", self._migration_create_dig_gear_system),
         ]
 
     # --- Migrations ---
@@ -2440,3 +2442,63 @@ class SchemaManager:
     def _migration_predictions_prev_price(self, cursor) -> None:
         """Add prev_price so the daily digest can show a price-change arrow."""
         self._add_column_if_not_exists(cursor, "predictions", "prev_price", "INTEGER")
+
+    def _migration_create_dig_gear_system(self, cursor) -> None:
+        """Per-player persistent boss-combat gear with durability.
+
+        Creates ``dig_gear`` to hold one row per owned piece across the
+        Weapon / Armor / Boots slots, plus a partial-unique-index that the
+        DB enforces ``one equipped piece per (discord_id, guild_id, slot)``.
+        Backfills a Weapon row for every existing tunnel using its current
+        ``pickaxe_tier`` so no one loses progression on rollout — the
+        legacy ``tunnels.pickaxe_tier`` column is kept in place this
+        release as a safety net while service-layer reads migrate over.
+        Relics continue to live in ``dig_artifacts``; they are not moved.
+        """
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS dig_gear (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                discord_id    INTEGER NOT NULL,
+                guild_id      INTEGER NOT NULL DEFAULT 0,
+                slot          TEXT    NOT NULL,
+                tier          INTEGER NOT NULL,
+                durability    INTEGER NOT NULL,
+                equipped      INTEGER NOT NULL DEFAULT 0,
+                acquired_at   INTEGER NOT NULL,
+                source        TEXT    NOT NULL DEFAULT 'shop'
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_dig_gear_player_slot
+            ON dig_gear(discord_id, guild_id, slot)
+            """
+        )
+        cursor.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_dig_gear_one_equipped_per_slot
+            ON dig_gear(discord_id, guild_id, slot) WHERE equipped = 1
+            """
+        )
+        # Backfill the Weapon slot from the legacy pickaxe_tier so existing
+        # players don't suddenly fight bosses naked. New artifacts (armor,
+        # boots) start empty per spec.
+        cursor.execute(
+            """
+            INSERT INTO dig_gear
+                (discord_id, guild_id, slot, tier, durability,
+                 equipped, acquired_at, source)
+            SELECT
+                discord_id,
+                guild_id,
+                'weapon',
+                pickaxe_tier,
+                20,
+                1,
+                COALESCE(last_dig_at, CAST(strftime('%s', 'now') AS INTEGER)),
+                'migration'
+            FROM tunnels
+            """
+        )
