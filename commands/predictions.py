@@ -1006,10 +1006,20 @@ class PredictionCommands(commands.Cog):
 
         embed = discord.Embed(title=title, color=0x3498DB)
 
-        # Discord caps an embed at 25 fields. Reserve one slot for resolved/cancelled
-        # entries when show_all is on; otherwise use the full 25 for open markets.
+        # Discord caps an embed at 25 fields. When show_all is on, split the
+        # cap between open / resolved / cancelled (~5 each for the latter two)
+        # so we don't silently truncate any category. Otherwise use the full 25
+        # for open markets.
         FIELD_CAP = 25
-        open_slot_cap = FIELD_CAP - 1 if show_all else FIELD_CAP
+        if show_all:
+            resolved_quota = min(len(resolved_preds), 5)
+            cancelled_quota = min(len(cancelled_preds), 5)
+            open_slot_cap = FIELD_CAP - resolved_quota - cancelled_quota
+        else:
+            resolved_quota = 0
+            cancelled_quota = 0
+            open_slot_cap = FIELD_CAP
+
         added = 0
         skipped_open = 0
         for p in open_preds:
@@ -1020,10 +1030,10 @@ class PredictionCommands(commands.Cog):
             embed.add_field(name=name, value=value, inline=False)
             added += 1
 
+        skipped_resolved = max(0, len(resolved_preds) - resolved_quota)
+        skipped_cancelled = max(0, len(cancelled_preds) - cancelled_quota)
         if show_all:
-            for p in resolved_preds[:10]:
-                if added >= FIELD_CAP:
-                    break
+            for p in resolved_preds[:resolved_quota]:
                 outcome = (p.get("outcome") or "?").upper()
                 question = (p.get("question") or "")[:200]
                 embed.add_field(
@@ -1032,9 +1042,7 @@ class PredictionCommands(commands.Cog):
                     inline=False,
                 )
                 added += 1
-            for p in cancelled_preds[:10]:
-                if added >= FIELD_CAP:
-                    break
+            for p in cancelled_preds[:cancelled_quota]:
                 question = (p.get("question") or "")[:200]
                 embed.add_field(
                     name=f"📈 #{p['prediction_id']}  ·  CANCELLED",
@@ -1044,8 +1052,15 @@ class PredictionCommands(commands.Cog):
                 added += 1
 
         footer_bits = ["/predict view <id> for the full ladder", "/predict help for how it works"]
+        overflow = []
         if skipped_open:
-            footer_bits.insert(0, f"+{skipped_open} more open markets not shown")
+            overflow.append(f"+{skipped_open} open")
+        if skipped_resolved:
+            overflow.append(f"+{skipped_resolved} resolved")
+        if skipped_cancelled:
+            overflow.append(f"+{skipped_cancelled} cancelled")
+        if overflow:
+            footer_bits.insert(0, f"more not shown: {', '.join(overflow)}")
         embed.set_footer(text="  ·  ".join(footer_bits))
 
         await safe_followup(interaction, embed=embed)
@@ -1103,8 +1118,8 @@ class PredictionCommands(commands.Cog):
             "**Example.** \"Will Luke hit immortal?\" market price 17 (~17% YES).\n"
             "• Buy YES @ 18 → if Luke makes it, +82. If not, −18.\n"
             "• Buy NO @ 84 → if Luke fails, +16. If he makes it, −84.\n\n"
-            "**Selling** (close a position): you can sell back any time before the market "
-            "resolves, at the current sell price. Cuts losses or banks profits early.\n\n"
+            "**Hold to resolution.** Once you buy contracts you hold them until the "
+            "market resolves — there's no early sell. Buy what you're comfortable holding.\n\n"
             "**The bot is your counterparty** for every trade (call it the Cama central bank). "
             "It posts a small ladder of prices each day; trades sweep top-of-book first. "
             "Price drifts daily based on order flow + a small random walk. If one side gets "
