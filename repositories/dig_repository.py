@@ -568,6 +568,139 @@ class DigRepository(BaseRepository, IDigRepository):
             cursor = conn.cursor()
             cursor.execute("DELETE FROM dig_artifacts WHERE id = ?", (artifact_db_id,))
 
+    # ── Boss-combat Gear ─────────────────────────────────────────────────
+
+    def add_gear(
+        self, discord_id: int, guild_id: int, slot: str, tier: int,
+        source: str = "shop", durability: int | None = None,
+    ) -> int:
+        """Add a new gear piece to a player's inventory (unequipped). Returns its id."""
+        from services.dig_constants import GEAR_MAX_DURABILITY  # avoid import cycle at module load
+        gid = self.normalize_guild_id(guild_id)
+        now = int(time.time())
+        dur = GEAR_MAX_DURABILITY if durability is None else durability
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO dig_gear
+                    (discord_id, guild_id, slot, tier, durability,
+                     equipped, acquired_at, source)
+                VALUES (?, ?, ?, ?, ?, 0, ?, ?)
+                """,
+                (discord_id, gid, slot, tier, dur, now, source),
+            )
+            return cursor.lastrowid
+
+    def get_gear(self, discord_id: int, guild_id: int) -> list[dict]:
+        """All gear owned by a player (any slot, equipped or not)."""
+        gid = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT * FROM dig_gear
+                WHERE discord_id = ? AND guild_id = ?
+                ORDER BY slot, tier DESC, acquired_at DESC
+                """,
+                (discord_id, gid),
+            )
+            return [dict(row) for row in cursor.fetchall()]
+
+    def get_equipped_gear(self, discord_id: int, guild_id: int) -> dict[str, dict]:
+        """Currently-equipped gear for a player, keyed by slot."""
+        gid = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT * FROM dig_gear
+                WHERE discord_id = ? AND guild_id = ? AND equipped = 1
+                """,
+                (discord_id, gid),
+            )
+            return {row["slot"]: dict(row) for row in cursor.fetchall()}
+
+    def get_gear_by_id(self, gear_id: int) -> dict | None:
+        """Look up a single gear row by primary key."""
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM dig_gear WHERE id = ?", (gear_id,))
+            row = cursor.fetchone()
+            return dict(row) if row is not None else None
+
+    def equip_gear(self, gear_id: int, discord_id: int, guild_id: int, slot: str) -> None:
+        """Equip a gear piece, atomically unequipping any existing piece in the slot.
+
+        The partial-unique-index on (discord_id, guild_id, slot) WHERE equipped=1
+        rejects the second equip if not done in one transaction.
+        """
+        gid = self.normalize_guild_id(guild_id)
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE dig_gear SET equipped = 0
+                WHERE discord_id = ? AND guild_id = ? AND slot = ? AND equipped = 1
+                """,
+                (discord_id, gid, slot),
+            )
+            cursor.execute(
+                "UPDATE dig_gear SET equipped = 1 WHERE id = ?",
+                (gear_id,),
+            )
+
+    def unequip_gear(self, gear_id: int) -> None:
+        """Unequip a single gear piece."""
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE dig_gear SET equipped = 0 WHERE id = ?",
+                (gear_id,),
+            )
+
+    def tick_gear_durability(self, discord_id: int, guild_id: int) -> list[int]:
+        """Decrement durability on every equipped piece by 1.
+
+        Returns the ids of pieces whose durability hit 0 — those rows are
+        also auto-unequipped here so the next fight reflects the loss.
+        """
+        gid = self.normalize_guild_id(guild_id)
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE dig_gear
+                SET durability = MAX(0, durability - 1)
+                WHERE discord_id = ? AND guild_id = ? AND equipped = 1
+                """,
+                (discord_id, gid),
+            )
+            cursor.execute(
+                """
+                SELECT id FROM dig_gear
+                WHERE discord_id = ? AND guild_id = ? AND equipped = 1 AND durability = 0
+                """,
+                (discord_id, gid),
+            )
+            broken_ids = [row["id"] for row in cursor.fetchall()]
+            if broken_ids:
+                placeholders = ",".join("?" for _ in broken_ids)
+                cursor.execute(
+                    f"UPDATE dig_gear SET equipped = 0 WHERE id IN ({placeholders})",
+                    broken_ids,
+                )
+            return broken_ids
+
+    def repair_gear(self, gear_id: int, to_durability: int) -> None:
+        """Restore a gear piece's durability. Does not auto-equip."""
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE dig_gear SET durability = ? WHERE id = ?",
+                (to_durability, gear_id),
+            )
+
     def has_artifact(self, discord_id: int, guild_id: int, artifact_id: str) -> bool:
         """Check if player has a specific artifact."""
         gid = self.normalize_guild_id(guild_id)
