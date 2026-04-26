@@ -429,6 +429,59 @@ class DisburseRepository(BaseRepository, IDisburseRepository):
 
             return True
 
+    def reset_and_return_fund_atomic(
+        self, guild_id: int | None, fund_amount: int
+    ) -> bool:
+        """
+        Atomically reset the active proposal and credit ``fund_amount`` back to
+        the nonprofit fund — all in one ``BEGIN IMMEDIATE``. Mirrors
+        ``complete_and_disburse_atomic`` for the cancel/reset path so a crash
+        between status flip and fund credit cannot strand the reserve.
+
+        Returns True if a proposal was reset, False if none was active.
+        """
+        normalized_guild = self.normalize_guild_id(guild_id)
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+
+            cursor.execute(
+                "SELECT proposal_id FROM disburse_proposals WHERE guild_id = ? AND status = 'active'",
+                (normalized_guild,),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return False
+
+            proposal_id = row["proposal_id"]
+
+            cursor.execute(
+                """
+                UPDATE disburse_proposals
+                SET status = 'reset'
+                WHERE guild_id = ? AND status = 'active'
+                """,
+                (normalized_guild,),
+            )
+
+            cursor.execute(
+                "DELETE FROM disburse_votes WHERE guild_id = ? AND proposal_id = ?",
+                (normalized_guild, proposal_id),
+            )
+
+            if fund_amount:
+                cursor.execute(
+                    """
+                    INSERT INTO nonprofit_fund (guild_id, total_collected, updated_at)
+                    VALUES (?, ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(guild_id) DO UPDATE SET
+                        total_collected = total_collected + excluded.total_collected,
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    (normalized_guild, fund_amount),
+                )
+
+            return True
+
     def record_disbursement(
         self,
         guild_id: int | None,

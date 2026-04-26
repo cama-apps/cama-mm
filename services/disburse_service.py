@@ -316,14 +316,15 @@ class DisburseService:
         fund_amount = proposal.fund_amount
 
         # Handle cancel specially - reset proposal instead of distributing.
-        # reset_proposal atomically flips status away from 'active', so the
-        # next concurrent caller's get_proposal() returns None.
+        # The reset + fund credit happen in a single BEGIN IMMEDIATE so a crash
+        # between them cannot strand the reserve.
         if method == "cancel":
-            was_active = self.disburse_repo.reset_proposal(guild_id)
+            was_active = self.disburse_repo.reset_and_return_fund_atomic(
+                guild_id, fund_amount,
+            )
             if not was_active:
                 # Another caller already handled this proposal. No-op.
                 raise ValueError("No active proposal")
-            self.loan_repo.add_to_nonprofit_fund(guild_id, fund_amount)
             return {
                 "success": True,
                 "method": "cancel",
@@ -489,12 +490,11 @@ class DisburseService:
             if not proposal_data:
                 return False
             fund_amount = proposal_data["fund_amount"]
-            # reset_proposal atomically transitions status away from 'active',
-            # so a concurrent caller observing via get_active_proposal sees None.
-            result = self.disburse_repo.reset_proposal(guild_id)
-            if result:
-                self.loan_repo.add_to_nonprofit_fund(guild_id, fund_amount)
-            return result
+            # Single BEGIN IMMEDIATE: status flip + nonprofit credit. A crash
+            # between the two would otherwise destroy ``fund_amount`` JC.
+            return self.disburse_repo.reset_and_return_fund_atomic(
+                guild_id, fund_amount,
+            )
 
     def get_last_disbursement(self, guild_id: int | None) -> dict | None:
         """Get the most recent disbursement for display in /nonprofit."""

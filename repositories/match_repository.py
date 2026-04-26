@@ -471,11 +471,16 @@ class MatchRepository(BaseRepository, IMatchRepository):
     def update_participant_bonus_jc(
         self, match_id: int, guild_id: int | None, bonus_by_player: dict[int, int]
     ) -> None:
-        """Persist the actual JC awarded per participant for this match."""
+        """Persist the actual JC awarded per participant for this match.
+
+        Atomic so a mid-batch crash can't leave some participants with a
+        ``bonus_jc`` snapshot and others with NULL — that mix would silently
+        break balance-history reconstruction for this match forever.
+        """
         if not bonus_by_player:
             return
         normalized_guild = self.normalize_guild_id(guild_id)
-        with self.connection() as conn:
+        with self.atomic_transaction() as conn:
             cursor = conn.cursor()
             cursor.executemany(
                 """
