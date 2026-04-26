@@ -44,47 +44,51 @@ MARKET_TITLE_RE = re.compile(rf"{re.escape(MARKET_TITLE_PREFIX)}(\d+)")
 # --------------------------------------------------------------------------- #
 
 def _build_ladder_fields(book: dict) -> list[tuple[str, str, bool]]:
-    """Return one embed field with a buy-only two-column ladder.
+    """Return one embed field with a depth-of-market style buy-only book.
 
-    Selling is disabled — positions are hold-to-resolution. So users only
-    ever do BUY YES (consume YES asks) or BUY NO (consume YES bids at the
-    mirrored price). The visual layout shows both buy ladders side by side,
-    cheapest first, in a single code-block field for monospace alignment.
+    Standard DOM convention adapted for our buy-only model:
+      - "Buy YES" section on top, cheapest first
+      - middle line showing implied probability (the "spread" label)
+      - "Buy NO" section on bottom, cheapest first
+    Each row shows price + a depth bar + the contract count, in a single
+    monospace code block. No "top of book" arrow — cheapest-first ordering
+    already makes the top obvious.
     """
-    asks = book.get("yes_asks", [])  # cheapest first
-    bids = book.get("yes_bids", [])  # highest first → cheapest NO ask first
+    asks = book.get("yes_asks", [])  # cheapest YES first
+    bids = book.get("yes_bids", [])  # highest YES bid → cheapest NO first
     current = book.get("current_price")
 
-    # Buy YES ladder = YES asks (cheapest first).
-    # Buy NO ladder  = mirror of YES bids (cheapest NO first).
-    buy_yes = list(asks)
-    buy_no = [(100 - p, s) for p, s in bids]
+    BAR_CAP = 10  # cap bar width so layered depth doesn't blow up the row
 
-    rows = max(len(buy_yes), len(buy_no))
-    lines = ["      Buy YES         Buy NO"]
-    if rows == 0:
-        lines.append("      (book empty - refreshes daily)")
+    def _row(price: int, size: int) -> str:
+        bar = "█" * min(size, BAR_CAP)
+        return f"  {price:>3}  {bar:<{BAR_CAP}}  {size}"
+
+    lines = ["Buy YES  (cheapest first)"]
+    if asks:
+        for p, s in asks:
+            lines.append(_row(p, s))
     else:
-        for i in range(rows):
-            yes_cell = (
-                f"{buy_yes[i][0]:>2}  x{buy_yes[i][1]:<3}" if i < len(buy_yes) else "  -      "
-            )
-            no_cell = (
-                f"{buy_no[i][0]:>2}  x{buy_no[i][1]:<3}" if i < len(buy_no) else "  -      "
-            )
-            arrow = "  <- top" if i == 0 else ""
-            lines.append(f"      {yes_cell}      {no_cell}{arrow}")
+        lines.append("  (none — refreshes daily)")
 
-    mid_label = (
-        f"price {current} (~{current}% YES)"
-        if current is not None
-        else "price ?"
-    )
     lines.append("")
-    lines.append(f"      {mid_label}")
+    if current is not None:
+        lines.append(
+            f"  ── price {current}  ·  {current}% YES / {100 - current}% NO ──"
+        )
+    else:
+        lines.append("  ── price ? ──")
+    lines.append("")
+
+    lines.append("Buy NO  (cheapest first)")
+    if bids:
+        for p, s in bids:
+            lines.append(_row(100 - p, s))
+    else:
+        lines.append("  (none — refreshes daily)")
 
     body = "```\n" + "\n".join(lines) + "\n```"
-    return [("Order book — Buy only (hold to resolution)", body, False)]
+    return [("Order book", body, False)]
 
 
 def _trade_link(prediction: dict) -> str | None:
@@ -196,12 +200,17 @@ class BuyContractsModal(discord.ui.Modal):
         balance: int,
     ):
         side_label = side.upper()
-        super().__init__(title=f"Buy {side_label} ({balance} jopa)")
+        # Title carries the per-contract price so the user sees their cost up
+        # front. Discord caps modal titles at 45 chars; this fits with room.
+        super().__init__(title=f"Buy {side_label} @ {unit_price} jopa each")
         self.cog = cog
         self.prediction_id = prediction_id
         self.side = side  # 'yes' or 'no'
+        self.contracts.label = f"How many? ({balance} jopa available)"
         self.contracts.placeholder = (
-            f"max {max_available} avail @ price {unit_price}"
+            f"e.g. 5  →  costs {5 * unit_price} jopa, wins {5 * 100} if {side_label}"
+            if max_available >= 5
+            else f"max {max_available} at top of book"
         )
         # keep question for context if we ever need it in followups
         self._question = question
@@ -556,7 +565,7 @@ class PredictionCommands(commands.Cog):
     def _build_market_embed(self, view: dict) -> discord.Embed:
         question = view.get("question", "")
         price = view.get("current_price")
-        vol = view.get("volume_since_refresh", 0)
+        volume = view.get("volume_since_refresh", 0)
         book = view.get("book", {"yes_asks": [], "yes_bids": [], "current_price": price})
         recent = view.get("recent_trades", [])
         position = view.get("viewer_position")
@@ -570,7 +579,7 @@ class PredictionCommands(commands.Cog):
             name="Current",
             value=(
                 f"price **{price if price is not None else '?'}**\n"
-                f"vol since refresh: **{vol}**"
+                f"contracts traded since refresh: **{volume}**"
             ),
             inline=False,
         )

@@ -148,7 +148,7 @@ async def _process_one_refresh(market: dict) -> None:
                 f"\n  biggest: <@{biggest['discord_id']}> {verb} {biggest['contracts']} {side} @ {avg}"
             )
         msg = (
-            f"📈 **Daily refresh** — vol {trade_summary.get('total_volume', 0)} "
+            f"📈 **Daily refresh** — volume {trade_summary.get('total_volume', 0)} contracts "
             f"({trade_summary.get('yes_volume', 0)} YES / {trade_summary.get('no_volume', 0)} NO)"
             f", price {summary['old_price']} → {summary['new_price']}{biggest_str}"
         )

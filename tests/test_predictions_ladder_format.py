@@ -9,60 +9,83 @@ from commands.predictions import _build_ladder_fields, _format_market_field, _tr
 # --------------------------------------------------------------------------- #
 
 
-def test_ladder_one_field_with_two_buy_columns():
+def test_ladder_dom_style_buy_yes_above_buy_no():
+    """DOM-style stacked layout: Buy YES section, mid label, Buy NO section."""
     book = {
         "current_price": 50,
         "yes_asks": [(51, 5), (52, 5), (53, 5)],
         "yes_bids": [(49, 5), (48, 5), (47, 5)],
     }
     fields = _build_ladder_fields(book)
-    # Single field (sell side removed — positions are hold-to-resolution)
     assert len(fields) == 1
     name, value, inline = fields[0]
-    assert "Buy only" in name
+    assert name == "Order book"
     assert not inline
-    # Header column titles
+    # Both sections present
     assert "Buy YES" in value
     assert "Buy NO" in value
-    # Top of book = cheapest. YES ask 51, NO ask = 100 - 49 = 51.
-    assert "51  x5" in value
-    # Mid line shown
-    assert "price 50" in value
-    # No sell language anywhere
+    # Buy YES is positioned above the mid line; Buy NO below.
+    yes_idx = value.index("Buy YES")
+    mid_idx = value.index("price 50")
+    no_idx = value.index("Buy NO")
+    assert yes_idx < mid_idx < no_idx
+    # Mid line shows both probabilities
+    assert "50% YES" in value and "50% NO" in value
+    # No bid/ask jargon, no top arrow, no sell language
     assert "Sell" not in value
+    assert "<- top" not in value
+    assert "ASK" not in value and "BID" not in value
 
 
-def test_ladder_asymmetric_market():
+def test_ladder_asymmetric_market_mirror_prices():
     book = {
         "current_price": 17,
         "yes_asks": [(18, 5), (19, 5), (20, 5)],
         "yes_bids": [(16, 5), (15, 5), (14, 5)],
     }
     value = _build_ladder_fields(book)[0][1]
-    # Buy YES options
-    assert "18  x5" in value
-    assert "19  x5" in value
-    assert "20  x5" in value
-    # Buy NO mirror options: 100 - 16 = 84, 100 - 15 = 85, 100 - 14 = 86
-    assert "84  x5" in value
-    assert "85  x5" in value
-    assert "86  x5" in value
-    assert "price 17" in value
+    # YES side prices appear as-is
+    for p in (18, 19, 20):
+        assert f" {p} " in value or f"{p} " in value or f" {p}" in value
+    # NO side mirrors: 100 - YES bid
+    for no_price in (84, 85, 86):
+        assert str(no_price) in value
+    # Mid label shows asymmetric probability
+    assert "17% YES" in value
+    assert "83% NO" in value
+
+
+def test_ladder_uses_depth_bars_capped():
+    """Each row has a █ bar reflecting size, capped at BAR_CAP=10 chars."""
+    book = {
+        "current_price": 50,
+        "yes_asks": [(51, 3)],
+        "yes_bids": [(49, 25)],  # large size — bar should cap at 10
+    }
+    value = _build_ladder_fields(book)[0][1]
+    # 3 blocks for size 3
+    assert "███" in value
+    # 10-block cap for size 25 (and the actual count "25" still appears)
+    assert "██████████" in value
+    assert "25" in value
 
 
 def test_ladder_empty_book():
     fields = _build_ladder_fields({"current_price": 50, "yes_asks": [], "yes_bids": []})
     value = fields[0][1]
-    assert "book empty" in value
+    # Both sections labelled empty
+    assert value.count("(none — refreshes daily)") == 2
     assert "price 50" in value
 
 
-def test_ladder_only_asks():
-    fields = _build_ladder_fields({"current_price": 50, "yes_asks": [(51, 5)], "yes_bids": []})
+def test_ladder_only_asks_keeps_no_section_empty():
+    fields = _build_ladder_fields(
+        {"current_price": 50, "yes_asks": [(51, 5)], "yes_bids": []}
+    )
     value = fields[0][1]
-    assert "51  x5" in value
-    # No NO column when bids empty
-    assert "  -" in value  # placeholder for empty NO column
+    # YES side has the 51 price; NO side is the empty placeholder.
+    assert "51" in value
+    assert "(none — refreshes daily)" in value
 
 
 def test_ladder_handles_missing_current_price():
