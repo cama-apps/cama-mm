@@ -9,29 +9,33 @@ from commands.predictions import _build_ladder_fields, _format_market_field, _tr
 # --------------------------------------------------------------------------- #
 
 
-def test_ladder_dom_style_buy_yes_above_buy_no():
-    """DOM-style stacked layout: Buy YES section, mid label, Buy NO section."""
+def test_ladder_dom_style_no_above_yes_converging_at_mid():
+    """Real DOM layout: NO on top with cheapest at bottom of section, mid line,
+    YES on bottom with cheapest at top of section. Both sides converge at mid."""
     book = {
-        "current_price": 50,
-        "yes_asks": [(51, 5), (52, 5), (53, 5)],
-        "yes_bids": [(49, 5), (48, 5), (47, 5)],
+        "current_price": 17,
+        "yes_asks": [(18, 5), (19, 5), (20, 5)],
+        "yes_bids": [(16, 5), (15, 5), (14, 5)],
     }
     fields = _build_ladder_fields(book)
     assert len(fields) == 1
     name, value, inline = fields[0]
     assert name == "Order book"
     assert not inline
-    # Both sections present
-    assert "Buy YES" in value
-    assert "Buy NO" in value
-    # Buy YES is positioned above the mid line; Buy NO below.
-    yes_idx = value.index("Buy YES")
-    mid_idx = value.index("price 50")
+    # Buy NO above the mid line; Buy YES below.
     no_idx = value.index("Buy NO")
-    assert yes_idx < mid_idx < no_idx
-    # Mid line shows both probabilities
-    assert "50% YES" in value and "50% NO" in value
-    # No bid/ask jargon, no top arrow, no sell language
+    mid_idx = value.index("price 17")
+    yes_idx = value.index("Buy YES")
+    assert no_idx < mid_idx < yes_idx
+    # NO section: deepest (most expensive, e.g. 86) at top, cheapest (84) at bottom — closest to mid.
+    no_section = value[no_idx:mid_idx]
+    assert no_section.index(" 86 ") < no_section.index(" 85 ") < no_section.index(" 84 ")
+    # YES section: cheapest (18) at top — closest to mid — deeper (20) at bottom.
+    yes_section = value[yes_idx:]
+    assert yes_section.index(" 18 ") < yes_section.index(" 19 ") < yes_section.index(" 20 ")
+    # Mid line shows both probabilities.
+    assert "17% YES" in value and "83% NO" in value
+    # No bid/ask jargon, no top arrow, no sell language.
     assert "Sell" not in value
     assert "<- top" not in value
     assert "ASK" not in value and "BID" not in value

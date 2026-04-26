@@ -67,10 +67,13 @@ def _build_ladder_fields(book: dict) -> list[tuple[str, str, bool]]:
         # depths share a clean right edge.
         return f"  {price:>3}  {bar:<{BAR_CAP}}  {size:>3}"
 
-    lines = [f"{GREEN}🟢 Buy YES  (cheapest first){RESET}"]
-    if asks:
-        for p, s in asks:
-            lines.append(f"{GREEN}{_row(p, s)}{RESET}")
+    # NO section on top: deepest NO at the top, cheapest NO at the bottom
+    # (closest to mid). Iterate reversed(bids) — bids is sorted highest-YES-bid
+    # first, which mirrors to cheapest-NO first; reversed puts cheapest NO last.
+    lines = [f"{RED}🔴 Buy NO{RESET}"]
+    if bids:
+        for p, s in reversed(bids):
+            lines.append(f"{RED}{_row(100 - p, s)}{RESET}")
     else:
         lines.append("  (none — refreshes daily)")
 
@@ -83,10 +86,11 @@ def _build_ladder_fields(book: dict) -> list[tuple[str, str, bool]]:
         lines.append("  ── price ? ──")
     lines.append("")
 
-    lines.append(f"{RED}🔴 Buy NO  (cheapest first){RESET}")
-    if bids:
-        for p, s in bids:
-            lines.append(f"{RED}{_row(100 - p, s)}{RESET}")
+    # YES section on bottom: cheapest YES at the top (closest to mid).
+    lines.append(f"{GREEN}🟢 Buy YES{RESET}")
+    if asks:
+        for p, s in asks:
+            lines.append(f"{GREEN}{_row(p, s)}{RESET}")
     else:
         lines.append("  (none — refreshes daily)")
 
