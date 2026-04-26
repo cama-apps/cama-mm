@@ -28,17 +28,30 @@ def test_ladder_dom_style_no_above_yes_converging_at_mid():
     yes_idx = value.index("Buy YES")
     assert no_idx < mid_idx < yes_idx
     # NO section: deepest (most expensive, e.g. 86) at top, cheapest (84) at bottom — closest to mid.
+    # Use the exact _row emit pattern ("  {price:>3}  ") to avoid loose substring matches.
     no_section = value[no_idx:mid_idx]
-    assert no_section.index(" 86 ") < no_section.index(" 85 ") < no_section.index(" 84 ")
+    assert no_section.index("  86  ") < no_section.index("  85  ") < no_section.index("  84  ")
     # YES section: cheapest (18) at top — closest to mid — deeper (20) at bottom.
     yes_section = value[yes_idx:]
-    assert yes_section.index(" 18 ") < yes_section.index(" 19 ") < yes_section.index(" 20 ")
+    assert yes_section.index("  18  ") < yes_section.index("  19  ") < yes_section.index("  20  ")
     # Mid line shows both probabilities.
     assert "17% YES" in value and "83% NO" in value
     # No bid/ask jargon, no top arrow, no sell language.
     assert "Sell" not in value
     assert "<- top" not in value
     assert "ASK" not in value and "BID" not in value
+
+
+def test_ladder_dom_order_is_no_above_yes_for_symmetric_market():
+    """Even at fair=50 where YES and NO prices coincide, NO section sits above
+    the mid line and YES section below — guards against an accidental swap."""
+    book = {
+        "current_price": 50,
+        "yes_asks": [(51, 5)],
+        "yes_bids": [(49, 5)],
+    }
+    value = _build_ladder_fields(book)[0][1]
+    assert value.index("Buy NO") < value.index("price 50") < value.index("Buy YES")
 
 
 def test_ladder_color_codes_yes_green_no_red():
