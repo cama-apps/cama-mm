@@ -125,3 +125,142 @@ class TestClearActiveBossIdsMigration:
         finally:
             conn.close()
         assert "clear_active_boss_ids_for_pool_reroll" in applied
+
+
+class TestDigGearMigration:
+    """Covers _migration_create_dig_gear_system: schema + backfill."""
+
+    def _rerun_gear_migration(self, db_path: str) -> None:
+        """Re-execute the gear migration directly on an already-initialized DB.
+
+        Used to simulate the upgrade case where pre-existing tunnels need
+        a Weapon row backfilled.
+        """
+        manager = SchemaManager(db_path)
+        conn = sqlite3.connect(db_path)
+        try:
+            cursor = conn.cursor()
+            # Pretend it never ran so we can replay it
+            cursor.execute(
+                "DELETE FROM schema_migrations WHERE name = 'create_dig_gear_system'"
+            )
+            cursor.execute("DROP TABLE IF EXISTS dig_gear")
+            manager._migration_create_dig_gear_system(cursor)
+            conn.commit()
+        finally:
+            conn.close()
+
+    def test_fresh_init_creates_table_and_indexes(self, tmp_path):
+        db_path = str(tmp_path / "fresh.db")
+        SchemaManager(db_path).initialize()
+        conn = sqlite3.connect(db_path)
+        try:
+            cols = {row[1] for row in conn.execute("PRAGMA table_info(dig_gear)").fetchall()}
+            indexes = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='dig_gear'"
+                ).fetchall()
+            }
+        finally:
+            conn.close()
+        assert {"id", "discord_id", "guild_id", "slot", "tier",
+                "durability", "equipped", "acquired_at", "source"} <= cols
+        assert "idx_dig_gear_player_slot" in indexes
+        assert "uq_dig_gear_one_equipped_per_slot" in indexes
+
+    def test_fresh_init_registers_migration(self, tmp_path):
+        db_path = str(tmp_path / "fresh.db")
+        SchemaManager(db_path).initialize()
+        conn = sqlite3.connect(db_path)
+        try:
+            applied = {
+                row[0]
+                for row in conn.execute("SELECT name FROM schema_migrations").fetchall()
+            }
+        finally:
+            conn.close()
+        assert "create_dig_gear_system" in applied
+
+    def test_backfills_weapon_for_each_existing_tunnel(self, repo_db_path):
+        """After migration, every tunnel has exactly one equipped Weapon row."""
+        # Seed a few tunnels with various pickaxe tiers and last_dig_at values
+        conn = sqlite3.connect(repo_db_path)
+        try:
+            conn.execute(
+                "INSERT INTO tunnels (discord_id, guild_id, depth, pickaxe_tier, last_dig_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (1, 0, 50, 3, 1700000000),
+            )
+            conn.execute(
+                "INSERT INTO tunnels (discord_id, guild_id, depth, pickaxe_tier, last_dig_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (2, 999, 100, 5, 1700001000),
+            )
+            # No last_dig_at — must fall back to "now"
+            conn.execute(
+                "INSERT INTO tunnels (discord_id, guild_id, depth, pickaxe_tier) "
+                "VALUES (?, ?, ?, ?)",
+                (3, 0, 25, 0),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        self._rerun_gear_migration(repo_db_path)
+
+        conn = sqlite3.connect(repo_db_path)
+        try:
+            rows = conn.execute(
+                "SELECT discord_id, guild_id, slot, tier, durability, equipped, source "
+                "FROM dig_gear ORDER BY discord_id"
+            ).fetchall()
+        finally:
+            conn.close()
+
+        assert len(rows) == 3
+        for row in rows:
+            assert row[2] == "weapon"      # slot
+            assert row[4] == 20            # durability
+            assert row[5] == 1             # equipped
+            assert row[6] == "migration"   # source
+        # Tier matches the seeded pickaxe_tier
+        assert rows[0][3] == 3
+        assert rows[1][3] == 5
+        assert rows[2][3] == 0
+
+    def test_initialize_is_idempotent(self, repo_db_path):
+        """Re-running initialize() must not re-execute the gear backfill.
+
+        ``schema_migrations`` is the idempotence guard — once a migration's
+        name is in there, the body is skipped on subsequent runs. Without
+        this guarantee a second initialize() would try to re-INSERT and
+        violate the partial-unique-index.
+        """
+        # Already initialized via the repo_db_path fixture — adding a
+        # tunnel here doesn't trigger backfill since the migration has
+        # already run once. Calling initialize() a second time must be a
+        # no-op for the gear migration.
+        conn = sqlite3.connect(repo_db_path)
+        try:
+            conn.execute(
+                "INSERT INTO tunnels (discord_id, guild_id, depth, pickaxe_tier) "
+                "VALUES (?, ?, ?, ?)",
+                (42, 0, 30, 2),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        # Second initialize: migration is already recorded, so the body
+        # never runs. The new tunnel does NOT get backfilled (that's the
+        # cost of running the migration only once at upgrade time).
+        SchemaManager(repo_db_path).initialize()
+
+        conn = sqlite3.connect(repo_db_path)
+        try:
+            n = conn.execute(
+                "SELECT COUNT(*) FROM dig_gear WHERE discord_id = 42"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        assert n == 0  # not backfilled because migration ran before tunnel insert
