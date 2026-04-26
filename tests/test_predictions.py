@@ -19,6 +19,7 @@ from config import (
     PREDICTION_LEVELS_PER_SIDE,
     PREDICTION_PRICE_HIGH,
     PREDICTION_PRICE_LOW,
+    PREDICTION_REFRESH_SIZE_PER_LEVEL,
     PREDICTION_SIZE_PER_LEVEL,
     PREDICTION_SPREAD_TICKS,
 )
@@ -304,31 +305,40 @@ def test_refresh_uses_observed_mid_when_book_intact(prediction_service, predicti
 def test_refresh_layers_size_onto_existing_levels(
     prediction_service, prediction_repo, player_repository, monkeypatch,
 ):
-    """Untouched levels accumulate size on each refresh; consumed ones get reseeded."""
+    """Daily refresh layers thinner/wider than the initial seed.
+
+    Initial: 3 levels x 5 (51,52,53 / 49,48,47). Refresh: 2 levels x 3 with
+    spread 2 (52,53 / 48,47). After a refresh: untouched seed levels intact;
+    refresh-position levels gain +3.
+    """
     _add_player(player_repository, 1)
     pid = prediction_service.create_orderbook_prediction(
         guild_id=TEST_GUILD_ID, creator_id=1, question="market m?", initial_fair=50,
     )["prediction_id"]
     prediction_service.buy_contracts(prediction_id=pid, discord_id=1, side="yes", contracts=5)
-    # After buy: top ask at 51 was fully consumed and deleted; 52, 53 still at size 5;
-    # all bids untouched at size 5.
+    # Top seed ask at 51 fully consumed; 52, 53 still at 5; all seed bids at 5.
 
     monkeypatch.setattr(random, "randint", lambda lo, hi: 0)
     prediction_service.refresh_market(pid)
     post = dict(post_helper(prediction_repo.get_book(pid)))
 
-    # Layering: untouched levels doubled, consumed level reseeded to default
-    assert post[("yes_ask", 51)] == PREDICTION_SIZE_PER_LEVEL
-    assert post[("yes_ask", 52)] == 2 * PREDICTION_SIZE_PER_LEVEL
-    assert post[("yes_ask", 53)] == 2 * PREDICTION_SIZE_PER_LEVEL
-    for price in (49, 48, 47):
-        assert post[("yes_bid", price)] == 2 * PREDICTION_SIZE_PER_LEVEL
+    # Refresh ladder positions are 52, 53 (asks) and 48, 47 (bids).
+    # 51 (consumed top seed) is NOT in the refresh ladder so stays absent.
+    # 52, 53 layered with +3 onto existing 5 → 8 each.
+    assert ("yes_ask", 51) not in post
+    assert post[("yes_ask", 52)] == PREDICTION_SIZE_PER_LEVEL + PREDICTION_REFRESH_SIZE_PER_LEVEL
+    assert post[("yes_ask", 53)] == PREDICTION_SIZE_PER_LEVEL + PREDICTION_REFRESH_SIZE_PER_LEVEL
+    # Seed bid at 49 untouched (not in refresh ladder).
+    assert post[("yes_bid", 49)] == PREDICTION_SIZE_PER_LEVEL
+    assert post[("yes_bid", 48)] == PREDICTION_SIZE_PER_LEVEL + PREDICTION_REFRESH_SIZE_PER_LEVEL
+    assert post[("yes_bid", 47)] == PREDICTION_SIZE_PER_LEVEL + PREDICTION_REFRESH_SIZE_PER_LEVEL
 
 
 def test_refresh_quiet_market_accumulates_depth(
     prediction_service, prediction_repo, monkeypatch,
 ):
-    """No trades + multiple refreshes at same fair = depth keeps growing."""
+    """No trades + multiple refreshes at same fair = depth grows at the
+    refresh-ladder positions only. Initial-seed-only positions stay flat."""
     pid = prediction_service.create_orderbook_prediction(
         guild_id=TEST_GUILD_ID, creator_id=1, question="market mm?", initial_fair=50,
     )["prediction_id"]
@@ -336,11 +346,15 @@ def test_refresh_quiet_market_accumulates_depth(
     for _ in range(3):
         prediction_service.refresh_market(pid)
     post = dict(post_helper(prediction_repo.get_book(pid)))
-    # Initial seeding (5) + 3 refreshes (5 each) = 20 at every default-ladder position
-    for price in (51, 52, 53):
-        assert post[("yes_ask", price)] == 4 * PREDICTION_SIZE_PER_LEVEL
-    for price in (49, 48, 47):
-        assert post[("yes_bid", price)] == 4 * PREDICTION_SIZE_PER_LEVEL
+    # Top seed levels (51 / 49) outside the refresh ladder — unchanged at 5.
+    assert post[("yes_ask", 51)] == PREDICTION_SIZE_PER_LEVEL
+    assert post[("yes_bid", 49)] == PREDICTION_SIZE_PER_LEVEL
+    # Refresh-ladder positions (52,53 / 48,47) gained +3 per refresh.
+    expected = PREDICTION_SIZE_PER_LEVEL + 3 * PREDICTION_REFRESH_SIZE_PER_LEVEL
+    for price in (52, 53):
+        assert post[("yes_ask", price)] == expected
+    for price in (48, 47):
+        assert post[("yes_bid", price)] == expected
 
 
 def test_refresh_fades_up_when_asks_consumed(
@@ -388,25 +402,28 @@ def post_helper(book):
         yield (("yes_bid", price), size)
 
 
-def test_refresh_locked_level_at_top_bid_is_kept(
-    prediction_service, prediction_repo, monkeypatch,
-):
-    """An old ask at exactly the new top bid is locked, not crossed — keep it."""
+def test_refresh_locked_level_at_top_bid_is_kept(prediction_service, prediction_repo):
+    """An old ask at exactly the new top bid is locked (not crossed) — keep it."""
     pid = prediction_service.create_orderbook_prediction(
         guild_id=TEST_GUILD_ID, creator_id=1, question="market mx?", initial_fair=50,
     )["prediction_id"]
-    pre = dict(post_helper(prediction_repo.get_book(pid)))
-    assert pre[("yes_ask", 51)] == PREDICTION_SIZE_PER_LEVEL
+    # Inject a stale ask at price 51 explicitly so we can target the boundary.
+    prediction_repo.replace_levels(pid, levels=[("yes_ask", 51, 5), ("yes_bid", 49, 5)])
 
-    monkeypatch.setattr(random, "randint", lambda lo, hi: 2)  # drift +2
-    prediction_service.refresh_market(pid)
-
+    # Apply a refresh whose new top bid lands at exactly 51 → locked, not crossed.
+    # New ladder around fair=52 with spread=1: asks at 52, bids at 51.
+    prediction_repo.apply_refresh(
+        pid,
+        new_price=52,
+        levels=[("yes_ask", 52, 3), ("yes_bid", 51, 3)],
+        now_ts=10**9,
+    )
     post = dict(post_helper(prediction_repo.get_book(pid)))
-    # New fair = 52; new top bid = 51. Old ask at 51 is at-the-bid (locked, not crossed) — keep.
-    assert post[("yes_ask", 51)] == PREDICTION_SIZE_PER_LEVEL
-    # Old asks at 52, 53 are inside the new spread / overlap with the new ladder.
-    assert post[("yes_ask", 52)] == PREDICTION_SIZE_PER_LEVEL
-    assert post[("yes_ask", 53)] == 2 * PREDICTION_SIZE_PER_LEVEL  # old layered with new
+    # Old ask at 51 is at-the-bid (locked, not crossed) — must survive.
+    assert post[("yes_ask", 51)] == 5
+    # New ladder positions added.
+    assert post[("yes_ask", 52)] == 3
+    assert post[("yes_bid", 51)] == 3
 
 
 def test_refresh_truly_crossing_ask_is_deleted(prediction_repo, prediction_service):
@@ -452,6 +469,40 @@ def test_set_fair_manual_changes_price_and_layers_ladder(
     assert 51 not in ask_prices and 52 not in ask_prices and 53 not in ask_prices
     # Old bids at 47,48,49 don't cross new asks (61), so they survive.
     assert 47 in bid_prices and 48 in bid_prices and 49 in bid_prices
+
+
+def test_refresh_layers_with_refresh_params_not_initial(
+    prediction_service, prediction_repo, monkeypatch,
+):
+    """Daily refresh uses thinner/wider params than the initial seed.
+
+    Initial: 3 levels x 5 contracts, 1-tick spread. Refresh: 2 levels x 3,
+    2-tick spread. After a single refresh the layered set sits at the wider
+    refresh positions (e.g. fair±2, ±3) with size +3 added.
+    """
+    pid = prediction_service.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID, creator_id=1, question="market lr?", initial_fair=50,
+    )["prediction_id"]
+    monkeypatch.setattr(random, "randint", lambda lo, hi: 0)  # zero drift
+    prediction_service.refresh_market(pid)
+
+    book = prediction_repo.get_book(pid)
+    asks_by_price = dict(book["yes_asks"])
+    bids_by_price = dict(book["yes_bids"])
+
+    # Original initial-seed asks at 51,52,53 are all kept (none cross new
+    # top bid 48). Refresh layered asks at 52 and 53 (fair=50, spread=2) get
+    # +3 onto the existing levels.
+    assert asks_by_price[51] == 5            # untouched (not in refresh ladder)
+    assert asks_by_price[52] == 5 + 3        # layered
+    assert asks_by_price[53] == 5 + 3        # layered
+    assert 54 not in asks_by_price           # refresh only goes 2 deep
+
+    # Symmetrically on the bid side: 49 untouched, 48/47 layered with +3.
+    assert bids_by_price[49] == 5
+    assert bids_by_price[48] == 5 + 3
+    assert bids_by_price[47] == 5 + 3
+    assert 46 not in bids_by_price
 
 
 def test_apply_refresh_stamps_prev_price(
@@ -504,20 +555,25 @@ def test_set_fair_manual_rejects_resolved_market(prediction_service, player_repo
         prediction_service.set_fair_manual(prediction_id=pid, new_price=60)
 
 
-def test_refresh_locked_bid_at_top_ask_is_kept(
-    prediction_service, prediction_repo, monkeypatch,
-):
+def test_refresh_locked_bid_at_top_ask_is_kept(prediction_service, prediction_repo):
     """Symmetric: an old bid at exactly the new top ask is locked, not crossed."""
     pid = prediction_service.create_orderbook_prediction(
         guild_id=TEST_GUILD_ID, creator_id=1, question="market mxd?", initial_fair=50,
     )["prediction_id"]
-    monkeypatch.setattr(random, "randint", lambda lo, hi: -2)  # drift -2
-    prediction_service.refresh_market(pid)
+    prediction_repo.replace_levels(pid, levels=[("yes_ask", 51, 5), ("yes_bid", 49, 5)])
+
+    # New ladder around fair=48 with spread=1: asks at 49, bids at 48.
+    prediction_repo.apply_refresh(
+        pid,
+        new_price=48,
+        levels=[("yes_ask", 49, 3), ("yes_bid", 48, 3)],
+        now_ts=10**9,
+    )
     post = dict(post_helper(prediction_repo.get_book(pid)))
-    # New fair = 48; new top ask = 49. Old bid at 49 is at-the-ask (locked, not crossed) — keep.
-    assert post[("yes_bid", 49)] == PREDICTION_SIZE_PER_LEVEL
-    assert post[("yes_bid", 48)] == PREDICTION_SIZE_PER_LEVEL
-    assert post[("yes_bid", 47)] == 2 * PREDICTION_SIZE_PER_LEVEL
+    # Old bid at 49 is at-the-ask (locked, not crossed) — must survive.
+    assert post[("yes_bid", 49)] == 5
+    assert post[("yes_bid", 48)] == 3
+    assert post[("yes_ask", 49)] == 3
 
 
 def test_set_fair_with_open_position_preserves_user_holdings(
