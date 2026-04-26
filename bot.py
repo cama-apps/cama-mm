@@ -182,6 +182,8 @@ async def _prediction_digest_loop() -> None:
 
 
 async def _post_daily_digest_all_guilds() -> None:
+    from commands.predictions import _format_market_field
+
     cog = bot.get_cog("PredictionCommands")
     if cog is None:
         return
@@ -192,17 +194,22 @@ async def _post_daily_digest_all_guilds() -> None:
             )
             if not opens:
                 continue
-            lines = ["📈 **Daily prediction markets digest**", ""]
-            for p in opens:
-                lines.append(
-                    f"  #{p['prediction_id']:>3} price {p.get('current_price','?'):>3}  "
-                    f"ask {p.get('top_ask') if p.get('top_ask') is not None else '—':>3} "
-                    f"/ bid {p.get('top_bid') if p.get('top_bid') is not None else '—':>3}  "
-                    f"vol {p.get('volume_recent', 0)}  "
-                    f"\"{p['question'][:50]}\""
-                )
-            content = "\n".join(lines)
-            await cog.announce_to_gamba(guild, content)
+            opens.sort(key=lambda p: p.get("volume_recent", 0) or 0, reverse=True)
+
+            embed = discord.Embed(
+                title="📈 Today in prediction markets",
+                color=0x3498DB,
+            )
+            FIELD_CAP = 25
+            for added, p in enumerate(opens):
+                if added >= FIELD_CAP - 1:
+                    embed.set_footer(
+                        text=f"+{len(opens) - added} more — use /predict list"
+                    )
+                    break
+                name, value = _format_market_field(p, with_delta=True)
+                embed.add_field(name=name, value=value, inline=False)
+            await cog.announce_to_gamba(guild, embed=embed)
         except Exception as ex:
             logger.warning("digest failed for guild %s: %s", guild.id, ex)
 

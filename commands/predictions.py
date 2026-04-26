@@ -43,36 +43,79 @@ MARKET_TITLE_RE = re.compile(rf"{re.escape(MARKET_TITLE_PREFIX)}(\d+)")
 # Embed rendering
 # --------------------------------------------------------------------------- #
 
-def _format_ladder(book: dict) -> str:
-    """Render the book in user-action terms: Buy/Sell YES/NO with prices.
+def _build_ladder_fields(book: dict) -> list[tuple[str, str, bool]]:
+    """Return four inline embed fields for the ladder: Buy YES, Buy NO, Sell YES, Sell NO.
 
-    Drops bid/ask jargon — many users don't have that vocabulary; the
-    Polymarket-style "Buy YES at X / Buy NO at Y" framing is more direct.
-    Both sides of the same physical book are surfaced explicitly here so
-    users can see what each action costs without mentally inverting prices.
+    Returned shape: [(field_name, field_value, inline), ...]. Each value is a
+    short one-liner like ``"18 x5 / 19 x5 / 20 x5"`` showing top-of-book first
+    then deeper levels, separated by ``/``. NO sides use the mirror: NO ask =
+    100 - YES bid, NO bid = 100 - YES ask. Empty sides render as ``"(none)"``.
     """
     asks = book.get("yes_asks", [])  # cheapest first
     bids = book.get("yes_bids", [])  # highest first
-    current = book.get("current_price")
 
-    def _fmt_row(label: str, level_strs: list[str]) -> str:
-        joined = "   ".join(level_strs) if level_strs else "(none)"
-        return f"  {label:<10} {joined}"
+    def _fmt(levels: list[tuple[int, int]], mirror: bool) -> str:
+        if not levels:
+            return "(none)"
+        return " / ".join(
+            f"{(100 - p) if mirror else p} x{s}" for p, s in levels
+        )
 
-    buy_yes = [f"{p} x{s}" for p, s in asks]                  # YES asks, cheapest first
-    buy_no = [f"{100 - p} x{s}" for p, s in bids]             # NO ask = 100 - top YES bid
-    sell_yes = [f"{p} x{s}" for p, s in bids]                 # YES bids, highest first
-    sell_no = [f"{100 - p} x{s}" for p, s in asks]            # NO bid = 100 - top YES ask
+    return [
+        ("Buy YES",  _fmt(asks, mirror=False), True),
+        ("Buy NO",   _fmt(bids, mirror=True),  True),
+        ("Sell YES", _fmt(bids, mirror=False), True),
+        ("Sell NO",  _fmt(asks, mirror=True),  True),
+    ]
 
-    lines = ["```"]
-    lines.append(f"  price: {current if current is not None else '?'}")
-    lines.append("")
-    lines.append(_fmt_row("Buy YES:", buy_yes))
-    lines.append(_fmt_row("Buy NO:", buy_no))
-    lines.append(_fmt_row("Sell YES:", sell_yes))
-    lines.append(_fmt_row("Sell NO:", sell_no))
-    lines.append("```")
-    return "\n".join(lines)
+
+def _trade_link(prediction: dict) -> str | None:
+    """Build a Discord deep link to the embed message inside a market thread.
+
+    Falls back from the message URL to the thread URL if ``embed_message_id``
+    is missing, and returns None when neither is known.
+    """
+    guild_id = prediction.get("guild_id")
+    thread_id = prediction.get("thread_id")
+    embed_message_id = prediction.get("embed_message_id")
+    if guild_id is None or thread_id is None:
+        return None
+    base = f"https://discord.com/channels/{guild_id}/{thread_id}"
+    if embed_message_id is not None:
+        return f"{base}/{embed_message_id}"
+    return base
+
+
+def _format_market_field(prediction: dict, *, with_delta: bool = False) -> tuple[str, str]:
+    """Build (field_name, field_value) for one market in /predict list or the digest.
+
+    Field name carries the market id and current price (and optional delta arrow);
+    field value carries the question text (mentions resolve here since this is
+    not a code block) and a [Trade →] markdown link to the trade buttons.
+    """
+    pid = prediction.get("prediction_id", "?")
+    price = prediction.get("current_price")
+    price_str = str(price) if price is not None else "?"
+
+    delta_str = ""
+    if with_delta and price is not None:
+        prev = prediction.get("prev_price")
+        if prev is not None and prev != price:
+            arrow = "↑" if price > prev else "↓"
+            delta_str = f"  ({arrow}{abs(price - prev)} today)"
+
+    name = f"📈 #{pid}  ·  price {price_str}{delta_str}"
+
+    question = (prediction.get("question") or "").strip()
+    if len(question) > 200:
+        question = question[:197] + "..."
+    quoted = f'"{question}"' if question else ""
+
+    link = _trade_link(prediction)
+    link_line = f"\n[Trade →]({link})" if link else ""
+
+    value = f"{quoted}{link_line}".strip() or "—"
+    return (name, value)
 
 
 def _format_recent_trades(trades: list[dict], cog: PredictionCommands) -> str:
@@ -511,7 +554,9 @@ class PredictionCommands(commands.Cog):
             ),
             inline=False,
         )
-        embed.add_field(name="Book", value=_format_ladder(book), inline=False)
+        # Ladder as 4 inline fields: Buy YES + Buy NO side-by-side, Sell YES + Sell NO below.
+        for fname, fvalue, finline in _build_ladder_fields(book):
+            embed.add_field(name=fname, value=fvalue, inline=finline)
         embed.add_field(
             name="Recent",
             value=_format_recent_trades(recent, self),
@@ -621,12 +666,19 @@ class PredictionCommands(commands.Cog):
                 return ch
         return None
 
-    async def announce_to_gamba(self, guild: discord.Guild, content: str) -> None:
+    async def announce_to_gamba(
+        self,
+        guild: discord.Guild,
+        content: str | None = None,
+        embed: discord.Embed | None = None,
+    ) -> None:
+        if content is None and embed is None:
+            return
         ch = self._gamba_channel_for_guild(guild)
         if ch is None:
             return
         try:
-            await ch.send(content)
+            await ch.send(content=content, embed=embed)
         except discord.Forbidden:
             logger.debug("No permission to post in #%s", ch.name)
         except Exception as e:
@@ -901,45 +953,79 @@ class PredictionCommands(commands.Cog):
         open_preds = await asyncio.to_thread(
             self.prediction_service.list_open_orderbook_markets, guild_id
         )
+        # Recently active first; quiet markets sink to the bottom.
+        open_preds.sort(key=lambda p: p.get("volume_recent", 0) or 0, reverse=True)
 
-        lines = []
-        for p in open_preds:
-            top_ask = p.get("top_ask")
-            top_bid = p.get("top_bid")
-            ask_str = str(top_ask) if top_ask is not None else "—"
-            bid_str = str(top_bid) if top_bid is not None else "—"
-            lines.append(
-                f"  #{p['prediction_id']:>3}  price {p.get('current_price','?'):>3}  "
-                f"ask {ask_str:>3} / bid {bid_str:>3}   vol today {p.get('volume_recent', 0)}\n"
-                f"        \"{p['question'][:80]}\""
+        if not open_preds and not show_all:
+            await safe_followup(
+                interaction,
+                content=(
+                    "No open markets right now. "
+                    "Admins can create one with `/predict create <question> [initial_fair=50]`."
+                ),
+            )
+            return
+
+        resolved_preds: list[dict] = []
+        cancelled_preds: list[dict] = []
+        if show_all:
+            resolved_preds = await asyncio.to_thread(
+                self.prediction_service.get_predictions_by_status, guild_id, "resolved"
+            )
+            cancelled_preds = await asyncio.to_thread(
+                self.prediction_service.get_predictions_by_status, guild_id, "cancelled"
             )
 
         if show_all:
-            for status in ("resolved", "cancelled"):
-                resolved = await asyncio.to_thread(
-                    self.prediction_service.get_predictions_by_status, guild_id, status
+            title = (
+                f"📈 Markets ({len(open_preds)} open · "
+                f"{len(resolved_preds)} resolved · {len(cancelled_preds)} cancelled)"
+            )
+        else:
+            title = f"📈 Open markets ({len(open_preds)})"
+
+        embed = discord.Embed(title=title, color=0x3498DB)
+
+        # Discord caps an embed at 25 fields.
+        FIELD_CAP = 25
+        added = 0
+        skipped_open = 0
+        for p in open_preds:
+            if added >= FIELD_CAP - 1:
+                skipped_open = len(open_preds) - added
+                break
+            name, value = _format_market_field(p, with_delta=False)
+            embed.add_field(name=name, value=value, inline=False)
+            added += 1
+
+        if show_all:
+            for p in resolved_preds[:10]:
+                if added >= FIELD_CAP:
+                    break
+                outcome = (p.get("outcome") or "?").upper()
+                question = (p.get("question") or "")[:200]
+                embed.add_field(
+                    name=f"📈 #{p['prediction_id']}  ·  RESOLVED {outcome}",
+                    value=f'"{question}"',
+                    inline=False,
                 )
-                for p in resolved[:10]:
-                    if status == "resolved":
-                        lines.append(
-                            f"  #{p['prediction_id']:>3}  RESOLVED {(p.get('outcome') or '?').upper()} "
-                            f"  \"{p['question'][:60]}\""
-                        )
-                    else:
-                        lines.append(
-                            f"  #{p['prediction_id']:>3}  CANCELLED   \"{p['question'][:60]}\""
-                        )
+                added += 1
+            for p in cancelled_preds[:10]:
+                if added >= FIELD_CAP:
+                    break
+                question = (p.get("question") or "")[:200]
+                embed.add_field(
+                    name=f"📈 #{p['prediction_id']}  ·  CANCELLED",
+                    value=f'"{question}"',
+                    inline=False,
+                )
+                added += 1
 
-        if not lines:
-            await safe_followup(interaction, content="No markets to show.")
-            return
+        footer_bits = ["/predict view <id> for the full ladder", "/predict help for how it works"]
+        if skipped_open:
+            footer_bits.insert(0, f"+{skipped_open} more open markets not shown")
+        embed.set_footer(text="  ·  ".join(footer_bits))
 
-        body = "```\n" + "\n".join(lines) + "\n```"
-        embed = discord.Embed(
-            title=f"📈 Markets ({len(open_preds)} open)",
-            description=body[:4000],
-            color=0x3498DB,
-        )
         await safe_followup(interaction, embed=embed)
 
     # -- /predict view ---

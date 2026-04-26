@@ -1529,8 +1529,16 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                         (prediction_id, side, price, size, now_ts),
                     )
 
+            # Stamp prev_price with the OLD current_price so the digest can
+            # render a price-change arrow on the next render.
             cursor.execute(
-                "UPDATE predictions SET current_price = ?, last_refresh_at = ? WHERE prediction_id = ?",
+                """
+                UPDATE predictions
+                SET prev_price = current_price,
+                    current_price = ?,
+                    last_refresh_at = ?
+                WHERE prediction_id = ?
+                """,
                 (new_price, now_ts, prediction_id),
             )
 
@@ -1734,8 +1742,8 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
             cursor.execute(
                 """
                 SELECT prediction_id, question, creator_id, current_price,
-                       last_refresh_at, created_at, thread_id, channel_id,
-                       embed_message_id
+                       prev_price, last_refresh_at, created_at, thread_id,
+                       channel_id, embed_message_id, guild_id
                 FROM predictions
                 WHERE guild_id = ? AND status = 'open'
                 ORDER BY created_at DESC

@@ -279,6 +279,7 @@ class SchemaManager:
             ("clear_active_boss_ids_for_pool_reroll", self._migration_clear_active_boss_ids_for_pool_reroll),
             # Predictions: continuous-quote order-book rework
             ("predictions_orderbook_v1", self._migration_predictions_orderbook),
+            ("predictions_prev_price_v1", self._migration_predictions_prev_price),
         ]
 
     # --- Migrations ---
@@ -2435,3 +2436,7 @@ class SchemaManager:
             "CREATE INDEX IF NOT EXISTS idx_pred_trades_user "
             "ON prediction_trades(discord_id)"
         )
+
+    def _migration_predictions_prev_price(self, cursor) -> None:
+        """Add prev_price so the daily digest can show a price-change arrow."""
+        self._add_column_if_not_exists(cursor, "predictions", "prev_price", "INTEGER")

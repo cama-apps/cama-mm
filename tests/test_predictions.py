@@ -454,6 +454,35 @@ def test_set_fair_manual_changes_price_and_layers_ladder(
     assert 47 in bid_prices and 48 in bid_prices and 49 in bid_prices
 
 
+def test_apply_refresh_stamps_prev_price(
+    prediction_service, prediction_repo, monkeypatch,
+):
+    """Each refresh records the OLD current_price as prev_price for the digest delta."""
+    pid = prediction_service.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID, creator_id=1, question="market pp?", initial_fair=50,
+    )["prediction_id"]
+    pred = prediction_repo.get_prediction(pid)
+    assert pred["current_price"] == 50
+    assert pred["prev_price"] is None  # never refreshed yet
+
+    monkeypatch.setattr(random, "randint", lambda lo, hi: 2)  # drift +2 → new price 52
+    prediction_service.refresh_market(pid)
+    pred = prediction_repo.get_prediction(pid)
+    assert pred["current_price"] == 52
+    assert pred["prev_price"] == 50  # OLD price was stamped as prev_price
+
+
+def test_set_fair_manual_stamps_prev_price(prediction_service, prediction_repo):
+    """Admin override also leaves a prev_price footprint so the digest reflects the move."""
+    pid = prediction_service.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID, creator_id=1, question="market sfp?", initial_fair=50,
+    )["prediction_id"]
+    prediction_service.set_fair_manual(prediction_id=pid, new_price=80)
+    pred = prediction_repo.get_prediction(pid)
+    assert pred["current_price"] == 80
+    assert pred["prev_price"] == 50
+
+
 def test_set_fair_manual_rejects_out_of_range(prediction_service):
     pid = prediction_service.create_orderbook_prediction(
         guild_id=TEST_GUILD_ID, creator_id=1, question="market sfo?", initial_fair=50,
