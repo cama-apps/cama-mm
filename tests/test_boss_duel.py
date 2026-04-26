@@ -335,3 +335,74 @@ class TestBossEchoWeakening:
         result = dig_service.fight_boss(10001, TEST_GUILD_ID, "cautious", wager=10)
         assert result["won"] is True
         assert result.get("echo_applied") is False
+
+
+class TestAbandonedDuelCleanup:
+    """start_boss_duel must tick durability for any stale dig_active_duels row.
+
+    Without this, a player who pauses mid-fight on a mechanic prompt and
+    never resumes would leak the durability tick for that fight.
+    """
+
+    def _seed_stale_duel(self, dig_repo, discord_id, guild_id, boss_id="grothak"):
+        """Insert a fake 'paused' duel row directly so we can test the cleanup branch."""
+        state = {
+            "boss_id": boss_id,
+            "tier": 25,
+            "mechanic_id": "fake_mechanic",
+            "risk_tier": "cautious",
+            "wager": 0,
+            "player_hp": 5,
+            "boss_hp": 5,
+            "round_num": 3,
+            "round_log": "[]",
+            "pending_prompt": "{}",
+            "rng_state": "",
+            "status_effects": "{}",
+            "echo_applied": 0,
+            "echo_killer_id": None,
+            "player_hit": 0.6,
+            "player_dmg": 1,
+            "boss_hit": 0.3,
+            "boss_dmg": 1,
+        }
+        dig_repo.save_active_duel(discord_id, guild_id, state)
+
+    def test_stale_row_triggers_cleanup_tick(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
+        # Equip a piece so a tick has something to bite
+        gid = dig_repo.add_gear(10001, TEST_GUILD_ID, "armor", 1)
+        dig_repo.equip_gear(gid, 10001, TEST_GUILD_ID, "armor")
+        self._seed_stale_duel(dig_repo, 10001, TEST_GUILD_ID)
+
+        dig_service.start_boss_duel(10001, TEST_GUILD_ID, "cautious", wager=0)
+
+        # Stale row was either cleared or replaced by a new pause record.
+        active = dig_repo.get_active_duel(10001, TEST_GUILD_ID)
+        if active is not None:
+            assert active.get("mechanic_id") != "fake_mechanic"
+        # The cleanup tick fired against the stale fight, dropping durability
+        # from 20 to at least 19 (the new fight may also tick if it
+        # auto-resolves, dropping further).
+        row = dig_repo.get_gear_by_id(gid)
+        assert row["durability"] <= 19
+
+    def test_no_stale_row_means_no_cleanup_tick(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        """Without a stale row, start_boss_duel must NOT pre-tick durability.
+
+        Whether the new fight itself ticks depends on whether it pauses or
+        resolves — which is RNG- and boss-content-dependent. We assert
+        only that the durability is in an acceptable range (no double-tick).
+        """
+        _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
+        gid = dig_repo.add_gear(10001, TEST_GUILD_ID, "armor", 1)
+        dig_repo.equip_gear(gid, 10001, TEST_GUILD_ID, "armor")
+
+        dig_service.start_boss_duel(10001, TEST_GUILD_ID, "cautious", wager=0)
+        row = dig_repo.get_gear_by_id(gid)
+        # At most one tick (no double-tick from a phantom cleanup pass).
+        assert row["durability"] >= 19

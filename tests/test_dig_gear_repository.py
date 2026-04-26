@@ -161,3 +161,43 @@ class TestRepair:
         gear_repo.repair_gear(a, 20)
         # equipped flag still 0 — caller must equip again explicitly
         assert gear_repo.get_gear_by_id(a)["equipped"] == 0
+
+
+class TestTickById:
+    def test_ticks_specific_ids_only(self, gear_repo):
+        a = gear_repo.add_gear(111, 0, "armor", 1)   # equipped soon
+        b = gear_repo.add_gear(111, 0, "boots", 2)   # equipped soon
+        c = gear_repo.add_gear(111, 0, "weapon", 3)  # NOT in snapshot
+        gear_repo.equip_gear(a, 111, 0, "armor")
+        gear_repo.equip_gear(b, 111, 0, "boots")
+        gear_repo.equip_gear(c, 111, 0, "weapon")
+        broken = gear_repo.tick_gear_durability_ids([a, b])
+        assert broken == []
+        rows = {r["id"]: r for r in gear_repo.get_gear(111, 0)}
+        assert rows[a]["durability"] == 19
+        assert rows[b]["durability"] == 19
+        assert rows[c]["durability"] == 20  # untouched
+
+    def test_ticks_unequipped_pieces_too(self, gear_repo):
+        """Snapshot ticks must work on pieces that have been unequipped."""
+        a = gear_repo.add_gear(111, 0, "armor", 1)
+        gear_repo.equip_gear(a, 111, 0, "armor")
+        gear_repo.unequip_gear(a)  # Player swapped during pause
+        gear_repo.tick_gear_durability_ids([a])
+        assert gear_repo.get_gear_by_id(a)["durability"] == 19
+
+    def test_breaks_at_zero_and_returns_id(self, gear_repo):
+        a = gear_repo.add_gear(111, 0, "armor", 1, durability=1)
+        gear_repo.equip_gear(a, 111, 0, "armor")
+        broken = gear_repo.tick_gear_durability_ids([a])
+        assert broken == [a]
+        row = gear_repo.get_gear_by_id(a)
+        assert row["durability"] == 0
+        assert row["equipped"] == 0  # auto-unequipped
+
+    def test_empty_list_is_a_noop(self, gear_repo):
+        a = gear_repo.add_gear(111, 0, "armor", 1)
+        gear_repo.equip_gear(a, 111, 0, "armor")
+        broken = gear_repo.tick_gear_durability_ids([])
+        assert broken == []
+        assert gear_repo.get_gear_by_id(a)["durability"] == 20

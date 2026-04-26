@@ -1686,9 +1686,15 @@ class GearSelectView(discord.ui.View):
                 value=f"gear:{g['id']}",
             ))
         for r in relics[:25 - len(options)]:
+            db_id = r.get("db_id")
+            if db_id is None:
+                # Skip malformed relic rows rather than encoding a string
+                # artifact_id that would later silently parse to id=0.
+                logger.warning("Relic %s missing db_id; skipping", r)
+                continue
             options.append(discord.SelectOption(
                 label=f"[Relic] {r.get('name', r.get('artifact_id', '?'))}"[:100],
-                value=f"relic:{r['db_id']}" if "db_id" in r else f"relic_id:{r.get('artifact_id')}",
+                value=f"relic:{db_id}",
             ))
         if not options:
             options = [discord.SelectOption(label="(nothing here)", value="noop")]
@@ -1716,29 +1722,35 @@ class GearSelectView(discord.ui.View):
         try:
             target_id = int(raw)
         except ValueError:
-            target_id = 0
+            await interaction.followup.send("Invalid selection.", ephemeral=True)
+            await self.parent._refresh(interaction)
+            return
 
+        gear_fns = {
+            "equip": self.dig_service.equip_gear,
+            "unequip": self.dig_service.unequip_gear,
+            "repair": self.dig_service.repair_gear,
+        }
+        relic_fns = {
+            "equip": self.dig_service.equip_relic_for_player,
+            "unequip": self.dig_service.unequip_relic_for_player,
+        }
         if kind == "gear":
-            if self.mode == "equip":
-                fn = self.dig_service.equip_gear
-            elif self.mode == "unequip":
-                fn = self.dig_service.unequip_gear
-            elif self.mode == "repair":
-                fn = self.dig_service.repair_gear
+            fn = gear_fns.get(self.mode)
+            if fn is None:
+                result = _wrap({"success": False, "error": "Action not supported."})
             else:
-                fn = None
-            result = _wrap(await asyncio.to_thread(fn, self.user_id, self.guild_id, target_id))
-        elif kind in ("relic", "relic_id"):
-            if self.mode == "equip":
-                fn = self.dig_service.equip_relic_for_player
-            elif self.mode == "unequip":
-                fn = self.dig_service.unequip_relic_for_player
-            else:
-                fn = None
+                result = _wrap(await asyncio.to_thread(
+                    fn, self.user_id, self.guild_id, target_id,
+                ))
+        elif kind == "relic":
+            fn = relic_fns.get(self.mode)
             if fn is None:
                 result = _wrap({"success": False, "error": "Relics can't be repaired."})
             else:
-                result = _wrap(await asyncio.to_thread(fn, self.user_id, self.guild_id, target_id))
+                result = _wrap(await asyncio.to_thread(
+                    fn, self.user_id, self.guild_id, target_id,
+                ))
         else:
             result = _wrap({"success": False, "error": "Unknown selection."})
 

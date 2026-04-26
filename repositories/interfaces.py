@@ -1568,6 +1568,9 @@ class IDigRepository(ABC):
     def tick_gear_durability(self, discord_id: int, guild_id: int) -> list[int]: ...
 
     @abstractmethod
+    def tick_gear_durability_ids(self, gear_ids: list[int]) -> list[int]: ...
+
+    @abstractmethod
     def repair_gear(self, gear_id: int, to_durability: int) -> None: ...
 
     # Artifact Registry

@@ -683,7 +683,12 @@ class DigService:
         return int(round(table[tier].shop_price * GEAR_REPAIR_COST_PCT))
 
     def repair_gear(self, discord_id: int, guild_id, gear_id: int) -> dict:
-        """Restore one piece to full durability for a JC cost."""
+        """Restore one piece to full durability for a JC cost.
+
+        Uses ``player_repo.try_debit`` so the balance check and the JC
+        debit happen as one atomic statement — a concurrent fight wager
+        cannot race the check and drive the balance negative.
+        """
         row = self.dig_repo.get_gear_by_id(gear_id)
         if row is None:
             return self._error("That gear piece doesn't exist.")
@@ -693,26 +698,28 @@ class DigService:
         if int(row["durability"]) >= GEAR_MAX_DURABILITY:
             return self._error("That piece is already at full durability.")
         cost = self._gear_repair_cost(row["slot"], int(row["tier"]))
-        if cost > 0:
+        if cost > 0 and not self.player_repo.try_debit(discord_id, guild_id, cost):
             balance = self.player_repo.get_balance(discord_id, guild_id)
-            if balance < cost:
-                return self._error(f"Repair costs {cost} JC; you only have {balance}.")
-            self.player_repo.add_balance(discord_id, guild_id, -cost)
+            return self._error(f"Repair costs {cost} JC; you only have {balance}.")
         self.dig_repo.repair_gear(gear_id, GEAR_MAX_DURABILITY)
         return self._ok(gear_id=gear_id, cost=cost)
 
     def repair_all_gear(self, discord_id: int, guild_id) -> dict:
-        """Repair every owned damaged piece in one billing transaction."""
+        """Repair every owned damaged piece in one billing transaction.
+
+        Total cost is debited atomically via ``try_debit``; on insufficient
+        balance no repair runs and no JC is deducted.
+        """
         rows = self.dig_repo.get_gear(discord_id, guild_id)
         damaged = [r for r in rows if int(r["durability"]) < GEAR_MAX_DURABILITY]
         if not damaged:
             return self._error("Nothing to repair.")
         total_cost = sum(self._gear_repair_cost(r["slot"], int(r["tier"])) for r in damaged)
-        if total_cost > 0:
+        if total_cost > 0 and not self.player_repo.try_debit(discord_id, guild_id, total_cost):
             balance = self.player_repo.get_balance(discord_id, guild_id)
-            if balance < total_cost:
-                return self._error(f"Total repair costs {total_cost} JC; you only have {balance}.")
-            self.player_repo.add_balance(discord_id, guild_id, -total_cost)
+            return self._error(
+                f"Total repair costs {total_cost} JC; you only have {balance}.",
+            )
         for r in damaged:
             self.dig_repo.repair_gear(int(r["id"]), GEAR_MAX_DURABILITY)
         return self._ok(repaired=len(damaged), cost=total_cost)
@@ -739,11 +746,13 @@ class DigService:
             return self._error(f"{td.name} requires depth {td.depth_required}.")
         if prestige < td.prestige_required:
             return self._error(f"{td.name} requires prestige {td.prestige_required}.")
-        if td.shop_price > 0:
+        if td.shop_price > 0 and not self.player_repo.try_debit(
+            discord_id, guild_id, td.shop_price,
+        ):
             balance = self.player_repo.get_balance(discord_id, guild_id)
-            if balance < td.shop_price:
-                return self._error(f"{td.name} costs {td.shop_price} JC; you have {balance}.")
-            self.player_repo.add_balance(discord_id, guild_id, -td.shop_price)
+            return self._error(
+                f"{td.name} costs {td.shop_price} JC; you have {balance}.",
+            )
         gear_id = self.dig_repo.add_gear(
             discord_id, guild_id, slot_enum.value, tier, source="shop",
         )
@@ -4150,6 +4159,15 @@ class DigService:
         tunnel = dict(tunnel)
         tunnel["discord_id"] = discord_id
 
+        # Abandoned-duel cleanup: if a previous mid-fight pause was never
+        # resumed, the stale dig_active_duels row would otherwise leak the
+        # durability tick for that fight. Tick once for the prior fight
+        # and clear the row before starting a fresh duel.
+        stale = self.dig_repo.get_active_duel(discord_id, guild_id)
+        if stale is not None:
+            self.dig_repo.tick_gear_durability(discord_id, guild_id)
+            self.dig_repo.clear_active_duel(discord_id, guild_id)
+
         boss_progress = self._get_boss_progress(tunnel)
         depth = tunnel.get("depth", 0)
         at_boss = self._at_boss_boundary(depth, boss_progress)
@@ -4256,6 +4274,14 @@ class DigService:
                         "attempts_this_fight": attempts,
                         "initial_win_chance": win_chance,
                         "multiplier": multiplier,
+                        # Snapshot the gear ids that fought THIS fight so the
+                        # durability tick on resume hits these pieces, even
+                        # if the player swapped gear during the pause.
+                        "gear_snapshot_ids": [
+                            int(p.id)
+                            for p in (loadout.weapon, loadout.armor, loadout.boots)
+                            if p is not None
+                        ],
                     }),
                     "echo_applied": 1 if echo_applied else 0,
                     "echo_killer_id": (
@@ -4443,6 +4469,7 @@ class DigService:
 
         self.dig_repo.clear_active_duel(discord_id, guild_id)
 
+        snapshot_ids = status_effects.get("gear_snapshot_ids") or []
         return self._resolve_duel_outcome(
             discord_id=discord_id, guild_id=guild_id,
             tunnel=tunnel, boss=boss, at_boss=at_boss,
@@ -4454,6 +4481,7 @@ class DigService:
             multiplier=multiplier, prestige_level=prestige_level,
             attempts=attempts, boss_progress=boss_progress,
             depth=depth,
+            gear_snapshot_ids=snapshot_ids,
         )
 
     # --- helpers --------------------------------------------------------
@@ -4618,6 +4646,7 @@ class DigService:
         risk_tier, wager, won, round_log, echo_applied, active_echo,
         win_chance, multiplier, prestige_level, attempts,
         boss_progress, depth,
+        gear_snapshot_ids: list[int] | None = None,
     ) -> dict:
         """Apply the win-branch or loss-branch post-processing and return the result dict.
 
@@ -4634,21 +4663,39 @@ class DigService:
         now = int(time.time())
         boss_name = boss.name if boss is not None else BOSS_NAMES.get(at_boss, "Unknown Boss")
 
-        # Wear-and-tear: re-fetch the current loadout (it could have changed
-        # between start_boss_duel and now if the player paused on a mechanic
-        # prompt and edited their gear before clicking through). Tick once
-        # for this fight regardless of which path arrived here.
-        pre_tick_loadout = self._get_loadout(discord_id, guild_id)
-        broken_ids = self.dig_repo.tick_gear_durability(discord_id, guild_id)
-        gear_broken_names: list[str] = []
-        if broken_ids:
+        # Wear-and-tear: tick durability for the gear that actually fought
+        # this fight. When resume_boss_duel forwards a ``gear_snapshot_ids``
+        # list, those are the IDs that were equipped at start_boss_duel
+        # time — use them so a player who swapped gear during the pause
+        # doesn't burn durability on pieces they never wore. Auto-resolve
+        # path (no snapshot) ticks the currently-equipped loadout.
+        if gear_snapshot_ids:
+            # Resolve names from the snapshot rows directly (those pieces
+            # may no longer be equipped, so the loadout helper won't see
+            # them).
             name_by_id: dict[int, str] = {}
+            for gid in gear_snapshot_ids:
+                row = self.dig_repo.get_gear_by_id(int(gid))
+                if row is None:
+                    continue
+                piece = self._hydrate_gear_piece(row)
+                if piece is not None:
+                    name_by_id[piece.id] = piece.tier_def.name
+            broken_ids = self.dig_repo.tick_gear_durability_ids(
+                [int(g) for g in gear_snapshot_ids]
+            )
+        else:
+            pre_tick_loadout = self._get_loadout(discord_id, guild_id)
+            name_by_id = {}
             for piece in (pre_tick_loadout.weapon,
                           pre_tick_loadout.armor,
                           pre_tick_loadout.boots):
                 if piece is not None:
                     name_by_id[piece.id] = piece.tier_def.name
-            gear_broken_names = [name_by_id.get(i, "a piece of gear") for i in broken_ids]
+            broken_ids = self.dig_repo.tick_gear_durability(discord_id, guild_id)
+        gear_broken_names: list[str] = [
+            name_by_id.get(i, "a piece of gear") for i in broken_ids
+        ]
 
         ascension = self._get_ascension_effects(prestige_level)
         boss_payout_mult = 1.0 + ascension.get("boss_payout_multiplier", 0)
