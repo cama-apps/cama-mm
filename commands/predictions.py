@@ -44,29 +44,47 @@ MARKET_TITLE_RE = re.compile(rf"{re.escape(MARKET_TITLE_PREFIX)}(\d+)")
 # --------------------------------------------------------------------------- #
 
 def _build_ladder_fields(book: dict) -> list[tuple[str, str, bool]]:
-    """Return four inline embed fields for the ladder: Buy YES, Buy NO, Sell YES, Sell NO.
+    """Return one embed field with a buy-only two-column ladder.
 
-    Returned shape: [(field_name, field_value, inline), ...]. Each value is a
-    short one-liner like ``"18 x5 / 19 x5 / 20 x5"`` showing top-of-book first
-    then deeper levels, separated by ``/``. NO sides use the mirror: NO ask =
-    100 - YES bid, NO bid = 100 - YES ask. Empty sides render as ``"(none)"``.
+    Selling is disabled — positions are hold-to-resolution. So users only
+    ever do BUY YES (consume YES asks) or BUY NO (consume YES bids at the
+    mirrored price). The visual layout shows both buy ladders side by side,
+    cheapest first, in a single code-block field for monospace alignment.
     """
     asks = book.get("yes_asks", [])  # cheapest first
-    bids = book.get("yes_bids", [])  # highest first
+    bids = book.get("yes_bids", [])  # highest first → cheapest NO ask first
+    current = book.get("current_price")
 
-    def _fmt(levels: list[tuple[int, int]], mirror: bool) -> str:
-        if not levels:
-            return "(none)"
-        return " / ".join(
-            f"{(100 - p) if mirror else p} x{s}" for p, s in levels
-        )
+    # Buy YES ladder = YES asks (cheapest first).
+    # Buy NO ladder  = mirror of YES bids (cheapest NO first).
+    buy_yes = list(asks)
+    buy_no = [(100 - p, s) for p, s in bids]
 
-    return [
-        ("Buy YES",  _fmt(asks, mirror=False), True),
-        ("Buy NO",   _fmt(bids, mirror=True),  True),
-        ("Sell YES", _fmt(bids, mirror=False), True),
-        ("Sell NO",  _fmt(asks, mirror=True),  True),
-    ]
+    rows = max(len(buy_yes), len(buy_no))
+    lines = ["      Buy YES         Buy NO"]
+    if rows == 0:
+        lines.append("      (book empty - refreshes daily)")
+    else:
+        for i in range(rows):
+            yes_cell = (
+                f"{buy_yes[i][0]:>2}  x{buy_yes[i][1]:<3}" if i < len(buy_yes) else "  -      "
+            )
+            no_cell = (
+                f"{buy_no[i][0]:>2}  x{buy_no[i][1]:<3}" if i < len(buy_no) else "  -      "
+            )
+            arrow = "  <- top" if i == 0 else ""
+            lines.append(f"      {yes_cell}      {no_cell}{arrow}")
+
+    mid_label = (
+        f"price {current} (~{current}% YES)"
+        if current is not None
+        else "price ?"
+    )
+    lines.append("")
+    lines.append(f"      {mid_label}")
+
+    body = "```\n" + "\n".join(lines) + "\n```"
+    return [("Order book — Buy only (hold to resolution)", body, False)]
 
 
 def _trade_link(prediction: dict) -> str | None:
@@ -457,19 +475,21 @@ class PersistentMarketView(discord.ui.View):
 
 
 class PositionEphemeralView(discord.ui.View):
-    """Ephemeral view shown when the user clicks MY POSITION; offers SELL buttons."""
+    """Ephemeral view shown when the user clicks MY POSITION.
+
+    Selling is currently disabled — positions are hold-to-resolution only.
+    The view exists for layout symmetry but contains no buttons; the position
+    card embed is what conveys the user's holdings.
+    """
 
     def __init__(self, cog: PredictionCommands, prediction_id: int, position: dict, book: dict):
         super().__init__(timeout=120)
         self.cog = cog
         self.prediction_id = prediction_id
-        yes_c = int(position.get("yes_contracts", 0))
-        no_c = int(position.get("no_contracts", 0))
-        if yes_c > 0:
-            self.add_item(_SellButton(cog, prediction_id, "yes", yes_c, book))
-        if no_c > 0:
-            self.add_item(_SellButton(cog, prediction_id, "no", no_c, book))
 
+
+# NOTE: _SellButton + SellContractsModal kept below as dormant code in case
+# selling is re-enabled later. Neither is referenced from the live UI today.
 
 class _SellButton(discord.ui.Button):
     def __init__(self, cog: PredictionCommands, prediction_id: int, side: str, held: int, book: dict):

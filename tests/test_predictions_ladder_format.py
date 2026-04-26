@@ -5,70 +5,69 @@ from __future__ import annotations
 from commands.predictions import _build_ladder_fields, _format_market_field, _trade_link
 
 # --------------------------------------------------------------------------- #
-# _build_ladder_fields — replaces the old code-block ladder
+# _build_ladder_fields — buy-only two-column visual ladder
 # --------------------------------------------------------------------------- #
 
 
-def _by_name(fields):
-    return {name: value for name, value, _inline in fields}
-
-
-def test_ladder_fields_balanced_book():
+def test_ladder_one_field_with_two_buy_columns():
     book = {
         "current_price": 50,
         "yes_asks": [(51, 5), (52, 5), (53, 5)],
         "yes_bids": [(49, 5), (48, 5), (47, 5)],
     }
     fields = _build_ladder_fields(book)
-    assert len(fields) == 4
-    # All four are inline so Discord renders them as a 2x2 grid.
-    assert all(inline for _, _, inline in fields)
-    by_name = _by_name(fields)
-    # Buy YES uses the asks ascending: 51, 52, 53
-    assert by_name["Buy YES"] == "51 x5 / 52 x5 / 53 x5"
-    # Buy NO mirrors top YES bid: 100-49=51, 100-48=52, 100-47=53
-    assert by_name["Buy NO"] == "51 x5 / 52 x5 / 53 x5"
-    # Sell YES uses bids descending (best first): 49, 48, 47
-    assert by_name["Sell YES"] == "49 x5 / 48 x5 / 47 x5"
-    # Sell NO mirrors asks: 100-51=49, 100-52=48, 100-53=47
-    assert by_name["Sell NO"] == "49 x5 / 48 x5 / 47 x5"
+    # Single field (sell side removed — positions are hold-to-resolution)
+    assert len(fields) == 1
+    name, value, inline = fields[0]
+    assert "Buy only" in name
+    assert not inline
+    # Header column titles
+    assert "Buy YES" in value
+    assert "Buy NO" in value
+    # Top of book = cheapest. YES ask 51, NO ask = 100 - 49 = 51.
+    assert "51  x5" in value
+    # Mid line shown
+    assert "price 50" in value
+    # No sell language anywhere
+    assert "Sell" not in value
 
 
-def test_ladder_fields_asymmetric_market():
+def test_ladder_asymmetric_market():
     book = {
         "current_price": 17,
         "yes_asks": [(18, 5), (19, 5), (20, 5)],
         "yes_bids": [(16, 5), (15, 5), (14, 5)],
     }
-    by_name = _by_name(_build_ladder_fields(book))
-    assert by_name["Buy YES"] == "18 x5 / 19 x5 / 20 x5"
-    assert by_name["Buy NO"] == "84 x5 / 85 x5 / 86 x5"
-    assert by_name["Sell YES"] == "16 x5 / 15 x5 / 14 x5"
-    assert by_name["Sell NO"] == "82 x5 / 81 x5 / 80 x5"
+    value = _build_ladder_fields(book)[0][1]
+    # Buy YES options
+    assert "18  x5" in value
+    assert "19  x5" in value
+    assert "20  x5" in value
+    # Buy NO mirror options: 100 - 16 = 84, 100 - 15 = 85, 100 - 14 = 86
+    assert "84  x5" in value
+    assert "85  x5" in value
+    assert "86  x5" in value
+    assert "price 17" in value
 
 
-def test_ladder_fields_empty_asks():
-    book = {"current_price": 50, "yes_asks": [], "yes_bids": [(49, 5)]}
-    by_name = _by_name(_build_ladder_fields(book))
-    assert by_name["Buy YES"] == "(none)"
-    assert by_name["Sell NO"] == "(none)"
-    assert by_name["Buy NO"] == "51 x5"
-    assert by_name["Sell YES"] == "49 x5"
-
-
-def test_ladder_fields_empty_bids():
-    book = {"current_price": 50, "yes_asks": [(51, 5)], "yes_bids": []}
-    by_name = _by_name(_build_ladder_fields(book))
-    assert by_name["Buy YES"] == "51 x5"
-    assert by_name["Buy NO"] == "(none)"
-    assert by_name["Sell YES"] == "(none)"
-    assert by_name["Sell NO"] == "49 x5"
-
-
-def test_ladder_fields_fully_empty_book():
+def test_ladder_empty_book():
     fields = _build_ladder_fields({"current_price": 50, "yes_asks": [], "yes_bids": []})
-    by_name = _by_name(fields)
-    assert all(v == "(none)" for v in by_name.values())
+    value = fields[0][1]
+    assert "book empty" in value
+    assert "price 50" in value
+
+
+def test_ladder_only_asks():
+    fields = _build_ladder_fields({"current_price": 50, "yes_asks": [(51, 5)], "yes_bids": []})
+    value = fields[0][1]
+    assert "51  x5" in value
+    # No NO column when bids empty
+    assert "  -" in value  # placeholder for empty NO column
+
+
+def test_ladder_handles_missing_current_price():
+    fields = _build_ladder_fields({"current_price": None, "yes_asks": [], "yes_bids": []})
+    assert "price ?" in fields[0][1]
 
 
 # --------------------------------------------------------------------------- #
@@ -108,7 +107,6 @@ def test_format_market_field_basic():
     name, value = _format_market_field(pred)
     assert "📈 #5" in name
     assert "price 17" in name
-    # Mention markup is preserved verbatim — Discord resolves at render time.
     assert "@Luke" in value
     assert "[Trade →](https://discord.com/channels/1/2/3)" in value
 
