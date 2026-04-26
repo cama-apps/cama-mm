@@ -67,30 +67,37 @@ def _build_ladder_fields(book: dict) -> list[tuple[str, str, bool]]:
         # depths share a clean right edge.
         return f"  {price:>3}  {bar:<{BAR_CAP}}  {size:>3}"
 
-    # NO section on top: deepest NO at the top, cheapest NO at the bottom
-    # (closest to mid). Iterate reversed(bids) — bids is sorted highest-YES-bid
-    # first, which mirrors to cheapest-NO first; reversed puts cheapest NO last.
-    lines = [f"{RED}🔴 Buy NO{RESET}"]
-    if bids:
-        for p, s in reversed(bids):
-            lines.append(f"{RED}{_row(100 - p, s)}{RESET}")
+    # YES section on top: deepest YES at the top, cheapest YES at the bottom
+    # (closest to mid). Iterate reversed(asks) — asks is sorted cheapest-YES
+    # first, so reversed puts cheapest YES last (touching the mid line).
+    lines = [f"{GREEN}🟢 Buy YES{RESET}"]
+    if asks:
+        for p, s in reversed(asks):
+            lines.append(f"{GREEN}{_row(p, s)}{RESET}")
     else:
         lines.append("  (none — refreshes daily)")
 
+    # Mid line: actual cheapest tradeable price on each side. Per-side `—` when
+    # that side has no resting orders; `?` only when neither the book nor a
+    # fair-value belief exists.
+    cheapest_yes = asks[0][0] if asks else None
+    cheapest_no = (100 - bids[0][0]) if bids else None
     lines.append("")
-    if current is not None:
-        lines.append(
-            f"  ── price {current}  ·  {current}% YES / {100 - current}% NO ──"
-        )
+    if cheapest_yes is None and cheapest_no is None and current is None:
+        lines.append("  ── ? ──")
     else:
-        lines.append("  ── price ? ──")
+        yes_str = f"YES {cheapest_yes}%" if cheapest_yes is not None else "YES —"
+        no_str = f"NO {cheapest_no}%" if cheapest_no is not None else "NO —"
+        lines.append(f"  ── {yes_str}  ·  {no_str} ──")
     lines.append("")
 
-    # YES section on bottom: cheapest YES at the top (closest to mid).
-    lines.append(f"{GREEN}🟢 Buy YES{RESET}")
-    if asks:
-        for p, s in asks:
-            lines.append(f"{GREEN}{_row(p, s)}{RESET}")
+    # NO section on bottom: cheapest NO at the top (closest to mid), deepest
+    # NO at the bottom. Iterate bids directly — bids is sorted highest-YES-bid
+    # first, which mirrors to cheapest-NO first (touching the mid line).
+    lines.append(f"{RED}🔴 Buy NO{RESET}")
+    if bids:
+        for p, s in bids:
+            lines.append(f"{RED}{_row(100 - p, s)}{RESET}")
     else:
         lines.append("  (none — refreshes daily)")
 
@@ -124,7 +131,7 @@ def _format_market_field(prediction: dict, *, with_delta: bool = False) -> tuple
     """
     pid = prediction.get("prediction_id", "?")
     price = prediction.get("current_price")
-    price_str = str(price) if price is not None else "?"
+    price_str = f"{price}%" if price is not None else "?"
 
     delta_str = ""
     if with_delta and price is not None:
@@ -133,7 +140,7 @@ def _format_market_field(prediction: dict, *, with_delta: bool = False) -> tuple
             arrow = "↑" if price > prev else "↓"
             delta_str = f"  ({arrow}{abs(price - prev)} today)"
 
-    name = f"📈 #{pid}  ·  price {price_str}{delta_str}"
+    name = f"📈 #{pid}  ·  YES {price_str}{delta_str}"
 
     question = (prediction.get("question") or "").strip()
     if len(question) > 200:
@@ -586,10 +593,11 @@ class PredictionCommands(commands.Cog):
             description=f'"{question}"',
             color=0x3498DB,
         )
+        price_display = f"{price}%" if price is not None else "?"
         embed.add_field(
             name="Current",
             value=(
-                f"price **{price if price is not None else '?'}**\n"
+                f"YES **{price_display}**\n"
                 f"contracts traded since refresh: **{volume}**"
             ),
             inline=False,
@@ -773,7 +781,7 @@ class PredictionCommands(commands.Cog):
         prediction_id = result["prediction_id"]
         await safe_followup(
             interaction,
-            content=f"✅ Market #{prediction_id} created at price {initial_fair}.",
+            content=f"✅ Market #{prediction_id} created at YES {initial_fair}%.",
             ephemeral=True,
         )
 
@@ -781,7 +789,7 @@ class PredictionCommands(commands.Cog):
         try:
             channel_msg = await interaction.channel.send(
                 f"📈 **New market #{prediction_id}** opened by {interaction.user.mention}\n"
-                f'"{question}" — starting price {initial_fair}',
+                f'"{question}" — starting at YES {initial_fair}%',
             )
             thread_name = f"Market #{prediction_id}: {question[:60]}"
             thread = await channel_msg.create_thread(name=thread_name)
@@ -910,7 +918,7 @@ class PredictionCommands(commands.Cog):
 
         announce = (
             f"📈 Market #{prediction_id} fair manually set by <@{interaction.user.id}>: "
-            f"{result['old_price']} → {result['new_price']}"
+            f"YES {result['old_price']}% → {result['new_price']}%"
         )
         await safe_followup(interaction, content=announce)
 

@@ -150,7 +150,7 @@ async def _process_one_refresh(market: dict) -> None:
         msg = (
             f"📈 **Daily refresh** — volume {trade_summary.get('total_volume', 0)} contracts "
             f"({trade_summary.get('yes_volume', 0)} YES / {trade_summary.get('no_volume', 0)} NO)"
-            f", price {summary['old_price']} → {summary['new_price']}{biggest_str}"
+            f", YES {summary['old_price']}% → {summary['new_price']}%{biggest_str}"
         )
         await thread.send(msg)
     except Exception as ex:

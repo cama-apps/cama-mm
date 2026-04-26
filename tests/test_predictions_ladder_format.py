@@ -9,9 +9,11 @@ from commands.predictions import _build_ladder_fields, _format_market_field, _tr
 # --------------------------------------------------------------------------- #
 
 
-def test_ladder_dom_style_no_above_yes_converging_at_mid():
-    """Real DOM layout: NO on top with cheapest at bottom of section, mid line,
-    YES on bottom with cheapest at top of section. Both sides converge at mid."""
+def test_ladder_dom_style_yes_above_no_converging_at_mid():
+    """Real DOM layout: YES on top with cheapest at bottom of section, mid line,
+    NO on bottom with cheapest at top of section. Both sides converge at mid —
+    so buying YES (consuming the cheapest YES near the mid) drives the mid up
+    into the YES stack, mirroring a stock DOM."""
     book = {
         "current_price": 17,
         "yes_asks": [(18, 5), (19, 5), (20, 5)],
@@ -22,36 +24,38 @@ def test_ladder_dom_style_no_above_yes_converging_at_mid():
     name, value, inline = fields[0]
     assert name == "Order book"
     assert not inline
-    # Buy NO above the mid line; Buy YES below.
-    no_idx = value.index("Buy NO")
-    mid_idx = value.index("price 17")
+    # Buy YES above the mid line; Buy NO below.
     yes_idx = value.index("Buy YES")
-    assert no_idx < mid_idx < yes_idx
-    # NO section: deepest (most expensive, e.g. 86) at top, cheapest (84) at bottom — closest to mid.
+    mid_idx = value.index("YES 18%")
+    no_idx = value.index("Buy NO")
+    assert yes_idx < mid_idx < no_idx
+    # YES section: deepest (most expensive, e.g. 20) at top, cheapest (18) at bottom — closest to mid.
     # Use the exact _row emit pattern ("  {price:>3}  ") to avoid loose substring matches.
-    no_section = value[no_idx:mid_idx]
-    assert no_section.index("  86  ") < no_section.index("  85  ") < no_section.index("  84  ")
-    # YES section: cheapest (18) at top — closest to mid — deeper (20) at bottom.
-    yes_section = value[yes_idx:]
-    assert yes_section.index("  18  ") < yes_section.index("  19  ") < yes_section.index("  20  ")
-    # Mid line shows both probabilities.
-    assert "17% YES" in value and "83% NO" in value
-    # No bid/ask jargon, no top arrow, no sell language.
+    yes_section = value[yes_idx:mid_idx]
+    assert yes_section.index("  20  ") < yes_section.index("  19  ") < yes_section.index("  18  ")
+    # NO section: cheapest (84) at top — closest to mid — deeper (86) at bottom.
+    no_section = value[no_idx:]
+    assert no_section.index("  84  ") < no_section.index("  85  ") < no_section.index("  86  ")
+    # Mid line shows actual cheapest tradeable prices on each side.
+    assert "YES 18%" in value and "NO 84%" in value
+    # No bid/ask jargon, no top arrow, no sell language, no stale "price X" label.
     assert "Sell" not in value
     assert "<- top" not in value
     assert "ASK" not in value and "BID" not in value
+    assert "price 17" not in value
 
 
-def test_ladder_dom_order_is_no_above_yes_for_symmetric_market():
-    """Even at fair=50 where YES and NO prices coincide, NO section sits above
-    the mid line and YES section below — guards against an accidental swap."""
+def test_ladder_dom_order_is_yes_above_no_for_symmetric_market():
+    """At fair=50 the cheapest YES (51) and cheapest NO (51) coincide, but the
+    YES section still sits above the mid line and NO sits below — guards
+    against an accidental swap when both sides land on the same number."""
     book = {
         "current_price": 50,
         "yes_asks": [(51, 5)],
         "yes_bids": [(49, 5)],
     }
     value = _build_ladder_fields(book)[0][1]
-    assert value.index("Buy NO") < value.index("price 50") < value.index("Buy YES")
+    assert value.index("Buy YES") < value.index("YES 51%") < value.index("Buy NO")
 
 
 def test_ladder_color_codes_yes_green_no_red():
@@ -88,9 +92,9 @@ def test_ladder_asymmetric_market_mirror_prices():
     # NO side mirrors: 100 - YES bid
     for no_price in (84, 85, 86):
         assert str(no_price) in value
-    # Mid label shows asymmetric probability
-    assert "17% YES" in value
-    assert "83% NO" in value
+    # Mid line shows the asymmetric cheapest-side tradeable prices.
+    assert "YES 18%" in value
+    assert "NO 84%" in value
 
 
 def test_ladder_uses_depth_bars_capped():
@@ -113,7 +117,11 @@ def test_ladder_empty_book():
     value = fields[0][1]
     # Both sections labelled empty
     assert value.count("(none — refreshes daily)") == 2
-    assert "price 50" in value
+    # Mid line honestly shows no tradeable prices on either side.
+    assert "YES —" in value and "NO —" in value
+    # The stale "price 50" label must be gone — the bot's fair belief lives in
+    # the Current field, not in the order book mid line.
+    assert "price 50" not in value
 
 
 def test_ladder_only_asks_keeps_no_section_empty():
@@ -124,11 +132,16 @@ def test_ladder_only_asks_keeps_no_section_empty():
     # YES side has the 51 price; NO side is the empty placeholder.
     assert "51" in value
     assert "(none — refreshes daily)" in value
+    # Mid line is asymmetric: YES has a tradeable price, NO does not.
+    assert "YES 51%" in value and "NO —" in value
 
 
 def test_ladder_handles_missing_current_price():
     fields = _build_ladder_fields({"current_price": None, "yes_asks": [], "yes_bids": []})
-    assert "price ?" in fields[0][1]
+    value = fields[0][1]
+    # Nothing tradeable and no fair belief — mid line falls back to a bare "?".
+    assert "?" in value
+    assert "price" not in value
 
 
 # --------------------------------------------------------------------------- #
@@ -167,7 +180,8 @@ def test_format_market_field_basic():
     }
     name, value = _format_market_field(pred)
     assert "📈 #5" in name
-    assert "price 17" in name
+    assert "YES 17%" in name
+    assert "price" not in name
     assert "@Luke" in value
     assert "[Trade →](https://discord.com/channels/1/2/3)" in value
 
@@ -183,6 +197,7 @@ def test_format_market_field_with_delta_up():
         "embed_message_id": 3,
     }
     name, _ = _format_market_field(pred, with_delta=True)
+    assert "YES 19%" in name
     assert "↑2 today" in name
 
 
@@ -197,6 +212,7 @@ def test_format_market_field_with_delta_down():
         "embed_message_id": 3,
     }
     name, _ = _format_market_field(pred, with_delta=True)
+    assert "YES 50%" in name
     assert "↓3 today" in name
 
 
