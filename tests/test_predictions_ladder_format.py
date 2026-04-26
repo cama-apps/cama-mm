@@ -50,10 +50,12 @@ def test_ladder_color_codes_yes_green_no_red():
     # Mobile-safe emoji headers
     assert "🟢 Buy YES" in value
     assert "🔴 Buy NO" in value
-    # ANSI green and red color codes are embedded in the rendered body.
-    assert "[0;32m" in value
-    assert "[0;31m" in value
-    assert "[0;0m" in value
+    # ANSI green/red/reset escapes are embedded with the actual ESC byte
+    # (\x1b) — assert the byte sequence so a missing escape character would
+    # fail in CI rather than render as literal text in Discord.
+    assert "\x1b[0;32m" in value
+    assert "\x1b[0;31m" in value
+    assert "\x1b[0;0m" in value
 
 
 def test_ladder_asymmetric_market_mirror_prices():

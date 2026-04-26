@@ -185,6 +185,27 @@ def test_buy_yes_rejects_insufficient_balance(prediction_service, player_reposit
         )
 
 
+def test_buy_rejects_negative_or_zero_contracts(prediction_service, player_repository):
+    _add_player(player_repository, 1)
+    pid = prediction_service.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID, creator_id=1, question="market neg?", initial_fair=50,
+    )["prediction_id"]
+    with pytest.raises(ValueError, match="positive"):
+        prediction_service.buy_contracts(prediction_id=pid, discord_id=1, side="yes", contracts=0)
+    with pytest.raises(ValueError, match="positive"):
+        prediction_service.buy_contracts(prediction_id=pid, discord_id=1, side="yes", contracts=-5)
+
+
+def test_buy_rejects_above_per_trade_cap(prediction_service, player_repository):
+    """Per-trade cap is 100 contracts; 101+ rejected even if depth/balance allow it."""
+    _add_player(player_repository, 1, balance=1_000_000)  # plenty of jopa
+    pid = prediction_service.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID, creator_id=1, question="market cap?", initial_fair=50,
+    )["prediction_id"]
+    with pytest.raises(ValueError, match="capped at 100"):
+        prediction_service.buy_contracts(prediction_id=pid, discord_id=1, side="yes", contracts=101)
+
+
 def test_buy_yes_rejects_in_debt(prediction_service, player_repository):
     _add_player(player_repository, 1, balance=-50)
     pid = prediction_service.create_orderbook_prediction(

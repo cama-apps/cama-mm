@@ -1012,10 +1012,15 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
         self, prediction_id: int, discord_id: int, side: str, contracts: int
     ) -> dict:
         """Atomically execute a BUY YES or BUY NO sweep across the book."""
+        from config import PREDICTION_MAX_CONTRACTS_PER_TRADE
         if side not in self.VALID_TRADE_SIDES:
             raise ValueError("side must be 'yes' or 'no'")
         if contracts <= 0:
             raise ValueError("contracts must be positive")
+        if contracts > PREDICTION_MAX_CONTRACTS_PER_TRADE:
+            raise ValueError(
+                f"contracts capped at {PREDICTION_MAX_CONTRACTS_PER_TRADE} per trade."
+            )
 
         now = int(time.time())
         # BUY YES consumes the yes_ask side (cheapest first).
@@ -1152,10 +1157,15 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
         self, prediction_id: int, discord_id: int, side: str, contracts: int
     ) -> dict:
         """Atomically execute a SELL YES or SELL NO sweep against the bids."""
+        from config import PREDICTION_MAX_CONTRACTS_PER_TRADE
         if side not in self.VALID_TRADE_SIDES:
             raise ValueError("side must be 'yes' or 'no'")
         if contracts <= 0:
             raise ValueError("contracts must be positive")
+        if contracts > PREDICTION_MAX_CONTRACTS_PER_TRADE:
+            raise ValueError(
+                f"contracts capped at {PREDICTION_MAX_CONTRACTS_PER_TRADE} per trade."
+            )
 
         now = int(time.time())
         # SELL YES consumes yes_bids (highest first; best price for seller).

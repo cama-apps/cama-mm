@@ -63,7 +63,9 @@ def _build_ladder_fields(book: dict) -> list[tuple[str, str, bool]]:
 
     def _row(price: int, size: int) -> str:
         bar = "█" * min(size, BAR_CAP)
-        return f"  {price:>3}  {bar:<{BAR_CAP}}  {size}"
+        # size column right-aligned to width 3 so single- and triple-digit
+        # depths share a clean right edge.
+        return f"  {price:>3}  {bar:<{BAR_CAP}}  {size:>3}"
 
     lines = [f"{GREEN}🟢 Buy YES  (cheapest first){RESET}"]
     if asks:
@@ -200,6 +202,8 @@ class BuyContractsModal(discord.ui.Modal):
         unit_price: int,
         balance: int,
     ):
+        from config import PREDICTION_MAX_CONTRACTS_PER_TRADE
+
         side_label = side.upper()
         # Title carries the per-contract price so the user sees their cost up
         # front. Discord caps modal titles at 45 chars; this fits with room.
@@ -207,11 +211,13 @@ class BuyContractsModal(discord.ui.Modal):
         self.cog = cog
         self.prediction_id = prediction_id
         self.side = side  # 'yes' or 'no'
+        # Hard cap per trade (positive integers up to PREDICTION_MAX_CONTRACTS_PER_TRADE).
+        effective_max = min(max_available, PREDICTION_MAX_CONTRACTS_PER_TRADE)
         self.contracts.label = f"How many? ({balance} jopa available)"
         self.contracts.placeholder = (
             f"e.g. 5  →  costs {5 * unit_price} jopa, wins {5 * 100} if {side_label}"
-            if max_available >= 5
-            else f"max {max_available} at top of book"
+            if effective_max >= 5
+            else f"max {effective_max} at top of book"
         )
         # keep question for context if we ever need it in followups
         self._question = question
