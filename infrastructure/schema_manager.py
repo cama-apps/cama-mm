@@ -295,6 +295,12 @@ class SchemaManager:
             ("predictions_prev_price_v1", self._migration_predictions_prev_price),
             # Dig boss-gear: persistent equipment with durability + relic equip wiring
             ("create_dig_gear_system", self._migration_create_dig_gear_system),
+            # Persist betting_mode per match so /admin correctmatch can reverse
+            # payouts using the same formula they were settled with.
+            ("add_betting_mode_to_matches", self._migration_add_betting_mode_to_matches),
+            # Persist actual JC awarded per participant so the balance-history
+            # chart can't drift when reward constants or penalty rules change.
+            ("add_bonus_jc_to_match_participants", self._migration_add_bonus_jc_to_match_participants),
         ]
 
     # --- Migrations ---
@@ -1041,6 +1047,21 @@ class SchemaManager:
         """Track which rating system was used for team balancing (experiment)."""
         self._add_column_if_not_exists(
             cursor, "matches", "balancing_rating_system", "TEXT DEFAULT 'glicko'"
+        )
+
+    def _migration_add_betting_mode_to_matches(self, cursor) -> None:
+        """Persist the betting mode per match. Without it, match correction has
+        no way to reverse house-mode payouts with the right formula."""
+        self._add_column_if_not_exists(
+            cursor, "matches", "betting_mode", "TEXT DEFAULT 'pool'"
+        )
+
+    def _migration_add_bonus_jc_to_match_participants(self, cursor) -> None:
+        """Snapshot the JC actually credited (after garnishment / bankruptcy
+        penalty) so the balance-history chart can replay real values instead
+        of recomputing from the current config constants."""
+        self._add_column_if_not_exists(
+            cursor, "match_participants", "bonus_jc", "INTEGER"
         )
 
     def _migration_create_match_corrections_table(self, cursor) -> None:

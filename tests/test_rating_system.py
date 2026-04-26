@@ -562,10 +562,16 @@ class TestRatingSystemCalibrationAndDecay:
         rd_after_13_days = CamaRatingSystem.apply_rd_decay(rd_start, RD_DECAY_GRACE_PERIOD_WEEKS * 7 - 1)
         assert rd_after_13_days == rd_start, "No decay should apply during grace period"
 
-        # After grace: use floor weeks; 21 days => 3 weeks
-        days = RD_DECAY_GRACE_PERIOD_WEEKS * 7 + 7  # 21 days if grace is 14
+        # Right at the grace boundary: still no decay (one full week beyond
+        # grace is required before any decay applies).
+        rd_at_grace = CamaRatingSystem.apply_rd_decay(rd_start, RD_DECAY_GRACE_PERIOD_WEEKS * 7)
+        assert rd_at_grace == rd_start, "Grace boundary itself should not decay"
+
+        # After grace: only the weeks BEYOND the grace period count. With grace
+        # of 14 days, 21 days inactive = 7 days past grace = 1 week of decay.
+        days = RD_DECAY_GRACE_PERIOD_WEEKS * 7 + 7
         rd_after_21_days = CamaRatingSystem.apply_rd_decay(rd_start, days)
-        expected_weeks = days // 7
+        expected_weeks = (days - RD_DECAY_GRACE_PERIOD_WEEKS * 7) // 7
         expected_rd = min(350.0, (rd_start * rd_start + (RD_DECAY_CONSTANT * RD_DECAY_CONSTANT) * expected_weeks) ** 0.5)
         assert rd_after_21_days == expected_rd
         assert rd_after_21_days > rd_start, "RD should increase after inactivity past grace period"

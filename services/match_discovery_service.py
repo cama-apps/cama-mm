@@ -14,6 +14,7 @@ from datetime import datetime
 
 from config import ENRICHMENT_DISCOVERY_TIME_WINDOW, ENRICHMENT_MIN_PLAYER_MATCH
 from opendota_integration import OpenDotaAPI
+from utils.guild import normalize_guild_id
 
 logger = logging.getLogger("cama_bot.services.match_discovery")
 
@@ -41,6 +42,9 @@ class MatchDiscoveryService:
         self.player_repo = player_repo
         self.opendota_api = opendota_api or OpenDotaAPI()
         self.match_service = match_service
+        # Lazy-cached: avoids spinning up a fresh enrichment service (with its
+        # own OpenDota session) on every match in a 1000-match discovery loop.
+        self._enrichment_service = None
 
     def discover_all_matches(self, guild_id: int | None = None, dry_run: bool = False) -> dict:
         """
@@ -60,7 +64,7 @@ class MatchDiscoveryService:
         """
         logger.info(f"Starting match discovery (dry_run={dry_run})")
 
-        normalized_guild = guild_id if guild_id is not None else 0
+        normalized_guild = normalize_guild_id(guild_id)
         unenriched = self.match_repo.get_matches_without_enrichment(normalized_guild, limit=1000)
         results = {
             "total_unenriched": len(unenriched),
@@ -213,15 +217,16 @@ class MatchDiscoveryService:
                 # Enrich the match with source='auto'
                 # The enrichment service will perform additional validation
                 # (winning team, player sides) before committing
-                from services.match_enrichment_service import MatchEnrichmentService
+                if self._enrichment_service is None:
+                    from services.match_enrichment_service import MatchEnrichmentService
 
-                enrichment_service = MatchEnrichmentService(
-                    self.match_repo,
-                    self.player_repo,
-                    self.opendota_api,
-                    match_service=self.match_service,
-                )
-                result = enrichment_service.enrich_match(
+                    self._enrichment_service = MatchEnrichmentService(
+                        self.match_repo,
+                        self.player_repo,
+                        self.opendota_api,
+                        match_service=self.match_service,
+                    )
+                result = self._enrichment_service.enrich_match(
                     match_id,
                     best_match_id,
                     source="auto",

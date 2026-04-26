@@ -117,11 +117,21 @@ class MatchService:
         thread_id: int | None = None,
         origin_channel_id: int | None = None,
         pending_match_id: int | None = None,
+        cmd_message_id: int | None = None,
+        cmd_channel_id: int | None = None,
     ) -> None:
         """Store message metadata for the pending shuffle (delegates to state_service)."""
         self.state_service.set_shuffle_message_info(
-            guild_id, message_id, channel_id, jump_url,
-            thread_message_id, thread_id, origin_channel_id, pending_match_id
+            guild_id,
+            message_id,
+            channel_id,
+            jump_url,
+            thread_message_id,
+            thread_id,
+            origin_channel_id,
+            pending_match_id,
+            cmd_message_id=cmd_message_id,
+            cmd_channel_id=cmd_channel_id,
         )
 
     def get_shuffle_message_info(self, guild_id: int | None, pending_match_id: int | None = None) -> dict[str, int | None]:
@@ -584,22 +594,43 @@ class MatchService:
             return distributions
 
         is_bomb_pot = last_shuffle.get("is_bomb_pot", False)
-        self.betting_service.award_participation(losing_ids, guild_id, is_bomb_pot=is_bomb_pot)
+        # Track actual net JC paid per player so we can persist it on
+        # match_participants. Without this, balance-history reconstruction
+        # would silently drift if reward constants or penalty rules change.
+        bonus_net: dict[int, int] = {}
+
+        def _accumulate(awards: dict[int, dict[str, int]]) -> None:
+            for pid, amounts in awards.items():
+                bonus_net[pid] = bonus_net.get(pid, 0) + int(amounts.get("net", 0))
+
+        _accumulate(
+            self.betting_service.award_participation(losing_ids, guild_id, is_bomb_pot=is_bomb_pot)
+        )
         if is_bomb_pot:
             # Winners also get the bomb-pot bonus (+1 JC) on top of their win bonus.
-            self.betting_service.award_participation(
-                winning_ids, guild_id, is_bomb_pot=True, bomb_pot_bonus_only=True
+            _accumulate(
+                self.betting_service.award_participation(
+                    winning_ids, guild_id, is_bomb_pot=True, bomb_pot_bonus_only=True
+                )
             )
 
         distributions = self.betting_service.settle_bets(
             match_id, guild_id, winning_team, pending_state=last_shuffle
         )
-        self.betting_service.award_win_bonus(winning_ids, guild_id)
+        _accumulate(self.betting_service.award_win_bonus(winning_ids, guild_id))
         if excluded_player_ids:
-            self.betting_service.award_exclusion_bonus(excluded_player_ids, guild_id)
+            _accumulate(
+                self.betting_service.award_exclusion_bonus(excluded_player_ids, guild_id)
+            )
         excluded_conditional_ids = last_shuffle.get("excluded_conditional_player_ids", [])
         if excluded_conditional_ids:
-            self.betting_service.award_exclusion_bonus_half(excluded_conditional_ids, guild_id)
+            _accumulate(
+                self.betting_service.award_exclusion_bonus_half(excluded_conditional_ids, guild_id)
+            )
+
+        if bonus_net and hasattr(self.match_repo, "update_participant_bonus_jc"):
+            self.match_repo.update_participant_bonus_jc(match_id, guild_id, bonus_net)
+
         return distributions
 
     def _repay_outstanding_loans(
@@ -747,6 +778,7 @@ class MatchService:
             # Determine lobby type from pending state (draft sets is_draft=True)
             lobby_type = "draft" if last_shuffle.get("is_draft") else "shuffle"
             balancing_rating_system = last_shuffle.get("balancing_rating_system", "glicko")
+            betting_mode = last_shuffle.get("betting_mode", "pool")
 
             match_id = self.match_repo.record_match(
                 team1_ids=radiant_team_ids,
@@ -756,6 +788,7 @@ class MatchService:
                 dotabuff_match_id=dotabuff_match_id,
                 lobby_type=lobby_type,
                 balancing_rating_system=balancing_rating_system,
+                betting_mode=betting_mode,
             )
 
             # Persist win/loss counters for all players in the match (prefer single transaction).
@@ -1705,10 +1738,11 @@ class MatchService:
                     match_id, old_winning_bets
                 )
 
-                # Apply new payouts
-                betting_mode = "pool"  # Default to pool mode
+                # Apply new payouts using the original betting_mode persisted on
+                # the match. Older matches (pre-migration) default to 'pool'.
+                original_betting_mode = match.get("betting_mode") or "pool"
                 new_deltas = bet_repo.apply_new_bet_payouts_for_correction(
-                    match_id, new_winning_bets, pool_mode=(betting_mode == "pool")
+                    match_id, new_winning_bets, pool_mode=(original_betting_mode == "pool")
                 )
 
                 # Combine deltas and apply to player balances

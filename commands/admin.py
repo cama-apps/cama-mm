@@ -218,7 +218,7 @@ class AdminCommands(commands.Cog):
             )
         logger.info(f"addfake completed: added {len(fake_users_added)} fake users")
 
-    @app_commands.command(
+    @admin.command(
         name="filllobbytest",
         description="Fill remaining lobby spots with fake users for testing (Admin only)",
     )
@@ -339,7 +339,7 @@ class AdminCommands(commands.Cog):
         )
         logger.info(f"filllobbytest completed: added {len(fake_users_added)} fake users")
 
-    @app_commands.command(
+    @admin.command(
         name="resetuser", description="Reset a specific user's account (Admin only)"
     )
     @app_commands.describe(user="The user whose account to reset")
@@ -400,7 +400,7 @@ class AdminCommands(commands.Cog):
                 ephemeral=True,
             )
 
-    @app_commands.command(
+    @admin.command(
         name="registeruser", description="Register another user as a player (Admin only)"
     )
     @app_commands.describe(
@@ -662,7 +662,7 @@ class AdminCommands(commands.Cog):
             f"{'to' if amount >= 0 else 'from'} {user.id} ({user}). Balance: {old_balance} → {new_balance}"
         )
 
-    @app_commands.command(
+    @admin.command(
         name="resetloancooldown", description="Reset a user's loan cooldown (Admin only)"
     )
     @app_commands.describe(user="The user whose loan cooldown to reset")
@@ -705,7 +705,7 @@ class AdminCommands(commands.Cog):
             f"{user.id} ({user})"
         )
 
-    @app_commands.command(
+    @admin.command(
         name="resetbankruptcycooldown",
         description="Reset a user's bankruptcy cooldown (Admin only)",
     )
@@ -824,7 +824,7 @@ class AdminCommands(commands.Cog):
             f"{user.id} ({user}) to {rating} with RD={rd:.1f}"
         )
 
-    @app_commands.command(
+    @admin.command(
         name="recalibrate", description="Reset rating uncertainty for a player (Admin only)"
     )
     @app_commands.describe(user="The player to recalibrate")
@@ -959,7 +959,7 @@ class AdminCommands(commands.Cog):
             f"{result['count']} players in guild {guild_id}: avg RD {result['avg_before']:.0f} -> {result['avg_after']:.0f}"
         )
 
-    @app_commands.command(
+    @admin.command(
         name="resetrecalibrationcooldown", description="Reset a user's recalibration cooldown (Admin only)"
     )
     @app_commands.describe(user="The user whose recalibration cooldown to reset")
@@ -1016,7 +1016,7 @@ class AdminCommands(commands.Cog):
             f"{user.id} ({user})"
         )
 
-    @app_commands.command(
+    @admin.command(
         name="extendbetting",
         description="Extend the betting window for the current match (Admin only)",
     )
@@ -1155,7 +1155,7 @@ class AdminCommands(commands.Cog):
             f"for guild {guild_id}. New lock: {new_lock_until}{status_note}"
         )
 
-    @app_commands.command(
+    @admin.command(
         name="correctmatch",
         description="Correct an incorrectly recorded match result (Admin only)",
     )
@@ -1275,8 +1275,8 @@ class AdminCommands(commands.Cog):
 
     # --- Multi-Steam ID Admin Commands ---
 
-    @app_commands.command(
-        name="adminaddsteamid",
+    @admin.command(
+        name="addsteamid",
         description="Add a Steam ID to a player's account (Admin only)",
     )
     @app_commands.describe(
@@ -1343,8 +1343,8 @@ class AdminCommands(commands.Cog):
                 ephemeral=True,
             )
 
-    @app_commands.command(
-        name="adminremovesteamid",
+    @admin.command(
+        name="removesteamid",
         description="Remove a Steam ID from a player's account (Admin only)",
     )
     @app_commands.describe(
@@ -1407,8 +1407,8 @@ class AdminCommands(commands.Cog):
                 ephemeral=True,
             )
 
-    @app_commands.command(
-        name="adminsetprimarysteam",
+    @admin.command(
+        name="setprimarysteam",
         description="Set a player's primary Steam ID (Admin only)",
     )
     @app_commands.describe(
@@ -1462,7 +1462,7 @@ class AdminCommands(commands.Cog):
                 ephemeral=True,
             )
 
-    @app_commands.command(
+    @admin.command(
         name="seedherogrid",
         description="Seed fake players with enriched match data for /herogrid testing (Admin only)",
     )

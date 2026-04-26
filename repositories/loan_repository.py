@@ -364,6 +364,100 @@ class LoanRepository(BaseRepository, ILoanRepository):
                 "was_negative_loan": was_negative_loan,
             }
 
+    def execute_repayment_atomic(
+        self,
+        discord_id: int,
+        guild_id: int | None,
+    ) -> dict:
+        """
+        Atomically settle an outstanding loan: debit balance, credit nonprofit fund,
+        clear the loan state. All four steps share one BEGIN IMMEDIATE so a crash
+        mid-sequence cannot leave the player charged but still indebted, or vice versa.
+
+        Returns a dict with principal, fee, balance_before, new_balance, nonprofit_total.
+        Raises ValueError("No outstanding loan to repay.") if there is no loan.
+        Raises ValueError("Player not found.") if the player row is missing.
+        """
+        normalized_guild_id = self.normalize_guild_id(guild_id)
+
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+
+            cursor.execute(
+                """
+                SELECT outstanding_principal, outstanding_fee,
+                       COALESCE(total_fees_paid, 0) as total_fees_paid
+                FROM loan_state
+                WHERE discord_id = ? AND guild_id = ?
+                """,
+                (discord_id, normalized_guild_id),
+            )
+            state_row = cursor.fetchone()
+            if not state_row:
+                raise ValueError("No outstanding loan to repay.")
+
+            principal = state_row["outstanding_principal"] or 0
+            fee = state_row["outstanding_fee"] or 0
+            total_owed = principal + fee
+            if total_owed <= 0:
+                raise ValueError("No outstanding loan to repay.")
+
+            cursor.execute(
+                "SELECT COALESCE(jopacoin_balance, 0) as balance FROM players WHERE discord_id = ? AND guild_id = ?",
+                (discord_id, normalized_guild_id),
+            )
+            balance_row = cursor.fetchone()
+            if not balance_row:
+                raise ValueError("Player not found.")
+            balance_before = balance_row["balance"]
+
+            cursor.execute(
+                """
+                UPDATE players
+                SET jopacoin_balance = COALESCE(jopacoin_balance, 0) - ?, updated_at = CURRENT_TIMESTAMP
+                WHERE discord_id = ? AND guild_id = ?
+                """,
+                (total_owed, discord_id, normalized_guild_id),
+            )
+
+            cursor.execute(
+                """
+                INSERT INTO nonprofit_fund (guild_id, total_collected, updated_at)
+                VALUES (?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(guild_id) DO UPDATE SET
+                    total_collected = total_collected + excluded.total_collected,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (normalized_guild_id, fee),
+            )
+            cursor.execute(
+                "SELECT total_collected FROM nonprofit_fund WHERE guild_id = ?",
+                (normalized_guild_id,),
+            )
+            nonprofit_row = cursor.fetchone()
+            nonprofit_total = nonprofit_row["total_collected"] if nonprofit_row else fee
+
+            cursor.execute(
+                """
+                UPDATE loan_state
+                SET outstanding_principal = 0,
+                    outstanding_fee = 0,
+                    total_fees_paid = COALESCE(total_fees_paid, 0) + ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE discord_id = ? AND guild_id = ?
+                """,
+                (fee, discord_id, normalized_guild_id),
+            )
+
+            return {
+                "principal": principal,
+                "fee": fee,
+                "total_owed": total_owed,
+                "balance_before": balance_before,
+                "new_balance": balance_before - total_owed,
+                "nonprofit_total": nonprofit_total,
+            }
+
     def disburse_fund_atomic(
         self,
         guild_id: int | None,

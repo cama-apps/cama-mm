@@ -136,7 +136,7 @@ class OpenDotaPlayerService:
     def _fetch_win_loss(self, steam_id: int) -> dict:
         """Fetch win/loss totals."""
         try:
-            response = self.api._make_request(f"{self.api.BASE_URL}/players/{steam_id}/wl")
+            response = self.api.make_request(f"{self.api.BASE_URL}/players/{steam_id}/wl")
             if response and response.status_code == 200:
                 return response.json()
         except Exception as e:
@@ -146,7 +146,7 @@ class OpenDotaPlayerService:
     def _fetch_totals(self, steam_id: int) -> dict:
         """Fetch player totals for calculating averages."""
         try:
-            response = self.api._make_request(f"{self.api.BASE_URL}/players/{steam_id}/totals")
+            response = self.api.make_request(f"{self.api.BASE_URL}/players/{steam_id}/totals")
             if response and response.status_code == 200:
                 totals_data = response.json()
                 result = {}
@@ -176,7 +176,7 @@ class OpenDotaPlayerService:
     def _fetch_top_heroes(self, steam_id: int, limit: int = 5) -> list[dict]:
         """Fetch top heroes by games played."""
         try:
-            response = self.api._make_request(f"{self.api.BASE_URL}/players/{steam_id}/heroes")
+            response = self.api.make_request(f"{self.api.BASE_URL}/players/{steam_id}/heroes")
             if response and response.status_code == 200:
                 heroes_data = response.json()
                 # Sort by games and take top N
@@ -201,7 +201,7 @@ class OpenDotaPlayerService:
     def _fetch_recent_matches(self, steam_id: int, limit: int = 5) -> list[dict]:
         """Fetch recent matches."""
         try:
-            response = self.api._make_request(
+            response = self.api.make_request(
                 f"{self.api.BASE_URL}/players/{steam_id}/recentMatches"
             )
             if response and response.status_code == 200:
@@ -374,7 +374,7 @@ class OpenDotaPlayerService:
     def _fetch_matches_for_stats(self, steam_id: int, limit: int = 100) -> list[dict]:
         """Fetch recent matches with projections for stats analysis."""
         try:
-            response = self.api._make_request(
+            response = self.api.make_request(
                 f"{self.api.BASE_URL}/players/{steam_id}/matches",
                 params={
                     "limit": limit,
@@ -403,7 +403,7 @@ class OpenDotaPlayerService:
             return _HERO_ATTRIBUTES_CACHE
 
         try:
-            response = self.api._make_request(f"{self.api.BASE_URL}/heroes")
+            response = self.api.make_request(f"{self.api.BASE_URL}/heroes")
             if response and response.status_code == 200:
                 heroes_data = response.json()
                 _HERO_ATTRIBUTES_CACHE = {
@@ -487,7 +487,7 @@ class OpenDotaPlayerService:
             return None
 
         try:
-            response = self.api._make_request(
+            response = self.api.make_request(
                 f"{self.api.BASE_URL}/players/{steam_id}/matches",
                 params={
                     "limit": limit,

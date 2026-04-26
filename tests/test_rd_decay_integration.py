@@ -125,14 +125,15 @@ def test_rd_decay_applied_for_inactive_player(test_db):
     )
 
     # Manually set last_match_date to 4 weeks ago (beyond grace period)
+    from config import RD_DECAY_GRACE_PERIOD_WEEKS
     four_weeks_ago = (datetime.now(UTC) - timedelta(weeks=4)).isoformat()
     player_repo.update_last_match_date(pid, TEST_GUILD_ID, four_weeks_ago)
 
     # Load the player - RD should have decayed
     player, _ = match_service._load_glicko_player(pid, TEST_GUILD_ID)
 
-    # Expected: sqrt(100^2 + 50^2 * 4) = sqrt(10000 + 10000) = sqrt(20000) ≈ 141.4
-    expected_weeks = 4
+    # Decay applies only to weeks BEYOND the grace period.
+    expected_weeks = max(0, (4 * 7 - RD_DECAY_GRACE_PERIOD_WEEKS * 7) // 7)
     expected_rd = math.sqrt(start_rd * start_rd + (50.0 * 50.0) * expected_weeks)
 
     assert math.isclose(player.rd, expected_rd, rel_tol=0.01), \

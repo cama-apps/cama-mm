@@ -282,11 +282,22 @@ def test_betting_totals_only_include_pending_bets(services):
     assert totals["dire"] == 6, "Should show 6 jopacoin on Dire (only pending bet)"
 
 
-def test_stale_pending_bets_do_not_show_or_block_new_match(services):
+def test_stale_pending_bets_do_not_show_or_block_new_match(services, monkeypatch):
     """Stale matchless bets (match_id NULL) from a prior shuffle should not leak."""
     match_service = services["match_service"]
     betting_service = services["betting_service"]
     player_repo = services["player_repo"]
+
+    # Monotonically advancing fake clock so the second shuffle gets a newer
+    # timestamp without sleeping for real wall-clock time. Replaces the
+    # banned time.sleep(1) below.
+    fake_now = [int(time.time())]
+
+    def _tick():
+        fake_now[0] += 1
+        return fake_now[0]
+
+    monkeypatch.setattr(time, "time", _tick)
 
     player_ids = list(range(8000, 8010))
     for pid in player_ids:
@@ -319,8 +330,9 @@ def test_stale_pending_bets_do_not_show_or_block_new_match(services):
         pending_old["bet_lock_until"] = int(time.time()) + 600
     betting_service.place_bet(TEST_GUILD_ID, spectator, "radiant", 5, pending_old)
 
-    # Wait to ensure a newer shuffle timestamp
-    time.sleep(1)
+    # No real sleep needed: the monkeypatched ``time.time`` advances on every
+    # call, so the next shuffle picks up a strictly larger ``shuffle_timestamp``
+    # without burning wall-clock time under ``pytest -n auto``.
 
     # Abort the first match (refund bets but don't settle)
     # This simulates the normal flow where a match must be completed or aborted before a new shuffle

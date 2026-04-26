@@ -421,6 +421,7 @@ class GamblingStatsService:
         bulk_leverage = self.bet_repo.get_bulk_leverage_distribution(guild_id, discord_ids)
         bulk_loss_chase = self.bet_repo.get_bulk_loss_chasing_data(guild_id, discord_ids)
         bulk_bankruptcy = self.bet_repo.get_bulk_bankruptcy_counts(discord_ids, guild_id)
+        bulk_unique_matches = self.bet_repo.get_bulk_unique_matches_bet_on(guild_id, discord_ids)
         total_matches = self.bet_repo.get_total_settled_matches(guild_id)
 
         # Batch fetch lowest balances for all players
@@ -441,7 +442,7 @@ class GamblingStatsService:
                 loss_chase_data=bulk_loss_chase.get(discord_id, {"sequences_analyzed": 0, "times_increased_after_loss": 0}),
                 bankruptcy_count=bulk_bankruptcy.get(discord_id, 0),
                 total_matches=total_matches,
-                matches_bet_on=s["total_bets"],  # This is an approximation - unique matches would be better
+                matches_bet_on=bulk_unique_matches.get(discord_id, 0),
                 lowest_balance=lowest_balances.get(discord_id),
                 negative_loans=negative_loans_by_id.get(discord_id, 0),
                 total_wagered=s["total_wagered"],

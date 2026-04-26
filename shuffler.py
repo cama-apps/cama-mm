@@ -675,6 +675,10 @@ class BalancedShuffler:
         # Randomly select from all matchups with the best score
         if best_matchups:
             best_teams = random.choice(best_matchups)[:2]  # Just get (team1, team2)
+        else:
+            # Should be unreachable for 10 valid players; raise rather than
+            # silently return None into a tuple-unpack at the call site.
+            raise RuntimeError("Shuffler produced no candidate matchup")
 
         # Log top 5 matchups
         top_matchups.sort(key=lambda x: x[0])
@@ -1160,13 +1164,17 @@ class BalancedShuffler:
                     best_score = total_score
                     best_result = (team1, team2, excluded_players)
 
-                    # Early termination on perfect match
-                    if best_score <= 0:
+                    # Early termination on a true perfect match. We compare
+                    # against ``== 0`` rather than ``<= 0`` because the
+                    # rd_priority bonus subtracted inside _optimize can drive
+                    # the score below zero on a non-perfect matchup, which
+                    # would otherwise trip the search to terminate early.
+                    if best_score == 0:
                         logger.info("Branch & bound: perfect match found, early termination")
                         break
 
-            # Check for early termination after inner loop
-            if best_score <= 0:
+            # Check for early termination after inner loop (same reasoning).
+            if best_score == 0:
                 break
 
         logger.info(

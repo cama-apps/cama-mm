@@ -9,8 +9,9 @@ from repositories.interfaces import IRecalibrationRepository
 class RecalibrationRepository(BaseRepository, IRecalibrationRepository):
     """Data access for recalibration state."""
 
-    def get_state(self, discord_id: int, guild_id: int) -> dict | None:
+    def get_state(self, discord_id: int, guild_id: int | None = None) -> dict | None:
         """Get recalibration state for a player."""
+        normalized_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -20,7 +21,7 @@ class RecalibrationRepository(BaseRepository, IRecalibrationRepository):
                 FROM recalibration_state
                 WHERE discord_id = ? AND guild_id = ?
                 """,
-                (discord_id, guild_id),
+                (discord_id, normalized_id),
             )
             row = cursor.fetchone()
             if not row:
@@ -36,12 +37,13 @@ class RecalibrationRepository(BaseRepository, IRecalibrationRepository):
     def upsert_state(
         self,
         discord_id: int,
-        guild_id: int,
+        guild_id: int | None = None,
         last_recalibration_at: int | None = None,
         total_recalibrations: int | None = None,
         rating_at_recalibration: float | None = None,
     ) -> None:
         """Create or update recalibration state."""
+        normalized_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -57,11 +59,12 @@ class RecalibrationRepository(BaseRepository, IRecalibrationRepository):
                     rating_at_recalibration = COALESCE(excluded.rating_at_recalibration, recalibration_state.rating_at_recalibration),
                     updated_at = CURRENT_TIMESTAMP
                 """,
-                (discord_id, guild_id, last_recalibration_at, total_recalibrations, rating_at_recalibration),
+                (discord_id, normalized_id, last_recalibration_at, total_recalibrations, rating_at_recalibration),
             )
 
-    def reset_cooldown(self, discord_id: int, guild_id: int) -> None:
+    def reset_cooldown(self, discord_id: int, guild_id: int | None = None) -> None:
         """Reset recalibration cooldown by setting last_recalibration_at to 0."""
+        normalized_id = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -70,5 +73,5 @@ class RecalibrationRepository(BaseRepository, IRecalibrationRepository):
                 SET last_recalibration_at = 0, updated_at = CURRENT_TIMESTAMP
                 WHERE discord_id = ? AND guild_id = ?
                 """,
-                (discord_id, guild_id),
+                (discord_id, normalized_id),
             )

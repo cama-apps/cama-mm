@@ -274,6 +274,33 @@ class DigLLMService:
         players = self.player_repo.get_by_ids(list(ids), guild_id)
         return {p.discord_id: p.name for p in players if p}
 
+    async def _gather_player_context(
+        self, discord_id: int, guild_id: int
+    ) -> tuple[dict | None, int, dict | None, list[dict] | None, list[dict] | None, int, dict[int, str]]:
+        """Single fetch of all the per-player state the LLM narration paths
+        need (tunnel, balance, personality, social, recent actions, rank,
+        and resolved names). Shared across `enhance`, `_narrate_outcome`, and
+        `narrate_boss_fight` to avoid triplicating the gather.
+        """
+        tunnel, balance, personality, social_actions, recent_actions, rank = (
+            await asyncio.gather(
+                asyncio.to_thread(self.dig_repo.get_tunnel, discord_id, guild_id),
+                asyncio.to_thread(self.player_repo.get_balance, discord_id, guild_id),
+                asyncio.to_thread(self.dig_repo.get_personality, discord_id, guild_id),
+                asyncio.to_thread(
+                    self.dig_repo.get_recent_social_actions, discord_id, guild_id,
+                ),
+                asyncio.to_thread(
+                    self.dig_repo.get_recent_actions, discord_id, guild_id, 15,
+                ),
+                asyncio.to_thread(self.dig_repo.get_player_rank, discord_id, guild_id),
+            )
+        )
+        names = await asyncio.to_thread(
+            self._resolve_names, social_actions, tunnel, guild_id,
+        )
+        return tunnel, balance, personality, social_actions, recent_actions, rank, names
+
     async def enhance(
         self,
         result: dict,
@@ -288,27 +315,8 @@ class DigLLMService:
         On ANY exception the original result is returned unchanged.
         """
         try:
-            # Gather context from repos (synchronous, so use to_thread)
-            tunnel, balance, personality, social_actions, recent_actions, rank = (
-                await asyncio.gather(
-                    asyncio.to_thread(self.dig_repo.get_tunnel, discord_id, guild_id),
-                    asyncio.to_thread(self.player_repo.get_balance, discord_id, guild_id),
-                    asyncio.to_thread(self.dig_repo.get_personality, discord_id, guild_id),
-                    asyncio.to_thread(
-                        self.dig_repo.get_recent_social_actions,
-                        discord_id,
-                        guild_id,
-                    ),
-                    asyncio.to_thread(
-                        self.dig_repo.get_recent_actions, discord_id, guild_id, 15,
-                    ),
-                    asyncio.to_thread(self.dig_repo.get_player_rank, discord_id, guild_id),
-                )
-            )
-
-            # Resolve player names for social context
-            names = await asyncio.to_thread(
-                self._resolve_names, social_actions, tunnel, guild_id,
+            tunnel, balance, personality, social_actions, recent_actions, rank, names = (
+                await self._gather_player_context(discord_id, guild_id)
             )
 
             # Build prompt context
@@ -452,25 +460,8 @@ class DigLLMService:
         """Generate a narrative for a completed boss fight. Returns the
         narrative string, or None on failure."""
         try:
-            tunnel, balance, personality, social_actions, recent_actions, rank = (
-                await asyncio.gather(
-                    asyncio.to_thread(self.dig_repo.get_tunnel, discord_id, guild_id),
-                    asyncio.to_thread(self.player_repo.get_balance, discord_id, guild_id),
-                    asyncio.to_thread(self.dig_repo.get_personality, discord_id, guild_id),
-                    asyncio.to_thread(
-                        self.dig_repo.get_recent_social_actions, discord_id, guild_id,
-                    ),
-                    asyncio.to_thread(
-                        self.dig_repo.get_recent_actions, discord_id, guild_id, 15,
-                    ),
-                    asyncio.to_thread(
-                        self.dig_repo.get_player_rank, discord_id, guild_id,
-                    ),
-                )
-            )
-
-            names = await asyncio.to_thread(
-                self._resolve_names, social_actions, tunnel, guild_id,
+            tunnel, balance, personality, social_actions, recent_actions, rank, names = (
+                await self._gather_player_context(discord_id, guild_id)
             )
 
             player_state = build_player_state_context(tunnel or {}, balance)

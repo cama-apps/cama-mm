@@ -566,7 +566,10 @@ class BossWagerModal(discord.ui.Modal):
                     embed.add_field(name="\u200b", value=f"*{boss_narrative}*", inline=False)
             embed.add_field(
                 name="Details",
-                value=f"Risk: {tier.title()} | Win chance: {int(win_chance * 100)}%",
+                value=(
+                    f"Risk: {tier.title()} | Pre-fight win chance: "
+                    f"{int(win_chance * 100)}%"
+                ),
                 inline=False,
             )
 
@@ -709,6 +712,25 @@ def _build_boss_fight_result_embed(*, result, risk_tier: str, amount: int) -> di
             f"Defeat! **{boss_name}** overpowered you. "
             f"You lost **{loss}** {JOPACOIN_EMOTE} and were knocked back {knockback} blocks."
         )
+
+    # Surface the mid-fight option the player picked plus its rolled narrative.
+    # Without this, picking a button on the reactive prompt jumps straight to
+    # a generic "Defeat!" and the player has no idea what happened.
+    raw = result._d if hasattr(result, "_d") else (result if isinstance(result, dict) else {})
+    round_log = raw.get("round_log") or []
+    mechanic_entry = next(
+        (e for e in reversed(round_log) if isinstance(e, dict) and e.get("mechanic_id")),
+        None,
+    )
+    if mechanic_entry:
+        option_label = mechanic_entry.get("option_label") or "Your choice"
+        narrative = mechanic_entry.get("narrative") or ""
+        if narrative:
+            embed.add_field(
+                name=f"You chose: {option_label}",
+                value=narrative,
+                inline=False,
+            )
         extra_kb = getattr(result, "extra_knockback", 0)
         extra_cd = getattr(result, "extra_cooldown_s", 0)
         if extra_kb or extra_cd:
@@ -722,7 +744,10 @@ def _build_boss_fight_result_embed(*, result, risk_tier: str, amount: int) -> di
             )
     embed.add_field(
         name="Details",
-        value=f"Risk: {risk_tier.title()} | Win chance: {int(win_chance * 100)}%",
+        value=(
+            f"Risk: {risk_tier.title()} | Pre-fight win chance: "
+            f"{int(win_chance * 100)}%"
+        ),
         inline=False,
     )
     if getattr(result, "echo_applied", False):
