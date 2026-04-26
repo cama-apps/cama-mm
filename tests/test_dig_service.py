@@ -1576,10 +1576,10 @@ class TestStreaks:
         # On day 3, should get streak bonus
         tunnel = dig_repo.get_tunnel(10001, guild_id)
         assert tunnel["streak_days"] >= 3
-        # The 3-day streak bonus is 1 JC
-        if 3 in STREAKS:
-            # The result from the last dig should show streak_bonus
-            assert result.get("streak_bonus", 0) >= STREAKS[3]
+        # The 3-day milestone is part of the contract — assert it exists rather
+        # than letting the assertion silently disappear if STREAKS is rekeyed.
+        assert 3 in STREAKS, "STREAKS lost its 3-day threshold key"
+        assert result.get("streak_bonus", 0) >= STREAKS[3]
 
 
 # =============================================================================

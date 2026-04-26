@@ -376,9 +376,13 @@ class LobbyCommands(commands.Cog):
 
                     await safe_followup(interaction, content=response, ephemeral=True)
                     return
-                except Exception:
-                    # Fall through to create a new one
-                    pass
+                except Exception as e:
+                    # Log so a real failure (e.g. permissions, network) doesn't
+                    # silently produce a duplicate lobby with orphan channel
+                    # artifacts. We still fall through to create a new one.
+                    logger.warning(
+                        "Existing lobby refresh failed; creating a new lobby: %s", e
+                    )
 
             # Get target channel (dedicated or fallback to interaction channel)
             target_channel = await self._get_lobby_target_channel(interaction)

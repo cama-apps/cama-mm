@@ -2,15 +2,23 @@
 End-to-end workflow tests for complete user workflows.
 """
 
-import json
-
 import pytest
 
 from database import Database
 from rating_system import CamaRatingSystem
 from repositories.lobby_repository import LobbyRepository
+from repositories.player_repository import PlayerRepository
 from services.lobby_manager_service import LobbyManagerService as LobbyManager
 from shuffler import BalancedShuffler
+
+
+def _set_player_roles(test_db: Database, discord_id: int, roles: list[str]) -> None:
+    """Set ``preferred_roles`` via PlayerRepository so the test exercises the
+    real persistence path. Hand-rolled UPDATE SQL was silently writing the
+    wrong column name when schema changed; routing through the repo means
+    a column rename or JSON shape change actually breaks the test."""
+    repo = PlayerRepository(test_db.db_path)
+    repo.update_roles(discord_id, None, roles)
 
 
 class TestEndToEndWorkflow:
@@ -45,19 +53,8 @@ class TestEndToEndWorkflow:
         assert player is not None
         assert player.name == "TestPlayer1"
 
-        # Simulate setting roles
-        conn = test_db.get_connection()
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            UPDATE players
-            SET preferred_roles = ?, updated_at = CURRENT_TIMESTAMP
-            WHERE discord_id = ?
-        """,
-            (json.dumps(["1", "2"]), user_id),
-        )
-        conn.commit()
-        conn.close()
+        # Simulate setting roles via the real persistence path
+        _set_player_roles(test_db, user_id, ["1", "2"])
 
         # Verify roles set
         player = test_db.get_player(user_id)
@@ -86,21 +83,10 @@ class TestEndToEndWorkflow:
                 glicko_volatility=0.06,
             )
 
-        # Set roles for all players (distribute roles 1-5)
+        # Set roles for all players (distribute roles 1-5) via the real path
         role_distribution = ["1", "2", "3", "4", "5", "1", "2", "3", "4", "5"]
-        conn = test_db.get_connection()
-        cursor = conn.cursor()
         for pid, role in zip(player_ids, role_distribution):
-            cursor.execute(
-                """
-                UPDATE players
-                SET preferred_roles = ?, updated_at = CURRENT_TIMESTAMP
-                WHERE discord_id = ?
-            """,
-                (json.dumps([role]), pid),
-            )
-        conn.commit()
-        conn.close()
+            _set_player_roles(test_db, pid, [role])
 
         # Verify all players registered and have roles
         for pid in player_ids:
@@ -186,21 +172,10 @@ class TestEndToEndWorkflow:
                 glicko_volatility=0.06,
             )
 
-        # Set roles
+        # Set roles via the real path
         roles = ["1", "2", "3", "4", "5"] * 3  # 15 roles, but only 12 players
-        conn = test_db.get_connection()
-        cursor = conn.cursor()
         for pid, role in zip(player_ids, roles[:12]):
-            cursor.execute(
-                """
-                UPDATE players
-                SET preferred_roles = ?, updated_at = CURRENT_TIMESTAMP
-                WHERE discord_id = ?
-            """,
-                (json.dumps([role]), pid),
-            )
-        conn.commit()
-        conn.close()
+            _set_player_roles(test_db, pid, [role])
 
         # Join all to lobby
         lobby = mock_lobby_manager.get_or_create_lobby(creator_id=player_ids[0])
@@ -265,19 +240,8 @@ class TestEndToEndWorkflow:
 
         # Set roles
         role_distribution = ["1", "2", "3", "4", "5", "1", "2", "3", "4", "5"]
-        conn = test_db.get_connection()
-        cursor = conn.cursor()
         for pid, role in zip(player_ids, role_distribution):
-            cursor.execute(
-                """
-                UPDATE players
-                SET preferred_roles = ?, updated_at = CURRENT_TIMESTAMP
-                WHERE discord_id = ?
-            """,
-                (json.dumps([role]), pid),
-            )
-        conn.commit()
-        conn.close()
+            _set_player_roles(test_db, pid, [role])
 
         # Shuffle
         players = test_db.get_players_by_ids(player_ids)
@@ -309,20 +273,38 @@ class TestEndToEndWorkflow:
         for pid in team1_ids:
             rating, rd, vol = test_db.get_player_glicko_rating(pid)
             glicko_player = rating_system.create_player_from_rating(rating, rd, vol)
-            team1_players_glicko.append((pid, glicko_player))
+            team1_players_glicko.append((glicko_player, pid))
 
         for pid in team2_ids:
             rating, rd, vol = test_db.get_player_glicko_rating(pid)
             glicko_player = rating_system.create_player_from_rating(rating, rd, vol)
-            team2_players_glicko.append((pid, glicko_player))
+            team2_players_glicko.append((glicko_player, pid))
 
-        # Update ratings (simplified - in real code this would be more complex)
-        # For now, just verify that ratings exist and can be updated
-        for pid, glicko_player in team1_players_glicko:
-            # In a real match, we'd update based on opponents
-            # For this test, just verify the structure
-            assert glicko_player.rating > 0
-            assert glicko_player.rd > 0
+        # Apply the actual Glicko-2 update for team1 winning vs team2 and
+        # write the new ratings back. Then assert: winners' ratings strictly
+        # increased, losers' strictly decreased, RD strictly decreased for
+        # everyone (we just played a match), and the magnitude is non-trivial.
+        team1_updated, team2_updated = rating_system.update_ratings_after_match(
+            team1_players_glicko, team2_players_glicko, 1,
+        )
+        for new_rating, new_rd, new_vol, pid in team1_updated:
+            test_db.update_player_glicko_rating(pid, new_rating, new_rd, new_vol)
+        for new_rating, new_rd, new_vol, pid in team2_updated:
+            test_db.update_player_glicko_rating(pid, new_rating, new_rd, new_vol)
+
+        for pid in team1_ids:
+            new_rating, new_rd, _ = test_db.get_player_glicko_rating(pid)
+            assert new_rating > initial_team1_ratings[pid], (
+                f"Winner {pid} rating did not increase"
+            )
+            assert new_rd < 350.0, f"Winner {pid} RD did not shrink after a match"
+
+        for pid in team2_ids:
+            new_rating, new_rd, _ = test_db.get_player_glicko_rating(pid)
+            assert new_rating < initial_team2_ratings[pid], (
+                f"Loser {pid} rating did not decrease"
+            )
+            assert new_rd < 350.0, f"Loser {pid} RD did not shrink after a match"
 
     def test_workflow_player_leaves_and_rejoins(self, test_db, mock_lobby_manager):
         """Test workflow when a player leaves and rejoins."""
@@ -333,19 +315,8 @@ class TestEndToEndWorkflow:
 
         # Set roles
         role_distribution = ["1", "2", "3", "4", "5", "1", "2", "3", "4", "5"]
-        conn = test_db.get_connection()
-        cursor = conn.cursor()
         for pid, role in zip(player_ids, role_distribution):
-            cursor.execute(
-                """
-                UPDATE players
-                SET preferred_roles = ?, updated_at = CURRENT_TIMESTAMP
-                WHERE discord_id = ?
-            """,
-                (json.dumps([role]), pid),
-            )
-        conn.commit()
-        conn.close()
+            _set_player_roles(test_db, pid, [role])
 
         # Join all to lobby
         lobby = mock_lobby_manager.get_or_create_lobby(creator_id=player_ids[0])
@@ -380,21 +351,10 @@ class TestEndToEndWorkflow:
                 glicko_volatility=0.06,
             )
 
-        # Set roles
+        # Set roles via the real path
         role_distribution = ["1", "2", "3", "4", "5", "1", "2", "3", "4", "5"]
-        conn = test_db.get_connection()
-        cursor = conn.cursor()
         for pid, role in zip(player_ids, role_distribution):
-            cursor.execute(
-                """
-                UPDATE players
-                SET preferred_roles = ?, updated_at = CURRENT_TIMESTAMP
-                WHERE discord_id = ?
-            """,
-                (json.dumps([role]), pid),
-            )
-        conn.commit()
-        conn.close()
+            _set_player_roles(test_db, pid, [role])
 
         # Play 5 matches with same teams
         team1_ids = player_ids[:5]

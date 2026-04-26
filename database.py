@@ -128,6 +128,27 @@ class Database:
             if should_close:
                 conn.close()
 
+    @contextmanager
+    def atomic_transaction(self):
+        """
+        Context manager that opens a connection and acquires a write lock
+        via ``BEGIN IMMEDIATE``. Use for read-then-write sequences that must
+        not interleave with other writers (e.g. consume-pending-match).
+        """
+        conn = self.get_connection()
+        should_close = not self._is_memory
+        try:
+            cursor = conn.cursor()
+            cursor.execute("BEGIN IMMEDIATE")
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            if should_close:
+                conn.close()
+
     def init_database(self):
         """Initialize database schema via SchemaManager (idempotent)."""
         self.schema_manager.initialize()
@@ -143,32 +164,23 @@ class Database:
         glicko_rating: float | None = None,
         glicko_rd: float | None = None,
         glicko_volatility: float | None = None,
+        guild_id: int | None = None,
     ):
         """
         Add a new player to the database.
 
-        Raises ValueError if player already exists (prevents accidental overwrites).
+        Raises ValueError if player already exists in this guild.
         Use update_player_username() or other update methods to modify existing players.
-
-        Args:
-            discord_id: Discord user ID
-            discord_username: Discord username
-            dotabuff_url: Optional Dotabuff profile URL
-            initial_mmr: Initial MMR seed
-            preferred_roles: List of preferred roles
-            main_role: Primary role from Dotabuff
-            glicko_rating: Initial Glicko-2 rating (if None, will be seeded from MMR)
-            glicko_rd: Initial Glicko-2 rating deviation
-            glicko_volatility: Initial Glicko-2 volatility
-
-        Raises:
-            ValueError: If player with this discord_id already exists
         """
+        normalized_gid = self._normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
 
-            # Check if player already exists
-            cursor.execute("SELECT discord_id FROM players WHERE discord_id = ?", (discord_id,))
+            # Check if player already exists in this guild
+            cursor.execute(
+                "SELECT discord_id FROM players WHERE discord_id = ? AND guild_id = ?",
+                (discord_id, normalized_gid),
+            )
             if cursor.fetchone():
                 raise ValueError(
                     f"Player with Discord ID {discord_id} already exists. Cannot overwrite existing player data."
@@ -179,13 +191,14 @@ class Database:
             cursor.execute(
                 """
                 INSERT INTO players
-                (discord_id, discord_username, dotabuff_url, initial_mmr, current_mmr,
+                (discord_id, guild_id, discord_username, dotabuff_url, initial_mmr, current_mmr,
                  preferred_roles, main_role, glicko_rating, glicko_rd, glicko_volatility,
                  exclusion_count, jopacoin_balance, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 3, CURRENT_TIMESTAMP)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 3, CURRENT_TIMESTAMP)
             """,
                 (
                     discord_id,
+                    normalized_gid,
                     discord_username,
                     dotabuff_url,
                     initial_mmr,
@@ -200,17 +213,15 @@ class Database:
             )
 
     def update_player_glicko_rating(
-        self, discord_id: int, rating: float, rd: float, volatility: float
+        self,
+        discord_id: int,
+        rating: float,
+        rd: float,
+        volatility: float,
+        guild_id: int | None = None,
     ):
-        """
-        Update player's Glicko-2 rating after a match.
-
-        Args:
-            discord_id: Discord user ID
-            rating: New Glicko-2 rating
-            rd: New rating deviation
-            volatility: New volatility
-        """
+        """Update player's Glicko-2 rating in a guild after a match."""
+        normalized_gid = self._normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
 
@@ -218,21 +229,16 @@ class Database:
                 """
                 UPDATE players
                 SET glicko_rating = ?, glicko_rd = ?, glicko_volatility = ?, updated_at = CURRENT_TIMESTAMP
-                WHERE discord_id = ?
+                WHERE discord_id = ? AND guild_id = ?
             """,
-                (rating, rd, volatility, discord_id),
+                (rating, rd, volatility, discord_id, normalized_gid),
             )
 
-    def get_player_glicko_rating(self, discord_id: int) -> tuple[float, float, float] | None:
-        """
-        Get player's Glicko-2 rating data.
-
-        Args:
-            discord_id: Discord user ID
-
-        Returns:
-            Tuple of (rating, rd, volatility) or None if not found
-        """
+    def get_player_glicko_rating(
+        self, discord_id: int, guild_id: int | None = None
+    ) -> tuple[float, float, float] | None:
+        """Get player's Glicko-2 rating data in a guild."""
+        normalized_gid = self._normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
 
@@ -240,9 +246,9 @@ class Database:
                 """
                 SELECT glicko_rating, glicko_rd, glicko_volatility
                 FROM players
-                WHERE discord_id = ?
+                WHERE discord_id = ? AND guild_id = ?
             """,
-                (discord_id,),
+                (discord_id, normalized_gid),
             )
 
             row = cursor.fetchone()
@@ -251,20 +257,16 @@ class Database:
                 return (row[0], row[1], row[2])
             return None
 
-    def get_player(self, discord_id: int) -> "Player | None":
-        """
-        Get player data by Discord ID.
-
-        Args:
-            discord_id: Discord user ID
-
-        Returns:
-            Player object or None if not found
-        """
+    def get_player(self, discord_id: int, guild_id: int | None = None) -> "Player | None":
+        """Get player data by Discord ID, scoped to a guild."""
+        normalized_gid = self._normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
 
-            cursor.execute("SELECT * FROM players WHERE discord_id = ?", (discord_id,))
+            cursor.execute(
+                "SELECT * FROM players WHERE discord_id = ? AND guild_id = ?",
+                (discord_id, normalized_gid),
+            )
             row = cursor.fetchone()
 
             if not row:
@@ -272,49 +274,49 @@ class Database:
 
             return self._row_to_player(row)
 
-    def get_player_balance(self, discord_id: int) -> int:
-        """Return the current jopacoin balance for a player."""
+    def get_player_balance(self, discord_id: int, guild_id: int | None = None) -> int:
+        """Return the current jopacoin balance for a player in a guild."""
+        normalized_gid = self._normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT COALESCE(jopacoin_balance, 0) as balance FROM players WHERE discord_id = ?",
-                (discord_id,),
+                "SELECT COALESCE(jopacoin_balance, 0) as balance FROM players WHERE discord_id = ? AND guild_id = ?",
+                (discord_id, normalized_gid),
             )
             row = cursor.fetchone()
             return int(row["balance"]) if row else 0
 
-    def get_all_players(self) -> list["Player"]:
-        """Get all players from database."""
+    def get_all_players(self, guild_id: int | None = None) -> list["Player"]:
+        """Get all players in a guild."""
+        normalized_gid = self._normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
 
-            cursor.execute("SELECT * FROM players")
+            cursor.execute("SELECT * FROM players WHERE guild_id = ?", (normalized_gid,))
             rows = cursor.fetchall()
 
             return [self._row_to_player(row) for row in rows]
 
-    def get_players_by_ids(self, discord_ids: list[int]) -> list["Player"]:
+    def get_players_by_ids(
+        self, discord_ids: list[int], guild_id: int | None = None
+    ) -> list["Player"]:
         """
-        Get multiple players by their Discord IDs.
+        Get multiple players by their Discord IDs, scoped to a guild.
 
         IMPORTANT: Returns players in the SAME ORDER as the input discord_ids.
         This is critical for maintaining the mapping between Discord IDs and Player objects.
-
-        Args:
-            discord_ids: List of Discord user IDs
-
-        Returns:
-            List of Player objects in the same order as input discord_ids
         """
         if not discord_ids:
             return []
 
+        normalized_gid = self._normalize_guild_id(guild_id)
         with self.connection() as conn:
             cursor = conn.cursor()
 
             placeholders = ",".join("?" * len(discord_ids))
             cursor.execute(
-                f"SELECT * FROM players WHERE discord_id IN ({placeholders})", discord_ids
+                f"SELECT * FROM players WHERE guild_id = ? AND discord_id IN ({placeholders})",
+                (normalized_gid, *discord_ids),
             )
             rows = cursor.fetchall()
 
@@ -745,7 +747,9 @@ class Database:
         This ensures only one caller can successfully consume a given match.
         """
         normalized = self._normalize_guild_id(guild_id)
-        with self.connection() as conn:
+        # BEGIN IMMEDIATE: two concurrent confirmations would otherwise both see
+        # the row before either DELETE landed, and both proceed to record the match.
+        with self.atomic_transaction() as conn:
             cursor = conn.cursor()
             if pending_match_id is not None:
                 cursor.execute(

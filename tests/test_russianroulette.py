@@ -39,20 +39,11 @@ class TestRussianRouletteRegistration:
         """The whitelist must not include any admin-gated commands."""
         from commands.russianroulette import ROULETTE_ENTRIES
 
+        # All admin-only commands now live under /admin so the "admin " prefix
+        # catches them. Remaining entries are non-admin destructive/scoped
+        # commands that still exist as top-level slash commands.
         forbidden_prefixes = ("admin ", "enrich ")
         forbidden_exact = {
-            "recalibrate",
-            "resetuser",
-            "registeruser",
-            "resetloancooldown",
-            "resetbankruptcycooldown",
-            "extendbetting",
-            "correctmatch",
-            "adminaddsteamid",
-            "adminremovesteamid",
-            "adminsetprimarysteam",
-            "seedherogrid",
-            "filllobbytest",
             "ratinganalysis",
             "trivia-reset-cooldown",
             "predict cancel",

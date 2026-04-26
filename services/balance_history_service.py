@@ -258,9 +258,19 @@ class BalanceHistoryService:
             match_time = row.get("match_time")
             if match_time is None:
                 continue
-            participation = JOPACOIN_PER_GAME
-            win = JOPACOIN_WIN_REWARD if row["won"] else 0
-            delta = participation + win
+            persisted = row.get("bonus_jc")
+            if persisted is not None:
+                # Use the actual net JC credited at match time so the chart
+                # reflects garnishment / bankruptcy penalties accurately.
+                delta = int(persisted)
+                detail_components = {"persisted_net": delta}
+            else:
+                # Pre-migration rows fall back to current-config reconstruction
+                # (loser gets participation, winner gets win-bonus only).
+                participation = 0 if row["won"] else JOPACOIN_PER_GAME
+                win = JOPACOIN_WIN_REWARD if row["won"] else 0
+                delta = participation + win
+                detail_components = {"participation": participation, "win": win}
             if delta == 0:
                 continue
             out.append(
@@ -270,10 +280,7 @@ class BalanceHistoryService:
                     source=SOURCE_BONUS,
                     detail={
                         "match_id": row["match_id"],
-                        "components": {
-                            "participation": participation,
-                            "win": win,
-                        },
+                        "components": detail_components,
                         "won": row["won"],
                     },
                 )

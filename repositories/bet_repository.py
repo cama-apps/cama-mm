@@ -1250,6 +1250,32 @@ class BetRepository(BaseRepository, IBetRepository):
 
         return result
 
+    def get_bulk_unique_matches_bet_on(
+        self, guild_id: int | None, discord_ids: list[int]
+    ) -> dict[int, int]:
+        """Per-player count of distinct matches the player has settled bets on.
+
+        Used for the leaderboard's degen frequency calculation so it lines up
+        with the per-player /gamble stats view, which keys off unique matches
+        rather than raw bet count.
+        """
+        if not discord_ids:
+            return {}
+        normalized_guild = self.normalize_guild_id(guild_id)
+        placeholders = ",".join("?" * len(discord_ids))
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"""
+                SELECT discord_id, COUNT(DISTINCT match_id) as unique_matches
+                FROM bets
+                WHERE guild_id = ? AND match_id IS NOT NULL AND discord_id IN ({placeholders})
+                GROUP BY discord_id
+                """,
+                (normalized_guild, *discord_ids),
+            )
+            return {row["discord_id"]: row["unique_matches"] for row in cursor.fetchall()}
+
     def get_bulk_loss_chasing_data(
         self, guild_id: int | None, discord_ids: list[int]
     ) -> dict[int, dict]:

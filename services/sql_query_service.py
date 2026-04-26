@@ -429,15 +429,20 @@ class SQLQueryService:
         if len(statements) > 1:
             return False, "Multiple statements not allowed"
 
-        # 4. Extract and validate table names against blocklist
+        # 4. Reject SELECT * — wildcard bypasses the column blocklist and
+        # would expose PII columns like discord_id and steam_id.
+        # Matches `SELECT *` and `SELECT table.*` (including DISTINCT/ALL).
+        if re.search(r"\bSELECT\s+(?:DISTINCT\s+|ALL\s+)?(?:\w+\s*\.\s*)?\*", sql_upper):
+            return False, "SELECT * is not allowed; list explicit columns"
+
+        # 5. Extract and validate table names against blocklist
         tables = self._extract_tables(sql)
         blocked_tables_lower = {t.lower() for t in BLOCKED_TABLES}
         for table in tables:
             if table.lower() in blocked_tables_lower:
                 return False, f"Table not allowed: {table}"
 
-        # 5. Extract and check for blocked columns in SELECT
-        # This is a best-effort check - complex queries may bypass it
+        # 6. Extract and check for blocked columns in SELECT
         blocked = self._check_blocked_columns(sql)
         if blocked:
             return False, f"Blocked column(s): {', '.join(blocked)}"

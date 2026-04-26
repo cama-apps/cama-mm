@@ -802,6 +802,12 @@ class ShopCommands(commands.Cog):
             )
             return
 
+        # Defer before deduction so the 3s response window can't expire after we
+        # take the JC but before we confirm. Without this, a slow followup leaves
+        # the user charged with no feedback.
+        if not await safe_defer(interaction, ephemeral=False):
+            return
+
         # Deduct cost
         await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, -cost)
 
@@ -814,7 +820,7 @@ class ShopCommands(commands.Cog):
         embed.set_footer(text=f"Cost: {cost} jopacoin")
 
         # Send public announcement
-        await interaction.response.send_message(embed=embed)
+        await safe_followup(interaction, embed=embed)
 
     async def _handle_double_or_nothing(
         self,
@@ -1102,6 +1108,10 @@ class ShopCommands(commands.Cog):
             )
             return
 
+        # Defer before deduction so we can't lose the response window after charging.
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+
         # Deduct cost
         await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, -cost)
 
@@ -1131,7 +1141,7 @@ class ShopCommands(commands.Cog):
         embed.set_footer(text=f"Cost: {cost} jopacoin")
 
         # Ephemeral response (private)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await safe_followup(interaction, embed=embed, ephemeral=True)
 
         # Neon Degen Terminal hook (soft avoid purchase)
         try:
@@ -1228,6 +1238,9 @@ class ShopCommands(commands.Cog):
                     ephemeral=True,
                 )
                 return
+            # Defer before deduction so we can't lose the response window after charging.
+            if not await safe_defer(interaction, ephemeral=True):
+                return
             await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, -cost)
 
         # Create or extend deal
@@ -1263,8 +1276,13 @@ class ShopCommands(commands.Cog):
                 text=f"Base cost: {SHOP_PACKAGE_DEAL_BASE_COST} + Rating bonus: {cost - SHOP_PACKAGE_DEAL_BASE_COST}"
             )
 
-        # Ephemeral response (private - target not notified)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        # Ephemeral response (private - target not notified). For free deals we
+        # never deferred, so go straight through response.send_message; for paid
+        # deals the deferred path needs followup.
+        if cost > 0:
+            await safe_followup(interaction, embed=embed, ephemeral=True)
+        else:
+            await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="myavoids", description="View your active soft avoids")
     async def myavoids(self, interaction: discord.Interaction):
@@ -1451,16 +1469,16 @@ class ShopCommands(commands.Cog):
             import time as _time
 
             from services.mana_service import get_today_pst
-            # Shield persists until next reset (4 AM PST)
-            # For simplicity, store in mana_shop_items table
-            db = getattr(self.bot, "db", None)
-            if db:
+            mana_repo = getattr(self.bot, "mana_repo", None)
+            if mana_repo:
                 now_ts = int(_time.time())
                 await asyncio.to_thread(
-                    lambda: db.execute_write(
-                        "INSERT INTO mana_shop_items (discord_id, guild_id, item_type, purchased_at, data) VALUES (?, ?, ?, ?, ?)",
-                        (user_id, interaction.guild.id if interaction.guild else 0, "mana_shield", now_ts, get_today_pst()),
-                    )
+                    mana_repo.insert_shop_item,
+                    user_id,
+                    guild_id,
+                    "mana_shield",
+                    now_ts,
+                    get_today_pst(),
                 )
             new_balance = balance - cost
             await interaction.followup.send(
@@ -1471,17 +1489,13 @@ class ShopCommands(commands.Cog):
         elif item_key == "regrowth":
             # Recover 25% of JC lost today (capped at 400 JC)
             from services.mana_service import get_today_pst
-            db = getattr(self.bot, "db", None)
+            mana_repo = getattr(self.bot, "mana_repo", None)
             recovery = 0
-            if db:
+            if mana_repo:
                 today = get_today_pst()
-                row = await asyncio.to_thread(
-                    lambda: db.execute_read(
-                        "SELECT total_lost FROM mana_daily_losses WHERE discord_id=? AND guild_id=? AND loss_date=?",
-                        (user_id, interaction.guild.id if interaction.guild else 0, today),
-                    )
+                total_lost = await asyncio.to_thread(
+                    mana_repo.get_daily_loss_total, user_id, guild_id, today,
                 )
-                total_lost = row[0]["total_lost"] if row else 0
                 recovery = min(400, int(total_lost * 0.25))
             if recovery > 0:
                 await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, recovery)
@@ -1501,15 +1515,19 @@ class ShopCommands(commands.Cog):
                 )
                 return
             import time as _time
-            db = getattr(self.bot, "db", None)
-            if db:
+            mana_repo = getattr(self.bot, "mana_repo", None)
+            if mana_repo:
                 now_ts = int(_time.time())
                 expires = now_ts + 7 * 24 * 3600  # 7 days
                 await asyncio.to_thread(
-                    lambda: db.execute_write(
-                        "INSERT INTO mana_shop_items (discord_id, guild_id, item_type, target_id, purchased_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
-                        (user_id, interaction.guild.id if interaction.guild else 0, "guardian_angel", target.id, now_ts, expires),
-                    )
+                    mana_repo.insert_shop_item,
+                    user_id,
+                    guild_id,
+                    "guardian_angel",
+                    now_ts,
+                    None,
+                    target.id,
+                    expires,
                 )
             new_balance = balance - cost
             await interaction.followup.send(

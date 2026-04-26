@@ -232,16 +232,21 @@ class RebellionService:
                 "message": f"You need {REBELLION_DEFENDER_STAKE} JC to vote DEFEND (you have {balance}).",
             }
 
-        # Deduct stake
-        self.player_repo.add_balance(discord_id, guild_id, -REBELLION_DEFENDER_STAKE)
-
+        # Record the vote first; if it fails (war missing, duplicate detected
+        # under race) we never charge the stake. Only deduct after the vote
+        # actually lands as a non-duplicate.
         result = self.rebellion_repo.add_defend_vote(war_id, discord_id)
+        is_duplicate = result.get("duplicate", False)
+        stake_deducted = 0
+        if not is_duplicate:
+            self.player_repo.add_balance(discord_id, guild_id, -REBELLION_DEFENDER_STAKE)
+            stake_deducted = REBELLION_DEFENDER_STAKE
 
         return {
             "success": True,
-            "duplicate": result.get("duplicate", False),
+            "duplicate": is_duplicate,
             "effective_defend_count": result["effective_defend_count"],
-            "stake_deducted": REBELLION_DEFENDER_STAKE,
+            "stake_deducted": stake_deducted,
         }
 
     # ------------------------------------------------------------------

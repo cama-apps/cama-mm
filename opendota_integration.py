@@ -118,7 +118,7 @@ class OpenDotaAPI:
                 OpenDotaAPI._rate_limiter = RateLimiter(requests_per_minute=rate_limit)
                 logger.info(f"OpenDota rate limiter initialized: {rate_limit} requests/minute")
 
-    def _make_request(self, url: str, params: dict | None = None) -> requests.Response | None:
+    def make_request(self, url: str, params: dict | None = None) -> requests.Response | None:
         """
         Make a rate-limited request to the OpenDota API with retry on transient errors.
 
@@ -220,6 +220,11 @@ class OpenDotaAPI:
         # So Steam ID32 = Steam ID64 - 76561197960265728
         steam_id32 = dotabuff_id - 76561197960265728
 
+        # A short / mistyped URL would yield a negative Steam32 ID, which OpenDota
+        # rejects opaquely — return None so callers see a clean failure instead.
+        if steam_id32 <= 0:
+            return None
+
         return steam_id32
 
     @staticmethod
@@ -249,7 +254,7 @@ class OpenDotaAPI:
         """
         try:
             logger.debug(f"Fetching player data from OpenDota for Steam ID {steam_id}")
-            response = self._make_request(f"{self.BASE_URL}/players/{steam_id}")
+            response = self.make_request(f"{self.BASE_URL}/players/{steam_id}")
             if response is None:
                 logger.warning(f"Rate limit prevented fetching player data for Steam ID {steam_id}")
                 return None
@@ -361,7 +366,7 @@ class OpenDotaAPI:
             Dictionary with role statistics
         """
         try:
-            response = self._make_request(f"{self.BASE_URL}/players/{steam_id}/heroes")
+            response = self.make_request(f"{self.BASE_URL}/players/{steam_id}/heroes")
             if response is None:
                 logger.warning(f"Rate limit prevented fetching hero data for Steam ID {steam_id}")
                 return None
@@ -396,7 +401,7 @@ class OpenDotaAPI:
             List of match data
         """
         try:
-            response = self._make_request(
+            response = self.make_request(
                 f"{self.BASE_URL}/players/{steam_id}/matches", params={"limit": limit}
             )
             if response is None:
@@ -423,7 +428,7 @@ class OpenDotaAPI:
         """
         try:
             logger.info(f"Fetching match details from OpenDota for match_id={match_id}")
-            response = self._make_request(f"{self.BASE_URL}/matches/{match_id}")
+            response = self.make_request(f"{self.BASE_URL}/matches/{match_id}")
             if response is None:
                 logger.warning(f"Rate limit prevented fetching match {match_id}")
                 return None

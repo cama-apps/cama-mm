@@ -326,44 +326,21 @@ class LoanService(ILoanService):
             Result.ok(RepaymentResult) on success
             Result.fail(error_message, code) if no outstanding loan
         """
-        state = self.get_state(discord_id, guild_id)
-
-        if not state.has_outstanding_loan:
-            return Result.fail(
-                "No outstanding loan to repay.",
-                code=error_codes.NO_OUTSTANDING_LOAN,
-            )
-
-        principal = state.outstanding_principal
-        fee = state.outstanding_fee
-        total_owed = principal + fee
-
-        balance_before = self.player_repo.get_balance(discord_id, guild_id)
-
-        # Deduct the total owed from balance (can push into debt)
-        self.player_repo.add_balance(discord_id, guild_id, -total_owed)
-
-        # Add fee to nonprofit fund
-        nonprofit_total = self.loan_repo.add_to_nonprofit_fund(guild_id, fee)
-
-        # Update loan state: clear outstanding, add fee to total_fees_paid
-        self.loan_repo.upsert_state(
-            discord_id=discord_id,
-            guild_id=guild_id,
-            total_fees_paid=state.total_fees_paid + fee,
-            outstanding_principal=0,
-            outstanding_fee=0,
-        )
-
-        new_balance = self.player_repo.get_balance(discord_id, guild_id)
+        try:
+            settled = self.loan_repo.execute_repayment_atomic(discord_id, guild_id)
+        except ValueError as e:
+            msg = str(e)
+            if "No outstanding loan" in msg:
+                return Result.fail(msg, code=error_codes.NO_OUTSTANDING_LOAN)
+            return Result.fail(msg, code=error_codes.PLAYER_NOT_FOUND)
 
         return Result.ok(
             RepaymentResult(
-                principal=principal,
-                fee=fee,
-                total_repaid=total_owed,
-                balance_before=balance_before,
-                new_balance=new_balance,
-                nonprofit_total=nonprofit_total,
+                principal=settled["principal"],
+                fee=settled["fee"],
+                total_repaid=settled["total_owed"],
+                balance_before=settled["balance_before"],
+                new_balance=settled["new_balance"],
+                nonprofit_total=settled["nonprofit_total"],
             )
         )

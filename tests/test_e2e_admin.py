@@ -181,7 +181,7 @@ class TestAdminCommands:
         # At least some players should have updated ratings
         updated_ratings = 0
         for pid in player_ids:
-            rating_data = test_db.get_player_glicko_rating(pid)
+            rating_data = test_db.get_player_glicko_rating(pid, guild_id=TEST_GUILD_ID)
             if rating_data:
                 rating, rd, vol = rating_data
                 # Initial rating was 1500.0, after a match it should have changed

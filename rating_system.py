@@ -89,7 +89,11 @@ class CamaRatingSystem:
         if days_since_last_match < RD_DECAY_GRACE_PERIOD_WEEKS * 7:
             return rd
 
-        weeks = max(0, days_since_last_match // 7)
+        # Decay only over the weeks BEYOND the grace period. Otherwise crossing
+        # the grace boundary by a single day applies the full week count and
+        # punishes a player who returned right at the threshold.
+        decay_days = days_since_last_match - RD_DECAY_GRACE_PERIOD_WEEKS * 7
+        weeks = max(0, decay_days // 7)
         if weeks == 0:
             return rd
 

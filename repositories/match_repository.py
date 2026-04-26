@@ -33,6 +33,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
         notes: str | None = None,
         lobby_type: str = "shuffle",
         balancing_rating_system: str = "glicko",
+        betting_mode: str = "pool",
     ) -> int:
         """
         Record a match result.
@@ -62,8 +63,9 @@ class MatchRepository(BaseRepository, IMatchRepository):
             cursor.execute(
                 """
                 INSERT INTO matches (guild_id, team1_players, team2_players, winning_team,
-                                    dotabuff_match_id, notes, lobby_type, balancing_rating_system)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                                    dotabuff_match_id, notes, lobby_type, balancing_rating_system,
+                                    betting_mode)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
                 (
                     guild_id,
@@ -74,6 +76,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     notes,
                     lobby_type,
                     balancing_rating_system,
+                    betting_mode,
                 ),
             )
 
@@ -465,17 +468,36 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 return None
             return json.loads(row["enrichment_data"])
 
+    def update_participant_bonus_jc(
+        self, match_id: int, guild_id: int | None, bonus_by_player: dict[int, int]
+    ) -> None:
+        """Persist the actual JC awarded per participant for this match."""
+        if not bonus_by_player:
+            return
+        normalized_guild = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.executemany(
+                """
+                UPDATE match_participants
+                SET bonus_jc = ?
+                WHERE match_id = ? AND discord_id = ? AND guild_id = ?
+                """,
+                [
+                    (int(amount), match_id, discord_id, normalized_guild)
+                    for discord_id, amount in bonus_by_player.items()
+                ],
+            )
+
     def get_player_bonus_events(
         self, discord_id: int, guild_id: int | None = None
     ) -> list[dict]:
         """
-        Return every match the player participated in (with win flag and date),
-        used to reconstruct participation and win bonuses for the balance history
-        chart. Ordered by ``match_date`` ascending.
-
-        Only the persisted fields are included (``match_id, match_date, won``). Other
-        bonus types (streaming, first-game, exclusion, bomb-pot) are not reconstructable
-        from the current schema and are silently omitted by the caller.
+        Return every match the player participated in with the actual JC bonus
+        awarded (after garnishment / bankruptcy penalty), if persisted. Older
+        rows fall back to ``bonus_jc IS NULL``, which the caller treats as
+        "use legacy reconstruction" so historical charts still render.
+        Ordered by ``match_date`` ascending.
         """
         normalized_guild = self.normalize_guild_id(guild_id)
         with self.connection() as conn:
@@ -485,7 +507,8 @@ class MatchRepository(BaseRepository, IMatchRepository):
                 SELECT
                     m.match_id,
                     CAST(strftime('%s', m.match_date) AS INTEGER) AS match_time,
-                    mp.won
+                    mp.won,
+                    mp.bonus_jc
                 FROM match_participants mp
                 JOIN matches m ON mp.match_id = m.match_id
                 WHERE mp.discord_id = ? AND mp.guild_id = ?
@@ -498,6 +521,7 @@ class MatchRepository(BaseRepository, IMatchRepository):
                     "match_id": row["match_id"],
                     "match_time": row["match_time"],
                     "won": bool(row["won"]),
+                    "bonus_jc": row["bonus_jc"],
                 }
                 for row in cursor.fetchall()
             ]

@@ -51,8 +51,13 @@ def match_test_db(repo_db_path):
     return Database(repo_db_path)
 
 
-def create_test_players(db, start_id=60000, count=10):
-    """Helper function to create test players."""
+def create_test_players(db, start_id=60000, count=10, guild_id=None):
+    """Helper function to create test players. ``guild_id`` defaults to the
+    e2e ``TEST_GUILD_ID`` so the helper doesn't silently land everyone in
+    guild 0 and undermine guild-isolation coverage."""
+    from tests.conftest import TEST_GUILD_ID
+
+    target_guild = TEST_GUILD_ID if guild_id is None else guild_id
     player_ids = list(range(start_id, start_id + count))
     for idx, pid in enumerate(player_ids):
         db.add_player(
@@ -62,5 +67,6 @@ def create_test_players(db, start_id=60000, count=10):
             glicko_rating=1600.0 + idx * 2,
             glicko_rd=200.0,
             glicko_volatility=0.06,
+            guild_id=target_guild,
         )
     return player_ids

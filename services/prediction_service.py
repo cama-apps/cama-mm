@@ -426,8 +426,11 @@ class PredictionService:
         pred = self.prediction_repo.get_prediction(prediction_id)
         if not pred:
             raise ValueError("Prediction not found.")
-        if pred["status"] != "open":
-            raise ValueError(f"Can only cancel open predictions. This one is {pred['status']}.")
+        # Allow cancellation of both open and locked predictions; otherwise a
+        # locked-but-unresolvable prediction has no admin escape and bets stay
+        # stuck. Resolved/cancelled predictions still cannot be re-cancelled.
+        if pred["status"] not in ("open", "locked"):
+            raise ValueError(f"Can only cancel open or locked predictions. This one is {pred['status']}.")
 
         # Cancel prediction
         self.prediction_repo.cancel_prediction(prediction_id)

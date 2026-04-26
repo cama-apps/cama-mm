@@ -422,9 +422,18 @@ class DisburseService:
         }
 
     def _finalize_noop(self, guild_id: int | None, fund_amount: int) -> None:
-        """Return reserved fund to pool and mark proposal complete (empty distribution)."""
-        self.disburse_repo.complete_proposal(guild_id)
-        self.loan_repo.add_to_nonprofit_fund(guild_id, fund_amount)
+        """Return reserved fund to pool and mark proposal complete (empty distribution).
+
+        Routes through the same atomic path as the happy case so a crash
+        between completing the proposal and crediting the fund cannot leave
+        the reserve permanently stranded.
+        """
+        self.disburse_repo.complete_and_disburse_atomic(
+            guild_id=guild_id,
+            fund_amount_to_return=fund_amount,
+            distributions=[],
+            method="noop",
+        )
 
     def _empty_result(self, method: str, *, message: str) -> dict:
         return {

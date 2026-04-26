@@ -301,23 +301,35 @@ class TestPlayerRepository:
             guild_id=TEST_GUILD_ID,
         )
 
-        # Set balances: Thief=0, Victim=100
+        # Steal twice. The second steal pushes the victim to a new low; the
+        # tracker should record THAT low rather than the intermediate value.
         player_repository.update_balance(5001, TEST_GUILD_ID, 0)
         player_repository.update_balance(5002, TEST_GUILD_ID, 100)
 
-        # Steal 50 coins
         player_repository.steal_atomic(
             thief_discord_id=5001,
             victim_discord_id=5002,
             guild_id=TEST_GUILD_ID,
             amount=50,
         )
+        # After first steal, victim sits at 50 — that's also the new low.
+        assert player_repository.get_lowest_balance(5002, TEST_GUILD_ID) == 50
 
-        # Check lowest_balance_ever was updated
+        # Bump victim back up between steals; lowest should NOT change.
+        player_repository.update_balance(5002, TEST_GUILD_ID, 100)
+        assert player_repository.get_lowest_balance(5002, TEST_GUILD_ID) == 50
+
+        # Second steal pushes victim below the old low.
+        player_repository.steal_atomic(
+            thief_discord_id=5001,
+            victim_discord_id=5002,
+            guild_id=TEST_GUILD_ID,
+            amount=70,
+        )
         victim = player_repository.get_by_id(5002, TEST_GUILD_ID)
-        # Note: lowest_balance_ever tracks via _row_to_player if exposed,
-        # but we can verify via direct query
-        assert victim.jopacoin_balance == 50
+        assert victim.jopacoin_balance == 30
+        # Lowest should now reflect the deepest dip (30), not the prior 50.
+        assert player_repository.get_lowest_balance(5002, TEST_GUILD_ID) == 30
 
 
 class TestMatchRepository:

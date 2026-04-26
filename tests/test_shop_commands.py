@@ -147,7 +147,9 @@ async def test_handle_mystery_gift_insufficient_balance():
 
 @pytest.mark.asyncio
 async def test_handle_mystery_gift_success_deducts_balance():
-    """Test that mystery gift deducts 10k JC and sends announcement."""
+    """Test that mystery gift deducts 10k JC and announces via the deferred
+    followup. The handler now defers before deducting so the 3s response
+    window can't expire after we charge the player."""
     bot = MagicMock()
     player_service = MagicMock()
     player_service.get_player.return_value = object()
@@ -163,9 +165,10 @@ async def test_handle_mystery_gift_success_deducts_balance():
         interaction.user.id, None, -SHOP_MYSTERY_GIFT_COST
     )
 
-    # Verify public announcement was sent
-    interaction.response.send_message.assert_awaited_once()
-    kwargs = interaction.response.send_message.call_args.kwargs
+    # Defer landed and the announcement was sent via followup.
+    interaction.response.defer.assert_awaited()
+    interaction.followup.send.assert_awaited()
+    kwargs = interaction.followup.send.call_args.kwargs
     assert "embed" in kwargs
     embed = kwargs["embed"]
     assert "Mystery Gift" in embed.title

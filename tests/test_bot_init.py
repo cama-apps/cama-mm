@@ -50,7 +50,7 @@ def test_bot_commands_registered():
         "player",  # Group: /player register, /player roles, etc.
         "draft",  # Group: /draft start, /draft captain, etc.
         "predict",  # Group: /predict create, /predict list, etc.
-        "admin",  # Group: /admin addfake, /admin sync, etc.
+        "admin",  # Group: /admin addfake, /admin resetuser, etc.
         "enrich",  # Group: /enrich match, /enrich discover, etc.
         "dota",  # Group: /dota hero, /dota ability
         "lobby",
@@ -59,7 +59,6 @@ def test_bot_commands_registered():
         "profile",  # Replaces stats, gambastats, pairwise, dotastats, etc.
         "leaderboard",  # Now includes type parameter for balance/gambling/predictions
         "help",
-        "resetuser",  # Note: 'reset' was renamed to 'resetuser' (admin only)
     ]
 
     for cmd_name in expected_commands:

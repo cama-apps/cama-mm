@@ -63,6 +63,74 @@ class BankruptcyRepository(BaseRepository, IBankruptcyRepository):
             )
             return {row["discord_id"]: dict(row) for row in cursor.fetchall()}
 
+    def execute_bankruptcy_atomic(
+        self,
+        discord_id: int,
+        guild_id: int | None,
+        fresh_start_balance: int,
+        cooldown_seconds: int,
+        penalty_games: int,
+        now: int,
+    ) -> int:
+        """
+        Atomically declare bankruptcy: re-check the player is in debt, that the
+        cooldown has elapsed, then reset the balance and bump the state — all
+        inside one BEGIN IMMEDIATE so two concurrent /bankruptcy calls cannot
+        both pass validation.
+
+        Returns the absolute debt cleared.
+        Raises ValueError("not_in_debt") or ValueError("cooldown:<remaining_seconds>")
+        if validation fails inside the transaction.
+        Raises ValueError("not_found") if the player row is missing.
+        """
+        normalized_id = self.normalize_guild_id(guild_id)
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+
+            cursor.execute(
+                "SELECT COALESCE(jopacoin_balance, 0) as balance FROM players WHERE discord_id = ? AND guild_id = ?",
+                (discord_id, normalized_id),
+            )
+            balance_row = cursor.fetchone()
+            if not balance_row:
+                raise ValueError("not_found")
+            balance = balance_row["balance"]
+            if balance >= 0:
+                raise ValueError("not_in_debt")
+
+            cursor.execute(
+                "SELECT last_bankruptcy_at FROM bankruptcy_state WHERE discord_id = ? AND guild_id = ?",
+                (discord_id, normalized_id),
+            )
+            state_row = cursor.fetchone()
+            if state_row and state_row["last_bankruptcy_at"]:
+                elapsed = now - state_row["last_bankruptcy_at"]
+                if elapsed < cooldown_seconds:
+                    raise ValueError(f"cooldown:{cooldown_seconds - elapsed}")
+
+            cursor.execute(
+                """
+                UPDATE players
+                SET jopacoin_balance = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE discord_id = ? AND guild_id = ?
+                """,
+                (fresh_start_balance, discord_id, normalized_id),
+            )
+            cursor.execute(
+                """
+                INSERT INTO bankruptcy_state (discord_id, guild_id, last_bankruptcy_at, penalty_games_remaining, bankruptcy_count, updated_at)
+                VALUES (?, ?, ?, ?, 1, CURRENT_TIMESTAMP)
+                ON CONFLICT(discord_id, guild_id) DO UPDATE SET
+                    last_bankruptcy_at = excluded.last_bankruptcy_at,
+                    penalty_games_remaining = excluded.penalty_games_remaining,
+                    bankruptcy_count = COALESCE(bankruptcy_state.bankruptcy_count, 0) + 1,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (discord_id, normalized_id, now, penalty_games),
+            )
+
+            return abs(balance)
+
     def upsert_state(
         self, discord_id: int, guild_id: int | None, last_bankruptcy_at: int, penalty_games_remaining: int
     ) -> None:

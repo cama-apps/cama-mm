@@ -341,11 +341,13 @@ def _ensure_extensions_loaded_for_import():
         {},
     )
     # endregion agent log
+    # asyncio.get_event_loop() emits a DeprecationWarning in 3.10+ and raises
+    # RuntimeError in 3.12+ when there is no running loop. Use the modern
+    # path: get_running_loop() to detect "already inside an event loop", and
+    # asyncio.run() for the standalone case.
     try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            return
-        loop.run_until_complete(_load_extensions())
+        asyncio.get_running_loop()
+        return
     except RuntimeError:
         asyncio.run(_load_extensions())
 
@@ -560,12 +562,22 @@ async def on_ready():
     except Exception as exc:
         logger.error(f"Failed to sync commands: {exc}", exc_info=True)
 
-    # Warm trivia image cache in background
+    # Warm trivia image cache in background. Use bot.loop.create_task with a
+    # done-callback so a failure inside warm_cache surfaces in logs instead of
+    # being silently swallowed (consistent with the prediction tasks below).
     try:
         from services.trivia_image_cache import warm_cache
-        asyncio.ensure_future(asyncio.to_thread(warm_cache))
+
+        def _log_warm_cache_failure(t: asyncio.Task) -> None:
+            try:
+                t.result()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Trivia image cache warm failed: %s", exc, exc_info=True)
+
+        warm_task = bot.loop.create_task(asyncio.to_thread(warm_cache))
+        warm_task.add_done_callback(_log_warm_cache_failure)
     except Exception as exc:
-        logger.debug(f"Trivia image cache warm failed: {exc}")
+        logger.debug(f"Trivia image cache warm failed to schedule: {exc}")
 
     # Start prediction-market background tasks (refresh worker + daily digest).
     # Both are idempotent: started once, survive reconnects.

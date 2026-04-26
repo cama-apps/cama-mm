@@ -191,18 +191,37 @@ def test_disbursement_events_credit_recipient_amount():
 
 def test_match_bonuses_collapse_to_one_event_per_match():
     svc, repos = _build_service()
-    # Two matches: one win, one loss. JOPACOIN_PER_GAME=1, JOPACOIN_WIN_REWARD=2 (defaults).
+    # Pre-migration rows (bonus_jc IS NULL) fall back to current-config
+    # reconstruction. Reality: only LOSERS get participation; winners only get
+    # the win reward. With JOPACOIN_PER_GAME=1, JOPACOIN_WIN_REWARD=2 the
+    # winner row contributes 2 and the loser row contributes 1.
     repos["match_repo"].get_player_bonus_events.return_value = [
-        {"match_id": 1, "match_time": 1000, "won": True},   # 1 + 2 = 3
-        {"match_id": 2, "match_time": 2000, "won": False},  # 1 + 0 = 1
+        {"match_id": 1, "match_time": 1000, "won": True, "bonus_jc": None},
+        {"match_id": 2, "match_time": 2000, "won": False, "bonus_jc": None},
     ]
     series, totals = svc.get_balance_event_series(discord_id=1, guild_id=123)
     assert len(series) == 2
     deltas = [info["delta"] for _, _, info in series]
-    assert sum(deltas) == 4
-    assert totals.get(SOURCE_BONUS) == 4
-    # First event carries a detail breakdown with both components
-    assert series[0][2]["detail"]["components"] == {"participation": 1, "win": 2}
+    assert sum(deltas) == 3
+    assert totals.get(SOURCE_BONUS) == 3
+    # First event (winner) breaks down to win-only.
+    assert series[0][2]["detail"]["components"] == {"participation": 0, "win": 2}
+
+
+def test_match_bonuses_use_persisted_bonus_jc_when_present():
+    svc, repos = _build_service()
+    # Newer rows persist the actual JC awarded (after garnishment / penalty)
+    # so the chart reflects what really happened, not a stale reconstruction.
+    repos["match_repo"].get_player_bonus_events.return_value = [
+        {"match_id": 1, "match_time": 1000, "won": True, "bonus_jc": 1},   # penalized
+        {"match_id": 2, "match_time": 2000, "won": False, "bonus_jc": 0},  # nothing left
+    ]
+    series, totals = svc.get_balance_event_series(discord_id=1, guild_id=123)
+    # The 0-delta event is dropped.
+    assert len(series) == 1
+    assert series[0][1] == 1
+    assert totals.get(SOURCE_BONUS) == 1
+    assert series[0][2]["detail"]["components"] == {"persisted_net": 1}
 
 
 def test_dig_action_earnings_credit_actor():

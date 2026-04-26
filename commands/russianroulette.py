@@ -11,6 +11,7 @@ normally.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import random
 import time
@@ -185,17 +186,27 @@ class RussianRouletteCommands(commands.Cog):
             entry.display,
         )
 
-        if interaction.channel is not None:
+        # Run the public announcement concurrently with the delegated command
+        # so the announcement's latency cannot eat the 3s interaction-response
+        # window the delegate needs.
+        announce_text = (
+            f"🎰 **Russian Roulette** — {interaction.user.mention} pulls the trigger... "
+            f"the chamber clicks on `/{entry.display}`!"
+        )
+
+        async def _announce():
+            if interaction.channel is None:
+                return
             try:
-                await interaction.channel.send(
-                    f"🎰 **Russian Roulette** — {interaction.user.mention} pulls the trigger... "
-                    f"the chamber clicks on `/{entry.display}`!"
-                )
+                await interaction.channel.send(announce_text)
             except discord.HTTPException as exc:
                 logger.warning("Failed to announce russianroulette roll: %s", exc)
 
         try:
-            await _invoke_callback(chosen_cmd, interaction, **entry.kwargs)
+            await asyncio.gather(
+                _announce(),
+                _invoke_callback(chosen_cmd, interaction, **entry.kwargs),
+            )
         except Exception as exc:
             logger.error(
                 "russianroulette delegation to /%s failed: %s",

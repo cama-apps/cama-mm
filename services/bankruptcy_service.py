@@ -249,23 +249,38 @@ class BankruptcyService(IBankruptcyService):
             Result.ok(BankruptcyDeclaration) on success
             Result.fail(error_message, code) on failure
         """
+        # Pre-check is best-effort UX; the atomic call below re-validates inside
+        # a write lock so two concurrent /bankruptcy calls cannot both succeed.
         validation = self.validate_bankruptcy(discord_id, guild_id)
         if not validation.success:
             return Result.fail(validation.error, code=validation.error_code)
 
-        debt_cleared = validation.value
         now = int(time.time())
-
-        # Clear debt and give fresh start balance
-        self.player_repo.update_balance(discord_id, guild_id, BANKRUPTCY_FRESH_START_BALANCE)
-
-        # Record bankruptcy and set penalty
-        self.bankruptcy_repo.upsert_state(
-            discord_id=discord_id,
-            guild_id=guild_id,
-            last_bankruptcy_at=now,
-            penalty_games_remaining=self.penalty_games,
-        )
+        try:
+            debt_cleared = self.bankruptcy_repo.execute_bankruptcy_atomic(
+                discord_id=discord_id,
+                guild_id=guild_id,
+                fresh_start_balance=BANKRUPTCY_FRESH_START_BALANCE,
+                cooldown_seconds=self.cooldown_seconds,
+                penalty_games=self.penalty_games,
+                now=now,
+            )
+        except ValueError as e:
+            msg = str(e)
+            if msg == "not_in_debt":
+                return Result.fail(
+                    "You're not in debt anymore. Bankruptcy unavailable.",
+                    code=error_codes.NOT_IN_DEBT,
+                )
+            if msg.startswith("cooldown:"):
+                remaining = int(msg.split(":", 1)[1])
+                days = remaining // 86400
+                hours = (remaining % 86400) // 3600
+                return Result.fail(
+                    f"Bankruptcy cooldown active. Try again in {days}d {hours}h.",
+                    code=error_codes.BANKRUPTCY_COOLDOWN,
+                )
+            return Result.fail(msg, code=error_codes.PLAYER_NOT_FOUND)
 
         return Result.ok(
             BankruptcyDeclaration(
