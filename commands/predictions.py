@@ -46,13 +46,10 @@ MARKET_TITLE_RE = re.compile(rf"{re.escape(MARKET_TITLE_PREFIX)}(\d+)")
 def _build_ladder_fields(book: dict) -> list[tuple[str, str, bool]]:
     """Return one embed field with a depth-of-market style buy-only book.
 
-    Standard DOM convention adapted for our buy-only model:
-      - "Buy YES" section on top, cheapest first
-      - middle line showing implied probability (the "spread" label)
-      - "Buy NO" section on bottom, cheapest first
-    Each row shows price + a depth bar + the contract count, in a single
-    monospace code block. No "top of book" arrow — cheapest-first ordering
-    already makes the top obvious.
+    Color-coded with ANSI inside an ```ansi block: green for YES rows, red
+    for NO rows, neutral for the mid line. The 🟢/🔴 emoji prefixes on the
+    section headers are the cross-platform fallback (ANSI in Discord renders
+    cleanly on desktop and web but is inconsistent on iOS / Android).
     """
     asks = book.get("yes_asks", [])  # cheapest YES first
     bids = book.get("yes_bids", [])  # highest YES bid → cheapest NO first
@@ -60,14 +57,18 @@ def _build_ladder_fields(book: dict) -> list[tuple[str, str, bool]]:
 
     BAR_CAP = 10  # cap bar width so layered depth doesn't blow up the row
 
+    GREEN = "[0;32m"
+    RED = "[0;31m"
+    RESET = "[0;0m"
+
     def _row(price: int, size: int) -> str:
         bar = "█" * min(size, BAR_CAP)
         return f"  {price:>3}  {bar:<{BAR_CAP}}  {size}"
 
-    lines = ["Buy YES  (cheapest first)"]
+    lines = [f"{GREEN}🟢 Buy YES  (cheapest first){RESET}"]
     if asks:
         for p, s in asks:
-            lines.append(_row(p, s))
+            lines.append(f"{GREEN}{_row(p, s)}{RESET}")
     else:
         lines.append("  (none — refreshes daily)")
 
@@ -80,14 +81,14 @@ def _build_ladder_fields(book: dict) -> list[tuple[str, str, bool]]:
         lines.append("  ── price ? ──")
     lines.append("")
 
-    lines.append("Buy NO  (cheapest first)")
+    lines.append(f"{RED}🔴 Buy NO  (cheapest first){RESET}")
     if bids:
         for p, s in bids:
-            lines.append(_row(100 - p, s))
+            lines.append(f"{RED}{_row(100 - p, s)}{RESET}")
     else:
         lines.append("  (none — refreshes daily)")
 
-    body = "```\n" + "\n".join(lines) + "\n```"
+    body = "```ansi\n" + "\n".join(lines) + "\n```"
     return [("Order book", body, False)]
 
 

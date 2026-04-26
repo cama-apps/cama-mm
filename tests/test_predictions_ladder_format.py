@@ -37,6 +37,25 @@ def test_ladder_dom_style_buy_yes_above_buy_no():
     assert "ASK" not in value and "BID" not in value
 
 
+def test_ladder_color_codes_yes_green_no_red():
+    """Code block declares ansi syntax and rows carry green/red ANSI hooks."""
+    book = {
+        "current_price": 50,
+        "yes_asks": [(51, 5)],
+        "yes_bids": [(49, 5)],
+    }
+    value = _build_ladder_fields(book)[0][1]
+    # ANSI code block opens with `ansi` so Discord parses escapes.
+    assert value.startswith("```ansi\n")
+    # Mobile-safe emoji headers
+    assert "🟢 Buy YES" in value
+    assert "🔴 Buy NO" in value
+    # ANSI green and red color codes are embedded in the rendered body.
+    assert "[0;32m" in value
+    assert "[0;31m" in value
+    assert "[0;0m" in value
+
+
 def test_ladder_asymmetric_market_mirror_prices():
     book = {
         "current_price": 17,
