@@ -11,6 +11,7 @@ import logging
 import random
 import time
 
+from domain.models.dig_gear import GearLoadout, GearPiece, GearSlot
 from repositories.dig_repository import DigRepository
 from repositories.player_repository import PlayerRepository
 from services.dig_constants import (
@@ -37,6 +38,11 @@ from services.dig_constants import (
     EVENT_CHAIN_CHANCE,
     EVENT_POOL,
     FREE_DIG_COOLDOWN,
+    GEAR_BOSS_DROP_RATE,
+    GEAR_DROP_DEPTH_TIER_MAP,
+    GEAR_MAX_DURABILITY,
+    GEAR_REPAIR_COST_PCT,
+    GEAR_TIER_TABLES,
     INJURY_SLOW_COOLDOWN,
     ITEM_PRICES,
     LAYER_WEATHER_POOL,
@@ -69,6 +75,7 @@ from services.dig_constants import (
     PLAYER_HIT_PENALTY_PER_25_DEPTH,
     PLAYER_HIT_PENALTY_PER_PRESTIGE,
     PRESTIGE_PERKS,
+    RELIC_SLOTS_BASE,
     STREAKS,
     TUNNEL_NAME_ADJECTIVES,
     TUNNEL_NAME_NOUNS,
@@ -526,6 +533,273 @@ class DigService:
         """Check if a specific relic is equipped."""
         relics = self._get_equipped_relics_for_player(discord_id, guild_id)
         return any(r.get("artifact_id") == relic_id for r in relics)
+
+    # ── Boss-combat Gear ─────────────────────────────────────────────
+
+    def _hydrate_gear_piece(self, row: dict) -> GearPiece | None:
+        """Build a GearPiece (with its tier_def attached) from a dig_gear row."""
+        if row is None:
+            return None
+        try:
+            slot = GearSlot(row["slot"])
+        except ValueError:
+            return None
+        table = GEAR_TIER_TABLES.get(slot, [])
+        tier_idx = int(row["tier"])
+        if tier_idx < 0 or tier_idx >= len(table):
+            return None
+        return GearPiece(
+            id=int(row["id"]),
+            slot=slot,
+            tier=tier_idx,
+            durability=int(row["durability"]),
+            equipped=bool(row["equipped"]),
+            acquired_at=int(row["acquired_at"]),
+            source=str(row.get("source") or "shop"),
+            tier_def=table[tier_idx],
+        )
+
+    def _get_loadout(self, discord_id: int, guild_id) -> GearLoadout:
+        """Bundle a player's three equipped gear slots + their relics."""
+        equipped = self.dig_repo.get_equipped_gear(discord_id, guild_id)
+        return GearLoadout(
+            weapon=self._hydrate_gear_piece(equipped.get("weapon")),
+            armor=self._hydrate_gear_piece(equipped.get("armor")),
+            boots=self._hydrate_gear_piece(equipped.get("boots")),
+            relics=self._get_equipped_relics_for_player(discord_id, guild_id),
+        )
+
+    def _apply_gear_to_combat(self, base: dict, loadout: GearLoadout) -> dict:
+        """Fold a loadout's combat modifiers into the base BOSS_DUEL_STATS dict.
+
+        Returns a new dict with player_hp / player_hit / player_dmg / boss_hit
+        / boss_dmg adjusted. ``player_hit`` is clamped to the same floor and
+        ceiling that ``fight_boss`` already enforces; ``boss_hit`` is floored
+        at 0.05 to keep at least some danger.
+        """
+        mods = loadout.combat_modifiers()
+        player_hit = base["player_hit"] + mods["player_hit"]
+        player_hit = max(PLAYER_HIT_FLOOR, min(PLAYER_HIT_CEILING, player_hit))
+        boss_hit = max(0.05, base["boss_hit"] - mods["boss_hit_reduction"])
+        return {
+            "player_hp":  int(base["player_hp"]) + int(mods["player_hp_bonus"]),
+            "player_hit": player_hit,
+            "player_dmg": int(base["player_dmg"]) + int(mods["player_dmg"]),
+            "boss_hit":   boss_hit,
+            "boss_dmg":   int(base["boss_dmg"]),
+        }
+
+    def _get_active_pickaxe_tier(self, discord_id: int, guild_id, tunnel: dict) -> int:
+        """Tier index used by dig-flow code.
+
+        Reads the equipped Weapon row first; falls back to the legacy
+        ``tunnels.pickaxe_tier`` column when no weapon is equipped (covers
+        tests, brand-new tunnels, and the rare case of a player
+        unequipping their only pickaxe).
+        """
+        equipped = self.dig_repo.get_equipped_gear(discord_id, guild_id)
+        wpn = equipped.get("weapon")
+        if wpn is not None:
+            return int(wpn["tier"])
+        return int(tunnel.get("pickaxe_tier", 0) or 0)
+
+    def get_loadout(self, discord_id: int, guild_id) -> dict:
+        """Public serialization of the equipped loadout for the /dig gear panel."""
+        loadout = self._get_loadout(discord_id, guild_id)
+        def serialize(p: GearPiece | None) -> dict | None:
+            if p is None:
+                return None
+            return {
+                "id": p.id,
+                "slot": p.slot.value,
+                "tier": p.tier,
+                "name": p.tier_def.name,
+                "durability": p.durability,
+                "max_durability": GEAR_MAX_DURABILITY,
+                "equipped": p.equipped,
+            }
+        return {
+            "weapon": serialize(loadout.weapon),
+            "armor":  serialize(loadout.armor),
+            "boots":  serialize(loadout.boots),
+            "relics": list(loadout.relics),
+        }
+
+    def get_inventory_gear(self, discord_id: int, guild_id) -> list[dict]:
+        """All gear pieces a player owns (any slot, equipped or not)."""
+        rows = self.dig_repo.get_gear(discord_id, guild_id)
+        out = []
+        for row in rows:
+            piece = self._hydrate_gear_piece(row)
+            if piece is None:
+                continue
+            out.append({
+                "id": piece.id,
+                "slot": piece.slot.value,
+                "tier": piece.tier,
+                "name": piece.tier_def.name,
+                "durability": piece.durability,
+                "max_durability": GEAR_MAX_DURABILITY,
+                "equipped": piece.equipped,
+            })
+        return out
+
+    def equip_gear(self, discord_id: int, guild_id, gear_id: int) -> dict:
+        """Equip a gear piece. Refuses if broken or not owned by this player."""
+        row = self.dig_repo.get_gear_by_id(gear_id)
+        if row is None:
+            return self._error("That gear piece doesn't exist.")
+        gid = self.dig_repo.normalize_guild_id(guild_id)
+        if int(row["discord_id"]) != int(discord_id) or int(row["guild_id"]) != gid:
+            return self._error("That gear piece doesn't belong to you.")
+        if int(row["durability"]) <= 0:
+            return self._error("That piece is broken — repair it first.")
+        if int(row["equipped"]) == 1:
+            return self._error("That piece is already equipped.")
+        self.dig_repo.equip_gear(gear_id, discord_id, guild_id, row["slot"])
+        return self._ok(slot=row["slot"], gear_id=gear_id)
+
+    def unequip_gear(self, discord_id: int, guild_id, gear_id: int) -> dict:
+        """Unequip a gear piece by id (no-op if already unequipped)."""
+        row = self.dig_repo.get_gear_by_id(gear_id)
+        if row is None:
+            return self._error("That gear piece doesn't exist.")
+        gid = self.dig_repo.normalize_guild_id(guild_id)
+        if int(row["discord_id"]) != int(discord_id) or int(row["guild_id"]) != gid:
+            return self._error("That gear piece doesn't belong to you.")
+        self.dig_repo.unequip_gear(gear_id)
+        return self._ok(slot=row["slot"], gear_id=gear_id)
+
+    def _gear_repair_cost(self, slot: str, tier: int) -> int:
+        """Repair price = ``GEAR_REPAIR_COST_PCT`` of the tier's shop_price."""
+        try:
+            slot_enum = GearSlot(slot)
+        except ValueError:
+            return 0
+        table = GEAR_TIER_TABLES.get(slot_enum, [])
+        if tier < 0 or tier >= len(table):
+            return 0
+        return int(round(table[tier].shop_price * GEAR_REPAIR_COST_PCT))
+
+    def repair_gear(self, discord_id: int, guild_id, gear_id: int) -> dict:
+        """Restore one piece to full durability for a JC cost."""
+        row = self.dig_repo.get_gear_by_id(gear_id)
+        if row is None:
+            return self._error("That gear piece doesn't exist.")
+        gid = self.dig_repo.normalize_guild_id(guild_id)
+        if int(row["discord_id"]) != int(discord_id) or int(row["guild_id"]) != gid:
+            return self._error("That gear piece doesn't belong to you.")
+        if int(row["durability"]) >= GEAR_MAX_DURABILITY:
+            return self._error("That piece is already at full durability.")
+        cost = self._gear_repair_cost(row["slot"], int(row["tier"]))
+        if cost > 0:
+            balance = self.player_repo.get_balance(discord_id, guild_id)
+            if balance < cost:
+                return self._error(f"Repair costs {cost} JC; you only have {balance}.")
+            self.player_repo.add_balance(discord_id, guild_id, -cost)
+        self.dig_repo.repair_gear(gear_id, GEAR_MAX_DURABILITY)
+        return self._ok(gear_id=gear_id, cost=cost)
+
+    def repair_all_gear(self, discord_id: int, guild_id) -> dict:
+        """Repair every owned damaged piece in one billing transaction."""
+        rows = self.dig_repo.get_gear(discord_id, guild_id)
+        damaged = [r for r in rows if int(r["durability"]) < GEAR_MAX_DURABILITY]
+        if not damaged:
+            return self._error("Nothing to repair.")
+        total_cost = sum(self._gear_repair_cost(r["slot"], int(r["tier"])) for r in damaged)
+        if total_cost > 0:
+            balance = self.player_repo.get_balance(discord_id, guild_id)
+            if balance < total_cost:
+                return self._error(f"Total repair costs {total_cost} JC; you only have {balance}.")
+            self.player_repo.add_balance(discord_id, guild_id, -total_cost)
+        for r in damaged:
+            self.dig_repo.repair_gear(int(r["id"]), GEAR_MAX_DURABILITY)
+        return self._ok(repaired=len(damaged), cost=total_cost)
+
+    def buy_gear(self, discord_id: int, guild_id, slot: str, tier: int) -> dict:
+        """Buy a gear piece from the shop. Enforces depth/prestige/JC gates."""
+        try:
+            slot_enum = GearSlot(slot)
+        except ValueError:
+            return self._error("Invalid gear slot.")
+        table = GEAR_TIER_TABLES.get(slot_enum, [])
+        if tier < 0 or tier >= len(table):
+            return self._error("Invalid gear tier.")
+        td = table[tier]
+        # Top tiers (Obsidian+) are drop-only; shop carries Wooden..Diamond (0..3).
+        if tier > 3:
+            return self._error(f"{td.name} doesn't drop in the shop — it comes from boss kills.")
+        tunnel = self.dig_repo.get_tunnel(discord_id, guild_id)
+        if tunnel is None:
+            return self._error("You don't have a tunnel.")
+        depth = int(tunnel.get("depth", 0) or 0)
+        prestige = int(tunnel.get("prestige_level", 0) or 0)
+        if depth < td.depth_required:
+            return self._error(f"{td.name} requires depth {td.depth_required}.")
+        if prestige < td.prestige_required:
+            return self._error(f"{td.name} requires prestige {td.prestige_required}.")
+        if td.shop_price > 0:
+            balance = self.player_repo.get_balance(discord_id, guild_id)
+            if balance < td.shop_price:
+                return self._error(f"{td.name} costs {td.shop_price} JC; you have {balance}.")
+            self.player_repo.add_balance(discord_id, guild_id, -td.shop_price)
+        gear_id = self.dig_repo.add_gear(
+            discord_id, guild_id, slot_enum.value, tier, source="shop",
+        )
+        return self._ok(gear_id=gear_id, name=td.name, cost=td.shop_price)
+
+    def equip_relic_for_player(self, discord_id: int, guild_id, artifact_db_id: int) -> dict:
+        """Equip a relic, enforcing the prestige-scaled cap.
+
+        The cap is ``prestige_level + RELIC_SLOTS_BASE``. Equipping over the
+        cap is rejected — caller (the panel) is expected to ask the user to
+        unequip something first.
+        """
+        artifacts = self.dig_repo.get_artifacts(discord_id, guild_id)
+        target = next((a for a in artifacts if int(a["id"]) == int(artifact_db_id)), None)
+        if target is None:
+            return self._error("That relic isn't in your inventory.")
+        if int(target.get("is_relic", 0)) != 1:
+            return self._error("That artifact isn't a relic and can't be equipped.")
+        if int(target.get("equipped", 0)) == 1:
+            return self._error("That relic is already equipped.")
+        tunnel = self.dig_repo.get_tunnel(discord_id, guild_id)
+        prestige = int(tunnel.get("prestige_level", 0) or 0) if tunnel else 0
+        cap = prestige + RELIC_SLOTS_BASE
+        equipped_count = self.dig_repo.count_equipped_relics(discord_id, guild_id)
+        if equipped_count >= cap:
+            return self._error(
+                f"You've hit your relic cap ({cap}). Unequip one first.",
+            )
+        self.dig_repo.equip_relic(int(artifact_db_id), True)
+        return self._ok(artifact_id=target.get("artifact_id"), cap=cap)
+
+    def unequip_relic_for_player(self, discord_id: int, guild_id, artifact_db_id: int) -> dict:
+        """Unequip a relic owned by this player."""
+        artifacts = self.dig_repo.get_artifacts(discord_id, guild_id)
+        target = next((a for a in artifacts if int(a["id"]) == int(artifact_db_id)), None)
+        if target is None:
+            return self._error("That relic isn't in your inventory.")
+        self.dig_repo.unequip_relic(int(artifact_db_id))
+        return self._ok(artifact_id=target.get("artifact_id"))
+
+    def _maybe_drop_gear(self, discord_id: int, guild_id, at_boss: int) -> dict | None:
+        """Roll a single boss-drop after a kill. Returns the drop payload or None."""
+        if at_boss not in GEAR_DROP_DEPTH_TIER_MAP:
+            return None
+        if random.random() >= GEAR_BOSS_DROP_RATE:
+            return None
+        tier = GEAR_DROP_DEPTH_TIER_MAP[at_boss]
+        slot_choice = random.choice(["weapon", "armor", "boots"])
+        gear_id = self.dig_repo.add_gear(
+            discord_id, guild_id, slot_choice, tier, source="boss_drop",
+        )
+        try:
+            slot_enum = GearSlot(slot_choice)
+            name = GEAR_TIER_TABLES[slot_enum][tier].name
+        except (ValueError, KeyError, IndexError):
+            name = f"{slot_choice} (tier {tier})"
+        return {"gear_id": gear_id, "slot": slot_choice, "tier": tier, "name": name}
 
     def _get_queued_items_for_tunnel(self, discord_id: int, guild_id) -> list[dict]:
         """Get items queued for next dig from inventory table."""
