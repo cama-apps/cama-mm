@@ -3275,7 +3275,12 @@ class DigService:
         return self._ok(refund=refund, current_depth=depth)
 
     def get_owned_relics(self, discord_id: int, guild_id) -> list[dict]:
-        """Return list of relics owned by the player."""
+        """Return list of relics owned by the player.
+
+        ``id`` is the artifact_id string (used by /dig gift autocomplete);
+        ``db_id`` is the dig_artifacts.id row primary key (used by the
+        gear panel to call equip/unequip).
+        """
         artifacts = self.dig_repo.get_artifacts(discord_id, guild_id)
         relics = []
         for a in (artifacts or []):
@@ -3288,7 +3293,12 @@ class DigService:
                     if pool_item["id"] == artifact_id:
                         name = pool_item["name"]
                         break
-                relics.append({"id": artifact_id, "name": name, "equipped": a.get("equipped", 0)})
+                relics.append({
+                    "id": artifact_id,
+                    "db_id": a.get("id"),
+                    "name": name,
+                    "equipped": a.get("equipped", 0),
+                })
         return relics
 
     def upgrade_pickaxe(self, discord_id: int, guild_id) -> dict:

@@ -1486,6 +1486,282 @@ class MuseumView(discord.ui.View):
         await interaction.response.edit_message(embed=self.pages[self.current], view=self)
 
 
+def _build_gear_embed(loadout: dict, inventory: list[dict], damaged: list[dict]) -> discord.Embed:
+    """Build the /dig gear embed: equipped slots + summary footer."""
+    embed = discord.Embed(title="Your Loadout", color=0x8B4513)
+
+    def _slot_value(slot_name: str) -> str:
+        piece = loadout.get(slot_name)
+        if piece is None:
+            return "_— Empty —_"
+        return f"**{piece['name']}** ({piece['durability']}/{piece['max_durability']})"
+
+    embed.add_field(name="Weapon", value=_slot_value("weapon"), inline=False)
+    embed.add_field(name="Armor",  value=_slot_value("armor"),  inline=False)
+    embed.add_field(name="Boots",  value=_slot_value("boots"),  inline=False)
+
+    relics = loadout.get("relics") or []
+    if relics:
+        names = ", ".join(r.get("artifact_id", "?") for r in relics)
+        relic_value = f"**{len(relics)}** equipped: {names}"
+    else:
+        relic_value = "_None equipped_"
+    embed.add_field(name="Relics", value=relic_value, inline=False)
+
+    inv_count = len(inventory)
+    damaged_count = len(damaged)
+    footer_parts = [f"{inv_count} owned"]
+    if damaged_count:
+        footer_parts.append(f"{damaged_count} damaged")
+    footer_parts.append("Buy gear via /dig shop")
+    embed.set_footer(text=" • ".join(footer_parts))
+    return embed
+
+
+class GearPanelView(discord.ui.View):
+    """Top-level /dig gear panel: equip, unequip, repair via Selects."""
+
+    def __init__(
+        self,
+        dig_service: DigService,
+        user_id: int,
+        guild_id: int | None,
+    ):
+        super().__init__(timeout=180)
+        self.dig_service = dig_service
+        self.user_id = user_id
+        self.guild_id = guild_id
+
+    async def _refresh(self, interaction: discord.Interaction) -> None:
+        """Reload loadout + inventory and rebuild the panel embed in place."""
+        loadout = await asyncio.to_thread(
+            self.dig_service.get_loadout, self.user_id, self.guild_id
+        )
+        inventory = await asyncio.to_thread(
+            self.dig_service.get_inventory_gear, self.user_id, self.guild_id
+        )
+        damaged = [g for g in inventory if g["durability"] < g["max_durability"]]
+        embed = _build_gear_embed(loadout, inventory, damaged)
+        # Reset to the main panel buttons (in case we're being called from a sub-view).
+        view = GearPanelView(self.dig_service, self.user_id, self.guild_id)
+        await interaction.edit_original_response(embed=embed, view=view)
+
+    def _check_owner(self, interaction: discord.Interaction) -> bool:
+        return interaction.user.id == self.user_id
+
+    @discord.ui.button(label="Equip", style=discord.ButtonStyle.primary, row=0)
+    async def equip_btn(self, interaction: discord.Interaction, _btn: discord.ui.Button):
+        if not self._check_owner(interaction):
+            await interaction.response.send_message("This isn't your gear panel.", ephemeral=True)
+            return
+        await interaction.response.defer()
+        inventory = await asyncio.to_thread(
+            self.dig_service.get_inventory_gear, self.user_id, self.guild_id
+        )
+        relics = await asyncio.to_thread(
+            self.dig_service.get_owned_relics, self.user_id, self.guild_id
+        )
+        unequipped_gear = [
+            g for g in inventory
+            if not g["equipped"] and g["durability"] > 0
+        ]
+        unequipped_relics = [r for r in relics if not r.get("equipped")]
+        if not unequipped_gear and not unequipped_relics:
+            await interaction.followup.send("Nothing to equip.", ephemeral=True)
+            return
+        view = GearSelectView(
+            dig_service=self.dig_service,
+            user_id=self.user_id,
+            guild_id=self.guild_id,
+            mode="equip",
+            gear_items=unequipped_gear,
+            relics=unequipped_relics,
+            parent=self,
+        )
+        await interaction.edit_original_response(view=view)
+
+    @discord.ui.button(label="Unequip", style=discord.ButtonStyle.secondary, row=0)
+    async def unequip_btn(self, interaction: discord.Interaction, _btn: discord.ui.Button):
+        if not self._check_owner(interaction):
+            await interaction.response.send_message("This isn't your gear panel.", ephemeral=True)
+            return
+        await interaction.response.defer()
+        inventory = await asyncio.to_thread(
+            self.dig_service.get_inventory_gear, self.user_id, self.guild_id
+        )
+        relics = await asyncio.to_thread(
+            self.dig_service.get_owned_relics, self.user_id, self.guild_id
+        )
+        equipped_gear = [g for g in inventory if g["equipped"]]
+        equipped_relics = [r for r in relics if r.get("equipped")]
+        if not equipped_gear and not equipped_relics:
+            await interaction.followup.send("Nothing equipped to unequip.", ephemeral=True)
+            return
+        view = GearSelectView(
+            dig_service=self.dig_service,
+            user_id=self.user_id,
+            guild_id=self.guild_id,
+            mode="unequip",
+            gear_items=equipped_gear,
+            relics=equipped_relics,
+            parent=self,
+        )
+        await interaction.edit_original_response(view=view)
+
+    @discord.ui.button(label="Repair", style=discord.ButtonStyle.success, row=0)
+    async def repair_btn(self, interaction: discord.Interaction, _btn: discord.ui.Button):
+        if not self._check_owner(interaction):
+            await interaction.response.send_message("This isn't your gear panel.", ephemeral=True)
+            return
+        await interaction.response.defer()
+        inventory = await asyncio.to_thread(
+            self.dig_service.get_inventory_gear, self.user_id, self.guild_id
+        )
+        damaged = [g for g in inventory if g["durability"] < g["max_durability"]]
+        if not damaged:
+            await interaction.followup.send("Nothing damaged to repair.", ephemeral=True)
+            return
+        view = GearSelectView(
+            dig_service=self.dig_service,
+            user_id=self.user_id,
+            guild_id=self.guild_id,
+            mode="repair",
+            gear_items=damaged,
+            relics=[],
+            parent=self,
+        )
+        await interaction.edit_original_response(view=view)
+
+    @discord.ui.button(label="Repair All", style=discord.ButtonStyle.danger, row=0)
+    async def repair_all_btn(self, interaction: discord.Interaction, _btn: discord.ui.Button):
+        if not self._check_owner(interaction):
+            await interaction.response.send_message("This isn't your gear panel.", ephemeral=True)
+            return
+        await interaction.response.defer()
+        # Run repair_all directly — the cost is shown in the result.
+        result = _wrap(await asyncio.to_thread(
+            self.dig_service.repair_all_gear, self.user_id, self.guild_id
+        ))
+        if not getattr(result, "success", True):
+            await interaction.followup.send(
+                getattr(result, "error", "Repair failed."), ephemeral=True
+            )
+        else:
+            count = getattr(result, "repaired", 0)
+            cost = getattr(result, "cost", 0)
+            await interaction.followup.send(
+                f"Repaired **{count}** piece(s) for **{cost}** {JOPACOIN_EMOTE}.",
+                ephemeral=True,
+            )
+        await self._refresh(interaction)
+
+
+class GearSelectView(discord.ui.View):
+    """Sub-view: dropdown of gear / relic items + Back button."""
+
+    def __init__(
+        self,
+        *,
+        dig_service: DigService,
+        user_id: int,
+        guild_id: int | None,
+        mode: str,                 # "equip" | "unequip" | "repair"
+        gear_items: list[dict],
+        relics: list[dict],
+        parent: GearPanelView,
+    ):
+        super().__init__(timeout=180)
+        self.dig_service = dig_service
+        self.user_id = user_id
+        self.guild_id = guild_id
+        self.mode = mode
+        self.parent = parent
+
+        options: list[discord.SelectOption] = []
+        for g in gear_items[:20]:
+            slot_label = g["slot"].title()
+            label = f"[{slot_label}] {g['name']} ({g['durability']}/{g['max_durability']})"[:100]
+            options.append(discord.SelectOption(
+                label=label,
+                value=f"gear:{g['id']}",
+            ))
+        for r in relics[:25 - len(options)]:
+            options.append(discord.SelectOption(
+                label=f"[Relic] {r.get('name', r.get('artifact_id', '?'))}"[:100],
+                value=f"relic:{r['db_id']}" if "db_id" in r else f"relic_id:{r.get('artifact_id')}",
+            ))
+        if not options:
+            options = [discord.SelectOption(label="(nothing here)", value="noop")]
+
+        verb = {"equip": "Equip", "unequip": "Unequip", "repair": "Repair"}.get(mode, "Choose")
+        self.select = discord.ui.Select(
+            placeholder=f"{verb} which piece?",
+            options=options,
+            min_values=1,
+            max_values=1,
+        )
+        self.select.callback = self._on_select
+        self.add_item(self.select)
+
+    async def _on_select(self, interaction: discord.Interaction):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("Not your panel.", ephemeral=True)
+            return
+        await interaction.response.defer()
+        value = self.select.values[0]
+        if value == "noop":
+            await self.parent._refresh(interaction)
+            return
+        kind, _, raw = value.partition(":")
+        try:
+            target_id = int(raw)
+        except ValueError:
+            target_id = 0
+
+        if kind == "gear":
+            if self.mode == "equip":
+                fn = self.dig_service.equip_gear
+            elif self.mode == "unequip":
+                fn = self.dig_service.unequip_gear
+            elif self.mode == "repair":
+                fn = self.dig_service.repair_gear
+            else:
+                fn = None
+            result = _wrap(await asyncio.to_thread(fn, self.user_id, self.guild_id, target_id))
+        elif kind in ("relic", "relic_id"):
+            if self.mode == "equip":
+                fn = self.dig_service.equip_relic_for_player
+            elif self.mode == "unequip":
+                fn = self.dig_service.unequip_relic_for_player
+            else:
+                fn = None
+            if fn is None:
+                result = _wrap({"success": False, "error": "Relics can't be repaired."})
+            else:
+                result = _wrap(await asyncio.to_thread(fn, self.user_id, self.guild_id, target_id))
+        else:
+            result = _wrap({"success": False, "error": "Unknown selection."})
+
+        if not getattr(result, "success", True):
+            await interaction.followup.send(
+                getattr(result, "error", "Action failed."), ephemeral=True
+            )
+        else:
+            verb_past = {"equip": "Equipped", "unequip": "Unequipped", "repair": "Repaired"}.get(self.mode, "Done")
+            cost = getattr(result, "cost", 0)
+            cost_part = f" for {cost} {JOPACOIN_EMOTE}" if cost else ""
+            await interaction.followup.send(f"{verb_past}{cost_part}.", ephemeral=True)
+        await self.parent._refresh(interaction)
+
+    @discord.ui.button(label="Back", style=discord.ButtonStyle.secondary, row=1)
+    async def back_btn(self, interaction: discord.Interaction, _btn: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("Not your panel.", ephemeral=True)
+            return
+        await interaction.response.defer()
+        await self.parent._refresh(interaction)
+
+
 class ConfirmAbandonView(discord.ui.View):
     """Confirm tunnel abandonment with refund info."""
 
@@ -1512,54 +1788,6 @@ class ConfirmAbandonView(discord.ui.View):
         self.value = False
         self.stop()
         await interaction.response.defer()
-
-
-class UpgradeView(discord.ui.View):
-    """View for purchasing pickaxe upgrades."""
-
-    def __init__(self, dig_service: DigService, user_id: int, guild_id: int | None, upgrade_info: dict):
-        super().__init__(timeout=60)
-        self.dig_service = dig_service
-        self.user_id = user_id
-        self.guild_id = guild_id
-        self.upgrade_info = upgrade_info
-        if not upgrade_info.get("eligible", False):
-            self.buy_btn.disabled = True
-
-    @discord.ui.button(label="Buy Upgrade", style=discord.ButtonStyle.green, emoji="\u2b06\ufe0f")
-    async def buy_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message("This isn't your upgrade.", ephemeral=True)
-            return
-        await interaction.response.defer()
-        try:
-            result = _wrap(await asyncio.to_thread(
-                self.dig_service.upgrade_pickaxe, self.user_id, self.guild_id
-            ))
-            embed = discord.Embed(
-                title="Pickaxe Upgraded!",
-                description=getattr(result, "message", "Your pickaxe has been upgraded!"),
-                color=0x00FF00,
-            )
-            pickaxe_file = None
-            try:
-                from utils.dig_assets import get_pickaxe_art
-                new_tier = getattr(result, "tier", 0)
-                pickaxe_file = get_pickaxe_art(new_tier)
-                if pickaxe_file:
-                    embed.set_thumbnail(url=f"attachment://{pickaxe_file.filename}")
-            except Exception:
-                pass
-            if pickaxe_file:
-                await interaction.followup.send(embed=embed, file=pickaxe_file)
-            else:
-                await interaction.followup.send(embed=embed)
-        except ValueError as e:
-            await interaction.followup.send(str(e), ephemeral=True)
-        except Exception as e:
-            logger.error("Upgrade error: %s", e)
-            await interaction.followup.send("Upgrade failed.", ephemeral=True)
-        self.stop()
 
 
 # ---------------------------------------------------------------------------
@@ -3043,75 +3271,11 @@ class DigCommands(commands.Cog):
             )
 
     # ------------------------------------------------------------------
-    # 12. /dig upgrade — View/buy pickaxe upgrades
+    # 12. /dig upgrade — REMOVED. Pickaxes are now part of the boss-gear
+    # system; buy them via `/dig shop` (or, soon, the gear-buy UI) and
+    # view/equip them via `/dig gear`. The upgrade_pickaxe service is
+    # kept and used by upcoming shop integration.
     # ------------------------------------------------------------------
-
-    @dig.command(name="upgrade", description="View or buy pickaxe upgrades")
-    async def dig_upgrade(self, interaction: discord.Interaction):
-        if not await require_gamba_channel(interaction):
-            return
-
-        player = await _check_registered(interaction, self.bot)
-        if not player:
-            return
-
-        await safe_defer(interaction)
-
-        guild_id = interaction.guild.id if interaction.guild else None
-        try:
-            info = _wrap(await asyncio.to_thread(
-                self.dig_service.get_upgrade_info, interaction.user.id, guild_id
-            ))
-        except Exception as e:
-            logger.error("Upgrade info error: %s", e)
-            await safe_followup(interaction, content="Upgrade info unavailable.", ephemeral=True)
-            return
-
-        current = getattr(info, "current_tier", "Wooden")
-        next_tier = getattr(info, "next_tier", None)
-
-        embed = discord.Embed(title="Pickaxe Upgrades", color=0xB0BEC5)
-        embed.add_field(name="Current Pickaxe", value=current, inline=True)
-        pickaxe_file = None
-        try:
-            from utils.dig_assets import get_pickaxe_art
-            tier_idx = getattr(info, "current_tier_index", 0)
-            pickaxe_file = get_pickaxe_art(tier_idx)
-            if pickaxe_file:
-                embed.set_thumbnail(url=f"attachment://{pickaxe_file.filename}")
-        except Exception:
-            pass
-
-        if next_tier:
-            reqs = []
-            cost = getattr(info, "cost", 0)
-            depth_req = getattr(info, "depth_required", 0)
-            prestige_req = getattr(info, "prestige_required", 0)
-            reqs.append(f"Cost: {cost} {JOPACOIN_EMOTE}")
-            reqs.append(f"Depth: {depth_req}")
-            if prestige_req:
-                reqs.append(f"Prestige: {prestige_req}")
-            embed.add_field(
-                name=f"Next: {next_tier}",
-                value="\n".join(reqs),
-                inline=True,
-            )
-            eligible = getattr(info, "eligible", False)
-            if eligible:
-                embed.set_footer(text="You meet all requirements!")
-            else:
-                missing = getattr(info, "missing_requirements", [])
-                if missing:
-                    embed.set_footer(text=f"Missing: {', '.join(missing)}")
-        else:
-            embed.add_field(name="Next", value="Max tier reached!", inline=True)
-
-        upgrade_info_dict = {
-            "eligible": getattr(info, "eligible", False),
-            "next_tier": next_tier,
-        }
-        view = UpgradeView(self.dig_service, interaction.user.id, guild_id, upgrade_info_dict)
-        await safe_followup(interaction, embed=embed, view=view, file=pickaxe_file)
 
     # ------------------------------------------------------------------
     # 13. /dig_trap — Set a trap
@@ -3245,6 +3409,35 @@ class DigCommands(commands.Cog):
             embed.set_footer(text="0/{MAX_INVENTORY_SLOTS} slots used")
 
         await safe_followup(interaction, embed=embed, file=inv_pickaxe_file)
+
+    # ------------------------------------------------------------------
+    # 16a. /dig gear — Manage boss-combat gear loadout
+    # ------------------------------------------------------------------
+
+    @dig.command(name="gear", description="Manage your boss-combat gear")
+    async def dig_gear(self, interaction: discord.Interaction):
+        if not await require_gamba_channel(interaction):
+            return
+        player = await _check_registered(interaction, self.bot)
+        if not player:
+            return
+        await safe_defer(interaction)
+        guild_id = interaction.guild.id if interaction.guild else None
+        try:
+            loadout = await asyncio.to_thread(
+                self.dig_service.get_loadout, interaction.user.id, guild_id
+            )
+            inventory = await asyncio.to_thread(
+                self.dig_service.get_inventory_gear, interaction.user.id, guild_id
+            )
+        except Exception as e:
+            logger.error("Gear panel error: %s", e)
+            await safe_followup(interaction, content="Gear panel unavailable.", ephemeral=True)
+            return
+        damaged = [g for g in inventory if g["durability"] < g["max_durability"]]
+        embed = _build_gear_embed(loadout, inventory, damaged)
+        view = GearPanelView(self.dig_service, interaction.user.id, guild_id)
+        await safe_followup(interaction, embed=embed, view=view)
 
     # ------------------------------------------------------------------
     # 16b. /dig weather — View today's layer weather

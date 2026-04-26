@@ -101,7 +101,7 @@ ROULETTE_ENTRIES: list[RouletteEntry] = [
     RouletteEntry("dig go"),
     RouletteEntry("dig prestige"),
     RouletteEntry("dig abandon"),
-    RouletteEntry("dig upgrade"),
+    RouletteEntry("dig gear"),
     RouletteEntry("dig trap"),
     RouletteEntry("dig insure"),
     # --- shop actions with prefilled item (no target/hero needed) ---
