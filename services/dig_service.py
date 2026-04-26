@@ -573,7 +573,8 @@ class DigService:
         """Fold a loadout's combat modifiers into the base BOSS_DUEL_STATS dict.
 
         Returns a new dict with player_hp / player_hit / player_dmg / boss_hit
-        / boss_dmg adjusted. ``player_hit`` is clamped to the same floor and
+        / boss_dmg adjusted, and any other keys passed through unchanged
+        (e.g. ``boss_hp``). ``player_hit`` is clamped to the same floor and
         ceiling that ``fight_boss`` already enforces; ``boss_hit`` is floored
         at 0.05 to keep at least some danger.
         """
@@ -581,13 +582,13 @@ class DigService:
         player_hit = base["player_hit"] + mods["player_hit"]
         player_hit = max(PLAYER_HIT_FLOOR, min(PLAYER_HIT_CEILING, player_hit))
         boss_hit = max(0.05, base["boss_hit"] - mods["boss_hit_reduction"])
-        return {
-            "player_hp":  int(base["player_hp"]) + int(mods["player_hp_bonus"]),
-            "player_hit": player_hit,
-            "player_dmg": int(base["player_dmg"]) + int(mods["player_dmg"]),
-            "boss_hit":   boss_hit,
-            "boss_dmg":   int(base["boss_dmg"]),
-        }
+        out = dict(base)
+        out["player_hp"] = int(base["player_hp"]) + int(mods["player_hp_bonus"])
+        out["player_hit"] = player_hit
+        out["player_dmg"] = int(base["player_dmg"]) + int(mods["player_dmg"])
+        out["boss_hit"] = boss_hit
+        out["boss_dmg"] = int(base["boss_dmg"])
+        return out
 
     def _get_active_pickaxe_tier(self, discord_id: int, guild_id, tunnel: dict) -> int:
         """Tier index used by dig-flow code.
@@ -3765,7 +3766,13 @@ class DigService:
         # ---- Multi-round HP duel ---------------------------------------
         # Each round the player attacks first; if the boss survives, it
         # counterattacks. Whichever side reaches 0 HP first loses.
-        stats = BOSS_DUEL_STATS.get(risk_tier, BOSS_DUEL_STATS["bold"])
+        base_stats = BOSS_DUEL_STATS.get(risk_tier, BOSS_DUEL_STATS["bold"])
+        # Fold the player's equipped gear into the base risk-tier stats
+        # before any depth/prestige/cheer/wager modifiers are applied.
+        # ``_apply_gear_to_combat`` already clamps player_hit and floors
+        # boss_hit; the depth/prestige penalties below stack on top.
+        loadout = self._get_loadout(discord_id, guild_id)
+        stats = self._apply_gear_to_combat(base_stats, loadout)
         tier_index = {"cautious": 0, "bold": 1, "reckless": 2}.get(risk_tier, 1)
         payouts = BOSS_PAYOUTS.get(at_boss, (2.0, 3.0, 6.0))
         multiplier = payouts[tier_index] if tier_index < len(payouts) else 2.0
@@ -3858,6 +3865,18 @@ class DigService:
             # ``random.random`` to extreme values.
             won = False
 
+        # Wear-and-tear: every equipped gear piece loses 1 durability per
+        # fight (win or lose). Anything that just hit zero gets reported
+        # back so the embed can announce it.
+        broken_ids = self.dig_repo.tick_gear_durability(discord_id, guild_id)
+        gear_broken_names: list[str] = []
+        if broken_ids:
+            name_by_id: dict[int, str] = {}
+            for piece in (loadout.weapon, loadout.armor, loadout.boots):
+                if piece is not None:
+                    name_by_id[piece.id] = piece.tier_def.name
+            gear_broken_names = [name_by_id.get(i, "a piece of gear") for i in broken_ids]
+
         boss_name = BOSS_NAMES.get(at_boss, "Unknown Boss")
         attempts = (tunnel.get("boss_attempts", 0) or 0) + 1
 
@@ -3912,6 +3931,8 @@ class DigService:
                     round_log=round_log,
                     echo_applied=echo_applied,
                     echo_killer_id=active_echo.get("killer_discord_id") if echo_applied else None,
+                    gear_broken=gear_broken_names,
+                    gear_drop=None,
                 )
 
             # Full victory (or phase 2 already cleared)
@@ -3966,6 +3987,10 @@ class DigService:
             dialogue_list = BOSS_DIALOGUE.get(at_boss, ["..."])
             defeat_msg = dialogue_list[-1] if dialogue_list else "Defeated!"
 
+            # Roll a possible gear drop on the full kill. Phase-1 transitions
+            # do NOT roll — only completed kills.
+            gear_drop = self._maybe_drop_gear(discord_id, guild_id, at_boss)
+
             self.dig_repo.log_action(
                 discord_id=discord_id, guild_id=guild_id,
                 action_type="boss_fight",
@@ -3994,6 +4019,8 @@ class DigService:
                 round_log=round_log,
                 echo_applied=echo_applied,
                 echo_killer_id=active_echo.get("killer_discord_id") if echo_applied else None,
+                gear_broken=gear_broken_names,
+                gear_drop=gear_drop,
             )
         else:
             knockback = random.randint(8, 16)
@@ -4035,6 +4062,8 @@ class DigService:
                 round_log=round_log,
                 echo_applied=echo_applied,
                 echo_killer_id=active_echo.get("killer_discord_id") if echo_applied else None,
+                gear_broken=gear_broken_names,
+                gear_drop=None,
             )
 
     # =====================================================================
@@ -4095,8 +4124,10 @@ class DigService:
             mechanic_id = random.Random().choice(list(boss.mechanic_pool))
         mechanic = _get_mechanic(mechanic_id) if mechanic_id else None
 
-        # Stats build — mirrors fight_boss lines 3516-3572.
-        stats = BOSS_DUEL_STATS.get(risk_tier, BOSS_DUEL_STATS["bold"])
+        # Stats build — mirrors fight_boss flow with gear modifiers folded in.
+        base_stats = BOSS_DUEL_STATS.get(risk_tier, BOSS_DUEL_STATS["bold"])
+        loadout = self._get_loadout(discord_id, guild_id)
+        stats = self._apply_gear_to_combat(base_stats, loadout)
         tier_index = {"cautious": 0, "bold": 1, "reckless": 2}.get(risk_tier, 1)
         payouts = BOSS_PAYOUTS.get(at_boss, (2.0, 3.0, 6.0))
         multiplier = payouts[tier_index] if tier_index < len(payouts) else 2.0
@@ -4554,6 +4585,22 @@ class DigService:
         now = int(time.time())
         boss_name = boss.name if boss is not None else BOSS_NAMES.get(at_boss, "Unknown Boss")
 
+        # Wear-and-tear: re-fetch the current loadout (it could have changed
+        # between start_boss_duel and now if the player paused on a mechanic
+        # prompt and edited their gear before clicking through). Tick once
+        # for this fight regardless of which path arrived here.
+        pre_tick_loadout = self._get_loadout(discord_id, guild_id)
+        broken_ids = self.dig_repo.tick_gear_durability(discord_id, guild_id)
+        gear_broken_names: list[str] = []
+        if broken_ids:
+            name_by_id: dict[int, str] = {}
+            for piece in (pre_tick_loadout.weapon,
+                          pre_tick_loadout.armor,
+                          pre_tick_loadout.boots):
+                if piece is not None:
+                    name_by_id[piece.id] = piece.tier_def.name
+            gear_broken_names = [name_by_id.get(i, "a piece of gear") for i in broken_ids]
+
         ascension = self._get_ascension_effects(prestige_level)
         boss_payout_mult = 1.0 + ascension.get("boss_payout_multiplier", 0)
 
@@ -4612,6 +4659,8 @@ class DigService:
                         active_echo.get("killer_discord_id")
                         if echo_applied and active_echo else None
                     ),
+                    gear_broken=gear_broken_names,
+                    gear_drop=None,
                 )
 
             # Full victory
@@ -4685,6 +4734,9 @@ class DigService:
                 else BOSS_DIALOGUE.get(at_boss, ["..."])
             )
             defeat_msg = dialogue_list[-1] if dialogue_list else "Defeated!"
+            # Boss-drop roll happens once per full kill, NOT on phase-1 transitions.
+            gear_drop = self._maybe_drop_gear(discord_id, guild_id, at_boss)
+
             self.dig_repo.log_action(
                 discord_id=discord_id, guild_id=guild_id,
                 action_type="boss_fight",
@@ -4715,6 +4767,8 @@ class DigService:
                     active_echo.get("killer_discord_id")
                     if echo_applied and active_echo else None
                 ),
+                gear_broken=gear_broken_names,
+                gear_drop=gear_drop,
             )
 
         # Loss branch
@@ -4766,6 +4820,8 @@ class DigService:
                 active_echo.get("killer_discord_id")
                 if echo_applied and active_echo else None
             ),
+            gear_broken=gear_broken_names,
+            gear_drop=None,
         )
 
     def retreat_boss(self, discord_id: int, guild_id) -> dict:
@@ -4852,9 +4908,14 @@ class DigService:
         hp_mult = 0.75 if echo_applied else 1.0
         payout_mult = 0.7 if echo_applied else 1.0
 
+        # Apply the player's current gear loadout so previewed odds reflect
+        # what they'd actually fight with.
+        scout_loadout = self._get_loadout(discord_id, guild_id)
+
         odds = {}
         for i, tier in enumerate(("cautious", "bold", "reckless")):
-            stats = BOSS_DUEL_STATS[tier]
+            base = BOSS_DUEL_STATS[tier]
+            stats = self._apply_gear_to_combat(base, scout_loadout)
             player_hit = stats["player_hit"] - depth_hit_penalty - prestige_hit_penalty + cheer_bonus
             player_hit = max(PLAYER_HIT_FLOOR, min(PLAYER_HIT_CEILING, player_hit))
             free_hit = max(
