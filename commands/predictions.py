@@ -67,11 +67,8 @@ def _format_ladder(book: dict) -> str:
     lines = ["```"]
     lines.append(f"  price: {current if current is not None else '?'}")
     lines.append("")
-    lines.append("  --- Open positions ---")
     lines.append(_fmt_row("Buy YES:", buy_yes))
     lines.append(_fmt_row("Buy NO:", buy_no))
-    lines.append("")
-    lines.append("  --- Close positions ---")
     lines.append(_fmt_row("Sell YES:", sell_yes))
     lines.append(_fmt_row("Sell NO:", sell_no))
     lines.append("```")
@@ -977,9 +974,11 @@ class PredictionCommands(commands.Cog):
         name="help",
         description="Explainer: how prediction markets work in this bot",
     )
+    @app_commands.checks.cooldown(1, 10)
     async def help_cmd(self, interaction: discord.Interaction):
-        if not await require_gamba_channel(interaction):
-            return
+        # Intentionally NOT gamba-channel gated: a help command should work
+        # anywhere a user can type a slash command. Charging someone a JC for
+        # asking how to play would be a hostile UX.
         if not await safe_defer(interaction, ephemeral=True):
             return
 
