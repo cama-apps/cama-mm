@@ -91,6 +91,48 @@ _prediction_refresh_task: asyncio.Task | None = None
 _prediction_digest_task: asyncio.Task | None = None
 
 
+def _log_task_exit(name: str):
+    """Done-callback factory: surface any unexpected task exit to the log.
+
+    A graceful shutdown raises ``CancelledError`` and is silent. Anything
+    else gets a traceback so we can never lose a task to silent failure.
+    """
+
+    def _cb(task: asyncio.Task) -> None:
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            return
+        except Exception:  # noqa: BLE001
+            logger.exception("background task %s exited unexpectedly", name)
+
+    return _cb
+
+
+async def _supervised_loop(name: str, body) -> None:
+    """Run a long-lived background coroutine; restart it with backoff on crash.
+
+    ``body`` is a no-arg coroutine function. Each call should be the loop
+    itself (so a single ``await body()`` lasts for the lifetime of the bot).
+    A clean return ends the supervisor; an exception is logged and ``body``
+    is invoked again after a backoff (5s, doubling, capped at 300s).
+    Cancellation propagates so shutdown is clean.
+    """
+    backoff = 5
+    while not bot.is_closed():
+        try:
+            await body()
+            return
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "background task %s crashed; restarting in %ds", name, backoff
+            )
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 300)
+
+
 async def _prediction_refresh_loop() -> None:
     """Per-market refresh worker.
 
@@ -109,6 +151,7 @@ async def _prediction_refresh_loop() -> None:
             due = await asyncio.to_thread(
                 bot.prediction_service.get_markets_due_for_refresh, now_ts
             )
+            logger.info("refresh wake: %d markets due", len(due))
             for market in due:
                 try:
                     await _process_one_refresh(market)
@@ -123,14 +166,24 @@ async def _process_one_refresh(market: dict) -> None:
     pid = market["prediction_id"]
     summary = await asyncio.to_thread(bot.prediction_service.refresh_market, pid)
     if summary.get("skipped"):
+        logger.info("refresh skipped pid=%s reason=%s", pid, summary.get("reason"))
         return
+
+    trade_summary = summary.get("trade_summary") or {}
+    trade_count = int(trade_summary.get("trade_count") or 0)
+    logger.info(
+        "refresh done pid=%s %s->%s trades=%d",
+        pid,
+        summary.get("old_price"),
+        summary.get("new_price"),
+        trade_count,
+    )
 
     cog = bot.get_cog("PredictionCommands")
     if cog is not None:
         await cog.refresh_market_embed(pid)
 
-    trade_summary = summary.get("trade_summary") or {}
-    if (trade_summary.get("trade_count") or 0) <= 0:
+    if trade_count <= 0:
         return  # quiet day; no thread spam
 
     thread_id = market.get("thread_id")
@@ -175,6 +228,7 @@ async def _prediction_digest_loop() -> None:
                 target = target + _dt.timedelta(days=1)
             wait_s = max(60.0, (target - now).total_seconds())
             await asyncio.sleep(wait_s)
+            logger.info("digest firing for %d guilds", len(bot.guilds))
             await _post_daily_digest_all_guilds()
         except Exception as ex:
             logger.exception("digest outer loop error: %s", ex)
@@ -186,6 +240,7 @@ async def _post_daily_digest_all_guilds() -> None:
 
     cog = bot.get_cog("PredictionCommands")
     if cog is None:
+        logger.warning("digest skipped: PredictionCommands cog not loaded")
         return
     for guild in bot.guilds:
         try:
@@ -193,6 +248,7 @@ async def _post_daily_digest_all_guilds() -> None:
                 bot.prediction_service.list_open_orderbook_markets, guild.id
             )
             if not opens:
+                logger.info("digest guild=%s skipped: no open markets", guild.id)
                 continue
             opens.sort(key=lambda p: p.get("volume_recent", 0) or 0, reverse=True)
 
@@ -210,6 +266,7 @@ async def _post_daily_digest_all_guilds() -> None:
                 name, value = _format_market_field(p, with_delta=True)
                 embed.add_field(name=name, value=value, inline=False)
             await cog.announce_to_gamba(guild, embed=embed)
+            logger.info("digest guild=%s posted %d markets", guild.id, min(len(opens), FIELD_CAP))
         except Exception as ex:
             logger.warning("digest failed for guild %s: %s", guild.id, ex)
 
@@ -580,12 +637,20 @@ async def on_ready():
         logger.debug(f"Trivia image cache warm failed to schedule: {exc}")
 
     # Start prediction-market background tasks (refresh worker + daily digest).
-    # Both are idempotent: started once, survive reconnects.
+    # Both are wrapped in a supervisor that auto-restarts the body on a
+    # crash, and a done-callback that surfaces an unexpected exit to the log
+    # so we can never lose a feature to silent failure.
     global _prediction_refresh_task, _prediction_digest_task
     if _prediction_refresh_task is None or _prediction_refresh_task.done():
-        _prediction_refresh_task = bot.loop.create_task(_prediction_refresh_loop())
+        _prediction_refresh_task = bot.loop.create_task(
+            _supervised_loop("prediction_refresh", _prediction_refresh_loop)
+        )
+        _prediction_refresh_task.add_done_callback(_log_task_exit("prediction_refresh"))
     if _prediction_digest_task is None or _prediction_digest_task.done():
-        _prediction_digest_task = bot.loop.create_task(_prediction_digest_loop())
+        _prediction_digest_task = bot.loop.create_task(
+            _supervised_loop("prediction_digest", _prediction_digest_loop)
+        )
+        _prediction_digest_task.add_done_callback(_log_task_exit("prediction_digest"))
 
 
 @bot.tree.error

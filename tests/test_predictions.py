@@ -788,3 +788,203 @@ def test_position_mark_helper():
 def test_position_mark_falls_back_when_side_empty():
     book = {"yes_asks": [], "yes_bids": [(45, 5)]}
     assert PredictionService.position_mark(book, "no") is None
+
+
+# --------------------------------------------------------------------------- #
+# Cog: /predict force_refresh and /predict refresh_status admin commands
+# --------------------------------------------------------------------------- #
+
+
+from types import SimpleNamespace  # noqa: E402
+from unittest.mock import AsyncMock  # noqa: E402
+
+from commands.predictions import PredictionCommands  # noqa: E402
+
+
+class _FakeFollowup:
+    def __init__(self):
+        self.messages: list[dict] = []
+
+    async def send(self, content=None, embed=None, ephemeral=None, allowed_mentions=None, view=None):
+        self.messages.append({"content": content, "embed": embed, "ephemeral": ephemeral})
+
+
+class _FakeResponse:
+    def __init__(self):
+        self.messages: list[dict] = []
+        self._done = False
+
+    def is_done(self):
+        return self._done
+
+    async def send_message(self, content=None, embed=None, ephemeral=None):
+        self._done = True
+        self.messages.append({"content": content, "embed": embed, "ephemeral": ephemeral})
+
+    async def defer(self, ephemeral=False, thinking=False):
+        self._done = True
+
+
+class _FakeThread:
+    def __init__(self):
+        self.sent: list[str] = []
+
+    async def send(self, content=None, embed=None):
+        self.sent.append(content if content is not None else "<embed>")
+
+
+class _FakeInteraction:
+    def __init__(self, user_id: int = 1, guild_id: int = TEST_GUILD_ID):
+        self.user = SimpleNamespace(id=user_id)
+        self.guild = SimpleNamespace(id=guild_id)
+        self.channel = SimpleNamespace(id=11)
+        self.response = _FakeResponse()
+        self.followup = _FakeFollowup()
+
+
+def _make_cog(prediction_service, thread: _FakeThread | None = None) -> PredictionCommands:
+    bot = SimpleNamespace()
+    bot.prediction_service = prediction_service
+    bot.player_service = SimpleNamespace()
+    bot.get_channel = lambda cid: thread
+
+    async def _fetch(cid):
+        return thread
+
+    bot.fetch_channel = _fetch
+    return PredictionCommands(bot, prediction_service, bot.player_service)
+
+
+@pytest.fixture
+def patched_cog_helpers(monkeypatch):
+    """Bypass require_gamba_channel/safe_defer/safe_followup so the cog body runs."""
+    from commands import predictions as pmod
+
+    async def _ok(_):
+        return True
+
+    monkeypatch.setattr(pmod, "require_gamba_channel", _ok)
+    monkeypatch.setattr(pmod, "safe_defer", AsyncMock(return_value=True))
+
+    async def _fwup(interaction, content=None, embed=None, ephemeral=None):
+        await interaction.followup.send(content=content, embed=embed, ephemeral=ephemeral)
+
+    monkeypatch.setattr(pmod, "safe_followup", _fwup)
+    return monkeypatch
+
+
+async def test_force_refresh_admin_only(prediction_service, player_repository, patched_cog_helpers):
+    """Non-admin gets a refusal reply; market is not refreshed."""
+    from commands import predictions as pmod
+
+    patched_cog_helpers.setattr(pmod, "has_admin_permission", lambda _: False)
+
+    pid = prediction_service.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID, creator_id=999, question="Will it work?", initial_fair=50,
+    )["prediction_id"]
+    before = prediction_service.prediction_repo.get_prediction(pid)
+
+    cog = _make_cog(prediction_service)
+    interaction = _FakeInteraction(user_id=1, guild_id=TEST_GUILD_ID)
+    await cog.force_refresh.callback(cog, interaction, pid)
+
+    after = prediction_service.prediction_repo.get_prediction(pid)
+    assert before["last_refresh_at"] == after["last_refresh_at"]
+    assert any("admin" in (m.get("content") or "").lower() for m in interaction.response.messages)
+    assert interaction.followup.messages == []
+
+
+async def test_force_refresh_announces_and_posts_to_thread(
+    prediction_service, player_repository, patched_cog_helpers
+):
+    """Admin call announces the new price in the followup AND in the market thread."""
+    from commands import predictions as pmod
+
+    patched_cog_helpers.setattr(pmod, "has_admin_permission", lambda _: True)
+
+    pid = prediction_service.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID, creator_id=999, question="Will it work?", initial_fair=50,
+    )["prediction_id"]
+    with prediction_service.prediction_repo.connection() as conn:
+        conn.execute(
+            "UPDATE predictions SET thread_id = ? WHERE prediction_id = ?", (12345, pid)
+        )
+
+    thread = _FakeThread()
+    cog = _make_cog(prediction_service, thread=thread)
+    # refresh_market_embed needs an embed_message_id; bypass to keep this test focused.
+    cog.refresh_market_embed = AsyncMock()
+
+    interaction = _FakeInteraction(user_id=999, guild_id=TEST_GUILD_ID)
+    await cog.force_refresh.callback(cog, interaction, pid)
+
+    fwup_contents = " ".join((m.get("content") or "") for m in interaction.followup.messages)
+    assert "manually refreshed" in fwup_contents.lower()
+    assert any("manually refreshed" in s.lower() for s in thread.sent)
+
+
+async def test_force_refresh_skipped_when_resolved(
+    prediction_service, player_repository, patched_cog_helpers
+):
+    """A resolved market hits the skipped path with a sensible reply."""
+    from commands import predictions as pmod
+
+    patched_cog_helpers.setattr(pmod, "has_admin_permission", lambda _: True)
+
+    pid = prediction_service.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID, creator_id=999, question="Resolved Q?", initial_fair=50,
+    )["prediction_id"]
+    prediction_service.resolve_orderbook(prediction_id=pid, outcome="yes", resolved_by=999)
+
+    cog = _make_cog(prediction_service)
+    interaction = _FakeInteraction(user_id=999, guild_id=TEST_GUILD_ID)
+    await cog.force_refresh.callback(cog, interaction, pid)
+
+    fwup = " ".join((m.get("content") or "") for m in interaction.followup.messages)
+    assert "skipped" in fwup.lower()
+
+
+async def test_refresh_status_admin_only(
+    prediction_service, player_repository, patched_cog_helpers
+):
+    """Non-admin gets a refusal reply; service.list_open_orderbook_markets is not called."""
+    from commands import predictions as pmod
+
+    patched_cog_helpers.setattr(pmod, "has_admin_permission", lambda _: False)
+
+    cog = _make_cog(prediction_service)
+    interaction = _FakeInteraction(user_id=1, guild_id=TEST_GUILD_ID)
+    await cog.refresh_status.callback(cog, interaction)
+
+    assert any("admin" in (m.get("content") or "").lower() for m in interaction.response.messages)
+    assert interaction.followup.messages == []
+
+
+async def test_refresh_status_lists_only_this_guild(
+    prediction_service, player_repository, patched_cog_helpers
+):
+    """refresh_status returns an embed listing this guild's open markets only."""
+    from commands import predictions as pmod
+
+    patched_cog_helpers.setattr(pmod, "has_admin_permission", lambda _: True)
+
+    p1 = prediction_service.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID, creator_id=999, question="Open Q1?", initial_fair=50,
+    )["prediction_id"]
+    p2 = prediction_service.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID, creator_id=999, question="Open Q2?", initial_fair=70,
+    )["prediction_id"]
+    p_other = prediction_service.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID + 1, creator_id=999, question="OtherQ?", initial_fair=40,
+    )["prediction_id"]
+
+    cog = _make_cog(prediction_service)
+    interaction = _FakeInteraction(user_id=999, guild_id=TEST_GUILD_ID)
+    await cog.refresh_status.callback(cog, interaction)
+
+    embeds = [m["embed"] for m in interaction.followup.messages if m.get("embed")]
+    assert len(embeds) == 1
+    body = embeds[0].description
+    assert f"{p1:>4}" in body
+    assert f"{p2:>4}" in body
+    assert f"{p_other:>4}" not in body
