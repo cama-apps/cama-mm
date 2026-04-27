@@ -27,10 +27,11 @@ from config import (
     PREDICTION_PRICE_HIGH,
     PREDICTION_PRICE_LOW,
     PREDICTION_RECENT_TRADES_SHOWN,
+    PREDICTION_REFRESH_SECONDS,
 )
 from services.permissions import has_admin_permission
 from services.prediction_service import PredictionService
-from utils.formatting import JOPACOIN_EMOTE
+from utils.formatting import JOPACOIN_EMOTE, format_duration_short
 from utils.interaction_safety import safe_defer, safe_followup
 
 logger = logging.getLogger("cama_bot.commands.predictions")
@@ -1220,6 +1221,114 @@ class PredictionCommands(commands.Cog):
             text=(
                 f"Total cost: {total_cost} | mark {total_mark} | uPnL {total_pnl:+d}"
             )
+        )
+        await safe_followup(interaction, embed=embed)
+
+    # -- /predict force_refresh ---
+
+    @predict.command(
+        name="force_refresh",
+        description="Manually trigger a market refresh (admin)",
+    )
+    @app_commands.describe(prediction_id="Market ID to refresh")
+    async def force_refresh(
+        self, interaction: discord.Interaction, prediction_id: int
+    ):
+        if not await require_gamba_channel(interaction):
+            return
+        if not has_admin_permission(interaction):
+            await interaction.response.send_message(
+                "Only admins can force a market refresh.", ephemeral=True
+            )
+            return
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+
+        summary = await asyncio.to_thread(
+            self.prediction_service.refresh_market, prediction_id
+        )
+        if summary.get("skipped"):
+            await safe_followup(
+                interaction,
+                content=f"Skipped (reason: {summary.get('reason')}).",
+            )
+            return
+
+        trade_summary = summary.get("trade_summary") or {}
+        trade_count = int(trade_summary.get("trade_count") or 0)
+        announce = (
+            f"🔧 Market #{prediction_id} manually refreshed by <@{interaction.user.id}>: "
+            f"YES {summary['old_price']}% → {summary['new_price']}% "
+            f"({trade_count} trade{'s' if trade_count != 1 else ''} since last refresh)"
+        )
+        await safe_followup(interaction, content=announce)
+
+        await self.refresh_market_embed(prediction_id)
+
+        pred = await asyncio.to_thread(
+            self.prediction_service.get_prediction, prediction_id
+        )
+        if pred and pred.get("thread_id"):
+            try:
+                thread = self.bot.get_channel(pred["thread_id"]) or await self.bot.fetch_channel(pred["thread_id"])
+                await thread.send(announce)
+            except Exception as e:
+                logger.warning(f"Failed to post force_refresh announcement: {e}")
+
+    # -- /predict refresh_status ---
+
+    @predict.command(
+        name="refresh_status",
+        description="Show refresh state for all open markets in this guild (admin)",
+    )
+    async def refresh_status(self, interaction: discord.Interaction):
+        if not await require_gamba_channel(interaction):
+            return
+        if not has_admin_permission(interaction):
+            await interaction.response.send_message(
+                "Only admins can view refresh status.", ephemeral=True
+            )
+            return
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+
+        guild_id = interaction.guild.id if interaction.guild else None
+        opens = await asyncio.to_thread(
+            self.prediction_service.list_open_orderbook_markets, guild_id
+        )
+        if not opens:
+            await safe_followup(interaction, content="No open markets in this guild.")
+            return
+
+        import time as _t
+
+        now = int(_t.time())
+        rows = [f"{'PID':>4}  {'Question':<32}  {'Last refresh':>14}  {'Next due':>16}"]
+        rows.append("-" * 72)
+        for p in opens:
+            last = int(p.get("last_refresh_at") or 0)
+            question = (p.get("question") or "")[:30]
+            if last <= 0:
+                last_str = "never"
+                next_str = "now (overdue)"
+            else:
+                last_str = f"{format_duration_short(now - last)} ago"
+                delta = (last + PREDICTION_REFRESH_SECONDS) - now
+                if delta <= 0:
+                    next_str = f"overdue {format_duration_short(-delta)}"
+                else:
+                    next_str = f"in {format_duration_short(delta)}"
+            rows.append(
+                f"{p['prediction_id']:>4}  {question:<32}  {last_str:>14}  {next_str:>16}"
+            )
+        body = "```\n" + "\n".join(rows) + "\n```"
+        embed = discord.Embed(
+            title="📈 Refresh status",
+            description=body,
+            color=0x3498DB,
+        )
+        embed.set_footer(
+            text=f"Refresh cadence: {format_duration_short(PREDICTION_REFRESH_SECONDS)}"
         )
         await safe_followup(interaction, embed=embed)
 
