@@ -9,10 +9,13 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import litellm
 from litellm import acompletion
+
+if TYPE_CHECKING:
+    from services.flavor_personas import FlavorPersona
 
 logger = logging.getLogger("cama_bot.services.ai")
 
@@ -187,6 +190,7 @@ class AIService:
         tools: list[dict[str, Any]],
         tool_choice: str | dict[str, Any] = "auto",
         max_tokens: int | None = None,
+        temperature: float | None = None,
     ) -> ToolCallResult:
         """
         Call LLM with tool definitions and return tool call results.
@@ -195,6 +199,7 @@ class AIService:
             messages: List of message dicts with role and content
             tools: List of tool definitions
             tool_choice: Tool selection mode ("auto", "none", or specific tool)
+            temperature: Optional sampling temperature override
 
         Returns:
             ToolCallResult with tool name, args, and raw response
@@ -211,6 +216,8 @@ class AIService:
                 "max_tokens": max_tokens or 2000,
                 "num_retries": 0,  # No retries - fail fast
             }
+            if temperature is not None:
+                kwargs["temperature"] = temperature
             # Groq requires parsed/hidden reasoning_format with tool calls
             if self._is_groq:
                 kwargs["reasoning_format"] = "parsed"
@@ -340,6 +347,7 @@ Bad: SELECT * FROM players JOIN loan_state... (too many columns)""",
         player_context: dict[str, Any],
         event_details: dict[str, Any],
         examples: list[str],
+        persona: FlavorPersona | None = None,
     ) -> str | None:
         """
         Generate flavor text for a player event.
@@ -349,11 +357,16 @@ Bad: SELECT * FROM players JOIN loan_state... (too many columns)""",
             player_context: Dict with player stats and history
             event_details: Dict with event-specific details
             examples: List of example comments for tone matching
+            persona: Optional persona that overrides voice + few-shot examples
+                for match_win and mvp_callout events
 
         Returns:
             Generated comment string or None on failure
         """
         examples_text = "\n".join(f"- {ex}" for ex in examples) if examples else "None"
+        # Persona-driven calls bump temperature for variety; other events
+        # keep the model's default sampling.
+        call_temperature: float | None = None
 
         # Shop events need a FLEX prompt, not a roast prompt
         is_shop_event = event_type in ("shop_announce", "shop_announce_target")
@@ -419,7 +432,7 @@ Cost Paid: {event_details.get('cost_paid', 0)} jopacoin
 
 Generate a cocky FLEX message hyping up their wealth."""
         elif event_type == "match_win":
-            # MATCH_WIN: chill but specific to WHY they're notable
+            # MATCH_WIN: persona-driven hype with narrative-aware framing
             is_underdog = event_details.get("is_underdog")
             is_big_gainer = event_details.get("is_big_gainer")
             expected_prob = event_details.get("expected_win_prob")
@@ -427,35 +440,44 @@ Generate a cocky FLEX message hyping up their wealth."""
 
             if is_underdog and expected_prob:
                 narrative = f"UNDERDOG VICTORY - team only had {expected_prob:.0%} chance to win, they defied the odds"
-                tone_hint = "Acknowledge they proved doubters wrong, beat expectations"
             elif is_big_gainer and rating_change:
                 narrative = (
                     f"BIG CLIMB - gained {rating_change:.0f} rating points this match"
                 )
-                tone_hint = "Acknowledge the rating boost, the grind paying off"
             else:
                 narrative = "Solid win, nothing exceptional but still a W"
-                tone_hint = "Just a simple acknowledgment"
 
-            system_prompt = f"""You are a chill commentator for a Dota 2 inhouse league.
-Generate ONE short sentence (max 15 words) acknowledging this player's win.
+            persona_examples = persona.examples if persona else examples
+            persona_examples_block = (
+                "\n".join(f"- {ex}" for ex in persona_examples) if persona_examples else "None"
+            )
+            persona_voice = (
+                persona.system_prompt
+                if persona
+                else "You are a hype commentator for a Dota 2 inhouse league."
+            )
+            persona_name = persona.name if persona else "the commentator"
 
-IMPORTANT: Your comment should reflect WHY this player is notable:
-- {tone_hint}
+            system_prompt = f"""{persona_voice}
+
+You are commenting on a Dota 2 inhouse league match for this player's WIN.
 
 RULES:
-- Keep it brief and understated (no ALL CAPS, no excessive hype)
-- Reference their specific accomplishment if there is one
-- Be genuine, not generic
+- Stay in character as {persona_name}.
+- Reference Dota 2 lore (heroes, items, mechanics, memes) when natural.
+- PG-13. No slurs.
+- One short comment, soft-cap ~30 words.
+- Match the narrative beat below.
 
-Example tone:
-{examples_text}"""
+Example lines from this persona:
+{persona_examples_block}"""
             user_prompt = f"""Player: {player_context.get('username', 'Unknown')}
-Narrative: {narrative}
+Narrative beat: {narrative}
 
-Write one sentence that acknowledges their specific accomplishment."""
+Write a single comment in the persona's voice celebrating this win."""
+            call_temperature = 0.95
         elif event_type == "mvp_callout":
-            # MVP_CALLOUT: backhanded compliment using enriched match stats
+            # MVP_CALLOUT: persona-driven commentary with rich enriched-match stats
             hero = event_details.get("hero", "Unknown Hero")
             kills = event_details.get("kills", 0)
             deaths = event_details.get("deaths", 0)
@@ -468,19 +490,30 @@ Write one sentence that acknowledges their specific accomplishment."""
             fantasy = event_details.get("fantasy_points")
             fantasy_str = f"{fantasy:.1f}" if fantasy is not None else "N/A"
 
-            system_prompt = f"""You are a snarky, backhanded commentator for a Dota 2 inhouse league.
-A player just WON a match. Give them a backhanded compliment or reluctant acknowledgment.
+            persona_examples = persona.examples if persona else examples
+            persona_examples_block = (
+                "\n".join(f"- {ex}" for ex in persona_examples) if persona_examples else "None"
+            )
+            persona_voice = (
+                persona.system_prompt
+                if persona
+                else "You are a snarky, backhanded commentator for a Dota 2 inhouse league."
+            )
+            persona_name = persona.name if persona else "the commentator"
+
+            system_prompt = f"""{persona_voice}
+
+You are commenting on a Dota 2 inhouse league match for this player's WIN, with detailed match stats available.
 
 RULES:
-- 1-2 sentences max. Terse and deadpan.
-- Reference specific stats that stand out (good OR bad).
-- If their deaths are high, mock the feeding. If GPM is low, question their farming.
-- If stats are actually impressive, give credit grudgingly.
-- Be darkly funny. The humor comes from reluctant praise or finding the flaw in a win.
-- No emojis. No exclamation marks.
+- Stay in character as {persona_name}.
+- Reference the player's specific match stats (KDA, hero, GPM, etc.) when they stand out.
+- Reference Dota 2 lore (heroes, items, mechanics, memes) when natural.
+- PG-13. No slurs.
+- One short comment, soft-cap ~30 words.
 
-Example tone:
-{examples_text}"""
+Example lines from this persona:
+{persona_examples_block}"""
             user_prompt = f"""Player: {player_context.get('username', 'Unknown')}
 Hero: {hero} | KDA: {kills}/{deaths}/{assists} | GPM: {gpm} | XPM: {xpm}
 Hero Damage: {hero_damage} | Tower Damage: {tower_damage} | Net Worth: {net_worth}
@@ -492,7 +525,8 @@ GAMBLING HISTORY:
 - Bankruptcies: {player_context.get('bankruptcy_count', 0)}
 - Bet Win Rate: {player_context.get('bet_win_rate') or 'Unknown'}
 
-Generate a backhanded compliment about their match performance."""
+Write a single comment in the persona's voice about this player's performance."""
+            call_temperature = 0.95
         else:
             # Regular roast events
             system_prompt = f"""You are a snarky commentator for a Dota 2 gambling Discord.
@@ -548,6 +582,7 @@ Generate a PERSONALIZED roast referencing their specific history."""
             messages=messages,
             tools=[FLAVOR_TOOL],
             tool_choice="auto",  # Use auto instead of required - more compatible
+            temperature=call_temperature,
         )
 
         if result.tool_name == "generate_flavor_text":
@@ -563,7 +598,7 @@ Generate a PERSONALIZED roast referencing their specific history."""
                 prompt=messages[1]["content"],
                 system_prompt=messages[0]["content"]
                 + "\n\nRespond with just the roast, nothing else.",
-                temperature=0.9,
+                temperature=call_temperature if call_temperature is not None else 0.9,
             )
             return fallback_result
         except Exception:

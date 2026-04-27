@@ -93,6 +93,76 @@ class TestAIService:
         assert result == "The house always wins, but at least you tried!"
 
     @pytest.mark.asyncio
+    async def test_generate_flavor_match_win_injects_persona(self, ai_service):
+        """match_win calls inject the persona's voice + examples into the system
+        prompt and bump temperature for variety."""
+        from services.flavor_personas import FlavorPersona
+
+        persona = FlavorPersona(
+            key="test_persona",
+            name="Test Persona Voice",
+            system_prompt="UNIQUE_VOICE_SENTINEL — speak only in haiku.",
+            examples=[
+                "UNIQUE_EXAMPLE_SENTINEL_ONE",
+                "UNIQUE_EXAMPLE_SENTINEL_TWO",
+            ],
+        )
+
+        mock_response = MagicMock()
+        mock_tool_call = MagicMock()
+        mock_tool_call.function.name = "generate_flavor_text"
+        mock_tool_call.function.arguments = json.dumps({"comment": "ok"})
+        mock_response.choices = [MagicMock(message=MagicMock(tool_calls=[mock_tool_call]))]
+
+        with patch("services.ai_service.acompletion", new_callable=AsyncMock) as mock_completion:
+            mock_completion.return_value = mock_response
+            await ai_service.generate_flavor(
+                event_type="match_win",
+                player_context={"username": "TestPlayer"},
+                event_details={
+                    "is_big_gainer": True,
+                    "rating_change": 90,
+                    "expected_win_prob": 0.55,
+                },
+                examples=["unused fallback"],
+                persona=persona,
+            )
+
+        call_kwargs = mock_completion.call_args.kwargs
+        system_content = call_kwargs["messages"][0]["content"]
+        assert "UNIQUE_VOICE_SENTINEL" in system_content
+        assert "UNIQUE_EXAMPLE_SENTINEL_ONE" in system_content
+        assert "UNIQUE_EXAMPLE_SENTINEL_TWO" in system_content
+        assert "Test Persona Voice" in system_content
+        # The fallback `examples` arg should be ignored when a persona is provided.
+        assert "unused fallback" not in system_content
+        # Persona calls bump temperature for variety.
+        assert call_kwargs.get("temperature") == 0.95
+
+    @pytest.mark.asyncio
+    async def test_generate_flavor_gambling_event_skips_persona(self, ai_service):
+        """Non-match events do not get persona injection or temperature override
+        even if a persona is somehow passed."""
+        mock_response = MagicMock()
+        mock_tool_call = MagicMock()
+        mock_tool_call.function.name = "generate_flavor_text"
+        mock_tool_call.function.arguments = json.dumps({"comment": "ok"})
+        mock_response.choices = [MagicMock(message=MagicMock(tool_calls=[mock_tool_call]))]
+
+        with patch("services.ai_service.acompletion", new_callable=AsyncMock) as mock_completion:
+            mock_completion.return_value = mock_response
+            await ai_service.generate_flavor(
+                event_type="loan_taken",
+                player_context={"username": "TestPlayer"},
+                event_details={},
+                examples=["Example A"],
+            )
+
+        call_kwargs = mock_completion.call_args.kwargs
+        # No temperature override for gambling-event flavor.
+        assert "temperature" not in call_kwargs
+
+    @pytest.mark.asyncio
     async def test_complete_returns_text_content(self, ai_service):
         """Test that complete returns the text content from the response."""
         mock_response = MagicMock()
@@ -383,7 +453,6 @@ class TestFlavorEvents:
             "BET_LOST",
             "LEVERAGE_LOSS",
             "MATCH_WIN",
-            "MATCH_LOSS",
             "MVP_CALLOUT",
         ]
 

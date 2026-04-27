@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
+from services.flavor_personas import pick_persona
+
 if TYPE_CHECKING:
     from repositories.interfaces import IGuildConfigRepository, IPlayerRepository
     from services.ai_service import AIService
@@ -39,7 +41,6 @@ class FlavorEvent(Enum):
     BET_LOST = "bet_lost"
     LEVERAGE_LOSS = "leverage_loss"  # Lost leveraged bet
     MATCH_WIN = "match_win"
-    MATCH_LOSS = "match_loss"
     SHOP_ANNOUNCE = "shop_announce"  # Balance announcement flex
     SHOP_ANNOUNCE_TARGET = "shop_announce_target"  # Targeted flex on another player
     DOUBLE_OR_NOTHING_WIN = "double_or_nothing_win"  # Won the 50/50 gamble
@@ -112,21 +113,22 @@ EVENT_EXAMPLES: dict[FlavorEvent, list[str]] = {
         "Leveraged losses hit different. And by different, we mean worse.",
     ],
     FlavorEvent.MATCH_WIN: [
-        # Underdog examples
-        "Wasn't supposed to win that one. Did anyway.",
-        "Doubters in shambles.",
-        # Big gainer examples
-        "The grind is paying off.",
-        "Rating stonks going up.",
-        # General examples
-        "Clean game.",
-        "Another one for the books.",
-    ],
-    FlavorEvent.MATCH_LOSS: [
-        "It's not about winning or losing, it's about— actually no, it's about winning. You lost.",
-        "The rating system sends its condolences.",
-        "Diff. Just diff.",
-        "Go next (and probably lose that one too).",
+        "OH MY — HE DID THAT. SOMEONE GET A STRETCHER FOR THE LADDER.",
+        "Ladies and gentlemen — the throne just heard footsteps.",
+        "The grind awakens. Doubters become dust.",
+        "absolutely cooked. no diff. throne deleted.",
+        "+mmr go brrr. opps reduced to atoms.",
+        "They don't want you to know what was in his Aghs. Open your eyes.",
+        "good for you kid. eat something. drink water. carry harder.",
+        "7.36b: Player (Buff): Hitbox on copium reduced. Devs cite emotional damage to opponents.",
+        "Hotfix: Removed an exploit where this player simply outplayed opponents.",
+        "BREAKING: Local degen ascends. Sources say 'we have to nerf him'.",
+        "MARKET WATCH: Rating boost so large the system reportedly 'felt that'.",
+        "RATING UP. RANK UP. EVERYBODY ELSE: DOWN BAD.",
+        "Bow down, ladder. Bow DOWN. Your KING has returned.",
+        "The ancients whisper a new name into the void tonight.",
+        "Four bankruptcies. NOW he wins? Coincidence? I think NOT.",
+        "i had ninety mmr once. lost it in a divorce. don't ask.",
     ],
     FlavorEvent.SHOP_ANNOUNCE: [
         "ATTENTION: Someone with poor financial priorities has entered the chat.",
@@ -170,10 +172,18 @@ EVENT_EXAMPLES: dict[FlavorEvent, list[str]] = {
         "Technically a win. Spiritually, a disaster.",
     ],
     FlavorEvent.MVP_CALLOUT: [
+        "AND HE FINISHES NINE-AND-TWO. HALL OF FAME PERFORMANCE.",
+        "Twenty-one assists. The lobby was a STAGE. He was the SHOW.",
+        "Eighteen kills. Two deaths. The shadow realm accepts him.",
+        "10/2 kda. gigachad behavior. opps reduced to pulp.",
+        "740 GPM in this economy? They cooked the books. I'm not saying — I'm just saying.",
+        "twelve kills. that's almost as many as i had in the army. wait, no — that was something else.",
+        "Hotfix: Player K/D ratio capped at 4.5 to preserve game balance. Currently exceeded.",
+        "BREAKING: Player records 12/1/19 line. Tribune analysts call it 'concerning'.",
         "The system notes this performance for the record. STATUS: ADEQUATE.",
-        "Congrats on winning a game of Dota. The bar was on the floor and you barely cleared it.",
-        "We ran the numbers. You were the least embarrassing player on your team. Well done.",
         "Performance review complete. Verdict: could have been worse. Barely.",
+        "NINETY THOUSAND HERO DAMAGE. SOMEBODY CHECK ON THE OPPONENT.",
+        "your mother and i didn't understand what you did but it sounded loud.",
     ],
 }
 
@@ -382,12 +392,21 @@ class FlavorTextService:
                 "lowest_balance": context.lowest_balance,
             }
 
-            logger.info(f"Calling AI service for {event.value}")
+            persona = (
+                pick_persona()
+                if event in (FlavorEvent.MATCH_WIN, FlavorEvent.MVP_CALLOUT)
+                else None
+            )
+            if persona:
+                logger.info(f"Calling AI service for {event.value} (persona={persona.key})")
+            else:
+                logger.info(f"Calling AI service for {event.value}")
             result = await self.ai_service.generate_flavor(
                 event_type=event.value,
                 player_context=player_context_dict,
                 event_details=event_details,
                 examples=examples,
+                persona=persona,
             )
 
             # If AI returns None, use fallback
