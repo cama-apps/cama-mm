@@ -12,7 +12,7 @@ from commands.dota_info import (
 )
 
 
-class TestHeroLookup:
+class TestDotaInfoHeroLookup:
     def test_get_all_heroes_shape(self):
         heroes = _get_all_heroes()
         assert isinstance(heroes, list)

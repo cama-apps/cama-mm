@@ -480,7 +480,7 @@ class TestRadiantDireMapping:
                 )
 
 
-class TestRadiantDireBugFix:
+class TestRadiantDireBugFixRecording:
     """Test the critical bug fix where Dire wins were incorrectly recorded as losses."""
 
     @pytest.fixture
