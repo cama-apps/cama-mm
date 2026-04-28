@@ -9,12 +9,6 @@ import pytest
 class TestServiceInterfacesExist:
     """Test that all expected interfaces are defined."""
 
-    def test_interfaces_module_imports(self):
-        """Service interfaces module can be imported."""
-        from services import interfaces
-
-        assert interfaces is not None
-
     def test_player_service_interface(self):
         """IPlayerService interface exists with expected methods."""
         from services.interfaces import IPlayerService

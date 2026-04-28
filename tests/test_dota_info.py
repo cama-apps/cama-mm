@@ -1,6 +1,6 @@
-"""
-Tests for DotaInfoCommands cog.
-"""
+"""Tests for DotaInfoCommands cog — hero/ability lookup and formatting helpers."""
+
+import pytest
 
 from commands.dota_info import (
     _format_ability_values,
@@ -13,126 +13,82 @@ from commands.dota_info import (
 
 
 class TestHeroLookup:
-    """Tests for hero lookup functions."""
-
-    def test_get_all_heroes_returns_list(self):
-        """Test that get_all_heroes returns a list of tuples."""
+    def test_get_all_heroes_shape(self):
         heroes = _get_all_heroes()
         assert isinstance(heroes, list)
-        assert len(heroes) > 100  # Should have 100+ heroes
-        # Each entry should be (name, id)
+        assert len(heroes) > 100
         assert all(isinstance(h, tuple) and len(h) == 2 for h in heroes)
         assert all(isinstance(h[0], str) and isinstance(h[1], int) for h in heroes)
 
-    def test_get_hero_by_name_exact_match(self):
-        """Test finding hero by exact name."""
-        hero = _get_hero_by_name("Anti-Mage")
+    @pytest.mark.parametrize(
+        "query,expected_name,expected_id",
+        [
+            ("Anti-Mage", "Anti-Mage", 1),
+            ("anti-mage", "Anti-Mage", 1),
+            ("am", "Anti-Mage", 1),
+        ],
+    )
+    def test_hero_by_name_finds(self, query, expected_name, expected_id):
+        hero = _get_hero_by_name(query)
         assert hero is not None
-        assert hero.localized_name == "Anti-Mage"
-        assert hero.id == 1
+        assert hero.localized_name == expected_name
+        assert hero.id == expected_id
 
-    def test_get_hero_by_name_case_insensitive(self):
-        """Test finding hero with different case."""
-        hero = _get_hero_by_name("anti-mage")
-        assert hero is not None
-        assert hero.localized_name == "Anti-Mage"
+    def test_hero_by_name_missing_returns_none(self):
+        assert _get_hero_by_name("NotARealHero123") is None
 
-    def test_get_hero_by_name_alias(self):
-        """Test finding hero by alias."""
-        hero = _get_hero_by_name("am")
-        assert hero is not None
-        assert hero.localized_name == "Anti-Mage"
-
-    def test_get_hero_by_name_not_found(self):
-        """Test that non-existent hero returns None."""
-        hero = _get_hero_by_name("NotARealHero123")
-        assert hero is None
-
-    def test_get_hero_has_abilities(self):
-        """Test that hero has abilities."""
-        hero = _get_hero_by_name("Pudge")
-        assert hero is not None
-        assert hero.abilities is not None
-        assert len(hero.abilities) > 0
-        # Check for Meat Hook
-        ability_names = [a.localized_name for a in hero.abilities]
+    def test_hero_abilities_and_talents(self):
+        pudge = _get_hero_by_name("Pudge")
+        assert pudge is not None
+        ability_names = [a.localized_name for a in pudge.abilities]
         assert "Meat Hook" in ability_names
 
-    def test_get_hero_has_talents(self):
-        """Test that hero has talents."""
-        hero = _get_hero_by_name("Crystal Maiden")
-        assert hero is not None
-        assert hero.talents is not None
-        # Should have 8 talents (4 pairs)
-        assert len(hero.talents) >= 4
+        cm = _get_hero_by_name("Crystal Maiden")
+        assert cm is not None
+        assert len(cm.talents) >= 4
 
 
 class TestAbilityLookup:
-    """Tests for ability lookup functions."""
-
-    def test_get_all_abilities_returns_list(self):
-        """Test that get_all_abilities returns a list of tuples."""
+    def test_get_all_abilities_shape(self):
         abilities = _get_all_abilities()
         assert isinstance(abilities, list)
-        assert len(abilities) > 200  # Should have many abilities
-        # Each entry should be (name, id)
+        assert len(abilities) > 200
         assert all(isinstance(a, tuple) and len(a) == 2 for a in abilities)
 
-    def test_get_ability_by_name_exact_match(self):
-        """Test finding ability by exact name."""
-        ability = _get_ability_by_name("Meat Hook")
+    @pytest.mark.parametrize("query", ["Meat Hook", "meat hook"])
+    def test_ability_by_name_finds(self, query):
+        ability = _get_ability_by_name(query)
         assert ability is not None
         assert ability.localized_name == "Meat Hook"
 
-    def test_get_ability_by_name_case_insensitive(self):
-        """Test finding ability with different case."""
-        ability = _get_ability_by_name("meat hook")
-        assert ability is not None
-        assert ability.localized_name == "Meat Hook"
-
-    def test_get_ability_by_name_not_found(self):
-        """Test that non-existent ability returns None."""
-        ability = _get_ability_by_name("NotARealAbility123")
-        assert ability is None
+    def test_ability_by_name_missing_returns_none(self):
+        assert _get_ability_by_name("NotARealAbility123") is None
 
     def test_ability_has_description(self):
-        """Test that ability has description."""
-        ability = _get_ability_by_name("Blink")
-        assert ability is not None
-        assert ability.description is not None
-        assert len(ability.description) > 0
+        blink = _get_ability_by_name("Blink")
+        assert blink is not None
+        assert blink.description and len(blink.description) > 0
 
 
 class TestFormatting:
-    """Tests for formatting functions."""
-
-    def test_format_stat_basic(self):
-        """Test basic stat formatting."""
-        result = _format_stat("Damage", 100)
-        assert result == "**Damage:** 100"
-
-    def test_format_stat_with_suffix(self):
-        """Test stat formatting with suffix."""
-        result = _format_stat("Magic Resist", 25, "%")
-        assert result == "**Magic Resist:** 25%"
-
-    def test_format_stat_none_value(self):
-        """Test stat formatting with None value."""
-        result = _format_stat("Damage", None)
-        assert result == ""
+    @pytest.mark.parametrize(
+        "label,value,suffix,expected",
+        [
+            ("Damage", 100, "", "**Damage:** 100"),
+            ("Magic Resist", 25, "%", "**Magic Resist:** 25%"),
+            ("Damage", None, "", ""),
+        ],
+    )
+    def test_format_stat(self, label, value, suffix, expected):
+        assert _format_stat(label, value, suffix) == expected
 
     def test_format_ability_values_empty(self):
-        """Test ability values formatting with no specials."""
-
         class MockAbility:
             ability_special = None
 
-        result = _format_ability_values(MockAbility())
-        assert result == ""
+        assert _format_ability_values(MockAbility()) == ""
 
     def test_format_ability_values_with_data(self):
-        """Test ability values formatting with special values."""
-
         class MockAbility:
             ability_special = [
                 {"header": "DAMAGE:", "value": "90 180 270 360"},
@@ -145,57 +101,39 @@ class TestFormatting:
 
 
 class TestHeroAttributes:
-    """Tests for hero attribute data."""
-
-    def test_hero_has_primary_attribute(self):
-        """Test that heroes have primary attributes."""
-        # STR hero
-        axe = _get_hero_by_name("Axe")
-        assert axe is not None
-        assert axe.attr_primary == "strength"
-
-        # AGI hero
-        pa = _get_hero_by_name("Phantom Assassin")
-        assert pa is not None
-        assert pa.attr_primary == "agility"
-
-        # INT hero
-        cm = _get_hero_by_name("Crystal Maiden")
-        assert cm is not None
-        assert cm.attr_primary == "intelligence"
-
-    def test_hero_has_base_stats(self):
-        """Test that heroes have base stats."""
-        hero = _get_hero_by_name("Pudge")
+    @pytest.mark.parametrize(
+        "name,attr",
+        [
+            ("Axe", "strength"),
+            ("Phantom Assassin", "agility"),
+            ("Crystal Maiden", "intelligence"),
+        ],
+    )
+    def test_hero_primary_attr(self, name, attr):
+        hero = _get_hero_by_name(name)
         assert hero is not None
-        assert hero.attr_strength_base is not None
-        assert hero.attr_agility_base is not None
-        assert hero.attr_intelligence_base is not None
-        assert hero.base_movement is not None
-        assert hero.base_armor is not None
+        assert hero.attr_primary == attr
+
+    def test_hero_base_stats_present(self):
+        pudge = _get_hero_by_name("Pudge")
+        assert pudge is not None
+        assert pudge.attr_strength_base is not None
+        assert pudge.attr_agility_base is not None
+        assert pudge.attr_intelligence_base is not None
+        assert pudge.base_movement is not None
+        assert pudge.base_armor is not None
 
     def test_hero_has_roles(self):
-        """Test that heroes have roles."""
-        hero = _get_hero_by_name("Lion")
-        assert hero is not None
-        assert hero.roles is not None
-        assert "Support" in hero.roles or "Disabler" in hero.roles
+        lion = _get_hero_by_name("Lion")
+        assert lion is not None
+        assert "Support" in lion.roles or "Disabler" in lion.roles
 
 
 class TestHeroFacets:
-    """Tests for hero facets (new feature)."""
-
-    def test_hero_has_facets(self):
-        """Test that heroes have facets."""
-        hero = _get_hero_by_name("Witch Doctor")
-        assert hero is not None
-        assert hero.facets is not None
-        assert len(hero.facets) >= 2  # Should have at least 2 facets
-
-    def test_facet_has_description(self):
-        """Test that facets have descriptions."""
-        hero = _get_hero_by_name("Witch Doctor")
-        assert hero is not None
-        for facet in hero.facets:
-            assert facet.localized_name is not None
-            assert facet.description is not None
+    def test_hero_has_facets_with_descriptions(self):
+        wd = _get_hero_by_name("Witch Doctor")
+        assert wd is not None
+        assert len(wd.facets) >= 2
+        for facet in wd.facets:
+            assert facet.localized_name
+            assert facet.description
