@@ -222,10 +222,10 @@ class TestLoanRepaymentAtomic:
 
         assert result["principal"] == 50
         assert result["fee"] == 10
-        assert result["total_repaid"] == 60
+        assert result["total_owed"] == 60
         assert result["balance_before"] == 50
         assert result["new_balance"] == -10
-        # Balance actually moved by the full total_repaid; outstanding cleared;
+        # Balance actually moved by the full total_owed; outstanding cleared;
         # nonprofit fund gained exactly the fee.
         assert player_repo.get_balance(1, TEST_GUILD_ID) == -10
         state = loan_repo.get_state(1, TEST_GUILD_ID)
@@ -233,9 +233,10 @@ class TestLoanRepaymentAtomic:
         assert state["outstanding_fee"] == 0
         assert loan_repo.get_nonprofit_fund(TEST_GUILD_ID) - fund_before == 10
 
-    def test_returns_none_when_no_outstanding_loan(self, player_repo, loan_repo):
+    def test_raises_when_no_outstanding_loan(self, player_repo, loan_repo):
         register(player_repo, 1, balance=50)
-        assert loan_repo.execute_repayment_atomic(1, TEST_GUILD_ID) is None
+        with pytest.raises(ValueError, match="No outstanding loan"):
+            loan_repo.execute_repayment_atomic(1, TEST_GUILD_ID)
         # Nothing moved.
         assert player_repo.get_balance(1, TEST_GUILD_ID) == 50
 
@@ -249,17 +250,16 @@ class TestBankruptcyAtomic:
     def test_clears_debt_and_records_state(self, player_repo, bankruptcy_repo):
         register(player_repo, 1, balance=-75)
 
-        result = bankruptcy_repo.execute_bankruptcy_atomic(
+        debt_cleared = bankruptcy_repo.execute_bankruptcy_atomic(
             discord_id=1,
             guild_id=TEST_GUILD_ID,
-            now=1_700_000_000,
-            cooldown_seconds=3600,
             fresh_start_balance=0,
+            cooldown_seconds=3600,
             penalty_games=5,
+            now=1_700_000_000,
         )
 
-        assert result["debt_cleared"] == 75
-        assert result["new_balance"] == 0
+        assert debt_cleared == 75
         assert player_repo.get_balance(1, TEST_GUILD_ID) == 0
         state = bankruptcy_repo.get_state(1, TEST_GUILD_ID)
         assert state["penalty_games_remaining"] == 5
@@ -269,14 +269,14 @@ class TestBankruptcyAtomic:
         self, player_repo, bankruptcy_repo
     ):
         register(player_repo, 1, balance=10)
-        with pytest.raises(ValueError, match="NOT_IN_DEBT"):
+        with pytest.raises(ValueError, match="not_in_debt"):
             bankruptcy_repo.execute_bankruptcy_atomic(
                 discord_id=1,
                 guild_id=TEST_GUILD_ID,
-                now=0,
-                cooldown_seconds=3600,
                 fresh_start_balance=0,
+                cooldown_seconds=3600,
                 penalty_games=5,
+                now=0,
             )
 
     def test_concurrent_declarations_do_not_double_bump(
@@ -285,22 +285,22 @@ class TestBankruptcyAtomic:
         """5 threads race to declare; only one should win."""
         register(player_repo, 1, balance=-100)
 
-        successes: list[dict] = []
+        successes: list[int] = []
         errors: list[str] = []
         lock = threading.Lock()
 
         def try_bankrupt() -> None:
             try:
-                r = bankruptcy_repo.execute_bankruptcy_atomic(
+                debt = bankruptcy_repo.execute_bankruptcy_atomic(
                     discord_id=1,
                     guild_id=TEST_GUILD_ID,
-                    now=1_700_000_000,
-                    cooldown_seconds=3600,
                     fresh_start_balance=0,
+                    cooldown_seconds=3600,
                     penalty_games=5,
+                    now=1_700_000_000,
                 )
                 with lock:
-                    successes.append(r)
+                    successes.append(debt)
             except ValueError as exc:
                 with lock:
                     errors.append(str(exc))
@@ -314,7 +314,7 @@ class TestBankruptcyAtomic:
         assert len(successes) == 1, f"expected 1 success, got {len(successes)}"
         # Losers must fail on a well-known reason — not silently skip.
         for err in errors:
-            assert err.startswith("ON_COOLDOWN") or err.startswith("NOT_IN_DEBT")
+            assert err.startswith("cooldown:") or err == "not_in_debt"
         state = bankruptcy_repo.get_state(1, TEST_GUILD_ID)
         # Counter reflects exactly one declaration (not 5).
         assert state["penalty_games_remaining"] == 5
