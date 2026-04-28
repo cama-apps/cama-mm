@@ -167,36 +167,50 @@ class SchemaManager:
         pending = [(name, action) for name, action in self._get_migrations() if name not in applied]
         if not pending:
             return
-        # Take an exclusive write lock for the duration of the unapplied
-        # migrations so two bot instances starting against the same SQLite
-        # file can't both observe the same migration as un-applied and
-        # double-execute it (which would, for example, double-backfill
-        # dig_gear weapon rows). The first instance commits and registers
-        # the migration name; the second wakes up, sees it applied, skips.
+        # Outer BEGIN IMMEDIATE: take an exclusive write lock for the duration
+        # of the unapplied migrations so two bot instances starting against
+        # the same SQLite file can't both observe the same migration as
+        # un-applied and double-execute it (which would, for example,
+        # double-backfill dig_gear weapon rows). Inside the outer lock each
+        # migration runs in its own SAVEPOINT so a partial failure rolls back
+        # just that migration (and its schema_migrations insert) instead of
+        # the whole batch — the next startup will then retry only the
+        # migrations that didn't land.
         cursor.execute("BEGIN IMMEDIATE")
-        # Re-read applied inside the lock — another instance may have
-        # finished while we were waiting on the busy_timeout.
-        applied = {row["name"] for row in cursor.execute("SELECT name FROM schema_migrations")}
-        for name, action in pending:
-            if name in applied:
-                continue
-            logger.info(f"Applying migration: {name}")
-            cursor.execute("BEGIN IMMEDIATE")
-            try:
-                action(cursor)
-                cursor.execute(
-                    "INSERT INTO schema_migrations (name) VALUES (?)",
-                    (name,),
-                )
-                cursor.execute("COMMIT")
-            except Exception:
+        try:
+            # Re-read applied inside the lock — another instance may have
+            # finished while we were waiting on the busy_timeout.
+            applied = {row["name"] for row in cursor.execute("SELECT name FROM schema_migrations")}
+            for name, action in pending:
+                if name in applied:
+                    continue
+                logger.info(f"Applying migration: {name}")
+                savepoint = f"migration_{abs(hash(name))}"
+                cursor.execute(f"SAVEPOINT {savepoint}")
                 try:
-                    cursor.execute("ROLLBACK")
-                except sqlite3.Error as rollback_exc:
-                    logger.error(
-                        "Rollback failed during migration %s: %s", name, rollback_exc
+                    action(cursor)
+                    cursor.execute(
+                        "INSERT INTO schema_migrations (name) VALUES (?)",
+                        (name,),
                     )
-                raise
+                    cursor.execute(f"RELEASE SAVEPOINT {savepoint}")
+                except Exception:
+                    try:
+                        cursor.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+                        cursor.execute(f"RELEASE SAVEPOINT {savepoint}")
+                    except sqlite3.Error as rollback_exc:
+                        logger.error(
+                            "Savepoint rollback failed during migration %s: %s",
+                            name, rollback_exc,
+                        )
+                    raise
+            cursor.execute("COMMIT")
+        except Exception:
+            try:
+                cursor.execute("ROLLBACK")
+            except sqlite3.Error as rollback_exc:
+                logger.error("Outer migration rollback failed: %s", rollback_exc)
+            raise
 
     def _get_migrations(self):
         return [
