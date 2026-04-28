@@ -134,6 +134,8 @@ class TestSteamAPIClient:
     def test_get_match_details_request_error(self, mock_sleep, mock_limiter):
         """Test match details fetch with request exception. Retry backoff is mocked
         out so the test doesn't burn 266 real seconds on the configured delays."""
+        from config import ENRICHMENT_RETRY_DELAYS
+
         api = SteamAPI(api_key="test_key")
         with patch.object(
             api.session, "get", side_effect=requests.exceptions.RequestException("Network error")
@@ -141,6 +143,8 @@ class TestSteamAPIClient:
             result = api.get_match_details(8181518332)
 
         assert result is None
+        # Lock in retry behavior: every configured delay must have been honored.
+        assert mock_sleep.call_count == len(ENRICHMENT_RETRY_DELAYS)
 
     @patch("steam_api.SteamAPI._rate_limiter")
     def test_get_match_history(self, mock_limiter):
