@@ -568,6 +568,14 @@ class TestEchoPerBossId:
         progress = json.dumps({"25": {"boss_id": "pudge", "status": "active"}})
         dig_repo.update_tunnel(10001, TEST_GUILD_ID, boss_progress=progress)
 
+        # Override Pudge's tank archetype to bruiser for this test so the
+        # cautious-no-gear duel is winnable under random=0.0 (Tank's 1.5x HP
+        # multiplier flips the math against an unequipped player). The echo
+        # logic is keyed on boss_id, not archetype, so this is safe.
+        monkeypatch.setitem(__import__(
+            "services.dig_constants", fromlist=["BOSS_ARCHETYPE_BY_ID"]
+        ).BOSS_ARCHETYPE_BY_ID, "pudge", "bruiser")
+
         # Cautious gives enough HP headroom that even a bad prompt roll on the
         # safe option doesn't lose the fight. We pin random.random=0.0 so every
         # hit lands and every probability distribution picks its first branch.

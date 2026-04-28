@@ -64,6 +64,10 @@ BOSS_SLUGS: dict[str, str] = {
     "weaver": "weaver",
     "oracle": "oracle",
     "terrorblade": "terrorblade",
+    # Pinnacle (depth 300) — slug == boss_id.
+    "forgotten_king": "forgotten_king",
+    "hollowforged": "hollowforged",
+    "first_digger": "first_digger",
 }
 
 # Legacy depth → boss_id fallback so a caller with only the boundary depth

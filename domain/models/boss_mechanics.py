@@ -56,6 +56,14 @@ class BossMechanic:
     prompt_description: str             # 1-2 line narrative below the title
     options: tuple[MechanicOption, ...] # exactly 3 options
     safe_option_idx: int                # timeout/abandon fallback
+    # Optional timed-input fields. When ``timed_input_kind`` is set, the UI
+    # renders a text-input modal instead of three buttons; the service maps
+    # the submitted answer + elapsed seconds to one of the three options:
+    #   option 0 = correct + fast (within ``time_window_seconds``)
+    #   option 1 = correct + slow
+    #   option 2 = wrong or timeout (also the safe fallback)
+    timed_input_kind: str | None = None  # "arithmetic" | "riddle" | None
+    time_window_seconds: int = 0         # 0 = no timed input
 
 
 # ---------------------------------------------------------------------------
@@ -1633,7 +1641,456 @@ MECHANIC_REGISTRY: dict[str, BossMechanic] = {
         ),
         safe_option_idx=1,
     ),
+
+    # ================================================================
+    # PINNACLE — Forgotten King
+    # ================================================================
+    "king_decree": BossMechanic(
+        id="king_decree",
+        archetype="court_protocol",
+        trigger_round=3,
+        prompt_title="The King issues a Decree",
+        prompt_description="A bony hand rises. \"Kneel, or be unmade.\"",
+        options=(
+            MechanicOption(
+                label="Kneel — perform the gesture",
+                flavor="You drop to one knee. The crown approves.",
+                outcome_rolls=(
+                    OutcomeRoll(0.70, 0, -1, None, None,         "He nods. Etiquette satisfied. You strike a leg cleanly."),
+                    OutcomeRoll(0.30, -1, 0, None, "bleed",      "He smiles, then kicks you in the ribs. Tradition."),
+                ),
+            ),
+            MechanicOption(
+                label="Strike at the crown",
+                flavor="You vault forward, pick raised.",
+                outcome_rolls=(
+                    OutcomeRoll(0.40, -2, -3, None, None,         "Glancing blow on the crown — he reels."),
+                    OutcomeRoll(0.60, -3, 0, "player", "silence", "His scepter cracks across your jaw. The throne speaks."),
+                ),
+            ),
+            MechanicOption(
+                label="Defy verbally",
+                flavor="\"I owe no king down here.\"",
+                outcome_rolls=(
+                    OutcomeRoll(0.50, -1, -1, None, None,         "He laughs, surprised. A truce of sorts."),
+                    OutcomeRoll(0.50, -2, 0, None, "bleed",       "His ring backhands you. The cut is shallow but deep enough."),
+                ),
+            ),
+        ),
+        safe_option_idx=0,
+    ),
+    "king_feast": BossMechanic(
+        id="king_feast",
+        archetype="hunger_offering",
+        trigger_round=3,
+        prompt_title="The Crowned Hunger demands tribute",
+        prompt_description="His mouth is no longer a mouth. It is a question.",
+        options=(
+            MechanicOption(
+                label="Offer a ration",
+                flavor="You toss your last loaf into the maw.",
+                outcome_rolls=(
+                    OutcomeRoll(0.65, 0, -2, None, None,        "He chews, distracted. You land two clean strikes."),
+                    OutcomeRoll(0.35, -1, -1, None, None,       "He swallows fast and lashes back. Trade."),
+                ),
+            ),
+            MechanicOption(
+                label="Strike the open throat",
+                flavor="You aim at the vulnerable second.",
+                outcome_rolls=(
+                    OutcomeRoll(0.45, 0, -4, None, None,         "Pick through cartilage. He chokes on his own scream."),
+                    OutcomeRoll(0.55, -3, 0, None, "bleed",      "The throat snaps shut on your wrist."),
+                ),
+            ),
+            MechanicOption(
+                label="Empty your pockets and run a step back",
+                flavor="Distraction by surplus.",
+                outcome_rolls=(
+                    OutcomeRoll(0.75, -1, 0, None, None,        "He stoops to scoop coins. You buy a breath."),
+                    OutcomeRoll(0.25, -2, -1, None, None,       "He sees through it but still bites a coin. You both bleed."),
+                ),
+            ),
+        ),
+        safe_option_idx=2,
+    ),
+    "king_deathbed": BossMechanic(
+        id="king_deathbed",
+        archetype="last_words",
+        trigger_round=3,
+        prompt_title="The King speaks his last lesson",
+        prompt_description="His voice frays. He has one truth left to give — or to take.",
+        options=(
+            MechanicOption(
+                label="Listen — let him finish",
+                flavor="You lower your weapon. He nods.",
+                outcome_rolls=(
+                    OutcomeRoll(0.55, 0, -2, None, "reveal",     "He whispers a weakness in his armor. The crown brightens, then dims."),
+                    OutcomeRoll(0.45, -2, 0, None, None,         "His final word was a curse. You stagger."),
+                ),
+            ),
+            MechanicOption(
+                label="End it now",
+                flavor="No last words. No last anything.",
+                outcome_rolls=(
+                    OutcomeRoll(0.50, 0, -3, None, None,          "Your strike lands clean. The court grows silent."),
+                    OutcomeRoll(0.50, -3, 0, "player", None,      "He chose this end and prepared for it. Counter-strike."),
+                ),
+            ),
+            MechanicOption(
+                label="Match his stillness",
+                flavor="You wait, watching the crown.",
+                outcome_rolls=(
+                    OutcomeRoll(0.60, -1, -2, None, None,         "He moves first, but slowly. You catch him on the turn."),
+                    OutcomeRoll(0.40, -2, -1, None, None,         "Both of you blink. Both of you bleed."),
+                ),
+            ),
+        ),
+        safe_option_idx=2,
+    ),
+
+    # ================================================================
+    # PINNACLE — Hollowforged
+    # ================================================================
+    "hollow_walls_close": BossMechanic(
+        id="hollow_walls_close",
+        archetype="environmental_squeeze",
+        trigger_round=3,
+        prompt_title="The walls inhale around you",
+        prompt_description="The chamber narrows. Stone teeth grow from the ceiling.",
+        options=(
+            MechanicOption(
+                label="Climb above the stone teeth",
+                flavor="You scramble up the wall.",
+                outcome_rolls=(
+                    OutcomeRoll(0.65, 0, -2, None, None,         "From above you find a soft seam. Two clean strikes."),
+                    OutcomeRoll(0.35, -2, 0, None, None,         "Your foothold gives. You drop hard."),
+                ),
+            ),
+            MechanicOption(
+                label="Brace and let it close",
+                flavor="You wedge your pick into the wall.",
+                outcome_rolls=(
+                    OutcomeRoll(0.55, -1, -1, None, None,         "The squeeze stalls. Both of you stuck, both of you bleeding."),
+                    OutcomeRoll(0.45, -3, 0, None, "bleed",       "The walls find your ribs. They keep going."),
+                ),
+            ),
+            MechanicOption(
+                label="Dig sideways through the wall",
+                flavor="You commit to a third tunnel.",
+                outcome_rolls=(
+                    OutcomeRoll(0.70, -1, -2, None, None,         "Sideways breakthrough. You strike from outside the squeeze."),
+                    OutcomeRoll(0.30, -2, 0, None, None,          "The wall fights back. You take a face full of grit."),
+                ),
+            ),
+        ),
+        safe_option_idx=2,
+    ),
+    "hollow_shape_shift": BossMechanic(
+        id="hollow_shape_shift",
+        archetype="reform_predict",
+        trigger_round=3,
+        prompt_title="Hollowforged reshapes",
+        prompt_description="The mineral body folds inward, then reassembles in a new outline.",
+        options=(
+            MechanicOption(
+                label="Predict the new edge",
+                flavor="You commit to where it will be.",
+                outcome_rolls=(
+                    OutcomeRoll(0.50, 0, -3, None, None,          "You called it. Pick lands where the wall finishes forming."),
+                    OutcomeRoll(0.50, -2, 0, None, None,          "Wrong guess. The new edge meets your face."),
+                ),
+            ),
+            MechanicOption(
+                label="Wait it out",
+                flavor="You hold ground and watch.",
+                outcome_rolls=(
+                    OutcomeRoll(0.70, -1, -1, None, None,         "Slow trade. You see the new shape and chip what you can."),
+                    OutcomeRoll(0.30, -2, 0, None, "bleed",       "It reshapes around your stillness. A spike grazes your side."),
+                ),
+            ),
+            MechanicOption(
+                label="Charge through the shifting form",
+                flavor="You commit before it solidifies.",
+                outcome_rolls=(
+                    OutcomeRoll(0.40, 0, -4, None, None,           "You catch it half-formed. The body shudders apart."),
+                    OutcomeRoll(0.60, -3, 0, "player", None,       "It hardens around you. You're inside the wall, briefly."),
+                ),
+            ),
+        ),
+        safe_option_idx=1,
+    ),
+    "hollow_many_voices": BossMechanic(
+        id="hollow_many_voices",
+        archetype="distraction_chorus",
+        trigger_round=3,
+        prompt_title="A chorus rises from every wall",
+        prompt_description="The mine speaks at once. Names. Insults. Promises.",
+        options=(
+            MechanicOption(
+                label="Listen for the loudest voice",
+                flavor="You hunt the source.",
+                outcome_rolls=(
+                    OutcomeRoll(0.55, 0, -3, None, "reveal",       "You find the speaker. Pick to vein."),
+                    OutcomeRoll(0.45, -2, 0, None, "silence",      "The voices drown your thoughts. You hesitate."),
+                ),
+            ),
+            MechanicOption(
+                label="Ignore the chorus and swing",
+                flavor="You attack the air at random.",
+                outcome_rolls=(
+                    OutcomeRoll(0.45, -1, -2, None, None,           "You hit something. Hard to say what."),
+                    OutcomeRoll(0.55, -2, 0, None, "bleed",         "The voices were a feint. The real strike came from behind."),
+                ),
+            ),
+            MechanicOption(
+                label="Sing back",
+                flavor="You match their pitch with a curse of your own.",
+                outcome_rolls=(
+                    OutcomeRoll(0.50, -1, -2, None, None,           "The chorus stutters. You step in and chip the wall."),
+                    OutcomeRoll(0.50, -2, -1, None, None,           "Both of you mid-song, both of you bleeding."),
+                ),
+            ),
+        ),
+        safe_option_idx=0,
+    ),
+
+    # ================================================================
+    # PINNACLE — The First Digger
+    # ================================================================
+    "digger_pickaxe_duel": BossMechanic(
+        id="digger_pickaxe_duel",
+        archetype="weapon_duel",
+        trigger_round=3,
+        prompt_title="The First Digger raises his pickaxe",
+        prompt_description="Two diggers, one tunnel. Only one pick will leave whole.",
+        options=(
+            MechanicOption(
+                label="Parry his swing",
+                flavor="You meet pick with pick.",
+                outcome_rolls=(
+                    OutcomeRoll(0.60, -1, -1, None, None,            "Sparks. Both of you push back. Even trade."),
+                    OutcomeRoll(0.40, -2, 0, None, None,             "His pick has more weight than you expected."),
+                ),
+            ),
+            MechanicOption(
+                label="Sidestep and drive in",
+                flavor="You commit to advance.",
+                outcome_rolls=(
+                    OutcomeRoll(0.45, 0, -3, None, None,             "You slip past — pick to the chest."),
+                    OutcomeRoll(0.55, -3, 0, "player", None,         "He pivots faster than you. Your ribs find his haft."),
+                ),
+            ),
+            MechanicOption(
+                label="Lock haft to haft, push him into the wall",
+                flavor="A wrestler's move underground.",
+                outcome_rolls=(
+                    OutcomeRoll(0.55, -1, -2, None, None,            "You out-leverage him. He cracks against stone."),
+                    OutcomeRoll(0.45, -2, -1, None, None,            "He's been at this for a century. You both stagger."),
+                ),
+            ),
+        ),
+        safe_option_idx=0,
+    ),
+    "digger_phasing": BossMechanic(
+        id="digger_phasing",
+        archetype="phase_chase",
+        trigger_round=3,
+        prompt_title="He flickers between solid and not",
+        prompt_description="Half a step out of phase, the Digger blinks through your strikes.",
+        options=(
+            MechanicOption(
+                label="Anticipate his solid moment",
+                flavor="You hold and time the swing.",
+                outcome_rolls=(
+                    OutcomeRoll(0.55, 0, -3, None, None,             "Caught mid-phase. Pick passes through skin first, then air."),
+                    OutcomeRoll(0.45, -2, 0, None, None,             "Wrong moment. You swing through nothing while he was already behind."),
+                ),
+            ),
+            MechanicOption(
+                label="Trap him with terrain",
+                flavor="You back into a corner he must turn through.",
+                outcome_rolls=(
+                    OutcomeRoll(0.65, -1, -2, None, "reveal",        "He has to commit to a direction. You have it covered."),
+                    OutcomeRoll(0.35, -2, 0, None, "silence",        "He passes through stone. He was never going to commit."),
+                ),
+            ),
+            MechanicOption(
+                label="Phase yourself — match his rhythm",
+                flavor="You step out of phase too. Maybe.",
+                outcome_rolls=(
+                    OutcomeRoll(0.40, 0, -4, None, None,              "You both drop into the half-place. You hit harder there."),
+                    OutcomeRoll(0.60, -3, 0, "player", "bleed",       "You weren't ready. He drags you back the wrong way."),
+                ),
+            ),
+        ),
+        safe_option_idx=1,
+    ),
+    "digger_tunnel_collapse": BossMechanic(
+        id="digger_tunnel_collapse",
+        archetype="environmental_collapse",
+        trigger_round=3,
+        prompt_title="The tunnel begins to fold",
+        prompt_description="\"I am the tunnel,\" he says. The walls listen.",
+        options=(
+            MechanicOption(
+                label="Dig out — straight up",
+                flavor="You commit to the surface.",
+                outcome_rolls=(
+                    OutcomeRoll(0.55, -1, 0, None, None,             "You break a vent and stagger. The collapse passes around you."),
+                    OutcomeRoll(0.45, -3, 0, None, "bleed",          "The vent caves. Stone wedges your shoulder."),
+                ),
+            ),
+            MechanicOption(
+                label="Flatten — let it pass over",
+                flavor="You drop and pray.",
+                outcome_rolls=(
+                    OutcomeRoll(0.65, -1, -1, None, None,            "Most of it passes. The last block clips your hip."),
+                    OutcomeRoll(0.35, -3, 0, None, None,             "You weren't flat enough. Something heavy finds you."),
+                ),
+            ),
+            MechanicOption(
+                label="Push deeper — into him",
+                flavor="If he is the tunnel, you can attack the tunnel.",
+                outcome_rolls=(
+                    OutcomeRoll(0.45, 0, -4, None, None,              "You strike the floor — and he flinches."),
+                    OutcomeRoll(0.55, -3, -1, None, None,             "The floor swallows you both. Painful for both of you."),
+                ),
+            ),
+        ),
+        safe_option_idx=1,
+    ),
+
+    # ================================================================
+    # PINNACLE — timed input (arithmetic + riddle)
+    # ================================================================
+    # These mechanics share a different UX: instead of three buttons, the
+    # client renders a text-input modal. Service maps the submitted answer
+    # + elapsed seconds to one of the three "options" below:
+    #   0 = correct + fast    (within time_window_seconds)
+    #   1 = correct + slow    (correct but past the window)
+    #   2 = wrong / timeout   (also safe_option_idx — fallback when the
+    #                          modal times out or is dismissed)
+    "pinnacle_arithmetic_challenge": BossMechanic(
+        id="pinnacle_arithmetic_challenge",
+        archetype="timed_arithmetic",
+        trigger_round=3,
+        prompt_title="A glyph etches itself in the air",
+        prompt_description=(
+            "The boss freezes. Numbers swim in the cavern air — a problem,"
+            " demanding solution. The wrong answer will cost."
+        ),
+        options=(
+            MechanicOption(
+                label="Solved (in time)",
+                flavor="Numbers click into place. The boss reels.",
+                outcome_rolls=(
+                    OutcomeRoll(0.85, 0, -4, None, None,              "Pencil-clean. The arithmetic dissolves; the boss takes the spillover."),
+                    OutcomeRoll(0.15, -1, -3, None, None,             "Right answer, sloppy form. Both of you bleed slightly."),
+                ),
+            ),
+            MechanicOption(
+                label="Solved (slowly)",
+                flavor="The answer was right. The clock was not.",
+                outcome_rolls=(
+                    OutcomeRoll(0.55, -1, -2, None, None,             "Late but right. The boss landed a glancing strike while you finished."),
+                    OutcomeRoll(0.45, -2, -1, None, None,             "Right answer; but the math left you exposed."),
+                ),
+            ),
+            MechanicOption(
+                label="Wrong / timeout",
+                flavor="The boss laughs in 3/4 time.",
+                outcome_rolls=(
+                    OutcomeRoll(0.30, -2, 0, None, "silence",         "Wrong answer. The cavern echoes back your error."),
+                    OutcomeRoll(0.70, -3, 0, None, "bleed",           "Wrong, and the boss takes the gap to drive home a strike."),
+                ),
+            ),
+        ),
+        safe_option_idx=2,
+        timed_input_kind="arithmetic",
+        time_window_seconds=20,
+    ),
+    "pinnacle_riddle_challenge": BossMechanic(
+        id="pinnacle_riddle_challenge",
+        archetype="timed_riddle",
+        trigger_round=3,
+        prompt_title="The boss poses a riddle",
+        prompt_description=(
+            "Voice older than this depth: \"Answer me, and I yield ground."
+            " Stay silent and I take yours.\""
+        ),
+        options=(
+            MechanicOption(
+                label="Solved (in time)",
+                flavor="The riddle's word leaves your mouth before it leaves theirs.",
+                outcome_rolls=(
+                    OutcomeRoll(0.80, 0, -4, None, "reveal",          "Stunned silence. The boss honors the answer with a flinch and a step back."),
+                    OutcomeRoll(0.20, -1, -3, None, None,             "You spoke the right word but mispronounced it. Both of you bleed a little."),
+                ),
+            ),
+            MechanicOption(
+                label="Solved (slowly)",
+                flavor="The answer comes — late.",
+                outcome_rolls=(
+                    OutcomeRoll(0.60, -1, -2, None, None,             "Late but correct. The boss frowns and lets you have a strike."),
+                    OutcomeRoll(0.40, -2, -1, None, None,             "Right answer, wrong tempo. The boss exploits the pause."),
+                ),
+            ),
+            MechanicOption(
+                label="Wrong / timeout",
+                flavor="The riddle asks itself again, louder.",
+                outcome_rolls=(
+                    OutcomeRoll(0.35, -2, 0, None, "silence",         "Your guess hangs in the air. The boss collects on the silence."),
+                    OutcomeRoll(0.65, -3, 0, None, "bleed",           "Wrong answer. The boss strikes through the wrong word."),
+                ),
+            ),
+        ),
+        safe_option_idx=2,
+        timed_input_kind="riddle",
+        time_window_seconds=30,
+    ),
 }
+
+
+# ---------------------------------------------------------------------------
+# Riddle pool (for pinnacle_riddle_challenge)
+# ---------------------------------------------------------------------------
+# Each entry: (riddle_text, [accepted_answers_lowercase]).
+# Answers are matched case-insensitively after .strip(); accept any synonym
+# in the list. Keep riddles dig-themed and short.
+RIDDLE_POOL: list[tuple[str, list[str]]] = [
+    (
+        "I have no light of my own, but I am the brightest thing in this hole. What am I?",
+        ["torch", "lantern", "flame", "fire"],
+    ),
+    (
+        "Lower me and I get heavier. Lift me and I get lighter. What am I?",
+        ["pickaxe", "pick"],
+    ),
+    (
+        "I follow you down but never up. What am I?",
+        ["shadow", "depth", "darkness"],
+    ),
+    (
+        "I am older than the surface and younger than the dark. What am I?",
+        ["stone", "rock", "tunnel"],
+    ),
+    (
+        "Two of us, one of you. The deeper you go, the more we have. What are we?",
+        ["walls", "echoes", "footprints", "echo"],
+    ),
+    (
+        "I am eaten before the fight and felt during it. What am I?",
+        ["fear", "breath", "courage"],
+    ),
+    (
+        "Brittle, but the only thing keeping you alive in deep dark. What am I?",
+        ["light", "lantern", "luminosity", "torch"],
+    ),
+    (
+        "I am dug, never built. I grow with every swing. What am I?",
+        ["tunnel", "hole", "shaft"],
+    ),
+]
 
 
 # ---------------------------------------------------------------------------

@@ -379,7 +379,14 @@ class TestMinerProfile:
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
         monkeypatch.setattr(random, "random", lambda: 0.99)
         dig_service.dig(10001, guild_id)
-        dig_repo.update_tunnel(10001, guild_id, depth=24)
+        # Pin grothak (bruiser, no HP multiplier) so the fight is winnable
+        # for an unequipped cautious player regardless of which tier-25 boss
+        # the locker rolled this run.
+        dig_repo.update_tunnel(
+            10001, guild_id,
+            depth=24,
+            boss_progress=json.dumps({"25": {"boss_id": "grothak", "status": "active"}}),
+        )
 
         monkeypatch.setattr(random, "random", lambda: 0.01)
         result = dig_service.fight_boss(10001, guild_id, "cautious", wager=0)
@@ -392,7 +399,7 @@ class TestMinerProfile:
             10001,
             guild_id,
             depth=24,
-            boss_progress=json.dumps({"25": "active"}),
+            boss_progress=json.dumps({"25": {"boss_id": "grothak", "status": "active"}}),
         )
         result = dig_service.fight_boss(10001, guild_id, "cautious", wager=0)
         assert result["success"]
@@ -985,7 +992,13 @@ class TestBoss:
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
         monkeypatch.setattr(random, "random", lambda: 0.99)
         dig_service.dig(10001, guild_id)
-        dig_repo.update_tunnel(10001, guild_id, depth=24)
+        # Pin grothak (bruiser, no HP multiplier) so the deterministic
+        # random=0.01 fight is winnable for an unequipped cautious player.
+        dig_repo.update_tunnel(
+            10001, guild_id,
+            depth=24,
+            boss_progress=json.dumps({"25": {"boss_id": "grothak", "status": "active"}}),
+        )
 
         # Force win
         monkeypatch.setattr(random, "random", lambda: 0.01)
@@ -1044,8 +1057,9 @@ class TestBoss:
         result = dig_service.prestige(10001, guild_id, "advance_boost")
         assert not result["success"]
 
-        # Now mark ALL bosses defeated
+        # Now mark ALL bosses defeated, including the pinnacle at depth 300.
         all_defeated = {str(b): "defeated" for b in BOSS_BOUNDARIES}
+        all_defeated["300"] = "defeated"
         dig_repo.update_tunnel(10001, guild_id, boss_progress=json.dumps(all_defeated))
         result = dig_service.prestige(10001, guild_id, "advance_boost")
         assert result["success"]
@@ -1060,13 +1074,15 @@ class TestPrestige:
     """Tests for prestige system."""
 
     def _setup_prestige_ready(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """Helper to set up a player ready for prestige (all 7 bosses defeated)."""
+        """Helper to set up a player ready for prestige (all 7 tier bosses
+        plus the pinnacle at depth 300 defeated)."""
         _register_player(player_repository, balance=500)
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
         monkeypatch.setattr(random, "random", lambda: 0.99)
         dig_service.dig(10001, guild_id)
         all_bosses_defeated = {str(b): "defeated" for b in BOSS_BOUNDARIES}
-        dig_repo.update_tunnel(10001, guild_id, depth=280, boss_progress=json.dumps(all_bosses_defeated))
+        all_bosses_defeated["300"] = "defeated"
+        dig_repo.update_tunnel(10001, guild_id, depth=300, boss_progress=json.dumps(all_bosses_defeated))
 
     def test_prestige_resets_depth(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
         """Depth resets to 0."""
@@ -1878,12 +1894,20 @@ class TestBossOdds:
         assert result["won"] is False
 
     def test_fight_boss_cautious_low_roll_wins(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """Cautious fight with low roll (0.01 < 0.75 base odds) should win."""
+        """Cautious fight with low roll (0.01 < 0.75 base odds) should win.
+
+        Pins grothak (bruiser archetype, no HP multiplier) so the fight is
+        deterministic regardless of which tier-25 boss the locker rolled.
+        """
         _register_player(player_repository, balance=200)
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
         monkeypatch.setattr(random, "random", lambda: 0.99)
         dig_service.dig(10001, guild_id)
-        dig_repo.update_tunnel(10001, guild_id, depth=24)
+        dig_repo.update_tunnel(
+            10001, guild_id,
+            depth=24,
+            boss_progress=json.dumps({"25": {"boss_id": "grothak", "status": "active"}}),
+        )
 
         monkeypatch.setattr(random, "random", lambda: 0.01)
         result = dig_service.fight_boss(10001, guild_id, "cautious", wager=0)
@@ -2691,53 +2715,73 @@ class TestAscensionSystem:
         # Level 3 rare_event_multiplier=0.50
         assert effects["rare_event_multiplier"] == 0.50
 
-    def test_boss_phase2_at_prestige_4(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """Boss fight at P4+ returns phase2_incoming on first win."""
+    def test_boss_phase2_at_prestige_2(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+        """Boss fight at P2+ returns phase2_incoming on first win.
+
+        Phase gate was lowered from P4 to P2 in the boss revamp; phase 2
+        unlocks at first prestige cycle so most active players can experience
+        the multi-phase fights.
+        """
         _register_player(player_repository, balance=500)
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
         monkeypatch.setattr(random, "random", lambda: 0.99)
         dig_service.dig(10001, guild_id)
-        dig_repo.update_tunnel(10001, guild_id, depth=24, prestige_level=4)
+        dig_repo.update_tunnel(10001, guild_id, depth=24, prestige_level=2)
 
-        # Cautious @ depth 25, P4 with wager=10: player_hit 0.60 − 0.01 − 0.04
-        # = 0.55 (no free-fight mod). boss_hit=0.30. A roll of 0.35 hits for
-        # the player (<0.55) and misses for the boss (>0.30), so the duel
-        # resolves deterministically against an 8-HP boss.
-        monkeypatch.setattr(random, "random", lambda: 0.35)
+        # Cautious @ depth 25, P2 with wager=10: player_hit 0.60 − 0.01 − 0.02
+        # = 0.57 (no free-fight mod). boss_hit=0.30 + tank archetype offset
+        # depending on rolled boss; we pin grothak (bruiser) below.
+        progress = json.dumps({"25": {"boss_id": "grothak", "status": "active"}})
+        dig_repo.update_tunnel(10001, guild_id, boss_progress=progress)
+        # Player hits, boss misses — alternating roll sequence overrides the
+        # blanket 0.99 set above. Sized for the post-revamp boss HP at P2.
+        rolls = iter([0.0, 0.99] * 100)
+        monkeypatch.setattr(random, "random", lambda: next(rolls))
         result = dig_service.fight_boss(10001, guild_id, "cautious", wager=10)
         assert result["success"]
         assert result.get("won") is True
-        # At P4, boss should enter phase 2 on first victory
+        # At P2+, boss should enter phase 2 on first victory
         assert result.get("phase2_incoming") is True
         assert result.get("phase") == 1
 
         # Boss progress should be "phase1_defeated"
         tunnel = dig_repo.get_tunnel(10001, guild_id)
         bp = json.loads(tunnel["boss_progress"])
-        assert bp["25"] == "phase1_defeated"
+        # boss_progress entry is now a dict; support either shape post-migration.
+        entry = bp["25"]
+        status = entry.get("status") if isinstance(entry, dict) else entry
+        assert status == "phase1_defeated"
 
-    def test_boss_no_phase2_below_prestige_4(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """Boss fight below P4 goes straight to defeated."""
+    def test_boss_no_phase2_below_prestige_2(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+        """Boss fight below P2 goes straight to defeated.
+
+        With the new gate, phase 2 only unlocks at P2+. P0 and P1 players
+        see a single-phase fight and the boss goes directly to ``defeated``.
+        """
         _register_player(player_repository, balance=500)
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
         monkeypatch.setattr(random, "random", lambda: 0.99)
         dig_service.dig(10001, guild_id)
-        dig_repo.update_tunnel(10001, guild_id, depth=24, prestige_level=3)
+        dig_repo.update_tunnel(10001, guild_id, depth=24, prestige_level=1)
+        progress = json.dumps({"25": {"boss_id": "grothak", "status": "active"}})
+        dig_repo.update_tunnel(10001, guild_id, boss_progress=progress)
 
-        # Same rationale as test_boss_phase2_at_prestige_4 but P3 so
-        # prestige penalty is 0.03. player_hit = 0.60 − 0.01 − 0.03 = 0.56
-        # with wager=10. roll=0.35 hits player (<0.56), misses boss (>0.30).
-        monkeypatch.setattr(random, "random", lambda: 0.35)
+        # Player hits, boss misses — alternating roll sequence so the test
+        # deterministically wins despite the post-revamp HP/hit scaling.
+        rolls = iter([0.0, 0.99] * 100)
+        monkeypatch.setattr(random, "random", lambda: next(rolls))
         result = dig_service.fight_boss(10001, guild_id, "cautious", wager=10)
         assert result["success"]
         assert result.get("won") is True
-        # No phase 2 at P3
+        # No phase 2 at P1
         assert result.get("phase2_incoming") is not True
 
         # Boss should go straight to defeated
         tunnel = dig_repo.get_tunnel(10001, guild_id)
         bp = json.loads(tunnel["boss_progress"])
-        assert bp["25"] == "defeated"
+        entry = bp["25"]
+        status = entry.get("status") if isinstance(entry, dict) else entry
+        assert status == "defeated"
 
 
 # =============================================================================
@@ -2865,8 +2909,9 @@ class TestMutationSystem:
         monkeypatch.setattr(random, "random", lambda: 0.99)
         dig_service.dig(10001, guild_id)
         all_bosses_defeated = {str(b): "defeated" for b in BOSS_BOUNDARIES}
+        all_bosses_defeated["300"] = "defeated"
         dig_repo.update_tunnel(
-            10001, guild_id, depth=280,
+            10001, guild_id, depth=300,
             boss_progress=json.dumps(all_bosses_defeated),
             prestige_level=7,  # After prestige will become P8
         )
@@ -2956,9 +3001,10 @@ class TestRunScoring:
         monkeypatch.setattr(random, "random", lambda: 0.99)
         dig_service.dig(10001, guild_id)
         all_bosses_defeated = {str(b): "defeated" for b in BOSS_BOUNDARIES}
+        all_bosses_defeated["300"] = "defeated"
         dig_repo.update_tunnel(
             10001, guild_id,
-            depth=280,
+            depth=300,
             boss_progress=json.dumps(all_bosses_defeated),
             current_run_jc=50,
             current_run_artifacts=3,
@@ -3101,9 +3147,10 @@ class TestHallOfFame:
         monkeypatch.setattr(random, "random", lambda: 0.99)
         dig_service.dig(10001, guild_id)
         all_bosses_defeated = {str(b): "defeated" for b in BOSS_BOUNDARIES}
+        all_bosses_defeated["300"] = "defeated"
         dig_repo.update_tunnel(
             10001, guild_id,
-            depth=280,
+            depth=300,
             boss_progress=json.dumps(all_bosses_defeated),
             current_run_jc=30,
             current_run_artifacts=2,

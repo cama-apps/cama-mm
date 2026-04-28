@@ -624,31 +624,53 @@ def _build_duel_prompt_embed(result) -> discord.Embed:
     player_hp = raw.get("player_hp", 0)
     boss_hp = raw.get("boss_hp", 0)
     round_num = raw.get("round_num", 0)
+    is_pinnacle = bool(raw.get("is_pinnacle"))
+    phase = raw.get("phase")
+    phase_total = raw.get("phase_total")
 
     title = pp.get("prompt_title") or f"{boss_name} acts"
     description = pp.get("prompt_description") or ""
 
+    header_parts = [boss_name, f"Round {round_num}"]
+    if is_pinnacle and phase and phase_total:
+        header_parts.insert(1, f"Phase {phase}/{phase_total}")
+    header = " — ".join(header_parts)
+
     embed = discord.Embed(
-        title=f"{boss_name} — Round {round_num}",
+        title=header,
         description=f"**{title}**\n*{description}*",
-        color=0xFFD700,
+        color=0xB22222 if is_pinnacle else 0xFFD700,
     )
     embed.add_field(
         name="State",
         value=f"You: **{player_hp}** HP  |  {boss_name}: **{boss_hp}** HP",
         inline=False,
     )
-    opts = pp.get("options") or []
-    if opts:
-        lines = [f"**{o['option_idx'] + 1}.** {o['label']}" for o in opts]
+    challenge = raw.get("timed_challenge")
+    if challenge:
+        kind = challenge.get("kind", "challenge")
+        question = challenge.get("question", "?")
+        window = int(challenge.get("time_window_seconds", 0))
         embed.add_field(
-            name="Your choice",
+            name=("Math" if kind == "arithmetic" else ("Riddle" if kind == "riddle" else "Challenge")),
             value=(
-                "\n".join(lines)
-                + "\n\n*(120s before the safe option is auto-picked.)*"
+                f"```{question}```\n"
+                f"Click **Solve** and type your answer. Within **{window}s** for the best outcome."
             ),
             inline=False,
         )
+    else:
+        opts = pp.get("options") or []
+        if opts:
+            lines = [f"**{o['option_idx'] + 1}.** {o['label']}" for o in opts]
+            embed.add_field(
+                name="Your choice",
+                value=(
+                    "\n".join(lines)
+                    + "\n\n*(120s before the safe option is auto-picked.)*"
+                ),
+                inline=False,
+            )
     return embed
 
 
@@ -761,7 +783,80 @@ def _build_boss_fight_result_embed(*, result, risk_tier: str, amount: int) -> di
             ),
             inline=False,
         )
+    # Pinnacle-specific surfaces: phase transition or relic drop.
+    if getattr(result, "is_pinnacle", False):
+        if getattr(result, "phase2_incoming", False) or getattr(result, "phase3_incoming", False):
+            next_title = getattr(result, "next_phase_title", None)
+            event_flavor = getattr(result, "phase_event_flavor", "")
+            event_desc = getattr(result, "phase_event_description", "")
+            value_lines = []
+            if next_title:
+                value_lines.append(f"Next: **{next_title}**")
+            if event_flavor:
+                value_lines.append(f"*{event_flavor}*")
+            if event_desc:
+                value_lines.append(event_desc)
+            if value_lines:
+                embed.add_field(
+                    name="Phase shift",
+                    value="\n".join(value_lines),
+                    inline=False,
+                )
+        if getattr(result, "pinnacle_defeated", False):
+            relic = getattr(result, "pinnacle_relic", None) or {}
+            if relic:
+                embed.add_field(
+                    name=f"Relic: {relic.get('name', '?')}",
+                    value="\n".join(f"• {s}" for s in (relic.get("stats") or [])) or "—",
+                    inline=False,
+                )
+    # Timed-input resolution surface (which option the answer mapped to).
+    challenge_res = getattr(result, "timed_challenge_resolution", None)
+    if challenge_res:
+        if challenge_res.get("correct"):
+            tag = "in time" if challenge_res.get("in_time") else "late"
+            embed.add_field(
+                name="Answer",
+                value=f"`{challenge_res.get('submitted')}` — correct, {tag}.",
+                inline=False,
+            )
+        else:
+            expected = challenge_res.get("expected_answer")
+            embed.add_field(
+                name="Answer",
+                value=(
+                    f"`{challenge_res.get('submitted')}` — wrong."
+                    + (f" The right answer was `{expected}`." if expected else "")
+                ),
+                inline=False,
+            )
     return embed
+
+
+class _TimedAnswerModal(discord.ui.Modal):
+    """Text-input modal for arithmetic / riddle pinnacle prompts.
+
+    The user types their answer; on submit, we forward it to the
+    enclosing ``BossDuelView`` which calls ``submit_timed_answer`` on the
+    service. The service evaluates correctness + elapsed time and maps
+    that to one of the mechanic's three options.
+    """
+
+    def __init__(self, *, view: BossDuelView, question: str, kind: str, window_seconds: int):
+        title_kind = "Math" if kind == "arithmetic" else ("Riddle" if kind == "riddle" else "Answer")
+        super().__init__(title=f"{title_kind} ({window_seconds}s window)"[:45])
+        self._view = view
+        self._answer = discord.ui.TextInput(
+            label=question[:45] or "Your answer",
+            placeholder=question[:100] if len(question) > 45 else "Type your answer here",
+            required=True,
+            max_length=80,
+        )
+        self.add_item(self._answer)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer()
+        await self._view._submit_timed(self._answer.value or "")
 
 
 class BossDuelView(discord.ui.View):
@@ -801,16 +896,32 @@ class BossDuelView(discord.ui.View):
         )
         pp = raw.get("pending_prompt") or {}
         self._safe_option_idx = int(pp.get("safe_option_idx", 0))
-        for opt in pp.get("options", []):
-            idx = int(opt.get("option_idx", 0))
-            label = (opt.get("label") or f"Option {idx + 1}")[:80]
+        # Timed-input prompts (arithmetic / riddle) render a single
+        # "Solve" button that pops a modal — not three option buttons.
+        challenge = raw.get("timed_challenge")
+        self._timed_challenge = challenge
+        if challenge:
+            kind = challenge.get("kind", "challenge")
+            window = int(challenge.get("time_window_seconds", 0))
+            label = f"Solve ({window}s window)"
             btn = discord.ui.Button(
-                label=label,
-                style=discord.ButtonStyle.primary,
-                custom_id=f"duel_opt_{idx}",
+                label=label[:80],
+                style=discord.ButtonStyle.success,
+                custom_id="duel_timed_open",
             )
-            btn.callback = self._make_callback(idx)
+            btn.callback = self._make_timed_callback(kind)
             self.add_item(btn)
+        else:
+            for opt in pp.get("options", []):
+                idx = int(opt.get("option_idx", 0))
+                label = (opt.get("label") or f"Option {idx + 1}")[:80]
+                btn = discord.ui.Button(
+                    label=label,
+                    style=discord.ButtonStyle.primary,
+                    custom_id=f"duel_opt_{idx}",
+                )
+                btn.callback = self._make_callback(idx)
+                self.add_item(btn)
 
     def _make_callback(self, option_idx: int):
         async def callback(interaction: discord.Interaction):
@@ -822,6 +933,46 @@ class BossDuelView(discord.ui.View):
             await interaction.response.defer()
             await self._submit(option_idx)
         return callback
+
+    def _make_timed_callback(self, kind: str):
+        """Open a TextInput modal for arithmetic / riddle prompts."""
+        async def callback(interaction: discord.Interaction):
+            if interaction.user.id != self.user_id:
+                await interaction.response.send_message(
+                    "Only the duelist can answer.", ephemeral=True,
+                )
+                return
+            challenge = self._timed_challenge or {}
+            modal = _TimedAnswerModal(
+                view=self,
+                question=challenge.get("question", "?"),
+                kind=kind,
+                window_seconds=int(challenge.get("time_window_seconds", 0)),
+            )
+            await interaction.response.send_modal(modal)
+        return callback
+
+    async def _submit_timed(self, answer_text: str) -> None:
+        if self._resolved:
+            return
+        self._resolved = True
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                child.disabled = True
+        try:
+            result = _wrap(await asyncio.to_thread(
+                self.dig_service.submit_timed_answer,
+                self.user_id, self.guild_id, answer_text,
+            ))
+        except Exception as e:
+            logger.error("Timed answer submit failed: %s", e, exc_info=True)
+            await self._edit_message(content="Timed answer failed.", embed=None, view=None)
+            return
+        if not getattr(result, "success", True):
+            err = getattr(result, "error", "Timed answer failed.")
+            await self._edit_message(content=err, embed=None, view=None)
+            return
+        await self._render_resolution(result)
 
     async def on_timeout(self):
         if self._resolved:
@@ -848,8 +999,10 @@ class BossDuelView(discord.ui.View):
             err = getattr(result, "error", "Duel resume failed.")
             await self._edit_message(content=err, embed=None, view=None)
             return
+        await self._render_resolution(result)
 
-        # Follow-up prompt (multi-prompt future-proofing; not v1 content).
+    async def _render_resolution(self, result) -> None:
+        """Render either a follow-up prompt or the final fight outcome."""
         if getattr(result, "pending_prompt", None):
             new_view = BossDuelView(
                 dig_service=self.dig_service,
@@ -864,7 +1017,6 @@ class BossDuelView(discord.ui.View):
             self.stop()
             return
 
-        # Resolved — render the final outcome.
         embed = _build_boss_fight_result_embed(
             result=result, risk_tier=self.risk_tier, amount=self.wager,
         )
@@ -2531,6 +2683,12 @@ class DigCommands(commands.Cog):
             embed.add_field(name="Boss", value="A boss blocks your path!", inline=True)
         elif next_boss:
             embed.add_field(name="Next Boss", value=f"Depth {next_boss}", inline=True)
+
+        # Pinnacle foreshadow — fires only after all 7 tier bosses cleared
+        # and pinnacle still pending. Subtle, no explicit depth.
+        foreshadow = info.get("pinnacle_foreshadow") if isinstance(info, dict) else None
+        if foreshadow:
+            embed.add_field(name="​", value=f"*{foreshadow}*", inline=False)
 
         # Insurance / reinforcement
         now = int(time.time())

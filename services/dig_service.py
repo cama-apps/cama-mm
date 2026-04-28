@@ -10,6 +10,7 @@ import json
 import logging
 import random
 import time
+import unicodedata
 
 from domain.models.dig_gear import GearLoadout, GearPiece, GearSlot
 from repositories.dig_repository import DigRepository
@@ -18,17 +19,23 @@ from services.dig_constants import (
     ACHIEVEMENTS,
     ARTIFACT_POOL,
     ASCENSION_MODIFIERS,
+    BOSS_ARCHETYPE_BY_ID,
+    BOSS_ARCHETYPES,
     BOSS_ASCII,
     BOSS_BOUNDARIES,
     BOSS_DIALOGUE,
+    BOSS_DIALOGUE_V2,
     BOSS_DUEL_STATS,
     BOSS_FREE_FIGHT_ACCURACY_MOD,
-    BOSS_HP_PER_40_DEPTH,
-    BOSS_HP_PER_PRESTIGE,
+    BOSS_HP_REGEN_PER_HOUR,
     BOSS_NAMES,
     BOSS_PAYOUTS,
     BOSS_PHASE2,
+    BOSS_PHASE3,
+    BOSS_PHASES,
+    BOSS_PRESTIGE_BONUS,
     BOSS_ROUND_CAP,
+    BOSS_TIER_BONUS,
     CAVE_IN_BLOCK_LOSS_MAX,
     CAVE_IN_BLOCK_LOSS_MIN,
     CONSUMABLE_ITEMS,
@@ -51,37 +58,55 @@ from services.dig_constants import (
     LUMINOSITY_DARK,
     LUMINOSITY_DARK_CAVE_IN_BONUS,
     LUMINOSITY_DARK_EVENT_MULTIPLIER,
+    LUMINOSITY_DARK_HIT_PENALTY,
     LUMINOSITY_DARK_JC_MULTIPLIER,
     LUMINOSITY_DARK_RISKY_PENALTY,
     LUMINOSITY_DIM,
     LUMINOSITY_DIM_CAVE_IN_BONUS,
     LUMINOSITY_DIM_EVENT_MULTIPLIER,
+    LUMINOSITY_DIM_HIT_PENALTY,
     LUMINOSITY_DRAIN_PER_DIG,
     LUMINOSITY_MAX,
     LUMINOSITY_PITCH_BLACK,
+    LUMINOSITY_PITCH_BOSS_DMG_BONUS,
     LUMINOSITY_PITCH_CAVE_IN_BONUS,
     LUMINOSITY_PITCH_EVENT_MULTIPLIER,
     LUMINOSITY_PITCH_FORCE_RISKY,
+    LUMINOSITY_PITCH_HIT_PENALTY,
     LUMINOSITY_PITCH_JC_MULTIPLIER,
+    LUMINOSITY_REFILL_PER_DAY,
     MAX_INVENTORY_SIZE,
     MAX_PRESTIGE,
     MILESTONES,
     MUTATION_BY_ID,
     MUTATIONS_POOL,
     PAID_DIG_COSTS,
+    PHASE_TRANSITION_EVENTS,
     PICKAXE_TIERS,
+    PINNACLE_BASE_JC_REWARD,
+    PINNACLE_BOSSES,
+    PINNACLE_DEPTH,
+    PINNACLE_FORESHADOW_LINES,
+    PINNACLE_JC_PER_PRESTIGE,
+    PINNACLE_POOL_IDS,
+    PINNACLE_RELIC_BASE_NAME,
+    PINNACLE_RELIC_STAT_POOL,
+    PINNACLE_RELIC_SUFFIX_POOL,
     PLAYER_HIT_CEILING,
     PLAYER_HIT_FLOOR,
-    PLAYER_HIT_PENALTY_PER_25_DEPTH,
-    PLAYER_HIT_PENALTY_PER_PRESTIGE,
     PRESTIGE_PERKS,
     RELIC_SLOTS_BASE,
+    RETREAT_BLOCK_LOSS_MAX,
+    RETREAT_BLOCK_LOSS_MIN,
+    RETREAT_COOLDOWN_SECONDS,
     STREAKS,
     TUNNEL_NAME_ADJECTIVES,
     TUNNEL_NAME_NOUNS,
     TUNNEL_NAME_SILLY,
     TUNNEL_NAME_TITLES,
     WEATHER_BY_ID,
+    WIN_CHANCE_CAP,
+    WIN_CHANCE_FLOOR,
 )
 
 logger = logging.getLogger("cama_bot.services.dig")
@@ -150,7 +175,25 @@ def _approx_duel_win_prob(
                 php -= boss_dmg
             if php <= 0:
                 break
-    return wins / trials
+    raw = wins / trials
+    return max(WIN_CHANCE_FLOOR, min(WIN_CHANCE_CAP, raw))
+
+
+def _luminosity_combat_penalty(luminosity: int) -> tuple[float, int]:
+    """Translate current luminosity into (player_hit_offset, boss_dmg_bonus).
+
+    Bright (>=76) → (0, 0)
+    Dim (26-75) → (-0.03, 0)
+    Dark (1-25) → (-0.08, 0)
+    Pitch black (0) → (-0.15, +1)
+    """
+    if luminosity >= LUMINOSITY_BRIGHT:
+        return (0.0, 0)
+    if luminosity >= LUMINOSITY_DIM:
+        return (-LUMINOSITY_DIM_HIT_PENALTY, 0)
+    if luminosity >= LUMINOSITY_DARK:
+        return (-LUMINOSITY_DARK_HIT_PENALTY, 0)
+    return (-LUMINOSITY_PITCH_HIT_PENALTY, LUMINOSITY_PITCH_BOSS_DMG_BONUS)
 
 
 # Pre-compute which event IDs have art assets (disk or PIL).
@@ -590,6 +633,142 @@ class DigService:
         out["boss_dmg"] = int(base["boss_dmg"])
         return out
 
+    def _resolve_persisted_boss_hp(
+        self,
+        boss_progress: dict,
+        at_boss: int | str,
+        fresh_hp: int,
+        now: int,
+    ) -> tuple[int, int]:
+        """Apply persisted-HP carry-over and time-based regen to a boss fight.
+
+        Returns ``(starting_hp, hp_max)``. ``hp_max`` is always ``fresh_hp``
+        (the freshly-computed scaled boss HP for this fight) so the boss can
+        regen back to it. ``starting_hp`` is:
+          - ``hp_remaining`` from the last unfinished engagement, plus regen
+            of ``BOSS_HP_REGEN_PER_HOUR`` per hour since ``last_engaged_at``,
+            capped at ``hp_max``;
+          - ``fresh_hp`` if no persisted HP exists.
+
+        ``at_boss`` is normally an int boundary depth (e.g. 25), but pinnacle
+        callers pass a composite phase key string like ``"300:1"``.
+        """
+        entry = boss_progress.get(str(at_boss))
+        if not isinstance(entry, dict):
+            return fresh_hp, fresh_hp
+        hp_remaining = entry.get("hp_remaining")
+        hp_max = entry.get("hp_max", fresh_hp)
+        if hp_remaining is None or hp_max is None:
+            return fresh_hp, fresh_hp
+        try:
+            hp_remaining = int(hp_remaining)
+            hp_max = int(hp_max)
+        except (TypeError, ValueError):
+            return fresh_hp, fresh_hp
+        last_engaged = entry.get("last_engaged_at")
+        if last_engaged is not None:
+            try:
+                hours_since = max(0, (now - int(last_engaged)) // 3600)
+            except (TypeError, ValueError):
+                hours_since = 0
+            hp_remaining = min(hp_max, hp_remaining + hours_since * BOSS_HP_REGEN_PER_HOUR)
+        return max(1, hp_remaining), hp_max
+
+    def _persist_boss_hp_after_fight(
+        self,
+        boss_progress: dict,
+        at_boss: int | str,
+        boss_id: str,
+        ending_hp: int,
+        hp_max: int,
+        won: bool,
+        outcome: str,
+        now: int,
+    ) -> None:
+        """Update boss_progress entry with post-fight HP and outcome.
+
+        Caller writes ``boss_progress`` back to the database afterwards. The
+        function only mutates the dict in place. ``ending_hp`` is the boss
+        HP at the moment the fight ended (0 on a player win, otherwise the
+        leftover after the duel loop). ``at_boss`` is normally an int boundary
+        depth (e.g. 25), but pinnacle callers pass a composite phase key
+        string like ``"300:1"``.
+        """
+        raw = boss_progress.get(str(at_boss))
+        if isinstance(raw, dict):
+            entry = dict(raw)
+        elif isinstance(raw, str):
+            entry = {"status": raw}
+        else:
+            entry = {}
+        entry["hp_remaining"] = max(0, int(ending_hp))
+        entry["hp_max"] = int(hp_max)
+        entry["last_engaged_at"] = int(now)
+        entry["last_outcome"] = outcome
+        entry["first_meet_seen"] = True
+        if boss_id and not entry.get("boss_id"):
+            entry["boss_id"] = boss_id
+        if not won:
+            entry.setdefault("status", "active")
+        boss_progress[str(at_boss)] = entry
+
+    def _scale_boss_stats(
+        self,
+        stats: dict,
+        *,
+        boss_id: str,
+        at_boss: int,
+        prestige_level: int,
+        echo_applied: bool = False,
+        archetype_name: str | None = None,
+    ) -> dict:
+        """Apply archetype + depth + prestige + echo to boss-side stats.
+
+        Returns ``(boss_hp, boss_hit, boss_dmg)`` keys updated. Player-side
+        stats are passed through; the caller still applies depth/prestige
+        hit penalties, cheers, phase2/3 penalties, lum penalty, and clamping
+        to player_hit. Order: archetype first, then linear depth/prestige
+        scaling, then echo HP discount.
+
+        ``archetype_name`` overrides the per-boss archetype lookup — used
+        by the pinnacle resolver to apply a different archetype per phase
+        (e.g. Forgotten King: Tank → Glass Cannon → Slippery).
+        """
+        if archetype_name is None:
+            archetype_name = BOSS_ARCHETYPE_BY_ID.get(boss_id, "bruiser")
+        archetype = BOSS_ARCHETYPES.get(archetype_name, BOSS_ARCHETYPES["bruiser"])
+
+        # Boundary key for the tier lookup. Pinnacle uses depth 300; for
+        # off-boundary calls (defensive), pick the highest boundary <= at_boss.
+        tier_key = at_boss if at_boss in BOSS_TIER_BONUS else max(
+            (k for k in BOSS_TIER_BONUS if k <= at_boss), default=25,
+        )
+        tier = BOSS_TIER_BONUS[tier_key]
+        prestige = BOSS_PRESTIGE_BONUS.get(prestige_level, BOSS_PRESTIGE_BONUS[max(BOSS_PRESTIGE_BONUS)])
+
+        # Boss HP: archetype mult, then tier+prestige adds from tables, then echo.
+        boss_hp = float(stats["boss_hp"]) * archetype["hp_mult"]
+        boss_hp += tier["hp"] + prestige["hp"]
+        boss_hp = max(1, int(round(boss_hp)))
+        if echo_applied:
+            boss_hp = max(1, int(round(boss_hp * 0.75)))
+
+        # Boss hit: archetype offset + tier + prestige, clamped.
+        boss_hit = float(stats["boss_hit"]) + archetype["hit_offset"]
+        boss_hit += tier["hit"] + prestige["hit"]
+        boss_hit = max(0.05, min(0.95, boss_hit))
+
+        # Boss dmg: archetype offset + tier + prestige, floored at 1.
+        boss_dmg = int(stats["boss_dmg"]) + int(archetype["dmg_offset"])
+        boss_dmg += int(tier["dmg"]) + int(prestige["dmg"])
+        boss_dmg = max(1, boss_dmg)
+
+        out = dict(stats)
+        out["boss_hp"] = boss_hp
+        out["boss_hit"] = boss_hit
+        out["boss_dmg"] = boss_dmg
+        return out
+
     def _get_active_pickaxe_tier(self, discord_id: int, guild_id, tunnel: dict) -> int:
         """Tier index used by dig-flow code.
 
@@ -930,12 +1109,134 @@ class DigService:
         return None
 
     def _at_boss_boundary(self, depth: int, boss_progress: dict) -> int | None:
-        """Return the boss boundary if depth is exactly at one and boss is active or in phase 1."""
+        """Return the boss boundary if depth is exactly at one and boss is in
+        an unfinished state (active / phase1_defeated / phase2_defeated).
+
+        The pinnacle (depth 300) is gated: it only fires once all 7 prior
+        tier bosses are marked defeated.
+        """
         for b in BOSS_BOUNDARIES:
-            status = boss_progress.get(str(b))
-            if depth == b - 1 and status in ("active", "phase1_defeated"):
+            entry = boss_progress.get(str(b))
+            status = entry.get("status") if isinstance(entry, dict) else entry
+            if depth == b - 1 and status in ("active", "phase1_defeated", "phase2_defeated"):
                 return b
+        # Pinnacle: triggers after all 7 tiers cleared, when depth hits PINNACLE_DEPTH-1.
+        if depth == PINNACLE_DEPTH - 1:
+            all_tiers_cleared = all(
+                (
+                    (e.get("status") if isinstance(e, dict) else e) == "defeated"
+                )
+                for b in BOSS_BOUNDARIES
+                for e in (boss_progress.get(str(b)),)
+                if e is not None
+            ) and len([
+                b for b in BOSS_BOUNDARIES if boss_progress.get(str(b)) is not None
+            ]) == len(BOSS_BOUNDARIES)
+            pinnacle_entry = boss_progress.get(str(PINNACLE_DEPTH))
+            pinnacle_status = (
+                pinnacle_entry.get("status") if isinstance(pinnacle_entry, dict)
+                else pinnacle_entry
+            )
+            if all_tiers_cleared and pinnacle_status in (
+                None, "active", "phase1_defeated", "phase2_defeated",
+            ):
+                return PINNACLE_DEPTH
         return None
+
+    def _is_pinnacle_depth(self, depth: int) -> bool:
+        """True if the given depth is the pinnacle boundary."""
+        return depth == PINNACLE_DEPTH
+
+    def _ensure_pinnacle_locked(
+        self, discord_id: int, guild_id, tunnel: dict,
+    ) -> str:
+        """Roll + persist the tunnel's pinnacle from PINNACLE_POOL_IDS.
+
+        Returns the locked ``pinnacle_boss_id`` (Slay-the-Spire-style
+        rotating pool). Idempotent: once locked, subsequent calls return
+        the same id. Stored on ``tunnels.pinnacle_boss_id``.
+        """
+        existing = tunnel.get("pinnacle_boss_id")
+        if existing and existing in PINNACLE_BOSSES:
+            return existing
+        choice = random.Random().choice(PINNACLE_POOL_IDS)
+        self.dig_repo.update_tunnel(
+            discord_id, guild_id,
+            pinnacle_boss_id=choice,
+            pinnacle_phase=1,  # start at phase 1
+        )
+        tunnel["pinnacle_boss_id"] = choice
+        tunnel["pinnacle_phase"] = 1
+        return choice
+
+    def _render_boss_bark(self, template: str, tunnel: dict) -> str:
+        """Render a dialogue line by substituting stat-aware tokens.
+
+        Supported tokens:
+          {streak}          → streak_days (defaults to 1)
+          {depth}           → current depth
+          {prestige}        → current prestige_level
+          {killed_boss_name} → name of a previously defeated boss in this delve;
+                                falls back to "the early dark" when none.
+        Lines without tokens render verbatim.
+        """
+        try:
+            killed_name = "the early dark"
+            try:
+                bp = json.loads(tunnel.get("boss_progress") or "{}")
+                defeated_ids = []
+                for _depth, entry in bp.items():
+                    status = entry.get("status") if isinstance(entry, dict) else entry
+                    boss_id = entry.get("boss_id", "") if isinstance(entry, dict) else ""
+                    if status == "defeated" and boss_id:
+                        defeated_ids.append(boss_id)
+                if defeated_ids:
+                    from services.dig_constants import (
+                        get_boss_by_id as _get_boss_by_id,
+                    )
+                    boss_def = _get_boss_by_id(random.choice(defeated_ids))
+                    if boss_def is not None:
+                        killed_name = boss_def.name
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+            return template.format(
+                streak=tunnel.get("streak_days", 1) or 1,
+                depth=tunnel.get("depth", 0) or 0,
+                prestige=tunnel.get("prestige_level", 0) or 0,
+                killed_boss_name=killed_name,
+            )
+        except (KeyError, IndexError):
+            return template
+
+    def _pick_boss_dialogue_line(
+        self, boss_id: str, slot: str, fallback: str,
+    ) -> str:
+        """Random-pick a hand-authored line from BOSS_DIALOGUE_V2[boss_id][slot].
+
+        Falls back to ``fallback`` when the boss or slot is missing — this
+        keeps grandfathered bosses without a v2 entry from breaking the embed.
+        """
+        boss_lines = BOSS_DIALOGUE_V2.get(boss_id, {}).get(slot, [])
+        if not boss_lines:
+            return fallback
+        return random.choice(boss_lines)
+
+    def _read_boss_progress_entry(self, boss_progress: dict, boundary: int) -> dict:
+        """Normalize a boss_progress entry to dict shape with default fields.
+
+        Legacy string values (``"active"`` / ``"defeated"`` / ``"phase1_defeated"``)
+        are wrapped as ``{"status": <string>}``. Missing fields default to
+        ``status="active"``.
+        """
+        raw = boss_progress.get(str(boundary))
+        if raw is None:
+            return {"status": "active"}
+        if isinstance(raw, str):
+            return {"status": raw}
+        if isinstance(raw, dict):
+            return dict(raw)  # caller-mutable copy
+        return {"status": "active"}
 
     def _build_boss_info(
         self, discord_id: int, guild_id, tunnel: dict, boundary: int,
@@ -943,19 +1244,342 @@ class DigService:
         """Build the boss encounter payload for a boundary.
 
         Locks a specific boss for this tunnel at this tier (idempotent), then
-        uses that boss's name/dialogue/ascii. The returned ``boss_id`` flows
-        through to the UI so ``get_boss_art`` resolves the correct PNG.
+        picks a dialogue line from ``BOSS_DIALOGUE_V2`` keyed on
+        ``first_meet`` / ``after_<last_outcome>`` if available, falling back
+        to the legacy v1 dialogue list. Tokens like ``{streak}`` are
+        substituted via ``_render_boss_bark``.
+
+        For the pinnacle (depth 300), uses the rotating PINNACLE_BOSSES
+        pool and the per-phase title/archetype.
+
+        Updates ``first_meet_seen`` so the first-meet line only fires once
+        per delve.
         """
+        if self._is_pinnacle_depth(boundary):
+            return self._build_pinnacle_info(discord_id, guild_id, tunnel)
+
         boss = self._ensure_boss_locked(discord_id, guild_id, tunnel, boundary)
         attempts = tunnel.get("boss_attempts", 0) or 0
-        dialogue_list = boss.dialogue or BOSS_DIALOGUE.get(boundary, ["..."])
+
+        boss_progress = json.loads(tunnel.get("boss_progress") or "{}")
+        entry = self._read_boss_progress_entry(boss_progress, boundary)
+        last_outcome = entry.get("last_outcome")
+        first_meet_seen = bool(entry.get("first_meet_seen", False))
+
+        # Choose dialogue slot.
+        if not first_meet_seen:
+            slot = "first_meet"
+        elif last_outcome in ("defeated", "retreat", "scout", "close_win"):
+            slot = f"after_{last_outcome}"
+        else:
+            slot = "first_meet"  # default to first-meet flavor when no history
+
+        v1_fallback_list = boss.dialogue or BOSS_DIALOGUE.get(boundary, ["..."])
+        v1_fallback = v1_fallback_list[min(attempts, len(v1_fallback_list) - 1)]
+        line = self._pick_boss_dialogue_line(boss.boss_id, slot, v1_fallback)
+        rendered = self._render_boss_bark(line, tunnel)
+
+        # Mark first-meet seen so subsequent encounters use outcome-aware lines.
+        if not first_meet_seen:
+            entry["first_meet_seen"] = True
+            # Preserve boss_id when present (multi-boss tier lookup).
+            entry.setdefault("boss_id", boss.boss_id)
+            boss_progress[str(boundary)] = entry
+            self.dig_repo.update_tunnel(
+                discord_id, guild_id,
+                boss_progress=json.dumps(boss_progress),
+            )
+            tunnel["boss_progress"] = json.dumps(boss_progress)
+
         return {
             "boundary": boundary,
             "boss_id": boss.boss_id,
             "name": boss.name,
-            "dialogue": dialogue_list[min(attempts, len(dialogue_list) - 1)],
+            "dialogue": rendered,
             "ascii_art": boss.ascii_art or BOSS_ASCII.get(boundary, ""),
         }
+
+    def _build_pinnacle_info(
+        self, discord_id: int, guild_id, tunnel: dict,
+    ) -> dict:
+        """Build the pinnacle encounter payload (depth 300).
+
+        Locks a pinnacle boss from the rotating pool on first encounter,
+        then returns the current-phase title and a dialogue line from
+        BOSS_DIALOGUE_V2. The 3-phase structure is persisted on the tunnel
+        in ``pinnacle_phase`` (1..3).
+        """
+        pinnacle_id = self._ensure_pinnacle_locked(discord_id, guild_id, tunnel)
+        pinnacle = PINNACLE_BOSSES[pinnacle_id]
+        phase_idx = max(1, min(3, int(tunnel.get("pinnacle_phase", 1) or 1)))
+        phase_def = pinnacle.phases[phase_idx - 1]
+
+        boss_progress = json.loads(tunnel.get("boss_progress") or "{}")
+        entry = self._read_boss_progress_entry(boss_progress, PINNACLE_DEPTH)
+        last_outcome = entry.get("last_outcome")
+        first_meet_seen = bool(entry.get("first_meet_seen", False))
+
+        if not first_meet_seen:
+            slot = "first_meet"
+        elif last_outcome in ("defeated", "retreat", "scout", "close_win"):
+            slot = f"after_{last_outcome}"
+        else:
+            slot = "first_meet"
+
+        # Hand-authored fallback uses the phase transition_dialogue, then
+        # the canonical first_meet pool from BOSS_DIALOGUE_V2[pinnacle_id].
+        fallback = (
+            phase_def.transition_dialogue[0]
+            if phase_def.transition_dialogue
+            else (BOSS_DIALOGUE_V2.get(pinnacle_id, {}).get("first_meet", ["..."])[0])
+        )
+        line = self._pick_boss_dialogue_line(pinnacle_id, slot, fallback)
+        rendered = self._render_boss_bark(line, tunnel)
+
+        if not first_meet_seen:
+            entry["first_meet_seen"] = True
+            entry.setdefault("boss_id", pinnacle_id)
+            boss_progress[str(PINNACLE_DEPTH)] = entry
+            self.dig_repo.update_tunnel(
+                discord_id, guild_id,
+                boss_progress=json.dumps(boss_progress),
+            )
+            tunnel["boss_progress"] = json.dumps(boss_progress)
+
+        return {
+            "boundary": PINNACLE_DEPTH,
+            "boss_id": pinnacle_id,
+            "name": phase_def.title,
+            "dialogue": rendered,
+            "ascii_art": pinnacle.ascii_art,
+            "is_pinnacle": True,
+            "phase": phase_idx,
+            "phase_total": 3,
+        }
+
+    def _pinnacle_foreshadow_line(self, tunnel: dict) -> str | None:
+        """Return a subtle foreshadowing line for /dig info if the player
+        has cleared all 7 tier bosses but not yet defeated the pinnacle.
+
+        The line never names the depth — players discover the pinnacle by
+        digging into it.
+        """
+        boss_progress = json.loads(tunnel.get("boss_progress") or "{}")
+        all_tiers_cleared = (
+            len(boss_progress) >= len(BOSS_BOUNDARIES)
+            and all(
+                (e.get("status") if isinstance(e, dict) else e) == "defeated"
+                for b in BOSS_BOUNDARIES
+                for e in (boss_progress.get(str(b)),)
+                if e is not None
+            )
+        )
+        if not all_tiers_cleared:
+            return None
+        pinnacle_entry = boss_progress.get(str(PINNACLE_DEPTH))
+        pinnacle_status = (
+            pinnacle_entry.get("status") if isinstance(pinnacle_entry, dict)
+            else pinnacle_entry
+        )
+        if pinnacle_status == "defeated":
+            return None
+        return random.choice(PINNACLE_FORESHADOW_LINES)
+
+    def _drop_pinnacle_relic(
+        self, discord_id: int, guild_id, tunnel: dict, pinnacle_id: str,
+    ) -> dict:
+        """Roll and persist a pinnacle relic with 2 random stats.
+
+        Returns the relic descriptor (name, stats, prestige_at_drop) for
+        the embed. Stores it as a `dig_artifacts` row with a synthetic
+        artifact_id of the form ``pinnacle:<base>:<suffix>:<stat1>:<stat2>``.
+        Combat-affecting stats are decoded and folded into combat math via
+        ``_apply_pinnacle_relic_stats`` when the relic is equipped.
+        """
+        prestige_level = tunnel.get("prestige_level", 0) or 0
+        base_name = PINNACLE_RELIC_BASE_NAME[pinnacle_id]
+        suffix = random.choice(PINNACLE_RELIC_SUFFIX_POOL)
+        # Pick two distinct stats from the pool.
+        stat_pool = list(PINNACLE_RELIC_STAT_POOL)
+        random.shuffle(stat_pool)
+        rolled_stats = stat_pool[:2]
+        stat_ids = [s.id for s in rolled_stats]
+        artifact_id = f"pinnacle:{base_name}:{suffix}:{stat_ids[0]}:{stat_ids[1]}"
+        relic_db_id = self.dig_repo.add_artifact(
+            discord_id, guild_id, artifact_id, is_relic=True,
+        )
+        return {
+            "name": f"{base_name} of {suffix}",
+            "stats": [s.label for s in rolled_stats],
+            "stat_ids": stat_ids,
+            "prestige_at_drop": prestige_level,
+            "artifact_id": artifact_id,
+            "db_id": relic_db_id,
+        }
+
+    def _apply_pinnacle_relic_stats(
+        self,
+        out: dict,
+        loadout,
+    ) -> dict:
+        """Fold combat-relevant pinnacle relic stats into a stats dict.
+
+        Pinnacle relics carry rolled stats encoded in their artifact_id
+        (``pinnacle:<base>:<suffix>:<stat1>:<stat2>``). Stats that affect
+        combat (player_hp, player_hit, boss_hit, boss_payout, boss_hp
+        multiplier) are decoded and applied to ``out`` here. Dig/utility
+        stats (jc_multiplier, cave_in_reduction, etc.) are surfaced via a
+        separate aggregator at dig time.
+        """
+        for relic in loadout.relics or []:
+            aid = relic.get("artifact_id", "") or ""
+            if not aid.startswith("pinnacle:"):
+                continue
+            parts = aid.split(":")
+            # ["pinnacle", base, suffix, stat1, stat2]
+            if len(parts) < 5:
+                continue
+            for stat_id in parts[3:]:
+                self._apply_pinnacle_stat(stat_id, out)
+        return out
+
+    def _apply_pinnacle_stat(self, stat_id: str, out: dict) -> None:
+        """Apply a single pinnacle stat by id to a combat stats dict."""
+        if stat_id == "hp_plus_1":
+            out["player_hp"] = int(out.get("player_hp", 0)) + 1
+        elif stat_id == "hit_plus_002":
+            out["player_hit"] = float(out.get("player_hit", 0)) + 0.02
+        elif stat_id == "boss_hit_minus":
+            out["boss_hit"] = max(0.05, float(out.get("boss_hit", 0)) - 0.02)
+        elif stat_id == "dmg_plus_per_100":
+            # Applied lazily — this is the only stat that depends on at_boss.
+            # The fight_boss path picks it up via _apply_pinnacle_depth_dmg.
+            pass
+        # Other stats (jc_multiplier, cave_in_reduction, lum_refill, etc.)
+        # apply at dig-time, not boss-fight time. They're aggregated separately.
+
+    def _generate_timed_challenge(self, kind: str) -> dict:
+        """Generate a timed-input challenge for a pinnacle mechanic.
+
+        Returns a dict with:
+          - kind: "arithmetic" | "riddle"
+          - question: the text to show the player
+          - answer_canonical: a string used to evaluate (lowercased, stripped)
+          - accepted: list of accepted lowercase answers (riddles can have synonyms)
+          - time_window_seconds: how many seconds counts as "fast"
+          - started_at: unix timestamp at challenge generation
+        """
+        now = int(time.time())
+        if kind == "arithmetic":
+            # (2-9) * (2-9) + (1-9), as the user spec'd. Always non-negative.
+            a = random.randint(2, 9)
+            b = random.randint(2, 9)
+            c = random.randint(1, 9)
+            answer = a * b + c
+            return {
+                "kind": "arithmetic",
+                "question": f"{a} * {b} + {c} = ?",
+                "answer_canonical": str(answer),
+                "accepted": [str(answer)],
+                "time_window_seconds": 20,
+                "started_at": now,
+            }
+        if kind == "riddle":
+            from domain.models.boss_mechanics import RIDDLE_POOL as _POOL
+            text, accepted = random.choice(_POOL)
+            return {
+                "kind": "riddle",
+                "question": text,
+                "answer_canonical": accepted[0],
+                "accepted": [a.lower().strip() for a in accepted],
+                "time_window_seconds": 30,
+                "started_at": now,
+            }
+        # Unknown kind — pretend timeout.
+        return {
+            "kind": kind, "question": "?", "answer_canonical": "",
+            "accepted": [], "time_window_seconds": 0, "started_at": now,
+        }
+
+    def _evaluate_timed_answer(
+        self, challenge: dict, answer_text: str, now: int,
+    ) -> int:
+        """Map a submitted answer + elapsed time to one of three options.
+
+        Returns 0 for correct+fast, 1 for correct+slow, 2 for wrong/timeout.
+        """
+        if not challenge:
+            return 2
+        def _norm(s: str) -> str:
+            return " ".join(unicodedata.normalize("NFKD", s or "").lower().split())
+        cleaned = _norm(answer_text)
+        accepted = [_norm(a) for a in challenge.get("accepted", [])]
+        is_correct = bool(cleaned and cleaned in accepted)
+        elapsed = max(0, int(now) - int(challenge.get("started_at", now)))
+        within_window = elapsed <= int(challenge.get("time_window_seconds", 0))
+        if is_correct and within_window:
+            return 0
+        if is_correct:
+            return 1
+        return 2
+
+    def submit_timed_answer(
+        self, discord_id: int, guild_id, answer_text: str,
+    ) -> dict:
+        """Player-submitted answer for an active timed-input pinnacle prompt.
+
+        Reads the active duel state, evaluates the answer against the
+        persisted challenge, and resumes the duel with the mapped option_idx.
+
+        Uses ``claim_active_duel`` (atomic read-and-delete) so a second
+        concurrent submission — e.g. a duplicate Discord modal ``on_submit``
+        from a network retry — gets ``None`` and bails out instead of
+        triggering a double resolution.
+        """
+        state_row = self.dig_repo.claim_active_duel(discord_id, guild_id)
+        if state_row is None:
+            return self._error("No active timed prompt to submit.")
+        try:
+            status_effects = json.loads(state_row["status_effects"] or "{}")
+        except (json.JSONDecodeError, TypeError):
+            status_effects = {}
+        challenge = status_effects.get("timed_challenge")
+        if not challenge:
+            return self._error("Active prompt is not a timed-input challenge.")
+        option_idx = self._evaluate_timed_answer(
+            challenge, answer_text, int(time.time()),
+        )
+        result = self.resume_boss_duel(
+            discord_id, guild_id, option_idx=option_idx, state_row=state_row,
+        )
+        # Surface what the player was being asked, plus the resolution outcome,
+        # so the UI can show "you answered 47 (correct, in time)" or similar.
+        if isinstance(result, dict) and result.get("success") is not False:
+            result.setdefault("timed_challenge_resolution", {
+                "option_idx": option_idx,
+                "submitted": answer_text,
+                "correct": option_idx in (0, 1),
+                "in_time": option_idx == 0,
+                "expected_answer": challenge.get("answer_canonical"),
+            })
+        return result
+
+    def _pinnacle_dmg_per_100_count(self, loadout) -> int:
+        """Count how many ``dmg_plus_per_100`` stats are equipped on
+        pinnacle relics. The fight_boss path uses this to add
+        ``count * (depth // 100)`` to player_dmg.
+        """
+        count = 0
+        for relic in (loadout.relics if loadout else []) or []:
+            aid = relic.get("artifact_id", "") or ""
+            if not aid.startswith("pinnacle:"):
+                continue
+            parts = aid.split(":")
+            if len(parts) >= 5:
+                for stat_id in parts[3:]:
+                    if stat_id == "dmg_plus_per_100":
+                        count += 1
+        return count
 
     def _pick_tip(self, depth: int) -> str:
         """Pick a progressive tip based on current depth."""
@@ -990,18 +1614,31 @@ class DigService:
         return "pitch_black"
 
     def _apply_luminosity_drain(self, discord_id: int, guild_id, tunnel: dict, layer_name: str) -> dict:
-        """
-        Drain luminosity for this dig. Resets to 100 on new game day.
+        """Apply slow refill from last_lum_update_at, then drain for this dig.
+
+        Refill rate is ``LUMINOSITY_REFILL_PER_DAY`` (default 20) per real-world
+        day, computed continuously: ``floor(hours_elapsed * REFILL_PER_DAY / 24)``.
+        The old daily snap-back to 100 has been removed — luminosity now
+        carries across sessions and only recovers slowly without intervention
+        (use Torch / Spore Cloak / events for faster recovery).
 
         Returns dict with luminosity_before, luminosity_after, level, drained.
         """
-        today = self._get_game_date()
-        last_lum_date = tunnel.get("streak_last_date")  # reuse game-date tracking
+        now = int(time.time())
         luminosity = self._get_luminosity(tunnel)
 
-        # Daily reset: if this is a new game day, restore to max
-        if last_lum_date != today:
-            luminosity = LUMINOSITY_MAX
+        # Slow refill: recover floor(hours * REFILL/24) since last update.
+        # ``last_lum_update_at`` defaults to ``now`` for fresh tunnels so the
+        # first dig doesn't get a free refill from time-zero.
+        last_update = tunnel.get("last_lum_update_at") or now
+        try:
+            last_update = int(last_update)
+        except (TypeError, ValueError):
+            last_update = now
+        hours_elapsed = max(0.0, (now - last_update) / 3600.0)
+        refill = int(hours_elapsed * (LUMINOSITY_REFILL_PER_DAY / 24.0))
+        if refill > 0:
+            luminosity = min(LUMINOSITY_MAX, luminosity + refill)
 
         before = luminosity
         drain = LUMINOSITY_DRAIN_PER_DIG.get(layer_name, 0)
@@ -1011,9 +1648,16 @@ class DigService:
             drain = max(0, drain - drain // 4)
         luminosity = max(0, luminosity - drain)
 
-        # Persist
-        self.dig_repo.update_tunnel(discord_id, guild_id, luminosity=luminosity)
+        # Persist both luminosity and the timestamp so subsequent digs compute
+        # refill from the correct anchor.
+        self.dig_repo.update_tunnel(
+            discord_id,
+            guild_id,
+            luminosity=luminosity,
+            last_lum_update_at=now,
+        )
         tunnel["luminosity"] = luminosity
+        tunnel["last_lum_update_at"] = now
 
         return {
             "luminosity_before": before,
@@ -1192,7 +1836,10 @@ class DigService:
         """Calculate prestige run score."""
         depth = tunnel.get("depth", 0) or 0
         boss_progress = self._get_boss_progress(tunnel)
-        bosses_defeated = sum(1 for v in boss_progress.values() if v == "defeated")
+        bosses_defeated = sum(
+            1 for v in boss_progress.values()
+            if (v.get("status") if isinstance(v, dict) else v) == "defeated"
+        )
         run_jc = tunnel.get("current_run_jc", 0) or 0
         run_artifacts = tunnel.get("current_run_artifacts", 0) or 0
         run_events = tunnel.get("current_run_events", 0) or 0
@@ -3703,6 +4350,11 @@ class DigService:
 
         cooldown = self._get_cooldown_remaining(tunnel)
 
+        # Surface a subtle pinnacle foreshadow line once all tier bosses
+        # are cleared but the pinnacle itself is still standing. Hidden when
+        # not eligible.
+        pinnacle_foreshadow = self._pinnacle_foreshadow_line(tunnel)
+
         return {
             "tunnel": tunnel,
             "depth": depth,
@@ -3721,6 +4373,7 @@ class DigService:
             "decay_info": decay_info,
             "prestige_level": tunnel.get("prestige_level", 0) or 0,
             "streak": tunnel.get("streak_days", 0) or 0,
+            "pinnacle_foreshadow": pinnacle_foreshadow,
         }
 
     # ------------------------------------------------------------------
@@ -3810,6 +4463,11 @@ class DigService:
             if balance < wager:
                 return self._error(f"You only have {balance} JC (wager: {wager}).")
 
+        # Pinnacle has its own 3-phase resolver — different boss data
+        # structure and "always 3 phases regardless of prestige" rules.
+        if self._is_pinnacle_depth(at_boss):
+            return self._fight_pinnacle(discord_id, guild_id, tunnel, risk_tier, wager)
+
         # ---- Multi-round HP duel ---------------------------------------
         # Each round the player attacks first; if the boss survives, it
         # counterattacks. Whichever side reaches 0 HP first loses.
@@ -3832,41 +4490,71 @@ class DigService:
         active_cheers = [c for c in cheers if c.get("expires_at", 0) > now]
         cheer_bonus = min(0.15, len(active_cheers) * 0.05)
 
-        # Phase 2 accuracy penalty for P4+ bosses (kept, interpreted as per-round hit penalty).
+        # Phase accuracy penalty: phase 2 (status phase1_defeated) reads
+        # BOSS_PHASE2; phase 3 (status phase2_defeated) reads BOSS_PHASE3.
         phase2_penalty = 0.0
-        if boss_progress.get(str(at_boss)) == "phase1_defeated" and at_boss in BOSS_PHASE2:
+        _phase_status = boss_progress.get(str(at_boss))
+        if _phase_status == "phase1_defeated" and at_boss in BOSS_PHASE2:
             phase2_penalty = abs(BOSS_PHASE2[at_boss].win_odds_penalty)
+        elif _phase_status == "phase2_defeated" and at_boss in BOSS_PHASE3:
+            phase2_penalty = abs(BOSS_PHASE3[at_boss].win_odds_penalty)
 
-        depth_hit_penalty = (at_boss // 25) * PLAYER_HIT_PENALTY_PER_25_DEPTH
-        prestige_hit_penalty = prestige_level * PLAYER_HIT_PENALTY_PER_PRESTIGE
-        player_hit = stats["player_hit"] - depth_hit_penalty - prestige_hit_penalty - phase2_penalty + cheer_bonus
-        if wager == 0:
-            player_hit *= BOSS_FREE_FIGHT_ACCURACY_MOD
-        player_hit = max(PLAYER_HIT_FLOOR, min(PLAYER_HIT_CEILING, player_hit))
-
-        player_hp = int(stats["player_hp"])
-        boss_hp = (int(stats["boss_hp"])
-                   + (at_boss // 40) * BOSS_HP_PER_40_DEPTH
-                   + prestige_level * BOSS_HP_PER_PRESTIGE)
-        player_dmg = int(stats["player_dmg"])
-        boss_hit_chance = float(stats["boss_hit"])
-        boss_dmg = int(stats["boss_dmg"])
+        # Lock the boss to know its archetype for stat scaling.
+        boss_def = self._ensure_boss_locked(discord_id, guild_id, tunnel, at_boss)
+        active_boss_id = boss_def.boss_id
 
         # Echo weakening: if another guildmate has killed this boss within
         # the last 24h, the boss comes in at -25% HP and pays -30%. The
         # original killer is exempt so re-runs can't farm their own discount.
-        # Keyed by boss_id now that each tier has multiple possible bosses.
-        # Lock-or-resolve the boss first so the echo lookup can't fall back to
-        # the grandfathered pool[0] for an unlocked-but-active entry.
-        boss_def = self._ensure_boss_locked(discord_id, guild_id, tunnel, at_boss)
-        active_boss_id = boss_def.boss_id
         active_echo = self.dig_repo.get_active_boss_echo(guild_id, active_boss_id)
         echo_applied = bool(
             active_echo
             and active_echo.get("killer_discord_id") != discord_id
         )
-        if echo_applied:
-            boss_hp = max(1, int(round(boss_hp * 0.75)))
+
+        # Apply boss-side scaling (archetype + depth + prestige + echo).
+        scaled = self._scale_boss_stats(
+            stats,
+            boss_id=active_boss_id,
+            at_boss=at_boss,
+            prestige_level=prestige_level,
+            echo_applied=echo_applied,
+        )
+        fresh_boss_hp = int(scaled["boss_hp"])
+        # Carry over persisted HP from prior unfinished engagements with regen.
+        boss_hp, boss_hp_max = self._resolve_persisted_boss_hp(
+            boss_progress, at_boss, fresh_boss_hp, now,
+        )
+        boss_hit_chance = float(scaled["boss_hit"])
+        boss_dmg = int(scaled["boss_dmg"])
+
+        # Luminosity combat penalty (Dim/Dark/Pitch reduce player hit; Pitch buffs boss dmg).
+        lum_value = self._get_luminosity(tunnel)
+        lum_hit_offset, lum_dmg_bonus = _luminosity_combat_penalty(lum_value)
+        boss_dmg += lum_dmg_bonus
+
+        # Player-side hit calc: tier+prestige penalty (from lookup tables),
+        # phase2 penalty, cheers, luminosity penalty, free-fight mod,
+        # then floor/ceiling.
+        tier_key = at_boss if at_boss in BOSS_TIER_BONUS else max(
+            (k for k in BOSS_TIER_BONUS if k <= at_boss), default=25,
+        )
+        depth_hit_penalty = BOSS_TIER_BONUS[tier_key]["pen"]
+        prestige_hit_penalty = BOSS_PRESTIGE_BONUS.get(
+            prestige_level, BOSS_PRESTIGE_BONUS[max(BOSS_PRESTIGE_BONUS)],
+        )["pen"]
+        player_hit = (
+            stats["player_hit"]
+            - depth_hit_penalty - prestige_hit_penalty - phase2_penalty
+            + cheer_bonus
+            + lum_hit_offset
+        )
+        if wager == 0:
+            player_hit *= BOSS_FREE_FIGHT_ACCURACY_MOD
+        player_hit = max(PLAYER_HIT_FLOOR, min(PLAYER_HIT_CEILING, player_hit))
+
+        player_hp = int(stats["player_hp"])
+        player_dmg = int(stats["player_dmg"])
 
         # Estimate actual win probability via Monte Carlo on the entry
         # stats so the returned ``win_chance`` matches what ``scout_boss``
@@ -3932,16 +4620,36 @@ class DigService:
         boss_payout_mult = 1.0 + ascension.get("boss_payout_multiplier", 0)
 
         if won:
-            # Check if boss has secret phase 2 (P4+ ascension)
+            # Phase gating: P2+ unlocks phase 2 (was P4); P5+ AND tier>=100 unlocks phase 3.
+            # The phase event pool is also rolled at the transition for flavor.
             current_status = boss_progress.get(str(at_boss), "active")
-            needs_phase2 = (ascension.get("boss_phase2", False)
-                            and at_boss in BOSS_PHASE2
-                            and current_status == "active")
+            phase2_min_p = int(BOSS_PHASES.get("phase_2_min_prestige", 2))
+            phase3_min_p = int(BOSS_PHASES.get("phase_3_min_prestige", 5))
+            phase3_min_tier = int(BOSS_PHASES.get("phase_3_min_tier", 100))
 
-            if needs_phase2:
-                # Phase 1 victory — boss transforms, fight again. Tunnel
-                # update + audit log commit together.
-                boss_progress[str(at_boss)] = "phase1_defeated"
+            needs_phase2 = (
+                prestige_level >= phase2_min_p
+                and at_boss in BOSS_PHASE2
+                and current_status == "active"
+            )
+            needs_phase3 = (
+                prestige_level >= phase3_min_p
+                and at_boss >= phase3_min_tier
+                and at_boss in BOSS_PHASE3
+                and current_status == "phase1_defeated"
+            )
+
+            if needs_phase2 or needs_phase3:
+                # Phase transition — boss transforms, fight again. Tunnel
+                # update + audit log commit together via atomic helper.
+                next_status = "phase1_defeated" if needs_phase2 else "phase2_defeated"
+                phase_def = BOSS_PHASE2[at_boss] if needs_phase2 else BOSS_PHASE3[at_boss]
+                next_phase_num = 2 if needs_phase2 else 3
+                # Roll an environmental transition event for flavor (mechanical
+                # effects on the next round are TODO — for now only the flavor
+                # surfaces in the embed).
+                phase_event = random.choice(PHASE_TRANSITION_EVENTS)
+                boss_progress[str(at_boss)] = next_status
                 self.dig_repo.atomic_tunnel_balance_update(
                     discord_id, guild_id,
                     tunnel_updates={
@@ -3951,28 +4659,30 @@ class DigService:
                     },
                     log_detail={
                         "boundary": at_boss, "won": True, "risk": risk_tier,
-                        "phase": 1, "wager": wager, "rounds": round_log,
+                        "phase": next_phase_num - 1, "wager": wager, "rounds": round_log,
                     },
                     log_action_type="boss_fight",
                 )
 
-                phase2 = BOSS_PHASE2[at_boss]
-                p2_dialogue = phase2.dialogue[min(attempts - 1, len(phase2.dialogue) - 1)]
+                p_dialogue = phase_def.dialogue[min(attempts - 1, len(phase_def.dialogue) - 1)]
 
                 return self._ok(
                     won=True,
-                    phase=1,
-                    phase2_incoming=True,
+                    phase=next_phase_num - 1,
+                    phase2_incoming=needs_phase2,
+                    phase3_incoming=needs_phase3,
                     boss_name=boss_name,
-                    phase2_name=phase2.name,
-                    phase2_title=phase2.title,
+                    phase2_name=phase_def.name,
+                    phase2_title=phase_def.title,
+                    phase_event_flavor=phase_event.flavor,
+                    phase_event_description=phase_event.description,
                     boundary=at_boss,
                     risk_tier=risk_tier,
                     win_chance=round(win_chance, 2),
                     jc_delta=0,
                     payout=0,
                     new_depth=depth,
-                    dialogue=p2_dialogue,
+                    dialogue=p_dialogue,
                     achievements=[],
                     round_log=round_log,
                     echo_applied=echo_applied,
@@ -3987,7 +4697,18 @@ class DigService:
             base_jc = int(wager * multiplier) if wager > 0 else random.randint(8, 18)
             jc_delta = int(base_jc * boss_payout_mult * echo_payout_mult)
 
-            boss_progress[str(at_boss)] = "defeated"
+            # Persist outcome for future dialogue picks. close_win signals when
+            # the player just barely won — the boss responds differently.
+            outcome_label = "close_win" if win_chance < 0.6 else "defeated"
+            boss_progress[str(at_boss)] = {
+                "status": "defeated",
+                "last_outcome": outcome_label,
+                "first_meet_seen": True,
+                "boss_id": active_boss_id,
+                "hp_remaining": 0,
+                "hp_max": boss_hp_max,
+                "last_engaged_at": int(now),
+            }
             prev_max_depth = tunnel.get("max_depth", 0) or 0
 
             # Compute stat point award (pure) so it can fold into the atomic
@@ -4060,7 +4781,11 @@ class DigService:
 
             return self._ok(
                 won=True,
-                phase=2 if current_status == "phase1_defeated" else None,
+                phase=(
+                    3 if current_status == "phase2_defeated"
+                    else 2 if current_status == "phase1_defeated"
+                    else None
+                ),
                 boss_name=boss_name,
                 boundary=at_boss,
                 risk_tier=risk_tier,
@@ -4082,6 +4807,14 @@ class DigService:
             new_depth = max(0, depth - knockback)
             jc_delta = -wager if wager > 0 else 0
 
+            # Persist post-fight boss HP so soften-and-retreat strategies work.
+            # Mutates boss_progress in place to a dict with hp_remaining/last_engaged_at.
+            self._persist_boss_hp_after_fight(
+                boss_progress, at_boss, active_boss_id,
+                ending_hp=max(0, boss_hp), hp_max=boss_hp_max,
+                won=False, outcome="loss", now=now,
+            )
+
             # Tunnel knockback + wager forfeit + audit log commit together.
             # The old flow could forfeit the wager without recording the
             # knockback (or vice versa) on a crash.
@@ -4090,6 +4823,7 @@ class DigService:
                 balance_delta=-wager if wager > 0 else 0,
                 tunnel_updates={
                     "depth": new_depth,
+                    "boss_progress": json.dumps(boss_progress),
                     "boss_attempts": attempts,
                     "cheer_data": None,     # clear cheers on defeat
                     "last_dig_at": now,
@@ -4097,7 +4831,7 @@ class DigService:
                 log_detail={
                     "boundary": at_boss, "won": False, "risk": risk_tier,
                     "wager": wager, "knockback": knockback,
-                    "rounds": round_log,
+                    "rounds": round_log, "boss_hp_remaining": max(0, boss_hp),
                 },
                 log_action_type="boss_fight",
             )
@@ -4111,6 +4845,8 @@ class DigService:
                 jc_delta=jc_delta,
                 knockback=knockback,
                 new_depth=new_depth,
+                boss_hp_remaining=max(0, boss_hp),
+                boss_hp_max=boss_hp_max,
                 dialogue=f"{boss_name} sends you flying back {knockback} blocks!",
                 achievements=[],
                 round_log=round_log,
@@ -4119,6 +4855,669 @@ class DigService:
                 gear_broken=gear_broken_names,
                 gear_drop=None,
             )
+
+    # =====================================================================
+    # Pinnacle boss resolver
+    # =====================================================================
+    # The pinnacle is a single 3-phase fight at PINNACLE_DEPTH. Each phase
+    # uses a distinct archetype (per PINNACLE_BOSSES[id].phases). Persisted
+    # HP carries between phases. Defeating phase 3 marks the pinnacle
+    # ``defeated`` and drops a unique relic with 2 random rolls.
+
+    def _fight_pinnacle(
+        self,
+        discord_id: int,
+        guild_id,
+        tunnel: dict,
+        risk_tier: str,
+        wager: int,
+    ) -> dict:
+        """Resolve one phase of the pinnacle fight.
+
+        On phase 1/2 win → advance pinnacle_phase, return phase-incoming
+        response (with the next phase's transition_dialogue from the
+        rolling event pool surfaced as flavor).
+
+        On phase 3 win → mark pinnacle defeated in boss_progress, drop a
+        pinnacle relic, return full-victory response.
+
+        On any phase loss → persist boss HP, knockback the player, return
+        loss response.
+        """
+        now = int(time.time())
+        depth = tunnel.get("depth", 0)
+        boss_progress = self._get_boss_progress(tunnel)
+
+        pinnacle_id = self._ensure_pinnacle_locked(discord_id, guild_id, tunnel)
+        pinnacle = PINNACLE_BOSSES[pinnacle_id]
+        phase_idx = max(1, min(3, int(tunnel.get("pinnacle_phase", 1) or 1)))
+        phase_def = pinnacle.phases[phase_idx - 1]
+
+        prestige_level = tunnel.get("prestige_level", 0) or 0
+
+        base_stats = BOSS_DUEL_STATS.get(risk_tier, BOSS_DUEL_STATS["bold"])
+        loadout = self._get_loadout(discord_id, guild_id)
+        stats = self._apply_gear_to_combat(base_stats, loadout)
+        # Pinnacle relics fold their combat-side rolls in here as well.
+        stats = self._apply_pinnacle_relic_stats(stats, loadout)
+
+        cheers = self._get_cheers(tunnel)
+        active_cheers = [c for c in cheers if c.get("expires_at", 0) > now]
+        cheer_bonus = min(0.15, len(active_cheers) * 0.05)
+
+        # Pinnacle phases inherit a small accuracy penalty in higher phases
+        # so the late-fight feels meaningful even before BOSS_PHASE3 kicks in.
+        phase_penalty = 0.0
+        if phase_idx == 2:
+            phase_penalty = 0.10
+        elif phase_idx == 3:
+            phase_penalty = 0.18
+
+        # Pinnacle is the Tier 8 fight — use its archetype per phase, not the
+        # per-boss BOSS_ARCHETYPE_BY_ID lookup.
+        scaled = self._scale_boss_stats(
+            stats,
+            boss_id=pinnacle_id,
+            at_boss=PINNACLE_DEPTH,
+            prestige_level=prestige_level,
+            echo_applied=False,
+            archetype_name=phase_def.archetype,
+        )
+        fresh_boss_hp = int(scaled["boss_hp"])
+        # Look up any pending phase event left over from the previous
+        # phase transition (one-shot, consumed at end of this fight).
+        pin_entry_now = self._read_boss_progress_entry(boss_progress, PINNACLE_DEPTH)
+        pending_event_id = pin_entry_now.get("pending_phase_event_id")
+        phase_event_obj = None
+        if pending_event_id:
+            phase_event_obj = next(
+                (e for e in PHASE_TRANSITION_EVENTS if e.id == pending_event_id),
+                None,
+            )
+        if phase_event_obj is not None:
+            fresh_boss_hp = max(1, fresh_boss_hp + int(phase_event_obj.boss_hp_delta))
+
+        # Carry over persisted HP within the SAME phase (mid-phase retreat
+        # leaves the boss wounded). Phase transitions reset HP because each
+        # phase is a new fight. Use a phase-suffixed key in boss_progress
+        # so we don't conflate phase 1 HP with phase 2 HP.
+        phase_key = f"{PINNACLE_DEPTH}:{phase_idx}"
+        boss_hp, boss_hp_max = self._resolve_persisted_boss_hp(
+            boss_progress, phase_key, fresh_boss_hp, now,
+        )
+        boss_hit_chance = float(scaled["boss_hit"])
+        boss_dmg = int(scaled["boss_dmg"])
+
+        # Luminosity penalty.
+        lum_value = self._get_luminosity(tunnel)
+        lum_hit_offset, lum_dmg_bonus = _luminosity_combat_penalty(lum_value)
+        boss_dmg += lum_dmg_bonus
+
+        # Phase event round-by-round offsets/deltas.
+        if phase_event_obj is not None:
+            boss_hit_chance = max(
+                0.05, min(0.95, boss_hit_chance + float(phase_event_obj.boss_hit_offset)),
+            )
+            boss_dmg = max(1, boss_dmg + int(phase_event_obj.boss_dmg_delta))
+
+        # Player hit calc — pinnacle uses tier+prestige penalty from
+        # the lookup tables, plus an inter-phase penalty.
+        depth_hit_penalty = BOSS_TIER_BONUS[PINNACLE_DEPTH]["pen"]
+        prestige_hit_penalty = BOSS_PRESTIGE_BONUS.get(
+            prestige_level, BOSS_PRESTIGE_BONUS[max(BOSS_PRESTIGE_BONUS)],
+        )["pen"]
+        player_hit = (
+            stats["player_hit"]
+            - depth_hit_penalty - prestige_hit_penalty - phase_penalty
+            + cheer_bonus
+            + lum_hit_offset
+        )
+        if phase_event_obj is not None:
+            player_hit += float(phase_event_obj.player_hit_offset)
+        if wager == 0:
+            player_hit *= BOSS_FREE_FIGHT_ACCURACY_MOD
+        player_hit = max(PLAYER_HIT_FLOOR, min(PLAYER_HIT_CEILING, player_hit))
+
+        player_hp = int(stats["player_hp"])
+        if phase_event_obj is not None:
+            player_hp = max(1, player_hp + int(phase_event_obj.player_hp_delta))
+        player_dmg = int(stats["player_dmg"])
+        if phase_event_obj is not None:
+            player_dmg = max(0, player_dmg + int(phase_event_obj.player_dmg_delta))
+        # Pinnacle relic stat: dmg per 100 depth (300 → +3 per stack).
+        player_dmg += self._pinnacle_dmg_per_100_count(loadout) * (PINNACLE_DEPTH // 100)
+
+        # Consume the pending phase event (one-shot) so it doesn't fire again.
+        if phase_event_obj is not None:
+            pin_entry_now.pop("pending_phase_event_id", None)
+            boss_progress[str(PINNACLE_DEPTH)] = pin_entry_now
+
+        win_chance = _approx_duel_win_prob(
+            player_hp=player_hp,
+            boss_hp=boss_hp,
+            player_hit=player_hit,
+            player_dmg=player_dmg,
+            boss_hit=boss_hit_chance,
+            boss_dmg=boss_dmg,
+        )
+
+        # Roll a mid-fight mechanic from this phase's pool. Pinnacle phase
+        # mechanics are stronger and more bespoke than tier-boss mechanics
+        # (see services.dig_constants.PINNACLE_BOSSES[*].phases[*].mechanic_pool).
+        from domain.models.boss_mechanics import (
+            get_mechanic as _get_mechanic,
+        )
+        mechanic_id = ""
+        if phase_def.mechanic_pool:
+            mechanic_id = random.Random().choice(list(phase_def.mechanic_pool))
+        mechanic = _get_mechanic(mechanic_id) if mechanic_id else None
+        attempts = (tunnel.get("boss_attempts", 0) or 0) + 1
+
+        # If the rolled mechanic is a timed-input prompt (arithmetic / riddle),
+        # generate the challenge now so it persists with the duel state.
+        challenge: dict | None = None
+        if mechanic is not None and mechanic.timed_input_kind:
+            challenge = self._generate_timed_challenge(mechanic.timed_input_kind)
+
+        round_log: list[dict] = []
+        won: bool | None = None
+        for round_num in range(1, BOSS_ROUND_CAP + 1):
+            # If a mechanic is scheduled for THIS round, pause and persist.
+            if (mechanic is not None
+                    and round_num == mechanic.trigger_round
+                    and player_hp > 0 and boss_hp > 0):
+                # Pinnacle pauses use the same dig_active_duels table as
+                # regular boss duels. The pinnacle is identified by storing
+                # the pinnacle_id in boss_id (since pinnacle ids are
+                # disjoint from BOSSES_BY_ID), with extra context in
+                # status_effects under "pinnacle_state".
+                state = {
+                    "boss_id": pinnacle_id,
+                    "tier": PINNACLE_DEPTH,
+                    "mechanic_id": mechanic_id,
+                    "risk_tier": risk_tier,
+                    "wager": wager,
+                    "player_hp": player_hp,
+                    "boss_hp": boss_hp,
+                    "round_num": round_num,
+                    "round_log": json.dumps(round_log),
+                    "pending_prompt": json.dumps(
+                        self._serialize_prompt(mechanic)
+                    ),
+                    "rng_state": "",
+                    "status_effects": json.dumps({
+                        "attempts_this_fight": attempts,
+                        "initial_win_chance": win_chance,
+                        "pinnacle_state": {
+                            "phase": phase_idx,
+                            "boss_hp_max": boss_hp_max,
+                            "phase_key": phase_key,
+                        },
+                        "timed_challenge": challenge,
+                        "gear_snapshot_ids": [
+                            int(p.id)
+                            for p in (loadout.weapon, loadout.armor, loadout.boots)
+                            if p is not None
+                        ],
+                    }),
+                    "echo_applied": 0,
+                    "echo_killer_id": None,
+                    "player_hit": player_hit,
+                    "player_dmg": player_dmg,
+                    "boss_hit": boss_hit_chance,
+                    "boss_dmg": boss_dmg,
+                }
+                self.dig_repo.save_active_duel(discord_id, guild_id, state)
+                response_extras = {}
+                if challenge is not None:
+                    response_extras["timed_challenge"] = {
+                        "kind": challenge["kind"],
+                        "question": challenge["question"],
+                        "time_window_seconds": challenge["time_window_seconds"],
+                        "started_at": challenge["started_at"],
+                    }
+                return self._ok(
+                    pending_prompt=self._serialize_prompt(mechanic),
+                    boss_id=pinnacle_id,
+                    boss_name=phase_def.title,
+                    mechanic_id=mechanic_id,
+                    boundary=PINNACLE_DEPTH,
+                    risk_tier=risk_tier,
+                    wager=wager,
+                    player_hp=player_hp,
+                    boss_hp=boss_hp,
+                    round_num=round_num,
+                    round_log=round_log,
+                    win_chance=round(win_chance, 2),
+                    is_pinnacle=True,
+                    phase=phase_idx,
+                    phase_total=3,
+                    **response_extras,
+                )
+
+            entry: dict = {"round": round_num}
+            if random.random() < player_hit:
+                boss_hp -= player_dmg
+            entry["boss_hp"] = max(0, boss_hp)
+            if boss_hp <= 0:
+                won = True
+                round_log.append(entry)
+                break
+            if random.random() < boss_hit_chance:
+                player_hp -= boss_dmg
+            entry["player_hp"] = max(0, player_hp)
+            round_log.append(entry)
+            if player_hp <= 0:
+                won = False
+                break
+        else:
+            won = False
+
+        # Tick gear durability.
+        broken_ids = self.dig_repo.tick_gear_durability(discord_id, guild_id)
+        gear_broken_names: list[str] = []
+        if broken_ids:
+            pre_loadout = self._get_loadout(discord_id, guild_id)
+            name_by_id = {
+                p.id: p.tier_def.name
+                for p in (pre_loadout.weapon, pre_loadout.armor, pre_loadout.boots)
+                if p is not None
+            }
+            gear_broken_names = [name_by_id.get(i, "a piece of gear") for i in broken_ids]
+
+        return self._finalize_pinnacle_outcome(
+            discord_id=discord_id, guild_id=guild_id, tunnel=tunnel,
+            pinnacle_id=pinnacle_id, pinnacle=pinnacle, phase_def=phase_def,
+            phase_idx=phase_idx, phase_key=phase_key,
+            boss_progress=boss_progress, won=won,
+            boss_hp=boss_hp, boss_hp_max=boss_hp_max,
+            risk_tier=risk_tier, wager=wager,
+            win_chance=win_chance, attempts=attempts,
+            round_log=round_log,
+            gear_broken_names=gear_broken_names,
+            prestige_level=prestige_level, depth=depth, now=now,
+        )
+
+    def _resume_pinnacle_duel(
+        self,
+        discord_id: int,
+        guild_id,
+        option_idx: int,
+        state_row: dict,
+    ) -> dict:
+        """Resume a paused pinnacle duel after the player picks an option.
+
+        Mirrors ``resume_boss_duel`` for regular bosses, but routes the
+        post-resolution branches through the pinnacle's 3-phase / relic
+        drop / prestige-gate logic in ``_fight_pinnacle``'s tail.
+        """
+        from domain.models.boss_mechanics import (
+            get_mechanic as _get_mechanic,
+        )
+
+        mechanic = _get_mechanic(state_row["mechanic_id"])
+        if mechanic is None:
+            self.dig_repo.clear_active_duel(discord_id, guild_id)
+            return self._error("Pinnacle duel references an unknown mechanic; cleared.")
+
+        try:
+            status_effects = json.loads(state_row["status_effects"] or "{}")
+        except (json.JSONDecodeError, TypeError):
+            status_effects = {}
+        try:
+            round_log = json.loads(state_row["round_log"] or "[]")
+        except (json.JSONDecodeError, TypeError):
+            round_log = []
+
+        if not 0 <= option_idx < len(mechanic.options):
+            option_idx = mechanic.safe_option_idx
+        option = mechanic.options[option_idx]
+
+        player_hp = int(state_row["player_hp"])
+        boss_hp = int(state_row["boss_hp"])
+        round_num = int(state_row["round_num"])
+
+        narrative, player_hp, boss_hp, status_effects = (
+            self._apply_option_outcome_to_state(
+                option=option,
+                player_hp=player_hp,
+                boss_hp=boss_hp,
+                status_effects=status_effects,
+            )
+        )
+        round_log.append({
+            "round": round_num,
+            "mechanic_id": state_row["mechanic_id"],
+            "option_idx": option_idx,
+            "option_label": option.label,
+            "narrative": narrative,
+            "player_hp": max(0, player_hp),
+            "boss_hp": max(0, boss_hp),
+        })
+
+        won: bool | None = None
+        if boss_hp <= 0:
+            won = True
+        elif player_hp <= 0:
+            won = False
+
+        tunnel = self.dig_repo.get_tunnel(discord_id, guild_id)
+        if tunnel is None:
+            self.dig_repo.clear_active_duel(discord_id, guild_id)
+            return self._error("Tunnel disappeared during pinnacle duel.")
+        tunnel = dict(tunnel)
+        tunnel["discord_id"] = discord_id
+
+        player_hit = float(state_row["player_hit"])
+        player_dmg = int(state_row["player_dmg"])
+        boss_hit_chance = float(state_row["boss_hit"])
+        boss_dmg = int(state_row["boss_dmg"])
+
+        # Continue remaining auto-rounds if option didn't decide it.
+        if won is None:
+            for r in range(round_num + 1, BOSS_ROUND_CAP + 1):
+                entry: dict = {"round": r}
+                if random.random() < player_hit:
+                    boss_hp -= player_dmg
+                entry["boss_hp"] = max(0, boss_hp)
+                if boss_hp <= 0:
+                    won = True
+                    round_log.append(entry)
+                    break
+                if random.random() < boss_hit_chance:
+                    player_hp -= boss_dmg
+                entry["player_hp"] = max(0, player_hp)
+                round_log.append(entry)
+                if player_hp <= 0:
+                    won = False
+                    break
+            else:
+                won = False
+
+        # Pinnacle state restored from status_effects; falls back to tunnel
+        # values when missing (e.g. legacy state row).
+        pinnacle_state = status_effects.get("pinnacle_state") or {}
+        phase_idx = int(pinnacle_state.get("phase") or tunnel.get("pinnacle_phase") or 1)
+        boss_hp_max = int(pinnacle_state.get("boss_hp_max") or boss_hp or 1)
+        phase_key = pinnacle_state.get("phase_key") or f"{PINNACLE_DEPTH}:{phase_idx}"
+
+        # Tick durability for the gear that fought this fight.
+        gear_snapshot_ids = status_effects.get("gear_snapshot_ids") or []
+        gear_broken_names: list[str] = []
+        if gear_snapshot_ids:
+            name_by_id: dict[int, str] = {}
+            for gid in gear_snapshot_ids:
+                row = self.dig_repo.get_gear_by_id(int(gid))
+                if row is None:
+                    continue
+                piece = self._hydrate_gear_piece(row)
+                if piece is not None:
+                    name_by_id[piece.id] = piece.tier_def.name
+            broken_ids = self.dig_repo.tick_gear_durability_ids(
+                [int(g) for g in gear_snapshot_ids]
+            )
+            gear_broken_names = [name_by_id.get(i, "a piece of gear") for i in broken_ids]
+        else:
+            broken_ids = self.dig_repo.tick_gear_durability(discord_id, guild_id)
+            if broken_ids:
+                pre_loadout = self._get_loadout(discord_id, guild_id)
+                name_by_id = {
+                    p.id: p.tier_def.name
+                    for p in (pre_loadout.weapon, pre_loadout.armor, pre_loadout.boots)
+                    if p is not None
+                }
+                gear_broken_names = [name_by_id.get(i, "a piece of gear") for i in broken_ids]
+
+        # Clear the paused state row before returning.
+        self.dig_repo.clear_active_duel(discord_id, guild_id)
+
+        win_chance = float(status_effects.get("initial_win_chance") or 0.5)
+        attempts = int(status_effects.get("attempts_this_fight") or 1)
+        risk_tier = state_row["risk_tier"]
+        wager = int(state_row["wager"])
+        boss_progress = self._get_boss_progress(tunnel)
+        pinnacle_id = state_row["boss_id"]
+        pinnacle = PINNACLE_BOSSES.get(pinnacle_id)
+        if pinnacle is None:
+            return self._error("Pinnacle reference disappeared.")
+        phase_def = pinnacle.phases[phase_idx - 1]
+        prestige_level = tunnel.get("prestige_level", 0) or 0
+        depth = tunnel.get("depth", 0)
+        now = int(time.time())
+
+        return self._finalize_pinnacle_outcome(
+            discord_id=discord_id, guild_id=guild_id, tunnel=tunnel,
+            pinnacle_id=pinnacle_id, pinnacle=pinnacle, phase_def=phase_def,
+            phase_idx=phase_idx, phase_key=phase_key,
+            boss_progress=boss_progress, won=won,
+            boss_hp=boss_hp, boss_hp_max=boss_hp_max,
+            risk_tier=risk_tier, wager=wager,
+            win_chance=win_chance, attempts=attempts,
+            round_log=round_log,
+            gear_broken_names=gear_broken_names,
+            prestige_level=prestige_level, depth=depth, now=now,
+        )
+
+    def _finalize_pinnacle_outcome(
+        self,
+        *,
+        discord_id: int,
+        guild_id,
+        tunnel: dict,
+        pinnacle_id: str,
+        pinnacle,
+        phase_def,
+        phase_idx: int,
+        phase_key: str,
+        boss_progress: dict,
+        won: bool,
+        boss_hp: int,
+        boss_hp_max: int,
+        risk_tier: str,
+        wager: int,
+        win_chance: float,
+        attempts: int,
+        round_log: list,
+        gear_broken_names: list,
+        prestige_level: int,
+        depth: int,
+        now: int,
+    ) -> dict:
+        """Shared end-of-pinnacle-fight resolution used by both
+        ``_fight_pinnacle`` and ``_resume_pinnacle_duel``."""
+        boss_name = phase_def.title
+
+        if won:
+            if phase_idx < 3:
+                phase_event = random.choice(PHASE_TRANSITION_EVENTS)
+                next_phase = phase_idx + 1
+                boss_progress.pop(phase_key, None)
+                pin_entry = self._read_boss_progress_entry(boss_progress, PINNACLE_DEPTH)
+                pin_entry["status"] = (
+                    "phase1_defeated" if phase_idx == 1 else "phase2_defeated"
+                )
+                pin_entry["last_outcome"] = "defeated"
+                pin_entry["first_meet_seen"] = True
+                pin_entry["boss_id"] = pinnacle_id
+                # Stash the event id so the next phase's fight can apply its
+                # round-by-round offsets (hit/dmg). Pre-fight effects (HP and
+                # luminosity deltas) are applied right now.
+                pin_entry["pending_phase_event_id"] = phase_event.id
+                boss_progress[str(PINNACLE_DEPTH)] = pin_entry
+
+                # Apply pre-fight effects of the event:
+                # - luminosity_delta: clamp to [0, MAX] on tunnel
+                # - boss_hp_delta: pre-seed the next phase's HP entry so the
+                #   first boss_hp resolution starts wounded (or refreshed).
+                lum_after = self._get_luminosity(tunnel)
+                if phase_event.luminosity_delta:
+                    lum_after = max(0, min(LUMINOSITY_MAX, lum_after + phase_event.luminosity_delta))
+                next_phase_key = f"{PINNACLE_DEPTH}:{next_phase}"
+                if phase_event.boss_hp_delta:
+                    # Pre-seed wounded HP using a synthetic prior-engagement.
+                    boss_progress[next_phase_key] = {
+                        "boss_id": pinnacle_id,
+                        "hp_remaining_delta": int(phase_event.boss_hp_delta),
+                    }
+
+                self.dig_repo.update_tunnel(
+                    discord_id, guild_id,
+                    boss_progress=json.dumps(boss_progress),
+                    pinnacle_phase=next_phase,
+                    boss_attempts=attempts,
+                    last_dig_at=now,
+                    luminosity=lum_after,
+                    last_lum_update_at=now,
+                )
+                next_title = pinnacle.phases[next_phase - 1].title
+                transition_lines = pinnacle.phases[next_phase - 1].transition_dialogue
+                transition = (
+                    random.choice(transition_lines)
+                    if transition_lines
+                    else f"The {pinnacle.name} reshapes."
+                )
+                self.dig_repo.log_action(
+                    discord_id=discord_id, guild_id=guild_id,
+                    action_type="pinnacle_fight",
+                    details=json.dumps({
+                        "pinnacle_id": pinnacle_id,
+                        "phase": phase_idx, "won": True,
+                        "rounds": round_log,
+                    }),
+                )
+                return self._ok(
+                    won=True,
+                    phase=phase_idx,
+                    phase2_incoming=(next_phase == 2),
+                    phase3_incoming=(next_phase == 3),
+                    boss_name=boss_name,
+                    boundary=PINNACLE_DEPTH,
+                    risk_tier=risk_tier,
+                    win_chance=round(win_chance, 2),
+                    jc_delta=0,
+                    payout=0,
+                    new_depth=depth,
+                    dialogue=transition,
+                    next_phase_title=next_title,
+                    phase_event_flavor=phase_event.flavor,
+                    phase_event_description=phase_event.description,
+                    achievements=[],
+                    round_log=round_log,
+                    is_pinnacle=True,
+                    gear_broken=gear_broken_names,
+                    gear_drop=None,
+                )
+
+            # Phase 3 win — pinnacle defeated.
+            new_depth = PINNACLE_DEPTH
+            jc_reward = PINNACLE_BASE_JC_REWARD + PINNACLE_JC_PER_PRESTIGE * prestige_level
+            relic_drop = self._drop_pinnacle_relic(discord_id, guild_id, tunnel, pinnacle_id)
+            boss_progress.pop(phase_key, None)
+            boss_progress[str(PINNACLE_DEPTH)] = {
+                "status": "defeated",
+                "last_outcome": "close_win" if win_chance < 0.6 else "defeated",
+                "first_meet_seen": True,
+                "boss_id": pinnacle_id,
+                "hp_remaining": 0,
+                "hp_max": boss_hp_max,
+                "last_engaged_at": int(now),
+            }
+            prev_max_depth = tunnel.get("max_depth", 0) or 0
+            self.dig_repo.update_tunnel(
+                discord_id, guild_id,
+                depth=new_depth,
+                max_depth=max(prev_max_depth, new_depth),
+                boss_progress=json.dumps(boss_progress),
+                boss_attempts=0,
+                cheer_data=None,
+                last_dig_at=now,
+                pinnacle_phase=0,
+            )
+            self.player_repo.add_balance(discord_id, guild_id, jc_reward)
+            self.dig_repo.log_action(
+                discord_id=discord_id, guild_id=guild_id,
+                action_type="pinnacle_fight",
+                details=json.dumps({
+                    "pinnacle_id": pinnacle_id,
+                    "phase": 3, "won": True,
+                    "jc_delta": jc_reward,
+                    "relic_id": relic_drop["artifact_id"],
+                }),
+            )
+            return self._ok(
+                won=True,
+                phase=3,
+                boss_name=pinnacle.name,
+                boundary=PINNACLE_DEPTH,
+                risk_tier=risk_tier,
+                win_chance=round(win_chance, 2),
+                jc_delta=jc_reward,
+                payout=jc_reward,
+                new_depth=new_depth,
+                dialogue=f"You stand over the broken form of {pinnacle.name}.",
+                pinnacle_relic=relic_drop,
+                achievements=[],
+                round_log=round_log,
+                is_pinnacle=True,
+                pinnacle_defeated=True,
+                gear_broken=gear_broken_names,
+                gear_drop=None,
+            )
+
+        # Loss
+        knockback = random.randint(8, 16)
+        new_depth = max(0, depth - knockback)
+        jc_delta = -wager if wager > 0 else 0
+        self._persist_boss_hp_after_fight(
+            boss_progress, phase_key, pinnacle_id,
+            ending_hp=max(0, boss_hp), hp_max=boss_hp_max,
+            won=False, outcome="loss", now=now,
+        )
+        pin_entry = self._read_boss_progress_entry(boss_progress, PINNACLE_DEPTH)
+        pin_entry["last_outcome"] = "loss"
+        pin_entry["first_meet_seen"] = True
+        pin_entry["boss_id"] = pinnacle_id
+        boss_progress[str(PINNACLE_DEPTH)] = pin_entry
+
+        self.dig_repo.update_tunnel(
+            discord_id, guild_id,
+            depth=new_depth,
+            boss_progress=json.dumps(boss_progress),
+            boss_attempts=attempts,
+            cheer_data=None,
+            last_dig_at=now,
+        )
+        if wager > 0:
+            self.player_repo.add_balance(discord_id, guild_id, -wager)
+        self.dig_repo.log_action(
+            discord_id=discord_id, guild_id=guild_id,
+            action_type="pinnacle_fight",
+            details=json.dumps({
+                "pinnacle_id": pinnacle_id,
+                "phase": phase_idx, "won": False,
+                "rounds": round_log,
+                "boss_hp_remaining": max(0, boss_hp),
+            }),
+        )
+        return self._ok(
+            won=False,
+            phase=phase_idx,
+            boss_name=boss_name,
+            boundary=PINNACLE_DEPTH,
+            risk_tier=risk_tier,
+            win_chance=round(win_chance, 2),
+            jc_delta=jc_delta,
+            knockback=knockback,
+            new_depth=new_depth,
+            boss_hp_remaining=max(0, boss_hp),
+            boss_hp_max=boss_hp_max,
+            dialogue=f"{boss_name} sends you reeling back {knockback} blocks!",
+            achievements=[],
+            round_log=round_log,
+            is_pinnacle=True,
+            gear_broken=gear_broken_names,
+            gear_drop=None,
+        )
 
     # =====================================================================
     # Multi-boss tier state machine — reactive mid-fight prompts
@@ -4178,6 +5577,10 @@ class DigService:
             if balance < wager:
                 return self._error(f"You only have {balance} JC (wager: {wager}).")
 
+        # Pinnacle uses its own resolver — no mid-fight prompts (yet).
+        if self._is_pinnacle_depth(at_boss):
+            return self._fight_pinnacle(discord_id, guild_id, tunnel, risk_tier, wager)
+
         # Ensure a specific boss is locked for this tunnel at this tier.
         boss = self._ensure_boss_locked(discord_id, guild_id, tunnel, at_boss)
 
@@ -4202,35 +5605,53 @@ class DigService:
         cheer_bonus = min(0.15, len(active_cheers) * 0.05)
 
         phase2_penalty = 0.0
-        if (boss_progress.get(str(at_boss)) == "phase1_defeated"
-                and at_boss in BOSS_PHASE2):
+        _phase_status = boss_progress.get(str(at_boss))
+        if _phase_status == "phase1_defeated" and at_boss in BOSS_PHASE2:
             phase2_penalty = abs(BOSS_PHASE2[at_boss].win_odds_penalty)
-
-        depth_hit_penalty = (at_boss // 25) * PLAYER_HIT_PENALTY_PER_25_DEPTH
-        prestige_hit_penalty = prestige_level * PLAYER_HIT_PENALTY_PER_PRESTIGE
-        player_hit = (
-            stats["player_hit"] - depth_hit_penalty - prestige_hit_penalty
-            - phase2_penalty + cheer_bonus
-        )
-        if wager == 0:
-            player_hit *= BOSS_FREE_FIGHT_ACCURACY_MOD
-        player_hit = max(PLAYER_HIT_FLOOR, min(PLAYER_HIT_CEILING, player_hit))
-
-        player_hp = int(stats["player_hp"])
-        boss_hp = (int(stats["boss_hp"])
-                   + (at_boss // 40) * BOSS_HP_PER_40_DEPTH
-                   + prestige_level * BOSS_HP_PER_PRESTIGE)
-        player_dmg = int(stats["player_dmg"])
-        boss_hit_chance = float(stats["boss_hit"])
-        boss_dmg = int(stats["boss_dmg"])
+        elif _phase_status == "phase2_defeated" and at_boss in BOSS_PHASE3:
+            phase2_penalty = abs(BOSS_PHASE3[at_boss].win_odds_penalty)
 
         active_echo = self.dig_repo.get_active_boss_echo(guild_id, boss.boss_id)
         echo_applied = bool(
             active_echo
             and active_echo.get("killer_discord_id") != discord_id
         )
-        if echo_applied:
-            boss_hp = max(1, int(round(boss_hp * 0.75)))
+
+        scaled = self._scale_boss_stats(
+            stats,
+            boss_id=boss.boss_id,
+            at_boss=at_boss,
+            prestige_level=prestige_level,
+            echo_applied=echo_applied,
+        )
+        fresh_boss_hp = int(scaled["boss_hp"])
+        # Carry persisted HP from prior unfinished engagements (with regen).
+        boss_hp, boss_hp_max = self._resolve_persisted_boss_hp(
+            boss_progress, at_boss, fresh_boss_hp, int(time.time()),
+        )
+        boss_hit_chance = float(scaled["boss_hit"])
+        boss_dmg = int(scaled["boss_dmg"])
+
+        # Luminosity combat penalty.
+        lum_value = self._get_luminosity(tunnel)
+        lum_hit_offset, lum_dmg_bonus = _luminosity_combat_penalty(lum_value)
+        boss_dmg += lum_dmg_bonus
+
+        _tk = at_boss if at_boss in BOSS_TIER_BONUS else max((k for k in BOSS_TIER_BONUS if k <= at_boss), default=25)
+        depth_hit_penalty = BOSS_TIER_BONUS[_tk]["pen"]
+        prestige_hit_penalty = BOSS_PRESTIGE_BONUS.get(prestige_level, BOSS_PRESTIGE_BONUS[max(BOSS_PRESTIGE_BONUS)])["pen"]
+        player_hit = (
+            stats["player_hit"]
+            - depth_hit_penalty - prestige_hit_penalty - phase2_penalty
+            + cheer_bonus
+            + lum_hit_offset
+        )
+        if wager == 0:
+            player_hit *= BOSS_FREE_FIGHT_ACCURACY_MOD
+        player_hit = max(PLAYER_HIT_FLOOR, min(PLAYER_HIT_CEILING, player_hit))
+
+        player_hp = int(stats["player_hp"])
+        player_dmg = int(stats["player_dmg"])
 
         win_chance = _approx_duel_win_prob(
             player_hp=player_hp,
@@ -4339,18 +5760,34 @@ class DigService:
             multiplier=multiplier, prestige_level=prestige_level,
             attempts=attempts, boss_progress=dict(boss_progress),
             depth=depth,
+            ending_boss_hp=int(boss_hp), boss_hp_max=int(boss_hp_max),
         )
 
     def resume_boss_duel(
         self, discord_id: int, guild_id, option_idx: int,
+        *, state_row: dict | None = None,
     ) -> dict:
-        """Resume a paused duel after the player picks a reactive option."""
+        """Resume a paused duel after the player picks a reactive option.
+
+        ``state_row`` may be supplied by the caller when the row was already
+        atomically claimed (see ``submit_timed_answer``). When omitted, the
+        row is read from the repo as usual.
+        """
         from domain.models.boss_mechanics import get_mechanic as _get_mechanic
         from services.dig_constants import get_boss_by_id as _get_boss
 
-        state_row = self.dig_repo.get_active_duel(discord_id, guild_id)
+        if state_row is None:
+            state_row = self.dig_repo.get_active_duel(discord_id, guild_id)
         if state_row is None:
             return self._error("No active duel to resume.")
+
+        # Pinnacle pauses store the pinnacle_id in state_row["boss_id"];
+        # route them to the dedicated resolver so the post-fight branch
+        # respects 3-phase + relic-drop rules.
+        if state_row["boss_id"] in PINNACLE_BOSSES:
+            return self._resume_pinnacle_duel(
+                discord_id, guild_id, option_idx, state_row,
+            )
 
         boss = _get_boss(state_row["boss_id"])
         if boss is None:
@@ -4466,6 +5903,15 @@ class DigService:
         self.dig_repo.clear_active_duel(discord_id, guild_id)
 
         snapshot_ids = status_effects.get("gear_snapshot_ids") or []
+        # Reconstruct boss_hp_max from the round log (highest post-hit value
+        # plus the player's per-round damage) to seed persisted-HP tracking.
+        approx_hp_max = max(
+            (int(r.get("boss_hp", 0)) for r in round_log if "boss_hp" in r),
+            default=int(boss_hp),
+        )
+        if approx_hp_max < int(boss_hp):
+            approx_hp_max = max(int(boss_hp), 1)
+        approx_hp_max += int(state_row["player_dmg"])
         return self._resolve_duel_outcome(
             discord_id=discord_id, guild_id=guild_id,
             tunnel=tunnel, boss=boss, at_boss=at_boss,
@@ -4478,6 +5924,7 @@ class DigService:
             attempts=attempts, boss_progress=boss_progress,
             depth=depth,
             gear_snapshot_ids=snapshot_ids,
+            ending_boss_hp=int(boss_hp), boss_hp_max=int(approx_hp_max),
         )
 
     # --- helpers --------------------------------------------------------
@@ -4643,6 +6090,8 @@ class DigService:
         win_chance, multiplier, prestige_level, attempts,
         boss_progress, depth,
         gear_snapshot_ids: list[int] | None = None,
+        ending_boss_hp: int | None = None,
+        boss_hp_max: int | None = None,
     ) -> dict:
         """Apply the win-branch or loss-branch post-processing and return the result dict.
 
@@ -4703,21 +6152,34 @@ class DigService:
                 if isinstance(current_entry, dict)
                 else current_entry
             )
+            phase2_min_p = int(BOSS_PHASES.get("phase_2_min_prestige", 2))
+            phase3_min_p = int(BOSS_PHASES.get("phase_3_min_prestige", 5))
+            phase3_min_tier = int(BOSS_PHASES.get("phase_3_min_tier", 100))
             needs_phase2 = (
-                ascension.get("boss_phase2", False)
+                prestige_level >= phase2_min_p
                 and at_boss in BOSS_PHASE2
                 and current_status == "active"
             )
+            needs_phase3 = (
+                prestige_level >= phase3_min_p
+                and at_boss >= phase3_min_tier
+                and at_boss in BOSS_PHASE3
+                and current_status == "phase1_defeated"
+            )
 
-            if needs_phase2:
-                # Phase 1 victory: mark phase1_defeated, don't advance depth.
+            if needs_phase2 or needs_phase3:
+                next_status = "phase1_defeated" if needs_phase2 else "phase2_defeated"
+                phase_def = BOSS_PHASE2[at_boss] if needs_phase2 else BOSS_PHASE3[at_boss]
+                next_phase_num = 2 if needs_phase2 else 3
+                phase_event = random.choice(PHASE_TRANSITION_EVENTS)
+                # Mark next phase status, preserving boss_id when present.
                 if isinstance(current_entry, dict):
-                    current_entry["status"] = "phase1_defeated"
+                    current_entry["status"] = next_status
                     boss_progress[str(at_boss)] = current_entry
                 else:
                     boss_progress[str(at_boss)] = {
                         "boss_id": boss.boss_id if boss else "",
-                        "status": "phase1_defeated",
+                        "status": next_status,
                     }
                 self.dig_repo.update_tunnel(
                     discord_id, guild_id,
@@ -4725,25 +6187,29 @@ class DigService:
                     boss_attempts=attempts,
                     last_dig_at=now,
                 )
-                phase2 = BOSS_PHASE2[at_boss]
-                p2_dialogue = phase2.dialogue[min(attempts - 1, len(phase2.dialogue) - 1)]
+                p_dialogue = phase_def.dialogue[min(attempts - 1, len(phase_def.dialogue) - 1)]
                 self.dig_repo.log_action(
                     discord_id=discord_id, guild_id=guild_id,
                     action_type="boss_fight",
                     details=json.dumps({
                         "boundary": at_boss, "won": True, "risk": risk_tier,
-                        "phase": 1, "wager": wager, "rounds": round_log,
+                        "phase": next_phase_num - 1, "wager": wager, "rounds": round_log,
                     }),
                 )
                 return self._ok(
-                    won=True, phase=1, phase2_incoming=True,
+                    won=True,
+                    phase=next_phase_num - 1,
+                    phase2_incoming=needs_phase2,
+                    phase3_incoming=needs_phase3,
                     boss_name=boss_name, boss_id=boss.boss_id if boss else "",
-                    phase2_name=phase2.name, phase2_title=phase2.title,
+                    phase2_name=phase_def.name, phase2_title=phase_def.title,
+                    phase_event_flavor=phase_event.flavor,
+                    phase_event_description=phase_event.description,
                     boundary=at_boss, risk_tier=risk_tier,
                     win_chance=round(win_chance, 2),
                     jc_delta=0, payout=0,
                     new_depth=depth,
-                    dialogue=p2_dialogue,
+                    dialogue=p_dialogue,
                     achievements=[],
                     round_log=round_log,
                     echo_applied=echo_applied,
@@ -4842,7 +6308,11 @@ class DigService:
             )
             return self._ok(
                 won=True,
-                phase=(2 if current_status == "phase1_defeated" else None),
+                phase=(
+                    3 if current_status == "phase2_defeated"
+                    else 2 if current_status == "phase1_defeated"
+                    else None
+                ),
                 boss_name=boss_name,
                 boss_id=boss.boss_id if boss else "",
                 boundary=at_boss,
@@ -4872,9 +6342,24 @@ class DigService:
         new_depth = max(0, depth - knockback)
         jc_delta = -wager if wager > 0 else 0
         last_dig_effective = now + extra_cd  # extended cooldown pushes the timer forward
+
+        # Persist remaining boss HP so soften-and-retreat works for the
+        # state-machine path. ending_boss_hp / boss_hp_max are forwarded
+        # from the caller (start_boss_duel / resume_boss_duel) — when the
+        # caller didn't track these (legacy auto-resolve path with no HP
+        # info), we skip persistence and the next encounter starts fresh.
+        bp_for_persist = self._get_boss_progress(tunnel)
+        if ending_boss_hp is not None and boss_hp_max is not None:
+            self._persist_boss_hp_after_fight(
+                bp_for_persist, at_boss, boss.boss_id if boss else "",
+                ending_hp=max(0, int(ending_boss_hp)),
+                hp_max=max(1, int(boss_hp_max)),
+                won=False, outcome="loss", now=int(now),
+            )
         self.dig_repo.update_tunnel(
             discord_id, guild_id,
             depth=new_depth,
+            boss_progress=json.dumps(bp_for_persist),
             boss_attempts=attempts,
             cheer_data=None,
             last_dig_at=last_dig_effective,
@@ -4917,7 +6402,14 @@ class DigService:
         )
 
     def retreat_boss(self, discord_id: int, guild_id) -> dict:
-        """Retreat from boss. Lose 1-3 blocks."""
+        """Retreat from boss. Lose 2-3 blocks and trigger a 30-min cooldown.
+
+        Persisted boss HP from any prior engagement is preserved (the
+        retreat exchanges no blows). The cooldown stops the player from
+        scout-and-back-off-loop scout the same boss for free intel until it
+        expires; ``fight_boss`` / ``start_boss_duel`` / ``scout_boss`` all
+        check ``retreat_cooldown_until`` before engaging.
+        """
         tunnel = self.dig_repo.get_tunnel(discord_id, guild_id)
         if tunnel is None:
             return self._error("You don't have a tunnel.")
@@ -4930,20 +6422,42 @@ class DigService:
         if at_boss is None:
             return self._error("You're not at a boss boundary.")
 
-        loss = random.randint(1, 3)
+        loss = random.randint(RETREAT_BLOCK_LOSS_MIN, RETREAT_BLOCK_LOSS_MAX)
         new_depth = max(0, depth - loss)
+        now = int(time.time())
+        cooldown_until = now + RETREAT_COOLDOWN_SECONDS
 
-        self.dig_repo.update_tunnel(discord_id, guild_id, depth=new_depth)
+        # Mark last_outcome so the next encounter's dialogue uses
+        # ``after_retreat`` lines.
+        entry = self._read_boss_progress_entry(boss_progress, at_boss)
+        entry["last_outcome"] = "retreat"
+        entry["first_meet_seen"] = True
+        # Preserve boss_id if known.
+        bp_raw = boss_progress.get(str(at_boss))
+        if isinstance(bp_raw, dict):
+            entry.setdefault("boss_id", bp_raw.get("boss_id", ""))
+        boss_progress[str(at_boss)] = entry
+
+        self.dig_repo.update_tunnel(
+            discord_id, guild_id,
+            depth=new_depth,
+            boss_progress=json.dumps(boss_progress),
+            retreat_cooldown_until=cooldown_until,
+        )
         self.dig_repo.log_action(
             discord_id=discord_id, guild_id=guild_id,
             action_type="boss_retreat",
-            details=json.dumps({"boundary": at_boss, "loss": loss}),
+            details=json.dumps({
+                "boundary": at_boss, "loss": loss,
+                "cooldown_until": cooldown_until,
+            }),
         )
 
         return self._ok(
             boundary=at_boss,
             loss=loss,
             new_depth=new_depth,
+            retreat_cooldown_until=cooldown_until,
         )
 
     def scout_boss(self, discord_id: int, guild_id) -> dict:
@@ -4976,8 +6490,9 @@ class DigService:
 
         # Calculate odds for all tiers using the HP-duel model.
         prestige_level = tunnel.get("prestige_level", 0) or 0
-        depth_hit_penalty = (at_boss // 25) * PLAYER_HIT_PENALTY_PER_25_DEPTH
-        prestige_hit_penalty = prestige_level * PLAYER_HIT_PENALTY_PER_PRESTIGE
+        _tk = at_boss if at_boss in BOSS_TIER_BONUS else max((k for k in BOSS_TIER_BONUS if k <= at_boss), default=25)
+        depth_hit_penalty = BOSS_TIER_BONUS[_tk]["pen"]
+        prestige_hit_penalty = BOSS_PRESTIGE_BONUS.get(prestige_level, BOSS_PRESTIGE_BONUS[max(BOSS_PRESTIGE_BONUS)])["pen"]
 
         cheers = self._get_cheers(tunnel)
         now = int(time.time())
@@ -4997,42 +6512,57 @@ class DigService:
             active_echo
             and active_echo.get("killer_discord_id") != discord_id
         )
-        hp_mult = 0.75 if echo_applied else 1.0
+        # Echo HP discount is applied inside `_scale_boss_stats` now.
         payout_mult = 0.7 if echo_applied else 1.0
 
         # Apply the player's current gear loadout so previewed odds reflect
         # what they'd actually fight with.
         scout_loadout = self._get_loadout(discord_id, guild_id)
 
+        # Luminosity penalty applies to the previewed odds as well.
+        lum_value = self._get_luminosity(tunnel)
+        lum_hit_offset, lum_dmg_bonus = _luminosity_combat_penalty(lum_value)
+
         odds = {}
         for i, tier in enumerate(("cautious", "bold", "reckless")):
             base = BOSS_DUEL_STATS[tier]
             stats = self._apply_gear_to_combat(base, scout_loadout)
-            player_hit = stats["player_hit"] - depth_hit_penalty - prestige_hit_penalty + cheer_bonus
+            scaled = self._scale_boss_stats(
+                stats,
+                boss_id=scout_boss_id,
+                at_boss=at_boss,
+                prestige_level=prestige_level,
+                echo_applied=echo_applied,
+            )
+            boss_hp = int(scaled["boss_hp"])
+            boss_hit_chance = float(scaled["boss_hit"])
+            boss_dmg_eff = int(scaled["boss_dmg"]) + lum_dmg_bonus
+
+            player_hit = (
+                stats["player_hit"]
+                - depth_hit_penalty - prestige_hit_penalty
+                + cheer_bonus + lum_hit_offset
+            )
             player_hit = max(PLAYER_HIT_FLOOR, min(PLAYER_HIT_CEILING, player_hit))
             free_hit = max(
                 PLAYER_HIT_FLOOR,
                 min(PLAYER_HIT_CEILING, player_hit * BOSS_FREE_FIGHT_ACCURACY_MOD),
             )
-            boss_hp = (int(stats["boss_hp"])
-                       + (at_boss // 40) * BOSS_HP_PER_40_DEPTH
-                       + prestige_level * BOSS_HP_PER_PRESTIGE)
-            boss_hp = max(1, int(round(boss_hp * hp_mult)))
             win_pct = _approx_duel_win_prob(
                 player_hp=int(stats["player_hp"]),
                 boss_hp=boss_hp,
                 player_hit=player_hit,
                 player_dmg=int(stats["player_dmg"]),
-                boss_hit=float(stats["boss_hit"]),
-                boss_dmg=int(stats["boss_dmg"]),
+                boss_hit=boss_hit_chance,
+                boss_dmg=boss_dmg_eff,
             )
             free_win_pct = _approx_duel_win_prob(
                 player_hp=int(stats["player_hp"]),
                 boss_hp=boss_hp,
                 player_hit=free_hit,
                 player_dmg=int(stats["player_dmg"]),
-                boss_hit=float(stats["boss_hit"]),
-                boss_dmg=int(stats["boss_dmg"]),
+                boss_hit=boss_hit_chance,
+                boss_dmg=boss_dmg_eff,
             )
             base_multiplier = payouts[i] if i < len(payouts) else 2.0
             odds[tier] = {
@@ -5041,7 +6571,7 @@ class DigService:
                 "player_hp": int(stats["player_hp"]),
                 "boss_hp": boss_hp,
                 "player_hit": round(player_hit, 2),
-                "boss_hit": round(float(stats["boss_hit"]), 2),
+                "boss_hit": round(boss_hit_chance, 2),
                 "multiplier": round(base_multiplier * payout_mult, 2),
             }
 
@@ -5167,14 +6697,41 @@ class DigService:
         boss_progress = self._get_boss_progress(tunnel)
         prestige_level = tunnel.get("prestige_level", 0) or 0
 
-        all_defeated = all(v == "defeated" for v in boss_progress.values())
+        # Tier bosses (25..275) must all be defeated.
+        tier_defeated = all(
+            (
+                (e.get("status") if isinstance(e, dict) else e) == "defeated"
+            )
+            for b in BOSS_BOUNDARIES
+            for e in (boss_progress.get(str(b)),)
+            if e is not None
+        ) and len([
+            b for b in BOSS_BOUNDARIES if boss_progress.get(str(b)) is not None
+        ]) == len(BOSS_BOUNDARIES)
+        # Pinnacle (depth 300) must also be defeated to ascend.
+        pinnacle_entry = boss_progress.get(str(PINNACLE_DEPTH))
+        pinnacle_status = (
+            pinnacle_entry.get("status") if isinstance(pinnacle_entry, dict)
+            else pinnacle_entry
+        )
+        pinnacle_defeated = pinnacle_status == "defeated"
+        all_defeated = tier_defeated and pinnacle_defeated
         at_max = prestige_level >= MAX_PRESTIGE
 
         can = all_defeated and not at_max
         reason = None
-        if not all_defeated:
-            remaining = [k for k, v in boss_progress.items() if v != "defeated"]
+        if not tier_defeated:
+            remaining = [
+                str(b) for b in BOSS_BOUNDARIES
+                if (
+                    (boss_progress.get(str(b)) or {}).get("status")
+                    if isinstance(boss_progress.get(str(b)), dict)
+                    else boss_progress.get(str(b))
+                ) != "defeated"
+            ]
             reason = f"Bosses remaining: {', '.join(remaining)}"
+        elif not pinnacle_defeated:
+            reason = "Something stirs deeper still — descend further."
         elif at_max:
             reason = f"Already at max prestige ({MAX_PRESTIGE})."
 
@@ -5244,7 +6801,8 @@ class DigService:
             mutations_json = json.dumps(active_mutations)
             mutation_info = {"forced": forced, "chosen": active_mutations[-1] if len(active_mutations) > 1 else None}
 
-        # Reset tunnel
+        # Reset tunnel — including pinnacle state so the next cycle re-rolls
+        # a fresh pinnacle from the rotating pool on first encounter.
         boss_progress = {str(b): "active" for b in BOSS_BOUNDARIES}
         self.dig_repo.update_tunnel(
             discord_id, guild_id,
@@ -5261,6 +6819,10 @@ class DigService:
             current_run_events=0,
             total_prestige_score=total_score,
             mutations=mutations_json,
+            pinnacle_boss_id=None,
+            pinnacle_phase=0,
+            pinnacle_hp_remaining=None,
+            pinnacle_last_engaged_at=None,
         )
 
         self.dig_repo.log_action(
@@ -5985,7 +7547,10 @@ class DigService:
                     unlocked = True
             elif ctype == "all_bosses":
                 bp = context.get("boss_progress") or self._get_boss_progress(tunnel)
-                if all(v == "defeated" for v in bp.values()):
+                if all(
+                    (v.get("status") if isinstance(v, dict) else v) == "defeated"
+                    for v in bp.values()
+                ):
                     unlocked = True
             elif ctype == "prestige":
                 if tunnel.get("prestige_level", 0) >= condition.get("value", 0):
@@ -6075,7 +7640,10 @@ class DigService:
         achievements = self.dig_repo.get_achievements(discord_id, guild_id)
 
         boss_progress = self._get_boss_progress(tunnel)
-        all_bosses_beaten = all(v == "defeated" for v in boss_progress.values())
+        all_bosses_beaten = all(
+            (v.get("status") if isinstance(v, dict) else v) == "defeated"
+            for v in boss_progress.values()
+        )
 
         titles = []
         if all_bosses_beaten:

@@ -310,7 +310,7 @@ WEAPON_TIERS: list[GearTierDef] = [
                 advance_bonus=3, cave_in_reduction=0.20, loot_bonus=3,
                 shop_price=600,  depth_required=200, prestige_required=3),
     GearTierDef("Void-Touched Pickaxe", tier=6, slot=GearSlot.WEAPON,
-                player_dmg=1, player_hit=0.07,
+                player_dmg=2, player_hit=0.07,
                 advance_bonus=4, cave_in_reduction=0.20, loot_bonus=5,
                 shop_price=1200, depth_required=275, prestige_required=5),
 ]
@@ -998,14 +998,81 @@ BOSS_DUEL_STATS: dict[str, dict[str, float]] = {
     "reckless": {"player_hp": 2, "boss_hp": 6, "player_hit": 0.10, "player_dmg": 3, "boss_hit": 0.60, "boss_dmg": 1},
 }
 
-BOSS_HP_PER_40_DEPTH: int = 1                     # boss HP bonus per 40 depth
-BOSS_HP_PER_PRESTIGE: int = 1                     # boss HP bonus per prestige level
-PLAYER_HIT_PENALTY_PER_25_DEPTH: float = 0.01     # -1% player hit per 25 depth
-PLAYER_HIT_PENALTY_PER_PRESTIGE: float = 0.01     # -1% player hit per prestige level
+# Boss difficulty curve — hand-tuned lookup tables. Replaces the prior
+# linear-formula scaling. The tables are the single source of truth: each
+# cell is added to the boss base+archetype stats, and a Monte-Carlo
+# simulation confirmed the resulting curve. Tune by editing entries.
+BOSS_TIER_BONUS: dict[int, dict[str, float]] = {
+    # boundary depth: {boss_hp_add, boss_hit_add, boss_dmg_add, player_hit_pen}
+    25:  {"hp": 0,  "hit": 0.00, "dmg": 0, "pen": 0.00},
+    50:  {"hp": 1,  "hit": 0.00, "dmg": 0, "pen": 0.01},
+    75:  {"hp": 2,  "hit": 0.01, "dmg": 0, "pen": 0.02},
+    100: {"hp": 4,  "hit": 0.03, "dmg": 0, "pen": 0.04},
+    150: {"hp": 6,  "hit": 0.04, "dmg": 0, "pen": 0.05},
+    200: {"hp": 6,  "hit": 0.05, "dmg": 0, "pen": 0.06},
+    275: {"hp": 7,  "hit": 0.06, "dmg": 0, "pen": 0.06},
+    300: {"hp": 12, "hit": 0.10, "dmg": 0, "pen": 0.07},   # pinnacle: HP grind, no dmg cliff
+}
+BOSS_PRESTIGE_BONUS: dict[int, dict[str, float]] = {
+    # prestige: {boss_hp_add, boss_hit_add, boss_dmg_add, player_hit_pen}
+    # P1/P3/P5 carry extra cushion to offset the gear-unlock power spike.
+    0: {"hp": 0,  "hit": 0.00, "dmg": 0, "pen": 0.000},
+    1: {"hp": 11, "hit": 0.08, "dmg": 0, "pen": 0.030},   # Obsidian unlock cushion
+    2: {"hp": 11, "hit": 0.09, "dmg": 0, "pen": 0.050},
+    3: {"hp": 14, "hit": 0.12, "dmg": 0, "pen": 0.080},   # Frost unlock cushion
+    4: {"hp": 16, "hit": 0.14, "dmg": 0, "pen": 0.110},
+    5: {"hp": 28, "hit": 0.20, "dmg": 0, "pen": 0.140},   # Void unlock cushion (big)
+    6: {"hp": 31, "hit": 0.23, "dmg": 0, "pen": 0.165},
+    7: {"hp": 32, "hit": 0.25, "dmg": 1, "pen": 0.190},   # purgatory: only +dmg row
+}
 PLAYER_HIT_FLOOR: float = 0.05                     # hard floor so Reckless remains playable
-PLAYER_HIT_CEILING: float = 0.95                   # hard ceiling even with max cheers
+PLAYER_HIT_CEILING: float = 0.85                   # hard ceiling — was 0.95; tightened so RNG matters
 BOSS_FREE_FIGHT_ACCURACY_MOD: float = 0.6          # multiplied into player_hit when wager == 0
 BOSS_ROUND_CAP: int = 20                           # safety valve against infinite loops
+WIN_CHANCE_CAP: float = 0.95                       # ceiling on displayed/computed win probability
+WIN_CHANCE_FLOOR: float = 0.05                     # floor on displayed/computed win probability ("miracle" chance)
+
+# Boss archetypes — applied on top of risk-tier base stats so each boss
+# in a tier feels distinct (e.g. Pudge tanks, Lina glass-cannons).
+# hp_mult applies to base boss_hp; hit/dmg are additive offsets.
+BOSS_ARCHETYPES: dict[str, dict[str, float]] = {
+    "tank":         {"hp_mult": 1.5, "hit_offset": -0.03, "dmg_offset": 0},
+    "bruiser":      {"hp_mult": 1.0, "hit_offset": 0.00,  "dmg_offset": 0},
+    "glass_cannon": {"hp_mult": 0.7, "hit_offset": 0.05,  "dmg_offset": 1},
+    "slippery":     {"hp_mult": 0.8, "hit_offset": 0.10,  "dmg_offset": 0},
+}
+
+# Per-boss archetype assignment (heuristic by Dota persona).
+BOSS_ARCHETYPE_BY_ID: dict[str, str] = {
+    # Tier 25
+    "grothak":             "bruiser",
+    "pudge":               "tank",
+    "ogre_magi":           "glass_cannon",
+    # Tier 50
+    "crystalia":           "bruiser",
+    "crystal_maiden":      "glass_cannon",
+    "tusk":                "tank",
+    # Tier 75
+    "magmus_rex":          "tank",
+    "lina":                "glass_cannon",
+    "doom":                "bruiser",
+    # Tier 100
+    "void_warden":         "slippery",
+    "spectre":             "slippery",
+    "void_spirit":         "slippery",
+    # Tier 150
+    "sporeling_sovereign": "tank",
+    "treant_protector":    "tank",
+    "broodmother":         "glass_cannon",
+    # Tier 200
+    "chronofrost":         "slippery",
+    "faceless_void":       "slippery",
+    "weaver":              "slippery",
+    # Tier 275
+    "nameless_depth":      "tank",
+    "oracle":              "glass_cannon",
+    "terrorblade":         "glass_cannon",
+}
 
 # Payouts: depth -> (cautious_multiplier, bold_multiplier, reckless_multiplier).
 # Flatter and harder than the pre-nerf table; the old exponential growth at
@@ -4953,6 +5020,17 @@ LUMINOSITY_PITCH_EVENT_MULTIPLIER: float = 3.0
 LUMINOSITY_PITCH_FORCE_RISKY: bool = True      # safe option removed at pitch black
 LUMINOSITY_PITCH_JC_MULTIPLIER: float = 1.50
 
+# Boss combat penalties from low luminosity (boss revamp)
+LUMINOSITY_DIM_HIT_PENALTY: float = 0.03         # -3% player_hit at Dim
+LUMINOSITY_DARK_HIT_PENALTY: float = 0.08        # -8% player_hit at Dark
+LUMINOSITY_PITCH_HIT_PENALTY: float = 0.15       # -15% player_hit at Pitch Black
+LUMINOSITY_PITCH_BOSS_DMG_BONUS: int = 1         # bosses hit harder in pitch black
+
+# Slow on-demand refill — replaces the old daily snap-back to 100.
+# Recovery is computed as floor(hours_elapsed * (REFILL_PER_DAY / 24)) on
+# every dig and boss encounter, using `last_lum_update_at` on the tunnel.
+LUMINOSITY_REFILL_PER_DAY: int = 20
+
 
 # ---------------------------------------------------------------------------
 # Prestige Constants
@@ -5283,6 +5361,392 @@ BOSS_PHASE2: dict[int, BossPhase2Def] = {
 
 
 # ---------------------------------------------------------------------------
+# Boss Phase Gates & Phase 3 Definitions (boss revamp)
+# ---------------------------------------------------------------------------
+# Phase gates control when multi-phase boss fights unlock.
+# Phase 2: P2+ on any tier (was P4). Phase 3: P5+ AND tier >= 100. Pinnacle
+# is always 3-phase regardless of prestige.
+BOSS_PHASES: dict[str, int | bool] = {
+    "phase_2_min_prestige": 2,
+    "phase_3_min_prestige": 5,
+    "phase_3_min_tier": 100,
+}
+
+
+@dataclass(frozen=True)
+class BossPhase3Def:
+    """Endgame third phase for tier 100+ bosses at prestige 5+."""
+    depth: int
+    name: str
+    title: str
+    dialogue: list[str]
+    win_odds_penalty: float
+
+
+BOSS_PHASE3: dict[int, BossPhase3Def] = {
+    100: BossPhase3Def(
+        depth=100,
+        name="The Void Itself",
+        title="There Was Never Anything Here",
+        dialogue=[
+            "You unraveled me. The unraveling unravels in turn. Endless.",
+            "There is no third phase. There is no second. There was no first.",
+            "You are arguing with the carpet now. Good luck.",
+        ],
+        win_odds_penalty=-0.15,
+    ),
+    150: BossPhase3Def(
+        depth=150,
+        name="The Hivemind Awoken",
+        title="Every Spore Speaks At Once",
+        dialogue=[
+            "We are a chorus. The chorus is a single voice. The voice is many.",
+            "You are a single thread in our weave. We have eaten threads before.",
+            "Every breath you take is a vote in our favor.",
+        ],
+        win_odds_penalty=-0.18,
+    ),
+    200: BossPhase3Def(
+        depth=200,
+        name="Chronofrost Rewound",
+        title="The Loop That Forgot Itself",
+        dialogue=[
+            "I have already won. I have always already won. The verb is set.",
+            "We have done this 1,032 times. You only remember one.",
+            "Round three. The clock has unwound to zero.",
+        ],
+        win_odds_penalty=-0.20,
+    ),
+    275: BossPhase3Def(
+        depth=275,
+        name="The Final Erasure",
+        title="[REDACTED] [REDACTED] [REDACTED]",
+        dialogue=[
+            "I take your name. I take your shape. I take the gap where you were.",
+            "The depth gets the last word. The depth has always had the last word.",
+            "You become a story told by the rocks. Be a good story.",
+        ],
+        win_odds_penalty=-0.20,
+    ),
+}
+
+
+# ---------------------------------------------------------------------------
+# Phase Transition Events (boss revamp)
+# ---------------------------------------------------------------------------
+# Drawn at random when a boss enters Phase 2 or Phase 3. Effects are
+# applied to the in-progress encounter; flavor goes into the embed.
+
+@dataclass(frozen=True)
+class PhaseTransitionEvent:
+    id: str
+    flavor: str
+    description: str
+    # Effects applied to the duel mid-fight. Any unset key has no effect.
+    player_hp_delta: int = 0
+    boss_hp_delta: int = 0
+    player_hit_offset: float = 0.0  # additive to player_hit for rest of fight
+    boss_hit_offset: float = 0.0
+    player_dmg_delta: int = 0
+    boss_dmg_delta: int = 0
+    luminosity_delta: int = 0       # one-shot tunnel luminosity adjustment
+
+
+PHASE_TRANSITION_EVENTS: list[PhaseTransitionEvent] = [
+    PhaseTransitionEvent(
+        id="cave_in",
+        flavor="Stalactites fracture overhead.",
+        description="Both you and the boss take 1 HP damage.",
+        player_hp_delta=-1, boss_hp_delta=-1,
+    ),
+    PhaseTransitionEvent(
+        id="fissure",
+        flavor="A magma fissure opens between you.",
+        description="-5% player_hit for the remainder of the fight; -5 luminosity.",
+        player_hit_offset=-0.05, luminosity_delta=-5,
+    ),
+    PhaseTransitionEvent(
+        id="glowburst",
+        flavor="A vein of phosphorus ignites.",
+        description="+20 luminosity but the boss sees you better (+5% boss_hit).",
+        boss_hit_offset=0.05, luminosity_delta=20,
+    ),
+    PhaseTransitionEvent(
+        id="cold_snap",
+        flavor="Frost sweeps through the chamber.",
+        description="Both attacks weaken: -1 player_dmg, -1 boss_dmg.",
+        player_dmg_delta=-1, boss_dmg_delta=-1,
+    ),
+    PhaseTransitionEvent(
+        id="spore_cloud",
+        flavor="Spores fill the air.",
+        description="Sluggishness: -3% player_hit and -3% boss_hit.",
+        player_hit_offset=-0.03, boss_hit_offset=-0.03,
+    ),
+    PhaseTransitionEvent(
+        id="void_pull",
+        flavor="Reality folds inward.",
+        description="Both lose 2 HP.",
+        player_hp_delta=-2, boss_hp_delta=-2,
+    ),
+]
+
+
+# ---------------------------------------------------------------------------
+# Pinnacle Boss (boss revamp)
+# ---------------------------------------------------------------------------
+# A new 8th boss boundary at depth 300 that gates prestige. One of three
+# pinnacle candidates is rolled and locked per prestige cycle.
+# Always 3 phases. Drops a relic with 2 random rolls on victory.
+
+PINNACLE_DEPTH: int = 300
+PINNACLE_RETREAT_FORESHADOW_DEPTH: int = 285  # /dig info hints from this depth
+PINNACLE_FORESHADOW_DEPTH: int = 276          # subtle hint after T275 cleared
+
+
+@dataclass(frozen=True)
+class PinnaclePhaseDef:
+    """One phase of a pinnacle boss."""
+    archetype: str
+    title: str
+    transition_dialogue: list[str]
+    mechanic_pool: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class PinnacleBossDef:
+    """A pinnacle boss candidate. One is rolled and locked per prestige cycle."""
+    boss_id: str
+    name: str
+    persona: str
+    ascii_art: str
+    phases: tuple[PinnaclePhaseDef, PinnaclePhaseDef, PinnaclePhaseDef]
+
+
+PINNACLE_BOSSES: dict[str, PinnacleBossDef] = {
+    "forgotten_king": PinnacleBossDef(
+        boss_id="forgotten_king",
+        name="The Forgotten King",
+        persona="ancient, dignified, hollowed by time",
+        ascii_art=(
+            "    .--^^--.\n"
+            "   /  ::::  \\\n"
+            "  | (o)  (o) |\n"
+            "  |    /\\    |\n"
+            "  |   '--'   |\n"
+            "   \\  '__'  /\n"
+            "    '------'\n"
+            "      ||||\n"
+            "    ##====##"
+        ),
+        phases=(
+            PinnaclePhaseDef(
+                archetype="tank",
+                title="The Forgotten King",
+                transition_dialogue=[],
+                mechanic_pool=("king_decree",),
+            ),
+            PinnaclePhaseDef(
+                archetype="glass_cannon",
+                title="The Crowned Hunger",
+                transition_dialogue=[
+                    "The crown burns. I am hungry now. Forgive me.",
+                    "Decorum slips. Hunger speaks.",
+                ],
+                mechanic_pool=("king_feast",),
+            ),
+            PinnaclePhaseDef(
+                archetype="slippery",
+                title="The Last Breath of Kings",
+                transition_dialogue=[
+                    "Last breath. Last lesson. Pay attention.",
+                    "I die slowly. You will witness.",
+                ],
+                mechanic_pool=(
+                    "king_deathbed",
+                    "pinnacle_arithmetic_challenge",
+                    "pinnacle_riddle_challenge",
+                ),
+            ),
+        ),
+    ),
+    "hollowforged": PinnacleBossDef(
+        boss_id="hollowforged",
+        name="Hollowforged",
+        persona="the depth made flesh, plural, mineral",
+        ascii_art=(
+            "  /\\/\\/\\/\\/\\/\\\n"
+            " /            \\\n"
+            "|  __    __    |\n"
+            "| (oo)  (oo)   |\n"
+            "|              |\n"
+            " \\  ========  /\n"
+            "  \\__________/\n"
+            "    ||    ||\n"
+            "   ###    ###"
+        ),
+        phases=(
+            PinnaclePhaseDef(
+                archetype="bruiser",
+                title="Hollowforged",
+                transition_dialogue=[],
+                mechanic_pool=("hollow_walls_close",),
+            ),
+            PinnaclePhaseDef(
+                archetype="tank",
+                title="Hollowforged Reformed",
+                transition_dialogue=[
+                    "Reform. The mine has new walls now.",
+                    "The walls speak in a different dialect.",
+                ],
+                mechanic_pool=("hollow_shape_shift",),
+            ),
+            PinnaclePhaseDef(
+                archetype="slippery",
+                title="Hollowforged Pluralized",
+                transition_dialogue=[
+                    "Plural. The depth is many things at once.",
+                    "We are the chamber and the wall and the air.",
+                ],
+                mechanic_pool=(
+                    "hollow_many_voices",
+                    "pinnacle_arithmetic_challenge",
+                    "pinnacle_riddle_challenge",
+                ),
+            ),
+        ),
+    ),
+    "first_digger": PinnacleBossDef(
+        boss_id="first_digger",
+        name="The First Digger",
+        persona="gaunt, manic, the one who never came back up",
+        ascii_art=(
+            "       /\\\n"
+            "      /  \\\n"
+            "     /    \\\n"
+            "    | O  O |\n"
+            "    |  /\\  |\n"
+            "     \\ -- /\n"
+            "      \\__/\n"
+            "       ||\n"
+            "    ___||___\n"
+            "   |________|"
+        ),
+        phases=(
+            PinnaclePhaseDef(
+                archetype="glass_cannon",
+                title="The First Digger",
+                transition_dialogue=[],
+                mechanic_pool=("digger_pickaxe_duel",),
+            ),
+            PinnaclePhaseDef(
+                archetype="slippery",
+                title="The Digger Unbound",
+                transition_dialogue=[
+                    "Unbound. The pickaxe is no longer needed.",
+                    "I dig with my hands now. Cleaner.",
+                ],
+                mechanic_pool=("digger_phasing",),
+            ),
+            PinnaclePhaseDef(
+                archetype="glass_cannon",
+                title="The Digger Eternal",
+                transition_dialogue=[
+                    "Eternal. The tunnel is me. I am the tunnel.",
+                    "Last shift. Last dig. Last.",
+                ],
+                mechanic_pool=(
+                    "digger_tunnel_collapse",
+                    "pinnacle_arithmetic_challenge",
+                    "pinnacle_riddle_challenge",
+                ),
+            ),
+        ),
+    ),
+}
+
+PINNACLE_POOL_IDS: tuple[str, ...] = ("forgotten_king", "hollowforged", "first_digger")
+
+
+# Pinnacle relic — random 2 stats from this pool, name = base + suffix.
+@dataclass(frozen=True)
+class RelicStatRoll:
+    """Possible stat roll for a pinnacle relic. effects keys feed into combat helpers."""
+    id: str
+    label: str
+    effects: dict   # e.g. {"player_hp_bonus": 1} or {"jc_multiplier": 0.05}
+
+
+PINNACLE_RELIC_STAT_POOL: tuple[RelicStatRoll, ...] = (
+    # Combat
+    RelicStatRoll("hp_plus_1",        "+1 player HP",
+                  {"player_hp_bonus": 1}),
+    RelicStatRoll("hit_plus_002",     "+0.02 player_hit",
+                  {"player_hit_bonus": 0.02}),
+    RelicStatRoll("dmg_plus_per_100", "+1 player_dmg per 100 depth",
+                  {"player_dmg_per_100_depth": 1}),
+    RelicStatRoll("boss_hit_minus",   "-0.02 boss_hit",
+                  {"boss_hit_offset": -0.02}),
+    RelicStatRoll("boss_hp_minus_10", "-10% boss starting HP",
+                  {"boss_hp_multiplier": -0.10}),
+    RelicStatRoll("boss_payout_5",    "+5% boss payout",
+                  {"boss_payout_bonus": 0.05}),
+    # Dig
+    RelicStatRoll("jc_plus_5",        "+5% JC on dig",
+                  {"jc_multiplier": 0.05}),
+    RelicStatRoll("cave_in_minus_5",  "-5% cave-in chance",
+                  {"cave_in_reduction": 0.05}),
+    RelicStatRoll("lum_refill_2",     "+2 luminosity refill per day",
+                  {"lum_refill_bonus": 2}),
+    RelicStatRoll("durability_minus", "-10% gear durability tick",
+                  {"durability_reduction": 0.10}),
+    RelicStatRoll("inventory_plus_1", "+1 inventory slot",
+                  {"inventory_bonus": 1}),
+    # Utility
+    RelicStatRoll("streak_immunity",  "Once per delve, streak does not break on missed day",
+                  {"streak_immunity": True}),
+    RelicStatRoll("extra_relic_slot", "+1 equipped-relic slot",
+                  {"relic_slot_bonus": 1}),
+    RelicStatRoll("scout_free",       "Boss scout costs 0 cooldown",
+                  {"scout_free": True}),
+    RelicStatRoll("cheer_buff",       "Cheers from others give +6% (was +5%)",
+                  {"cheer_bonus": 0.01}),
+)
+
+PINNACLE_RELIC_SUFFIX_POOL: tuple[str, ...] = (
+    "Echoes", "Hunger", "Patience", "Ruin", "Bloom",
+    "Silence", "Endings", "First Light", "Last Breath", "Hollow",
+    "Persistence", "Forgotten Things",
+)
+
+PINNACLE_RELIC_BASE_NAME: dict[str, str] = {
+    "forgotten_king": "Crown",
+    "hollowforged":   "Heart",
+    "first_digger":   "Pickaxe",
+}
+
+# Flat JC reward layered on top of the relic drop.
+PINNACLE_BASE_JC_REWARD: int = 500
+PINNACLE_JC_PER_PRESTIGE: int = 100
+
+
+# ---------------------------------------------------------------------------
+# Retreat Cost (boss revamp)
+# ---------------------------------------------------------------------------
+# Retreat now costs depth blocks + a cooldown so it can't be spammed for
+# free intel after we add persisted boss HP.
+RETREAT_BLOCK_LOSS_MIN: int = 2
+RETREAT_BLOCK_LOSS_MAX: int = 3
+RETREAT_COOLDOWN_SECONDS: int = 30 * 60   # 30 minutes
+
+
+# ---------------------------------------------------------------------------
+# Persisted boss HP / regen (boss revamp)
+# ---------------------------------------------------------------------------
+BOSS_HP_REGEN_PER_HOUR: int = 1
+
+
+# ---------------------------------------------------------------------------
 # Decay Constants
 # ---------------------------------------------------------------------------
 
@@ -5411,9 +5875,669 @@ INJURY_SLOW_COOLDOWN: int = 6 * 3600  # 6 hours in seconds (injury slower cooldo
 BOSS_BOUNDARIES: list[int] = LAYER_BOUNDARIES  # [25, 50, 75, 100, 150, 200, 275]
 BOSS_DEPTHS: list[int] = LAYER_BOUNDARIES
 
+# All encounter boundaries including the pinnacle. Used by service layer to
+# detect when to trigger any boss (regular or pinnacle).
+ALL_BOSS_BOUNDARIES: list[int] = LAYER_BOUNDARIES + [PINNACLE_DEPTH]
+
 BOSS_NAMES: dict[int, str] = {d: b.name for d, b in BOSSES.items()}
 BOSS_DIALOGUE: dict[int, list[str]] = {d: b.dialogue for d, b in BOSSES.items()}
 BOSS_ASCII: dict[int, str] = {d: b.ascii_art for d, b in BOSSES.items()}
+
+
+# ---------------------------------------------------------------------------
+# Boss Dialogue V2 (boss revamp, pre-generated)
+# ---------------------------------------------------------------------------
+# Per-boss dialogue keyed by slot:
+#   first_meet: line on first encounter this delve (resets on prestige)
+#   after_defeat: last fight player won (boss may have been weakened)
+#   after_retreat: last fight player retreated
+#   after_close_win: last fight player won with low win-prob (<0.6)
+#   after_scout: last action was scout
+# Tokens are substituted at render time:
+#   {streak}, {depth}, {prestige}, {killed_boss_name}.
+BOSS_DIALOGUE_V2: dict[str, dict[str, list[str]]] = {
+    # ---- Tier 25 -------------------------------------------------------
+    "grothak": {
+        "first_meet": [
+            "I have stood here longer than you have been alive. Continue.",
+            "You came down. Most go up. I respect this.",
+            "I am Grothak. You are not. Begin.",
+        ],
+        "after_defeat": [
+            "Again. I will not break. You might.",
+            "Streak {streak} days, you say? I have stood here {streak} centuries.",
+            "Round two. I have weight. You have intent.",
+        ],
+        "after_retreat": [
+            "You left. The stone remembers.",
+            "Patience. I am not hard to find.",
+            "You will be back. They always are.",
+        ],
+        "after_close_win": [
+            "A chip is not a crack. Try again.",
+            "You bled me. Acceptable. Not enough.",
+            "I felt that. I have not felt that in some time.",
+        ],
+        "after_scout": [
+            "Looking? Look. I am unbothered.",
+            "Note my stance. It will not change.",
+        ],
+    },
+    "pudge": {
+        "first_meet": [
+            "You look stringy. Maybe with sauce.",
+            "Fresh meat. Don't run. You'll just sweat.",
+            "I haven't eaten today. You'll do.",
+        ],
+        "after_defeat": [
+            "You! ...have you been working out?",
+            "Lucky. The hook was wet.",
+            "Round two. Bring friends. Or don't.",
+        ],
+        "after_retreat": [
+            "Run! It only adds flavor.",
+            "Coward soup. My favorite.",
+            "Smart. I'd run from me too.",
+        ],
+        "after_close_win": [
+            "Scratched. You're learning.",
+            "Bleeding? Both of us. Cute.",
+            "I almost had you. Almost.",
+        ],
+        "after_scout": [
+            "Watching me eat? Weirdo.",
+            "Take notes. There's a quiz.",
+        ],
+    },
+    "ogre_magi": {
+        "first_meet": [
+            "Hi! ...wait, who are you?",
+            "Left head says fight. Right head says snacks. Compromise: fight snack.",
+            "FIRE! ...what was I doing?",
+        ],
+        "after_defeat": [
+            "We saw you yesterday. We forgot you today. Hi again!",
+            "Did you win last time? Don't tell us. We don't believe you.",
+            "Streak {streak} days! Both heads agree we hate that.",
+        ],
+        "after_retreat": [
+            "You ran! Or arrived! Hard to say!",
+            "Goodbye! Or hello! Same thing!",
+            "We won? We didn't win? Doesn't matter, FIRE!",
+        ],
+        "after_close_win": [
+            "Multicast: ow ow ow.",
+            "We meant to do that. Both heads agree. Probably.",
+            "You're hard to forget. We'll work on it.",
+        ],
+        "after_scout": [
+            "You're staring. We like staring. STARE BACK.",
+            "Two heads, two opinions on you. Both bad.",
+        ],
+    },
+    # ---- Tier 50 -------------------------------------------------------
+    "crystalia": {
+        "first_meet": [
+            "Do you see how the light loves me? It will not love you.",
+            "I have a thousand faces. None of them like yours.",
+            "Approach. Watch yourself approach. Watch yourself approach. Watch yourself—",
+        ],
+        "after_defeat": [
+            "You chipped me. The chip is more beautiful than you.",
+            "Refracted again. The mirror reverses. So will I.",
+            "{streak} days of digging and you bring this light to me. Tasteless.",
+        ],
+        "after_retreat": [
+            "Run. The crystal reflects everything, including the back of your head.",
+            "Half a hundred faces watched you flee. They will gossip.",
+            "You return to surface daylight. I pity you.",
+        ],
+        "after_close_win": [
+            "A facet broken. I have nine hundred and ninety-nine others.",
+            "Light bleeds. I bleed. Cute symmetry.",
+            "You're sharper than I thought. Not as sharp as me.",
+        ],
+        "after_scout": [
+            "Gawker. Make a wish.",
+            "I see you in fragments. Most of them are unflattering.",
+        ],
+    },
+    "crystal_maiden": {
+        "first_meet": [
+            "Stand still. The cold finds the still.",
+            "I'm small. The fields I cast are not.",
+            "Wave hello. It'll be the last time you wave with both arms.",
+        ],
+        "after_defeat": [
+            "You melted me. Rude. I'll re-form by Tuesday.",
+            "I'll remember the warmth of your win. Briefly.",
+            "Round two. Bring a coat.",
+        ],
+        "after_retreat": [
+            "Run. I'll catch up. Frost is patient.",
+            "Goodbye. The glaciers I made are still here.",
+            "Coward! ...wait, sensible? I respect both.",
+        ],
+        "after_close_win": [
+            "You felt the field! Now you're afraid.",
+            "Survived? Lucky. The cold remembers your gait.",
+            "Almost. Almost is colder than 'no'.",
+        ],
+        "after_scout": [
+            "Studying my robes? They're insulated. Yours aren't.",
+            "Don't blink. I freeze the eyelashes first.",
+        ],
+    },
+    "tusk": {
+        "first_meet": [
+            "WALRUS PUNCH WARM-UP! You'll do as the tackle dummy.",
+            "Hahaha! Fresh blood for the snowfield.",
+            "You came down here in those? Bold. Stupid. I respect it.",
+        ],
+        "after_defeat": [
+            "Round two! I've packed harder snowballs!",
+            "{streak} days of digging and you've still got soft hands. Cute.",
+            "You won. I respect winners. Now eat snow.",
+        ],
+        "after_retreat": [
+            "Run! I'll roll downhill after you!",
+            "Cold feet, eh? Mine never get cold.",
+            "Tusk waits. Tusk is patient. Tusk is also bored.",
+        ],
+        "after_close_win": [
+            "You took the punch! You stood up! Mostly!",
+            "Bruised but proud. That's the way.",
+            "I felt that. Want to feel mine?",
+        ],
+        "after_scout": [
+            "Squinting? My armor is thick. Your eyes are not.",
+            "Ho ho! A scout! Be sure to scout the fist.",
+        ],
+    },
+    # ---- Tier 75 -------------------------------------------------------
+    "magmus_rex": {
+        "first_meet": [
+            "Bow or burn. Either is acceptable.",
+            "You bring iron into a furnace. Charming.",
+            "I have been king longer than your line has had names.",
+        ],
+        "after_defeat": [
+            "You scorched me. The throne has a new dent.",
+            "Round two. The crown is heavier this time.",
+            "Streak {streak} days and still you crawl back. Persistent rats are still rats.",
+        ],
+        "after_retreat": [
+            "Withdraw. The lava has memory. So do I.",
+            "Hot under your collar? Try mine.",
+            "You will be back. The mantle pulls everything down eventually.",
+        ],
+        "after_close_win": [
+            "A spark off my crown. The crown remains.",
+            "Embers. You are bringing me embers. Adorable.",
+            "I felt warmth. Strange — I am warmth.",
+        ],
+        "after_scout": [
+            "Look. I am unconcerned. Look longer if you wish.",
+            "Inspect my regalia. It survives diggers like you.",
+        ],
+    },
+    "lina": {
+        "first_meet": [
+            "I've been waiting. Don't bore me.",
+            "You're early. I haven't finished applying my eyeliner.",
+            "Make this fun. Make this fast. Pick one.",
+        ],
+        "after_defeat": [
+            "You won? Let me check. ...rude.",
+            "Defeated by depth-{depth} dirt. The shame.",
+            "Round two. I'm bringing the dragon this time.",
+        ],
+        "after_retreat": [
+            "Run! I'll burn brighter while you're gone!",
+            "Goodbye. Take your retreat with a side of fire.",
+            "Patience is a fuel. I have plenty.",
+        ],
+        "after_close_win": [
+            "Singed but standing. Cute outfit, by the way.",
+            "Almost combusted. I respect almost.",
+            "You'll need ointment. I have a recommendation.",
+        ],
+        "after_scout": [
+            "Watch closely. The next one is faster.",
+            "Don't blink. The flash blinds easily.",
+        ],
+    },
+    "doom": {
+        "first_meet": [
+            "Hello. I am Doom. Goodbye.",
+            "Your name. I'd like it for the list.",
+            "You will burn. I'll wait while you process this.",
+        ],
+        "after_defeat": [
+            "Last round you survived. This round, less likely.",
+            "Mark renewed. Streak {streak} noted in the ledger.",
+            "I underestimated you. I will adjust.",
+        ],
+        "after_retreat": [
+            "Branded. You carry me with you now.",
+            "Run. The mark catches up.",
+            "You will return. Branded things always do.",
+        ],
+        "after_close_win": [
+            "A scratch. The brand still burns under it.",
+            "Almost. The list is patient.",
+            "You bleed neatly. I appreciate that.",
+        ],
+        "after_scout": [
+            "Look. The brand is patient.",
+            "Memorize my face. It will be the last polite one you see.",
+        ],
+    },
+    # ---- Tier 100 ------------------------------------------------------
+    "void_warden": {
+        "first_meet": [
+            "I am between two thoughts. You arrived in the gap.",
+            "Hello. Or have we already had this conversation. I forget the order.",
+            "Step closer. Or further. The geometry is forgiving.",
+        ],
+        "after_defeat": [
+            "I lost. Or I lost. Or I will lose. The verbs blur.",
+            "Streak {streak} days. The streak is also a line. Lines fold.",
+            "You won. The previous you won. The next you may not.",
+        ],
+        "after_retreat": [
+            "You retreat. Ahead, behind. Same direction here.",
+            "The void does not chase. It anticipates.",
+            "Goodbye. Or hello in another moment.",
+        ],
+        "after_close_win": [
+            "You bled the right amount. Coincidence is generous.",
+            "I admit confusion. I admit it backwards too.",
+            "Close. Closer than the math allowed.",
+        ],
+        "after_scout": [
+            "You watch. I am also watching. We have always been watching.",
+            "The geometry approves of your inspection. The Warden does not.",
+        ],
+    },
+    "spectre": {
+        "first_meet": [
+            "...",
+            "(The shade does not greet. It haunts.)",
+            "You step into a doorway you did not see. There is no door.",
+        ],
+        "after_defeat": [
+            "You ended me. I have been ended before. It does not stop me long.",
+            "Streak {streak} days. You haunt the depths. So do I.",
+            "Vengeance has been delayed. Not denied.",
+        ],
+        "after_retreat": [
+            "You leave. I am already with you.",
+            "Footsteps fade. Mine do not.",
+            "The shade always follows.",
+        ],
+        "after_close_win": [
+            "Surprised? I bleed shadow.",
+            "Almost yours. Almost mine.",
+            "A near miss. I have eternity.",
+        ],
+        "after_scout": [
+            "Look closer. There is more of me than you see.",
+            "I am behind you. And in front. Pick.",
+        ],
+    },
+    "void_spirit": {
+        "first_meet": [
+            "Hi! Or — wait, is it 'bye'? Always confuses me.",
+            "I'm the echo. The original is busy.",
+            "Stand still! Or don't. Either way I'll be where you aren't.",
+        ],
+        "after_defeat": [
+            "Caught me. The original will be embarrassed.",
+            "{streak} days digging and you found a glitch. Nice.",
+            "Score: you 1, the lattice 0. The lattice is stubborn.",
+        ],
+        "after_retreat": [
+            "Bye! See you in the next chamber!",
+            "You're rotating, but I'm rotating faster.",
+            "Goodbye! Or hello! Both! Neither!",
+        ],
+        "after_close_win": [
+            "Scratched the lattice. The lattice does not forget.",
+            "Almost phased through me. Almost.",
+            "I felt your edge. Mostly through your edge.",
+        ],
+        "after_scout": [
+            "Hello, the watcher! Here, here, here, here.",
+            "Pick a me. They're all valid.",
+        ],
+    },
+    # ---- Tier 150 ------------------------------------------------------
+    "sporeling_sovereign": {
+        "first_meet": [
+            "We are many. You are alone. We forgive this.",
+            "Welcome to the bloom. Mind the spores. They mind you.",
+            "Approach. The mycelium catalogs you.",
+        ],
+        "after_defeat": [
+            "You harvested me. The spores remember harvest.",
+            "Round two. We have re-bloomed in your absence.",
+            "Streak {streak} days. We are a streak too. Older.",
+        ],
+        "after_retreat": [
+            "Leave. We are also outside, in places you have walked.",
+            "Goodbye. You take spores with you.",
+            "Retreat, watered properly, becomes a return.",
+        ],
+        "after_close_win": [
+            "Bruised the bloom. The bloom is patient.",
+            "A petal lost. We have many petals.",
+            "Closer than expected. We will adjust.",
+        ],
+        "after_scout": [
+            "Watch the bloom. The bloom watches back.",
+            "Inspect the spore-clouds. They take notes.",
+        ],
+    },
+    "treant_protector": {
+        "first_meet": [
+            "Little digger. Why so deep?",
+            "The roots heard you coming. Patience, child.",
+            "Welcome. Try not to chop anything.",
+        ],
+        "after_defeat": [
+            "You bested an elder. I am surprised. And amused.",
+            "{streak} days underground and still strong. The sun would suit you.",
+            "Round two. The grove has fed.",
+        ],
+        "after_retreat": [
+            "Go. The grove is patient. Trees outlast.",
+            "Roots remember. They are still under your boots.",
+            "Return whenever. The grove will be here.",
+        ],
+        "after_close_win": [
+            "A leaf fell. I have many leaves.",
+            "You scraped bark. Bark grows back.",
+            "Closer than I expected. Charmed.",
+        ],
+        "after_scout": [
+            "Look. The grove is unchanged. Mostly.",
+            "Examine the rings. There are many, like your scars.",
+        ],
+    },
+    "broodmother": {
+        "first_meet": [
+            "Welcome, dear. The nest is a little sticky today.",
+            "So small. So protein-rich.",
+            "Don't mind the children. They mind themselves.",
+        ],
+        "after_defeat": [
+            "You broke a thread. The web has many.",
+            "Streak {streak}? Impressive. The children would like to study you. Closely.",
+            "Round two. We are hungrier.",
+        ],
+        "after_retreat": [
+            "Go. The web is sticky. You'll bring some with you.",
+            "Bye-bye, little dinner. Tell your friends.",
+            "Run. The little ones love a chase.",
+        ],
+        "after_close_win": [
+            "Bit me, did you? Cheeky.",
+            "A leg lost. I have eight. Plenty.",
+            "Closer than we anticipated. The children are impressed.",
+        ],
+        "after_scout": [
+            "Watch the nest. The nest watches you.",
+            "Counting eggs? Don't. It's rude.",
+        ],
+    },
+    # ---- Tier 200 ------------------------------------------------------
+    "chronofrost": {
+        "first_meet": [
+            "I have been in this exact second for some time.",
+            "You arrive. The second arrives also. They are the same.",
+            "Welcome. The fight has already started, technically.",
+        ],
+        "after_defeat": [
+            "You won at second 0.347. I have logged it.",
+            "Streak {streak} days. I have streaks too. Mine are colder.",
+            "Round two. The same second, refreshed.",
+        ],
+        "after_retreat": [
+            "Leave. I am still in the second. I will be when you return.",
+            "Time accommodates retreat. Time also accommodates pursuit.",
+            "Goodbye. I will not move. I will not need to.",
+        ],
+        "after_close_win": [
+            "A close second. Pun intended.",
+            "You scratched 0.001 of me. The other 0.999 disagrees.",
+            "Almost. The clock froze on 'almost'.",
+        ],
+        "after_scout": [
+            "Observe. I am still. You are not.",
+            "Take your time. I have all of it.",
+        ],
+    },
+    "faceless_void": {
+        "first_meet": [
+            "...",
+            "(The Timeless does not greet. The Timeless arrives.)",
+            "You step into a stopped second. Adjust.",
+        ],
+        "after_defeat": [
+            "You found a gap in the chronosphere. I will close it.",
+            "{streak} days. A streak is a kind of timeline. I cut timelines.",
+            "Round two. The clock will not be merciful.",
+        ],
+        "after_retreat": [
+            "Backtrack. I do that for a living.",
+            "Leave. The chronosphere closes anyway.",
+            "Goodbye. Time does not chase. Time waits.",
+        ],
+        "after_close_win": [
+            "Scratched. The damage is in the past now. Both pasts.",
+            "Closer than the math. The math will adjust.",
+            "Almost. Almost is its own dimension.",
+        ],
+        "after_scout": [
+            "Look. The Timeless is unmoved.",
+            "Watch closely. I will not blink because I will not.",
+        ],
+    },
+    "weaver": {
+        "first_meet": [
+            "Stitch stitch stitch. You arrived in my pattern.",
+            "Hi. Little weft, little warp, little you.",
+            "The thread says you are interesting. I disagree.",
+        ],
+        "after_defeat": [
+            "Pulled a stitch out of me! Naughty digger!",
+            "Streak {streak} days. I have woven {streak} layers around your tunnel.",
+            "Round two. The pattern has more knots now.",
+        ],
+        "after_retreat": [
+            "Run! The thread comes with you! Pull, pull!",
+            "Goodbye! Or hello, depending on which thread you take!",
+            "Bye! I will be in another moment. Always am.",
+        ],
+        "after_close_win": [
+            "A close weave. The pattern shivered.",
+            "You almost fell out of time. You still might.",
+            "Stitched yourself up. Cute. Mine looks like spaghetti.",
+        ],
+        "after_scout": [
+            "Watching the threads? They watch back. They gossip.",
+            "Don't pull on any. You'll regret which one.",
+        ],
+    },
+    # ---- Tier 275 ------------------------------------------------------
+    "nameless_depth": {
+        "first_meet": [
+            "I have no name. You will not provide one.",
+            "Approach. Names fall off here.",
+            "(Silence so heavy it weighs on your tongue.)",
+        ],
+        "after_defeat": [
+            "You won. The verb does not survive me. Neither will the noun.",
+            "Streak {streak}. The number is also forgotten now.",
+            "Round two. The silence is louder.",
+        ],
+        "after_retreat": [
+            "You retreat. The depth follows in your unspoken thoughts.",
+            "Leave. The Nameless does not pursue. The Nameless waits.",
+            "Goodbye. The word departs. The depth remains.",
+        ],
+        "after_close_win": [
+            "A close end. Ends are my specialty.",
+            "Almost the bottom. Almost is also a depth.",
+            "You bled. The bleeding has no name either.",
+        ],
+        "after_scout": [
+            "Look. There is nothing to see. Look longer.",
+            "Inspect the silence. The silence inspects you.",
+        ],
+    },
+    "oracle": {
+        "first_meet": [
+            "Hello. I knew you'd say nothing back. Disappointed but not surprised.",
+            "You arrive. The omen said depth-{depth}. The omen is annoying.",
+            "Sit. Not there. There. Yes. The vision said so.",
+        ],
+        "after_defeat": [
+            "You won. Yes. I told myself.",
+            "{streak} days of digging. The tea leaves predicted exactly that. Or nothing. Or both.",
+            "Round two. I will lose differently this time.",
+        ],
+        "after_retreat": [
+            "You leave. I saw this. Twice. Once with feeling.",
+            "Goodbye. The omens are also leaving.",
+            "Retreat. Foretold. Boring.",
+        ],
+        "after_close_win": [
+            "Close. The vision said 'close'. Annoyingly accurate.",
+            "Bled. The omens warned me. I ignored them.",
+            "Almost. The omens warn me of all almosts.",
+        ],
+        "after_scout": [
+            "Stare. I can't see. You're staring at the blindfold.",
+            "Watching me? The blindfold watches you. Don't blink.",
+        ],
+    },
+    "terrorblade": {
+        "first_meet": [
+            "Kneel. The throne is gone. The protocol remains.",
+            "You disturb royalty. Royalty disapproves.",
+            "I was a prince. Now I am a problem.",
+        ],
+        "after_defeat": [
+            "You unmade my unmaking. The math is poetry.",
+            "Streak {streak}. The crown survived longer.",
+            "Round two. The illusions will be unkinder.",
+        ],
+        "after_retreat": [
+            "Run. A prince is patient about pursuits.",
+            "Goodbye. The illusion of you is still here, mocking.",
+            "Coward, by my definition. By yours, sensible.",
+        ],
+        "after_close_win": [
+            "A near-sundering. Of me, this time.",
+            "Closer than I dignify.",
+            "Almost. The almost has a kind of beauty.",
+        ],
+        "after_scout": [
+            "Watching? The illusions also watch. They are catty.",
+            "Inspect closely. Royalty rewards attention.",
+        ],
+    },
+    # ---- Pinnacle pool (depth 300) -------------------------------------
+    "forgotten_king": {
+        "first_meet": [
+            "Hello, child. You have walked far. Sit. No, stand. I forget which is the etiquette.",
+            "I am a king without a kingdom. You are a digger without an end. We are family of a kind.",
+            "Welcome to the throne. The throne is also the bottom of the mine. They are the same room.",
+        ],
+        "after_defeat": [
+            "You ended a king. Streak {streak} of kings, perhaps.",
+            "I lost. Royalty does not lose, except when it does.",
+            "Round two. The crown is on tighter.",
+        ],
+        "after_retreat": [
+            "You leave royalty mid-audience. Bold.",
+            "Go. I will resume my soliloquy.",
+            "The court does not chase. The court endures.",
+        ],
+        "after_close_win": [
+            "A close court. The protocol wavered.",
+            "You drew royal blood. Rare honor. Rude.",
+            "Closer than I have come to ending in some time.",
+        ],
+        "after_scout": [
+            "Inspect the throne. It is a chair. It is also a tomb.",
+            "Look at me. The crown does not enjoy attention. I do.",
+        ],
+    },
+    "hollowforged": {
+        "first_meet": [
+            "We are the mine. The mine has decided to talk back.",
+            "You dig us. We dig you back.",
+            "Welcome, surface thing. The walls have an opinion.",
+        ],
+        "after_defeat": [
+            "You broke a wall. The wall reforms. The wall is patient.",
+            "Round two. We have more walls.",
+            "Streak {streak}. Walls also have streaks. Geological ones.",
+        ],
+        "after_retreat": [
+            "Leave. The walls follow. They are slow but committed.",
+            "Goodbye. The mine is endless. You will be back.",
+            "Retreat is dug too. Welcome.",
+        ],
+        "after_close_win": [
+            "Cracked, not collapsed.",
+            "A near-cave-in. We respect the geometry.",
+            "Almost. Almost is also a layer.",
+        ],
+        "after_scout": [
+            "Examine the walls. The walls examine you back.",
+            "Inspect the rocks. They are taking a head count.",
+        ],
+    },
+    "first_digger": {
+        "first_meet": [
+            "Oh! Another one! Hello! Don't go up. Don't ever go up.",
+            "I started this tunnel. You're in it. Lovely.",
+            "First time, eh? Mine was a Tuesday. Long Tuesday.",
+        ],
+        "after_defeat": [
+            "You won. I lost. Wait. Did I want to lose?",
+            "{streak} days. Pretender. I have {streak} centuries.",
+            "Round two. I dug while you slept.",
+        ],
+        "after_retreat": [
+            "Going up? Don't. The light is wrong now.",
+            "Goodbye. The tunnel is mine when you leave it.",
+            "Retreat? I retreated once. Then I dug here. Look how that turned out.",
+        ],
+        "after_close_win": [
+            "A close one. The pickaxe is hungry.",
+            "Almost. Almost is the depth I prefer.",
+            "Closer than I've been to surface in centuries.",
+        ],
+        "after_scout": [
+            "Watching me dig? Take notes. Mostly: don't.",
+            "Inspect. Yes. Inspect the hole. The hole inspects you.",
+        ],
+    },
+}
+
+
+# Subtle pinnacle foreshadowing lines for /dig info, post-T275 clear.
+PINNACLE_FORESHADOW_LINES: tuple[str, ...] = (
+    "Something stirs below.",
+    "The dark hums in a frequency you can almost hear.",
+    "A pressure builds in the rock ahead.",
+    "Your lantern flame leans, like wind — but there is no wind.",
+)
 
 # Consumable items as dicts for service-layer lookups
 CONSUMABLE_ITEMS: dict[str, dict] = {

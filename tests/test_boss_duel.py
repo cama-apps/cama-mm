@@ -10,10 +10,12 @@ import pytest
 
 from repositories.dig_repository import DigRepository
 from services.dig_constants import (
+    BOSS_ARCHETYPE_BY_ID,
+    BOSS_ARCHETYPES,
     BOSS_DUEL_STATS,
-    BOSS_HP_PER_40_DEPTH,
-    BOSS_HP_PER_PRESTIGE,
     BOSS_PAYOUTS,
+    BOSS_PRESTIGE_BONUS,
+    BOSS_TIER_BONUS,
     FREE_DIG_COOLDOWN_SECONDS,
 )
 from services.dig_service import DigService, _approx_duel_win_prob
@@ -109,20 +111,29 @@ class TestDuelScaling:
     """Depth and prestige both add boss HP to make duels harder."""
 
     def test_boss_hp_scales_with_depth(self, dig_service, dig_repo, player_repository, monkeypatch):
-        """Boss HP at depth 200 = base + (200//40) * BOSS_HP_PER_40_DEPTH.
+        """Boss HP at depth 200 = base*archetype + BOSS_TIER_BONUS[200]['hp'].
 
         Asserts directly on the first round's recorded ``boss_hp`` (which
         is post-player-hit HP) so the test doesn't depend on who wins.
         """
         base_boss_hp = int(BOSS_DUEL_STATS["cautious"]["boss_hp"])
-        expected = base_boss_hp + (200 // 40) * BOSS_HP_PER_40_DEPTH
+        # Pin chronofrost (slippery archetype) at the 200 boundary so the
+        # math is deterministic regardless of which Tier 200 boss the locker rolled.
+        archetype = BOSS_ARCHETYPES[BOSS_ARCHETYPE_BY_ID["chronofrost"]]
+        expected = (
+            int(round(base_boss_hp * archetype["hp_mult"]))
+            + int(BOSS_TIER_BONUS[200]["hp"])
+        )
 
         _register(player_repository, balance=2000)
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
         monkeypatch.setattr(random, "random", lambda: 0.99)
         dig_service.dig(10001, TEST_GUILD_ID)
-        bp_defeated = json.dumps({"25": "defeated", "50": "defeated", "75": "defeated",
-                                   "100": "defeated", "150": "defeated"})
+        bp_defeated = json.dumps({
+            "25": "defeated", "50": "defeated", "75": "defeated",
+            "100": "defeated", "150": "defeated",
+            "200": {"boss_id": "chronofrost", "status": "active"},
+        })
         dig_repo.update_tunnel(10001, TEST_GUILD_ID, depth=199, boss_progress=bp_defeated)
         monkeypatch.setattr(time, "time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1)
         # Force a hit so the first round's boss_hp reflects one damage instance.
@@ -136,13 +147,23 @@ class TestDuelScaling:
     def test_boss_hp_scales_with_prestige(self, dig_service, dig_repo, player_repository, monkeypatch):
         base_boss_hp = int(BOSS_DUEL_STATS["cautious"]["boss_hp"])
         prestige = 3
-        expected = base_boss_hp + prestige * BOSS_HP_PER_PRESTIGE
+        # Pin grothak (bruiser archetype: ×1.0 HP mult) so the math is deterministic
+        # regardless of which tier-25 boss the locker rolled.
+        archetype = BOSS_ARCHETYPES[BOSS_ARCHETYPE_BY_ID["grothak"]]
+        expected = (
+            int(round(base_boss_hp * archetype["hp_mult"]))
+            + int(BOSS_PRESTIGE_BONUS[prestige]["hp"])
+        )
 
         _register(player_repository, balance=500)
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
         monkeypatch.setattr(random, "random", lambda: 0.99)
         dig_service.dig(10001, TEST_GUILD_ID)
-        dig_repo.update_tunnel(10001, TEST_GUILD_ID, depth=24, prestige_level=prestige)
+        dig_repo.update_tunnel(
+            10001, TEST_GUILD_ID,
+            depth=24, prestige_level=prestige,
+            boss_progress=json.dumps({"25": {"boss_id": "grothak", "status": "active"}}),
+        )
         monkeypatch.setattr(time, "time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1)
         monkeypatch.setattr(random, "random", lambda: 0.0)
 

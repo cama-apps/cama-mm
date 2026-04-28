@@ -341,6 +341,10 @@ class SchemaManager:
             # Persist actual JC awarded per participant so the balance-history
             # chart can't drift when reward constants or penalty rules change.
             ("add_bonus_jc_to_match_participants", self._migration_add_bonus_jc_to_match_participants),
+            # Boss revamp: scaling rebalance, persisted boss HP, pinnacle boss,
+            # luminosity-as-real-resource, retreat cost, dialogue v2.
+            ("dig_boss_revamp_columns", self._migration_dig_boss_revamp_columns),
+            ("dig_boss_progress_persistent_hp", self._migration_dig_boss_progress_persistent_hp),
         ]
 
     # --- Migrations ---
@@ -1103,6 +1107,70 @@ class SchemaManager:
         self._add_column_if_not_exists(
             cursor, "match_participants", "bonus_jc", "INTEGER"
         )
+
+    def _migration_dig_boss_revamp_columns(self, cursor) -> None:
+        """Boss revamp: add tunnel columns for luminosity refill anchor,
+        pinnacle state, and retreat cooldown."""
+        # Slow on-demand luminosity refill anchor (replaces the daily-snap reset).
+        self._add_column_if_not_exists(
+            cursor, "tunnels", "last_lum_update_at", "INTEGER"
+        )
+        # Pinnacle state — locked boss id, current phase (1-3), persisted HP,
+        # and last engagement time for regen.
+        self._add_column_if_not_exists(
+            cursor, "tunnels", "pinnacle_boss_id", "TEXT"
+        )
+        self._add_column_if_not_exists(
+            cursor, "tunnels", "pinnacle_phase", "INTEGER NOT NULL DEFAULT 0"
+        )
+        self._add_column_if_not_exists(
+            cursor, "tunnels", "pinnacle_hp_remaining", "INTEGER"
+        )
+        self._add_column_if_not_exists(
+            cursor, "tunnels", "pinnacle_last_engaged_at", "INTEGER"
+        )
+        # Retreat cooldown — when retreats from a boss become free again.
+        self._add_column_if_not_exists(
+            cursor, "tunnels", "retreat_cooldown_until", "INTEGER"
+        )
+
+    def _migration_dig_boss_progress_persistent_hp(self, cursor) -> None:
+        """Boss revamp: upgrade boss_progress JSON entries from string status
+        (``"active"`` / ``"defeated"`` / ``"phase1_defeated"``) to a structured
+        dict so we can carry HP / last_outcome / first_meet_seen across
+        encounters.
+
+        Each non-null boss_progress JSON is rewritten in place. Legacy string
+        values become ``{"status": <value>}``; entries already in dict shape
+        are passed through. The reader code in dig_service still handles
+        legacy strings as a safety net.
+        """
+        import json as _json
+
+        cursor.execute(
+            "SELECT discord_id, guild_id, boss_progress FROM tunnels "
+            "WHERE boss_progress IS NOT NULL AND boss_progress != ''"
+        )
+        rows = cursor.fetchall()
+        for row in rows:
+            try:
+                bp = _json.loads(row["boss_progress"])
+            except (TypeError, ValueError, _json.JSONDecodeError):
+                continue
+            if not isinstance(bp, dict):
+                continue
+            changed = False
+            for depth_key, value in list(bp.items()):
+                if isinstance(value, str):
+                    bp[depth_key] = {"status": value}
+                    changed = True
+                # Already-dict values: leave alone.
+            if changed:
+                cursor.execute(
+                    "UPDATE tunnels SET boss_progress = ? "
+                    "WHERE discord_id = ? AND guild_id = ?",
+                    (_json.dumps(bp), row["discord_id"], row["guild_id"]),
+                )
 
     def _migration_create_match_corrections_table(self, cursor) -> None:
         """Create table for tracking match result corrections."""

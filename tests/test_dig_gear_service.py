@@ -175,7 +175,7 @@ class TestApplyGearToCombat:
         loadout = GearLoadout(weapon=weapon, armor=armor, boots=boots)
         out = svc._apply_gear_to_combat(base, loadout)
         # Void-Touched stat sums (per dig_constants.py)
-        assert out["player_dmg"] == base["player_dmg"] + 1   # weapon +1
+        assert out["player_dmg"] == base["player_dmg"] + 2   # weapon +2
         assert out["player_hp"]  == base["player_hp"] + 3    # armor +3
         assert abs(out["player_hit"] - (base["player_hit"] + 0.07)) < 1e-9
         assert abs(out["boss_hit"]  - (base["boss_hit"]  - 0.13)) < 1e-9

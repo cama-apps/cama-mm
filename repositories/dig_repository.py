@@ -23,6 +23,9 @@ class DigRepository(BaseRepository, IDigRepository):
         "best_run_score", "current_run_jc", "current_run_artifacts",
         "current_run_events", "total_prestige_score", "stat_strength",
         "stat_smarts", "stat_stamina", "stat_points",
+        # boss revamp
+        "last_lum_update_at", "pinnacle_phase", "pinnacle_hp_remaining",
+        "pinnacle_last_engaged_at", "retreat_cooldown_until",
     })
 
     @staticmethod
@@ -108,6 +111,14 @@ class DigRepository(BaseRepository, IDigRepository):
         "stat_stamina", "stat_points", "stat_boss_awards",
         # add_stinger_curse_to_tunnels migration (multi-boss tiers)
         "stinger_curse",
+        # boss revamp: persisted luminosity refill anchor and pinnacle state
+        "last_lum_update_at",
+        "pinnacle_boss_id",
+        "pinnacle_phase",
+        "pinnacle_hp_remaining",
+        "pinnacle_last_engaged_at",
+        # boss revamp: retreat cooldown
+        "retreat_cooldown_until",
     })
 
     def update_tunnel(self, discord_id: int, guild_id: int, **kwargs) -> None:
@@ -1592,6 +1603,32 @@ class DigRepository(BaseRepository, IDigRepository):
                 "DELETE FROM dig_active_duels WHERE discord_id = ? AND guild_id = ?",
                 (int(discord_id), gid),
             )
+
+    def claim_active_duel(
+        self, discord_id: int, guild_id: int | None,
+    ) -> dict | None:
+        """Atomically read-and-delete the paused duel row.
+
+        Used by timed-input submission paths to prevent double-submit races
+        where two concurrent modal `on_submit` callbacks both pass the initial
+        guard check and trigger duplicate resolution. The first caller gets
+        the row; the second gets ``None`` and should bail.
+        """
+        gid = self.normalize_guild_id(guild_id)
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM dig_active_duels WHERE discord_id = ? AND guild_id = ?",
+                (int(discord_id), gid),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return None
+            cursor.execute(
+                "DELETE FROM dig_active_duels WHERE discord_id = ? AND guild_id = ?",
+                (int(discord_id), gid),
+            )
+            return dict(row)
 
     # ── Great Lantern ownership check ───────────────────────────────────
 
