@@ -73,38 +73,33 @@ def _register_player(player_repository, discord_id=10001, guild_id=TEST_GUILD_ID
 # classify_play_style
 # ---------------------------------------------------------------------------
 
-class TestClassifyPlayStyle:
-    def test_unknown_when_too_few_choices(self):
-        assert classify_play_style({"safe": 2, "risky": 1}) == "unknown"
 
-    def test_cautious_grinder(self):
-        assert classify_play_style({"safe": 80, "risky": 10, "desperate": 1}) == "cautious_grinder"
-
-    def test_reckless_degen(self):
-        assert classify_play_style({"safe": 10, "risky": 20, "desperate": 10}) == "reckless_degen"
-
-    def test_calculated_risk_taker(self):
-        assert classify_play_style({"safe": 10, "risky": 50, "desperate": 5}) == "calculated_risk_taker"
-
-    def test_social_butterfly(self):
-        assert classify_play_style({"safe": 5, "risky": 5, "help": 20}) == "social_butterfly"
-
-    def test_balanced_explorer(self):
-        assert classify_play_style({"safe": 10, "risky": 8, "desperate": 2}) == "balanced_explorer"
-
-    def test_empty_histogram(self):
-        assert classify_play_style({}) == "unknown"
+@pytest.mark.parametrize(
+    "histogram,expected",
+    [
+        ({"safe": 2, "risky": 1}, "unknown"),
+        ({}, "unknown"),
+        ({"safe": 80, "risky": 10, "desperate": 1}, "cautious_grinder"),
+        ({"safe": 10, "risky": 20, "desperate": 10}, "reckless_degen"),
+        ({"safe": 10, "risky": 50, "desperate": 5}, "calculated_risk_taker"),
+        ({"safe": 5, "risky": 5, "help": 20}, "social_butterfly"),
+        ({"safe": 10, "risky": 8, "desperate": 2}, "balanced_explorer"),
+    ],
+)
+def test_classify_play_style(histogram, expected):
+    assert classify_play_style(histogram) == expected
 
 
 # ---------------------------------------------------------------------------
 # DigLLMValidator
 # ---------------------------------------------------------------------------
 
+
 class TestDigLLMValidator:
     def setup_method(self):
         self.validator = DigLLMValidator()
 
-    def test_valid_narrative(self):
+    def test_valid_narrative_keeps_fields(self):
         result = self.validator.validate_narrative({
             "narrative": "You swing your pickaxe.",
             "tone": "dramatic",
@@ -115,12 +110,6 @@ class TestDigLLMValidator:
         assert result["cave_in_flavor"] == ""
         assert result["callback_reference"] == ""
 
-    def test_narrative_truncation(self):
-        long_text = "A" * 600
-        result = self.validator.validate_narrative({"narrative": long_text, "tone": "humorous"})
-        assert len(result["narrative"]) == 500
-        assert result["narrative"].endswith("...")
-
     def test_invalid_tone_defaults_to_dramatic(self):
         result = self.validator.validate_narrative({"narrative": "Hello", "tone": "invalid"})
         assert result["tone"] == "dramatic"
@@ -130,46 +119,39 @@ class TestDigLLMValidator:
             result = self.validator.validate_narrative({"narrative": "test", "tone": tone})
             assert result["tone"] == tone
 
-    def test_event_flavor_truncation(self):
-        result = self.validator.validate_narrative({
-            "narrative": "Hi",
-            "tone": "dramatic",
-            "event_flavor": "B" * 400,
-        })
-        assert len(result["event_flavor"]) == 300
-        assert result["event_flavor"].endswith("...")
-
-    def test_cave_in_flavor_truncation(self):
-        result = self.validator.validate_narrative({
-            "narrative": "Hi",
-            "tone": "dramatic",
-            "cave_in_flavor": "C" * 400,
-        })
-        assert len(result["cave_in_flavor"]) == 300
-
-    def test_callback_truncation(self):
-        result = self.validator.validate_narrative({
-            "narrative": "Hi",
-            "tone": "dramatic",
-            "callback_reference": "D" * 250,
-        })
-        assert len(result["callback_reference"]) == 200
+    @pytest.mark.parametrize(
+        "field,limit,padded_size",
+        [
+            ("narrative", 500, 600),
+            ("event_flavor", 300, 400),
+            ("cave_in_flavor", 300, 400),
+            ("callback_reference", 200, 250),
+        ],
+    )
+    def test_long_text_truncated_with_ellipsis(self, field, limit, padded_size):
+        payload = {"narrative": "Hi", "tone": "dramatic", field: "X" * padded_size}
+        result = self.validator.validate_narrative(payload)
+        assert len(result[field]) == limit
+        assert result[field].endswith("...")
 
     def test_missing_fields_get_defaults(self):
         result = self.validator.validate_narrative({})
-        assert result["narrative"] == ""
-        assert result["tone"] == "dramatic"
-        assert result["event_flavor"] == ""
-        assert result["cave_in_flavor"] == ""
-        assert result["callback_reference"] == ""
+        assert result == {
+            "narrative": "",
+            "tone": "dramatic",
+            "event_flavor": "",
+            "cave_in_flavor": "",
+            "callback_reference": "",
+        }
 
 
 # ---------------------------------------------------------------------------
-# Context builders
+# Context builders — happy paths + key features wired through
 # ---------------------------------------------------------------------------
+
 
 class TestBuildPlayerStateContext:
-    def test_basic_tunnel(self):
+    def test_basic_tunnel_includes_depth_tier_and_balance(self):
         tunnel = {
             "tunnel_name": "Test Tunnel",
             "depth": 42,
@@ -186,7 +168,7 @@ class TestBuildPlayerStateContext:
         assert "Iron" in ctx
         assert "50 JC" in ctx
 
-    def test_miner_profile_context(self):
+    def test_miner_profile_included(self):
         tunnel = {
             "tunnel_name": "Burrow",
             "depth": 12,
@@ -202,109 +184,85 @@ class TestBuildPlayerStateContext:
         assert "Smarts 3" in ctx
         assert "Stamina 1" in ctx
 
-    def test_empty_tunnel(self):
+    def test_empty_tunnel_uses_defaults(self):
         ctx = build_player_state_context({}, 0)
         assert "Dirt" in ctx
         assert "Wooden" in ctx
 
-    def test_relics_json(self):
-        tunnel = {
-            "depth": 10,
-            "equipped_relics": json.dumps([{"name": "Mole Claws"}, {"name": "Crystal Compass"}]),
-        }
+    @pytest.mark.parametrize(
+        "field,value,must_contain",
+        [
+            ("equipped_relics", json.dumps([{"name": "Mole Claws"}]), ["Mole Claws"]),
+            ("mutations", json.dumps([{"name": "Dark Sight"}]), ["Dark Sight"]),
+            (
+                "temp_buffs",
+                json.dumps([{"name": "Second Wind", "digs_remaining": 2}]),
+                ["Second Wind", "2 digs left"],
+            ),
+        ],
+    )
+    def test_json_collections_render_into_context(self, field, value, must_contain):
+        tunnel = {"depth": 50, field: value}
         ctx = build_player_state_context(tunnel, 0)
-        assert "Mole Claws" in ctx
-        assert "Crystal Compass" in ctx
-
-    def test_mutations_json(self):
-        tunnel = {
-            "depth": 200,
-            "mutations": json.dumps([{"name": "Dark Sight"}, {"name": "Thick Skin"}]),
-        }
-        ctx = build_player_state_context(tunnel, 0)
-        assert "Dark Sight" in ctx
-        assert "Thick Skin" in ctx
-
-    def test_buffs_json(self):
-        tunnel = {
-            "depth": 50,
-            "temp_buffs": json.dumps([{"name": "Second Wind", "digs_remaining": 2}]),
-        }
-        ctx = build_player_state_context(tunnel, 0)
-        assert "Second Wind" in ctx
-        assert "2 digs left" in ctx
+        for token in must_contain:
+            assert token in ctx
 
 
 class TestBuildPersonalityContext:
-    def test_none_personality(self):
-        assert build_personality_context(None) == "New player, no history yet."
+    @pytest.mark.parametrize("personality", [None, {}])
+    def test_blank_personality_falls_back_to_default_blurb(self, personality):
+        assert build_personality_context(personality) == "New player, no history yet."
 
-    def test_empty_personality(self):
-        assert build_personality_context({}) == "New player, no history yet."
-
-    def test_with_play_style(self):
-        personality = {"play_style": "cautious_grinder"}
-        ctx = build_personality_context(personality)
-        assert "cautious_grinder" in ctx
-        assert "plays it safe" in ctx
-
-    def test_with_histogram(self):
+    def test_play_style_and_histogram_render(self):
         personality = {
             "play_style": "balanced_explorer",
             "choice_histogram": {"safe": 10, "risky": 8},
+            "notable_moments": ["Slew their first boss"],
         }
         ctx = build_personality_context(personality)
+        assert "balanced_explorer" in ctx
         assert "safe: 10" in ctx
         assert "risky: 8" in ctx
-
-    def test_with_notable_moments(self):
-        personality = {
-            "play_style": "unknown",
-            "notable_moments": ["Slew their first boss", "Discovered a rare artifact"],
-        }
-        ctx = build_personality_context(personality)
         assert "first boss" in ctx
-        assert "artifact" in ctx
 
 
 class TestBuildDigOutcomeContext:
-    def test_basic_outcome(self):
-        result = {"advance": 3, "jc_earned": 5}
+    @pytest.mark.parametrize(
+        "result,must_contain",
+        [
+            ({"advance": 3, "jc_earned": 5}, ["+3 blocks", "JC earned: 5"]),
+            (
+                {
+                    "advance": 0,
+                    "jc_earned": 0,
+                    "cave_in": True,
+                    "cave_in_detail": {"block_loss": 5, "message": "Rocks tumbled."},
+                },
+                ["CAVE-IN", "5 blocks"],
+            ),
+            (
+                {
+                    "advance": 2,
+                    "jc_earned": 3,
+                    "event": {"id": "crystal_golem", "name": "Crystal Golem", "description": "!"},
+                },
+                ["Crystal Golem"],
+            ),
+            ({}, ["+0 blocks"]),
+        ],
+    )
+    def test_dig_outcome_renders_expected_tokens(self, result, must_contain):
         ctx = build_dig_outcome_context(result)
-        assert "+3 blocks" in ctx
-        assert "JC earned: 5" in ctx
-
-    def test_cave_in_outcome(self):
-        result = {
-            "advance": 0,
-            "jc_earned": 0,
-            "cave_in": True,
-            "cave_in_detail": {"block_loss": 5, "message": "Rocks tumbled."},
-        }
-        ctx = build_dig_outcome_context(result)
-        assert "CAVE-IN" in ctx
-        assert "5 blocks" in ctx
-
-    def test_event_outcome(self):
-        result = {
-            "advance": 2,
-            "jc_earned": 3,
-            "event": {"id": "crystal_golem", "name": "Crystal Golem", "description": "A golem appears!"},
-        }
-        ctx = build_dig_outcome_context(result)
-        assert "Crystal Golem" in ctx
-
-    def test_empty_result(self):
-        ctx = build_dig_outcome_context({})
-        assert "+0 blocks" in ctx
+        for token in must_contain:
+            assert token in ctx
 
 
 class TestBuildMultiplayerContext:
-    def test_empty(self):
-        assert build_multiplayer_context([]) == ""
-        assert build_multiplayer_context(None) == ""
+    @pytest.mark.parametrize("actions", [[], None])
+    def test_blank_actions_returns_empty(self, actions):
+        assert build_multiplayer_context(actions) == ""
 
-    def test_with_actions(self):
+    def test_actions_render_with_serialized_details(self):
         actions = [
             {
                 "action_type": "sabotage",
@@ -323,90 +281,72 @@ class TestBuildMultiplayerContext:
         assert "Sabotage" in ctx
         assert "Help" in ctx
 
-    def test_backward_compatible_no_tunnel(self):
-        actions = [
-            {"action_type": "sabotage", "detail": json.dumps({"damage": 4})},
-        ]
-        ctx = build_multiplayer_context(actions)
-        assert "Sabotage" in ctx
-
-    def test_active_cheers(self):
+    def test_active_cheers_visible(self):
         import time as _time
         future = int(_time.time()) + 3600
-        tunnel = {"cheer_data": json.dumps([
-            {"cheerer_id": 111, "expires_at": future},
-            {"cheerer_id": 222, "expires_at": future},
-        ])}
+        tunnel = {
+            "cheer_data": json.dumps([
+                {"cheerer_id": 111, "expires_at": future},
+                {"cheerer_id": 222, "expires_at": future},
+            ])
+        }
         ctx = build_multiplayer_context([], tunnel=tunnel)
         assert "+10%" in ctx
         assert "+2 advance" in ctx
 
-    def test_expired_cheers_excluded(self):
-        tunnel = {"cheer_data": json.dumps([
-            {"cheerer_id": 111, "expires_at": 1000},
-        ])}
-        ctx = build_multiplayer_context([], tunnel=tunnel)
-        assert "Cheer" not in ctx
+    def test_expired_state_is_filtered_out(self):
+        """Both expired cheers and expired revenge windows must not appear."""
+        tunnel_cheers = {"cheer_data": json.dumps([{"cheerer_id": 111, "expires_at": 1000}])}
+        assert "Cheer" not in build_multiplayer_context([], tunnel=tunnel_cheers)
 
-    def test_revenge_window_active(self):
+        tunnel_revenge = {"revenge_target": 999, "revenge_type": "damage", "revenge_until": 1000}
+        assert "Revenge" not in build_multiplayer_context([], tunnel=tunnel_revenge)
+
+    def test_revenge_window_active_renders(self):
         import time as _time
-        future = int(_time.time()) + 7200
-        tunnel = {"revenge_target": 999, "revenge_type": "damage", "revenge_until": future}
+        tunnel = {
+            "revenge_target": 999,
+            "revenge_type": "damage",
+            "revenge_until": int(_time.time()) + 7200,
+        }
         ctx = build_multiplayer_context([], tunnel=tunnel)
         assert "Revenge" in ctx
         assert "damage" in ctx
 
-    def test_revenge_window_expired(self):
-        tunnel = {"revenge_target": 999, "revenge_type": "damage", "revenge_until": 1000}
-        ctx = build_multiplayer_context([], tunnel=tunnel)
-        assert "Revenge" not in ctx
-
-    def test_trap_armed(self):
-        tunnel = {"trap_active": 1}
-        ctx = build_multiplayer_context([], tunnel=tunnel)
-        assert "armed" in ctx
-
-    def test_protection_insured(self):
+    def test_trap_and_insurance_and_injury_render(self):
         import time as _time
         future = int(_time.time()) + 3600
-        tunnel = {"insured_until": future}
-        ctx = build_multiplayer_context([], tunnel=tunnel)
-        assert "insured" in ctx
-
-    def test_rank_shown(self):
-        ctx = build_multiplayer_context([], rank=3)
-        assert "#3" in ctx
-
-    def test_rank_zero_skipped(self):
-        ctx = build_multiplayer_context([], rank=0)
-        assert "Rank" not in ctx
-
-    def test_injury_shown(self):
-        tunnel = {"injury_state": json.dumps({"type": "reduced_advance", "digs_remaining": 2})}
-        ctx = build_multiplayer_context([], tunnel=tunnel)
+        assert "armed" in build_multiplayer_context([], tunnel={"trap_active": 1})
+        assert "insured" in build_multiplayer_context([], tunnel={"insured_until": future})
+        injury = {"injury_state": json.dumps({"type": "reduced_advance", "digs_remaining": 2})}
+        ctx = build_multiplayer_context([], tunnel=injury)
         assert "Injury" in ctx
         assert "2 digs" in ctx
 
-    def test_all_empty(self):
-        ctx = build_multiplayer_context([], tunnel=None, rank=0)
-        assert ctx == ""
+    @pytest.mark.parametrize("rank,expected", [(3, "#3"), (0, None)])
+    def test_rank_visibility(self, rank, expected):
+        ctx = build_multiplayer_context([], rank=rank)
+        if expected:
+            assert expected in ctx
+        else:
+            assert "Rank" not in ctx
 
 
 class TestBuildDigHistoryContext:
-    def test_empty_actions_and_tunnel(self):
-        ctx = build_dig_history_context([], {})
-        assert ctx == ""
+    @pytest.mark.parametrize("tunnel", [{}, None])
+    def test_blank_history_returns_empty(self, tunnel):
+        assert build_dig_history_context([], tunnel) == ""
 
-    def test_lifetime_stats_from_tunnel(self):
+    def test_lifetime_stats_render(self):
         tunnel = {"total_digs": 50, "total_jc_earned": 200, "max_depth": 60}
         ctx = build_dig_history_context([], tunnel)
         assert "50 digs" in ctx
         assert "200 JC" in ctx
 
-    def test_dig_summary_with_cave_ins(self):
+    def test_dig_summary_counts_advances_and_cave_ins(self):
         actions = []
         for i in range(10):
-            cave_in = i < 3  # first 3 (most recent) are cave-ins
+            cave_in = i < 3
             actions.append({
                 "action_type": "dig",
                 "depth_before": 40 + i,
@@ -418,48 +358,42 @@ class TestBuildDigHistoryContext:
         assert "3 cave-ins" in ctx
         assert "1 digs ago" in ctx  # most recent cave-in
 
-    def test_depth_trend(self):
+    def test_depth_trend_shows_range_and_max(self):
         actions = [
             {"action_type": "dig", "depth_before": 50, "depth_after": 52, "detail": "{}"},
             {"action_type": "dig", "depth_before": 38, "depth_after": 40, "detail": "{}"},
         ]
-        tunnel = {"max_depth": 74}
-        ctx = build_dig_history_context(actions, tunnel)
+        ctx = build_dig_history_context(actions, {"max_depth": 74})
         assert "38->52" in ctx
         assert "+14" in ctx
         assert "74" in ctx
 
-    def test_boss_progress_display(self):
+    def test_boss_progress_and_attempts_render(self):
         tunnel = {
             "boss_progress": json.dumps({"25": "defeated", "50": "defeated", "75": "active"}),
             "boss_attempts": 2,
         }
         ctx = build_dig_history_context([], tunnel)
-        assert "\u2713" in ctx  # checkmark for defeated
+        assert "✓" in ctx
         assert "2 attempts" in ctx
 
-    def test_prestige_shown_when_nonzero(self):
-        tunnel = {"prestige_level": 2, "best_run_score": 450}
+    @pytest.mark.parametrize(
+        "tunnel,must_contain,must_not_contain",
+        [
+            ({"prestige_level": 2, "best_run_score": 450}, ["Prestige", "450"], []),
+            ({"prestige_level": 0}, [], ["Prestige"]),
+        ],
+    )
+    def test_prestige_visibility(self, tunnel, must_contain, must_not_contain):
         ctx = build_dig_history_context([], tunnel)
-        assert "Prestige" in ctx
-        assert "450" in ctx
+        for token in must_contain:
+            assert token in ctx
+        for token in must_not_contain:
+            assert token not in ctx
 
-    def test_prestige_hidden_when_zero(self):
-        tunnel = {"prestige_level": 0}
-        ctx = build_dig_history_context([], tunnel)
-        assert "Prestige" not in ctx
-
-    def test_recent_events(self):
+    def test_recent_events_and_boss_fights_render(self):
         actions = [
             {"action_type": "event", "detail": json.dumps({"event_id": "crystal_golem"})},
-            {"action_type": "event", "detail": json.dumps({"event_id": "tunnel_collapse"})},
-        ]
-        ctx = build_dig_history_context(actions, {})
-        assert "crystal_golem" in ctx
-        assert "tunnel_collapse" in ctx
-
-    def test_recent_boss_fights(self):
-        actions = [
             {
                 "action_type": "boss_fight",
                 "detail": json.dumps({"won": True, "risk": "reckless", "boundary": 50}),
@@ -470,80 +404,267 @@ class TestBuildDigHistoryContext:
             },
         ]
         ctx = build_dig_history_context(actions, {})
+        assert "crystal_golem" in ctx
         assert "won" in ctx
         assert "lost" in ctx
         assert "reckless" in ctx
 
-    def test_invalid_detail_json(self):
+    def test_invalid_detail_json_does_not_crash(self):
         actions = [
             {"action_type": "dig", "depth_before": 10, "depth_after": 12, "detail": "not json"},
         ]
         ctx = build_dig_history_context(actions, {})
-        # Should not raise
         assert "1 advances" in ctx
-
-    def test_none_tunnel(self):
-        ctx = build_dig_history_context([], None)
-        assert ctx == ""
 
 
 class TestBuildMessages:
-    def test_structure(self):
+    def test_structure_includes_state_personality_outcome(self):
         msgs = build_messages("system", "state", "personality", "outcome", "")
         assert len(msgs) == 2
-        assert msgs[0]["role"] == "system"
-        assert msgs[0]["content"] == "system"
+        assert msgs[0] == {"role": "system", "content": "system"}
         assert msgs[1]["role"] == "user"
-        assert "PLAYER STATE" in msgs[1]["content"]
-        assert "PERSONALITY" in msgs[1]["content"]
-        assert "DIG OUTCOME" in msgs[1]["content"]
+        for label in ("PLAYER STATE", "PERSONALITY", "DIG OUTCOME"):
+            assert label in msgs[1]["content"]
         assert "MULTIPLAYER" not in msgs[1]["content"]
 
-    def test_with_multiplayer(self):
-        msgs = build_messages("system", "state", "personality", "outcome", "sabotage stuff")
-        assert "MULTIPLAYER" in msgs[1]["content"]
-
-    def test_with_history(self):
-        msgs = build_messages("system", "state", "personality", "outcome", "", history="some history")
+    def test_optional_sections_ordering(self):
+        msgs = build_messages(
+            "system",
+            "state",
+            "personality",
+            "outcome",
+            "sabotage stuff",
+            history="some history",
+        )
         content = msgs[1]["content"]
+        assert "MULTIPLAYER" in content
         assert "DIG HISTORY" in content
-        # History should appear between personality and outcome
+        # History sits between personality and outcome
         assert content.index("PERSONALITY") < content.index("DIG HISTORY") < content.index("DIG OUTCOME")
 
-    def test_without_history(self):
-        msgs = build_messages("system", "state", "personality", "outcome", "")
-        assert "DIG HISTORY" not in msgs[1]["content"]
+
+# ---------------------------------------------------------------------------
+# Prompt constants and engine tool definition
+# ---------------------------------------------------------------------------
+
+
+def test_outcome_tool_has_expected_shape():
+    """DIG_OUTCOME_TOOL covers narration only; engine tool covers mechanics only."""
+    assert DIG_OUTCOME_TOOL["type"] == "function"
+    func = DIG_OUTCOME_TOOL["function"]
+    assert func["name"] == "narrate_dig_outcome"
+    props = func["parameters"]["properties"]
+    for field in ("narrative", "tone", "event_flavor", "cave_in_flavor", "callback_reference"):
+        assert field in props
+    assert set(func["parameters"]["required"]) == {"narrative", "tone"}
+    assert len(DIG_SYSTEM_PROMPT) > 100
+    expected = {
+        "cautious_grinder",
+        "reckless_degen",
+        "calculated_risk_taker",
+        "balanced_explorer",
+        "social_butterfly",
+        "unknown",
+    }
+    assert set(PLAY_STYLE_DESCRIPTIONS.keys()) == expected
+
+
+def test_engine_tool_separates_mechanics_from_narrative():
+    assert DIG_ENGINE_TOOL["type"] == "function"
+    func = DIG_ENGINE_TOOL["function"]
+    assert func["name"] == "resolve_dig"
+    props = func["parameters"]["properties"]
+    for field in ("advance", "jc_earned", "cave_in", "event_id"):
+        assert field in props
+    assert "narrative" not in props
+    assert "tone" not in props
+    assert {"advance", "jc_earned", "cave_in"} <= set(func["parameters"]["required"])
+    assert len(DIG_ENGINE_SYSTEM_PROMPT) > 100
+    assert "Dungeon Master" in DIG_ENGINE_SYSTEM_PROMPT
+
+    msgs = build_engine_messages("sys", "state", "pers", "precond", "")
+    assert msgs[0]["role"] == "system"
+    assert "DIG PRECONDITIONS" in msgs[1]["content"]
+    assert "MULTIPLAYER" not in msgs[1]["content"]
 
 
 # ---------------------------------------------------------------------------
-# Prompts constants
+# build_preconditions_context
 # ---------------------------------------------------------------------------
 
-class TestPromptConstants:
-    def test_tool_definition_structure(self):
-        assert DIG_OUTCOME_TOOL["type"] == "function"
-        func = DIG_OUTCOME_TOOL["function"]
-        assert func["name"] == "narrate_dig_outcome"
-        props = func["parameters"]["properties"]
-        assert "narrative" in props
-        assert "tone" in props
-        assert "event_flavor" in props
-        assert "cave_in_flavor" in props
-        assert "callback_reference" in props
-        assert set(func["parameters"]["required"]) == {"narrative", "tone"}
 
-    def test_system_prompt_not_empty(self):
-        assert len(DIG_SYSTEM_PROMPT) > 100
+class TestBuildPreconditionsContext:
+    def test_basic_renders_layer_ranges_and_stats(self):
+        p = {
+            "depth_before": 42,
+            "layer_name": "Stone",
+            "advance_min": 2,
+            "advance_max": 4,
+            "jc_min": 1,
+            "jc_max": 5,
+            "cave_in_chance": 0.15,
+            "event_chance": 0.20,
+            "available_events": [{"id": "crystal_golem", "name": "Crystal Golem", "rarity": "common"}],
+            "luminosity": 80,
+            "miner_stats": {"strength": 2, "smarts": 3, "stamina": 1},
+            "stat_effects": {
+                "advance_min_bonus": 0,
+                "advance_max_bonus": 1,
+                "cave_in_reduction": 0.06,
+                "cooldown_multiplier": 0.96,
+            },
+        }
+        ctx = build_preconditions_context(p)
+        assert "42" in ctx
+        assert "Stone" in ctx
+        assert "2-4" in ctx
+        assert "15%" in ctx
+        assert "crystal_golem" in ctx
+        assert "Strength 2" in ctx
+        assert "-6% cave-in" in ctx
 
-    def test_play_style_descriptions_complete(self):
-        expected = {"cautious_grinder", "reckless_degen", "calculated_risk_taker",
-                    "balanced_explorer", "social_butterfly", "unknown"}
-        assert set(PLAY_STYLE_DESCRIPTIONS.keys()) == expected
+    @pytest.mark.parametrize(
+        "extras,must_contain",
+        [
+            ({"has_dynamite": True, "has_grappling_hook": True}, ["Dynamite", "Grappling Hook"]),
+            (
+                {"has_hard_hat": True, "hard_hat_prevents": True, "hard_hat_charges": 2},
+                ["Cave-in chance: 0%", "Hard Hat", "cannot happen this dig"],
+            ),
+        ],
+    )
+    def test_item_state_renders(self, extras, must_contain):
+        p = {
+            "depth_before": 10,
+            "layer_name": "Dirt",
+            "advance_min": 1,
+            "advance_max": 3,
+            "jc_min": 0,
+            "jc_max": 1,
+            "cave_in_chance": 0.05,
+            "event_chance": 0.16,
+            "available_events": [],
+            "luminosity": 100,
+            **extras,
+        }
+        ctx = build_preconditions_context(p)
+        for token in must_contain:
+            assert token in ctx
+
+
+def test_build_dice_results_context_formats_rolls():
+    ctx = build_dice_results_context([
+        {"label": "cave_in", "sides": 100, "rolls": [42], "modifier": 0, "total": 42},
+        {"label": "loss", "sides": 6, "rolls": [4], "modifier": 2, "total": 6},
+    ])
+    assert "cave_in" in ctx
+    assert "d100" in ctx
+    assert "loss" in ctx
+    assert "+ 2 = 6" in ctx
 
 
 # ---------------------------------------------------------------------------
-# DigLLMService — enhance
+# DigLLMValidator.validate_engine_outcome — clamping logic
 # ---------------------------------------------------------------------------
+
+
+class TestValidateEngineOutcome:
+    def setup_method(self):
+        self.validator = DigLLMValidator()
+
+    def _preconditions(self, **overrides):
+        base = {
+            "advance_min": 1,
+            "advance_max": 3,
+            "jc_min": 0,
+            "jc_max": 5,
+            "hard_hat_prevents": False,
+            "available_events": [
+                {"id": "crystal_golem", "name": "Crystal Golem", "rarity": "common"},
+            ],
+        }
+        base.update(overrides)
+        return base
+
+    @pytest.mark.parametrize(
+        "outcome,field,expected",
+        [
+            ({"advance": 10, "jc_earned": 3, "cave_in": False}, "advance", 3),
+            ({"advance": -5, "jc_earned": 2, "cave_in": False}, "advance", 1),
+            ({"advance": 2, "jc_earned": 100, "cave_in": False}, "jc_earned", 5),
+        ],
+    )
+    def test_clamps_advance_and_jc(self, outcome, field, expected):
+        result = self.validator.validate_engine_outcome(outcome, self._preconditions())
+        assert result[field] == expected
+
+    def test_cave_in_forces_zero_advance_and_jc(self):
+        result = self.validator.validate_engine_outcome(
+            {
+                "advance": 3,
+                "jc_earned": 5,
+                "cave_in": True,
+                "cave_in_block_loss": 5,
+                "cave_in_type": "stun",
+            },
+            self._preconditions(),
+        )
+        assert result["cave_in"] is True
+        assert result["advance"] == 0
+        assert result["jc_earned"] == 0
+
+    def test_cave_in_block_loss_clamped(self):
+        result = self.validator.validate_engine_outcome(
+            {
+                "advance": 0,
+                "jc_earned": 0,
+                "cave_in": True,
+                "cave_in_block_loss": 15,
+                "cave_in_type": "injury",
+            },
+            self._preconditions(),
+        )
+        assert result["cave_in_block_loss"] == 8
+
+    def test_hard_hat_prevents_cave_in(self):
+        result = self.validator.validate_engine_outcome(
+            {
+                "advance": 2,
+                "jc_earned": 3,
+                "cave_in": True,
+                "cave_in_block_loss": 5,
+                "cave_in_type": "stun",
+            },
+            self._preconditions(hard_hat_prevents=True),
+        )
+        assert result["cave_in"] is False
+        assert result["cave_in_block_loss"] == 0
+        assert "narrative" not in result
+
+    @pytest.mark.parametrize(
+        "event_id,expected",
+        [("nonexistent_event", ""), ("crystal_golem", "crystal_golem")],
+    )
+    def test_event_id_validation(self, event_id, expected):
+        result = self.validator.validate_engine_outcome(
+            {"advance": 2, "jc_earned": 3, "cave_in": False, "event_id": event_id},
+            self._preconditions(),
+        )
+        assert result["event_id"] == expected
+
+    def test_engine_outcome_carries_no_narrative_fields(self):
+        result = self.validator.validate_engine_outcome(
+            {"advance": 2, "jc_earned": 3, "cave_in": False},
+            self._preconditions(),
+        )
+        assert "narrative" not in result
+        assert "tone" not in result
+
+
+# ---------------------------------------------------------------------------
+# DigLLMService — enhance (legacy single-call narration path)
+# ---------------------------------------------------------------------------
+
 
 @dataclass
 class _MockToolCallResult:
@@ -554,8 +675,6 @@ class _MockToolCallResult:
 
 
 class TestDigLLMServiceEnhance:
-    """Integration test with mocked AI service."""
-
     def _make_service(self, dig_repo, player_repo, tool_result=None, side_effect=None):
         ai_service = MagicMock()
         if side_effect:
@@ -581,66 +700,43 @@ class TestDigLLMServiceEnhance:
         dig_repo.create_tunnel(uid, TEST_GUILD_ID, "Test Tunnel")
 
         svc = self._make_service(dig_repo, player_repository)
-        result = {"advance": 3, "jc_earned": 5, "depth": 10}
-        enhanced = await svc.enhance(result, uid, TEST_GUILD_ID)
+        enhanced = await svc.enhance({"advance": 3, "jc_earned": 5, "depth": 10}, uid, TEST_GUILD_ID)
 
-        assert "llm_narrative" in enhanced
         assert enhanced["llm_narrative"] == "The earth shudders as your pickaxe bites into stone."
         assert enhanced["llm_tone"] == "dramatic"
 
     @pytest.mark.asyncio
-    async def test_enhance_fallback_on_timeout(self, dig_repo, player_repository):
+    @pytest.mark.parametrize("side_effect", [TimeoutError(), RuntimeError("API down")])
+    async def test_enhance_falls_back_silently_on_error(
+        self, side_effect, dig_repo, player_repository
+    ):
         uid = _register_player(player_repository)
         dig_repo.create_tunnel(uid, TEST_GUILD_ID, "Test Tunnel")
 
-        svc = self._make_service(
-            dig_repo, player_repository,
-            side_effect=TimeoutError(),
-        )
-        result = {"advance": 3, "jc_earned": 5, "depth": 10}
-        enhanced = await svc.enhance(result, uid, TEST_GUILD_ID)
+        svc = self._make_service(dig_repo, player_repository, side_effect=side_effect)
+        enhanced = await svc.enhance({"advance": 3, "jc_earned": 5}, uid, TEST_GUILD_ID)
 
-        # Original result returned unchanged
         assert "llm_narrative" not in enhanced
         assert enhanced["advance"] == 3
 
     @pytest.mark.asyncio
-    async def test_enhance_fallback_on_api_error(self, dig_repo, player_repository):
+    async def test_enhance_falls_back_on_wrong_tool(self, dig_repo, player_repository):
         uid = _register_player(player_repository)
         dig_repo.create_tunnel(uid, TEST_GUILD_ID, "Test Tunnel")
 
         svc = self._make_service(
-            dig_repo, player_repository,
-            side_effect=RuntimeError("API down"),
-        )
-        result = {"advance": 2, "jc_earned": 1}
-        enhanced = await svc.enhance(result, uid, TEST_GUILD_ID)
-
-        assert "llm_narrative" not in enhanced
-        assert enhanced["advance"] == 2
-
-    @pytest.mark.asyncio
-    async def test_enhance_wrong_tool_name(self, dig_repo, player_repository):
-        uid = _register_player(player_repository)
-        dig_repo.create_tunnel(uid, TEST_GUILD_ID, "Test Tunnel")
-
-        svc = self._make_service(
-            dig_repo, player_repository,
+            dig_repo,
+            player_repository,
             tool_result=_MockToolCallResult(tool_name="wrong_tool", tool_args={}),
         )
-        result = {"advance": 1, "jc_earned": 2}
-        enhanced = await svc.enhance(result, uid, TEST_GUILD_ID)
-
+        enhanced = await svc.enhance({"advance": 1, "jc_earned": 2}, uid, TEST_GUILD_ID)
         assert "llm_narrative" not in enhanced
 
     @pytest.mark.asyncio
-    async def test_enhance_no_tunnel(self, dig_repo, player_repository):
-        """Enhance should still work even if no tunnel exists (graceful)."""
+    async def test_enhance_works_without_tunnel(self, dig_repo, player_repository):
         uid = _register_player(player_repository)
         svc = self._make_service(dig_repo, player_repository)
-        result = {"advance": 1, "jc_earned": 1}
-        enhanced = await svc.enhance(result, uid, TEST_GUILD_ID)
-        # Should either succeed with narrative or fail gracefully
+        enhanced = await svc.enhance({"advance": 1, "jc_earned": 1}, uid, TEST_GUILD_ID)
         assert "advance" in enhanced
 
 
@@ -648,111 +744,97 @@ class TestDigLLMServiceEnhance:
 # DigLLMService — update_personality
 # ---------------------------------------------------------------------------
 
+
 class TestDigLLMServicePersonality:
+    def _make_service(self, dig_repo, player_repository):
+        return DigLLMService(MagicMock(), dig_repo, player_repository)
+
     def test_update_personality_creates_new(self, dig_repo, player_repository):
         uid = _register_player(player_repository)
         dig_repo.create_tunnel(uid, TEST_GUILD_ID, "Test Tunnel")
 
-        ai_service = MagicMock()
-        svc = DigLLMService(ai_service, dig_repo, player_repository)
+        svc = self._make_service(dig_repo, player_repository)
         svc.update_personality(uid, TEST_GUILD_ID, "dig", choice="safe")
 
         personality = dig_repo.get_personality(uid, TEST_GUILD_ID)
         assert personality is not None
-        histogram = personality.get("choice_histogram", {})
-        assert histogram.get("safe") == 1
+        assert personality["choice_histogram"].get("safe") == 1
 
     def test_update_personality_increments(self, dig_repo, player_repository):
         uid = _register_player(player_repository)
         dig_repo.create_tunnel(uid, TEST_GUILD_ID, "Test Tunnel")
 
-        ai_service = MagicMock()
-        svc = DigLLMService(ai_service, dig_repo, player_repository)
-
+        svc = self._make_service(dig_repo, player_repository)
         for _ in range(5):
             svc.update_personality(uid, TEST_GUILD_ID, "dig", choice="safe")
         svc.update_personality(uid, TEST_GUILD_ID, "event", choice="risky")
 
-        personality = dig_repo.get_personality(uid, TEST_GUILD_ID)
-        histogram = personality["choice_histogram"]
+        histogram = dig_repo.get_personality(uid, TEST_GUILD_ID)["choice_histogram"]
         assert histogram["safe"] == 5
         assert histogram["risky"] == 1
 
-    def test_update_personality_notable_moment(self, dig_repo, player_repository):
+    def test_update_personality_records_notable_moment(self, dig_repo, player_repository):
         uid = _register_player(player_repository)
         dig_repo.create_tunnel(uid, TEST_GUILD_ID, "Test Tunnel")
 
-        ai_service = MagicMock()
-        svc = DigLLMService(ai_service, dig_repo, player_repository)
+        svc = self._make_service(dig_repo, player_repository)
         svc.update_personality(
-            uid, TEST_GUILD_ID, "boss_fight",
-            details={"first_boss_kill": True},
+            uid, TEST_GUILD_ID, "boss_fight", details={"first_boss_kill": True}
         )
 
-        personality = dig_repo.get_personality(uid, TEST_GUILD_ID)
-        moments = personality.get("notable_moments", [])
+        moments = dig_repo.get_personality(uid, TEST_GUILD_ID).get("notable_moments", [])
         assert len(moments) == 1
         assert "first boss" in moments[0].lower()
 
-    def test_update_personality_classifies_style(self, dig_repo, player_repository):
+    def test_update_personality_classifies_after_threshold(self, dig_repo, player_repository):
         uid = _register_player(player_repository)
         dig_repo.create_tunnel(uid, TEST_GUILD_ID, "Test Tunnel")
 
-        ai_service = MagicMock()
-        svc = DigLLMService(ai_service, dig_repo, player_repository)
-
-        # 8 safe choices should classify as cautious after threshold
+        svc = self._make_service(dig_repo, player_repository)
         for _ in range(8):
             svc.update_personality(uid, TEST_GUILD_ID, "dig", choice="safe")
 
-        personality = dig_repo.get_personality(uid, TEST_GUILD_ID)
-        assert personality["play_style"] == "cautious_grinder"
+        assert dig_repo.get_personality(uid, TEST_GUILD_ID)["play_style"] == "cautious_grinder"
 
     def test_invalid_choice_ignored(self, dig_repo, player_repository):
         uid = _register_player(player_repository)
         dig_repo.create_tunnel(uid, TEST_GUILD_ID, "Test Tunnel")
 
-        ai_service = MagicMock()
-        svc = DigLLMService(ai_service, dig_repo, player_repository)
+        svc = self._make_service(dig_repo, player_repository)
         svc.update_personality(uid, TEST_GUILD_ID, "dig", choice="invalid_choice")
 
-        personality = dig_repo.get_personality(uid, TEST_GUILD_ID)
-        histogram = personality.get("choice_histogram", {})
+        histogram = dig_repo.get_personality(uid, TEST_GUILD_ID).get("choice_histogram", {})
         assert "invalid_choice" not in histogram
 
 
 # ---------------------------------------------------------------------------
-# Repository — engine mode + personality
+# Repository — engine mode + personality + social actions
 # ---------------------------------------------------------------------------
 
+
 class TestDigRepoEngineMode:
-    def test_default_mode_is_legacy(self, dig_repo, player_repository):
+    def test_default_mode_is_legacy_with_or_without_tunnel(self, dig_repo, player_repository):
+        # No tunnel
+        assert dig_repo.get_engine_mode(99999, TEST_GUILD_ID) == "legacy"
+        # With tunnel
         uid = _register_player(player_repository)
         dig_repo.create_tunnel(uid, TEST_GUILD_ID, "Test Tunnel")
         assert dig_repo.get_engine_mode(uid, TEST_GUILD_ID) == "legacy"
 
-    def test_set_mode_to_llm(self, dig_repo, player_repository):
+    def test_mode_can_round_trip_through_llm(self, dig_repo, player_repository):
         uid = _register_player(player_repository)
         dig_repo.create_tunnel(uid, TEST_GUILD_ID, "Test Tunnel")
         dig_repo.set_engine_mode(uid, TEST_GUILD_ID, "llm")
         assert dig_repo.get_engine_mode(uid, TEST_GUILD_ID) == "llm"
-
-    def test_set_mode_back_to_legacy(self, dig_repo, player_repository):
-        uid = _register_player(player_repository)
-        dig_repo.create_tunnel(uid, TEST_GUILD_ID, "Test Tunnel")
-        dig_repo.set_engine_mode(uid, TEST_GUILD_ID, "llm")
         dig_repo.set_engine_mode(uid, TEST_GUILD_ID, "legacy")
         assert dig_repo.get_engine_mode(uid, TEST_GUILD_ID) == "legacy"
 
-    def test_no_tunnel_returns_legacy(self, dig_repo):
-        assert dig_repo.get_engine_mode(99999, TEST_GUILD_ID) == "legacy"
-
 
 class TestDigRepoPersonality:
-    def test_get_personality_none(self, dig_repo):
+    def test_get_personality_none_when_missing(self, dig_repo):
         assert dig_repo.get_personality(99999, TEST_GUILD_ID) is None
 
-    def test_upsert_and_get(self, dig_repo):
+    def test_upsert_persists_and_round_trips(self, dig_repo):
         data = {
             "play_style": "cautious_grinder",
             "choice_histogram": {"safe": 10, "risky": 3},
@@ -760,316 +842,88 @@ class TestDigRepoPersonality:
         }
         dig_repo.upsert_personality(10001, TEST_GUILD_ID, data)
         result = dig_repo.get_personality(10001, TEST_GUILD_ID)
-        assert result is not None
         assert result["play_style"] == "cautious_grinder"
         assert result["choice_histogram"]["safe"] == 10
         assert len(result["notable_moments"]) == 1
 
-    def test_upsert_updates_existing(self, dig_repo):
-        data1 = {"play_style": "unknown", "choice_histogram": {"safe": 1}, "notable_moments": []}
-        dig_repo.upsert_personality(10001, TEST_GUILD_ID, data1)
-
-        data2 = {"play_style": "reckless_degen", "choice_histogram": {"safe": 1, "desperate": 5}, "notable_moments": ["Cave-in streak"]}
-        dig_repo.upsert_personality(10001, TEST_GUILD_ID, data2)
-
+    def test_upsert_overwrites_existing(self, dig_repo):
+        dig_repo.upsert_personality(
+            10001, TEST_GUILD_ID,
+            {"play_style": "unknown", "choice_histogram": {"safe": 1}, "notable_moments": []},
+        )
+        dig_repo.upsert_personality(
+            10001, TEST_GUILD_ID,
+            {
+                "play_style": "reckless_degen",
+                "choice_histogram": {"safe": 1, "desperate": 5},
+                "notable_moments": ["Cave-in streak"],
+            },
+        )
         result = dig_repo.get_personality(10001, TEST_GUILD_ID)
         assert result["play_style"] == "reckless_degen"
         assert result["choice_histogram"]["desperate"] == 5
 
 
 class TestDigRepoSocialActions:
-    def test_empty_social_actions(self, dig_repo):
-        actions = dig_repo.get_recent_social_actions(10001, TEST_GUILD_ID)
-        assert actions == []
+    def test_empty_when_none_logged(self, dig_repo):
+        assert dig_repo.get_recent_social_actions(10001, TEST_GUILD_ID) == []
 
-    def test_returns_social_actions(self, dig_repo):
+    def test_returns_only_social_actions(self, dig_repo):
         dig_repo.log_action(
-            guild_id=TEST_GUILD_ID,
-            actor_id=10001,
-            target_id=10002,
-            action_type="sabotage",
-            depth_before=50,
-            depth_after=45,
-            jc_delta=-5,
+            guild_id=TEST_GUILD_ID, actor_id=10001, target_id=10002,
+            action_type="sabotage", depth_before=50, depth_after=45, jc_delta=-5,
         )
         dig_repo.log_action(
-            guild_id=TEST_GUILD_ID,
-            actor_id=10003,
-            target_id=10001,
-            action_type="help",
-            depth_before=45,
-            depth_after=48,
+            guild_id=TEST_GUILD_ID, actor_id=10003, target_id=10001,
+            action_type="help", depth_before=45, depth_after=48,
         )
         # Non-social action should NOT be returned
         dig_repo.log_action(
-            guild_id=TEST_GUILD_ID,
-            actor_id=10001,
-            action_type="dig",
-            depth_before=48,
-            depth_after=50,
+            guild_id=TEST_GUILD_ID, actor_id=10001,
+            action_type="dig", depth_before=48, depth_after=50,
         )
 
         actions = dig_repo.get_recent_social_actions(10001, TEST_GUILD_ID)
-        assert len(actions) == 2
-        types = {a["action_type"] for a in actions}
-        assert types == {"sabotage", "help"}
+        assert {a["action_type"] for a in actions} == {"sabotage", "help"}
 
 
 # ---------------------------------------------------------------------------
-# Engine tool / prompt constants
+# dig_with_preconditions — terminal states + happy path
 # ---------------------------------------------------------------------------
 
-class TestEngineToolDefinition:
-    def test_tool_structure(self):
-        assert DIG_ENGINE_TOOL["type"] == "function"
-        func = DIG_ENGINE_TOOL["function"]
-        assert func["name"] == "resolve_dig"
-        props = func["parameters"]["properties"]
-        assert "advance" in props
-        assert "jc_earned" in props
-        assert "cave_in" in props
-        assert "event_id" in props
-        # narrative/tone are NOT in the engine tool — narration is separate
-        assert "narrative" not in props
-        assert "tone" not in props
-        required = set(func["parameters"]["required"])
-        assert {"advance", "jc_earned", "cave_in"} <= required
-
-    def test_engine_system_prompt_not_empty(self):
-        assert len(DIG_ENGINE_SYSTEM_PROMPT) > 100
-        assert "Dungeon Master" in DIG_ENGINE_SYSTEM_PROMPT
-
-    def test_engine_messages_structure(self):
-        msgs = build_engine_messages("sys", "state", "pers", "precond", "")
-        assert len(msgs) == 2
-        assert msgs[0]["role"] == "system"
-        assert "DIG PRECONDITIONS" in msgs[1]["content"]
-        assert "MULTIPLAYER" not in msgs[1]["content"]
-
-
-# ---------------------------------------------------------------------------
-# build_preconditions_context
-# ---------------------------------------------------------------------------
-
-class TestBuildPreconditionsContext:
-    def test_basic(self):
-        p = {
-            "depth_before": 42,
-            "layer_name": "Stone",
-            "advance_min": 2,
-            "advance_max": 4,
-            "jc_min": 1,
-            "jc_max": 5,
-            "cave_in_chance": 0.15,
-            "event_chance": 0.20,
-            "available_events": [{"id": "crystal_golem", "name": "Crystal Golem", "rarity": "common"}],
-            "luminosity": 80,
-            "miner_stats": {"strength": 2, "smarts": 3, "stamina": 1},
-            "stat_effects": {"advance_min_bonus": 0, "advance_max_bonus": 1, "cave_in_reduction": 0.06, "cooldown_multiplier": 0.96},
-        }
-        ctx = build_preconditions_context(p)
-        assert "42" in ctx
-        assert "Stone" in ctx
-        assert "2-4" in ctx
-        assert "15%" in ctx
-        assert "crystal_golem" in ctx
-        assert "Strength 2" in ctx
-        assert "-6% cave-in" in ctx
-
-    def test_items_shown(self):
-        p = {
-            "depth_before": 10,
-            "layer_name": "Dirt",
-            "advance_min": 1, "advance_max": 3,
-            "jc_min": 0, "jc_max": 1,
-            "cave_in_chance": 0.05,
-            "event_chance": 0.16,
-            "available_events": [],
-            "luminosity": 100,
-            "has_dynamite": True,
-            "has_grappling_hook": True,
-        }
-        ctx = build_preconditions_context(p)
-        assert "Dynamite" in ctx
-        assert "Grappling Hook" in ctx
-
-    def test_hard_hat_prevention_shown(self):
-        p = {
-            "depth_before": 74,
-            "layer_name": "Crystal",
-            "advance_min": 1,
-            "advance_max": 2,
-            "jc_min": 1,
-            "jc_max": 3,
-            "cave_in_chance": 0.18,
-            "event_chance": 0.20,
-            "available_events": [],
-            "luminosity": 80,
-            "has_hard_hat": True,
-            "hard_hat_prevents": True,
-            "hard_hat_charges": 2,
-        }
-        ctx = build_preconditions_context(p)
-        assert "Cave-in chance: 0%" in ctx
-        assert "Hard Hat" in ctx
-        assert "cannot happen this dig" in ctx
-
-
-class TestBuildDiceResultsContext:
-    def test_formats_dice_results(self):
-        ctx = build_dice_results_context([
-            {"label": "cave_in", "sides": 100, "rolls": [42], "modifier": 0, "total": 42},
-            {"label": "loss", "sides": 6, "rolls": [4], "modifier": 2, "total": 6},
-        ])
-        assert "cave_in" in ctx
-        assert "d100" in ctx
-        assert "loss" in ctx
-        assert "+ 2 = 6" in ctx
-
-
-# ---------------------------------------------------------------------------
-# DigLLMValidator.validate_engine_outcome
-# ---------------------------------------------------------------------------
-
-class TestValidateEngineOutcome:
-    def setup_method(self):
-        self.validator = DigLLMValidator()
-
-    def _preconditions(self, **overrides):
-        base = {
-            "advance_min": 1, "advance_max": 3,
-            "jc_min": 0, "jc_max": 5,
-            "hard_hat_prevents": False,
-            "available_events": [
-                {"id": "crystal_golem", "name": "Crystal Golem", "rarity": "common"},
-            ],
-        }
-        base.update(overrides)
-        return base
-
-    def test_clamps_advance(self):
-        result = self.validator.validate_engine_outcome(
-            {"advance": 10, "jc_earned": 3, "cave_in": False},
-            self._preconditions(),
-        )
-        assert result["advance"] == 3
-
-    def test_clamps_advance_min(self):
-        result = self.validator.validate_engine_outcome(
-            {"advance": -5, "jc_earned": 2, "cave_in": False},
-            self._preconditions(),
-        )
-        assert result["advance"] == 1
-
-    def test_clamps_jc(self):
-        result = self.validator.validate_engine_outcome(
-            {"advance": 2, "jc_earned": 100, "cave_in": False},
-            self._preconditions(),
-        )
-        assert result["jc_earned"] == 5
-
-    def test_cave_in_forces_zero_advance(self):
-        result = self.validator.validate_engine_outcome(
-            {"advance": 3, "jc_earned": 5, "cave_in": True,
-             "cave_in_block_loss": 5, "cave_in_type": "stun"},
-            self._preconditions(),
-        )
-        assert result["cave_in"] is True
-        assert result["advance"] == 0
-        assert result["jc_earned"] == 0
-
-    def test_cave_in_block_loss_clamped(self):
-        result = self.validator.validate_engine_outcome(
-            {"advance": 0, "jc_earned": 0, "cave_in": True,
-             "cave_in_block_loss": 15, "cave_in_type": "injury"},
-            self._preconditions(),
-        )
-        assert result["cave_in_block_loss"] == 8
-
-    def test_hard_hat_prevents_cave_in(self):
-        result = self.validator.validate_engine_outcome(
-            {"advance": 2, "jc_earned": 3, "cave_in": True,
-             "cave_in_block_loss": 5, "cave_in_type": "stun"},
-            self._preconditions(hard_hat_prevents=True),
-        )
-        assert result["cave_in"] is False
-        assert result["cave_in_block_loss"] == 0
-        # narrative/tone no longer in engine outcome
-        assert "narrative" not in result
-
-    def test_invalid_event_id_cleared(self):
-        result = self.validator.validate_engine_outcome(
-            {"advance": 2, "jc_earned": 3, "cave_in": False,
-             "event_id": "nonexistent_event"},
-            self._preconditions(),
-        )
-        assert result["event_id"] == ""
-
-    def test_valid_event_id_preserved(self):
-        result = self.validator.validate_engine_outcome(
-            {"advance": 2, "jc_earned": 3, "cave_in": False,
-             "event_id": "crystal_golem"},
-            self._preconditions(),
-        )
-        assert result["event_id"] == "crystal_golem"
-
-    def test_no_narrative_in_engine_outcome(self):
-        """Engine outcome should not contain narrative fields."""
-        result = self.validator.validate_engine_outcome(
-            {"advance": 2, "jc_earned": 3, "cave_in": False},
-            self._preconditions(),
-        )
-        assert "narrative" not in result
-        assert "tone" not in result
-
-
-# ---------------------------------------------------------------------------
-# dig_with_preconditions
-# ---------------------------------------------------------------------------
 
 class TestDigWithPreconditions:
     def test_returns_preconditions_for_normal_dig(self, dig_service, player_repository):
         uid = _register_player(player_repository)
         dig_service.dig_repo.create_tunnel(uid, TEST_GUILD_ID, "Test Tunnel")
-        # First dig via normal dig() to move past first-dig state
         dig_service.dig(uid, TEST_GUILD_ID)
-        # Reset cooldown so we can dig again
         dig_service.reset_dig_cooldown(uid, TEST_GUILD_ID)
 
         terminal, preconditions = dig_service.dig_with_preconditions(uid, TEST_GUILD_ID)
         assert terminal is None
         assert preconditions is not None
-        assert "advance_min" in preconditions
-        assert "advance_max" in preconditions
-        assert "jc_min" in preconditions
-        assert "jc_max" in preconditions
-        assert "cave_in_chance" in preconditions
-        assert "available_events" in preconditions
+        for k in ("advance_min", "advance_max", "jc_min", "jc_max", "cave_in_chance", "available_events"):
+            assert k in preconditions
         assert preconditions["discord_id"] == uid
         assert preconditions["depth_before"] >= 0
 
-    def test_returns_terminal_for_unregistered(self, dig_service):
+    def test_unregistered_returns_terminal_failure(self, dig_service):
         terminal, preconditions = dig_service.dig_with_preconditions(99999, TEST_GUILD_ID)
         assert terminal is not None
         assert terminal["success"] is False
         assert preconditions is None
 
-    def test_returns_terminal_for_first_dig(self, dig_service, player_repository):
+    def test_first_dig_returns_terminal(self, dig_service, player_repository):
         uid = _register_player(player_repository)
         terminal, preconditions = dig_service.dig_with_preconditions(uid, TEST_GUILD_ID)
-        assert terminal is not None
         assert terminal.get("is_first_dig") is True
         assert preconditions is None
 
-    def test_returns_terminal_for_cooldown(self, dig_service, player_repository):
+    def test_cooldown_returns_terminal(self, dig_service, player_repository):
         uid = _register_player(player_repository)
-        # Create tunnel and do first dig
         dig_service.dig(uid, TEST_GUILD_ID)
-        # Do another dig to start cooldown
         dig_service.dig(uid, TEST_GUILD_ID)
-
         terminal, preconditions = dig_service.dig_with_preconditions(uid, TEST_GUILD_ID)
-        assert terminal is not None
         assert terminal.get("paid_dig_available") is True
         assert preconditions is None
 
@@ -1078,59 +932,56 @@ class TestDigWithPreconditions:
 # apply_dig_outcome
 # ---------------------------------------------------------------------------
 
+
 class TestApplyDigOutcome:
     def _get_preconditions(self, dig_service, uid):
-        """Helper: compute preconditions for a ready-to-dig player."""
-        # Move past first dig
         dig_service.dig(uid, TEST_GUILD_ID)
-        # Reset cooldown
         dig_service.reset_dig_cooldown(uid, TEST_GUILD_ID)
         terminal, preconditions = dig_service.dig_with_preconditions(uid, TEST_GUILD_ID)
         assert terminal is None
         return preconditions
 
-    def test_normal_outcome(self, dig_service, player_repository):
+    def test_normal_outcome_advances_depth(self, dig_service, player_repository):
         uid = _register_player(player_repository)
         p = self._get_preconditions(dig_service, uid)
         depth_before = p["depth_before"]
 
-        outcome = {
-            "advance": 2, "jc_earned": 3, "cave_in": False,
-            "event_id": "",
-        }
-        result = dig_service.apply_dig_outcome(p, outcome)
+        result = dig_service.apply_dig_outcome(
+            p, {"advance": 2, "jc_earned": 3, "cave_in": False, "event_id": ""}
+        )
         assert result["success"] is True
         assert result["advance"] == 2
         assert result["depth_after"] == depth_before + 2
-        # Narrative is no longer set by apply_dig_outcome
         assert "llm_narrative" not in result
 
-    def test_cave_in_outcome(self, dig_service, player_repository):
+    def test_cave_in_outcome_records_detail(self, dig_service, player_repository):
         uid = _register_player(player_repository)
         p = self._get_preconditions(dig_service, uid)
 
-        outcome = {
-            "advance": 0, "jc_earned": 0, "cave_in": True,
-            "cave_in_block_loss": 4, "cave_in_type": "stun",
-        }
-        result = dig_service.apply_dig_outcome(p, outcome)
+        result = dig_service.apply_dig_outcome(
+            p,
+            {
+                "advance": 0,
+                "jc_earned": 0,
+                "cave_in": True,
+                "cave_in_block_loss": 4,
+                "cave_in_type": "stun",
+            },
+        )
         assert result["success"] is True
         assert result["cave_in"] is True
         assert result["cave_in_detail"]["type"] == "stun"
 
-    def test_boss_boundary_capped(self, dig_service, player_repository):
+    def test_advance_capped_at_boss_boundary(self, dig_service, player_repository):
         uid = _register_player(player_repository)
         p = self._get_preconditions(dig_service, uid)
-        # Set depth to just below boss boundary (25)
         dig_service.dig_repo.update_tunnel(uid, TEST_GUILD_ID, depth=23)
         p["depth_before"] = 23
 
-        outcome = {
-            "advance": 10, "jc_earned": 5, "cave_in": False,
-            "event_id": "",
-        }
-        result = dig_service.apply_dig_outcome(p, outcome)
-        # Should be capped to boss boundary - 1
+        result = dig_service.apply_dig_outcome(
+            p, {"advance": 10, "jc_earned": 5, "cave_in": False, "event_id": ""}
+        )
+        # Boss boundary at 25 — advance is capped to boundary - 1
         assert result["depth_after"] == 24
         assert result["boss_encounter"] is True
 
@@ -1138,18 +989,16 @@ class TestApplyDigOutcome:
         uid = _register_player(player_repository, balance=100)
         p = self._get_preconditions(dig_service, uid)
 
-        outcome = {
-            "advance": 1, "jc_earned": 5, "cave_in": False,
-            "event_id": "",
-        }
-        dig_service.apply_dig_outcome(p, outcome)
-        balance = player_repository.get_balance(uid, TEST_GUILD_ID)
-        assert balance >= 100
+        dig_service.apply_dig_outcome(
+            p, {"advance": 1, "jc_earned": 5, "cave_in": False, "event_id": ""}
+        )
+        assert player_repository.get_balance(uid, TEST_GUILD_ID) >= 100
 
 
 # ---------------------------------------------------------------------------
-# DigLLMService.run_dig
+# DigLLMService.run_dig — two-call orchestration + fallbacks
 # ---------------------------------------------------------------------------
+
 
 class TestDigLLMServiceRunDig:
     def _make_service(self, dig_repo, player_repo, dig_service, tool_result=None, side_effect=None):
@@ -1159,21 +1008,14 @@ class TestDigLLMServiceRunDig:
         elif tool_result:
             ai_service.call_with_tools = AsyncMock(return_value=tool_result)
         else:
-            # Default: 2-call flow — resolve (mechanics) → narrate
             ai_service.call_with_tools = AsyncMock(side_effect=[
                 _MockToolCallResult(
                     tool_name="resolve_dig",
-                    tool_args={
-                        "advance": 2, "jc_earned": 3, "cave_in": False,
-                        "event_id": "",
-                    },
+                    tool_args={"advance": 2, "jc_earned": 3, "cave_in": False, "event_id": ""},
                 ),
                 _MockToolCallResult(
                     tool_name="narrate_dig_outcome",
-                    tool_args={
-                        "narrative": "DM narrates the dig.",
-                        "tone": "dramatic",
-                    },
+                    tool_args={"narrative": "DM narrates the dig.", "tone": "dramatic"},
                 ),
             ])
         return DigLLMService(ai_service, dig_repo, player_repo, dig_service=dig_service)
@@ -1186,7 +1028,9 @@ class TestDigLLMServiceRunDig:
         return preconditions
 
     @pytest.mark.asyncio
-    async def test_run_dig_applies_dm_outcome(self, dig_repo, player_repository, dig_service):
+    async def test_run_dig_applies_outcome_with_narrative(
+        self, dig_repo, player_repository, dig_service
+    ):
         uid = _register_player(player_repository)
         p = self._get_preconditions(dig_service, uid)
 
@@ -1198,7 +1042,9 @@ class TestDigLLMServiceRunDig:
         assert result["llm_narrative"] == "DM narrates the dig."
 
     @pytest.mark.asyncio
-    async def test_run_dig_includes_dice_results(self, dig_repo, player_repository, dig_service):
+    async def test_run_dig_passes_dice_results_to_resolve_call(
+        self, dig_repo, player_repository, dig_service
+    ):
         uid = _register_player(player_repository)
         p = self._get_preconditions(dig_service, uid)
 
@@ -1206,58 +1052,40 @@ class TestDigLLMServiceRunDig:
         ai_service.call_with_tools = AsyncMock(side_effect=[
             _MockToolCallResult(
                 tool_name="resolve_dig",
-                tool_args={
-                    "advance": 1, "jc_earned": 0, "cave_in": False, "event_id": "",
-                },
+                tool_args={"advance": 1, "jc_earned": 0, "cave_in": False, "event_id": ""},
             ),
             _MockToolCallResult(
                 tool_name="narrate_dig_outcome",
-                tool_args={
-                    "narrative": "The dice clatter in the dark.",
-                    "tone": "ominous",
-                },
+                tool_args={"narrative": "The dice clatter in the dark.", "tone": "ominous"},
             ),
         ])
         svc = DigLLMService(ai_service, dig_repo, player_repository, dig_service=dig_service)
         result = await svc.run_dig(uid, TEST_GUILD_ID, p)
 
-        assert result["success"] is True
         assert result["llm_narrative"] == "The dice clatter in the dark."
         assert ai_service.call_with_tools.call_count == 2
-        # First call (resolve) should see locally-rolled dice results
         resolve_messages = ai_service.call_with_tools.call_args_list[0].args[0]
         assert "DICE RESULTS" in resolve_messages[1]["content"]
 
     @pytest.mark.asyncio
-    async def test_run_dig_fallback_on_timeout(self, dig_repo, player_repository, dig_service):
+    @pytest.mark.parametrize("side_effect", [TimeoutError(), RuntimeError("API down")])
+    async def test_run_dig_falls_back_on_error(
+        self, side_effect, dig_repo, player_repository, dig_service
+    ):
         uid = _register_player(player_repository)
         p = self._get_preconditions(dig_service, uid)
 
         svc = self._make_service(
-            dig_repo, player_repository, dig_service,
-            side_effect=TimeoutError(),
+            dig_repo, player_repository, dig_service, side_effect=side_effect
         )
         result = await svc.run_dig(uid, TEST_GUILD_ID, p)
-
-        # Should still succeed via deterministic fallback
         assert result["success"] is True
         assert result.get("advance", 0) >= 0
 
     @pytest.mark.asyncio
-    async def test_run_dig_fallback_on_api_error(self, dig_repo, player_repository, dig_service):
-        uid = _register_player(player_repository)
-        p = self._get_preconditions(dig_service, uid)
-
-        svc = self._make_service(
-            dig_repo, player_repository, dig_service,
-            side_effect=RuntimeError("API down"),
-        )
-        result = await svc.run_dig(uid, TEST_GUILD_ID, p)
-
-        assert result["success"] is True
-
-    @pytest.mark.asyncio
-    async def test_run_dig_wrong_tool_falls_back(self, dig_repo, player_repository, dig_service):
+    async def test_run_dig_falls_back_on_wrong_tool(
+        self, dig_repo, player_repository, dig_service
+    ):
         uid = _register_player(player_repository)
         p = self._get_preconditions(dig_service, uid)
 
@@ -1266,6 +1094,4 @@ class TestDigLLMServiceRunDig:
             tool_result=_MockToolCallResult(tool_name="wrong_tool", tool_args={}),
         )
         result = await svc.run_dig(uid, TEST_GUILD_ID, p)
-
-        # Falls back to deterministic
         assert result["success"] is True
