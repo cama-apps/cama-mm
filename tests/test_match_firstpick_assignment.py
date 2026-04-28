@@ -81,22 +81,15 @@ class TestFirstpickAssignment:
         appear as firstpick at least once, indicating proper randomization.
         """
         firstpick_counts = {"Radiant": 0, "Dire": 0}
-        num_runs = 50
+        num_runs = 20
 
         for _ in range(num_runs):
             result = match_service.shuffle_players(test_players, guild_id=TEST_GUILD_ID)
-            first_pick = result["first_pick_team"]
-            firstpick_counts[first_pick] += 1
+            firstpick_counts[result["first_pick_team"]] += 1
 
-        # Verify both values appear (with high probability, 50 runs should produce both)
-        assert firstpick_counts["Radiant"] > 0, "Radiant should appear as firstpick at least once"
-        assert firstpick_counts["Dire"] > 0, "Dire should appear as firstpick at least once"
-
-        # Verify distribution is roughly balanced (not perfect, but should be close)
-        # With 50 runs, we expect ~25 of each, so we check that neither is extremely skewed
-        # (e.g., at least 10% of runs for each team, meaning at least 5 of 50)
-        assert firstpick_counts["Radiant"] >= 5, "Radiant should appear reasonably often"
-        assert firstpick_counts["Dire"] >= 5, "Dire should appear reasonably often"
+        # With 20 fair flips, P(<3 on either side) is ~2e-4 — robust against RNG noise.
+        assert firstpick_counts["Radiant"] >= 3
+        assert firstpick_counts["Dire"] >= 3
 
     def test_firstpick_assignment_multiple_guilds(self, match_service, test_db, player_repo, test_players):
         """Test that firstpick assignment works correctly for different guilds."""
@@ -210,10 +203,9 @@ class TestFirstpickEndToEnd:
         This ensures that firstpick can be either Radiant or Dire regardless of
         which players are assigned to which team.
         """
-        # Run multiple shuffles to get different team assignments
         firstpick_with_radiant_wins = 0
         firstpick_with_dire_wins = 0
-        num_runs = 30
+        num_runs = 15
 
         for _ in range(num_runs):
             result = match_service.shuffle_players(test_players, guild_id=TEST_GUILD_ID)

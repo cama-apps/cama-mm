@@ -130,8 +130,10 @@ class TestSteamAPIClient:
         assert result is None
 
     @patch("steam_api.SteamAPI._rate_limiter")
-    def test_get_match_details_request_error(self, mock_limiter):
-        """Test match details fetch with request exception."""
+    @patch("steam_api.time.sleep")
+    def test_get_match_details_request_error(self, mock_sleep, mock_limiter):
+        """Test match details fetch with request exception. Retry backoff is mocked
+        out so the test doesn't burn 266 real seconds on the configured delays."""
         api = SteamAPI(api_key="test_key")
         with patch.object(
             api.session, "get", side_effect=requests.exceptions.RequestException("Network error")
