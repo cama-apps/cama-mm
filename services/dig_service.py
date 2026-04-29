@@ -94,6 +94,7 @@ from services.dig_constants import (
     PINNACLE_RELIC_BASE_NAME,
     PINNACLE_RELIC_STAT_POOL,
     PINNACLE_RELIC_SUFFIX_POOL,
+    PINNACLE_REPROC_DEPTH,
     PLAYER_HIT_CEILING,
     PLAYER_HIT_FLOOR,
     PRESTIGE_HARD_CAP,
@@ -1138,8 +1139,13 @@ class DigService:
             status = entry.get("status") if isinstance(entry, dict) else entry
             if depth == b - 1 and status in ("active", "phase1_defeated", "phase2_defeated"):
                 return b
-        # Pinnacle: triggers after all 7 tiers cleared, when depth hits PINNACLE_DEPTH-1.
-        if depth == PINNACLE_DEPTH - 1:
+        # Pinnacle: triggers after all 7 tiers cleared, when depth hits
+        # PINNACLE_DEPTH-1. Also re-procs if the player has tunneled past
+        # PINNACLE_REPROC_DEPTH without defeating it (catch-up for legacy
+        # tunnels that pre-date the pinnacle).
+        at_pinnacle_threshold = depth == PINNACLE_DEPTH - 1
+        in_reproc_window = depth >= PINNACLE_REPROC_DEPTH
+        if at_pinnacle_threshold or in_reproc_window:
             all_tiers_cleared = all(
                 (
                     (e.get("status") if isinstance(e, dict) else e) == "defeated"

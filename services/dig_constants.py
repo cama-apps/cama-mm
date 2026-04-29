@@ -326,13 +326,13 @@ ARMOR_TIERS: list[GearTierDef] = [
     GearTierDef("Iron Plate",         tier=2, slot=GearSlot.ARMOR,
                 player_hp_bonus=1, shop_price=60,   depth_required=50),
     GearTierDef("Diamond Plate",      tier=3, slot=GearSlot.ARMOR,
-                player_hp_bonus=1, shop_price=180,  depth_required=75),
+                player_hp_bonus=2, shop_price=180,  depth_required=75),
     GearTierDef("Obsidian Plate",     tier=4, slot=GearSlot.ARMOR,
-                player_hp_bonus=2, shop_price=350,  depth_required=100, prestige_required=1),
+                player_hp_bonus=3, shop_price=350,  depth_required=100, prestige_required=1),
     GearTierDef("Frostforged Plate",  tier=5, slot=GearSlot.ARMOR,
-                player_hp_bonus=2, shop_price=700,  depth_required=200, prestige_required=3),
+                player_hp_bonus=3, shop_price=700,  depth_required=200, prestige_required=3),
     GearTierDef("Void-Touched Plate", tier=6, slot=GearSlot.ARMOR,
-                player_hp_bonus=3, shop_price=1400, depth_required=275, prestige_required=5),
+                player_hp_bonus=4, shop_price=1400, depth_required=275, prestige_required=5),
 ]
 
 # Boots reduce boss_hit (the chance an incoming attack lands). Stays
@@ -5013,6 +5013,12 @@ PRESTIGE_HARD_CAP: int = 500
 # the bonus is +10, doubling The Hollow's base drain.
 LUMINOSITY_DEEP_DRAIN_START_DEPTH: int = 300
 LUMINOSITY_DEEP_DRAIN_BLOCKS_PER_STEP: int = 20
+
+# Pinnacle catch-up: if a player tunneled past the pinnacle without
+# defeating it (legacy tunnels that pre-date the pinnacle, or skipped
+# encounters), the pinnacle re-procs at this depth so prestige isn't
+# permanently locked out. Tier bosses must still all be cleared.
+PINNACLE_REPROC_DEPTH: int = 400
 
 # Thresholds and their gameplay effects
 LUMINOSITY_BRIGHT: int = 76       # 76-100: normal
