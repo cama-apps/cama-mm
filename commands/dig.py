@@ -19,6 +19,7 @@ from commands.checks import require_gamba_channel
 from config import DIG_CHANNEL_ID
 from services.dig_constants import (
     ASCENSION_MODIFIERS,
+    LUMINOSITY_DEEP_DRAIN_START_DEPTH,
     LUMINOSITY_PITCH_BLACK,
     MAX_INVENTORY_SLOTS,
     PICKAXE_TIERS,
@@ -1035,12 +1036,14 @@ class EventEncounterView(discord.ui.View):
         guild_id: int | None,
         event_data: dict,
         luminosity: int = 100,
+        target_channel: discord.abc.Messageable | None = None,
     ):
         super().__init__(timeout=60)
         self.dig_service = dig_service
         self.user_id = user_id
         self.guild_id = guild_id
         self.event_data = event_data
+        self.target_channel = target_channel
         safe_label = "Play it safe"
         risky_label = "Take the risk"
         if isinstance(event_data, dict):
@@ -1070,13 +1073,22 @@ class EventEncounterView(discord.ui.View):
         self.safe_btn.label = safe_label[:80]
         self.risky_btn.label = risky_label[:80]
 
+    async def _send_result(self, interaction: discord.Interaction, embed: discord.Embed) -> None:
+        if self.target_channel is not None:
+            try:
+                await self.target_channel.send(embed=embed)
+                return
+            except Exception as exc:
+                logger.warning("Choice-event result send to dig channel failed: %s", exc)
+        await interaction.followup.send(embed=embed)
+
     async def _desperate_callback(self, interaction: discord.Interaction):
         if interaction.user.id != self.user_id:
             await interaction.response.send_message("This isn't your event.", ephemeral=True)
             return
         await interaction.response.defer()
         result = await self._resolve("desperate")
-        await interaction.followup.send(embed=result)
+        await self._send_result(interaction, result)
         self.stop()
 
     @discord.ui.button(label="Safe", style=discord.ButtonStyle.secondary, emoji="\U0001f6e1\ufe0f")
@@ -1086,7 +1098,7 @@ class EventEncounterView(discord.ui.View):
             return
         await interaction.response.defer()
         result = await self._resolve("safe")
-        await interaction.followup.send(embed=result)
+        await self._send_result(interaction, result)
         self.stop()
 
     @discord.ui.button(label="Risky", style=discord.ButtonStyle.danger, emoji="\u2694\ufe0f")
@@ -1096,7 +1108,7 @@ class EventEncounterView(discord.ui.View):
             return
         await interaction.response.defer()
         result = await self._resolve("risky")
-        await interaction.followup.send(embed=result)
+        await self._send_result(interaction, result)
         self.stop()
 
     async def _resolve(self, choice: str) -> discord.Embed:
@@ -1197,12 +1209,14 @@ class BoonSelectionView(discord.ui.View):
         user_id: int,
         guild_id: int | None,
         event_data: dict,
+        target_channel: discord.abc.Messageable | None = None,
     ):
         super().__init__(timeout=60)
         self.dig_service = dig_service
         self.user_id = user_id
         self.guild_id = guild_id
         self.event_data = event_data
+        self.target_channel = target_channel
         boons = event_data.get("boon_options", []) if isinstance(event_data, dict) else []
         for i, boon in enumerate(boons[:5]):
             label = boon.get("name", f"Boon {i + 1}")[:80]
@@ -1244,7 +1258,14 @@ class BoonSelectionView(discord.ui.View):
                         value=f"Active for {buff_d.get('duration_digs', 0)} digs",
                         inline=True,
                     )
-                await interaction.followup.send(embed=embed)
+                if self.target_channel is not None:
+                    try:
+                        await self.target_channel.send(embed=embed)
+                    except Exception as exc:
+                        logger.warning("Boon result send to dig channel failed: %s", exc)
+                        await interaction.followup.send(embed=embed)
+                else:
+                    await interaction.followup.send(embed=embed)
             except Exception as e:
                 logger.error("Boon selection error: %s", e, exc_info=True)
                 await interaction.followup.send("Boon selection failed.", ephemeral=True)
@@ -2123,12 +2144,14 @@ class DigCommands(commands.Cog):
         """
         if not DIG_CHANNEL_ID:
             return interaction.channel
+        if interaction.guild is None:
+            return interaction.channel
         try:
             channel = self.bot.get_channel(DIG_CHANNEL_ID)
             if not channel:
                 channel = await self.bot.fetch_channel(DIG_CHANNEL_ID)
             if isinstance(channel, discord.TextChannel):
-                if interaction.guild and channel.guild.id != interaction.guild.id:
+                if channel.guild.id != interaction.guild.id:
                     logger.warning(
                         "Dedicated dig channel %s is in different guild", DIG_CHANNEL_ID,
                     )
@@ -2468,7 +2491,11 @@ class DigCommands(commands.Cog):
         if boon_event_file:
             event_embed.set_image(url=f"attachment://{boon_event_file.filename}")
 
-        view = BoonSelectionView(self.dig_service, interaction.user.id, guild_id, event_data)
+        target_channel = await self._get_dig_target_channel(interaction)
+        view = BoonSelectionView(
+            self.dig_service, interaction.user.id, guild_id, event_data,
+            target_channel=target_channel,
+        )
         if boon_event_file:
             await self._send_public_dig(interaction, embed=event_embed, view=view, file=boon_event_file)
         else:
@@ -2497,7 +2524,11 @@ class DigCommands(commands.Cog):
         _lum_info = getattr(result, "luminosity_info", None)
         _lum_val = (_lum_info.get("luminosity_after", 100) if isinstance(_lum_info, dict)
                     else getattr(_lum_info, "luminosity_after", 100)) if _lum_info else 100
-        view = EventEncounterView(self.dig_service, interaction.user.id, guild_id, event_data, luminosity=_lum_val)
+        target_channel = await self._get_dig_target_channel(interaction)
+        view = EventEncounterView(
+            self.dig_service, interaction.user.id, guild_id, event_data,
+            luminosity=_lum_val, target_channel=target_channel,
+        )
         if event_file:
             await self._send_public_dig(interaction, embed=event_embed, view=view, file=event_file)
         else:
@@ -2796,7 +2827,7 @@ class DigCommands(commands.Cog):
         foreshadow = info.get("pinnacle_foreshadow") if isinstance(info, dict) else None
         if foreshadow:
             embed.add_field(name="​", value=f"*{foreshadow}*", inline=False)
-        elif depth > 300:
+        elif depth > LUMINOSITY_DEEP_DRAIN_START_DEPTH:
             embed.add_field(name="​", value="*The deep grows hungry.*", inline=False)
 
         # Insurance / reinforcement
