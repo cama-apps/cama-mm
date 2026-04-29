@@ -493,6 +493,16 @@ class TestDigGearServiceApplyGearToCombat:
         # against the base HP of 2-5 in BOSS_DUEL_STATS.
         assert ARMOR_TIERS[3].player_hp_bonus >= 2
 
+    def test_weapon_dmg_progression_pins_smoothed_curve(self):
+        """Weapon player_dmg should show real progression at Diamond and
+        Frostforged so mid-tier purchases feel meaningful. Pins the curve."""
+        dmg = [t.player_dmg for t in WEAPON_TIERS]
+        assert dmg == [0, 0, 0, 1, 1, 2, 2]
+        # Diamond is the first dmg-bearing pickaxe (depth 75 milestone).
+        assert WEAPON_TIERS[3].player_dmg >= 1
+        # Frostforged is the next visible step (depth 200, P3 unlock).
+        assert WEAPON_TIERS[5].player_dmg >= 2
+
     def test_player_hit_clamps_to_ceiling(self, svc):
         base = {"player_hp": 5, "boss_hp": 5, "player_hit": 0.99, "player_dmg": 1,
                 "boss_hit": 0.5, "boss_dmg": 1}

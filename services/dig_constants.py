@@ -298,7 +298,7 @@ WEAPON_TIERS: list[GearTierDef] = [
                 advance_bonus=1, cave_in_reduction=0.05, loot_bonus=0,
                 shop_price=50,   depth_required=50,  prestige_required=0),
     GearTierDef("Diamond Pickaxe",      tier=3, slot=GearSlot.WEAPON,
-                player_dmg=0, player_hit=0.03,
+                player_dmg=1, player_hit=0.03,
                 advance_bonus=2, cave_in_reduction=0.05, loot_bonus=2,
                 shop_price=150,  depth_required=75,  prestige_required=0),
     GearTierDef("Obsidian Pickaxe",     tier=4, slot=GearSlot.WEAPON,
@@ -306,7 +306,7 @@ WEAPON_TIERS: list[GearTierDef] = [
                 advance_bonus=3, cave_in_reduction=0.10, loot_bonus=3,
                 shop_price=300,  depth_required=100, prestige_required=1),
     GearTierDef("Frostforged Pickaxe",  tier=5, slot=GearSlot.WEAPON,
-                player_dmg=1, player_hit=0.05,
+                player_dmg=2, player_hit=0.05,
                 advance_bonus=3, cave_in_reduction=0.20, loot_bonus=3,
                 shop_price=600,  depth_required=200, prestige_required=3),
     GearTierDef("Void-Touched Pickaxe", tier=6, slot=GearSlot.WEAPON,
@@ -1007,26 +1007,26 @@ BOSS_TIER_BONUS: dict[int, dict[str, float]] = {
     25:  {"hp": 0,  "hit": 0.00, "dmg": 0, "pen": 0.00},
     50:  {"hp": 1,  "hit": 0.00, "dmg": 0, "pen": 0.01},
     75:  {"hp": 2,  "hit": 0.01, "dmg": 0, "pen": 0.02},
-    100: {"hp": 4,  "hit": 0.03, "dmg": 0, "pen": 0.04},
-    150: {"hp": 6,  "hit": 0.04, "dmg": 0, "pen": 0.05},
-    200: {"hp": 6,  "hit": 0.05, "dmg": 0, "pen": 0.06},
-    275: {"hp": 7,  "hit": 0.06, "dmg": 0, "pen": 0.06},
-    300: {"hp": 12, "hit": 0.10, "dmg": 0, "pen": 0.07},   # pinnacle: HP grind, no dmg cliff
+    100: {"hp": 3,  "hit": 0.03, "dmg": 0, "pen": 0.04},
+    150: {"hp": 5,  "hit": 0.04, "dmg": 0, "pen": 0.05},
+    200: {"hp": 5,  "hit": 0.05, "dmg": 0, "pen": 0.06},
+    275: {"hp": 6,  "hit": 0.06, "dmg": 0, "pen": 0.06},
+    300: {"hp": 10, "hit": 0.10, "dmg": 0, "pen": 0.07},   # pinnacle: HP grind, no dmg cliff
 }
 BOSS_PRESTIGE_BONUS: dict[int, dict[str, float]] = {
     # prestige: {boss_hp_add, boss_hit_add, boss_dmg_add, player_hit_pen}
     # P1/P3/P5 carry extra cushion to offset the gear-unlock power spike.
     0: {"hp": 0,  "hit": 0.00, "dmg": 0, "pen": 0.000},
-    1: {"hp": 11, "hit": 0.08, "dmg": 0, "pen": 0.030},   # Obsidian unlock cushion
-    2: {"hp": 11, "hit": 0.09, "dmg": 0, "pen": 0.050},
-    3: {"hp": 14, "hit": 0.12, "dmg": 0, "pen": 0.080},   # Frost unlock cushion
-    4: {"hp": 16, "hit": 0.14, "dmg": 0, "pen": 0.110},
-    5: {"hp": 28, "hit": 0.20, "dmg": 0, "pen": 0.140},   # Void unlock cushion (big)
-    6: {"hp": 31, "hit": 0.23, "dmg": 0, "pen": 0.165},
-    7: {"hp": 32, "hit": 0.25, "dmg": 1, "pen": 0.190},   # purgatory: only +dmg row
+    1: {"hp": 9,  "hit": 0.08, "dmg": 0, "pen": 0.030},   # Obsidian unlock cushion
+    2: {"hp": 9,  "hit": 0.09, "dmg": 0, "pen": 0.050},
+    3: {"hp": 12, "hit": 0.12, "dmg": 0, "pen": 0.080},   # Frost unlock cushion
+    4: {"hp": 14, "hit": 0.14, "dmg": 0, "pen": 0.110},
+    5: {"hp": 24, "hit": 0.20, "dmg": 0, "pen": 0.140},   # Void unlock cushion (big)
+    6: {"hp": 26, "hit": 0.23, "dmg": 0, "pen": 0.165},
+    7: {"hp": 27, "hit": 0.25, "dmg": 1, "pen": 0.190},   # purgatory: only +dmg row
 }
 PLAYER_HIT_FLOOR: float = 0.05                     # hard floor so Reckless remains playable
-PLAYER_HIT_CEILING: float = 0.85                   # hard ceiling — was 0.95; tightened so RNG matters
+PLAYER_HIT_CEILING: float = 0.90                   # hard ceiling — luminosity already eats hit chance, so leave a wider cap
 BOSS_FREE_FIGHT_ACCURACY_MOD: float = 0.6          # multiplied into player_hit when wager == 0
 BOSS_ROUND_CAP: int = 20                           # safety valve against infinite loops
 WIN_CHANCE_CAP: float = 0.95                       # ceiling on displayed/computed win probability
