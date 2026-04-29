@@ -188,6 +188,7 @@ class EnrichmentCommands(commands.Cog):
                 dire_participants=dire,
                 bankruptcy_repo=self.bankruptcy_repo,
                 lobby_type=match_data.get("lobby_type", "shuffle"),
+                guild_id=guild_id,
             )
 
             # Add summary note
@@ -551,6 +552,7 @@ class EnrichmentCommands(commands.Cog):
                 dire_participants=dire,
                 bankruptcy_repo=self.bankruptcy_repo,
                 lobby_type=match_data.get("lobby_type", "shuffle"),
+                guild_id=guild_id,
             )
 
             # Generate and attach stats image
@@ -593,6 +595,7 @@ class EnrichmentCommands(commands.Cog):
                 valve_match_id=match_data.get("valve_match_id"),
                 bankruptcy_repo=self.bankruptcy_repo,
                 lobby_type=match_data.get("lobby_type", "shuffle"),
+                guild_id=guild_id,
             )
             note = (
                 "ℹ️ This match has not been enriched yet. Use `/enrich match` to add detailed stats."

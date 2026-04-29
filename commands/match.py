@@ -1555,6 +1555,7 @@ class MatchCommands(commands.Cog):
                     dire_participants=dire,
                     bankruptcy_repo=self.bankruptcy_repo,
                     lobby_type=match_data.get("lobby_type", "shuffle"),
+                    guild_id=guild_id,
                 )
 
                 enrichment_data = self.match_service.get_enrichment_data(

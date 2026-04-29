@@ -17,13 +17,9 @@ from repositories.player_repository import PlayerRepository
 from services.bankruptcy_service import BankruptcyService
 from services.lobby_manager_service import LobbyManagerService as LobbyManager
 from services.lobby_service import LobbyService
-from utils.embeds import create_lobby_embed, format_player_list
+from tests.conftest import TEST_GUILD_ID
+from utils.embeds import create_lobby_embed, create_match_summary_embed, format_player_list
 from utils.formatting import TOMBSTONE_EMOJI, get_player_display_name
-
-# Use guild_id=0 because get_player_display_name() doesn't pass guild_id
-# to bankruptcy_repo.get_penalty_games(), which normalizes None to 0.
-# This ensures the bankruptcy state lookup works correctly.
-TEST_GUILD_ID = 0
 
 
 @pytest.fixture
@@ -141,7 +137,7 @@ def test_tombstone_disappears_after_penalty_games(test_services):
     # Simulate winning games until penalty is gone (only wins count)
     penalty_games = bankruptcy_service.penalty_games
     for _ in range(penalty_games):
-        bankruptcy_service.on_game_won(1003)
+        bankruptcy_service.on_game_won(1003, TEST_GUILD_ID)
 
     # Tombstone should be gone
     display_name = get_player_display_name(
@@ -219,12 +215,12 @@ def test_tombstone_in_lobby_embed(test_services):
     bankruptcy_service.execute_bankruptcy(1011, TEST_GUILD_ID)
 
     # Create lobby and add players
-    lobby = lobby_manager.get_or_create_lobby(creator_id=1010)
+    lobby = lobby_manager.get_or_create_lobby(creator_id=1010, guild_id=TEST_GUILD_ID)
     for i in range(1010, 1015):
-        lobby_manager.join_lobby(i)
+        lobby_manager.join_lobby(i, guild_id=TEST_GUILD_ID)
 
     # Build embed
-    lobby = lobby_manager.get_lobby()
+    lobby = lobby_manager.get_lobby(TEST_GUILD_ID)
     players = player_repo.get_by_ids(list(lobby.players), TEST_GUILD_ID)
     player_ids = list(lobby.players)
 
@@ -245,6 +241,38 @@ def test_tombstone_in_lobby_embed(test_services):
     lines = player_field.value.split('\n')
     player_1011_line = [line for line in lines if "<@1011>" in line][0]
     assert " <@1011>" in player_1011_line  # Space indicates tombstone present
+
+
+def test_tombstone_in_match_summary_uses_participant_guild(test_services):
+    """Test match summary tombstones use the participant guild, not guild 0."""
+    player_repo = test_services["player_repo"]
+    bankruptcy_repo = test_services["bankruptcy_repo"]
+    bankruptcy_service = test_services["bankruptcy_service"]
+
+    player_repo.add(
+        discord_id=1016,
+        discord_username="MatchBankruptPlayer",
+        guild_id=TEST_GUILD_ID,
+        dotabuff_url="https://dotabuff.com/players/1016",
+        initial_mmr=3000,
+        glicko_rating=750.0,
+        glicko_rd=350.0,
+        glicko_volatility=0.06,
+    )
+    player_repo.add_balance(1016, TEST_GUILD_ID, -100)
+    bankruptcy_service.execute_bankruptcy(1016, TEST_GUILD_ID)
+
+    embed = create_match_summary_embed(
+        match_id=1,
+        winning_team=1,
+        radiant_participants=[{"discord_id": 1016, "guild_id": TEST_GUILD_ID}],
+        dire_participants=[],
+        bankruptcy_repo=bankruptcy_repo,
+    )
+
+    radiant_field = next(field for field in embed.fields if "Radiant" in field.name)
+    assert TOMBSTONE_EMOJI in radiant_field.value
+    assert "<@1016>" in radiant_field.value
 
 
 def test_fake_users_excluded_from_bankruptcy_check(test_services):
@@ -302,7 +330,7 @@ def test_bankruptcy_state_persistence(test_services):
 
     # Create new bankruptcy repo instance
     bankruptcy_repo2 = BankruptcyRepository(db_path)
-    penalty_games = bankruptcy_repo2.get_penalty_games(1020)
+    penalty_games = bankruptcy_repo2.get_penalty_games(1020, TEST_GUILD_ID)
 
     # Should still have penalty games
     assert penalty_games > 0

@@ -6,6 +6,7 @@ import time
 
 import pytest
 
+from config import BANKRUPTCY_FRESH_START_BALANCE, JOPACOIN_WIN_REWARD
 from database import Database
 from repositories.bankruptcy_repository import BankruptcyRepository
 from repositories.bet_repository import BetRepository
@@ -262,6 +263,41 @@ class TestBettingServiceIntegration:
         # Should get half due to penalty
         assert results[pid]["bankruptcy_penalty"] == 1  # Half of 2 is 1
         assert results[pid]["net"] == 1  # Gets only 1 instead of 2
+
+    def test_final_penalty_win_is_still_penalized(self, db_and_repos):
+        """The last bankruptcy-clearing win still receives reduced winnings."""
+        player_repo = db_and_repos["player_repo"]
+        bankruptcy_repo = db_and_repos["bankruptcy_repo"]
+        bet_repo = db_and_repos["bet_repo"]
+
+        bankruptcy_service = BankruptcyService(
+            bankruptcy_repo=bankruptcy_repo,
+            player_repo=player_repo,
+            cooldown_seconds=604800,
+            penalty_games=1,
+            penalty_rate=0.5,
+        )
+
+        betting_service = BettingService(
+            bet_repo=bet_repo,
+            player_repo=player_repo,
+            bankruptcy_service=bankruptcy_service,
+        )
+
+        pid = create_test_player(player_repo, 1001, balance=-200)
+        bankruptcy_service.execute_bankruptcy(pid, TEST_GUILD_ID)
+
+        results = betting_service.award_win_bonus([pid], TEST_GUILD_ID)
+
+        expected_net = int(JOPACOIN_WIN_REWARD * bankruptcy_service.penalty_rate)
+        expected_penalty = JOPACOIN_WIN_REWARD - expected_net
+        assert results[pid]["bankruptcy_penalty"] == expected_penalty
+        assert results[pid]["net"] == expected_net
+        assert bankruptcy_service.get_state(pid, TEST_GUILD_ID).penalty_games_remaining == 0
+        assert (
+            player_repo.get_balance(pid, TEST_GUILD_ID)
+            == BANKRUPTCY_FRESH_START_BALANCE + expected_net
+        )
 
     def test_participation_does_not_decrement_penalty(self, db_and_repos):
         """Participation (playing) does NOT decrement bankruptcy penalty - only wins count."""

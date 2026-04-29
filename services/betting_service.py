@@ -218,12 +218,14 @@ class BettingService:
 
         Returns dict of {discord_id: {gross, garnished, net, bankruptcy_penalty}} for each player.
         """
-        # Decrement bankruptcy penalty games for winners only (wins clear bankruptcy)
+        results = self._award_with_penalties(winning_ids, JOPACOIN_WIN_REWARD, guild_id)
+
+        # Decrement after awarding so the final required win is still reduced.
         if self.bankruptcy_service and winning_ids:
             for pid in winning_ids:
                 self.bankruptcy_service.on_game_won(pid, guild_id)
 
-        return self._award_with_penalties(winning_ids, JOPACOIN_WIN_REWARD, guild_id)
+        return results
 
     def award_exclusion_bonus(
         self, excluded_ids: list[int], guild_id: int | None = None
