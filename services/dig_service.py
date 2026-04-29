@@ -61,6 +61,8 @@ from services.dig_constants import (
     LUMINOSITY_DARK_HIT_PENALTY,
     LUMINOSITY_DARK_JC_MULTIPLIER,
     LUMINOSITY_DARK_RISKY_PENALTY,
+    LUMINOSITY_DEEP_DRAIN_BLOCKS_PER_STEP,
+    LUMINOSITY_DEEP_DRAIN_START_DEPTH,
     LUMINOSITY_DIM,
     LUMINOSITY_DIM_CAVE_IN_BONUS,
     LUMINOSITY_DIM_EVENT_MULTIPLIER,
@@ -94,6 +96,7 @@ from services.dig_constants import (
     PINNACLE_RELIC_SUFFIX_POOL,
     PLAYER_HIT_CEILING,
     PLAYER_HIT_FLOOR,
+    PRESTIGE_HARD_CAP,
     PRESTIGE_PERKS,
     RELIC_SLOTS_BASE,
     RETREAT_BLOCK_LOSS_MAX,
@@ -860,6 +863,21 @@ class DigService:
         if tier < 0 or tier >= len(table):
             return 0
         return int(round(table[tier].shop_price * GEAR_REPAIR_COST_PCT))
+
+    def compute_repair_cost(self, slot: str, tier: int) -> int:
+        """Public read of the repair price for a (slot, tier). Mirrors the
+        cost ``repair_gear`` would charge for a damaged piece, without
+        touching balance or durability."""
+        return self._gear_repair_cost(slot, tier)
+
+    def compute_repair_all_cost(self, discord_id: int, guild_id) -> int:
+        """Sum repair cost across every damaged piece the player owns."""
+        rows = self.dig_repo.get_gear(discord_id, guild_id)
+        return sum(
+            self._gear_repair_cost(r["slot"], int(r["tier"]))
+            for r in rows
+            if int(r["durability"]) < GEAR_MAX_DURABILITY
+        )
 
     def repair_gear(self, discord_id: int, guild_id, gear_id: int) -> dict:
         """Restore one piece to full durability for a JC cost.
@@ -1646,6 +1664,13 @@ class DigService:
         pickaxe_tier = self._get_active_pickaxe_tier(discord_id, guild_id, tunnel)
         if pickaxe_tier >= 5:  # Frostforged or better
             drain = max(0, drain - drain // 4)
+        # Past the pinnacle the deep grows hungry — drain ramps linearly
+        # toward the hard cap, applying pressure to prestige.
+        depth = int(tunnel.get("depth", 0) or 0)
+        if depth > LUMINOSITY_DEEP_DRAIN_START_DEPTH:
+            drain += (depth - LUMINOSITY_DEEP_DRAIN_START_DEPTH) // (
+                LUMINOSITY_DEEP_DRAIN_BLOCKS_PER_STEP
+            )
         luminosity = max(0, luminosity - drain)
 
         # Persist both luminosity and the timestamp so subsequent digs compute
@@ -2102,6 +2127,16 @@ class DigService:
                 )
                 if parked_return is not None:
                     return parked_return
+
+        # 2c. Hard cap: the deep refuses to yield further. Block dig
+        #     before any cost or cooldown is consumed so the player can
+        #     prestige cleanly.
+        if not is_first_dig and depth_before >= PRESTIGE_HARD_CAP:
+            return {
+                "success": False,
+                "error": "The earth refuses to yield further. The path beyond demands ascension.",
+                "hard_cap": True,
+            }
 
         # 3. Cooldown / paid dig check — normal digs only, parked players
         #    short-circuited above.
@@ -7411,6 +7446,17 @@ class DigService:
         jc = result.get("jc", 0)
         cave_in = result.get("cave_in", False)
         description = result.get("description", "Something happened.")
+
+        # Subtle variance on the authored outcome so each fire of a given
+        # event differs slightly. JC scales by ±50%, advance shifts ±2,
+        # both clamped to preserve sign so a successful outcome never
+        # reverses into a retreat. Players see the rolled values; the
+        # spread itself stays hidden behind the embed.
+        if jc != 0:
+            jc = int(round(jc * random.uniform(0.5, 1.5)))
+        if advance != 0:
+            jittered = advance + random.randint(-2, 2)
+            advance = max(1, jittered) if advance > 0 else min(-1, jittered)
 
         # P7 chain JC multiplier: chained events get 1.5x JC
         if chained and jc > 0:

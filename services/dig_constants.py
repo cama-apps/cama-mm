@@ -266,7 +266,7 @@ PICKAXE_TIERS: list[dict] = [
 from domain.models.dig_gear import GearSlot, GearTierDef  # noqa: E402
 
 GEAR_MAX_DURABILITY: int = 20
-GEAR_REPAIR_COST_PCT: float = 0.5
+GEAR_REPAIR_COST_PCT: float = 0.33
 GEAR_BOSS_DROP_RATE: float = 0.07
 # Maps boss-boundary depth → tier index of the dropped piece. Boundaries
 # missing from this map (25/50/75) drop nothing; players buy low-tier
@@ -5002,6 +5002,17 @@ LUMINOSITY_DRAIN_PER_DIG: dict[str, int] = {
     "Frozen Core": 7,
     "The Hollow": 10,
 }
+
+# Hard depth wall: the deep refuses to yield further. Players hitting
+# this depth must prestige to continue. Sized so that post-pinnacle
+# (depth 300) progress feels like a slow descent under pressure rather
+# than an open runway.
+PRESTIGE_HARD_CAP: int = 500
+# Past this depth the drain rate accelerates linearly — +1 extra drain
+# per LUMINOSITY_DEEP_DRAIN_BLOCKS_PER_STEP blocks. At cap (depth 500)
+# the bonus is +10, doubling The Hollow's base drain.
+LUMINOSITY_DEEP_DRAIN_START_DEPTH: int = 300
+LUMINOSITY_DEEP_DRAIN_BLOCKS_PER_STEP: int = 20
 
 # Thresholds and their gameplay effects
 LUMINOSITY_BRIGHT: int = 76       # 76-100: normal
