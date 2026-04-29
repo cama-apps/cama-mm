@@ -75,6 +75,25 @@ class TestEventVariance:
         for x in (0.5, 1.0, 1.5, 0.73, 1.42):
             assert int(round(0 * x)) == 0
 
+    def test_zero_advance_outcome_stays_zero(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        """End-to-end: an event whose safe option has advance=0 must
+        never produce depth_delta != 0 after jitter. Guards the
+        ``if advance != 0`` skip in resolve_event."""
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        _seed_tunnel(dig_service, dig_repo, player_repository)
+
+        for i in range(80):
+            random.seed(i + 700)
+            dig_repo.update_tunnel(10001, 12345, depth=30)
+            r = dig_service.resolve_event(10001, 12345, "underground_stream", "safe")
+            assert r["success"]
+            assert r.get("depth_delta", 0) == 0, (
+                f"advance jitter fired on a 0-base outcome (iter {i}, "
+                f"got {r.get('depth_delta')})"
+            )
+
     def test_advance_sign_clamp_no_retreat_from_success(
         self, dig_service, dig_repo, player_repository, monkeypatch,
     ):

@@ -45,10 +45,14 @@ def _seed_player(dig_service, dig_repo, player_repository, depth: int, luminosit
     player_repository.update_balance(10001, 12345, 10000)
     random.seed(0)
     dig_service.dig(10001, 12345)
-    # Cooldown bypass: zero out last_dig_at so subsequent digs can run
+    # Cooldown bypass: zero out last_dig_at so subsequent digs can run.
+    # Pin last_lum_update_at to the mocked clock so any lazy-decay path
+    # sees zero elapsed time and the luminosity invariant remains a
+    # clean check on dig-time drain only.
     dig_repo.update_tunnel(
         10001, 12345,
-        depth=depth, luminosity=luminosity, last_dig_at=0, last_lum_update_at=0,
+        depth=depth, luminosity=luminosity,
+        last_dig_at=0, last_lum_update_at=1_000_000,
     )
 
 
@@ -69,11 +73,12 @@ class TestPrestigeHardCap:
         assert result.get("hard_cap") is True
         # Flavor message — no depth number, no command hint
         assert "yield" in result["error"].lower() or "ascen" in result["error"].lower()
-        # No state changed
+        # Hard-cap contract: nothing is consumed by the rejected dig.
         assert player_repository.get_balance(10001, 12345) == bal_before
         tunnel_after = dict(dig_repo.get_tunnel(10001, 12345))
         assert tunnel_after["depth"] == tunnel_before["depth"]
         assert tunnel_after["luminosity"] == tunnel_before["luminosity"]
+        assert tunnel_after["last_dig_at"] == tunnel_before["last_dig_at"]
 
     def test_dig_one_below_cap_allowed(
         self, dig_service, dig_repo, player_repository, monkeypatch,
