@@ -530,6 +530,133 @@ class TestPinnacleBoundary:
         assert dig_service._at_boss_boundary(299, bp_dict) is None
 
 
+class TestPinnacleReproc:
+    """Catch-up: a player who tunneled past the pinnacle without
+    defeating it (legacy tunnels, or skipped encounters) gets the
+    pinnacle re-prompted at depth >= PINNACLE_REPROC_DEPTH so prestige
+    isn't permanently locked out."""
+
+    def test_reproc_fires_past_threshold_when_pinnacle_undefeated(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        from services.dig_constants import PINNACLE_REPROC_DEPTH
+
+        _register(player_repository)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, TEST_GUILD_ID)
+
+        bp = _all_tiers_cleared_progress()  # tier bosses defeated, pinnacle absent
+        dig_repo.update_tunnel(
+            10001, TEST_GUILD_ID,
+            depth=PINNACLE_REPROC_DEPTH + 56,  # 456: Steve W.'s actual depth
+            boss_progress=json.dumps(bp),
+        )
+        tunnel = dig_repo.get_tunnel(10001, TEST_GUILD_ID)
+        bp_dict = dig_service._get_boss_progress(dict(tunnel))
+        assert dig_service._at_boss_boundary(
+            PINNACLE_REPROC_DEPTH + 56, bp_dict
+        ) == PINNACLE_DEPTH
+
+    def test_reproc_fires_at_hard_cap_so_prestige_can_unlock(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        """A player at depth 500 (hard cap) with an undefeated pinnacle
+        should still see the pinnacle proc — otherwise they're stuck
+        unable to dig (cap) and unable to prestige (pinnacle gate)."""
+        from services.dig_constants import PRESTIGE_HARD_CAP
+
+        _register(player_repository)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, TEST_GUILD_ID)
+
+        bp = _all_tiers_cleared_progress()
+        dig_repo.update_tunnel(
+            10001, TEST_GUILD_ID,
+            depth=PRESTIGE_HARD_CAP,
+            boss_progress=json.dumps(bp),
+        )
+        tunnel = dig_repo.get_tunnel(10001, TEST_GUILD_ID)
+        bp_dict = dig_service._get_boss_progress(dict(tunnel))
+        assert dig_service._at_boss_boundary(
+            PRESTIGE_HARD_CAP, bp_dict
+        ) == PINNACLE_DEPTH
+
+    def test_reproc_does_not_fire_if_tier_bosses_remain(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        """Catch-up shouldn't trip if tier bosses are still active —
+        only legacy tunnels that cleared everything but the pinnacle."""
+        from services.dig_constants import PINNACLE_REPROC_DEPTH
+
+        _register(player_repository)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, TEST_GUILD_ID)
+
+        bp = _all_tiers_cleared_progress()
+        bp["275"] = "active"  # one tier boss still pending
+        dig_repo.update_tunnel(
+            10001, TEST_GUILD_ID,
+            depth=PINNACLE_REPROC_DEPTH + 50,
+            boss_progress=json.dumps(bp),
+        )
+        tunnel = dig_repo.get_tunnel(10001, TEST_GUILD_ID)
+        bp_dict = dig_service._get_boss_progress(dict(tunnel))
+        assert dig_service._at_boss_boundary(
+            PINNACLE_REPROC_DEPTH + 50, bp_dict
+        ) is None
+
+    def test_reproc_does_not_fire_if_pinnacle_already_defeated(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        """A defeated pinnacle stays defeated — no re-fight loop."""
+        from services.dig_constants import PINNACLE_REPROC_DEPTH
+
+        _register(player_repository)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, TEST_GUILD_ID)
+
+        bp = _all_tiers_cleared_progress()
+        bp[str(PINNACLE_DEPTH)] = "defeated"
+        dig_repo.update_tunnel(
+            10001, TEST_GUILD_ID,
+            depth=PINNACLE_REPROC_DEPTH + 50,
+            boss_progress=json.dumps(bp),
+        )
+        tunnel = dig_repo.get_tunnel(10001, TEST_GUILD_ID)
+        bp_dict = dig_service._get_boss_progress(dict(tunnel))
+        assert dig_service._at_boss_boundary(
+            PINNACLE_REPROC_DEPTH + 50, bp_dict
+        ) is None
+
+    def test_reproc_does_not_fire_below_threshold(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        """Below the catch-up threshold, the boundary is the only
+        trigger — depth 350 (after the pinnacle but before reproc)
+        should NOT spawn the boss."""
+        from services.dig_constants import PINNACLE_REPROC_DEPTH
+
+        _register(player_repository)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, TEST_GUILD_ID)
+
+        bp = _all_tiers_cleared_progress()  # pinnacle absent
+        below = PINNACLE_REPROC_DEPTH - 50
+        dig_repo.update_tunnel(
+            10001, TEST_GUILD_ID,
+            depth=below,
+            boss_progress=json.dumps(bp),
+        )
+        tunnel = dig_repo.get_tunnel(10001, TEST_GUILD_ID)
+        bp_dict = dig_service._get_boss_progress(dict(tunnel))
+        assert dig_service._at_boss_boundary(below, bp_dict) is None
+
+
 # --- Pinnacle locking ------------------------------------------------
 
 

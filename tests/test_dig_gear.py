@@ -479,9 +479,19 @@ class TestDigGearServiceApplyGearToCombat:
         out = svc._apply_gear_to_combat(base, loadout)
         # Void-Touched stat sums (per dig_constants.py)
         assert out["player_dmg"] == base["player_dmg"] + 2   # weapon +2
-        assert out["player_hp"]  == base["player_hp"] + 3    # armor +3
+        assert out["player_hp"]  == base["player_hp"] + 4    # armor +4
         assert abs(out["player_hit"] - (base["player_hit"] + 0.07)) < 1e-9
         assert abs(out["boss_hit"]  - (base["boss_hit"]  - 0.13)) < 1e-9
+
+    def test_armor_hp_progression_is_monotonic_and_meaningful(self):
+        """Armor's HP bonus should increase by tier and produce a real
+        soak in mid-tier gear (Diamond+) so the slot is felt in fights.
+        Pins the post-buff curve."""
+        bonuses = [t.player_hp_bonus for t in ARMOR_TIERS]
+        assert bonuses == [0, 0, 1, 2, 3, 3, 4]
+        # Diamond+ should be at least +2 — anything less is invisible
+        # against the base HP of 2-5 in BOSS_DUEL_STATS.
+        assert ARMOR_TIERS[3].player_hp_bonus >= 2
 
     def test_player_hit_clamps_to_ceiling(self, svc):
         base = {"player_hp": 5, "boss_hp": 5, "player_hit": 0.99, "player_dmg": 1,
