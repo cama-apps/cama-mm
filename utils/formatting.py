@@ -107,7 +107,11 @@ def format_betting_display(
 
 
 def get_player_display_name(
-    player, discord_id: int | None = None, guild=None, bankruptcy_repo=None
+    player,
+    discord_id: int | None = None,
+    guild=None,
+    bankruptcy_repo=None,
+    guild_id: int | None = None,
 ) -> str:
     """
     Get a player's display name, preferring Discord nickname when available.
@@ -120,6 +124,8 @@ def get_player_display_name(
         discord_id: Discord user ID (optional)
         guild: Discord guild object (optional)
         bankruptcy_repo: BankruptcyRepository instance for checking bankruptcy status (optional)
+        guild_id: Guild ID for bankruptcy lookups. If omitted, inferred from
+            the Discord guild or player object when available.
     """
     # Skip guild lookup for fake users
     if discord_id and discord_id < 0:
@@ -141,7 +147,12 @@ def get_player_display_name(
     # Add tombstone emoji if player has active bankruptcy penalty
     if bankruptcy_repo and discord_id and discord_id > 0:
         try:
-            penalty_games = bankruptcy_repo.get_penalty_games(discord_id)
+            lookup_guild_id = guild_id
+            if lookup_guild_id is None and guild is not None:
+                lookup_guild_id = getattr(guild, "id", None)
+            if lookup_guild_id is None:
+                lookup_guild_id = getattr(player, "guild_id", None)
+            penalty_games = bankruptcy_repo.get_penalty_games(discord_id, lookup_guild_id)
             if penalty_games > 0:
                 return f"{TOMBSTONE_EMOJI} {base_name}"
         except Exception:

@@ -259,6 +259,7 @@ class LobbyService:
             max_players=self.max_players,
             bankruptcy_repo=self.bankruptcy_repo,
             captain_eligible_ids=captain_eligible_ids,
+            guild_id=guild_id,
         )
 
     def is_ready(self, lobby: Lobby) -> bool:

@@ -9,7 +9,22 @@ from utils.formatting import FROGLING_EMOTE, ROLE_EMOJIS, TOMBSTONE_EMOJI
 from utils.hero_lookup import get_hero_image_url, get_hero_name
 
 
-def format_player_list(players, player_ids, bankruptcy_repo=None, captain_eligible_ids=None):
+def _get_penalty_games(bankruptcy_repo, discord_id: int, guild_id: int | None) -> int:
+    if not bankruptcy_repo or discord_id <= 0:
+        return 0
+    try:
+        return bankruptcy_repo.get_penalty_games(discord_id, guild_id)
+    except Exception:
+        return 0
+
+
+def format_player_list(
+    players,
+    player_ids,
+    bankruptcy_repo=None,
+    captain_eligible_ids=None,
+    guild_id: int | None = None,
+):
     """
     Build a formatted lobby player list with ratings and role emojis.
 
@@ -22,6 +37,8 @@ def format_player_list(players, player_ids, bankruptcy_repo=None, captain_eligib
         player_ids: List of Discord IDs
         bankruptcy_repo: BankruptcyRepository instance (optional)
         captain_eligible_ids: Set of Discord IDs eligible for captaining (optional)
+        guild_id: Guild ID for bankruptcy lookups. If omitted, inferred from
+            each Player object when available.
     """
     if not players:
         return "No players yet", 0
@@ -58,13 +75,9 @@ def format_player_list(players, player_ids, bankruptcy_repo=None, captain_eligib
 
         # Add tombstone if player has active bankruptcy penalty
         tombstone = ""
-        if bankruptcy_repo and is_real_user:
-            try:
-                penalty_games = bankruptcy_repo.get_penalty_games(pid)
-                if penalty_games > 0:
-                    tombstone = f"{TOMBSTONE_EMOJI} "
-            except Exception:
-                pass
+        lookup_guild_id = guild_id if guild_id is not None else getattr(player, "guild_id", None)
+        if is_real_user and _get_penalty_games(bankruptcy_repo, pid, lookup_guild_id) > 0:
+            tombstone = f"{TOMBSTONE_EMOJI} "
 
         captain = "👑 " if captain_eligible_ids and pid in captain_eligible_ids else ""
         display = f"{tombstone}{captain}<@{pid}>" if is_real_user else player.name
@@ -86,6 +99,7 @@ def create_lobby_embed(
     conditional_players=None, conditional_ids=None,
     ready_threshold: int = 10, max_players: int = 14, bankruptcy_repo=None,
     captain_eligible_ids=None,
+    guild_id: int | None = None,
 ):
     """Create the lobby embed with player list and status.
 
@@ -99,7 +113,9 @@ def create_lobby_embed(
         max_players: Maximum players allowed in lobby
         bankruptcy_repo: BankruptcyRepository instance
         captain_eligible_ids: Set of Discord IDs eligible for captaining (optional)
+        guild_id: Guild ID for bankruptcy lookups. If omitted, inferred from lobby.
     """
+    lookup_guild_id = guild_id if guild_id is not None else getattr(lobby, "guild_id", None)
     regular_count = lobby.get_player_count()
     conditional_count = lobby.get_conditional_count()
     total_count = lobby.get_total_count()
@@ -118,7 +134,11 @@ def create_lobby_embed(
 
     # Regular players section
     player_list, unique_count = format_player_list(
-        players, player_ids, bankruptcy_repo, captain_eligible_ids=captain_eligible_ids
+        players,
+        player_ids,
+        bankruptcy_repo,
+        captain_eligible_ids=captain_eligible_ids,
+        guild_id=lookup_guild_id,
     )
 
     embed.add_field(
@@ -132,6 +152,7 @@ def create_lobby_embed(
         conditional_list, _ = format_player_list(
             conditional_players, conditional_ids, bankruptcy_repo,
             captain_eligible_ids=captain_eligible_ids,
+            guild_id=lookup_guild_id,
         )
         embed.add_field(
             name=f"**Conditional ({conditional_count})** {FROGLING_EMOTE}",
@@ -283,6 +304,7 @@ def create_enriched_match_embed(
     show_mvp: bool = True,
     bankruptcy_repo=None,
     lobby_type: str = "shuffle",
+    guild_id: int | None = None,
 ) -> discord.Embed:
     """
     Create a rich embed displaying enriched match statistics.
@@ -381,13 +403,9 @@ def create_enriched_match_embed(
 
             # Add tombstone if player has active bankruptcy penalty
             tombstone = ""
-            if bankruptcy_repo and discord_id and discord_id > 0:
-                try:
-                    penalty_games = bankruptcy_repo.get_penalty_games(discord_id)
-                    if penalty_games > 0:
-                        tombstone = f"{TOMBSTONE_EMOJI} "
-                except Exception:
-                    pass
+            lookup_guild_id = guild_id if guild_id is not None else p.get("guild_id")
+            if discord_id and _get_penalty_games(bankruptcy_repo, discord_id, lookup_guild_id) > 0:
+                tombstone = f"{TOMBSTONE_EMOJI} "
 
             # Format: <@id> **Hero** `K/D/A` | stats
             player_ref = f"{tombstone}<@{discord_id}>" if discord_id and discord_id > 0 else "?"
@@ -437,6 +455,7 @@ def create_match_summary_embed(
     valve_match_id: int | None = None,
     bankruptcy_repo=None,
     lobby_type: str = "shuffle",
+    guild_id: int | None = None,
 ) -> discord.Embed:
     """
     Create a simpler match summary embed for non-enriched matches.
@@ -462,13 +481,9 @@ def create_match_summary_embed(
 
             # Add tombstone if player has active bankruptcy penalty
             tombstone = ""
-            if bankruptcy_repo and discord_id and discord_id > 0:
-                try:
-                    penalty_games = bankruptcy_repo.get_penalty_games(discord_id)
-                    if penalty_games > 0:
-                        tombstone = f"{TOMBSTONE_EMOJI} "
-                except Exception:
-                    pass
+            lookup_guild_id = guild_id if guild_id is not None else p.get("guild_id")
+            if discord_id and _get_penalty_games(bankruptcy_repo, discord_id, lookup_guild_id) > 0:
+                tombstone = f"{TOMBSTONE_EMOJI} "
 
             if hero_id:
                 hero = get_hero_name(hero_id)
