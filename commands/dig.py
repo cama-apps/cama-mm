@@ -15,7 +15,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
-from commands.checks import require_gamba_channel
+from commands.checks import require_dig_channel
 from config import DIG_CHANNEL_ID
 from services.dig_constants import (
     ASCENSION_MODIFIERS,
@@ -2255,7 +2255,7 @@ class DigCommands(commands.Cog):
 
     @dig.command(name="go", description="Dig deeper into your tunnel")
     async def dig_go(self, interaction: discord.Interaction):
-        if not await require_gamba_channel(interaction):
+        if not await require_dig_channel(interaction):
             return
 
         guild_id = interaction.guild.id if interaction.guild else None
@@ -2591,7 +2591,7 @@ class DigCommands(commands.Cog):
     @dig.command(name="help", description="Help another player's tunnel")
     @app_commands.describe(user="The player to help")
     async def dig_help(self, interaction: discord.Interaction, user: discord.Member):
-        if not await require_gamba_channel(interaction):
+        if not await require_dig_channel(interaction):
             return
 
         player = await _check_registered(interaction, self.bot)
@@ -2658,7 +2658,7 @@ class DigCommands(commands.Cog):
     @dig.command(name="sabotage", description="Sabotage another player's tunnel")
     @app_commands.describe(user="The player to sabotage")
     async def dig_sabotage(self, interaction: discord.Interaction, user: discord.Member):
-        if not await require_gamba_channel(interaction):
+        if not await require_dig_channel(interaction):
             return
 
         player = await _check_registered(interaction, self.bot)
@@ -2744,7 +2744,7 @@ class DigCommands(commands.Cog):
     @dig.command(name="info", description="View tunnel information")
     @app_commands.describe(user="View another player's tunnel (optional)")
     async def dig_info(self, interaction: discord.Interaction, user: discord.Member | None = None):
-        if not await require_gamba_channel(interaction):
+        if not await require_dig_channel(interaction):
             return
 
         player = await _check_registered(interaction, self.bot)
@@ -2935,7 +2935,7 @@ class DigCommands(commands.Cog):
 
     @dig.command(name="leaderboard", description="View top tunnels")
     async def dig_leaderboard(self, interaction: discord.Interaction):
-        if not await require_gamba_channel(interaction):
+        if not await require_dig_channel(interaction):
             return
 
         player = await _check_registered(interaction, self.bot)
@@ -2993,7 +2993,7 @@ class DigCommands(commands.Cog):
 
     @dig.command(name="halloffame", description="View the hall of fame (best prestige run scores)")
     async def dig_halloffame(self, interaction: discord.Interaction):
-        if not await require_gamba_channel(interaction):
+        if not await require_dig_channel(interaction):
             return
 
         player = await _check_registered(interaction, self.bot)
@@ -3049,7 +3049,7 @@ class DigCommands(commands.Cog):
     @app_commands.describe(item="The item to use")
     @app_commands.autocomplete(item=item_autocomplete)
     async def dig_use(self, interaction: discord.Interaction, item: str):
-        if not await require_gamba_channel(interaction):
+        if not await require_dig_channel(interaction):
             return
 
         player = await _check_registered(interaction, self.bot)
@@ -3099,7 +3099,7 @@ class DigCommands(commands.Cog):
     @app_commands.describe(user="The player to gift to", artifact="The relic to gift")
     @app_commands.autocomplete(artifact=relic_autocomplete)
     async def dig_gift(self, interaction: discord.Interaction, user: discord.Member, artifact: str):
-        if not await require_gamba_channel(interaction):
+        if not await require_dig_channel(interaction):
             return
 
         player = await _check_registered(interaction, self.bot)
@@ -3136,7 +3136,7 @@ class DigCommands(commands.Cog):
 
     @dig.command(name="shop", description="Browse the mining shop")
     async def dig_shop(self, interaction: discord.Interaction):
-        if not await require_gamba_channel(interaction):
+        if not await require_dig_channel(interaction):
             return
 
         player = await _check_registered(interaction, self.bot)
@@ -3226,7 +3226,7 @@ class DigCommands(commands.Cog):
         app_commands.Choice(name="Diamond Boots (200 JC)", value="boots:3"),
     ])
     async def dig_buy(self, interaction: discord.Interaction, item: str):
-        if not await require_gamba_channel(interaction):
+        if not await require_dig_channel(interaction):
             return
 
         player = await _check_registered(interaction, self.bot)
@@ -3318,7 +3318,7 @@ class DigCommands(commands.Cog):
 
     @dig.command(name="museum", description="View the guild artifact museum")
     async def dig_museum(self, interaction: discord.Interaction):
-        if not await require_gamba_channel(interaction):
+        if not await require_dig_channel(interaction):
             return
 
         player = await _check_registered(interaction, self.bot)
@@ -3378,7 +3378,7 @@ class DigCommands(commands.Cog):
 
     @dig.command(name="flex", description="Show off your mining achievements")
     async def dig_flex(self, interaction: discord.Interaction):
-        if not await require_gamba_channel(interaction):
+        if not await require_dig_channel(interaction):
             return
 
         player = await _check_registered(interaction, self.bot)
@@ -3467,7 +3467,7 @@ class DigCommands(commands.Cog):
 
     @dig.command(name="prestige", description="Prestige your tunnel (reset depth, gain a perk)")
     async def dig_prestige(self, interaction: discord.Interaction):
-        if not await require_gamba_channel(interaction):
+        if not await require_dig_channel(interaction):
             return
 
         player = await _check_registered(interaction, self.bot)
@@ -3604,7 +3604,7 @@ class DigCommands(commands.Cog):
 
     @dig.command(name="abandon", description="Abandon your tunnel (partial refund)")
     async def dig_abandon(self, interaction: discord.Interaction):
-        if not await require_gamba_channel(interaction):
+        if not await require_dig_channel(interaction):
             return
 
         player = await _check_registered(interaction, self.bot)
@@ -3673,7 +3673,7 @@ class DigCommands(commands.Cog):
 
     @dig.command(name="trap", description="Set a trap in your tunnel")
     async def dig_trap(self, interaction: discord.Interaction):
-        if not await require_gamba_channel(interaction):
+        if not await require_dig_channel(interaction):
             return
 
         player = await _check_registered(interaction, self.bot)
@@ -3704,7 +3704,7 @@ class DigCommands(commands.Cog):
 
     @dig.command(name="insure", description="Buy cave-in insurance")
     async def dig_insure(self, interaction: discord.Interaction):
-        if not await require_gamba_channel(interaction):
+        if not await require_dig_channel(interaction):
             return
 
         player = await _check_registered(interaction, self.bot)
@@ -3749,7 +3749,7 @@ class DigCommands(commands.Cog):
 
     @dig.command(name="inventory", description="View your mining inventory")
     async def dig_inventory(self, interaction: discord.Interaction):
-        if not await require_gamba_channel(interaction):
+        if not await require_dig_channel(interaction):
             return
 
         player = await _check_registered(interaction, self.bot)
@@ -3806,7 +3806,7 @@ class DigCommands(commands.Cog):
 
     @dig.command(name="gear", description="Manage your boss-combat gear")
     async def dig_gear(self, interaction: discord.Interaction):
-        if not await require_gamba_channel(interaction):
+        if not await require_dig_channel(interaction):
             return
         player = await _check_registered(interaction, self.bot)
         if not player:
@@ -3841,7 +3841,7 @@ class DigCommands(commands.Cog):
 
     @dig.command(name="weather", description="View today's layer weather conditions")
     async def dig_weather(self, interaction: discord.Interaction):
-        if not await require_gamba_channel(interaction):
+        if not await require_dig_channel(interaction):
             return
 
         guild_id = interaction.guild.id if interaction.guild else None
@@ -3960,7 +3960,7 @@ class DigCommands(commands.Cog):
 
     @miner.command(name="profile", description="View your miner profile and S stats")
     async def dig_profile(self, interaction: discord.Interaction):
-        if not await require_gamba_channel(interaction):
+        if not await require_dig_channel(interaction):
             return
 
         player = await _check_registered(interaction, self.bot)
@@ -3999,7 +3999,7 @@ class DigCommands(commands.Cog):
         interaction: discord.Interaction,
         backstory: str,
     ):
-        if not await require_gamba_channel(interaction):
+        if not await require_dig_channel(interaction):
             return
 
         player = await _check_registered(interaction, self.bot)
@@ -4038,7 +4038,7 @@ class DigCommands(commands.Cog):
         smarts: int = 0,
         stamina: int = 0,
     ):
-        if not await require_gamba_channel(interaction):
+        if not await require_dig_channel(interaction):
             return
 
         player = await _check_registered(interaction, self.bot)
@@ -4076,7 +4076,7 @@ class DigCommands(commands.Cog):
         app_commands.Choice(name="DM Mode (AI-narrated)", value="llm"),
     ])
     async def dig_mode(self, interaction: discord.Interaction, mode: app_commands.Choice[str]):
-        if not await require_gamba_channel(interaction):
+        if not await require_dig_channel(interaction):
             return
 
         player = await _check_registered(interaction, self.bot)
@@ -4121,7 +4121,7 @@ class DigCommands(commands.Cog):
 
     @dig.command(name="guide", description="Learn how to dig")
     async def dig_guide(self, interaction: discord.Interaction):
-        if not await require_gamba_channel(interaction):
+        if not await require_dig_channel(interaction):
             return
 
         player = await _check_registered(interaction, self.bot)
