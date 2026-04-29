@@ -16,6 +16,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from commands.checks import require_gamba_channel
+from config import DIG_CHANNEL_ID
 from services.dig_constants import (
     ASCENSION_MODIFIERS,
     LUMINOSITY_PITCH_BLACK,
@@ -49,44 +50,6 @@ def _splash_aftermath_lines(splash: dict) -> list[str]:
         f"<@{v['discord_id']}>: {sign}{v['amount']} {JOPACOIN_EMOTE}"
         for v in victims
     ]
-
-
-def _build_splash_broadcast_embed(splash: dict, digger_id: int) -> discord.Embed:
-    """Build the public Discord embed announcing a splash event's collateral damage."""
-    event_name = splash.get("event_name", "Event")
-    total = splash.get("total_burned", 0)
-    mode = splash.get("mode") or "burn"
-    if mode == "steal":
-        title_prefix = "\U0001f5e1\ufe0f Splash Event"
-        flavor = (
-            f"<@{digger_id}>'s dig stole **{total} {JOPACOIN_EMOTE}** "
-            f"from other players."
-        )
-        field_name = "Lifted from"
-    elif mode == "grant":
-        title_prefix = "\u2728 Splash Event"
-        flavor = (
-            f"<@{digger_id}>'s dig shared **{total} {JOPACOIN_EMOTE}** "
-            f"with other players."
-        )
-        field_name = "Received a share"
-    else:
-        title_prefix = "\u26a0\ufe0f Splash Event"
-        flavor = (
-            f"<@{digger_id}>'s dig rippled through the tunnel network. "
-            f"**{total} {JOPACOIN_EMOTE}** was lost to the collapse."
-        )
-        field_name = "Caught in the cave-in"
-    color = 0x7B68EE if mode == "steal" else (0x4FC3F7 if mode == "grant" else 0xC23B22)
-    embed = discord.Embed(
-        title=f"{title_prefix}: {event_name}",
-        description=flavor,
-        color=color,
-    )
-    lines = _splash_aftermath_lines(splash)
-    if lines:
-        embed.add_field(name=field_name, value="\n".join(lines), inline=False)
-    return embed
 
 
 # ---------------------------------------------------------------------------
@@ -1114,7 +1077,6 @@ class EventEncounterView(discord.ui.View):
         await interaction.response.defer()
         result = await self._resolve("desperate")
         await interaction.followup.send(embed=result)
-        await self._maybe_broadcast_splash(interaction)
         self.stop()
 
     @discord.ui.button(label="Safe", style=discord.ButtonStyle.secondary, emoji="\U0001f6e1\ufe0f")
@@ -1125,7 +1087,6 @@ class EventEncounterView(discord.ui.View):
         await interaction.response.defer()
         result = await self._resolve("safe")
         await interaction.followup.send(embed=result)
-        await self._maybe_broadcast_splash(interaction)
         self.stop()
 
     @discord.ui.button(label="Risky", style=discord.ButtonStyle.danger, emoji="\u2694\ufe0f")
@@ -1136,24 +1097,7 @@ class EventEncounterView(discord.ui.View):
         await interaction.response.defer()
         result = await self._resolve("risky")
         await interaction.followup.send(embed=result)
-        await self._maybe_broadcast_splash(interaction)
         self.stop()
-
-    async def _maybe_broadcast_splash(self, interaction: discord.Interaction) -> None:
-        """Post the splash event announcement to the channel, if one fired.
-
-        Broadcast failures (missing channel permissions, deleted channel,
-        etc.) must never propagate back to the digger — they already got
-        their result embed.
-        """
-        broadcast = getattr(self, "_pending_splash_broadcast", None)
-        self._pending_splash_broadcast = None
-        if broadcast is None or interaction.channel is None:
-            return
-        try:
-            await interaction.channel.send(embed=broadcast)
-        except Exception as exc:  # noqa: BLE001 — broadcast must not fail the dig
-            logger.warning("Splash broadcast failed: %s", exc)
 
     async def _resolve(self, choice: str) -> discord.Embed:
         """Resolve event choice via service layer (handles chaining, cruel echoes, logging)."""
@@ -1227,11 +1171,11 @@ class EventEncounterView(discord.ui.View):
                     inline=False,
                 )
 
-        # Splash: private Aftermath field for the digger + public broadcast
-        # queued on the view so the callback can post it after followup.send.
+        # Splash: surface the aftermath inline on the digger's embed.
+        # The digger's result is itself public, so victims who follow
+        # the dig channel see the Aftermath field — no separate broadcast.
         splash_obj = getattr(result, "splash", None)
         splash_d = splash_obj._d if hasattr(splash_obj, "_d") else splash_obj
-        self._pending_splash_broadcast = None
         if isinstance(splash_d, dict) and splash_d.get("victims"):
             aftermath_lines = _splash_aftermath_lines(splash_d)
             if aftermath_lines:
@@ -1240,7 +1184,6 @@ class EventEncounterView(discord.ui.View):
                     value="\n".join(aftermath_lines),
                     inline=False,
                 )
-            self._pending_splash_broadcast = _build_splash_broadcast_embed(splash_d, self.user_id)
 
         return embed
 
@@ -1552,7 +1495,12 @@ class PrestigePerksView(discord.ui.View):
                     if mut_lines:
                         embed.add_field(name="Mutations", value="\n".join(mut_lines), inline=False)
 
-                await interaction.followup.send(embed=embed)
+                # Detailed embed (perk + run score + ascension unlock) is
+                # for the prestiger only — keeps progression details private.
+                await interaction.followup.send(embed=embed, ephemeral=True)
+                # Public ascension announcement: terse, atmospheric, no
+                # perk or score reveal. Routes to dig channel when set.
+                await self._announce_ascension_publicly(interaction)
             except ValueError as e:
                 await interaction.followup.send(str(e), ephemeral=True)
             except Exception as e:
@@ -1561,6 +1509,40 @@ class PrestigePerksView(discord.ui.View):
             self.stop()
 
         return callback
+
+    async def _announce_ascension_publicly(
+        self, interaction: discord.Interaction,
+    ) -> None:
+        """Post a terse, flavor-only ascension line to the dig channel."""
+        member = None
+        if interaction.guild is not None:
+            member = interaction.guild.get_member(self.user_id)
+        name = member.display_name if member else f"<@{self.user_id}>"
+        text = f"*{name} has ascended.*"
+
+        target: discord.abc.Messageable | None = None
+        if DIG_CHANNEL_ID:
+            try:
+                channel = interaction.client.get_channel(DIG_CHANNEL_ID)
+                if channel is None:
+                    channel = await interaction.client.fetch_channel(DIG_CHANNEL_ID)
+                if isinstance(channel, discord.TextChannel) and (
+                    interaction.guild is None
+                    or channel.guild.id == interaction.guild.id
+                ):
+                    perms = channel.permissions_for(channel.guild.me)
+                    if perms.send_messages:
+                        target = channel
+            except Exception as exc:
+                logger.warning("Cannot fetch dig channel for ascension: %s", exc)
+        if target is None:
+            target = interaction.channel
+        if target is None:
+            return
+        try:
+            await target.send(text)
+        except Exception:
+            logger.warning("Ascension announcement failed", exc_info=True)
 
 
 class MutationSelectionView(discord.ui.View):
@@ -1663,15 +1645,32 @@ class MuseumView(discord.ui.View):
         await interaction.response.edit_message(embed=self.pages[self.current], view=self)
 
 
-def _build_gear_embed(loadout: dict, inventory: list[dict], damaged: list[dict]) -> discord.Embed:
-    """Build the /dig gear embed: equipped slots + summary footer."""
+def _build_gear_embed(
+    loadout: dict,
+    inventory: list[dict],
+    damaged: list[dict],
+    dig_service: DigService | None = None,
+) -> discord.Embed:
+    """Build the /dig gear embed: equipped slots + summary footer.
+
+    When ``dig_service`` is provided, damaged equipped pieces also show
+    their repair cost so the player can decide before clicking Repair.
+    """
     embed = discord.Embed(title="Your Loadout", color=0x8B4513)
 
     def _slot_value(slot_name: str) -> str:
         piece = loadout.get(slot_name)
         if piece is None:
             return "_— Empty —_"
-        return f"**{piece['name']}** ({piece['durability']}/{piece['max_durability']})"
+        line = f"**{piece['name']}** ({piece['durability']}/{piece['max_durability']})"
+        if (
+            dig_service is not None
+            and piece["durability"] < piece["max_durability"]
+        ):
+            cost = dig_service.compute_repair_cost(piece["slot"], piece["tier"])
+            if cost > 0:
+                line += f"\nRepair: {cost} {JOPACOIN_EMOTE}"
+        return line
 
     embed.add_field(name="Weapon", value=_slot_value("weapon"), inline=False)
     embed.add_field(name="Armor",  value=_slot_value("armor"),  inline=False)
@@ -1703,11 +1702,20 @@ class GearPanelView(discord.ui.View):
         dig_service: DigService,
         user_id: int,
         guild_id: int | None,
+        repair_all_cost: int = 0,
     ):
         super().__init__(timeout=180)
         self.dig_service = dig_service
         self.user_id = user_id
         self.guild_id = guild_id
+        # Surface the total repair cost on the button so players see the
+        # bill before they click. Disable when nothing is damaged.
+        if repair_all_cost > 0:
+            self.repair_all_btn.label = f"Repair All ({repair_all_cost} JC)"
+            self.repair_all_btn.disabled = False
+        else:
+            self.repair_all_btn.label = "Repair All"
+            self.repair_all_btn.disabled = True
 
     async def _refresh(self, interaction: discord.Interaction) -> None:
         """Reload loadout + inventory and rebuild the panel embed in place."""
@@ -1718,9 +1726,15 @@ class GearPanelView(discord.ui.View):
             self.dig_service.get_inventory_gear, self.user_id, self.guild_id
         )
         damaged = [g for g in inventory if g["durability"] < g["max_durability"]]
-        embed = _build_gear_embed(loadout, inventory, damaged)
+        total_cost = sum(
+            self.dig_service.compute_repair_cost(g["slot"], g["tier"])
+            for g in damaged
+        )
+        embed = _build_gear_embed(loadout, inventory, damaged, self.dig_service)
         # Reset to the main panel buttons (in case we're being called from a sub-view).
-        view = GearPanelView(self.dig_service, self.user_id, self.guild_id)
+        view = GearPanelView(
+            self.dig_service, self.user_id, self.guild_id, repair_all_cost=total_cost,
+        )
         await interaction.edit_original_response(embed=embed, view=view)
 
     def _check_owner(self, interaction: discord.Interaction) -> bool:
@@ -1857,9 +1871,13 @@ class GearSelectView(discord.ui.View):
         options: list[discord.SelectOption] = []
         for g in gear_items[:20]:
             slot_label = g["slot"].title()
-            label = f"[{slot_label}] {g['name']} ({g['durability']}/{g['max_durability']})"[:100]
+            label = f"[{slot_label}] {g['name']} ({g['durability']}/{g['max_durability']})"
+            if mode == "repair":
+                cost = dig_service.compute_repair_cost(g["slot"], g["tier"])
+                if cost > 0:
+                    label += f" — {cost} JC"
             options.append(discord.SelectOption(
-                label=label,
+                label=label[:100],
                 value=f"gear:{g['id']}",
             ))
         for r in relics[:25 - len(options)]:
@@ -2041,6 +2059,95 @@ class DigCommands(commands.Cog):
         self._last_weather_date = await asyncio.to_thread(self.dig_service._get_game_date)
 
     # ------------------------------------------------------------------
+    # Channel routing
+    # ------------------------------------------------------------------
+
+    async def _send_public_dig(
+        self,
+        interaction: discord.Interaction,
+        *,
+        embed: discord.Embed | None = None,
+        view: discord.ui.View | None = None,
+        file: discord.File | None = None,
+        files: list[discord.File] | None = None,
+    ) -> discord.Message | None:
+        """Send a public dig embed to the dedicated dig channel when set,
+        otherwise fall through to ``safe_followup``. When routed away from
+        the invocation channel, also post a one-line ephemeral pointer so
+        the user knows where their result landed.
+        """
+        target = await self._get_dig_target_channel(interaction)
+        invocation_channel = interaction.channel
+        send_kwargs: dict = {}
+        if embed is not None:
+            send_kwargs["embed"] = embed
+        if view is not None:
+            send_kwargs["view"] = view
+        if files:
+            send_kwargs["files"] = files
+        elif file is not None:
+            send_kwargs["file"] = file
+
+        if target is None or (
+            invocation_channel is not None
+            and getattr(target, "id", None) == getattr(invocation_channel, "id", None)
+        ):
+            return await safe_followup(interaction, **send_kwargs)
+
+        try:
+            msg = await target.send(**send_kwargs)
+        except Exception:
+            logger.exception("Dig channel send failed; falling back to invocation channel")
+            return await safe_followup(interaction, **send_kwargs)
+
+        # Acknowledge the deferred interaction with a quiet pointer so the
+        # user isn't left with a perpetual "thinking..." indicator.
+        try:
+            mention = getattr(target, "mention", None) or "the dig channel"
+            await interaction.followup.send(
+                f"Posted in {mention}.", ephemeral=True,
+            )
+        except Exception:
+            pass
+        return msg
+
+    async def _get_dig_target_channel(
+        self, interaction: discord.Interaction,
+    ) -> discord.abc.Messageable | None:
+        """Resolve the channel where public /dig embeds should land.
+
+        Returns the dedicated dig channel when ``DIG_CHANNEL_ID`` is set,
+        accessible, in the same guild as the interaction, and the bot
+        has send permission. Otherwise falls back to ``interaction.channel``.
+        Mirrors the lobby-channel pattern.
+        """
+        if not DIG_CHANNEL_ID:
+            return interaction.channel
+        try:
+            channel = self.bot.get_channel(DIG_CHANNEL_ID)
+            if not channel:
+                channel = await self.bot.fetch_channel(DIG_CHANNEL_ID)
+            if isinstance(channel, discord.TextChannel):
+                if interaction.guild and channel.guild.id != interaction.guild.id:
+                    logger.warning(
+                        "Dedicated dig channel %s is in different guild", DIG_CHANNEL_ID,
+                    )
+                    return interaction.channel
+                perms = channel.permissions_for(channel.guild.me)
+                if not perms.send_messages:
+                    logger.warning(
+                        "Bot lacks send_messages in dedicated dig channel %s", DIG_CHANNEL_ID,
+                    )
+                    return interaction.channel
+            return channel
+        except (discord.NotFound, discord.Forbidden) as exc:
+            logger.warning("Cannot access dedicated dig channel %s: %s", DIG_CHANNEL_ID, exc)
+            return interaction.channel
+        except Exception as exc:
+            logger.warning("Error fetching dedicated dig channel: %s", exc)
+            return interaction.channel
+
+    # ------------------------------------------------------------------
     # DM Mode helpers
     # ------------------------------------------------------------------
 
@@ -2206,7 +2313,7 @@ class DigCommands(commands.Cog):
             ),
             color=LAYER_COLORS["Dirt"],
         )
-        await safe_followup(interaction, embed=embed)
+        await self._send_public_dig(interaction, embed=embed)
 
     async def _handle_boss_encounter(
         self, interaction: discord.Interaction, guild_id: int | None, result
@@ -2239,7 +2346,7 @@ class DigCommands(commands.Cog):
             embed.add_field(name="\u200b", value=f"```\n{boss_info.ascii_art}\n```", inline=False)
 
         view = BossEncounterView(self.dig_service, interaction.user.id, guild_id, boss_info, has_lantern, dig_llm_service=self.dig_llm_service)
-        msg = await safe_followup(interaction, embed=embed, view=view, file=boss_file)
+        msg = await self._send_public_dig(interaction, embed=embed, view=view, file=boss_file)
         if msg:
             try:
                 await msg.add_reaction("\U0001f480")
@@ -2336,11 +2443,11 @@ class DigCommands(commands.Cog):
         items_strip = await _attach_items_strip(embed, items_ids)
         dig_files = [f for f in (layer_file, pickaxe_file, items_strip) if f]
         if len(dig_files) > 1:
-            await safe_followup(interaction, embed=embed, files=dig_files)
+            await self._send_public_dig(interaction, embed=embed, files=dig_files)
         elif dig_files:
-            await safe_followup(interaction, embed=embed, file=dig_files[0])
+            await self._send_public_dig(interaction, embed=embed, file=dig_files[0])
         else:
-            await safe_followup(interaction, embed=embed)
+            await self._send_public_dig(interaction, embed=embed)
 
     async def _send_boon_event_ui(
         self,
@@ -2363,9 +2470,9 @@ class DigCommands(commands.Cog):
 
         view = BoonSelectionView(self.dig_service, interaction.user.id, guild_id, event_data)
         if boon_event_file:
-            await safe_followup(interaction, embed=event_embed, view=view, file=boon_event_file)
+            await self._send_public_dig(interaction, embed=event_embed, view=view, file=boon_event_file)
         else:
-            await safe_followup(interaction, embed=event_embed, view=view)
+            await self._send_public_dig(interaction, embed=event_embed, view=view)
 
     async def _send_choice_event_ui(
         self,
@@ -2392,9 +2499,9 @@ class DigCommands(commands.Cog):
                     else getattr(_lum_info, "luminosity_after", 100)) if _lum_info else 100
         view = EventEncounterView(self.dig_service, interaction.user.id, guild_id, event_data, luminosity=_lum_val)
         if event_file:
-            await safe_followup(interaction, embed=event_embed, view=view, file=event_file)
+            await self._send_public_dig(interaction, embed=event_embed, view=view, file=event_file)
         else:
-            await safe_followup(interaction, embed=event_embed, view=view)
+            await self._send_public_dig(interaction, embed=event_embed, view=view)
 
     async def _handle_boon_encounter(
         self,
@@ -2428,11 +2535,11 @@ class DigCommands(commands.Cog):
         items_strip = await _attach_items_strip(embed, items_ids)
         dig_files = [f for f in (layer_file, pickaxe_file, items_strip) if f]
         if len(dig_files) > 1:
-            msg = await safe_followup(interaction, embed=embed, files=dig_files)
+            msg = await self._send_public_dig(interaction, embed=embed, files=dig_files)
         elif dig_files:
-            msg = await safe_followup(interaction, embed=embed, file=dig_files[0])
+            msg = await self._send_public_dig(interaction, embed=embed, file=dig_files[0])
         else:
-            msg = await safe_followup(interaction, embed=embed)
+            msg = await self._send_public_dig(interaction, embed=embed)
 
         if msg:
             reactions = ["\u26cf\ufe0f"]  # pickaxe
@@ -2689,6 +2796,8 @@ class DigCommands(commands.Cog):
         foreshadow = info.get("pinnacle_foreshadow") if isinstance(info, dict) else None
         if foreshadow:
             embed.add_field(name="​", value=f"*{foreshadow}*", inline=False)
+        elif depth > 300:
+            embed.add_field(name="​", value="*The deep grows hungry.*", inline=False)
 
         # Insurance / reinforcement
         now = int(time.time())
@@ -3685,8 +3794,14 @@ class DigCommands(commands.Cog):
             await safe_followup(interaction, content="Gear panel unavailable.", ephemeral=True)
             return
         damaged = [g for g in inventory if g["durability"] < g["max_durability"]]
-        embed = _build_gear_embed(loadout, inventory, damaged)
-        view = GearPanelView(self.dig_service, interaction.user.id, guild_id)
+        total_cost = sum(
+            self.dig_service.compute_repair_cost(g["slot"], g["tier"])
+            for g in damaged
+        )
+        embed = _build_gear_embed(loadout, inventory, damaged, self.dig_service)
+        view = GearPanelView(
+            self.dig_service, interaction.user.id, guild_id, repair_all_cost=total_cost,
+        )
         await safe_followup(interaction, embed=embed, view=view)
 
     # ------------------------------------------------------------------

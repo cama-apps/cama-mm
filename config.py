@@ -73,6 +73,17 @@ if _lobby_channel_raw:
         LOBBY_CHANNEL_ID = int(_lobby_channel_raw.strip())
     except ValueError:
         LOBBY_CHANNEL_ID = None
+
+# Dedicated dig channel - if set, public /dig embeds are posted here instead
+# of the command channel. Ephemeral followups (gear panel, info, shop, etc.)
+# stay in the invocation channel regardless.
+DIG_CHANNEL_ID: int | None = None
+_dig_channel_raw = os.getenv("DIG_CHANNEL_ID")
+if _dig_channel_raw:
+    try:
+        DIG_CHANNEL_ID = int(_dig_channel_raw.strip())
+    except ValueError:
+        DIG_CHANNEL_ID = None
 USE_GLICKO = _parse_bool("USE_GLICKO", True)
 OPENSKILL_SHUFFLE_CHANCE = _parse_float("OPENSKILL_SHUFFLE_CHANCE", 0.01)  # 1% chance per shuffle
 
