@@ -22,6 +22,7 @@ from services.dig_constants import (
     GEAR_DROP_DEPTH_TIER_MAP,
     GEAR_MAX_DURABILITY,
     GEAR_TIER_TABLES,
+    PLAYER_HIT_CEILING,
     WEAPON_TIERS,
 )
 from services.dig_service import DigService
@@ -513,7 +514,7 @@ class TestDigGearServiceApplyGearToCombat:
         )
         loadout = GearLoadout(weapon=weapon)
         out = svc._apply_gear_to_combat(base, loadout)
-        assert out["player_hit"] <= 0.95  # PLAYER_HIT_CEILING
+        assert out["player_hit"] <= PLAYER_HIT_CEILING
 
     def test_boss_hit_floors_at_005(self, svc):
         """Even Void-Touched boots can't push boss accuracy below 5%."""

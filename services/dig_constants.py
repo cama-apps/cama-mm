@@ -254,14 +254,6 @@ PICKAXE_TIERS: list[dict] = [
 # Void-Touched). Shop sells Wooden–Diamond; Obsidian–Void-Touched are
 # boss-drop-only. Durability ticks once per boss fight; at zero the
 # piece auto-unequips and must be repaired before re-equipping.
-#
-# Power calibration (first-pass; re-tune via duel sim before merge):
-#     Cautious @ depth 100: naked 0.81 → full Void 1.00 (+19pp)  ← on spec
-#     Bold     @ depth 100: naked 0.20 → full Void 0.97 (+78pp)  ← TOO STRONG
-#     Reckless @ depth 100: naked 0.00 → full Void 0.54 (+53pp)
-# Bold over-shoots the +25pp spec; the duel-sim balance pass should
-# either cut weapon player_dmg progression to zero, or trim armor
-# player_hp_bonus across the board.
 
 from domain.models.dig_gear import GearSlot, GearTierDef  # noqa: E402
 
