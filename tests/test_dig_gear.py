@@ -22,6 +22,7 @@ from services.dig_constants import (
     GEAR_DROP_DEPTH_TIER_MAP,
     GEAR_MAX_DURABILITY,
     GEAR_TIER_TABLES,
+    PLAYER_HIT_CEILING,
     WEAPON_TIERS,
 )
 from services.dig_service import DigService
@@ -493,6 +494,16 @@ class TestDigGearServiceApplyGearToCombat:
         # against the base HP of 2-5 in BOSS_DUEL_STATS.
         assert ARMOR_TIERS[3].player_hp_bonus >= 2
 
+    def test_weapon_dmg_progression_pins_smoothed_curve(self):
+        """Weapon player_dmg should show real progression at Diamond and
+        Frostforged so mid-tier purchases feel meaningful. Pins the curve."""
+        dmg = [t.player_dmg for t in WEAPON_TIERS]
+        assert dmg == [0, 0, 0, 1, 1, 2, 2]
+        # Diamond is the first dmg-bearing pickaxe (depth 75 milestone).
+        assert WEAPON_TIERS[3].player_dmg >= 1
+        # Frostforged is the next visible step (depth 200, P3 unlock).
+        assert WEAPON_TIERS[5].player_dmg >= 2
+
     def test_player_hit_clamps_to_ceiling(self, svc):
         base = {"player_hp": 5, "boss_hp": 5, "player_hit": 0.99, "player_dmg": 1,
                 "boss_hit": 0.5, "boss_dmg": 1}
@@ -503,7 +514,7 @@ class TestDigGearServiceApplyGearToCombat:
         )
         loadout = GearLoadout(weapon=weapon)
         out = svc._apply_gear_to_combat(base, loadout)
-        assert out["player_hit"] <= 0.95  # PLAYER_HIT_CEILING
+        assert out["player_hit"] <= PLAYER_HIT_CEILING
 
     def test_boss_hit_floors_at_005(self, svc):
         """Even Void-Touched boots can't push boss accuracy below 5%."""
