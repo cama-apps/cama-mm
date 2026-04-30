@@ -1128,3 +1128,93 @@ def test_market_chart_renders_for_zero_one_and_many_snapshots():
     series = [(created_at + 3600 * i, 30 + i * 5) for i in range(8)]
     bytes_many = draw_market_fair_history(market_id=3, snapshots=series, created_at=created_at)
     assert bytes_many.getbuffer().nbytes > 0
+
+
+def test_fair_history_backfill_from_levels_groups_by_utc_day(prediction_repo, prediction_service):
+    """The retro-population migration walks prediction_levels.posted_at,
+    buckets to UTC day, and inserts one snapshot per day at end-of-day with
+    a defensible mid (or single-side fallback when only one side was posted).
+    """
+    from datetime import UTC, datetime
+
+    from infrastructure.schema_manager import SchemaManager
+
+    pid = prediction_service.create_orderbook_prediction(
+        guild_id=TEST_GUILD_ID, creator_id=1, question="retro?", initial_fair=50,
+    )["prediction_id"]
+
+    # Day A (2026-04-01 UTC): both sides posted → mid (35 + 65) / 2 = 50.
+    day_a_ts = int(datetime(2026, 4, 1, 12, 0, 0, tzinfo=UTC).timestamp())
+    day_a_eod = int(datetime(2026, 4, 1, 23, 59, 59, tzinfo=UTC).timestamp())
+    # Day B (2026-04-03 UTC): only yes_ask posted → snapshot at min ask = 70.
+    day_b_ts = int(datetime(2026, 4, 3, 6, 30, 0, tzinfo=UTC).timestamp())
+    day_b_eod = int(datetime(2026, 4, 3, 23, 59, 59, tzinfo=UTC).timestamp())
+
+    seed = [
+        ("yes_ask", 65, 100, day_a_ts),
+        ("yes_ask", 67, 100, day_a_ts + 60),  # same day, same side, larger price
+        ("yes_bid", 35, 100, day_a_ts),
+        ("yes_ask", 70, 100, day_b_ts),
+        ("yes_ask", 72, 100, day_b_ts + 30),
+    ]
+    with prediction_repo.connection() as conn:
+        cursor = conn.cursor()
+        # Wipe the snapshot + levels written during create_orderbook_prediction
+        # so we control the seeded state in isolation.
+        cursor.execute("DELETE FROM prediction_fair_snapshots WHERE market_id = ?", (pid,))
+        cursor.execute("DELETE FROM prediction_levels WHERE prediction_id = ?", (pid,))
+        for side, price, size, posted_at in seed:
+            cursor.execute(
+                "INSERT INTO prediction_levels "
+                "(prediction_id, side, price, remaining_size, posted_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (pid, side, price, size, posted_at),
+            )
+        SchemaManager(prediction_repo.db_path)._migration_predictions_fair_history_backfill_from_levels(cursor)
+
+    history = prediction_repo.get_fair_history(pid, TEST_GUILD_ID)
+    # One snapshot per UTC day of activity, each at end-of-day.
+    assert [snapshot_at for snapshot_at, _ in history] == [day_a_eod, day_b_eod]
+    # Day A: mid of cheapest yes_ask (65) and highest yes_bid (35) = 50.
+    # Day B: only yes_ask side posted → cheapest yes_ask (70).
+    assert [pct for _, pct in history] == [50, 70]
+
+    # Provenance: backfill_levels.
+    with prediction_repo.connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT reason FROM prediction_fair_snapshots WHERE market_id = ? ORDER BY snapshot_at",
+            (pid,),
+        )
+        reasons = [row["reason"] for row in cursor.fetchall()]
+    assert reasons == ["backfill_levels", "backfill_levels"]
+
+    # Re-running the migration must not duplicate snapshots — the HAVING NOT
+    # EXISTS guard skips (market, day) buckets already present.
+    with prediction_repo.connection() as conn:
+        cursor = conn.cursor()
+        SchemaManager(prediction_repo.db_path)._migration_predictions_fair_history_backfill_from_levels(cursor)
+    history_after = prediction_repo.get_fair_history(pid, TEST_GUILD_ID)
+    assert history_after == history
+
+
+def test_market_chart_auto_zooms_for_narrow_band_markets():
+    """Narrow-band series should auto-zoom Y so the line is legible. A series
+    sitting in 17–22% must render differently from the same shape lifted to
+    cover the full 0–100% range — proving the Y axis adapted."""
+    from utils.drawing.predictions import draw_market_fair_history
+
+    created_at = 1_700_000_000
+    narrow = [(created_at + 3600 * i, p) for i, p in enumerate([17, 19, 22, 18, 20])]
+    wide = [(created_at + 3600 * i, p) for i, p in enumerate([5, 30, 70, 40, 95])]
+
+    narrow_bytes = draw_market_fair_history(
+        market_id=10, snapshots=narrow, created_at=created_at
+    ).getvalue()
+    wide_bytes = draw_market_fair_history(
+        market_id=10, snapshots=wide, created_at=created_at
+    ).getvalue()
+
+    # The two charts must render to different pixels — gridlines and line
+    # positions both depend on the auto-zoomed range.
+    assert narrow_bytes != wide_bytes

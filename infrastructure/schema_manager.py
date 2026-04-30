@@ -348,6 +348,12 @@ class SchemaManager:
             # 10:1 prediction-market stock split + EOD-fair history table +
             # one-shot digest banner sentinel.
             ("predictions_mini_split_v1", self._migration_predictions_mini_split_v1),
+            # Backfill prediction_fair_snapshots from prediction_levels.posted_at
+            # so charts for pre-migration markets aren't a single flat point.
+            (
+                "predictions_fair_history_backfill_from_levels",
+                self._migration_predictions_fair_history_backfill_from_levels,
+            ),
         ]
 
     # --- Migrations ---
@@ -2721,5 +2727,57 @@ class SchemaManager:
             SELECT DISTINCT guild_id, 'split_announced', '0'
             FROM prediction_trades
             JOIN predictions USING (prediction_id)
+            """
+        )
+
+    def _migration_predictions_fair_history_backfill_from_levels(self, cursor) -> None:
+        """Backfill ``prediction_fair_snapshots`` from ``prediction_levels.posted_at``.
+
+        The prior split migration only inserted one snapshot per still-open
+        market, so charts for older markets render as a single flat point.
+        ``prediction_levels.posted_at`` records when each level was layered in
+        (the LP centers each refresh's ladder around the new fair), so for
+        each (market, UTC day) we can derive a defensible historical fair
+        from the levels posted that day.
+
+        Dedupes against any pre-existing row at the same EOD timestamp via
+        ``NOT EXISTS`` rather than a unique index — production writers can
+        legitimately fire two snapshots within the same second (e.g. create
+        + immediate refresh in tests), so the index stays non-unique.
+        """
+        # One snapshot per (market, UTC day) at end-of-day timestamp.
+        # Both sides present → mid; single side → that side's best price.
+        cursor.execute(
+            """
+            INSERT INTO prediction_fair_snapshots
+                (market_id, guild_id, snapshot_at, fair_pct, reason)
+            SELECT
+                l.prediction_id,
+                p.guild_id,
+                CAST(strftime(
+                    '%s',
+                    date(l.posted_at, 'unixepoch'),
+                    '+1 day',
+                    '-1 second'
+                ) AS INTEGER) AS eod_ts,
+                CASE
+                    WHEN MIN(CASE WHEN l.side = 'yes_ask' THEN l.price END) IS NOT NULL
+                     AND MAX(CASE WHEN l.side = 'yes_bid' THEN l.price END) IS NOT NULL
+                        THEN (MIN(CASE WHEN l.side = 'yes_ask' THEN l.price END)
+                            + MAX(CASE WHEN l.side = 'yes_bid' THEN l.price END)) / 2
+                    WHEN MIN(CASE WHEN l.side = 'yes_ask' THEN l.price END) IS NOT NULL
+                        THEN MIN(CASE WHEN l.side = 'yes_ask' THEN l.price END)
+                    ELSE MAX(CASE WHEN l.side = 'yes_bid' THEN l.price END)
+                END,
+                'backfill_levels'
+            FROM prediction_levels l
+            JOIN predictions p ON p.prediction_id = l.prediction_id
+            GROUP BY l.prediction_id, date(l.posted_at, 'unixepoch')
+            HAVING NOT EXISTS (
+                SELECT 1 FROM prediction_fair_snapshots s
+                WHERE s.market_id = l.prediction_id
+                  AND s.guild_id = p.guild_id
+                  AND s.snapshot_at = eod_ts
+            )
             """
         )

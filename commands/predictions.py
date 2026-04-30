@@ -87,9 +87,9 @@ def _build_ladder_fields(book: dict) -> list[tuple[str, str, bool]]:
     RESET = "[0;0m"
 
     def _row(price: int, size: int) -> str:
-        bar = "█" * min(size, BAR_CAP)
-        # size column right-aligned to width 3 so single- and triple-digit
-        # depths share a clean right edge.
+        # 1 cell per 10 size units — sizes below 10 render as an empty bar;
+        # the right-aligned size column still surfaces the actual depth.
+        bar = "█" * min(size // 10, BAR_CAP)
         return f"  {price:>3}  {bar:<{BAR_CAP}}  {size:>3}"
 
     # YES section on top: deepest YES at the top, cheapest YES at the bottom

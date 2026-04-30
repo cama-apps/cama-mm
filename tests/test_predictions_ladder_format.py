@@ -97,19 +97,33 @@ def test_ladder_asymmetric_market_mirror_prices():
     assert "NO 84%" in value
 
 
-def test_ladder_uses_depth_bars_capped():
-    """Each row has a █ bar reflecting size, capped at BAR_CAP=10 chars."""
+def test_ladder_depth_bars_scale_per_ten_size():
+    """Bars render at 1 cell per 10 size units. Sub-10 sizes render empty
+    (the right-aligned size column still surfaces actual depth); 100+ caps
+    at BAR_CAP=10 cells."""
     book = {
         "current_price": 50,
-        "yes_asks": [(51, 3)],
-        "yes_bids": [(49, 25)],  # large size — bar should cap at 10
+        "yes_asks": [(60, 3), (61, 25), (62, 80), (63, 250)],
+        "yes_bids": [],
     }
     value = _build_ladder_fields(book)[0][1]
-    # 3 blocks for size 3
-    assert "███" in value
-    # 10-block cap for size 25 (and the actual count "25" still appears)
-    assert "██████████" in value
-    assert "25" in value
+
+    def _row_for(price: int) -> str:
+        rows = [r for r in value.splitlines() if f"  {price:>3}  " in r]
+        assert rows, f"no row found for price {price}"
+        return rows[0]
+
+    # size 3 → no █ on that row.
+    assert "█" not in _row_for(60)
+    # size 25 → exactly two cells, not three.
+    row_25 = _row_for(61)
+    assert "██" in row_25 and "███" not in row_25
+    # size 80 → eight cells, not nine.
+    row_80 = _row_for(62)
+    assert "████████" in row_80 and "█████████" not in row_80
+    # size 250 → caps at ten cells.
+    row_250 = _row_for(63)
+    assert "██████████" in row_250 and "███████████" not in row_250
 
 
 def test_ladder_empty_book():

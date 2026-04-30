@@ -1,9 +1,10 @@
 """Per-market price chart for prediction-market embeds.
 
 Plots fair-price snapshots over time. One snapshot per ladder refresh / admin
-override / market creation; straight-line interpolation between points. Y axis
-fixed at 0-100% so the visual range is comparable across markets and the chart
-can't lie about the ladder's bounds.
+override / market creation; straight-line interpolation between points. With
+multiple snapshots, the Y axis auto-zooms to the data range (±10pp, snapped
+to nearest 10) so narrow-band markets render legibly. Empty / single-point
+series keep the original 0–100 axis since there's no range to zoom around.
 """
 
 from __future__ import annotations
@@ -69,15 +70,28 @@ def draw_market_fair_history(
         last_ts = max(now_ts, created_at + 1)
     span = max(last_ts - created_at, 1)
 
+    # Y range: auto-zoom to data with ±10pp padding snapped to nearest 10
+    # when we have at least 2 points; fall back to 0–100 otherwise.
+    if len(snapshots) >= 2:
+        pcts = [pct for _, pct in snapshots]
+        lo = max(0, ((min(pcts) - 10) // 10) * 10)
+        hi = min(100, -((-(max(pcts) + 10)) // 10) * 10)
+        if hi <= lo:
+            lo, hi = 0, 100
+    else:
+        lo, hi = 0, 100
+    y_span = hi - lo
+
     def x_for(ts: int) -> int:
         return chart_x + int((ts - created_at) / span * chart_width)
 
     def y_for(pct: float) -> int:
-        clamped = max(0.0, min(100.0, pct))
-        return chart_y + int((100.0 - clamped) / 100.0 * chart_height)
+        clamped = max(float(lo), min(float(hi), pct))
+        return chart_y + int((hi - clamped) / y_span * chart_height)
 
-    # Y gridlines + labels at 0 / 25 / 50 / 75 / 100.
-    for pct in (0, 25, 50, 75, 100):
+    # 5 evenly spaced gridlines across [lo, hi]; rounded to int for display.
+    tick_pcts = [lo + round(y_span * i / 4) for i in range(5)]
+    for pct in tick_pcts:
         y = y_for(pct)
         draw.line(
             [(chart_x, y), (chart_x + chart_width, y)],
