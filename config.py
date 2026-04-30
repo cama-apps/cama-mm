@@ -296,13 +296,13 @@ REBELLION_FIZZLE_SPIN_MAX_WIN = _parse_int("REBELLION_FIZZLE_SPIN_MAX_WIN", 5)  
 REBELLION_GAMBA_COOLDOWN_PENALTY = _parse_int("REBELLION_GAMBA_COOLDOWN_PENALTY", 172800)  # 48h extra cooldown for attackers on defender win
 
 # Prediction market (order-book mechanic) configuration
-PREDICTION_CONTRACT_VALUE = _parse_int("PREDICTION_CONTRACT_VALUE", 100)         # jopa paid per winning contract
+PREDICTION_CONTRACT_VALUE = _parse_int("PREDICTION_CONTRACT_VALUE", 10)          # jopa paid per winning contract
 PREDICTION_TICK_SIZE = _parse_int("PREDICTION_TICK_SIZE", 1)                     # jopa per price tick (= 1% probability)
 PREDICTION_LEVELS_PER_SIDE = _parse_int("PREDICTION_LEVELS_PER_SIDE", 3)         # ladder depth each side (initial seed)
-PREDICTION_SIZE_PER_LEVEL = _parse_int("PREDICTION_SIZE_PER_LEVEL", 5)           # contracts per level (initial seed)
+PREDICTION_SIZE_PER_LEVEL = _parse_int("PREDICTION_SIZE_PER_LEVEL", 50)          # contracts per level (initial seed)
 PREDICTION_SPREAD_TICKS = _parse_int("PREDICTION_SPREAD_TICKS", 1)               # top-of-book offset from mid (initial seed)
 PREDICTION_REFRESH_LEVELS_PER_SIDE = _parse_int("PREDICTION_REFRESH_LEVELS_PER_SIDE", 2)  # daily-refresh ladder depth
-PREDICTION_REFRESH_SIZE_PER_LEVEL = _parse_int("PREDICTION_REFRESH_SIZE_PER_LEVEL", 3)    # daily-refresh contracts/level
+PREDICTION_REFRESH_SIZE_PER_LEVEL = _parse_int("PREDICTION_REFRESH_SIZE_PER_LEVEL", 30)   # daily-refresh contracts/level
 PREDICTION_REFRESH_SPREAD_TICKS = _parse_int("PREDICTION_REFRESH_SPREAD_TICKS", 2)        # daily-refresh top-of-book offset (wider than seed)
 PREDICTION_REFRESH_SECONDS = _parse_int("PREDICTION_REFRESH_SECONDS", 86400)     # per-market refresh interval (~daily)
 PREDICTION_REFRESH_WAKE_SECONDS = _parse_int("PREDICTION_REFRESH_WAKE_SECONDS", 3600)  # how often the worker wakes to scan
@@ -314,7 +314,7 @@ PREDICTION_PRICE_HIGH = _parse_int("PREDICTION_PRICE_HIGH", 96)
 PREDICTION_RECENT_TRADES_SHOWN = _parse_int("PREDICTION_RECENT_TRADES_SHOWN", 5)
 PREDICTION_DIGEST_HOUR_UTC = _parse_int("PREDICTION_DIGEST_HOUR_UTC", 12)        # UTC hour for daily guild digest
 PREDICTION_INITIAL_FAIR_DEFAULT = _parse_int("PREDICTION_INITIAL_FAIR_DEFAULT", 50)
-PREDICTION_MAX_CONTRACTS_PER_TRADE = _parse_int("PREDICTION_MAX_CONTRACTS_PER_TRADE", 100)  # hard cap on a single buy
+PREDICTION_MAX_CONTRACTS_PER_TRADE = _parse_int("PREDICTION_MAX_CONTRACTS_PER_TRADE", 1000)  # hard cap on a single buy
 
 # Trivia configuration
 TRIVIA_COOLDOWN_SECONDS = _parse_int("TRIVIA_COOLDOWN_SECONDS", 21600)  # 6 hours

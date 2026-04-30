@@ -345,6 +345,9 @@ class SchemaManager:
             # luminosity-as-real-resource, retreat cost, dialogue v2.
             ("dig_boss_revamp_columns", self._migration_dig_boss_revamp_columns),
             ("dig_boss_progress_persistent_hp", self._migration_dig_boss_progress_persistent_hp),
+            # 10:1 prediction-market stock split + EOD-fair history table +
+            # one-shot digest banner sentinel.
+            ("predictions_mini_split_v1", self._migration_predictions_mini_split_v1),
         ]
 
     # --- Migrations ---
@@ -2642,5 +2645,81 @@ class SchemaManager:
                 COALESCE(last_dig_at, CAST(strftime('%s', 'now') AS INTEGER)),
                 'migration'
             FROM tunnels
+            """
+        )
+
+    def _migration_predictions_mini_split_v1(self, cursor) -> None:
+        """10:1 stock split for prediction markets, fair-history table, banner sentinel.
+
+        Quantity columns scale ×10; jopa and price columns are untouched. The
+        contract value constant moves 100→10 in code so the same trade payload
+        clears at the same jopa total. Combined with the per-trade VWAP rewrite,
+        every existing position's P&L is preserved exactly.
+
+        Also creates ``prediction_fair_snapshots`` (the new EOD-fair history
+        feeding the per-market chart), backfills one row per still-open market,
+        and writes a one-shot ``split_announced=0`` sentinel into ``app_kv`` so
+        the next daily digest can post a one-time 'units restated' notice.
+        """
+        cursor.execute(
+            "UPDATE prediction_positions "
+            "SET yes_contracts = yes_contracts * 10, "
+            "    no_contracts = no_contracts * 10"
+        )
+        cursor.execute(
+            "UPDATE prediction_levels SET remaining_size = remaining_size * 10"
+        )
+        cursor.execute(
+            "UPDATE prediction_trades SET contracts = contracts * 10"
+        )
+
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS prediction_fair_snapshots (
+                snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                market_id   INTEGER NOT NULL,
+                guild_id    INTEGER NOT NULL,
+                snapshot_at INTEGER NOT NULL,
+                fair_pct    INTEGER NOT NULL,
+                reason      TEXT NOT NULL
+            )
+            """
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_prediction_fair_snapshots_lookup "
+            "ON prediction_fair_snapshots(market_id, guild_id, snapshot_at)"
+        )
+        cursor.execute(
+            """
+            INSERT OR IGNORE INTO prediction_fair_snapshots
+                (market_id, guild_id, snapshot_at, fair_pct, reason)
+            SELECT
+                prediction_id,
+                guild_id,
+                COALESCE(last_refresh_at, CAST(strftime('%s', 'now') AS INTEGER)),
+                COALESCE(current_price, initial_fair),
+                'backfill'
+            FROM predictions
+            WHERE status = 'open'
+              AND COALESCE(current_price, initial_fair) IS NOT NULL
+            """
+        )
+
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS app_kv (
+                guild_id INTEGER NOT NULL,
+                key TEXT NOT NULL,
+                value TEXT NOT NULL,
+                PRIMARY KEY (guild_id, key)
+            )
+            """
+        )
+        cursor.execute(
+            """
+            INSERT OR IGNORE INTO app_kv (guild_id, key, value)
+            SELECT DISTINCT guild_id, 'split_announced', '0'
+            FROM prediction_trades
+            JOIN predictions USING (prediction_id)
             """
         )

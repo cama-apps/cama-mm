@@ -770,7 +770,8 @@ class PredictionService:
 
         Skips the random drift / observed-mid logic of the daily refresh — admin
         is explicitly saying "the market should be at this price now". Uses the
-        same `apply_refresh` path so layering + cross-prevention apply.
+        same `apply_refresh` path so layering applies. Crossing leftovers from
+        prior flow are deliberately preserved as arb opportunities.
         """
         if not (PREDICTION_PRICE_LOW <= new_price <= PREDICTION_PRICE_HIGH):
             raise ValueError(
@@ -786,7 +787,9 @@ class PredictionService:
         old_price = int(pred.get("current_price") or PREDICTION_INITIAL_FAIR_DEFAULT)
         levels = self._build_initial_levels(new_price)
         now = int(time.time())
-        self.prediction_repo.apply_refresh(prediction_id, new_price, levels, now)
+        self.prediction_repo.apply_refresh(
+            prediction_id, new_price, levels, now, reason="set_fair"
+        )
         return {
             "prediction_id": prediction_id,
             "old_price": old_price,

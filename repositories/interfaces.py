@@ -893,8 +893,20 @@ class IPredictionRepository(ABC):
         new_price: int,
         levels: list[tuple[str, int, int]],
         now_ts: int,
+        reason: str = "refresh",
     ) -> None:
-        """Atomically: cancel old levels, post new ones, set current_price + last_refresh_at."""
+        """Layer fresh size + new fair onto the ladder; record a fair snapshot.
+
+        ``reason`` is one of 'refresh' / 'set_fair' / 'create' and is stored on
+        the snapshot row so the chart can label admin overrides separately.
+        """
+        ...
+
+    @abstractmethod
+    def get_fair_history(
+        self, prediction_id: int, guild_id: int
+    ) -> list[tuple[int, int]]:
+        """Return ``[(snapshot_at, fair_pct), ...]`` for the per-market chart."""
         ...
 
     @abstractmethod

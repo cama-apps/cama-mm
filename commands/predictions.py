@@ -31,6 +31,7 @@ from config import (
 )
 from services.permissions import has_admin_permission
 from services.prediction_service import PredictionService
+from utils.drawing.predictions import draw_market_fair_history
 from utils.formatting import JOPACOIN_EMOTE, format_duration_short
 from utils.interaction_safety import safe_defer, safe_followup
 
@@ -38,6 +39,29 @@ logger = logging.getLogger("cama_bot.commands.predictions")
 
 MARKET_TITLE_PREFIX = "📈 Market #"
 MARKET_TITLE_RE = re.compile(rf"{re.escape(MARKET_TITLE_PREFIX)}(\d+)")
+
+
+def _avg_price_pct(cost_basis: int, qty: int) -> float:
+    """Average price in % units (0..100), independent of CONTRACT_VALUE.
+
+    A position of ``qty`` contracts cost ``qty * price_pct * CV / 100`` jopa, so
+    inverting: ``avg_pct = cost_basis * 100 / (qty * CV)``.
+    """
+    if qty <= 0:
+        return 0.0
+    return (cost_basis * 100) / (qty * PREDICTION_CONTRACT_VALUE)
+
+
+def _upnl_jopa(mark_pct: float, avg_pct: float, qty: int) -> int:
+    """Unrealized jopa P&L for a long position marked at ``mark_pct``."""
+    return int((mark_pct - avg_pct) * qty * PREDICTION_CONTRACT_VALUE / 100)
+
+
+def _mark_value_jopa(mark_pct: float | int | None, qty: int) -> int:
+    """Mark-to-market jopa value of ``qty`` contracts at ``mark_pct``."""
+    if mark_pct is None:
+        return 0
+    return int(mark_pct * qty * PREDICTION_CONTRACT_VALUE / 100)
 
 
 # --------------------------------------------------------------------------- #
@@ -179,15 +203,15 @@ def _format_position_card(pos: dict, book: dict) -> str:
         return ""
     parts = []
     if yes_c > 0:
-        avg = int(pos["yes_cost_basis_total"]) / yes_c
+        avg = _avg_price_pct(int(pos["yes_cost_basis_total"]), yes_c)
         mark = PredictionService.position_mark(book, "yes")
-        upnl = ((mark - avg) * yes_c) if mark is not None else 0
-        parts.append(f"YES {yes_c} @ avg {avg:.1f} (mark {mark if mark is not None else '-'}, uPnL {int(upnl):+d})")
+        upnl = _upnl_jopa(mark, avg, yes_c) if mark is not None else 0
+        parts.append(f"YES {yes_c} @ avg {avg:.1f} (mark {mark if mark is not None else '-'}, uPnL {upnl:+d})")
     if no_c > 0:
-        avg = int(pos["no_cost_basis_total"]) / no_c
+        avg = _avg_price_pct(int(pos["no_cost_basis_total"]), no_c)
         mark = PredictionService.position_mark(book, "no")
-        upnl = ((mark - avg) * no_c) if mark is not None else 0
-        parts.append(f"NO  {no_c} @ avg {avg:.1f} (mark {mark if mark is not None else '-'}, uPnL {int(upnl):+d})")
+        upnl = _upnl_jopa(mark, avg, no_c) if mark is not None else 0
+        parts.append(f"NO  {no_c} @ avg {avg:.1f} (mark {mark if mark is not None else '-'}, uPnL {upnl:+d})")
     return "Your position: " + " | ".join(parts)
 
 
@@ -215,19 +239,22 @@ class BuyContractsModal(discord.ui.Modal):
         balance: int,
     ):
         from config import PREDICTION_MAX_CONTRACTS_PER_TRADE
+        from repositories.prediction_repository import _quote_total
 
         side_label = side.upper()
-        # Title carries the per-contract price so the user sees their cost up
-        # front. Discord caps modal titles at 45 chars; this fits with room.
-        super().__init__(title=f"Buy {side_label} @ {unit_price} jopa each")
+        # Title carries the price quote in % so the user sees the implied
+        # probability up front. Discord caps modal titles at 45 chars.
+        super().__init__(title=f"Buy {side_label} @ {unit_price}%")
         self.cog = cog
         self.prediction_id = prediction_id
         self.side = side  # 'yes' or 'no'
         # Hard cap per trade (positive integers up to PREDICTION_MAX_CONTRACTS_PER_TRADE).
         effective_max = min(max_available, PREDICTION_MAX_CONTRACTS_PER_TRADE)
         self.contracts.label = f"How many? ({balance} jopa available)"
+        sample_cost = _quote_total(5 * unit_price, "buy")
         self.contracts.placeholder = (
-            f"e.g. 5  →  costs {5 * unit_price} jopa, wins {5 * 100} if {side_label}"
+            f"e.g. 5  →  costs {sample_cost} jopa, wins "
+            f"{5 * PREDICTION_CONTRACT_VALUE} if {side_label}"
             if effective_max >= 5
             else f"max {effective_max} at top of book"
         )
@@ -302,7 +329,7 @@ class SellContractsModal(discord.ui.Modal):
         self.prediction_id = prediction_id
         self.side = side
         self.contracts.placeholder = (
-            f"max {held}, top bid price {unit_price}"
+            f"max {held}, top bid {unit_price}%"
             if unit_price is not None
             else f"max {held}"
         )
@@ -581,7 +608,9 @@ class PredictionCommands(commands.Cog):
 
     # -- embed builders ---
 
-    def _build_market_embed(self, view: dict) -> discord.Embed:
+    def _build_market_embed(
+        self, view: dict, chart_filename: str | None = None
+    ) -> discord.Embed:
         question = view.get("question", "")
         price = view.get("current_price")
         volume = view.get("volume_since_refresh", 0)
@@ -615,8 +644,37 @@ class PredictionCommands(commands.Cog):
             position_text = _format_position_card(position, book)
             if position_text:
                 embed.add_field(name="​", value=position_text, inline=False)
+        if chart_filename:
+            embed.set_image(url=f"attachment://{chart_filename}")
         embed.set_footer(text=f"{PREDICTION_CONTRACT_VALUE} jopa per winning contract")
         return embed
+
+    async def _render_market_chart_file(self, view: dict) -> discord.File | None:
+        """Render the per-market fair-history chart as a discord.File.
+
+        Returns None on render failure so embed updates aren't blocked by a
+        chart bug.
+        """
+        market_id = view.get("prediction_id")
+        if market_id is None:
+            return None
+        guild_id = int(view.get("guild_id") or 0)
+        created_at = int(view.get("created_at") or 0)
+        try:
+            snapshots = await asyncio.to_thread(
+                self.prediction_service.prediction_repo.get_fair_history,
+                market_id,
+                guild_id,
+            )
+            chart_bytes = await asyncio.to_thread(
+                functools.partial(
+                    draw_market_fair_history, market_id, snapshots, created_at
+                )
+            )
+        except Exception as e:
+            logger.warning("Failed to render market chart for %s: %s", market_id, e)
+            return None
+        return discord.File(chart_bytes, filename=f"predict_{market_id}.png")
 
     def _build_resolved_embed(self, view: dict) -> discord.Embed:
         outcome = (view.get("outcome") or "?").upper()
@@ -646,30 +704,30 @@ class PredictionCommands(commands.Cog):
         yes_c = int(position.get("yes_contracts", 0))
         no_c = int(position.get("no_contracts", 0))
         if yes_c > 0:
-            avg = int(position["yes_cost_basis_total"]) / yes_c
+            avg = _avg_price_pct(int(position["yes_cost_basis_total"]), yes_c)
             mark = PredictionService.position_mark(book, "yes")
-            upnl = ((mark - avg) * yes_c) if mark is not None else 0
+            upnl = _upnl_jopa(mark, avg, yes_c) if mark is not None else 0
             embed.add_field(
                 name="YES",
                 value=(
                     f"contracts: **{yes_c}**\n"
                     f"avg cost: {avg:.1f}\n"
                     f"mark: {mark if mark is not None else '-'}\n"
-                    f"uPnL: **{int(upnl):+d}**"
+                    f"uPnL: **{upnl:+d}**"
                 ),
                 inline=True,
             )
         if no_c > 0:
-            avg = int(position["no_cost_basis_total"]) / no_c
+            avg = _avg_price_pct(int(position["no_cost_basis_total"]), no_c)
             mark = PredictionService.position_mark(book, "no")
-            upnl = ((mark - avg) * no_c) if mark is not None else 0
+            upnl = _upnl_jopa(mark, avg, no_c) if mark is not None else 0
             embed.add_field(
                 name="NO",
                 value=(
                     f"contracts: **{no_c}**\n"
                     f"avg cost: {avg:.1f}\n"
                     f"mark: {mark if mark is not None else '-'}\n"
-                    f"uPnL: **{int(upnl):+d}**"
+                    f"uPnL: **{upnl:+d}**"
                 ),
                 inline=True,
             )
@@ -694,13 +752,16 @@ class PredictionCommands(commands.Cog):
 
             if view["status"] == "resolved":
                 embed = self._build_resolved_embed(view)
-                await msg.edit(embed=embed, view=None)
+                await msg.edit(embed=embed, view=None, attachments=[])
             elif view["status"] == "cancelled":
                 embed = self._build_cancelled_embed(view)
-                await msg.edit(embed=embed, view=None)
+                await msg.edit(embed=embed, view=None, attachments=[])
             else:
-                embed = self._build_market_embed(view)
-                await msg.edit(embed=embed)
+                chart_file = await self._render_market_chart_file(view)
+                chart_filename = chart_file.filename if chart_file else None
+                embed = self._build_market_embed(view, chart_filename=chart_filename)
+                attachments = [chart_file] if chart_file else []
+                await msg.edit(embed=embed, attachments=attachments)
         except discord.NotFound:
             logger.debug("Market embed message vanished for %s", prediction_id)
         except Exception as e:
@@ -798,9 +859,13 @@ class PredictionCommands(commands.Cog):
             view_data = await asyncio.to_thread(
                 self.prediction_service.get_market_view, prediction_id
             )
-            embed = self._build_market_embed(view_data)
+            chart_file = await self._render_market_chart_file(view_data)
+            chart_filename = chart_file.filename if chart_file else None
+            embed = self._build_market_embed(view_data, chart_filename=chart_filename)
             view = PersistentMarketView(self)
-            embed_msg = await thread.send(embed=embed, view=view)
+            embed_msg = await thread.send(
+                embed=embed, view=view, file=chart_file or discord.utils.MISSING
+            )
             try:
                 await embed_msg.pin()
             except discord.Forbidden:
@@ -1114,11 +1179,18 @@ class PredictionCommands(commands.Cog):
 
         if view_data["status"] == "resolved":
             embed = self._build_resolved_embed(view_data)
+            await safe_followup(interaction, embed=embed)
         elif view_data["status"] == "cancelled":
             embed = self._build_cancelled_embed(view_data)
+            await safe_followup(interaction, embed=embed)
         else:
-            embed = self._build_market_embed(view_data)
-        await safe_followup(interaction, embed=embed)
+            chart_file = await self._render_market_chart_file(view_data)
+            chart_filename = chart_file.filename if chart_file else None
+            embed = self._build_market_embed(view_data, chart_filename=chart_filename)
+            if chart_file:
+                await safe_followup(interaction, embed=embed, file=chart_file)
+            else:
+                await safe_followup(interaction, embed=embed)
 
     # -- /predict help ---
 
@@ -1185,7 +1257,7 @@ class PredictionCommands(commands.Cog):
 
         # Build a code-block table per (market, side) row
         rows = []
-        rows.append(f"{'Market':<28}{'Side':<5}{'Qty':>5}{'Cost':>7}{'Mark':>6}{'uPnL':>7}")
+        rows.append(f"{'Market':<28}{'Side':<5}{'Qty':>5}{'Avg%':>7}{'Mark':>6}{'uPnL':>7}")
         rows.append("-" * 58)
         total_cost = 0
         total_mark = 0
@@ -1199,9 +1271,9 @@ class PredictionCommands(commands.Cog):
                 if qty == 0:
                     continue
                 basis = int(p[f"{side}_cost_basis_total"])
-                avg = basis / qty
+                avg = _avg_price_pct(basis, qty)
                 mark_p = PredictionService.position_mark(book, side)
-                mark_value = (mark_p * qty) if mark_p is not None else 0
+                mark_value = _mark_value_jopa(mark_p, qty)
                 upnl = mark_value - basis
                 total_cost += basis
                 total_mark += mark_value
