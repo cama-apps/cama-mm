@@ -70,8 +70,15 @@ The bot uses a **Glicko-2 rating system** for team balancing. Players are matche
      DB_PATH=/path/to/cama_shuffle.db   # overrides the default sqlite file
      OPENDOTA_API_KEY=your_opendota_key  # unlocks the 1200 req/min rate limit
      STEAM_API_KEY=your_steam_api_key    # enables Valve API match enrichment
+     DIG_CHANNEL_ID=123456789012345678   # gates /dig commands and routes output to this channel
      ```
      Both default to sane values (`cama_shuffle.db` and no API key) if omitted.
+
+   **Dig channel setup:** when `DIG_CHANNEL_ID` is set, all `/dig *` invocations
+   must happen in that channel (or a thread under it) and public dig output
+   posts there. To also hide the slash commands from other channels, restrict
+   the bot's integration in Discord: Server Settings → Integrations → Cama MM →
+   Channels.
 
 6. **Invite bot to your server:**
    - In Discord Developer Portal, go to OAuth2 > URL Generator

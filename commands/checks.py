@@ -59,13 +59,38 @@ async def require_gamba_channel(
 
 
 async def require_dig_channel(interaction: discord.Interaction) -> bool:
-    """Variant of ``require_gamba_channel`` that also accepts ``DIG_CHANNEL_ID``.
+    """Gate /dig commands to the configured DIG_CHANNEL_ID.
 
-    A guild can designate a dedicated dig channel via the ``DIG_CHANNEL_ID``
-    env var; this check lets /dig run there even if the channel name lacks
-    'gamba'. Threads under that channel pass too.
+    Threads under the dig channel inherit (parent.id check). If
+    DIG_CHANNEL_ID is unset, or the configured channel can't be resolved in
+    this guild, fall back to require_gamba_channel so other guilds and
+    misconfigured deploys keep working. Wrong channel charges 1 JC and sends
+    an ephemeral pointer. Must be called before deferring.
     """
     from config import DIG_CHANNEL_ID
 
-    extra: tuple[int, ...] = (DIG_CHANNEL_ID,) if DIG_CHANNEL_ID else ()
-    return await require_gamba_channel(interaction, extra_allowed_channel_ids=extra)
+    if DIG_CHANNEL_ID is None:
+        return await require_gamba_channel(interaction)
+
+    guild = interaction.guild
+    if guild is None or guild.get_channel(DIG_CHANNEL_ID) is None:
+        return await require_gamba_channel(interaction)
+
+    channel = interaction.channel
+    if getattr(channel, "id", None) == DIG_CHANNEL_ID:
+        return True
+    parent = getattr(channel, "parent", None)
+    if parent is not None and getattr(parent, "id", None) == DIG_CHANNEL_ID:
+        return True
+
+    user_id = interaction.user.id
+    guild_id = guild.id
+    player_service = interaction.client.player_service  # type: ignore[union-attr]
+    await asyncio.to_thread(player_service.adjust_balance, user_id, guild_id, -1)
+
+    await interaction.response.send_message(
+        f"The earth here is silent. Your tools belong in <#{DIG_CHANNEL_ID}> — "
+        "a single jopacoin dissolves into the ether as penance.",
+        ephemeral=True,
+    )
+    return False

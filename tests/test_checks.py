@@ -31,7 +31,7 @@ def _mock_interaction(
     interaction = SimpleNamespace(
         channel=channel,
         user=SimpleNamespace(id=42),
-        guild=SimpleNamespace(id=99),
+        guild=SimpleNamespace(id=99, get_channel=lambda _id: SimpleNamespace()),
         client=SimpleNamespace(
             player_service=SimpleNamespace(adjust_balance=lambda *a, **k: None)
         ),

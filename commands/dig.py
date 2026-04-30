@@ -2067,10 +2067,16 @@ class DigCommands(commands.Cog):
                     )
                 embed.set_footer(text="Weather affects all diggers in that layer today. Use /dig weather for details.")
 
-                for channel in guild.text_channels:
-                    if "gamba" in channel.name.lower():
-                        await channel.send(embed=embed)
-                        break
+                target = None
+                if DIG_CHANNEL_ID is not None:
+                    target = guild.get_channel(DIG_CHANNEL_ID)
+                if target is None:
+                    for channel in guild.text_channels:
+                        if "gamba" in channel.name.lower():
+                            target = channel
+                            break
+                if target is not None:
+                    await target.send(embed=embed)
             except Exception:
                 logger.exception("Failed to broadcast weather for guild %s", guild.id)
 
