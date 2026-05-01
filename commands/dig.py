@@ -2433,9 +2433,11 @@ class DigCommands(commands.Cog):
         interactive boon/choice encounters.
         """
         cost = getattr(result, "paid_dig_cost", 0)
+        cooldown_remaining = getattr(result, "cooldown_remaining", 0)
+        cooldown_str = _fmt_duration(int(cooldown_remaining))
         embed = discord.Embed(
             title="Paid Dig Required",
-            description=f"Continuing costs **{cost}** {JOPACOIN_EMOTE}. Proceed?",
+            description=f"Free dig on cooldown for **{cooldown_str}**.\nContinuing costs **{cost}** {JOPACOIN_EMOTE}. Proceed?",
             color=0xFFA500,
         )
         view = PaidDigView(self.dig_service, interaction.user.id, guild_id, cost)
