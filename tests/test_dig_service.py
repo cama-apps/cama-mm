@@ -148,7 +148,7 @@ class TestCooldown:
     """Tests for dig cooldown mechanics."""
 
     def test_dig_cooldown_blocks_free_dig(self, dig_service, player_repository, guild_id, monkeypatch):
-        """Can't free dig within 4h."""
+        """Can't free dig within 3h."""
         _register_player(player_repository)
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
         result = dig_service.dig(10001, guild_id)

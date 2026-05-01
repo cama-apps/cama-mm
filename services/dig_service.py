@@ -6401,6 +6401,7 @@ class DigService:
                 ),
                 gear_broken=gear_broken_names,
                 gear_drop=gear_drop,
+                luminosity_display=self._luminosity_combat_display(tunnel),
             )
 
         # Loss branch
@@ -6469,6 +6470,7 @@ class DigService:
             ),
             gear_broken=gear_broken_names,
             gear_drop=None,
+            luminosity_display=self._luminosity_combat_display(tunnel),
         )
 
     def retreat_boss(self, discord_id: int, guild_id) -> dict:
