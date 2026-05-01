@@ -4860,13 +4860,13 @@ RANDOM_EVENTS: list[RandomEvent] = [
         ),
         risky_option=EventChoice(
             "Meet its gaze",
-            success=EventOutcome("The eye blinks once. Something it had been holding for someone else slides into your hands.", 0, 0, False),
+            success=EventOutcome("The eye blinks once. Something it had been holding for someone else slides into your hands — and you find you can read the stone the way it does.", 0, 0, False),
             failure=EventOutcome("It looks longer than you do. The cave answers for both of you.", 0, -50, True),
             success_chance=0.50,
         ),
         desperate_option=EventChoice(
             "Speak to it",
-            success=EventOutcome("The dark answers in your own voice. Several caches change hands at once.", 1, 30, False),
+            success=EventOutcome("The dark answers in your own voice. Several caches change hands. You leave knowing things about the rock that no one teaches.", 1, 30, False),
             failure=EventOutcome("Your voice carries somewhere it shouldn't. The cave folds in on you.", -2, -90, True),
             success_chance=0.25,
         ),
