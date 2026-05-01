@@ -508,6 +508,35 @@ class TestPersistedHPCarry:
         assert entry_25.get("hp_max") == 10
 
 
+    def test_retreat_preserves_other_boundaries(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        """``retreat_boss`` must not wipe carry data on other boundaries.
+        Same flattening-accessor write bug as the loss path, just on the
+        retreat write site."""
+        _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
+        progress = json.dumps({
+            "25": {"boss_id": "grothak", "status": "active"},
+            "50": {
+                "boss_id": "crystalia", "status": "active",
+                "hp_remaining": 3, "hp_max": 14, "last_engaged_at": 2_000,
+            },
+        })
+        dig_repo.update_tunnel(10001, TEST_GUILD_ID, boss_progress=progress)
+
+        result = dig_service.retreat_boss(10001, TEST_GUILD_ID)
+        assert result["success"] is True
+
+        fresh = dict(dig_repo.get_tunnel(10001, TEST_GUILD_ID))
+        bp = json.loads(fresh["boss_progress"])
+        entry_50 = bp.get("50")
+        assert isinstance(entry_50, dict), (
+            f"Boundary 50 lost its dict shape after retreat at 25; got {entry_50!r}"
+        )
+        assert entry_50.get("hp_remaining") == 3
+        assert entry_50.get("hp_max") == 14
+
+
 class TestApplyOptionOutcome:
     """``_apply_option_outcome_to_state`` rolls the option distribution and
     applies the chosen OutcomeRoll deltas + status effects to the duel state."""

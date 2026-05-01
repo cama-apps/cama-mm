@@ -6265,9 +6265,14 @@ class DigService:
                 next_phase_num = 2 if needs_phase2 else 3
                 phase_event = random.choice(PHASE_TRANSITION_EVENTS)
                 # Mark next phase status, preserving boss_id when present.
+                # Drop hp_remaining/hp_max so the next phase starts with its
+                # own fresh HP pool (each phase has its own HP).
                 if isinstance(current_entry, dict):
-                    current_entry["status"] = next_status
-                    boss_progress[str(at_boss)] = current_entry
+                    next_entry = dict(current_entry)
+                    next_entry["status"] = next_status
+                    next_entry.pop("hp_remaining", None)
+                    next_entry.pop("hp_max", None)
+                    boss_progress[str(at_boss)] = next_entry
                 else:
                     boss_progress[str(at_boss)] = {
                         "boss_id": boss.boss_id if boss else "",
@@ -6509,7 +6514,7 @@ class DigService:
             return self._error("You don't have a tunnel.")
 
         tunnel = dict(tunnel)
-        boss_progress = self._get_boss_progress(tunnel)
+        boss_progress = self._get_boss_progress_entries(tunnel)
         depth = tunnel.get("depth", 0)
         at_boss = self._at_boss_boundary(depth, boss_progress)
 
