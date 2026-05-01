@@ -4665,6 +4665,218 @@ RANDOM_EVENTS: list[RandomEvent] = [
             trigger="success", mode="steal",
         ),
     ),
+
+    # ---- Rumor pass: a small batch of additional events. Mostly cross-player,
+    # mostly layer-restricted. Splash configs reuse existing strategies.
+    # -------------------------------------------------------------------------
+
+    RandomEvent(
+        id="wisps_tether",
+        name="Wisp's Tether",
+        description=(
+            "A drifting mote of light recognizes you. As you cup your hand around it, a second mote pulses awake somewhere far above.",
+            "The wisp leans toward your warmth, then tilts — as if it can hear someone else who needs it more.",
+        ),
+        min_depth=51, max_depth=75,
+        safe_option=EventChoice(
+            "Wave the wisp off",
+            success=EventOutcome("The mote drifts away. The cave is colder for its absence.", 0, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Cup the light gently",
+            success=EventOutcome("The wisp doubles in your palm. A second flicker brightens far above.", 0, 6, False),
+            failure=EventOutcome("The mote burns through your fingers and is gone.", 0, -3, False),
+            success_chance=0.60,
+        ),
+        rarity="common", social=True,
+        splash=SplashConfig(
+            strategy="random_active", victim_count=1, penalty_jc=4,
+            trigger="success", mode="grant",
+        ),
+    ),
+
+    RandomEvent(
+        id="tunnel_echoes",
+        name="Tunnel Echoes",
+        description=(
+            "Your pickaxe rings wrong. Stone shifts somewhere it shouldn't have.",
+            "The walls carry your mistake to places you can't see. Someone there feels it.",
+        ),
+        min_depth=None, max_depth=None,
+        safe_option=EventChoice(
+            "Muffle the strike",
+            success=EventOutcome("You ease the swing. Slow and quiet pays a small dividend.", 0, 1, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Swing through it",
+            success=EventOutcome("The stone gives clean. Your strike lands where you wanted.", 0, 5, False),
+            failure=EventOutcome("Your strike rolls long. Something gives way somewhere else.", 0, -3, False),
+            success_chance=0.60,
+        ),
+        rarity="common", social=True,
+        splash=SplashConfig(
+            strategy="active_diggers", victim_count=1, penalty_jc=3,
+            trigger="failure", mode="burn",
+        ),
+    ),
+
+    RandomEvent(
+        id="stalled_caravan",
+        name="Stalled Caravan",
+        description=(
+            "A wagon wheel half-sunk in dirt. A faint voice asks if you're going their way.",
+            "Tracks lead nowhere. The cart still smells of oil, recently.",
+        ),
+        min_depth=None, max_depth=25,
+        safe_option=EventChoice(
+            "Walk on by",
+            success=EventOutcome("You don't get involved. The voice fades.", 0, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Lend a shoulder",
+            success=EventOutcome("The wheel pops free. The driver presses coin into your palm and is gone.", 0, 8, False),
+            failure=EventOutcome("The wagon tips the wrong way. You pay for what broke.", 0, -5, False),
+            success_chance=0.65,
+        ),
+        rarity="common",
+    ),
+
+    RandomEvent(
+        id="volatile_affix",
+        name="Volatile Affix",
+        description=(
+            "A jagged crystal pulses with a rhythm that doesn't match the cave. Pressing it is an invitation.",
+            "The shard hums against your palm in a key the rock doesn't share.",
+        ),
+        min_depth=51, max_depth=75,
+        safe_option=EventChoice(
+            "Step around it",
+            success=EventOutcome("You leave the shard humming. Some bargains aren't worth the noise.", 0, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Press the shard",
+            success=EventOutcome("The hum settles into your bones. The next few swings feel charged.", 0, 6, False),
+            failure=EventOutcome("The shard cracks against your palm and the hum cuts out.", 0, -8, False),
+            success_chance=0.55,
+        ),
+        buff_on_success=TempBuff("affix_hum", "Affix Hum", 2, {"advance_bonus": 1}),
+        rarity="uncommon",
+    ),
+
+    RandomEvent(
+        id="rivals_cache",
+        name="Rival's Cache",
+        description=(
+            "A camouflaged stash, tucked behind a false stone. Someone deliberate left this. They'll know.",
+            "Tools laid out. Marks fresh. You aren't the first one here today.",
+        ),
+        min_depth=None, max_depth=25,
+        safe_option=EventChoice(
+            "Leave it untouched",
+            success=EventOutcome("You reseal the stone and walk on. Some rivals you don't poke.", 0, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Pry it open",
+            success=EventOutcome("The stash gives. Whoever stocked it is going to feel that.", 0, 0, False),
+            failure=EventOutcome("A snare you didn't see takes its toll.", 0, -6, False),
+            success_chance=0.55,
+        ),
+        rarity="uncommon", social=True,
+        splash=SplashConfig(
+            strategy="richest_n", victim_count=1, penalty_jc=8,
+            trigger="success", mode="steal",
+        ),
+    ),
+
+    RandomEvent(
+        id="forsaken_pact",
+        name="Forsaken Pact",
+        description=(
+            "A voice from the cracks offers a deal. The wording is careful. Too careful.",
+            "The dark proposes. The terms aren't only for you.",
+        ),
+        min_depth=101, max_depth=150,
+        safe_option=EventChoice(
+            "Refuse the wording",
+            success=EventOutcome("You walk away. The voice charges a small fee for your time.", 0, -2, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Accept the bargain",
+            success=EventOutcome("The pact pays out in your purse. The voice keeps its end.", 0, 20, False),
+            failure=EventOutcome("The cost of breaking the deal pours through the cracks. Others nearby feel it.", 0, -10, False),
+            success_chance=0.50,
+        ),
+        rarity="uncommon", social=True,
+        splash=SplashConfig(
+            strategy="active_diggers", victim_count=2, penalty_jc=5,
+            trigger="failure", mode="burn",
+        ),
+    ),
+
+    RandomEvent(
+        id="mapworks_drift",
+        name="Mapworks Drift",
+        description=(
+            "A folded map unfurls itself in midair. It points to riches in places no one has dug yet.",
+            "Lines redraw themselves on the parchment. Several names brighten — none of them yours.",
+        ),
+        min_depth=51, max_depth=75,
+        safe_option=EventChoice(
+            "Refold the map",
+            success=EventOutcome("You tuck the parchment away. Some directions you don't follow.", 0, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Follow the lines",
+            success=EventOutcome("The map sings. You return heavy, and you weren't the only one paid.", 1, 20, False),
+            failure=EventOutcome("The lines led somewhere that isn't there anymore.", 0, -12, False),
+            success_chance=0.55,
+        ),
+        rarity="rare", social=True,
+        splash=SplashConfig(
+            strategy="random_active", victim_count=2, penalty_jc=8,
+            trigger="success", mode="grant",
+        ),
+    ),
+
+    RandomEvent(
+        id="the_eye_opens",
+        name="The Eye Opens",
+        description=(
+            "A seam in the rock parts. An eye looks back. It is not blinking. It is listening.",
+            "The dark watches you watching it. The transaction has already started.",
+        ),
+        min_depth=101, max_depth=150,
+        safe_option=EventChoice(
+            "Avert your eyes",
+            success=EventOutcome("You look away. The dark accepts the courtesy and lets you through.", 0, 3, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Meet its gaze",
+            success=EventOutcome("The eye blinks once. Something it had been holding for someone else slides into your hands.", 0, 0, False),
+            failure=EventOutcome("It looks longer than you do. The cave answers for both of you.", 0, -50, True),
+            success_chance=0.50,
+        ),
+        desperate_option=EventChoice(
+            "Speak to it",
+            success=EventOutcome("The dark answers in your own voice. Several caches change hands at once.", 1, 30, False),
+            failure=EventOutcome("Your voice carries somewhere it shouldn't. The cave folds in on you.", -2, -90, True),
+            success_chance=0.25,
+        ),
+        buff_on_success=TempBuff("whispered_insight", "Whispered Insight", 3, {"cave_in_reduction": 0.20}),
+        rarity="legendary", social=True, requires_dark=True,
+        splash=SplashConfig(
+            strategy="richest_n", victim_count=1, penalty_jc=28,
+            trigger="success", mode="steal",
+        ),
+    ),
 ]
 
 
