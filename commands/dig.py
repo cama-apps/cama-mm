@@ -42,15 +42,22 @@ def _splash_aftermath_lines(splash: dict) -> list[str]:
     """Format splash victim lines for display in embeds.
 
     Returned as a list so callers can join with newlines or slice for the
-    public broadcast vs. the digger's private reply.
+    public broadcast vs. the digger's private reply. If an LLM narrative
+    is present on the splash dict, it is rendered as the first (italic)
+    line above the deterministic per-victim lines.
     """
     victims = splash.get("victims", []) if splash else []
     mode = (splash.get("mode") or "burn") if splash else "burn"
     sign = "+" if mode == "grant" else "-"
-    return [
+    lines: list[str] = []
+    narrative = (splash.get("llm_narrative") or "").strip() if splash else ""
+    if narrative:
+        lines.append(f"*{narrative}*")
+    lines.extend(
         f"<@{v['discord_id']}>: {sign}{v['amount']} {JOPACOIN_EMOTE}"
         for v in victims
-    ]
+    )
+    return lines
 
 
 # ---------------------------------------------------------------------------
@@ -1043,6 +1050,7 @@ class EventEncounterView(discord.ui.View):
         event_data: dict,
         luminosity: int = 100,
         target_channel: discord.abc.Messageable | None = None,
+        dig_llm_service: DigLLMService | None = None,
     ):
         super().__init__(timeout=60)
         self.dig_service = dig_service
@@ -1050,6 +1058,7 @@ class EventEncounterView(discord.ui.View):
         self.guild_id = guild_id
         self.event_data = event_data
         self.target_channel = target_channel
+        self.dig_llm_service = dig_llm_service
         safe_label = "Play it safe"
         risky_label = "Take the risk"
         if isinstance(event_data, dict):
@@ -1195,6 +1204,17 @@ class EventEncounterView(discord.ui.View):
         splash_obj = getattr(result, "splash", None)
         splash_d = splash_obj._d if hasattr(splash_obj, "_d") else splash_obj
         if isinstance(splash_d, dict) and splash_d.get("victims"):
+            if self.dig_llm_service is not None:
+                narrative = await self.dig_llm_service.narrate_splash(
+                    digger_id=self.user_id,
+                    guild_id=self.guild_id or 0,
+                    event_name=event.get("name", "Unknown Event"),
+                    event_description=msg,
+                    splash_mode=splash_d.get("mode", "burn"),
+                    victims=splash_d.get("victims", []),
+                )
+                if narrative:
+                    splash_d["llm_narrative"] = narrative
             aftermath_lines = _splash_aftermath_lines(splash_d)
             if aftermath_lines:
                 embed.add_field(
@@ -2544,6 +2564,7 @@ class DigCommands(commands.Cog):
         view = EventEncounterView(
             self.dig_service, interaction.user.id, guild_id, event_data,
             luminosity=_lum_val, target_channel=target_channel,
+            dig_llm_service=self.dig_llm_service,
         )
         if event_file:
             await self._send_public_dig(interaction, embed=event_embed, view=view, file=event_file)
