@@ -2972,13 +2972,12 @@ class DigCommands(commands.Cog):
 
         max_depth = max(_get(e, "depth", 0) for e in entries[:10]) or 1
         for i, entry in enumerate(entries[:10], 1):
-            name = _get(entry, "name", f"Player {_get(entry, 'user_id', '?')}")
+            name = _get(entry, "tunnel_name", None) or f"Tunnel #{_get(entry, 'discord_id', '?')}"
             depth = _get(entry, "depth", 0)
-            layer = _get(entry, "layer", "Dirt")
+            layer = self.dig_service.get_layer(depth).get("name", "Dirt")
             bar_len = max(1, int(20 * depth / max_depth))
             bar = "\u2588" * bar_len
-            medal = {1: "\U0001f947", 2: "\U0001f948", 3: "\U0001f949"}.get(i, f"`{i}.`")
-            lines.append(f"{medal} **{name}** — {depth} ({layer})\n`{bar}`")
+            lines.append(f"`{i:>2}.` **{name}** — {depth} ({layer})\n`{bar}`")
 
         # Requester's position
         user_pos = getattr(lb, "user_position", None)
