@@ -433,6 +433,81 @@ class TestStartBossDuel:
             assert opt["label"]
 
 
+class TestPersistedHPCarry:
+    """Boss HP carries between encounters through the public service entry
+    points. Regression for the bug where ``_get_boss_progress``'s flattening
+    silently dropped ``hp_remaining`` so every fight started fresh."""
+
+    def test_start_boss_duel_reads_persisted_hp(
+        self, dig_service, dig_repo, player_repository, monkeypatch, deterministic_rng,
+    ):
+        _at_boss(dig_service, dig_repo, player_repository, monkeypatch)
+        # Pre-seed the depth-25 entry as a wounded boss with hp_remaining=1.
+        # Pre-fix, _get_boss_progress flattened this to {"25": "active"} and
+        # _resolve_persisted_boss_hp returned fresh HP — fight took multiple
+        # rounds and triggered the round-3 mechanic pause.
+        progress = json.dumps({
+            "25": {
+                "boss_id": "grothak",
+                "status": "active",
+                "hp_remaining": 1,
+                "hp_max": 12,
+                "last_engaged_at": int(time.time()),
+            },
+        })
+        dig_repo.update_tunnel(10001, TEST_GUILD_ID, boss_progress=progress)
+        # Player hits (0.5 < 0.60), boss misses (0.5 > 0.30). Round 1 kills
+        # the 1-HP boss before any mechanic trigger.
+        monkeypatch.setattr(random, "random", lambda: 0.5)
+
+        result = dig_service.start_boss_duel(
+            10001, TEST_GUILD_ID, "cautious", wager=10,
+        )
+
+        assert result["success"] is True
+        assert result.get("won") is True, (
+            f"Expected wounded boss to die round 1; got {result}"
+        )
+        assert result.get("pending_prompt") is None, (
+            "Mechanic should not pause when the boss dies before its trigger round."
+        )
+
+    def test_loss_write_preserves_other_boundaries(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        """A loss at boundary B must not wipe boundary A's persisted HP.
+        Pre-fix, the loss path read boss_progress through the flattening
+        accessor, mutated, and re-serialized — collapsing every other
+        boundary's dict entry to a status string."""
+        _at_boss(dig_service, dig_repo, player_repository, monkeypatch, depth=49)
+        progress = json.dumps({
+            "25": {
+                "boss_id": "grothak", "status": "active",
+                "hp_remaining": 2, "hp_max": 10, "last_engaged_at": 1_000,
+            },
+            "50": {"boss_id": "crystalia", "status": "active"},
+        })
+        dig_repo.update_tunnel(10001, TEST_GUILD_ID, boss_progress=progress)
+        # All rolls fail → both miss every round → BOSS_ROUND_CAP loss.
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+
+        result = dig_service.fight_boss(
+            10001, TEST_GUILD_ID, "cautious", wager=10,
+        )
+        assert result["success"] is True
+        assert result["won"] is False
+
+        # Boundary 25's wounded carry must still be a dict with hp_remaining.
+        fresh = dict(dig_repo.get_tunnel(10001, TEST_GUILD_ID))
+        bp = json.loads(fresh["boss_progress"])
+        entry_25 = bp.get("25")
+        assert isinstance(entry_25, dict), (
+            f"Boundary 25 lost its dict shape after a loss at 50; got {entry_25!r}"
+        )
+        assert entry_25.get("hp_remaining") == 2
+        assert entry_25.get("hp_max") == 10
+
+
 class TestApplyOptionOutcome:
     """``_apply_option_outcome_to_state`` rolls the option distribution and
     applies the chosen OutcomeRoll deltas + status effects to the duel state."""

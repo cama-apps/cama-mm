@@ -3086,6 +3086,8 @@ class DigService:
             + weather_fx.get("jc_multiplier", 0)
         )
         jc_mult *= self._luminosity_jc_multiplier(luminosity)
+        if depth_before >= 276:
+            jc_mult *= 0.83
         jc_fixed = magma_heart_bonus + int(weather_fx.get("jc_bonus", 0))
         jc_min = max(0, int(jc_min_base * jc_mult) + jc_fixed)
         jc_max = max(0, int(jc_max_base * jc_mult) + jc_fixed)
@@ -4508,7 +4510,7 @@ class DigService:
 
         tunnel = dict(tunnel)
         tunnel["discord_id"] = discord_id
-        boss_progress = self._get_boss_progress(tunnel)
+        boss_progress = self._get_boss_progress_entries(tunnel)
         depth = tunnel.get("depth", 0)
         at_boss = self._at_boss_boundary(depth, boss_progress)
 
@@ -4556,7 +4558,11 @@ class DigService:
         # Phase accuracy penalty: phase 2 (status phase1_defeated) reads
         # BOSS_PHASE2; phase 3 (status phase2_defeated) reads BOSS_PHASE3.
         phase2_penalty = 0.0
-        _phase_status = boss_progress.get(str(at_boss))
+        _phase_entry = boss_progress.get(str(at_boss))
+        _phase_status = (
+            _phase_entry.get("status") if isinstance(_phase_entry, dict)
+            else _phase_entry
+        )
         if _phase_status == "phase1_defeated" and at_boss in BOSS_PHASE2:
             phase2_penalty = abs(BOSS_PHASE2[at_boss].win_odds_penalty)
         elif _phase_status == "phase2_defeated" and at_boss in BOSS_PHASE3:
@@ -4685,7 +4691,11 @@ class DigService:
         if won:
             # Phase gating: P2+ unlocks phase 2 (was P4); P5+ AND tier>=100 unlocks phase 3.
             # The phase event pool is also rolled at the transition for flavor.
-            current_status = boss_progress.get(str(at_boss), "active")
+            _cur_entry = boss_progress.get(str(at_boss), "active")
+            current_status = (
+                _cur_entry.get("status", "active") if isinstance(_cur_entry, dict)
+                else _cur_entry
+            )
             phase2_min_p = int(BOSS_PHASES.get("phase_2_min_prestige", 2))
             phase3_min_p = int(BOSS_PHASES.get("phase_3_min_prestige", 5))
             phase3_min_tier = int(BOSS_PHASES.get("phase_3_min_tier", 100))
@@ -4712,7 +4722,15 @@ class DigService:
                 # effects on the next round are TODO — for now only the flavor
                 # surfaces in the embed).
                 phase_event = random.choice(PHASE_TRANSITION_EVENTS)
-                boss_progress[str(at_boss)] = next_status
+                _prev_entry = boss_progress.get(str(at_boss))
+                if isinstance(_prev_entry, dict):
+                    _next_entry = dict(_prev_entry)
+                    _next_entry["status"] = next_status
+                    _next_entry.pop("hp_remaining", None)
+                    _next_entry.pop("hp_max", None)
+                    boss_progress[str(at_boss)] = _next_entry
+                else:
+                    boss_progress[str(at_boss)] = next_status
                 self.dig_repo.atomic_tunnel_balance_update(
                     discord_id, guild_id,
                     tunnel_updates={
@@ -4951,7 +4969,7 @@ class DigService:
         """
         now = int(time.time())
         depth = tunnel.get("depth", 0)
-        boss_progress = self._get_boss_progress(tunnel)
+        boss_progress = self._get_boss_progress_entries(tunnel)
 
         pinnacle_id = self._ensure_pinnacle_locked(discord_id, guild_id, tunnel)
         pinnacle = PINNACLE_BOSSES[pinnacle_id]
@@ -5632,7 +5650,7 @@ class DigService:
             self.dig_repo.tick_gear_durability(discord_id, guild_id)
             self.dig_repo.clear_active_duel(discord_id, guild_id)
 
-        boss_progress = self._get_boss_progress(tunnel)
+        boss_progress = self._get_boss_progress_entries(tunnel)
         depth = tunnel.get("depth", 0)
         at_boss = self._at_boss_boundary(depth, boss_progress)
         if at_boss is None:
@@ -5674,7 +5692,11 @@ class DigService:
         cheer_bonus = min(0.15, len(active_cheers) * 0.05)
 
         phase2_penalty = 0.0
-        _phase_status = boss_progress.get(str(at_boss))
+        _phase_entry = boss_progress.get(str(at_boss))
+        _phase_status = (
+            _phase_entry.get("status") if isinstance(_phase_entry, dict)
+            else _phase_entry
+        )
         if _phase_status == "phase1_defeated" and at_boss in BOSS_PHASE2:
             phase2_penalty = abs(BOSS_PHASE2[at_boss].win_odds_penalty)
         elif _phase_status == "phase2_defeated" and at_boss in BOSS_PHASE3:
@@ -6419,7 +6441,7 @@ class DigService:
         # from the caller (start_boss_duel / resume_boss_duel) — when the
         # caller didn't track these (legacy auto-resolve path with no HP
         # info), we skip persistence and the next encounter starts fresh.
-        bp_for_persist = self._get_boss_progress(tunnel)
+        bp_for_persist = self._get_boss_progress_entries(tunnel)
         if ending_boss_hp is not None and boss_hp_max is not None:
             self._persist_boss_hp_after_fight(
                 bp_for_persist, at_boss, boss.boss_id if boss else "",
