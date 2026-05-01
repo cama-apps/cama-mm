@@ -341,6 +341,7 @@ EXTENSIONS = [
     "commands.roll",
     "commands.dig",
     "commands.russianroulette",
+    "commands.reminders",
 ]
 
 
@@ -661,6 +662,11 @@ async def on_ready():
             _supervised_loop("prediction_digest", _prediction_digest_loop)
         )
         _prediction_digest_task.add_done_callback(_log_task_exit("prediction_digest"))
+
+    reminder_svc = getattr(bot, "reminder_service", None)
+    if reminder_svc:
+        guild_ids = [g.id for g in bot.guilds]
+        asyncio.ensure_future(reminder_svc.reschedule_all(bot, guild_ids))
 
 
 @bot.tree.error

@@ -1923,3 +1923,14 @@ class IDigRepository(ABC):
     def has_great_lantern(
         self, discord_id: int, guild_id: int | None,
     ) -> bool: ...
+
+
+class IReminderRepository(ABC):
+    @abstractmethod
+    def get_preferences(self, discord_id: int, guild_id: int) -> dict: ...
+
+    @abstractmethod
+    def set_preference(self, discord_id: int, guild_id: int, reminder_type: str, enabled: bool) -> None: ...
+
+    @abstractmethod
+    def get_enabled_users_for_type(self, guild_id: int, reminder_type: str) -> list[int]: ...

@@ -1902,6 +1902,9 @@ class BettingCommands(commands.Cog):
                 new_balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
 
             next_spin_time = int(now) + WHEEL_COOLDOWN_SECONDS
+            reminder_svc = getattr(self.bot, "reminder_service", None)
+            if reminder_svc:
+                reminder_svc.schedule_wheel_reminder(self.bot, user_id, guild_id, next_spin_time)
 
             # Log the explosion as a special result
             await asyncio.to_thread(
@@ -2827,6 +2830,9 @@ class BettingCommands(commands.Cog):
             next_spin_time = int(now) + WHEEL_LOSE_PENALTY_COOLDOWN
         else:
             next_spin_time = int(now) + WHEEL_COOLDOWN_SECONDS
+        reminder_svc = getattr(self.bot, "reminder_service", None)
+        if reminder_svc:
+            reminder_svc.schedule_wheel_reminder(self.bot, user_id, guild_id, next_spin_time)
 
         # Log the wheel spin for history tracking
         # For shell outcomes, log the actual amount gained/lost
