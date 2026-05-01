@@ -610,6 +610,9 @@ def _build_duel_prompt_embed(result) -> discord.Embed:
         value=f"You: **{player_hp}** HP  |  {boss_name}: **{boss_hp}** HP",
         inline=False,
     )
+    lum_line = raw.get("luminosity_display")
+    if lum_line:
+        embed.add_field(name="​", value=lum_line, inline=False)
     challenge = raw.get("timed_challenge")
     if challenge:
         kind = challenge.get("kind", "challenge")
@@ -736,6 +739,9 @@ def _build_boss_fight_result_embed(*, result, risk_tier: str, amount: int) -> di
         ),
         inline=False,
     )
+    lum_line = getattr(result, "luminosity_display", None)
+    if lum_line:
+        embed.add_field(name="​", value=lum_line, inline=False)
     if getattr(result, "echo_applied", False):
         killer_id = getattr(result, "echo_killer_id", None)
         killer_mention = f"<@{killer_id}>" if killer_id else "a guildmate"
@@ -2373,6 +2379,10 @@ class DigCommands(commands.Cog):
             embed.set_image(url=f"attachment://{boss_file.filename}")
         elif hasattr(boss_info, "ascii_art"):
             embed.add_field(name="\u200b", value=f"```\n{boss_info.ascii_art}\n```", inline=False)
+
+        lum_line = getattr(boss_info, "luminosity_display", None)
+        if lum_line:
+            embed.add_field(name="\u200b", value=lum_line, inline=False)
 
         view = BossEncounterView(self.dig_service, interaction.user.id, guild_id, boss_info, has_lantern, dig_llm_service=self.dig_llm_service)
         msg = await self._send_public_dig(interaction, embed=embed, view=view, file=boss_file)

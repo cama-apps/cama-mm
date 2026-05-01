@@ -27,7 +27,7 @@ from services.dig_constants import (
     BOSS_DIALOGUE_V2,
     BOSS_DUEL_STATS,
     BOSS_FREE_FIGHT_ACCURACY_MOD,
-    BOSS_HP_REGEN_PER_HOUR,
+    BOSS_HP_REGEN_PER_2_HOURS,
     BOSS_NAMES,
     BOSS_PAYOUTS,
     BOSS_PHASE2,
@@ -651,8 +651,8 @@ class DigService:
         (the freshly-computed scaled boss HP for this fight) so the boss can
         regen back to it. ``starting_hp`` is:
           - ``hp_remaining`` from the last unfinished engagement, plus regen
-            of ``BOSS_HP_REGEN_PER_HOUR`` per hour since ``last_engaged_at``,
-            capped at ``hp_max``;
+            of ``BOSS_HP_REGEN_PER_2_HOURS`` per two-hour block since
+            ``last_engaged_at``, capped at ``hp_max``;
           - ``fresh_hp`` if no persisted HP exists.
 
         ``at_boss`` is normally an int boundary depth (e.g. 25), but pinnacle
@@ -673,10 +673,10 @@ class DigService:
         last_engaged = entry.get("last_engaged_at")
         if last_engaged is not None:
             try:
-                hours_since = max(0, (now - int(last_engaged)) // 3600)
+                two_hour_blocks = max(0, (now - int(last_engaged)) // 7200)
             except (TypeError, ValueError):
-                hours_since = 0
-            hp_remaining = min(hp_max, hp_remaining + hours_since * BOSS_HP_REGEN_PER_HOUR)
+                two_hour_blocks = 0
+            hp_remaining = min(hp_max, hp_remaining + two_hour_blocks * BOSS_HP_REGEN_PER_2_HOURS)
         return max(1, hp_remaining), hp_max
 
     def _persist_boss_hp_after_fight(
@@ -1322,6 +1322,7 @@ class DigService:
             "name": boss.name,
             "dialogue": rendered,
             "ascii_art": boss.ascii_art or BOSS_ASCII.get(boundary, ""),
+            "luminosity_display": self._luminosity_combat_display(tunnel),
         }
 
     def _build_pinnacle_info(
@@ -1380,6 +1381,7 @@ class DigService:
             "is_pinnacle": True,
             "phase": phase_idx,
             "phase_total": 3,
+            "luminosity_display": self._luminosity_combat_display(tunnel),
         }
 
     def _pinnacle_foreshadow_line(self, tunnel: dict) -> str | None:
@@ -1637,6 +1639,24 @@ class DigService:
         if luminosity >= LUMINOSITY_DARK:
             return "dark"
         return "pitch_black"
+
+    def _luminosity_combat_display(self, tunnel: dict) -> str | None:
+        """Return a one-line description of the luminosity combat penalty,
+        or ``None`` when the player is at Bright (no penalty to surface).
+
+        Used by the boss UI to make the otherwise-invisible accuracy/dmg
+        penalty discoverable so players can choose to retreat and refill
+        before pulling the trigger on a fight they can't actually win.
+        """
+        luminosity = self._get_luminosity(tunnel)
+        hit_offset, dmg_bonus = _luminosity_combat_penalty(luminosity)
+        if hit_offset == 0 and dmg_bonus == 0:
+            return None
+        level = self._get_luminosity_level(luminosity).replace("_", " ").title()
+        parts = [f"{int(hit_offset * 100)}% hit"]
+        if dmg_bonus:
+            parts.append(f"+{dmg_bonus} boss dmg")
+        return f"Luminosity: **{level} ({luminosity})** — {', '.join(parts)}"
 
     def _apply_luminosity_drain(self, discord_id: int, guild_id, tunnel: dict, layer_name: str) -> dict:
         """Apply slow refill from last_lum_update_at, then drain for this dig.
@@ -4472,6 +4492,7 @@ class DigService:
             ascii_art=boss_info["ascii_art"],
             attempts=attempts,
             options=["cautious", "bold", "reckless"],
+            luminosity_display=self._luminosity_combat_display(tunnel),
         )
 
     def fight_boss(self, discord_id: int, guild_id, risk_tier: str, wager: int = 0) -> dict:
@@ -4843,6 +4864,7 @@ class DigService:
                 echo_killer_id=active_echo.get("killer_discord_id") if echo_applied else None,
                 gear_broken=gear_broken_names,
                 gear_drop=gear_drop,
+                luminosity_display=self._luminosity_combat_display(tunnel),
             )
         else:
             knockback = random.randint(8, 16)
@@ -4896,6 +4918,7 @@ class DigService:
                 echo_killer_id=active_echo.get("killer_discord_id") if echo_applied else None,
                 gear_broken=gear_broken_names,
                 gear_drop=None,
+                luminosity_display=self._luminosity_combat_display(tunnel),
             )
 
     # =====================================================================
@@ -4953,7 +4976,7 @@ class DigService:
         if phase_idx == 2:
             phase_penalty = 0.10
         elif phase_idx == 3:
-            phase_penalty = 0.18
+            phase_penalty = 0.15
 
         # Pinnacle is the Tier 8 fight — use its archetype per phase, not the
         # per-boss BOSS_ARCHETYPE_BY_ID lookup.
@@ -5134,6 +5157,7 @@ class DigService:
                     is_pinnacle=True,
                     phase=phase_idx,
                     phase_total=3,
+                    luminosity_display=self._luminosity_combat_display(tunnel),
                     **response_extras,
                 )
 
@@ -5448,6 +5472,7 @@ class DigService:
                     is_pinnacle=True,
                     gear_broken=gear_broken_names,
                     gear_drop=None,
+                    luminosity_display=self._luminosity_combat_display(tunnel),
                 )
 
             # Phase 3 win — pinnacle defeated.
@@ -5504,6 +5529,7 @@ class DigService:
                 pinnacle_defeated=True,
                 gear_broken=gear_broken_names,
                 gear_drop=None,
+                luminosity_display=self._luminosity_combat_display(tunnel),
             )
 
         # Loss
@@ -5559,6 +5585,7 @@ class DigService:
             is_pinnacle=True,
             gear_broken=gear_broken_names,
             gear_drop=None,
+            luminosity_display=self._luminosity_combat_display(tunnel),
         )
 
     # =====================================================================
@@ -5771,6 +5798,7 @@ class DigService:
                         active_echo.get("killer_discord_id")
                         if echo_applied and active_echo else None
                     ),
+                    luminosity_display=self._luminosity_combat_display(tunnel),
                 )
 
             entry, player_hp, boss_hp, terminal = self._run_one_round(

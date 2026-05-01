@@ -1004,7 +1004,7 @@ BOSS_TIER_BONUS: dict[int, dict[str, float]] = {
     150: {"hp": 5,  "hit": 0.04, "dmg": 0, "pen": 0.05},
     200: {"hp": 5,  "hit": 0.05, "dmg": 0, "pen": 0.06},
     275: {"hp": 6,  "hit": 0.06, "dmg": 0, "pen": 0.06},
-    300: {"hp": 10, "hit": 0.10, "dmg": 0, "pen": 0.07},   # pinnacle: HP grind, no dmg cliff
+    300: {"hp": 9,  "hit": 0.10, "dmg": 0, "pen": 0.06},   # pinnacle: HP grind, no dmg cliff
 }
 BOSS_PRESTIGE_BONUS: dict[int, dict[str, float]] = {
     # prestige: {boss_hp_add, boss_hit_add, boss_dmg_add, player_hit_pen}
@@ -5753,7 +5753,9 @@ RETREAT_COOLDOWN_SECONDS: int = 30 * 60   # 30 minutes
 # ---------------------------------------------------------------------------
 # Persisted boss HP / regen (boss revamp)
 # ---------------------------------------------------------------------------
-BOSS_HP_REGEN_PER_HOUR: int = 1
+# Halved from "1 HP / hour" so damage actually persists across the new
+# shorter free-dig cycle. A 24h hiatus now regens half a phase, not a full one.
+BOSS_HP_REGEN_PER_2_HOURS: int = 1
 
 
 # ---------------------------------------------------------------------------
