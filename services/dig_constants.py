@@ -57,7 +57,7 @@ def get_layer(depth: int) -> LayerDef:
 # Pacing Constants
 # ---------------------------------------------------------------------------
 
-FREE_DIG_COOLDOWN_SECONDS: int = 14_400          # 4 hours
+FREE_DIG_COOLDOWN_SECONDS: int = 10_800          # 3 hours
 CHEER_COOLDOWN_SECONDS: int = 30                 # short anti-spam, independent of dig
 
 PAID_DIG_COSTS_PER_DAY: list[int] = [3, 6, 12, 24, 48]
