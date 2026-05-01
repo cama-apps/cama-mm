@@ -99,6 +99,33 @@ DIG_OUTCOME_TOOL: dict[str, Any] = {
     },
 }
 
+SPLASH_NARRATION_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "narrate_splash",
+        "description": (
+            "Narrate the moment a tunnel event reaches other players. "
+            "Mechanics are already resolved — the JC has moved. "
+            "Output is one short paragraph, no numbers, no mechanics."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "narrative": {
+                    "type": "string",
+                    "description": (
+                        "1-2 sentences (≤200 characters total). "
+                        "Name the victim(s) by Discord display name. "
+                        "Match the event's vibe (luminous / ominous / etc.). "
+                        "Do NOT mention JC amounts, rolls, success rates, or rarity."
+                    ),
+                },
+            },
+            "required": ["narrative"],
+        },
+    },
+}
+
 DIG_ENGINE_TOOL: dict[str, Any] = {
     "type": "function",
     "function": {
@@ -235,6 +262,32 @@ the visual weight."""
 # ===================================================================
 # DM engine system prompt -- LLM makes mechanical decisions
 # ===================================================================
+
+SPLASH_NARRATION_SYSTEM_PROMPT: str = """\
+You write a single short prose beat — 1 to 2 sentences, ≤200 characters total — \
+for the moment a tunnel event reaches other players in a Dota 2 inhouse league \
+Discord bot's mining minigame.
+
+Your sole output is that prose. The mechanical effects (JC movement, victims \
+chosen) are already resolved — do NOT restate amounts, rolls, success chances, \
+or rarity.
+
+Style:
+- Lean into the EVENT FLAVOR provided. If the event reads gentle/luminous, the \
+  beat is gentle. If it reads ominous/predatory, the beat is ominous.
+- Address victims by their Discord display name as given.
+- For SPLASH MODE = "steal": the digger TOOK from the victim — sting, not \
+  cooperation.
+- For SPLASH MODE = "burn": the victim LOST coin to the cave/world (not to \
+  the digger) — a misfortune that spilled outward.
+- For SPLASH MODE = "grant": the victim RECEIVED a small gift — share the warmth.
+- Atmospheric over mechanical. No exposed game terms. No emoji.
+- Never quote raw numbers, percentages, or 'JC'.
+
+OUTPUT: Call the narrate_splash tool with the prose in the 'narrative' field. \
+Nothing else.\
+"""
+
 
 DIG_ENGINE_SYSTEM_PROMPT: str = """\
 You are the Dungeon Master for a tunnel-digging minigame. You DECIDE what \
@@ -1098,6 +1151,35 @@ def build_messages(
     return [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": "\n\n".join(user_sections)},
+    ]
+
+
+def build_splash_narration_messages(
+    digger_name: str,
+    digger_layer: str,
+    event_name: str,
+    event_description: str,
+    splash_mode: str,
+    victims: list[dict],
+) -> list[dict[str, str]]:
+    """Build the messages list for the splash narration LLM call.
+
+    ``victims`` is a list of ``{"name": <str>, "amount": <int>}`` dicts —
+    the amount is included for context only; the model is instructed
+    not to quote it.
+    """
+    victim_lines = "\n".join(
+        f"- {v.get('name', 'a stranger')}" for v in victims
+    ) or "- (no resolvable names)"
+    sections: list[str] = [
+        f"=== DIGGER ===\n{digger_name} (in the {digger_layer})",
+        f"=== EVENT ===\n{event_name}\n{event_description}",
+        f"=== SPLASH MODE ===\n{splash_mode}",
+        f"=== VICTIMS ===\n{victim_lines}",
+    ]
+    return [
+        {"role": "system", "content": SPLASH_NARRATION_SYSTEM_PROMPT},
+        {"role": "user", "content": "\n\n".join(sections)},
     ]
 
 
