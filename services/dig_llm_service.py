@@ -529,13 +529,16 @@ class DigLLMService:
         event_description: str,
         splash_mode: str,
         victims: list[dict],
+        digger_layer: str | None = None,
     ) -> str:
         """Produce a short prose blurb naming the splash victims.
 
         ``victims`` is a list of ``{"discord_id": int, "amount": int}`` dicts
-        as already serialized for the embed. Returns the empty string on any
-        failure (timeout, missing names, validator rejection) — callers fall
-        back to the deterministic per-victim lines.
+        as already serialized for the embed. ``digger_layer`` may be passed
+        in by the caller (e.g. EventEncounterView already knows it) to avoid
+        a redundant tunnel fetch. Returns the empty string on any failure
+        (timeout, missing names, validator rejection) — callers fall back to
+        the deterministic per-victim lines.
         """
         if not victims:
             return ""
@@ -548,11 +551,12 @@ class DigLLMService:
             name_by_id = {p.discord_id: p.name for p in players if p}
             digger_name = name_by_id.get(digger_id, "the digger")
 
-            tunnel = await asyncio.to_thread(
-                self.dig_repo.get_tunnel, digger_id, guild_id,
-            )
-            depth = (tunnel or {}).get("depth", 0)
-            digger_layer = _get_layer_name(int(depth))
+            if not digger_layer:
+                tunnel = await asyncio.to_thread(
+                    self.dig_repo.get_tunnel, digger_id, guild_id,
+                )
+                depth = (tunnel or {}).get("depth", 0)
+                digger_layer = _get_layer_name(int(depth))
 
             victim_payload = [
                 {
@@ -581,7 +585,7 @@ class DigLLMService:
                     },
                     max_tokens=200,
                 ),
-                timeout=5.0,
+                timeout=3.0,
             )
             if llm_result.tool_name != "narrate_splash":
                 return ""

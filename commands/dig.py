@@ -1205,6 +1205,9 @@ class EventEncounterView(discord.ui.View):
         splash_d = splash_obj._d if hasattr(splash_obj, "_d") else splash_obj
         if isinstance(splash_d, dict) and splash_d.get("victims"):
             if self.dig_llm_service is not None:
+                depth_after = getattr(result, "depth_after", 0) or getattr(result, "depth", 0)
+                layer_def = get_layer_def(int(depth_after) if depth_after else 0)
+                digger_layer = layer_def.name if layer_def else "Dirt"
                 narrative = await self.dig_llm_service.narrate_splash(
                     digger_id=self.user_id,
                     guild_id=self.guild_id or 0,
@@ -1212,6 +1215,7 @@ class EventEncounterView(discord.ui.View):
                     event_description=msg,
                     splash_mode=splash_d.get("mode", "burn"),
                     victims=splash_d.get("victims", []),
+                    digger_layer=digger_layer,
                 )
                 if narrative:
                     splash_d["llm_narrative"] = narrative

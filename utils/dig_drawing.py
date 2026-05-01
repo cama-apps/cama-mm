@@ -294,6 +294,34 @@ EVENT_SCENES: dict[str, list[SceneElement]] = {
     ],
     "the_lightless_path": [],  # Darkness — no visible elements
     "whispering_walls_extended": [],
+    "wisps_tether": [
+        SceneElement("item", "crystal", 0.3, 0.3),
+        SceneElement("item", "crystal", 0.7, 0.55),
+    ],
+    "tunnel_echoes": [
+        SceneElement("creature", "ghost", 0.7, 0.45),
+    ],
+    "stalled_caravan": [
+        SceneElement("item", "chest", 0.4, 0.6),
+        SceneElement("creature", "merchant", 0.65, 0.4),
+    ],
+    "volatile_affix": [
+        SceneElement("item", "crystal", 0.5, 0.4),
+    ],
+    "rivals_cache": [
+        SceneElement("item", "chest", 0.55, 0.65),
+    ],
+    "forsaken_pact": [
+        SceneElement("creature", "ghost", 0.55, 0.4),
+    ],
+    "mapworks_drift": [
+        SceneElement("item", "book", 0.5, 0.45),
+        SceneElement("item", "crystal", 0.3, 0.25),
+        SceneElement("item", "crystal", 0.7, 0.25),
+    ],
+    "the_eye_opens": [
+        SceneElement("creature", "boss", 0.55, 0.35),
+    ],
 }
 
 
