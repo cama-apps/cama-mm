@@ -1071,13 +1071,14 @@ BOSS_ARCHETYPE_BY_ID: dict[str, str] = {
 # Flatter and harder than the pre-nerf table; the old exponential growth at
 # top-end depths was the main jopacoin inflation source.
 BOSS_PAYOUTS: dict[int, tuple[float, float, float]] = {
-    25:  (1.2, 1.9, 3.4),
-    50:  (1.4, 2.6, 4.6),
-    75:  (1.7, 3.4, 5.8),
-    100: (1.9, 3.8, 6.7),
-    150: (2.3, 4.6, 7.8),
-    200: (2.6, 5.3, 9.0),
-    275: (2.9, 6.2, 9.6),
+    25:  (1.5, 2.4, 4.3),
+    50:  (1.8, 3.3, 5.8),
+    75:  (2.1, 4.3, 7.3),
+    100: (2.4, 4.8, 8.4),
+    150: (2.9, 5.8, 9.8),
+    200: (3.3, 6.6, 11.3),
+    275: (3.6, 7.8, 12.0),
+    300: (2.5, 3.8, 7.5),
 }
 
 
