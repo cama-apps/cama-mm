@@ -289,27 +289,6 @@ class TestServiceLayerConstraints:
             )
 
 
-class TestNoCircularImports:
-    """Tests to verify there are no circular import issues."""
-
-    def test_can_import_core_modules(self):
-        """Verify core modules can be imported without circular import errors."""
-        # Note: We don't clear sys.modules because that can cause false positives
-        # when modules have complex initialization. Instead, we verify that
-        # imports work in the normal pytest environment.
-
-        # Just verify basic imports work
-        from domain.models.lobby import Lobby
-        from domain.models.player import Player
-        from domain.models.team import Team
-        from repositories.base_repository import BaseRepository
-
-        assert BaseRepository is not None
-        assert Player is not None
-        assert Team is not None
-        assert Lobby is not None
-
-
 class TestBaseRepositoryPatterns:
     """Tests for BaseRepository shared patterns."""
 

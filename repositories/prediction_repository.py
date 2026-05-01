@@ -12,6 +12,24 @@ from repositories.base_repository import BaseRepository
 from repositories.interfaces import IPredictionRepository
 
 
+def _quote_total(raw_jopa_x10: int, kind: str) -> int:
+    """Convert a price-weighted qty (in % units) to integer jopa.
+
+    Contract value is 10 jopa per winning contract, so the per-trade jopa cost
+    is `sum(price_pct * qty) / 10`. Rounding favors the house: buys ceil at the
+    half-tick, sells floor at the half-tick. Buys carry a 1-jopa floor so any
+    non-zero trade has non-zero cost; sells have no floor (zero proceeds is OK
+    when the user is voluntarily closing).
+    """
+    if raw_jopa_x10 <= 0:
+        return 0
+    if kind == "buy":
+        return max(1, (raw_jopa_x10 + 5) // 10)
+    if kind == "sell":
+        return (raw_jopa_x10 + 4) // 10
+    raise ValueError(f"unknown kind: {kind}")
+
+
 class PredictionRepository(BaseRepository, IPredictionRepository):
     """
     Handles CRUD operations for predictions and prediction_bets tables.
@@ -958,7 +976,7 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
         normalized_guild = self.normalize_guild_id(guild_id)
         now = int(time.time())
 
-        with self.connection() as conn:
+        with self.atomic_transaction() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
@@ -980,7 +998,16 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                     now,
                 ),
             )
-            return cursor.lastrowid
+            prediction_id = cursor.lastrowid
+            cursor.execute(
+                """
+                INSERT INTO prediction_fair_snapshots
+                    (market_id, guild_id, snapshot_at, fair_pct, reason)
+                VALUES (?, ?, ?, ?, 'create')
+                """,
+                (prediction_id, normalized_guild, now, initial_fair),
+            )
+            return prediction_id
 
     def replace_levels(
         self, prediction_id: int, levels: list[tuple[str, int, int]]
@@ -1103,9 +1130,10 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                 )
 
             if side == "yes":
-                total_cost = sum(price * take for _, price, take in fills)
+                weighted_pct = sum(price * take for _, price, take in fills)
             else:  # no — cost per contract = 100 - bid_price
-                total_cost = sum((100 - price) * take for _, price, take in fills)
+                weighted_pct = sum((100 - price) * take for _, price, take in fills)
+            total_cost = _quote_total(weighted_pct, "buy")
 
             cursor.execute(
                 """
@@ -1156,7 +1184,11 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                 no_t += total_cost
             self._write_position(cursor, prediction_id, discord_id, yes_c, yes_t, no_c, no_t)
 
-            vwap_x100 = (total_cost * 100) // contracts if contracts > 0 else 0
+            vwap_x100 = (
+                (weighted_pct * 100 + contracts // 2) // contracts
+                if contracts > 0
+                else 0
+            )
             action = "buy_yes" if side == "yes" else "buy_no"
             cursor.execute(
                 """
@@ -1264,9 +1296,10 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                 )
 
             if side == "yes":
-                total_proceeds = sum(price * take for _, price, take in fills)
+                weighted_pct = sum(price * take for _, price, take in fills)
             else:  # NO — proceeds per contract = 100 - ask_price
-                total_proceeds = sum((100 - price) * take for _, price, take in fills)
+                weighted_pct = sum((100 - price) * take for _, price, take in fills)
+            total_proceeds = _quote_total(weighted_pct, "sell")
 
             cursor.execute(
                 """
@@ -1298,7 +1331,11 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                 no_c, no_t = new_qty, new_basis
             self._write_position(cursor, prediction_id, discord_id, yes_c, yes_t, no_c, no_t)
 
-            vwap_x100 = (total_proceeds * 100) // contracts if contracts > 0 else 0
+            vwap_x100 = (
+                (weighted_pct * 100 + contracts // 2) // contracts
+                if contracts > 0
+                else 0
+            )
             action = "sell_yes" if side == "yes" else "sell_no"
             cursor.execute(
                 """
@@ -1498,6 +1535,7 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
         new_price: int,
         levels: list[tuple[str, int, int]],
         now_ts: int,
+        reason: str = "refresh",
     ) -> None:
         """Layer fresh size onto the ladder and stamp the new fair / refresh time.
 
@@ -1513,31 +1551,16 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
         with self.atomic_transaction() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT status FROM predictions WHERE prediction_id = ?",
+                "SELECT status, guild_id FROM predictions WHERE prediction_id = ?",
                 (prediction_id,),
             )
             row = cursor.fetchone()
             if not row or row["status"] != "open":
                 return  # market was resolved/cancelled while we were processing
+            guild_id = int(row["guild_id"])
 
-            # Cross-prevention: delete any old resting levels that would *cross*
-            # the new ladder. A true cross is ask < bid; ask == bid is "locked"
-            # (degenerate but not poisoned), so use strict inequality.
-            new_ask_prices = [p for s, p, _ in levels if s == "yes_ask"]
-            new_bid_prices = [p for s, p, _ in levels if s == "yes_bid"]
-            if new_ask_prices and new_bid_prices:
-                top_new_ask = min(new_ask_prices)
-                top_new_bid = max(new_bid_prices)
-                cursor.execute(
-                    "DELETE FROM prediction_levels "
-                    "WHERE prediction_id = ? AND side = 'yes_ask' AND price < ?",
-                    (prediction_id, top_new_bid),
-                )
-                cursor.execute(
-                    "DELETE FROM prediction_levels "
-                    "WHERE prediction_id = ? AND side = 'yes_bid' AND price > ?",
-                    (prediction_id, top_new_ask),
-                )
+            # Crossing levels from earlier flow are left in place on purpose:
+            # they're the arb pockets that drive engagement.
 
             for side, price, size in levels:
                 if side not in self.VALID_BOOK_SIDES:
@@ -1582,15 +1605,66 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                 (new_price, now_ts, prediction_id),
             )
 
+            cursor.execute(
+                """
+                INSERT INTO prediction_fair_snapshots
+                    (market_id, guild_id, snapshot_at, fair_pct, reason)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (prediction_id, guild_id, now_ts, new_price, reason),
+            )
+
+    def pop_one_shot_flag(self, guild_id: int, key: str) -> bool:
+        """Return True if ``app_kv[(guild, key)]`` was '0' (and atomically flip to '1').
+
+        Used for one-shot digest banners. Subsequent calls return False.
+        """
+        normalized_guild = self.normalize_guild_id(guild_id)
+        with self.atomic_transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT value FROM app_kv WHERE guild_id = ? AND key = ?",
+                (normalized_guild, key),
+            )
+            row = cursor.fetchone()
+            if not row or str(row["value"]) != "0":
+                return False
+            cursor.execute(
+                "UPDATE app_kv SET value = '1' WHERE guild_id = ? AND key = ?",
+                (normalized_guild, key),
+            )
+            return True
+
+    def get_fair_history(
+        self, prediction_id: int, guild_id: int
+    ) -> list[tuple[int, int]]:
+        """Return ``[(snapshot_at, fair_pct), ...]`` ordered oldest first.
+
+        Powers the per-market price chart in the embed.
+        """
+        normalized_guild = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT snapshot_at, fair_pct
+                FROM prediction_fair_snapshots
+                WHERE market_id = ? AND guild_id = ?
+                ORDER BY snapshot_at ASC
+                """,
+                (prediction_id, normalized_guild),
+            )
+            return [(int(r["snapshot_at"]), int(r["fair_pct"])) for r in cursor.fetchall()]
+
     def settle_prediction_orderbook(
         self, prediction_id: int, outcome: str, resolved_by: int | None = None
     ) -> dict:
         """Atomic resolve: cancel levels, pay winners, mark resolved.
 
-        ``outcome`` is 'yes' or 'no'. Pays ``CONTRACT_VALUE = 100`` per winning
-        contract; losing contracts pay 0. Cost basis is irrelevant — payout is
-        purely a function of contract count. ``resolved_by`` is recorded for
-        the audit trail.
+        ``outcome`` is 'yes' or 'no'. Pays ``PREDICTION_CONTRACT_VALUE`` per
+        winning contract; losing contracts pay 0. Cost basis is irrelevant —
+        payout is purely a function of contract count. ``resolved_by`` is
+        recorded for the audit trail.
         """
         if outcome not in self.VALID_POSITIONS:
             raise ValueError(f"Invalid outcome: {outcome}")

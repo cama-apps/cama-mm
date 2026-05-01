@@ -19,6 +19,8 @@ from services.dig_llm_prompts import (
     DIG_ENGINE_TOOL,
     DIG_OUTCOME_TOOL,
     DIG_SYSTEM_PROMPT,
+    SPLASH_NARRATION_TOOL,
+    _get_layer_name,
     build_boss_outcome_context,
     build_dice_results_context,
     build_dig_history_context,
@@ -29,6 +31,7 @@ from services.dig_llm_prompts import (
     build_personality_context,
     build_player_state_context,
     build_preconditions_context,
+    build_splash_narration_messages,
 )
 
 logger = logging.getLogger("cama_bot.services.dig_llm")
@@ -103,6 +106,19 @@ class DigLLMValidator:
             "cave_in_flavor": cave_in_flavor,
             "callback_reference": callback_reference,
         }
+
+    def validate_splash_narrative(self, tool_args: dict) -> str:
+        """Validate and clamp a splash narration string.
+
+        Returns the narrative or empty string on any issue. The cap mirrors
+        the tool description (≤200 chars).
+        """
+        narrative = str(tool_args.get("narrative", "")).strip()
+        if not narrative:
+            return ""
+        if len(narrative) > 200:
+            narrative = narrative[:197] + "..."
+        return narrative
 
     def validate_engine_outcome(
         self, tool_args: dict, preconditions: dict,
@@ -503,6 +519,80 @@ class DigLLMService:
         except Exception:
             logger.debug("Boss fight narration failed", exc_info=True)
             return None
+
+    async def narrate_splash(
+        self,
+        *,
+        digger_id: int,
+        guild_id: int,
+        event_name: str,
+        event_description: str,
+        splash_mode: str,
+        victims: list[dict],
+        digger_layer: str | None = None,
+    ) -> str:
+        """Produce a short prose blurb naming the splash victims.
+
+        ``victims`` is a list of ``{"discord_id": int, "amount": int}`` dicts
+        as already serialized for the embed. ``digger_layer`` may be passed
+        in by the caller (e.g. EventEncounterView already knows it) to avoid
+        a redundant tunnel fetch. Returns the empty string on any failure
+        (timeout, missing names, validator rejection) — callers fall back to
+        the deterministic per-victim lines.
+        """
+        if not victims:
+            return ""
+        try:
+            ids = [int(v["discord_id"]) for v in victims if "discord_id" in v]
+            ids_with_digger = list({digger_id, *ids})
+            players = await asyncio.to_thread(
+                self.player_repo.get_by_ids, ids_with_digger, guild_id,
+            )
+            name_by_id = {p.discord_id: p.name for p in players if p}
+            digger_name = name_by_id.get(digger_id, "the digger")
+
+            if not digger_layer:
+                tunnel = await asyncio.to_thread(
+                    self.dig_repo.get_tunnel, digger_id, guild_id,
+                )
+                depth = (tunnel or {}).get("depth", 0)
+                digger_layer = _get_layer_name(int(depth))
+
+            victim_payload = [
+                {
+                    "name": name_by_id.get(int(v["discord_id"]), "a stranger"),
+                    "amount": int(v.get("amount", 0)),
+                }
+                for v in victims if "discord_id" in v
+            ]
+
+            messages = build_splash_narration_messages(
+                digger_name=digger_name,
+                digger_layer=digger_layer,
+                event_name=event_name,
+                event_description=event_description,
+                splash_mode=splash_mode,
+                victims=victim_payload,
+            )
+
+            llm_result = await asyncio.wait_for(
+                self.ai_service.call_with_tools(
+                    messages,
+                    [SPLASH_NARRATION_TOOL],
+                    tool_choice={
+                        "type": "function",
+                        "function": {"name": "narrate_splash"},
+                    },
+                    max_tokens=200,
+                ),
+                timeout=3.0,
+            )
+            if llm_result.tool_name != "narrate_splash":
+                return ""
+            return self.validator.validate_splash_narrative(llm_result.tool_args)
+        except Exception:
+            logger.debug("Splash narration failed", exc_info=True)
+            return ""
 
     async def run_dig(
         self,

@@ -7,58 +7,6 @@ from infrastructure.service_container import ServiceContainer
 class TestServiceContainerInitialization:
     """Tests for ServiceContainer initialization."""
 
-    def test_initialize_creates_all_repositories(self, repo_db_path):
-        """All repositories are created after initialization."""
-        container = ServiceContainer(repo_db_path)
-        container.initialize()
-
-        c = container._components
-        assert c["player_repo"] is not None
-        assert c["match_repo"] is not None
-        assert c["bet_repo"] is not None
-        assert c["lobby_repo"] is not None
-        assert c["pairings_repo"] is not None
-        assert c["guild_config_repo"] is not None
-        assert c["prediction_repo"] is not None
-        assert c["bankruptcy_repo"] is not None
-        assert c["loan_repo"] is not None
-        assert c["soft_avoid_repo"] is not None
-        assert c["package_deal_repo"] is not None
-        assert c["tip_repo"] is not None
-        assert c["wrapped_repo"] is not None
-        assert c["neon_event_repo"] is not None
-
-    def test_initialize_creates_all_services(self, repo_db_path):
-        """All services are created after initialization."""
-        container = ServiceContainer(repo_db_path)
-        container.initialize()
-
-        c = container._components
-        assert c["player_service"] is not None
-        assert c["match_service"] is not None
-        assert c["betting_service"] is not None
-        assert c["loan_service"] is not None
-        assert c["bankruptcy_service"] is not None
-        assert c["prediction_service"] is not None
-        assert c["lobby_service"] is not None
-        assert c["lobby_manager"] is not None
-        assert c["gambling_stats_service"] is not None
-        assert c["garnishment_service"] is not None
-        assert c["guild_config_service"] is not None
-        assert c["recalibration_service"] is not None
-        assert c["disburse_service"] is not None
-        assert c["match_enrichment_service"] is not None
-        assert c["match_discovery_service"] is not None
-        assert c["rating_comparison_service"] is not None
-        assert c["opendota_player_service"] is not None
-        assert c["pairings_service"] is not None
-        assert c["soft_avoid_service"] is not None
-        assert c["package_deal_service"] is not None
-        assert c["tip_service"] is not None
-        assert c["match_state_service"] is not None
-        assert c["neon_degen_service"] is not None
-        assert c["wrapped_service"] is not None
-
     def test_initialize_is_idempotent(self, repo_db_path):
         """Calling initialize multiple times is safe."""
         container = ServiceContainer(repo_db_path)

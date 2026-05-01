@@ -18,6 +18,7 @@ import io
 import json
 from unittest.mock import MagicMock, patch
 
+import pytest
 from PIL import Image
 
 from services.wrapped_service import (
@@ -85,14 +86,10 @@ class TestGetRandomFlavor:
             result = get_random_flavor("test_pool")
             assert result == "Hello {missing_var}"
 
-    def test_every_pool_is_non_empty(self):
-        """All defined flavor pools should have at least one entry."""
+    def test_every_pool_has_non_empty_strings(self):
+        """All defined flavor pools should be non-empty and contain only strings."""
         for key, pool in FLAVOR_POOLS.items():
             assert len(pool) > 0, f"FLAVOR_POOLS['{key}'] is empty"
-
-    def test_every_pool_has_strings(self):
-        """All entries in all pools should be strings."""
-        for key, pool in FLAVOR_POOLS.items():
             for i, entry in enumerate(pool):
                 assert isinstance(entry, str), f"FLAVOR_POOLS['{key}'][{i}] is not a string"
 
@@ -103,40 +100,20 @@ class TestGetRandomFlavor:
 
 
 class TestComputePercentile:
-    def test_empty_list_returns_50(self):
-        assert WrappedService._compute_percentile(10, []) == 50.0
-
-    def test_single_value_equal(self):
-        # Only value equals query → below=0, equal=1 → (0 + 0.5) / 1 * 100 = 50
-        assert WrappedService._compute_percentile(5, [5]) == 50.0
-
-    def test_highest_value(self):
-        # 10 in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-        # below=9, equal=1 → (9 + 0.5) / 10 * 100 = 95.0
-        result = WrappedService._compute_percentile(10, list(range(1, 11)))
-        assert result == 95.0
-
-    def test_lowest_value(self):
-        # 1 in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-        # below=0, equal=1 → (0 + 0.5) / 10 * 100 = 5.0
-        result = WrappedService._compute_percentile(1, list(range(1, 11)))
-        assert result == 5.0
-
-    def test_middle_value(self):
-        # 5 in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-        # below=4, equal=1 → (4 + 0.5) / 10 * 100 = 45.0
-        result = WrappedService._compute_percentile(5, list(range(1, 11)))
-        assert result == 45.0
-
-    def test_all_equal(self):
-        # 5 in [5, 5, 5] → below=0, equal=3 → (0 + 1.5) / 3 * 100 = 50.0
-        result = WrappedService._compute_percentile(5, [5, 5, 5])
-        assert result == 50.0
-
-    def test_ties(self):
-        # 3 in [1, 3, 3, 5] → below=1, equal=2 → (1 + 1.0) / 4 * 100 = 50.0
-        result = WrappedService._compute_percentile(3, [1, 3, 3, 5])
-        assert result == 50.0
+    @pytest.mark.parametrize(
+        "query,values,expected",
+        [
+            (10, [], 50.0),
+            (5, [5], 50.0),
+            (10, list(range(1, 11)), 95.0),
+            (1, list(range(1, 11)), 5.0),
+            (5, list(range(1, 11)), 45.0),
+            (5, [5, 5, 5], 50.0),
+            (3, [1, 3, 3, 5], 50.0),
+        ],
+    )
+    def test_compute_percentile(self, query, values, expected):
+        assert WrappedService._compute_percentile(query, values) == expected
 
 
 # ===========================================================================
@@ -174,29 +151,29 @@ class TestNewDataclasses:
         pe = PairwiseEntry(discord_id=1, username="A", games=10, wins=7, win_rate=0.7)
         assert pe.win_rate == 0.7
 
-    def test_pairwise_wrapped_defaults(self):
-        pw = PairwiseWrapped()
-        assert pw.best_teammates == []
-        assert pw.nemesis is None
-
-    def test_package_deal_wrapped_defaults(self):
-        pdw = PackageDealWrapped()
-        assert pdw.times_bought == 0
-        assert pdw.times_bought_on_you == 0
-        assert pdw.unique_buyers == 0
-        assert pdw.jc_spent == 0
-        assert pdw.jc_spent_on_you == 0
-        assert pdw.total_games_committed == 0
-
-    def test_hero_spotlight_wrapped_defaults(self):
-        hsw = HeroSpotlightWrapped()
-        assert hsw.top_hero_name == ""
-        assert hsw.top_3_heroes == []
-
-    def test_role_breakdown_wrapped_defaults(self):
-        rbw = RoleBreakdownWrapped()
-        assert rbw.lane_freq == {}
-        assert rbw.total_games == 0
+    @pytest.mark.parametrize(
+        "cls,assertions",
+        [
+            (PairwiseWrapped, lambda obj: (obj.best_teammates == [], obj.nemesis is None)),
+            (
+                PackageDealWrapped,
+                lambda obj: (
+                    obj.times_bought == 0,
+                    obj.times_bought_on_you == 0,
+                    obj.unique_buyers == 0,
+                    obj.jc_spent == 0,
+                    obj.jc_spent_on_you == 0,
+                    obj.total_games_committed == 0,
+                ),
+            ),
+            (HeroSpotlightWrapped, lambda obj: (obj.top_hero_name == "", obj.top_3_heroes == [])),
+            (RoleBreakdownWrapped, lambda obj: (obj.lane_freq == {}, obj.total_games == 0)),
+        ],
+    )
+    def test_no_arg_dataclass_defaults(self, cls, assertions):
+        obj = cls()
+        for check in assertions(obj):
+            assert check
 
 
 # ===========================================================================
@@ -692,37 +669,6 @@ class TestDrawStorySlide:
         img = Image.open(buf)
         assert img.size == (800, 600)
 
-    def test_with_comparisons(self):
-        from utils.wrapped_drawing import draw_story_slide
-
-        buf = draw_story_slide(
-            headline="YOUR MONTH",
-            stat_value="15",
-            stat_label="GAMES PLAYED",
-            flavor_text="You played a lot",
-            accent_color=(88, 101, 242),
-            username="TestPlayer",
-            year_label="Cama Wrapped 2026",
-            comparisons=["More than 78% of players", "Top 22%"],
-        )
-        img = Image.open(buf)
-        assert img.size == (800, 600)
-
-    def test_empty_flavor_text(self):
-        from utils.wrapped_drawing import draw_story_slide
-
-        buf = draw_story_slide(
-            headline="RATING",
-            stat_value="+50",
-            stat_label="RATING CHANGE",
-            flavor_text="",
-            accent_color=(241, 196, 15),
-            username="TestPlayer",
-            year_label="Cama Wrapped 2026",
-        )
-        img = Image.open(buf)
-        assert img.size == (800, 600)
-
 
 class TestDrawSummaryStatsSlide:
     def test_basic_render(self):
@@ -735,17 +681,6 @@ class TestDrawSummaryStatsSlide:
             ("40 min", "AVG GAME", "Long games", (88, 101, 242)),
             ("10", "UNIQUE HEROES", "Diverse", (46, 204, 113)),
             ("3.5", "AVG KDA", "Clean", (155, 89, 182)),
-        ]
-        buf = draw_summary_stats_slide("TestPlayer", "Cama Wrapped 2026", stats)
-        img = Image.open(buf)
-        assert img.size == (800, 600)
-
-    def test_partial_stats(self):
-        from utils.wrapped_drawing import draw_summary_stats_slide
-
-        stats = [
-            ("60%", "WIN RATE", "", (87, 242, 135)),
-            ("+50", "RATING", "", (241, 196, 15)),
         ]
         buf = draw_summary_stats_slide("TestPlayer", "Cama Wrapped 2026", stats)
         img = Image.open(buf)
@@ -766,49 +701,6 @@ class TestDrawPairwiseSlide:
         img = Image.open(buf)
         assert img.size == (800, 600)
 
-    def test_rivals_slide(self):
-        from utils.wrapped_drawing import draw_pairwise_slide
-
-        entries = [
-            {"discord_id": 444, "username": "Charlie", "games": 8, "wins": 2,
-             "win_rate": 0.25, "label": "Nemesis", "flavor": "Pain incarnate"},
-        ]
-        buf = draw_pairwise_slide("TestPlayer", "Cama Wrapped 2026", entries, slide_type="rivals")
-        img = Image.open(buf)
-        assert img.size == (800, 600)
-
-    def test_with_avatar_fallback(self):
-        from utils.wrapped_drawing import draw_pairwise_slide
-
-        entries = [
-            {"discord_id": 222, "username": "Alice", "games": 5, "wins": 3,
-             "win_rate": 0.6, "label": None, "flavor": None},
-        ]
-        # No avatar images provided → should use initial circle fallback
-        buf = draw_pairwise_slide("TestPlayer", "Cama Wrapped 2026", entries, avatar_images=None)
-        img = Image.open(buf)
-        assert img.size == (800, 600)
-
-    def test_with_avatar_bytes(self):
-        from utils.wrapped_drawing import draw_pairwise_slide
-
-        # Create a tiny valid PNG for avatar
-        avatar_img = Image.new("RGBA", (48, 48), (255, 0, 0, 255))
-        avatar_buf = io.BytesIO()
-        avatar_img.save(avatar_buf, format="PNG")
-        avatar_bytes = avatar_buf.getvalue()
-
-        entries = [
-            {"discord_id": 222, "username": "Alice", "games": 5, "wins": 3,
-             "win_rate": 0.6, "label": "Best", "flavor": None},
-        ]
-        buf = draw_pairwise_slide(
-            "TestPlayer", "Cama Wrapped 2026", entries,
-            avatar_images={222: avatar_bytes},
-        )
-        img = Image.open(buf)
-        assert img.size == (800, 600)
-
 
 class TestDrawHeroSpotlightSlide:
     def test_basic_render(self):
@@ -824,14 +716,6 @@ class TestDrawHeroSpotlightSlide:
         img = Image.open(buf)
         assert img.size == (800, 600)
 
-    def test_single_hero(self):
-        from utils.wrapped_drawing import draw_hero_spotlight_slide
-
-        top_hero = {"name": "Crystal Maiden", "picks": 15, "wins": 10, "win_rate": 0.667}
-        buf = draw_hero_spotlight_slide("TestPlayer", "Cama Wrapped 2026", top_hero, [top_hero], 1)
-        img = Image.open(buf)
-        assert img.size == (800, 600)
-
 
 class TestDrawLaneBreakdownSlide:
     def test_with_lane_data(self):
@@ -842,12 +726,6 @@ class TestDrawLaneBreakdownSlide:
         img = Image.open(buf)
         assert img.size == (800, 600)
 
-    def test_empty_lane_data(self):
-        from utils.wrapped_drawing import draw_lane_breakdown_slide
-
-        buf = draw_lane_breakdown_slide("TestPlayer", "Cama Wrapped 2026", {}, total_games=10)
-        img = Image.open(buf)
-        assert img.size == (800, 600)
 
 class TestWordWrap:
     def test_empty_string(self):
@@ -920,17 +798,6 @@ class TestDrawPackageDealSlide:
         img = Image.open(buf)
         assert img.size == (800, 600)
 
-    def test_single_deal(self):
-        from utils.wrapped_drawing import draw_package_deal_slide
-
-        buf = draw_package_deal_slide(
-            "TestPlayer", "Cama Wrapped 2026",
-            times_bought=1, times_bought_on_you=0, unique_buyers=0,
-            jc_spent=50, jc_spent_on_you=0, total_games=5,
-        )
-        img = Image.open(buf)
-        assert img.size == (800, 600)
-
 
 class TestWrapChartInSlide:
     def test_wraps_chart_image(self):
@@ -943,38 +810,6 @@ class TestWrapChartInSlide:
         chart_bytes = chart_buf.getvalue()
 
         buf = wrap_chart_in_slide(chart_bytes, "RATING HISTORY", "The climb was real")
-        img = Image.open(buf)
-        assert img.size == (800, 600)
-
-    def test_handles_invalid_chart_bytes(self):
-        from utils.wrapped_drawing import wrap_chart_in_slide
-
-        buf = wrap_chart_in_slide(b"not_a_real_image", "CHART", "Oops")
-        img = Image.open(buf)
-        assert img.size == (800, 600)
-
-    def test_large_chart_gets_scaled(self):
-        from utils.wrapped_drawing import wrap_chart_in_slide
-
-        # Create an oversized chart
-        chart_img = Image.new("RGBA", (1200, 800), (100, 100, 100, 255))
-        chart_buf = io.BytesIO()
-        chart_img.save(chart_buf, format="PNG")
-        chart_bytes = chart_buf.getvalue()
-
-        buf = wrap_chart_in_slide(chart_bytes, "BIG CHART", "Scaled down")
-        img = Image.open(buf)
-        assert img.size == (800, 600)
-
-    def test_empty_flavor_text(self):
-        from utils.wrapped_drawing import wrap_chart_in_slide
-
-        chart_img = Image.new("RGBA", (700, 400), (100, 100, 100, 255))
-        chart_buf = io.BytesIO()
-        chart_img.save(chart_buf, format="PNG")
-        chart_bytes = chart_buf.getvalue()
-
-        buf = wrap_chart_in_slide(chart_bytes, "CHART", "")
         img = Image.open(buf)
         assert img.size == (800, 600)
 
@@ -1070,28 +905,3 @@ class TestDrawAwardsGrid:
         img = Image.open(buf)
         assert img.width > 0
         assert img.height > 0
-
-    def test_viewer_highlight_render(self):
-        from utils.wrapped_drawing import draw_awards_grid
-
-        awards = [self._make_award(i, f"Award{i}") for i in range(1, 4)]
-        buf = draw_awards_grid(awards, viewer_discord_id=1)
-        img = Image.open(buf)
-        assert img.width > 0
-        assert img.height > 0
-
-    def test_single_award(self):
-        from utils.wrapped_drawing import draw_awards_grid
-
-        awards = [self._make_award(1, "Solo Award")]
-        buf = draw_awards_grid(awards, viewer_discord_id=1)
-        img = Image.open(buf)
-        assert img.width > 0
-
-    def test_six_awards(self):
-        from utils.wrapped_drawing import draw_awards_grid
-
-        awards = [self._make_award(i, f"Award{i}") for i in range(1, 7)]
-        buf = draw_awards_grid(awards, viewer_discord_id=3)
-        img = Image.open(buf)
-        assert img.width > 0

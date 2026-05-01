@@ -1,5 +1,6 @@
 """Tests for services/trivia_data.py — data loading and CDN URL builders."""
 
+import pytest
 
 from services.trivia_data import (
     ability_icon_url,
@@ -15,54 +16,36 @@ from services.trivia_data import (
 )
 
 
-class TestCDNUrls:
-    def test_hero_image_url(self):
-        url = hero_image_url("npc_dota_hero_antimage")
-        assert url is not None
-        assert "antimage.png" in url
-        assert "dota_react/heroes/" in url
-
-    def test_hero_image_url_empty(self):
-        assert hero_image_url("") is None
-
-    def test_ability_icon_url(self):
-        url = ability_icon_url("/panorama/images/spellicons/antimage_mana_break_png.png")
-        assert url is not None
-        assert "antimage_mana_break.png" in url
-        assert "dota_react/abilities/" in url
-
-    def test_ability_icon_url_none(self):
-        assert ability_icon_url(None) is None
-
-    def test_item_icon_url(self):
-        url = item_icon_url("/panorama/images/items/blink_png.png")
-        assert url is not None
-        assert "blink.png" in url
-        assert "dota_react/items/" in url
-
-    def test_item_icon_url_none(self):
-        assert item_icon_url(None) is None
-
-    def test_item_icon_url_recipe(self):
-        """Recipe icons end in .png (not _png.png) — must not produce double .png."""
-        url = item_icon_url("/panorama/images/items/recipe.png")
-        assert url is not None
-        assert url.endswith("/items/recipe.png")
-        assert ".png.png" not in url
-
-    def test_item_icon_url_normal(self):
-        """Standard items with _png.png suffix still work."""
-        url = item_icon_url("/panorama/images/items/blink_png.png")
-        assert url is not None
-        assert url.endswith("/items/blink.png")
-        assert ".png.png" not in url
-
-    def test_ability_icon_url_trailing_png(self):
-        """Ability icons ending in .png (not _png.png) must not produce double .png."""
-        url = ability_icon_url("/panorama/images/spellicons/some_ability.png")
-        assert url is not None
-        assert url.endswith("/abilities/some_ability.png")
-        assert ".png.png" not in url
+@pytest.mark.parametrize(
+    "fn,arg,expected_substr",
+    [
+        (hero_image_url, "npc_dota_hero_antimage", "/dota_react/heroes/antimage.png"),
+        (hero_image_url, "", None),
+        (
+            ability_icon_url,
+            "/panorama/images/spellicons/antimage_mana_break_png.png",
+            "/dota_react/abilities/antimage_mana_break.png",
+        ),
+        (
+            ability_icon_url,
+            "/panorama/images/spellicons/some_ability.png",
+            "/dota_react/abilities/some_ability.png",
+        ),
+        (ability_icon_url, None, None),
+        (item_icon_url, "/panorama/images/items/blink_png.png", "/dota_react/items/blink.png"),
+        (item_icon_url, "/panorama/images/items/recipe.png", "/dota_react/items/recipe.png"),
+        (item_icon_url, None, None),
+    ],
+)
+def test_cdn_url(fn, arg, expected_substr):
+    """One pass over hero/ability/item URL builders. Catches double-.png and missing-prefix bugs."""
+    result = fn(arg)
+    if expected_substr is None:
+        assert result is None
+    else:
+        assert result is not None
+        assert expected_substr in result
+        assert ".png.png" not in result
 
 
 class TestDataLoading:

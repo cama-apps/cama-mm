@@ -345,6 +345,17 @@ class SchemaManager:
             # luminosity-as-real-resource, retreat cost, dialogue v2.
             ("dig_boss_revamp_columns", self._migration_dig_boss_revamp_columns),
             ("dig_boss_progress_persistent_hp", self._migration_dig_boss_progress_persistent_hp),
+            # 10:1 prediction-market stock split + EOD-fair history table +
+            # one-shot digest banner sentinel.
+            ("predictions_mini_split_v1", self._migration_predictions_mini_split_v1),
+            # Backfill prediction_fair_snapshots from prediction_levels.posted_at
+            # so charts for pre-migration markets aren't a single flat point.
+            (
+                "predictions_fair_history_backfill_from_levels",
+                self._migration_predictions_fair_history_backfill_from_levels,
+            ),
+            # Cheer cooldown decoupled from free-dig cooldown.
+            ("add_last_cheer_at_to_tunnels", self._migration_add_last_cheer_at_to_tunnels),
         ]
 
     # --- Migrations ---
@@ -2644,3 +2655,137 @@ class SchemaManager:
             FROM tunnels
             """
         )
+
+    def _migration_predictions_mini_split_v1(self, cursor) -> None:
+        """10:1 stock split for prediction markets, fair-history table, banner sentinel.
+
+        Quantity columns scale ×10; jopa and price columns are untouched. The
+        contract value constant moves 100→10 in code so the same trade payload
+        clears at the same jopa total. Combined with the per-trade VWAP rewrite,
+        every existing position's P&L is preserved exactly.
+
+        Also creates ``prediction_fair_snapshots`` (the new EOD-fair history
+        feeding the per-market chart), backfills one row per still-open market,
+        and writes a one-shot ``split_announced=0`` sentinel into ``app_kv`` so
+        the next daily digest can post a one-time 'units restated' notice.
+        """
+        cursor.execute(
+            "UPDATE prediction_positions "
+            "SET yes_contracts = yes_contracts * 10, "
+            "    no_contracts = no_contracts * 10"
+        )
+        cursor.execute(
+            "UPDATE prediction_levels SET remaining_size = remaining_size * 10"
+        )
+        cursor.execute(
+            "UPDATE prediction_trades SET contracts = contracts * 10"
+        )
+
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS prediction_fair_snapshots (
+                snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                market_id   INTEGER NOT NULL,
+                guild_id    INTEGER NOT NULL,
+                snapshot_at INTEGER NOT NULL,
+                fair_pct    INTEGER NOT NULL,
+                reason      TEXT NOT NULL
+            )
+            """
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_prediction_fair_snapshots_lookup "
+            "ON prediction_fair_snapshots(market_id, guild_id, snapshot_at)"
+        )
+        cursor.execute(
+            """
+            INSERT OR IGNORE INTO prediction_fair_snapshots
+                (market_id, guild_id, snapshot_at, fair_pct, reason)
+            SELECT
+                prediction_id,
+                guild_id,
+                COALESCE(last_refresh_at, CAST(strftime('%s', 'now') AS INTEGER)),
+                COALESCE(current_price, initial_fair),
+                'backfill'
+            FROM predictions
+            WHERE status = 'open'
+              AND COALESCE(current_price, initial_fair) IS NOT NULL
+            """
+        )
+
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS app_kv (
+                guild_id INTEGER NOT NULL,
+                key TEXT NOT NULL,
+                value TEXT NOT NULL,
+                PRIMARY KEY (guild_id, key)
+            )
+            """
+        )
+        cursor.execute(
+            """
+            INSERT OR IGNORE INTO app_kv (guild_id, key, value)
+            SELECT DISTINCT guild_id, 'split_announced', '0'
+            FROM prediction_trades
+            JOIN predictions USING (prediction_id)
+            """
+        )
+
+    def _migration_predictions_fair_history_backfill_from_levels(self, cursor) -> None:
+        """Backfill ``prediction_fair_snapshots`` from ``prediction_levels.posted_at``.
+
+        The prior split migration only inserted one snapshot per still-open
+        market, so charts for older markets render as a single flat point.
+        ``prediction_levels.posted_at`` records when each level was layered in
+        (the LP centers each refresh's ladder around the new fair), so for
+        each (market, UTC day) we can derive a defensible historical fair
+        from the levels posted that day.
+
+        Dedupes against any pre-existing row at the same EOD timestamp via
+        ``NOT EXISTS`` rather than a unique index — production writers can
+        legitimately fire two snapshots within the same second (e.g. create
+        + immediate refresh in tests), so the index stays non-unique.
+        """
+        # One snapshot per (market, UTC day) at end-of-day timestamp.
+        # Both sides present → mid; single side → that side's best price.
+        cursor.execute(
+            """
+            INSERT INTO prediction_fair_snapshots
+                (market_id, guild_id, snapshot_at, fair_pct, reason)
+            SELECT
+                l.prediction_id,
+                p.guild_id,
+                CAST(strftime(
+                    '%s',
+                    date(l.posted_at, 'unixepoch'),
+                    '+1 day',
+                    '-1 second'
+                ) AS INTEGER) AS eod_ts,
+                CASE
+                    WHEN MIN(CASE WHEN l.side = 'yes_ask' THEN l.price END) IS NOT NULL
+                     AND MAX(CASE WHEN l.side = 'yes_bid' THEN l.price END) IS NOT NULL
+                        THEN (MIN(CASE WHEN l.side = 'yes_ask' THEN l.price END)
+                            + MAX(CASE WHEN l.side = 'yes_bid' THEN l.price END)) / 2
+                    WHEN MIN(CASE WHEN l.side = 'yes_ask' THEN l.price END) IS NOT NULL
+                        THEN MIN(CASE WHEN l.side = 'yes_ask' THEN l.price END)
+                    ELSE MAX(CASE WHEN l.side = 'yes_bid' THEN l.price END)
+                END,
+                'backfill_levels'
+            FROM prediction_levels l
+            JOIN predictions p ON p.prediction_id = l.prediction_id
+            GROUP BY l.prediction_id, date(l.posted_at, 'unixepoch')
+            HAVING NOT EXISTS (
+                SELECT 1 FROM prediction_fair_snapshots s
+                WHERE s.market_id = l.prediction_id
+                  AND s.guild_id = p.guild_id
+                  AND s.snapshot_at = eod_ts
+            )
+            """
+        )
+
+    def _migration_add_last_cheer_at_to_tunnels(self, cursor) -> None:
+        """Track the cheerer's last cheer timestamp so cheer can have its own
+        short cooldown without sharing the free-dig cooldown.
+        """
+        self._add_column_if_not_exists(cursor, "tunnels", "last_cheer_at", "INTEGER")

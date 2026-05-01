@@ -256,6 +256,16 @@ async def _post_daily_digest_all_guilds() -> None:
                 title="📈 Today in prediction markets",
                 color=0x3498DB,
             )
+            split_banner = await asyncio.to_thread(
+                bot.prediction_service.prediction_repo.pop_one_shot_flag,
+                guild.id,
+                "split_announced",
+            )
+            if split_banner:
+                embed.description = (
+                    "**Markets stock-split 10:1** — quantities have been restated; "
+                    "jopa balances unchanged."
+                )
             FIELD_CAP = 25
             for added, p in enumerate(opens):
                 if added >= FIELD_CAP:

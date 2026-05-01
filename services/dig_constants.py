@@ -57,7 +57,8 @@ def get_layer(depth: int) -> LayerDef:
 # Pacing Constants
 # ---------------------------------------------------------------------------
 
-FREE_DIG_COOLDOWN_SECONDS: int = 14_400          # 4 hours
+FREE_DIG_COOLDOWN_SECONDS: int = 10_800          # 3 hours
+CHEER_COOLDOWN_SECONDS: int = 30                 # short anti-spam, independent of dig
 
 PAID_DIG_COSTS_PER_DAY: list[int] = [3, 6, 12, 24, 48]
 PAID_DIG_COST_CAP: int = 48
@@ -254,19 +255,11 @@ PICKAXE_TIERS: list[dict] = [
 # Void-Touched). Shop sells Wooden–Diamond; Obsidian–Void-Touched are
 # boss-drop-only. Durability ticks once per boss fight; at zero the
 # piece auto-unequips and must be repaired before re-equipping.
-#
-# Power calibration (first-pass; re-tune via duel sim before merge):
-#     Cautious @ depth 100: naked 0.81 → full Void 1.00 (+19pp)  ← on spec
-#     Bold     @ depth 100: naked 0.20 → full Void 0.97 (+78pp)  ← TOO STRONG
-#     Reckless @ depth 100: naked 0.00 → full Void 0.54 (+53pp)
-# Bold over-shoots the +25pp spec; the duel-sim balance pass should
-# either cut weapon player_dmg progression to zero, or trim armor
-# player_hp_bonus across the board.
 
 from domain.models.dig_gear import GearSlot, GearTierDef  # noqa: E402
 
 GEAR_MAX_DURABILITY: int = 20
-GEAR_REPAIR_COST_PCT: float = 0.5
+GEAR_REPAIR_COST_PCT: float = 0.33
 GEAR_BOSS_DROP_RATE: float = 0.07
 # Maps boss-boundary depth → tier index of the dropped piece. Boundaries
 # missing from this map (25/50/75) drop nothing; players buy low-tier
@@ -298,7 +291,7 @@ WEAPON_TIERS: list[GearTierDef] = [
                 advance_bonus=1, cave_in_reduction=0.05, loot_bonus=0,
                 shop_price=50,   depth_required=50,  prestige_required=0),
     GearTierDef("Diamond Pickaxe",      tier=3, slot=GearSlot.WEAPON,
-                player_dmg=0, player_hit=0.03,
+                player_dmg=1, player_hit=0.03,
                 advance_bonus=2, cave_in_reduction=0.05, loot_bonus=2,
                 shop_price=150,  depth_required=75,  prestige_required=0),
     GearTierDef("Obsidian Pickaxe",     tier=4, slot=GearSlot.WEAPON,
@@ -306,7 +299,7 @@ WEAPON_TIERS: list[GearTierDef] = [
                 advance_bonus=3, cave_in_reduction=0.10, loot_bonus=3,
                 shop_price=300,  depth_required=100, prestige_required=1),
     GearTierDef("Frostforged Pickaxe",  tier=5, slot=GearSlot.WEAPON,
-                player_dmg=1, player_hit=0.05,
+                player_dmg=2, player_hit=0.05,
                 advance_bonus=3, cave_in_reduction=0.20, loot_bonus=3,
                 shop_price=600,  depth_required=200, prestige_required=3),
     GearTierDef("Void-Touched Pickaxe", tier=6, slot=GearSlot.WEAPON,
@@ -326,13 +319,13 @@ ARMOR_TIERS: list[GearTierDef] = [
     GearTierDef("Iron Plate",         tier=2, slot=GearSlot.ARMOR,
                 player_hp_bonus=1, shop_price=60,   depth_required=50),
     GearTierDef("Diamond Plate",      tier=3, slot=GearSlot.ARMOR,
-                player_hp_bonus=1, shop_price=180,  depth_required=75),
+                player_hp_bonus=2, shop_price=180,  depth_required=75),
     GearTierDef("Obsidian Plate",     tier=4, slot=GearSlot.ARMOR,
-                player_hp_bonus=2, shop_price=350,  depth_required=100, prestige_required=1),
+                player_hp_bonus=3, shop_price=350,  depth_required=100, prestige_required=1),
     GearTierDef("Frostforged Plate",  tier=5, slot=GearSlot.ARMOR,
-                player_hp_bonus=2, shop_price=700,  depth_required=200, prestige_required=3),
+                player_hp_bonus=3, shop_price=700,  depth_required=200, prestige_required=3),
     GearTierDef("Void-Touched Plate", tier=6, slot=GearSlot.ARMOR,
-                player_hp_bonus=3, shop_price=1400, depth_required=275, prestige_required=5),
+                player_hp_bonus=4, shop_price=1400, depth_required=275, prestige_required=5),
 ]
 
 # Boots reduce boss_hit (the chance an incoming attack lands). Stays
@@ -1007,26 +1000,26 @@ BOSS_TIER_BONUS: dict[int, dict[str, float]] = {
     25:  {"hp": 0,  "hit": 0.00, "dmg": 0, "pen": 0.00},
     50:  {"hp": 1,  "hit": 0.00, "dmg": 0, "pen": 0.01},
     75:  {"hp": 2,  "hit": 0.01, "dmg": 0, "pen": 0.02},
-    100: {"hp": 4,  "hit": 0.03, "dmg": 0, "pen": 0.04},
-    150: {"hp": 6,  "hit": 0.04, "dmg": 0, "pen": 0.05},
-    200: {"hp": 6,  "hit": 0.05, "dmg": 0, "pen": 0.06},
-    275: {"hp": 7,  "hit": 0.06, "dmg": 0, "pen": 0.06},
-    300: {"hp": 12, "hit": 0.10, "dmg": 0, "pen": 0.07},   # pinnacle: HP grind, no dmg cliff
+    100: {"hp": 3,  "hit": 0.03, "dmg": 0, "pen": 0.04},
+    150: {"hp": 5,  "hit": 0.04, "dmg": 0, "pen": 0.05},
+    200: {"hp": 5,  "hit": 0.05, "dmg": 0, "pen": 0.06},
+    275: {"hp": 6,  "hit": 0.06, "dmg": 0, "pen": 0.06},
+    300: {"hp": 9,  "hit": 0.10, "dmg": 0, "pen": 0.06},   # pinnacle: HP grind, no dmg cliff
 }
 BOSS_PRESTIGE_BONUS: dict[int, dict[str, float]] = {
     # prestige: {boss_hp_add, boss_hit_add, boss_dmg_add, player_hit_pen}
     # P1/P3/P5 carry extra cushion to offset the gear-unlock power spike.
     0: {"hp": 0,  "hit": 0.00, "dmg": 0, "pen": 0.000},
-    1: {"hp": 11, "hit": 0.08, "dmg": 0, "pen": 0.030},   # Obsidian unlock cushion
-    2: {"hp": 11, "hit": 0.09, "dmg": 0, "pen": 0.050},
-    3: {"hp": 14, "hit": 0.12, "dmg": 0, "pen": 0.080},   # Frost unlock cushion
-    4: {"hp": 16, "hit": 0.14, "dmg": 0, "pen": 0.110},
-    5: {"hp": 28, "hit": 0.20, "dmg": 0, "pen": 0.140},   # Void unlock cushion (big)
-    6: {"hp": 31, "hit": 0.23, "dmg": 0, "pen": 0.165},
-    7: {"hp": 32, "hit": 0.25, "dmg": 1, "pen": 0.190},   # purgatory: only +dmg row
+    1: {"hp": 9,  "hit": 0.08, "dmg": 0, "pen": 0.030},   # Obsidian unlock cushion
+    2: {"hp": 9,  "hit": 0.09, "dmg": 0, "pen": 0.050},
+    3: {"hp": 12, "hit": 0.12, "dmg": 0, "pen": 0.080},   # Frost unlock cushion
+    4: {"hp": 14, "hit": 0.14, "dmg": 0, "pen": 0.110},
+    5: {"hp": 24, "hit": 0.20, "dmg": 0, "pen": 0.140},   # Void unlock cushion (big)
+    6: {"hp": 26, "hit": 0.23, "dmg": 0, "pen": 0.165},
+    7: {"hp": 27, "hit": 0.25, "dmg": 1, "pen": 0.190},   # purgatory: only +dmg row
 }
 PLAYER_HIT_FLOOR: float = 0.05                     # hard floor so Reckless remains playable
-PLAYER_HIT_CEILING: float = 0.85                   # hard ceiling — was 0.95; tightened so RNG matters
+PLAYER_HIT_CEILING: float = 0.90                   # hard ceiling — luminosity already eats hit chance, so leave a wider cap
 BOSS_FREE_FIGHT_ACCURACY_MOD: float = 0.6          # multiplied into player_hit when wager == 0
 BOSS_ROUND_CAP: int = 20                           # safety valve against infinite loops
 WIN_CHANCE_CAP: float = 0.95                       # ceiling on displayed/computed win probability
@@ -4672,6 +4665,218 @@ RANDOM_EVENTS: list[RandomEvent] = [
             trigger="success", mode="steal",
         ),
     ),
+
+    # ---- Rumor pass: a small batch of additional events. Mostly cross-player,
+    # mostly layer-restricted. Splash configs reuse existing strategies.
+    # -------------------------------------------------------------------------
+
+    RandomEvent(
+        id="wisps_tether",
+        name="Wisp's Tether",
+        description=(
+            "A drifting mote of light recognizes you. As you cup your hand around it, a second mote pulses awake somewhere far above.",
+            "The wisp leans toward your warmth, then tilts — as if it can hear someone else who needs it more.",
+        ),
+        min_depth=51, max_depth=75,
+        safe_option=EventChoice(
+            "Wave the wisp off",
+            success=EventOutcome("The mote drifts away. The cave is colder for its absence.", 0, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Cup the light gently",
+            success=EventOutcome("The wisp doubles in your palm. A second flicker brightens far above.", 0, 6, False),
+            failure=EventOutcome("The mote burns through your fingers and is gone.", 0, -3, False),
+            success_chance=0.60,
+        ),
+        rarity="common", social=True,
+        splash=SplashConfig(
+            strategy="random_active", victim_count=1, penalty_jc=4,
+            trigger="success", mode="grant",
+        ),
+    ),
+
+    RandomEvent(
+        id="tunnel_echoes",
+        name="Tunnel Echoes",
+        description=(
+            "Your pickaxe rings wrong. Stone shifts somewhere it shouldn't have.",
+            "The walls carry your mistake to places you can't see. Someone there feels it.",
+        ),
+        min_depth=None, max_depth=None,
+        safe_option=EventChoice(
+            "Muffle the strike",
+            success=EventOutcome("You ease the swing. Slow and quiet pays a small dividend.", 0, 1, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Swing through it",
+            success=EventOutcome("The stone gives clean. Your strike lands where you wanted.", 0, 5, False),
+            failure=EventOutcome("Your strike rolls long. Something gives way somewhere else.", 0, -3, False),
+            success_chance=0.60,
+        ),
+        rarity="common", social=True,
+        splash=SplashConfig(
+            strategy="active_diggers", victim_count=1, penalty_jc=3,
+            trigger="failure", mode="burn",
+        ),
+    ),
+
+    RandomEvent(
+        id="stalled_caravan",
+        name="Stalled Caravan",
+        description=(
+            "A wagon wheel half-sunk in dirt. A faint voice asks if you're going their way.",
+            "Tracks lead nowhere. The cart still smells of oil, recently.",
+        ),
+        min_depth=None, max_depth=25,
+        safe_option=EventChoice(
+            "Walk on by",
+            success=EventOutcome("You don't get involved. The voice fades.", 0, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Lend a shoulder",
+            success=EventOutcome("The wheel pops free. The driver presses coin into your palm and is gone.", 0, 8, False),
+            failure=EventOutcome("The wagon tips the wrong way. You pay for what broke.", 0, -5, False),
+            success_chance=0.65,
+        ),
+        rarity="common",
+    ),
+
+    RandomEvent(
+        id="volatile_affix",
+        name="Volatile Affix",
+        description=(
+            "A jagged crystal pulses with a rhythm that doesn't match the cave. Pressing it is an invitation.",
+            "The shard hums against your palm in a key the rock doesn't share.",
+        ),
+        min_depth=51, max_depth=75,
+        safe_option=EventChoice(
+            "Step around it",
+            success=EventOutcome("You leave the shard humming. Some bargains aren't worth the noise.", 0, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Press the shard",
+            success=EventOutcome("The hum settles into your bones. The next few swings feel charged.", 0, 6, False),
+            failure=EventOutcome("The shard cracks against your palm and the hum cuts out.", 0, -8, False),
+            success_chance=0.55,
+        ),
+        buff_on_success=TempBuff("affix_hum", "Affix Hum", 2, {"advance_bonus": 1}),
+        rarity="uncommon",
+    ),
+
+    RandomEvent(
+        id="rivals_cache",
+        name="Rival's Cache",
+        description=(
+            "A camouflaged stash, tucked behind a false stone. Someone deliberate left this. They'll know.",
+            "Tools laid out. Marks fresh. You aren't the first one here today.",
+        ),
+        min_depth=None, max_depth=25,
+        safe_option=EventChoice(
+            "Leave it untouched",
+            success=EventOutcome("You reseal the stone and walk on. Some rivals you don't poke.", 0, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Pry it open",
+            success=EventOutcome("The stash gives. Whoever stocked it is going to feel that.", 0, 0, False),
+            failure=EventOutcome("A snare you didn't see takes its toll.", 0, -6, False),
+            success_chance=0.55,
+        ),
+        rarity="uncommon", social=True,
+        splash=SplashConfig(
+            strategy="richest_n", victim_count=1, penalty_jc=8,
+            trigger="success", mode="steal",
+        ),
+    ),
+
+    RandomEvent(
+        id="forsaken_pact",
+        name="Forsaken Pact",
+        description=(
+            "A voice from the cracks offers a deal. The wording is careful. Too careful.",
+            "The dark proposes. The terms aren't only for you.",
+        ),
+        min_depth=101, max_depth=150,
+        safe_option=EventChoice(
+            "Refuse the wording",
+            success=EventOutcome("You walk away. The voice charges a small fee for your time.", 0, -2, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Accept the bargain",
+            success=EventOutcome("The pact pays out in your purse. The voice keeps its end.", 0, 20, False),
+            failure=EventOutcome("The cost of breaking the deal pours through the cracks. Others nearby feel it.", 0, -10, False),
+            success_chance=0.50,
+        ),
+        rarity="uncommon", social=True,
+        splash=SplashConfig(
+            strategy="active_diggers", victim_count=2, penalty_jc=5,
+            trigger="failure", mode="burn",
+        ),
+    ),
+
+    RandomEvent(
+        id="mapworks_drift",
+        name="Mapworks Drift",
+        description=(
+            "A folded map unfurls itself in midair. It points to riches in places no one has dug yet.",
+            "Lines redraw themselves on the parchment. Several names brighten — none of them yours.",
+        ),
+        min_depth=51, max_depth=75,
+        safe_option=EventChoice(
+            "Refold the map",
+            success=EventOutcome("You tuck the parchment away. Some directions you don't follow.", 0, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Follow the lines",
+            success=EventOutcome("The map sings. You return heavy, and you weren't the only one paid.", 1, 20, False),
+            failure=EventOutcome("The lines led somewhere that isn't there anymore.", 0, -12, False),
+            success_chance=0.55,
+        ),
+        rarity="rare", social=True,
+        splash=SplashConfig(
+            strategy="random_active", victim_count=2, penalty_jc=8,
+            trigger="success", mode="grant",
+        ),
+    ),
+
+    RandomEvent(
+        id="the_eye_opens",
+        name="The Eye Opens",
+        description=(
+            "A seam in the rock parts. An eye looks back. It is not blinking. It is listening.",
+            "The dark watches you watching it. The transaction has already started.",
+        ),
+        min_depth=101, max_depth=150,
+        safe_option=EventChoice(
+            "Avert your eyes",
+            success=EventOutcome("You look away. The dark accepts the courtesy and lets you through.", 0, 3, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Meet its gaze",
+            success=EventOutcome("The eye blinks once. Something it had been holding for someone else slides into your hands — and you find you can read the stone the way it does.", 0, 0, False),
+            failure=EventOutcome("It looks longer than you do. The cave answers for both of you.", 0, -50, True),
+            success_chance=0.50,
+        ),
+        desperate_option=EventChoice(
+            "Speak to it",
+            success=EventOutcome("The dark answers in your own voice. Several caches change hands. You leave knowing things about the rock that no one teaches.", 1, 30, False),
+            failure=EventOutcome("Your voice carries somewhere it shouldn't. The cave folds in on you.", -2, -90, True),
+            success_chance=0.25,
+        ),
+        buff_on_success=TempBuff("whispered_insight", "Whispered Insight", 3, {"cave_in_reduction": 0.20}),
+        rarity="legendary", social=True, requires_dark=True,
+        splash=SplashConfig(
+            strategy="richest_n", victim_count=1, penalty_jc=28,
+            trigger="success", mode="steal",
+        ),
+    ),
 ]
 
 
@@ -5002,6 +5207,23 @@ LUMINOSITY_DRAIN_PER_DIG: dict[str, int] = {
     "Frozen Core": 7,
     "The Hollow": 10,
 }
+
+# Hard depth wall: the deep refuses to yield further. Players hitting
+# this depth must prestige to continue. Sized so that post-pinnacle
+# (depth 300) progress feels like a slow descent under pressure rather
+# than an open runway.
+PRESTIGE_HARD_CAP: int = 500
+# Past this depth the drain rate accelerates linearly — +1 extra drain
+# per LUMINOSITY_DEEP_DRAIN_BLOCKS_PER_STEP blocks. At cap (depth 500)
+# the bonus is +10, doubling The Hollow's base drain.
+LUMINOSITY_DEEP_DRAIN_START_DEPTH: int = 300
+LUMINOSITY_DEEP_DRAIN_BLOCKS_PER_STEP: int = 20
+
+# Pinnacle catch-up: if a player tunneled past the pinnacle without
+# defeating it (legacy tunnels that pre-date the pinnacle, or skipped
+# encounters), the pinnacle re-procs at this depth so prestige isn't
+# permanently locked out. Tier bosses must still all be cleared.
+PINNACLE_REPROC_DEPTH: int = 400
 
 # Thresholds and their gameplay effects
 LUMINOSITY_BRIGHT: int = 76       # 76-100: normal
@@ -5743,7 +5965,9 @@ RETREAT_COOLDOWN_SECONDS: int = 30 * 60   # 30 minutes
 # ---------------------------------------------------------------------------
 # Persisted boss HP / regen (boss revamp)
 # ---------------------------------------------------------------------------
-BOSS_HP_REGEN_PER_HOUR: int = 1
+# Halved from "1 HP / hour" so damage actually persists across the new
+# shorter free-dig cycle. A 24h hiatus now regens half a phase, not a full one.
+BOSS_HP_REGEN_PER_2_HOURS: int = 1
 
 
 # ---------------------------------------------------------------------------

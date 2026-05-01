@@ -27,7 +27,7 @@ from services.dig_constants import (
     BOSS_DIALOGUE_V2,
     BOSS_DUEL_STATS,
     BOSS_FREE_FIGHT_ACCURACY_MOD,
-    BOSS_HP_REGEN_PER_HOUR,
+    BOSS_HP_REGEN_PER_2_HOURS,
     BOSS_NAMES,
     BOSS_PAYOUTS,
     BOSS_PHASE2,
@@ -38,6 +38,7 @@ from services.dig_constants import (
     BOSS_TIER_BONUS,
     CAVE_IN_BLOCK_LOSS_MAX,
     CAVE_IN_BLOCK_LOSS_MIN,
+    CHEER_COOLDOWN_SECONDS,
     CONSUMABLE_ITEMS,
     CORRUPTION_BAD,
     CORRUPTION_WEIRD,
@@ -61,6 +62,8 @@ from services.dig_constants import (
     LUMINOSITY_DARK_HIT_PENALTY,
     LUMINOSITY_DARK_JC_MULTIPLIER,
     LUMINOSITY_DARK_RISKY_PENALTY,
+    LUMINOSITY_DEEP_DRAIN_BLOCKS_PER_STEP,
+    LUMINOSITY_DEEP_DRAIN_START_DEPTH,
     LUMINOSITY_DIM,
     LUMINOSITY_DIM_CAVE_IN_BONUS,
     LUMINOSITY_DIM_EVENT_MULTIPLIER,
@@ -92,8 +95,10 @@ from services.dig_constants import (
     PINNACLE_RELIC_BASE_NAME,
     PINNACLE_RELIC_STAT_POOL,
     PINNACLE_RELIC_SUFFIX_POOL,
+    PINNACLE_REPROC_DEPTH,
     PLAYER_HIT_CEILING,
     PLAYER_HIT_FLOOR,
+    PRESTIGE_HARD_CAP,
     PRESTIGE_PERKS,
     RELIC_SLOTS_BASE,
     RETREAT_BLOCK_LOSS_MAX,
@@ -646,8 +651,8 @@ class DigService:
         (the freshly-computed scaled boss HP for this fight) so the boss can
         regen back to it. ``starting_hp`` is:
           - ``hp_remaining`` from the last unfinished engagement, plus regen
-            of ``BOSS_HP_REGEN_PER_HOUR`` per hour since ``last_engaged_at``,
-            capped at ``hp_max``;
+            of ``BOSS_HP_REGEN_PER_2_HOURS`` per two-hour block since
+            ``last_engaged_at``, capped at ``hp_max``;
           - ``fresh_hp`` if no persisted HP exists.
 
         ``at_boss`` is normally an int boundary depth (e.g. 25), but pinnacle
@@ -668,10 +673,10 @@ class DigService:
         last_engaged = entry.get("last_engaged_at")
         if last_engaged is not None:
             try:
-                hours_since = max(0, (now - int(last_engaged)) // 3600)
+                two_hour_blocks = max(0, (now - int(last_engaged)) // 7200)
             except (TypeError, ValueError):
-                hours_since = 0
-            hp_remaining = min(hp_max, hp_remaining + hours_since * BOSS_HP_REGEN_PER_HOUR)
+                two_hour_blocks = 0
+            hp_remaining = min(hp_max, hp_remaining + two_hour_blocks * BOSS_HP_REGEN_PER_2_HOURS)
         return max(1, hp_remaining), hp_max
 
     def _persist_boss_hp_after_fight(
@@ -860,6 +865,21 @@ class DigService:
         if tier < 0 or tier >= len(table):
             return 0
         return int(round(table[tier].shop_price * GEAR_REPAIR_COST_PCT))
+
+    def compute_repair_cost(self, slot: str, tier: int) -> int:
+        """Public read of the repair price for a (slot, tier). Mirrors the
+        cost ``repair_gear`` would charge for a damaged piece, without
+        touching balance or durability."""
+        return self._gear_repair_cost(slot, tier)
+
+    def compute_repair_all_cost(self, discord_id: int, guild_id) -> int:
+        """Sum repair cost across every damaged piece the player owns."""
+        rows = self.dig_repo.get_gear(discord_id, guild_id)
+        return sum(
+            self._gear_repair_cost(r["slot"], int(r["tier"]))
+            for r in rows
+            if int(r["durability"]) < GEAR_MAX_DURABILITY
+        )
 
     def repair_gear(self, discord_id: int, guild_id, gear_id: int) -> dict:
         """Restore one piece to full durability for a JC cost.
@@ -1120,8 +1140,13 @@ class DigService:
             status = entry.get("status") if isinstance(entry, dict) else entry
             if depth == b - 1 and status in ("active", "phase1_defeated", "phase2_defeated"):
                 return b
-        # Pinnacle: triggers after all 7 tiers cleared, when depth hits PINNACLE_DEPTH-1.
-        if depth == PINNACLE_DEPTH - 1:
+        # Pinnacle: triggers after all 7 tiers cleared, when depth hits
+        # PINNACLE_DEPTH-1. Also re-procs if the player has tunneled past
+        # PINNACLE_REPROC_DEPTH without defeating it (catch-up for legacy
+        # tunnels that pre-date the pinnacle).
+        at_pinnacle_threshold = depth == PINNACLE_DEPTH - 1
+        in_reproc_window = depth >= PINNACLE_REPROC_DEPTH
+        if at_pinnacle_threshold or in_reproc_window:
             all_tiers_cleared = all(
                 (
                     (e.get("status") if isinstance(e, dict) else e) == "defeated"
@@ -1297,6 +1322,7 @@ class DigService:
             "name": boss.name,
             "dialogue": rendered,
             "ascii_art": boss.ascii_art or BOSS_ASCII.get(boundary, ""),
+            "luminosity_display": self._luminosity_combat_display(tunnel),
         }
 
     def _build_pinnacle_info(
@@ -1355,6 +1381,7 @@ class DigService:
             "is_pinnacle": True,
             "phase": phase_idx,
             "phase_total": 3,
+            "luminosity_display": self._luminosity_combat_display(tunnel),
         }
 
     def _pinnacle_foreshadow_line(self, tunnel: dict) -> str | None:
@@ -1613,6 +1640,24 @@ class DigService:
             return "dark"
         return "pitch_black"
 
+    def _luminosity_combat_display(self, tunnel: dict) -> str | None:
+        """Return a one-line description of the luminosity combat penalty,
+        or ``None`` when the player is at Bright (no penalty to surface).
+
+        Used by the boss UI to make the otherwise-invisible accuracy/dmg
+        penalty discoverable so players can choose to retreat and refill
+        before pulling the trigger on a fight they can't actually win.
+        """
+        luminosity = self._get_luminosity(tunnel)
+        hit_offset, dmg_bonus = _luminosity_combat_penalty(luminosity)
+        if hit_offset == 0 and dmg_bonus == 0:
+            return None
+        level = self._get_luminosity_level(luminosity).replace("_", " ").title()
+        parts = [f"{int(hit_offset * 100)}% hit"]
+        if dmg_bonus:
+            parts.append(f"+{dmg_bonus} boss dmg")
+        return f"Luminosity: **{level} ({luminosity})** — {', '.join(parts)}"
+
     def _apply_luminosity_drain(self, discord_id: int, guild_id, tunnel: dict, layer_name: str) -> dict:
         """Apply slow refill from last_lum_update_at, then drain for this dig.
 
@@ -1646,6 +1691,13 @@ class DigService:
         pickaxe_tier = self._get_active_pickaxe_tier(discord_id, guild_id, tunnel)
         if pickaxe_tier >= 5:  # Frostforged or better
             drain = max(0, drain - drain // 4)
+        # Past the pinnacle the deep grows hungry — drain ramps linearly
+        # toward the hard cap, applying pressure to prestige.
+        depth = int(tunnel.get("depth", 0) or 0)
+        if depth > LUMINOSITY_DEEP_DRAIN_START_DEPTH:
+            drain += (depth - LUMINOSITY_DEEP_DRAIN_START_DEPTH) // (
+                LUMINOSITY_DEEP_DRAIN_BLOCKS_PER_STEP
+            )
         luminosity = max(0, luminosity - drain)
 
         # Persist both luminosity and the timestamp so subsequent digs compute
@@ -2102,6 +2154,16 @@ class DigService:
                 )
                 if parked_return is not None:
                     return parked_return
+
+        # 2c. Hard cap: the deep refuses to yield further. Block dig
+        #     before any cost or cooldown is consumed so the player can
+        #     prestige cleanly.
+        if not is_first_dig and depth_before >= PRESTIGE_HARD_CAP:
+            return {
+                "success": False,
+                "error": "The earth refuses to yield further. The path beyond demands ascension.",
+                "hard_cap": True,
+            }
 
         # 3. Cooldown / paid dig check — normal digs only, parked players
         #    short-circuited above.
@@ -4430,6 +4492,7 @@ class DigService:
             ascii_art=boss_info["ascii_art"],
             attempts=attempts,
             options=["cautious", "bold", "reckless"],
+            luminosity_display=self._luminosity_combat_display(tunnel),
         )
 
     def fight_boss(self, discord_id: int, guild_id, risk_tier: str, wager: int = 0) -> dict:
@@ -4801,6 +4864,7 @@ class DigService:
                 echo_killer_id=active_echo.get("killer_discord_id") if echo_applied else None,
                 gear_broken=gear_broken_names,
                 gear_drop=gear_drop,
+                luminosity_display=self._luminosity_combat_display(tunnel),
             )
         else:
             knockback = random.randint(8, 16)
@@ -4854,6 +4918,7 @@ class DigService:
                 echo_killer_id=active_echo.get("killer_discord_id") if echo_applied else None,
                 gear_broken=gear_broken_names,
                 gear_drop=None,
+                luminosity_display=self._luminosity_combat_display(tunnel),
             )
 
     # =====================================================================
@@ -4911,7 +4976,7 @@ class DigService:
         if phase_idx == 2:
             phase_penalty = 0.10
         elif phase_idx == 3:
-            phase_penalty = 0.18
+            phase_penalty = 0.15
 
         # Pinnacle is the Tier 8 fight — use its archetype per phase, not the
         # per-boss BOSS_ARCHETYPE_BY_ID lookup.
@@ -5092,6 +5157,7 @@ class DigService:
                     is_pinnacle=True,
                     phase=phase_idx,
                     phase_total=3,
+                    luminosity_display=self._luminosity_combat_display(tunnel),
                     **response_extras,
                 )
 
@@ -5406,6 +5472,7 @@ class DigService:
                     is_pinnacle=True,
                     gear_broken=gear_broken_names,
                     gear_drop=None,
+                    luminosity_display=self._luminosity_combat_display(tunnel),
                 )
 
             # Phase 3 win — pinnacle defeated.
@@ -5462,6 +5529,7 @@ class DigService:
                 pinnacle_defeated=True,
                 gear_broken=gear_broken_names,
                 gear_drop=None,
+                luminosity_display=self._luminosity_combat_display(tunnel),
             )
 
         # Loss
@@ -5517,6 +5585,7 @@ class DigService:
             is_pinnacle=True,
             gear_broken=gear_broken_names,
             gear_drop=None,
+            luminosity_display=self._luminosity_combat_display(tunnel),
         )
 
     # =====================================================================
@@ -5729,6 +5798,7 @@ class DigService:
                         active_echo.get("killer_discord_id")
                         if echo_applied and active_echo else None
                     ),
+                    luminosity_display=self._luminosity_combat_display(tunnel),
                 )
 
             entry, player_hp, boss_hp, terminal = self._run_one_round(
@@ -6331,6 +6401,7 @@ class DigService:
                 ),
                 gear_broken=gear_broken_names,
                 gear_drop=gear_drop,
+                luminosity_display=self._luminosity_combat_display(tunnel),
             )
 
         # Loss branch
@@ -6399,6 +6470,7 @@ class DigService:
             ),
             gear_broken=gear_broken_names,
             gear_drop=None,
+            luminosity_display=self._luminosity_combat_display(tunnel),
         )
 
     def retreat_boss(self, discord_id: int, guild_id) -> dict:
@@ -6634,14 +6706,16 @@ class DigService:
         if at_boss is None:
             return self._error("That player is not at a boss boundary.")
 
-        # Check cheerer cooldown
+        # Cheer has its own short cooldown — independent of the free-dig
+        # cooldown so a player who just dug can still cheer for someone else.
         cheerer_tunnel = self.dig_repo.get_tunnel(cheerer_id, guild_id)
         if cheerer_tunnel:
             cheerer_tunnel = dict(cheerer_tunnel)
-            cheerer_tunnel["discord_id"] = cheerer_id
-            cooldown = self._get_cooldown_remaining(cheerer_tunnel)
-            if cooldown > 0:
-                return self._error(f"You're on cooldown ({cooldown}s remaining).")
+            last_cheer_at = cheerer_tunnel.get("last_cheer_at") or 0
+            elapsed = int(time.time()) - int(last_cheer_at)
+            remaining = CHEER_COOLDOWN_SECONDS - elapsed
+            if remaining > 0:
+                return self._error(f"Cheer cooldown ({remaining}s remaining).")
 
         # Check cost
         cost = 3
@@ -6669,7 +6743,7 @@ class DigService:
             target_id=target_id,
             guild_id=guild_id,
             cost=cost,
-            cheerer_last_dig_at=now,
+            cheerer_last_cheer_at=now,
             create_cheerer_tunnel_name=None if cheerer_tunnel else self.generate_tunnel_name(),
             target_cheer_data_json=json.dumps(active_cheers),
         )
@@ -7411,6 +7485,17 @@ class DigService:
         jc = result.get("jc", 0)
         cave_in = result.get("cave_in", False)
         description = result.get("description", "Something happened.")
+
+        # Subtle variance on the authored outcome so each fire of a given
+        # event differs slightly. JC scales by ±50%, advance shifts ±2,
+        # both clamped to preserve sign so a successful outcome never
+        # reverses into a retreat. Players see the rolled values; the
+        # spread itself stays hidden behind the embed.
+        if jc != 0:
+            jc = int(round(jc * random.uniform(0.5, 1.5)))
+        if advance != 0:
+            jittered = advance + random.randint(-2, 2)
+            advance = max(1, jittered) if advance > 0 else min(-1, jittered)
 
         # P7 chain JC multiplier: chained events get 1.5x JC
         if chained and jc > 0:

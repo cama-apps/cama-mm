@@ -1032,7 +1032,7 @@ class DigRepository(BaseRepository, IDigRepository):
         target_id: int,
         guild_id: int,
         cost: int,
-        cheerer_last_dig_at: int,
+        cheerer_last_cheer_at: int,
         create_cheerer_tunnel_name: str | None,
         target_cheer_data_json: str,
     ) -> None:
@@ -1040,8 +1040,9 @@ class DigRepository(BaseRepository, IDigRepository):
 
         Debits the cheerer's JC, optionally creates a minimal tunnel row for
         the cheerer (when ``create_cheerer_tunnel_name`` is given) so their
-        cooldown can be tracked, bumps the cheerer's ``last_dig_at``, and
-        writes the target's updated ``cheer_data`` JSON — all inside one
+        cooldown can be tracked, bumps the cheerer's ``last_cheer_at`` (a
+        short cooldown distinct from the free-dig cooldown), and writes the
+        target's updated ``cheer_data`` JSON — all inside one
         BEGIN IMMEDIATE so the cheerer can't be charged without the cheer
         actually landing on the target.
         """
@@ -1078,8 +1079,8 @@ class DigRepository(BaseRepository, IDigRepository):
                 )
 
             cursor.execute(
-                "UPDATE tunnels SET last_dig_at = ? WHERE discord_id = ? AND guild_id = ?",
-                (cheerer_last_dig_at, cheerer_id, gid),
+                "UPDATE tunnels SET last_cheer_at = ? WHERE discord_id = ? AND guild_id = ?",
+                (cheerer_last_cheer_at, cheerer_id, gid),
             )
 
             cursor.execute(

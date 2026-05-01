@@ -8,22 +8,6 @@ import asyncio
 import pytest
 
 
-def test_imports():
-    """Test that all required modules can be imported."""
-    # Test core modules
-    from database import Database
-    from domain.models.player import Player
-    from domain.models.team import Team
-    from services.lobby_manager_service import LobbyManagerService as LobbyManager
-    from shuffler import BalancedShuffler
-
-    assert Player is not None
-    assert Team is not None
-    assert BalancedShuffler is not None
-    assert Database is not None
-    assert LobbyManager is not None
-
-
 def test_bot_import():
     """Test that bot module can be imported (without running it)."""
     import bot

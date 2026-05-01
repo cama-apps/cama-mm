@@ -113,33 +113,32 @@ class TestBankruptcyCooldown:
         assert not result2.success
         assert result2.error_code == "bankruptcy_cooldown"
 
-    def test_cooldown_expires_after_duration(self, db_and_repos):
+    def test_cooldown_expires_after_duration(self, db_and_repos, monkeypatch):
         """Players can declare bankruptcy after cooldown expires."""
         player_repo = db_and_repos["player_repo"]
         bankruptcy_repo = db_and_repos["bankruptcy_repo"]
 
-        # Create service with 1 second cooldown for testing
         service = BankruptcyService(
             bankruptcy_repo=bankruptcy_repo,
             player_repo=player_repo,
-            cooldown_seconds=1,  # Very short for testing
+            cooldown_seconds=1,
             penalty_games=5,
             penalty_rate=0.5,
         )
 
         pid = create_test_player(player_repo, 1001, balance=-200)
 
-        # First bankruptcy
+        base = int(time.time())
+        monkeypatch.setattr("time.time", lambda: base)
+
         result1 = service.execute_bankruptcy(pid, TEST_GUILD_ID)
         assert result1.success
 
-        # Wait for cooldown to expire
-        time.sleep(1.1)
+        # Advance the clock past the cooldown — no real sleep required.
+        monkeypatch.setattr("time.time", lambda: base + 2)
 
-        # Put player back in debt
         player_repo.update_balance(pid, TEST_GUILD_ID, -100)
 
-        # Should be able to declare again
         result2 = service.validate_bankruptcy(pid, TEST_GUILD_ID)
         assert result2.success
 
@@ -541,33 +540,32 @@ class TestBulkBankruptcyState:
         assert states[pid3].penalty_games_remaining == 0
         assert states[pid3].is_on_cooldown is False
 
-    def test_get_bulk_states_cooldown_calculation(self, db_and_repos):
+    def test_get_bulk_states_cooldown_calculation(self, db_and_repos, monkeypatch):
         """Should correctly calculate cooldown status for bulk fetch."""
         player_repo = db_and_repos["player_repo"]
         bankruptcy_repo = db_and_repos["bankruptcy_repo"]
 
-        # Create service with short but safe cooldown for testing.
-        # Note: Using 2 seconds instead of 1 to avoid timing issues at second boundaries
-        # (both declare_bankruptcy and get_bulk_states use int(time.time()) which truncates)
         short_cooldown_service = BankruptcyService(
             bankruptcy_repo=bankruptcy_repo,
             player_repo=player_repo,
-            cooldown_seconds=2,  # 2 second cooldown (1s is flaky due to truncation)
+            cooldown_seconds=2,
             penalty_games=5,
             penalty_rate=0.5,
         )
 
         pid = create_test_player(player_repo, 1001, balance=-200)
+
+        base = int(time.time())
+        monkeypatch.setattr("time.time", lambda: base)
         short_cooldown_service.execute_bankruptcy(pid, TEST_GUILD_ID)
 
         # Immediately after: should be on cooldown
         states = short_cooldown_service.get_bulk_states([pid], TEST_GUILD_ID)
         assert states[pid].is_on_cooldown is True
 
-        # Wait for cooldown to expire
-        time.sleep(2.1)
+        # Advance past the 2s cooldown — no real sleep required.
+        monkeypatch.setattr("time.time", lambda: base + 3)
 
-        # After cooldown: should not be on cooldown
         states = short_cooldown_service.get_bulk_states([pid], TEST_GUILD_ID)
         assert states[pid].is_on_cooldown is False
 

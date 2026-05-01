@@ -1,4 +1,5 @@
-"""Tests for the tunnel digging minigame service."""
+"""Core dig progression: basic dig flow, depth/balance updates, cooldowns,
+layer transitions, paid digs, and prestige-adjacent gameplay paths."""
 
 import json
 import random
@@ -8,29 +9,23 @@ import pytest
 
 from repositories.dig_repository import DigRepository
 from services.dig_constants import (
-    ABANDON_REFUND_PCT,
-    ALL_ARTIFACTS,
     BOSS_BOUNDARIES,
     BOSSES,
     CAVE_IN_BLOCK_LOSS_MAX,
     CAVE_IN_BLOCK_LOSS_MIN,
-    CONSUMABLES,
+    CHEER_COOLDOWN_SECONDS,
     DIG_TIPS,
     FIRST_DIG_ADVANCE_MAX,
     FIRST_DIG_ADVANCE_MIN,
     FIRST_DIG_JC_MAX,
     FIRST_DIG_JC_MIN,
     FREE_DIG_COOLDOWN_SECONDS,
-    HARD_HAT_USES,
     INSURANCE_BASE_COST,
     INSURANCE_COST_DEPTH_DIVISOR,
     INSURANCE_DURATION_SECONDS,
-    MAX_INVENTORY_SLOTS,
-    MAX_PRESTIGE,
     MILESTONES,
     PAID_DIG_COSTS_PER_DAY,
     PICKAXE_TIERS,
-    PRESTIGE_PERKS,
     SABOTAGE_BASE_COST,
     SABOTAGE_COOLDOWN_SECONDS,
     SABOTAGE_COST_DIVISOR,
@@ -70,11 +65,6 @@ def _register_player(player_repository, discord_id=10001, guild_id=12345, balanc
     if balance != 3:  # default is 3
         player_repository.update_balance(discord_id, guild_id, balance)
     return discord_id
-
-
-# =============================================================================
-# Core Dig Tests
-# =============================================================================
 
 
 class TestCoreDig:
@@ -154,16 +144,11 @@ class TestCoreDig:
         assert "error" in result
 
 
-# =============================================================================
-# Cooldown Tests
-# =============================================================================
-
-
 class TestCooldown:
     """Tests for dig cooldown mechanics."""
 
     def test_dig_cooldown_blocks_free_dig(self, dig_service, player_repository, guild_id, monkeypatch):
-        """Can't free dig within 4h."""
+        """Can't free dig within 3h."""
         _register_player(player_repository)
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
         result = dig_service.dig(10001, guild_id)
@@ -408,11 +393,6 @@ class TestMinerProfile:
         assert tunnel["stat_points"] == 6
 
 
-# =============================================================================
-# Cave-in Tests
-# =============================================================================
-
-
 class TestCaveIn:
     """Tests for cave-in mechanics."""
 
@@ -483,11 +463,6 @@ class TestCaveIn:
             assert result["medical_bill"] == max(1, 50 // 10)
 
 
-# =============================================================================
-# Milestone Tests
-# =============================================================================
-
-
 class TestMilestones:
     """Tests for milestone depth bonuses."""
 
@@ -539,11 +514,6 @@ class TestMilestones:
         assert result["success"]
         assert result["depth"] >= 100
         assert result["milestone_bonus"] == MILESTONES[100]
-
-
-# =============================================================================
-# Decay Tests
-# =============================================================================
 
 
 class TestDecay:
@@ -646,11 +616,6 @@ class TestDecay:
         assert decay == 0
 
 
-# =============================================================================
-# Help Tests
-# =============================================================================
-
-
 class TestHelp:
     """Tests for helping other players' tunnels."""
 
@@ -718,11 +683,6 @@ class TestHelp:
         monkeypatch.setattr(time, "time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1)
         result = dig_service.help_tunnel(10001, 10001, guild_id)
         assert not result["success"]
-
-
-# =============================================================================
-# Sabotage Tests
-# =============================================================================
 
 
 class TestSabotage:
@@ -819,11 +779,6 @@ class TestSabotage:
         assert not result["success"]
 
 
-# =============================================================================
-# Trap Tests
-# =============================================================================
-
-
 class TestTrap:
     """Tests for trap mechanics."""
 
@@ -876,11 +831,6 @@ class TestTrap:
         balance_after = player_repository.get_balance(10002, guild_id)
         # Saboteur should have lost JC (sabotage cost + trap penalty)
         assert balance_after < balance_before
-
-
-# =============================================================================
-# Insurance Tests
-# =============================================================================
 
 
 class TestInsurance:
@@ -943,11 +893,6 @@ class TestInsurance:
         tunnel = dig_repo.get_tunnel(10001, guild_id)
         # Insurance should be expired
         assert tunnel["insured_until"] <= 1_000_000 + INSURANCE_DURATION_SECONDS
-
-
-# =============================================================================
-# Boss Tests
-# =============================================================================
 
 
 class TestBoss:
@@ -1065,443 +1010,6 @@ class TestBoss:
         assert result["success"]
 
 
-# =============================================================================
-# Prestige Tests
-# =============================================================================
-
-
-class TestPrestige:
-    """Tests for prestige system."""
-
-    def _setup_prestige_ready(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """Helper to set up a player ready for prestige (all 7 tier bosses
-        plus the pinnacle at depth 300 defeated)."""
-        _register_player(player_repository, balance=500)
-        monkeypatch.setattr(time, "time", lambda: 1_000_000)
-        monkeypatch.setattr(random, "random", lambda: 0.99)
-        dig_service.dig(10001, guild_id)
-        all_bosses_defeated = {str(b): "defeated" for b in BOSS_BOUNDARIES}
-        all_bosses_defeated["300"] = "defeated"
-        dig_repo.update_tunnel(10001, guild_id, depth=300, boss_progress=json.dumps(all_bosses_defeated))
-
-    def test_prestige_resets_depth(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """Depth resets to 0."""
-        self._setup_prestige_ready(dig_service, dig_repo, player_repository, guild_id, monkeypatch)
-        result = dig_service.prestige(10001, guild_id, "advance_boost")
-        assert result["success"]
-        tunnel = dig_repo.get_tunnel(10001, guild_id)
-        assert tunnel["depth"] == 0
-
-    def test_prestige_keeps_pickaxe(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """Pickaxe carries over."""
-        self._setup_prestige_ready(dig_service, dig_repo, player_repository, guild_id, monkeypatch)
-        dig_repo.update_tunnel(10001, guild_id, pickaxe_tier=1)
-        result = dig_service.prestige(10001, guild_id, "advance_boost")
-        assert result["success"]
-        tunnel = dig_repo.get_tunnel(10001, guild_id)
-        assert tunnel["pickaxe_tier"] == 1
-
-    def test_prestige_adds_perk(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """Chosen perk is stored."""
-        self._setup_prestige_ready(dig_service, dig_repo, player_repository, guild_id, monkeypatch)
-        result = dig_service.prestige(10001, guild_id, "advance_boost")
-        assert result["success"]
-        tunnel = dig_repo.get_tunnel(10001, guild_id)
-        perks = json.loads(tunnel["prestige_perks"]) if tunnel["prestige_perks"] else []
-        assert "advance_boost" in perks
-
-    def test_prestige_max(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """Can't prestige past MAX_PRESTIGE."""
-        self._setup_prestige_ready(dig_service, dig_repo, player_repository, guild_id, monkeypatch)
-        dig_repo.update_tunnel(10001, guild_id, prestige_level=MAX_PRESTIGE)
-        result = dig_service.prestige(10001, guild_id, "advance_boost")
-        assert not result["success"]
-
-    def test_prestige_bosses_respawn(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """Boss progress resets."""
-        self._setup_prestige_ready(dig_service, dig_repo, player_repository, guild_id, monkeypatch)
-        result = dig_service.prestige(10001, guild_id, "advance_boost")
-        assert result["success"]
-        tunnel = dig_repo.get_tunnel(10001, guild_id)
-        bp = json.loads(tunnel["boss_progress"]) if tunnel["boss_progress"] else {}
-        assert all(v == "active" for v in bp.values())
-
-
-# =============================================================================
-# Item Tests
-# =============================================================================
-
-
-class TestItems:
-    """Tests for item purchase and usage."""
-
-    def test_buy_item_deducts_jc(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """Buying item costs JC."""
-        _register_player(player_repository, balance=100)
-        monkeypatch.setattr(time, "time", lambda: 1_000_000)
-        monkeypatch.setattr(random, "random", lambda: 0.99)
-        dig_service.dig(10001, guild_id)
-
-        balance_before = player_repository.get_balance(10001, guild_id)
-        result = dig_service.buy_item(10001, guild_id, "dynamite")
-        assert result["success"]
-        balance_after = player_repository.get_balance(10001, guild_id)
-        assert balance_before - balance_after == CONSUMABLES["dynamite"].cost
-
-    def test_inventory_max(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """Can't exceed MAX_INVENTORY_SLOTS items."""
-        _register_player(player_repository, balance=500)
-        monkeypatch.setattr(time, "time", lambda: 1_000_000)
-        monkeypatch.setattr(random, "random", lambda: 0.99)
-        dig_service.dig(10001, guild_id)
-
-        for i in range(MAX_INVENTORY_SLOTS):
-            result = dig_service.buy_item(10001, guild_id, "dynamite")
-            assert result["success"], f"Should be able to buy item #{i+1}"
-
-        # 6th item should fail
-        result = dig_service.buy_item(10001, guild_id, "dynamite")
-        assert not result["success"]
-
-    def test_dynamite_adds_blocks(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """Dynamite gives +5 bonus blocks."""
-        _register_player(player_repository, balance=200)
-        monkeypatch.setattr(time, "time", lambda: 1_000_000)
-        monkeypatch.setattr(random, "random", lambda: 0.99)
-        dig_service.dig(10001, guild_id)
-        dig_repo.update_tunnel(10001, guild_id, depth=10)
-
-        # Buy and queue dynamite
-        dig_service.buy_item(10001, guild_id, "dynamite")
-        items = dig_repo.get_inventory(10001, guild_id)
-        dig_repo.queue_item(items[0]["id"])
-
-        # Dig with dynamite queued
-        monkeypatch.setattr(time, "time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1)
-        monkeypatch.setattr(random, "randint", lambda a, b: a)  # min advance
-        result = dig_service.dig(10001, guild_id)
-        assert result["success"]
-        # Dynamite should add bonus blocks
-        assert result.get("dynamite_bonus") or result["advance"] >= CONSUMABLES["dynamite"].params["bonus_blocks"]
-
-    def test_hard_hat_prevents_cave_in(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """Hard hat blocks cave-in (for 3 digs) when charges are already set."""
-        _register_player(player_repository, balance=200)
-        monkeypatch.setattr(time, "time", lambda: 1_000_000)
-        monkeypatch.setattr(random, "random", lambda: 0.99)
-        dig_service.dig(10001, guild_id)
-        dig_repo.update_tunnel(10001, guild_id, depth=20, hard_hat_charges=HARD_HAT_USES)
-
-        # Force cave-in conditions but hard hat should block it
-        t = 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1
-        monkeypatch.setattr(time, "time", lambda: t)
-        monkeypatch.setattr(random, "random", lambda: 0.001)  # force cave-in roll
-        result = dig_service.dig(10001, guild_id)
-        assert result["success"]
-        assert not result.get("cave_in"), "Hard hat should prevent cave-in"
-
-        tunnel = dig_repo.get_tunnel(10001, guild_id)
-        assert tunnel["hard_hat_charges"] == HARD_HAT_USES - 1
-
-    def test_hard_hat_queued_sets_charges(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """Buying and queuing a hard hat actually sets hard_hat_charges on the tunnel."""
-        _register_player(player_repository, balance=200)
-        monkeypatch.setattr(time, "time", lambda: 1_000_000)
-        monkeypatch.setattr(random, "random", lambda: 0.99)
-        dig_service.dig(10001, guild_id)
-        dig_repo.update_tunnel(10001, guild_id, depth=20)
-
-        # Buy and queue hard hat
-        result = dig_service.buy_item(10001, guild_id, "hard_hat")
-        assert result["success"]
-        items = dig_repo.get_inventory(10001, guild_id)
-        dig_repo.queue_item(items[0]["id"])
-
-        # Dig with hard hat queued — force cave-in roll
-        t = 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1
-        monkeypatch.setattr(time, "time", lambda: t)
-        monkeypatch.setattr(random, "random", lambda: 0.001)
-        result = dig_service.dig(10001, guild_id)
-        assert result["success"]
-        assert not result.get("cave_in"), "Queued hard hat should prevent cave-in"
-
-        # Charges should be set to HARD_HAT_USES - 1 (one consumed this dig)
-        tunnel = dig_repo.get_tunnel(10001, guild_id)
-        assert tunnel["hard_hat_charges"] == HARD_HAT_USES - 1
-
-    def test_lantern_reduces_cave_in(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """Lantern halves cave-in chance for the dig it's used on."""
-        _register_player(player_repository, balance=200)
-        monkeypatch.setattr(time, "time", lambda: 1_000_000)
-        monkeypatch.setattr(random, "random", lambda: 0.99)
-        dig_service.dig(10001, guild_id)
-        # Place at depth 76 (Magma layer, 25% base cave-in) so halved = 12.5%
-        dig_repo.update_tunnel(10001, guild_id, depth=76)
-
-        # Buy and queue lantern
-        dig_service.buy_item(10001, guild_id, "lantern")
-        items = dig_repo.get_inventory(10001, guild_id)
-        dig_repo.queue_item(items[0]["id"])
-
-        # Roll 0.13 — would cave-in at 25% but NOT at ~12.5%
-        t = 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1
-        monkeypatch.setattr(time, "time", lambda: t)
-        monkeypatch.setattr(random, "random", lambda: 0.13)
-        result = dig_service.dig(10001, guild_id)
-        assert result["success"]
-        assert not result.get("cave_in"), "Lantern should halve cave-in chance"
-
-    def test_reinforcement_sets_reinforced_until(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """Reinforcement item sets reinforced_until timestamp on the tunnel."""
-        _register_player(player_repository, balance=200)
-        base_time = 1_000_000
-        monkeypatch.setattr(time, "time", lambda: base_time)
-        monkeypatch.setattr(random, "random", lambda: 0.99)
-        dig_service.dig(10001, guild_id)
-        dig_repo.update_tunnel(10001, guild_id, depth=20)
-
-        # Buy and queue reinforcement
-        dig_service.buy_item(10001, guild_id, "reinforcement")
-        items = dig_repo.get_inventory(10001, guild_id)
-        dig_repo.queue_item(items[0]["id"])
-
-        # Dig to consume it
-        t = base_time + FREE_DIG_COOLDOWN_SECONDS + 1
-        monkeypatch.setattr(time, "time", lambda: t)
-        dig_service.dig(10001, guild_id)
-
-        tunnel = dig_repo.get_tunnel(10001, guild_id)
-        assert tunnel["reinforced_until"] >= t + 47 * 3600, "Reinforcement should set ~48h protection"
-
-    def test_void_bait_doubles_event_chance(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """Void Bait sets void_bait_digs and decrements each dig."""
-        _register_player(player_repository, balance=200)
-        monkeypatch.setattr(time, "time", lambda: 1_000_000)
-        monkeypatch.setattr(random, "random", lambda: 0.99)
-        dig_service.dig(10001, guild_id)
-        dig_repo.update_tunnel(10001, guild_id, depth=20)
-
-        # Buy and queue void bait
-        dig_service.buy_item(10001, guild_id, "void_bait")
-        items = dig_repo.get_inventory(10001, guild_id)
-        dig_repo.queue_item(items[0]["id"])
-
-        # Dig to consume it
-        t = 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1
-        monkeypatch.setattr(time, "time", lambda: t)
-        dig_service.dig(10001, guild_id)
-
-        # Void bait should have set 3 charges, then decremented to 2 on this dig
-        tunnel = dig_repo.get_tunnel(10001, guild_id)
-        assert tunnel["void_bait_digs"] == 2
-
-    def test_sonar_pulse_returns_event_preview(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """Sonar Pulse includes an event_preview in the dig result."""
-        _register_player(player_repository, balance=200)
-        monkeypatch.setattr(time, "time", lambda: 1_000_000)
-        monkeypatch.setattr(random, "random", lambda: 0.99)
-        dig_service.dig(10001, guild_id)
-        dig_repo.update_tunnel(10001, guild_id, depth=20)
-
-        # Buy and queue sonar pulse
-        dig_service.buy_item(10001, guild_id, "sonar_pulse")
-        items = dig_repo.get_inventory(10001, guild_id)
-        dig_repo.queue_item(items[0]["id"])
-
-        t = 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1
-        monkeypatch.setattr(time, "time", lambda: t)
-        result = dig_service.dig(10001, guild_id)
-        assert result["success"]
-        # event_preview may or may not have a value depending on the roll,
-        # but the key should be present
-        assert "event_preview" in result
-
-    def test_queue_item_for_next_dig(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """Queued item consumed on next dig."""
-        _register_player(player_repository, balance=200)
-        monkeypatch.setattr(time, "time", lambda: 1_000_000)
-        monkeypatch.setattr(random, "random", lambda: 0.99)
-        dig_service.dig(10001, guild_id)
-
-        # Buy and queue
-        result = dig_service.buy_item(10001, guild_id, "dynamite")
-        item_id = result["item_id"]
-        dig_service.queue_item(10001, guild_id, item_id)
-
-        queued = dig_repo.get_queued_items(10001, guild_id)
-        assert len(queued) == 1
-
-        # Dig consumes queued item
-        monkeypatch.setattr(time, "time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1)
-        dig_service.dig(10001, guild_id)
-
-        queued_after = dig_repo.get_queued_items(10001, guild_id)
-        assert len(queued_after) == 0
-
-
-# =============================================================================
-# Layer Weather Tests
-# =============================================================================
-
-
-@pytest.mark.real_weather
-class TestLayerWeather:
-    """Tests for the daily layer weather system."""
-
-    def _setup_and_second_dig(self, dig_service, player_repository, monkeypatch):
-        """Helper: register, first dig, then second dig to trigger weather."""
-        # Restore real weather effects (fixture stubs them out)
-        monkeypatch.setattr(dig_service, "_get_weather_effects", DigService._get_weather_effects.__get__(dig_service))
-        _register_player(player_repository, balance=200)
-        monkeypatch.setattr(time, "time", lambda: 1_000_000)
-        monkeypatch.setattr(random, "random", lambda: 0.99)
-        dig_service.dig(10001, 12345)  # first dig (early return, no weather)
-        t = 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1
-        monkeypatch.setattr(time, "time", lambda: t)
-        dig_service.dig(10001, 12345)  # second dig triggers weather
-
-    def test_weather_rolled_on_dig(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """Weather should be rolled lazily when a dig reaches the main flow."""
-        self._setup_and_second_dig(dig_service, player_repository, monkeypatch)
-
-        today = dig_service._get_game_date()
-        weather = dig_repo.get_weather(guild_id, today)
-        assert len(weather) == 2, "Should roll exactly 2 weather events"
-
-    def test_weather_targets_populated_layer(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """At least one weather event should target a layer with active players."""
-        self._setup_and_second_dig(dig_service, player_repository, monkeypatch)
-
-        today = dig_service._get_game_date()
-        weather = dig_repo.get_weather(guild_id, today)
-        layers_hit = {w["layer_name"] for w in weather}
-        # Dirt should be targeted since the player is in Dirt
-        assert "Dirt" in layers_hit
-
-    def test_weather_stable_within_day(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """Weather should not re-roll on subsequent digs the same day."""
-        self._setup_and_second_dig(dig_service, player_repository, monkeypatch)
-
-        today = dig_service._get_game_date()
-        weather1 = dig_repo.get_weather(guild_id, today)
-
-        # Third dig same day
-        t = 1_000_000 + 2 * FREE_DIG_COOLDOWN_SECONDS + 2
-        monkeypatch.setattr(time, "time", lambda: t)
-        monkeypatch.setattr(random, "random", lambda: 0.99)
-        dig_service.dig(10001, guild_id)
-
-        weather2 = dig_repo.get_weather(guild_id, today)
-        assert weather1 == weather2, "Weather should not change within the same day"
-
-    def test_get_weather_returns_info(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """get_weather() should return displayable weather info."""
-        self._setup_and_second_dig(dig_service, player_repository, monkeypatch)
-
-        weather = dig_service.get_weather(guild_id)
-        assert len(weather) == 2
-        for w in weather:
-            assert "name" in w
-            assert "description" in w
-            assert "layer" in w
-            assert "effects" in w
-
-    def test_weather_effects_in_dig_result(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """Dig result should include weather info when player is in an affected layer."""
-        # Restore real _get_weather_effects (fixture stubs it out)
-        monkeypatch.setattr(dig_service, "_get_weather_effects", DigService._get_weather_effects.__get__(dig_service))
-
-        _register_player(player_repository, balance=200)
-        monkeypatch.setattr(time, "time", lambda: 1_000_000)
-        monkeypatch.setattr(random, "random", lambda: 0.99)
-        dig_service.dig(10001, guild_id)
-
-        # Force weather on Dirt layer
-        today = dig_service._get_game_date()
-        dig_repo.set_weather(guild_id, today, "Dirt", "earthworm_migration")
-        # Clear the other weather entries to control the test
-        dig_repo.set_weather(guild_id, today, "Stone", "mineral_vein")
-
-        dig_repo.update_tunnel(10001, guild_id, depth=5)
-
-        t = 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1
-        monkeypatch.setattr(time, "time", lambda: t)
-        result = dig_service.dig(10001, guild_id)
-        assert result["success"]
-        assert result.get("weather") is not None
-        assert result["weather"]["name"] == "Earthworm Migration"
-
-
-# =============================================================================
-# Artifact Tests
-# =============================================================================
-
-
-class TestArtifacts:
-    """Tests for artifact discovery and trading."""
-
-    def test_artifact_found_tracked(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """Found artifact added to collection."""
-        _register_player(player_repository)
-        monkeypatch.setattr(time, "time", lambda: 1_000_000)
-
-        # Directly add an artifact (simulating a find)
-        artifact_id = ALL_ARTIFACTS[0].id
-        db_id = dig_repo.add_artifact(10001, guild_id, artifact_id)
-        assert db_id > 0
-
-        artifacts = dig_repo.get_artifacts(10001, guild_id)
-        assert len(artifacts) == 1
-        assert artifacts[0]["artifact_id"] == artifact_id
-
-    def test_artifact_registered_in_guild(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """First finder tracked in registry."""
-        _register_player(player_repository)
-        monkeypatch.setattr(time, "time", lambda: 1_000_000)
-
-        artifact_id = ALL_ARTIFACTS[0].id
-        is_first = dig_repo.register_artifact_find(artifact_id, guild_id, 10001, 1_000_000)
-        assert is_first is True
-
-        # Second find is not first
-        _register_player(player_repository, discord_id=10002)
-        is_first2 = dig_repo.register_artifact_find(artifact_id, guild_id, 10002, 1_000_001)
-        assert is_first2 is False
-
-        entry = dig_repo.get_registry_entry(artifact_id, guild_id)
-        assert entry["first_finder_id"] == 10001
-        assert entry["total_found"] == 2
-
-    def test_gift_relic_transfers(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """Relic moves from giver to receiver."""
-        _register_player(player_repository, discord_id=10001)
-        _register_player(player_repository, discord_id=10002)
-        monkeypatch.setattr(time, "time", lambda: 1_000_000)
-        monkeypatch.setattr(random, "random", lambda: 0.99)
-
-        # Create tunnels
-        dig_service.dig(10001, guild_id)
-        dig_service.dig(10002, guild_id)
-
-        # Give player 1 a relic
-        relic_id = "mole_claws"
-        db_id = dig_repo.add_artifact(10001, guild_id, relic_id, is_relic=True)
-
-        # Gift it
-        result = dig_service.gift_relic(10001, 10002, guild_id, db_id)
-        assert result["success"]
-
-        # Giver no longer has it
-        assert not dig_repo.has_artifact(10001, guild_id, relic_id)
-        # Receiver has it
-        assert dig_repo.has_artifact(10002, guild_id, relic_id)
-
-
-# =============================================================================
-# Achievement Tests
-# =============================================================================
-
-
 class TestAchievements:
     """Tests for achievement unlocking."""
 
@@ -1529,11 +1037,6 @@ class TestAchievements:
 
         achievements = dig_repo.get_achievements(10001, guild_id)
         assert len(achievements) == 1
-
-
-# =============================================================================
-# Streak Tests
-# =============================================================================
 
 
 class TestStreaks:
@@ -1598,59 +1101,6 @@ class TestStreaks:
         assert result.get("streak_bonus", 0) >= STREAKS[3]
 
 
-# =============================================================================
-# Abandon Tests
-# =============================================================================
-
-
-class TestAbandon:
-    """Tests for tunnel abandonment."""
-
-    def test_abandon_refunds_10_percent(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """Refund = depth * 0.1."""
-        _register_player(player_repository, balance=100)
-        monkeypatch.setattr(time, "time", lambda: 1_000_000)
-        monkeypatch.setattr(random, "random", lambda: 0.99)
-        dig_service.dig(10001, guild_id)
-        dig_repo.update_tunnel(10001, guild_id, depth=50)
-
-        balance_before = player_repository.get_balance(10001, guild_id)
-        result = dig_service.abandon_tunnel(10001, guild_id)
-        assert result["success"]
-        balance_after = player_repository.get_balance(10001, guild_id)
-        expected_refund = int(50 * ABANDON_REFUND_PCT)
-        assert balance_after - balance_before == expected_refund
-
-    def test_abandon_min_depth_10(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """Can't abandon below depth 10."""
-        _register_player(player_repository, balance=100)
-        monkeypatch.setattr(time, "time", lambda: 1_000_000)
-        monkeypatch.setattr(random, "random", lambda: 0.99)
-        dig_service.dig(10001, guild_id)
-        dig_repo.update_tunnel(10001, guild_id, depth=5)
-
-        result = dig_service.abandon_tunnel(10001, guild_id)
-        assert not result["success"]
-
-    def test_abandon_keeps_prestige(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """Prestige level preserved."""
-        _register_player(player_repository, balance=100)
-        monkeypatch.setattr(time, "time", lambda: 1_000_000)
-        monkeypatch.setattr(random, "random", lambda: 0.99)
-        dig_service.dig(10001, guild_id)
-        dig_repo.update_tunnel(10001, guild_id, depth=50, prestige_level=2)
-
-        result = dig_service.abandon_tunnel(10001, guild_id)
-        assert result["success"]
-        tunnel = dig_repo.get_tunnel(10001, guild_id)
-        assert tunnel["prestige_level"] == 2
-
-
-# =============================================================================
-# Pickaxe Tests
-# =============================================================================
-
-
 class TestPickaxe:
     """Tests for pickaxe upgrade system."""
 
@@ -1698,104 +1148,6 @@ class TestPickaxe:
         assert result["advance"] >= 1 + stone_bonus
 
 
-# =============================================================================
-# Bug Fix Regression Tests
-# =============================================================================
-
-
-class TestTunnelNameKey:
-    """Verify tunnel_name (not 'name') is used for tunnel display names."""
-
-    def test_help_returns_tunnel_name(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """help_tunnel result should contain the actual tunnel name."""
-        _register_player(player_repository, discord_id=10001)
-        _register_player(player_repository, discord_id=10002)
-        monkeypatch.setattr(time, "time", lambda: 1_000_000)
-        monkeypatch.setattr(random, "random", lambda: 0.99)  # no cave-in
-        # Create target tunnel
-        dig_service.dig(10002, guild_id)
-        tunnel = dig_repo.get_tunnel(10002, guild_id)
-        actual_name = dict(tunnel).get("tunnel_name")
-        assert actual_name  # tunnel has a name
-
-        # Help the target
-        monkeypatch.setattr(time, "time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1)
-        result = dig_service.help_tunnel(10001, 10002, guild_id)
-        assert result["success"]
-        assert result["target_tunnel"] == actual_name
-
-    def test_sabotage_returns_tunnel_name(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """sabotage_tunnel result should contain the actual tunnel name."""
-        _register_player(player_repository, discord_id=10001, balance=200)
-        _register_player(player_repository, discord_id=10002)
-        monkeypatch.setattr(time, "time", lambda: 1_000_000)
-        monkeypatch.setattr(random, "random", lambda: 0.99)  # no cave-in
-        dig_service.dig(10002, guild_id)
-        # Set target depth high enough for sabotage cost
-        dig_repo.update_tunnel(10002, guild_id, depth=30)
-        tunnel = dig_repo.get_tunnel(10002, guild_id)
-        actual_name = dict(tunnel).get("tunnel_name")
-
-        result = dig_service.sabotage_tunnel(10001, 10002, guild_id)
-        assert result["success"]
-        assert result["target_tunnel"] == actual_name
-
-    def test_get_flex_data_returns_tunnel_name(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """get_flex_data should return the actual tunnel name."""
-        _register_player(player_repository)
-        monkeypatch.setattr(time, "time", lambda: 1_000_000)
-        monkeypatch.setattr(random, "random", lambda: 0.99)
-        dig_service.dig(10001, guild_id)
-        tunnel = dig_repo.get_tunnel(10001, guild_id)
-        actual_name = dict(tunnel).get("tunnel_name")
-
-        result = dig_service.get_flex_data(10001, guild_id)
-        assert result["success"]
-        assert result["tunnel_name"] == actual_name
-
-    def test_generate_clue_first_letter_uses_tunnel_name(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """_generate_clue should use tunnel_name for the first-letter clue."""
-        _register_player(player_repository)
-        monkeypatch.setattr(time, "time", lambda: 1_000_000)
-        monkeypatch.setattr(random, "random", lambda: 0.99)
-        dig_service.dig(10001, guild_id)
-        tunnel = dig_repo.get_tunnel(10001, guild_id)
-        actual_name = dict(tunnel).get("tunnel_name")
-        first_letter = actual_name[0]
-
-        clue = dig_service._generate_clue(10001, guild_id, "first_letter")
-        assert first_letter in clue["hint"]
-
-
-class TestHasLanternInResult:
-    """Verify has_lantern is included in dig results for boss encounters."""
-
-    def test_dig_result_includes_has_lantern(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """Normal dig result should include has_lantern field."""
-        _register_player(player_repository, balance=200)
-        monkeypatch.setattr(time, "time", lambda: 1_000_000)
-        monkeypatch.setattr(random, "random", lambda: 0.99)  # no cave-in
-        dig_service.dig(10001, guild_id)
-
-        # Queue a lantern
-        dig_repo.add_inventory_item(10001, guild_id, "lantern")
-        items = dig_repo.get_inventory(10001, guild_id)
-        for item in items:
-            if dict(item).get("item_type") == "lantern":
-                dig_repo.queue_item(dict(item)["id"])
-
-        # Set depth near boss boundary so advance doesn't skip it
-        dig_repo.update_tunnel(10001, guild_id, depth=23)
-
-        # Force advance to hit boss boundary at 25
-        monkeypatch.setattr(time, "time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1)
-        monkeypatch.setattr(random, "randint", lambda a, b: 3)  # advance 3 would reach 26 > 25
-        result = dig_service.dig(10001, guild_id)
-        assert result["success"]
-        # has_lantern should be in the result
-        assert "has_lantern" in result
-
-
 class TestPickTipMaxDepth:
     """Verify _pick_tip filters tips by max_depth."""
 
@@ -1819,36 +1171,6 @@ class TestPickTipMaxDepth:
         tip = dig_service._pick_tip(5)
         eligible_texts = {t["text"] for t in shallow_tips}
         assert tip in eligible_texts
-
-
-class TestUseItemValidation:
-    """Verify use_item returns errors for invalid item types."""
-
-    def test_use_item_unknown_type_returns_error(self, dig_service, player_repository, guild_id, monkeypatch):
-        """use_item with a display name (e.g. 'Dynamite') instead of type key ('dynamite') should fail."""
-        _register_player(player_repository)
-        monkeypatch.setattr(time, "time", lambda: 1_000_000)
-        monkeypatch.setattr(random, "random", lambda: 0.99)
-        dig_service.dig(10001, guild_id)
-
-        result = dig_service.use_item(10001, guild_id, "Dynamite")
-        assert result["success"] is False
-        assert "Unknown" in result["error"]
-
-    def test_use_item_valid_type_succeeds(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """use_item with correct type key ('dynamite') should succeed when item is in inventory."""
-        _register_player(player_repository, balance=200)
-        monkeypatch.setattr(time, "time", lambda: 1_000_000)
-        monkeypatch.setattr(random, "random", lambda: 0.99)
-        dig_service.dig(10001, guild_id)
-
-        # Buy dynamite
-        buy_result = dig_service.buy_item(10001, guild_id, "dynamite")
-        assert buy_result["success"]
-
-        # Use dynamite with lowercase type key
-        result = dig_service.use_item(10001, guild_id, "dynamite")
-        assert result["success"]
 
 
 class TestBossOdds:
@@ -1913,11 +1235,6 @@ class TestBossOdds:
         result = dig_service.fight_boss(10001, guild_id, "cautious", wager=0)
         assert result["success"]
         assert result["won"] is True
-
-
-# =============================================================================
-# Expansion System Tests
-# =============================================================================
 
 
 class TestNewLayers:
@@ -2221,109 +1538,6 @@ class TestTempBuffs:
         assert buff is None
 
 
-class TestExpandedEvents:
-    """Verify expanded event system."""
-
-    def test_event_pool_size_floor(self):
-        """Event pool: 93 baseline + 5 trap + 3 splash + 15 delve-themed, so ≥116.
-
-        Floor, not exact count, so routine event additions don't break the test.
-        """
-        from services.dig_constants import EVENT_POOL
-        assert len(EVENT_POOL) >= 116
-
-    def test_new_events_have_complexity_field(self):
-        """All events should have a complexity field."""
-        from services.dig_constants import EVENT_POOL
-        for e in EVENT_POOL:
-            assert "complexity" in e, f"Event {e['id']} missing complexity"
-
-    def test_darkness_events_exist(self):
-        """Should have events that require pitch black luminosity."""
-        from services.dig_constants import EVENT_POOL
-        dark_events = [e for e in EVENT_POOL if e.get("requires_dark")]
-        assert len(dark_events) >= 3
-
-    def test_roll_event_filters_by_layer(self, dig_service):
-        """roll_event should filter events by depth/layer."""
-        random.seed(42)
-        # Roll 100 events at shallow depth — should never get deep events
-        for _ in range(100):
-            event = dig_service.roll_event(5, luminosity=100)
-            if event:
-                assert event.get("rarity") in ("common", "uncommon", "rare", "legendary")
-
-    def test_dota_hero_events_exist(self):
-        """Should have Dota hero encounter events."""
-        from services.dig_constants import EVENT_POOL
-        dota_ids = {"pudge_fishing", "tinker_workshop", "the_burrow", "arcanist_library", "the_dark_rift", "roshan_lair"}
-        event_ids = {e["id"] for e in EVENT_POOL}
-        assert dota_ids.issubset(event_ids), f"Missing Dota events: {dota_ids - event_ids}"
-
-
-class TestExpandedPrestige:
-    """Verify extended prestige and pickaxes."""
-
-    def test_max_prestige_is_10(self):
-        from services.dig_constants import MAX_PRESTIGE
-        assert MAX_PRESTIGE == 10
-
-    def test_seven_pickaxe_tiers(self):
-        from services.dig_constants import _PICKAXE_TIERS_DEF
-        assert len(_PICKAXE_TIERS_DEF) == 7
-        assert _PICKAXE_TIERS_DEF[-1].name == "Void-Touched"
-
-    def test_nine_prestige_perks(self):
-        assert len(PRESTIGE_PERKS) == 9
-        assert "deep_sight" in PRESTIGE_PERKS
-        assert "the_endless" in PRESTIGE_PERKS
-
-    def test_crowns_for_all_levels(self):
-        from services.dig_constants import MAX_PRESTIGE, PRESTIGE_CROWNS
-        for i in range(MAX_PRESTIGE + 1):
-            assert i in PRESTIGE_CROWNS, f"Missing crown for prestige {i}"
-
-
-class TestNewItemsAndArtifacts:
-    """Verify new consumables and artifacts."""
-
-    def test_nine_consumables(self):
-        from services.dig_constants import CONSUMABLES
-        assert len(CONSUMABLES) == 9
-        assert "torch" in CONSUMABLES
-        assert "void_bait" in CONSUMABLES
-
-    def test_35_artifacts(self):
-        from services.dig_constants import ALL_ARTIFACTS
-        assert len(ALL_ARTIFACTS) == 35
-
-    def test_fungal_artifacts_exist(self):
-        from services.dig_constants import ALL_ARTIFACTS
-        fungal = [a for a in ALL_ARTIFACTS if a.layer == "Fungal Depths"]
-        assert len(fungal) >= 4  # 1 relic + 3 collectibles
-
-    def test_aegis_fragment_exists(self):
-        from services.dig_constants import ARTIFACT_BY_ID
-        assert "aegis_fragment" in ARTIFACT_BY_ID
-        assert ARTIFACT_BY_ID["aegis_fragment"].is_relic is True
-
-    def test_buy_item_torch(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """Should be able to buy a torch."""
-        _register_player(player_repository, balance=200)
-        monkeypatch.setattr(time, "time", lambda: 1_000_000)
-        monkeypatch.setattr(random, "random", lambda: 0.99)
-        dig_service.dig(10001, guild_id)
-
-        result = dig_service.buy_item(10001, guild_id, "torch")
-        assert result["success"]
-        assert result["cost"] == 6
-
-
-# =============================================================================
-# Cheer Tests
-# =============================================================================
-
-
 class TestCheer:
     """Tests for boss fight cheer mechanics."""
 
@@ -2462,10 +1676,53 @@ class TestCheer:
         result = dig_service.cheer_boss(10001, 10001, guild_id)
         assert not result["success"]
 
+    def test_cheer_does_not_trigger_dig_cooldown(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+        """Cheering must not put the cheerer on the free-dig cooldown.
 
-# =============================================================================
-# Boss Error / Boundary Tests
-# =============================================================================
+        Regression: cheer_boss used to write last_dig_at, blocking the cheerer
+        from digging until the full free-dig cooldown elapsed.
+        """
+        _register_player(player_repository, discord_id=10001, balance=200)
+        _register_player(player_repository, discord_id=10002, balance=200)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+        dig_repo.update_tunnel(10001, guild_id, depth=24)
+
+        # 10002 has never dug; cheer_boss should succeed.
+        result = dig_service.cheer_boss(10002, 10001, guild_id)
+        assert result["success"]
+
+        # Right after the cheer (no time advance), 10002 should be able to dig.
+        dig_result = dig_service.dig(10002, guild_id)
+        assert dig_result["success"], (
+            f"cheer should not block dig, got: {dig_result.get('error')}"
+        )
+
+    def test_cheer_has_own_30s_cooldown(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+        """A cheerer cannot cheer twice inside CHEER_COOLDOWN_SECONDS."""
+        _register_player(player_repository, discord_id=10001, balance=200)
+        _register_player(player_repository, discord_id=10002, balance=200)
+        _register_player(player_repository, discord_id=10003, balance=200)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+        dig_service.dig(10003, guild_id)
+        dig_repo.update_tunnel(10001, guild_id, depth=24)
+        dig_repo.update_tunnel(10003, guild_id, depth=24)
+
+        first = dig_service.cheer_boss(10002, 10001, guild_id)
+        assert first["success"]
+
+        # Same cheerer, different target — still on cooldown.
+        second = dig_service.cheer_boss(10002, 10003, guild_id)
+        assert not second["success"]
+        assert "cooldown" in second.get("error", "").lower()
+
+        # After the cheer cooldown, the same cheerer may cheer again.
+        monkeypatch.setattr(time, "time", lambda: 1_000_000 + CHEER_COOLDOWN_SECONDS + 1)
+        third = dig_service.cheer_boss(10002, 10003, guild_id)
+        assert third["success"]
 
 
 class TestBossErrors:
@@ -2628,647 +1885,3 @@ class TestBossErrors:
         assert terminal.get("success") is True
         assert terminal.get("boss_encounter") is True
         assert not terminal.get("paid_dig_available")
-
-
-# =============================================================================
-# Tunnel Normalization Tests
-# =============================================================================
-
-
-class TestTunnelNormalization:
-    """Tests for integer type coercion in tunnel data."""
-
-    def test_normalize_tunnel_casts_string_ints(self, dig_repo):
-        """_normalize_tunnel converts string values to int for known columns."""
-        raw = {
-            "depth": "49",
-            "luminosity": "100",
-            "last_dig_at": "1000000",
-            "boss_attempts": "3",
-            "tunnel_name": "Test Tunnel",
-            "boss_progress": '{"50": "active"}',
-        }
-        normalized = DigRepository._normalize_tunnel(raw)
-        assert normalized["depth"] == 49
-        assert isinstance(normalized["depth"], int)
-        assert normalized["luminosity"] == 100
-        assert isinstance(normalized["luminosity"], int)
-        assert normalized["last_dig_at"] == 1000000
-        assert normalized["boss_attempts"] == 3
-        # Non-int columns left alone
-        assert normalized["tunnel_name"] == "Test Tunnel"
-        assert normalized["boss_progress"] == '{"50": "active"}'
-
-    def test_normalize_tunnel_handles_none_values(self, dig_repo):
-        """_normalize_tunnel leaves None values as None."""
-        raw = {"depth": 10, "last_dig_at": None, "luminosity": None}
-        normalized = DigRepository._normalize_tunnel(raw)
-        assert normalized["depth"] == 10
-        assert normalized["last_dig_at"] is None
-        assert normalized["luminosity"] is None
-
-    def test_get_tunnel_returns_int_types(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """get_tunnel returns integer types for numeric columns."""
-        _register_player(player_repository, balance=200)
-        monkeypatch.setattr(time, "time", lambda: 1_000_000)
-        monkeypatch.setattr(random, "random", lambda: 0.99)
-        dig_service.dig(10001, guild_id)
-
-        tunnel = dig_repo.get_tunnel(10001, guild_id)
-        assert isinstance(tunnel["depth"], int)
-        assert isinstance(tunnel["luminosity"], int)
-        assert isinstance(tunnel["last_dig_at"], int)
-
-
-# =============================================================================
-# Ascension System Tests
-# =============================================================================
-
-
-class TestAscensionSystem:
-    """Test ascension modifier mechanics."""
-
-    def test_get_ascension_effects_level_0(self, dig_service):
-        """No effects at prestige 0."""
-        effects = dig_service._get_ascension_effects(0)
-        assert effects == {}
-
-    def test_get_ascension_effects_level_1(self, dig_service):
-        """Level 1 returns jc_multiplier (no advance penalty)."""
-        effects = dig_service._get_ascension_effects(1)
-        assert "advance_penalty" not in effects
-        assert "jc_multiplier" in effects
-        assert effects["jc_multiplier"] == 0.25
-
-    def test_ascension_effects_cumulative(self, dig_service):
-        """Multiple levels stack their effects."""
-        effects = dig_service._get_ascension_effects(3)
-        # Level 1 jc_multiplier=0.25 (no advance_penalty)
-        assert "advance_penalty" not in effects
-        assert effects["jc_multiplier"] == 0.25
-        # Level 2 cave_in_bonus=0.03
-        assert effects["cave_in_bonus"] == 0.03
-        # Level 2 event_chance_multiplier=0.20
-        assert effects["event_chance_multiplier"] == 0.20
-        # Level 3 luminosity_drain_multiplier=0.25
-        assert effects["luminosity_drain_multiplier"] == 0.25
-        # Level 3 rare_event_multiplier=0.50
-        assert effects["rare_event_multiplier"] == 0.50
-
-    def test_boss_phase2_at_prestige_2(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """Boss fight at P2+ returns phase2_incoming on first win.
-
-        Phase gate was lowered from P4 to P2 in the boss revamp; phase 2
-        unlocks at first prestige cycle so most active players can experience
-        the multi-phase fights.
-        """
-        _register_player(player_repository, balance=500)
-        monkeypatch.setattr(time, "time", lambda: 1_000_000)
-        monkeypatch.setattr(random, "random", lambda: 0.99)
-        dig_service.dig(10001, guild_id)
-        dig_repo.update_tunnel(10001, guild_id, depth=24, prestige_level=2)
-
-        # Cautious @ depth 25, P2 with wager=10: player_hit 0.60 − 0.01 − 0.02
-        # = 0.57 (no free-fight mod). boss_hit=0.30 + tank archetype offset
-        # depending on rolled boss; we pin grothak (bruiser) below.
-        progress = json.dumps({"25": {"boss_id": "grothak", "status": "active"}})
-        dig_repo.update_tunnel(10001, guild_id, boss_progress=progress)
-        # Player hits, boss misses — alternating roll sequence overrides the
-        # blanket 0.99 set above. Sized for the post-revamp boss HP at P2.
-        rolls = iter([0.0, 0.99] * 100)
-        monkeypatch.setattr(random, "random", lambda: next(rolls))
-        result = dig_service.fight_boss(10001, guild_id, "cautious", wager=10)
-        assert result["success"]
-        assert result.get("won") is True
-        # At P2+, boss should enter phase 2 on first victory
-        assert result.get("phase2_incoming") is True
-        assert result.get("phase") == 1
-
-        # Boss progress should be "phase1_defeated"
-        tunnel = dig_repo.get_tunnel(10001, guild_id)
-        bp = json.loads(tunnel["boss_progress"])
-        # boss_progress entry is now a dict; support either shape post-migration.
-        entry = bp["25"]
-        status = entry.get("status") if isinstance(entry, dict) else entry
-        assert status == "phase1_defeated"
-
-    def test_boss_no_phase2_below_prestige_2(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """Boss fight below P2 goes straight to defeated.
-
-        With the new gate, phase 2 only unlocks at P2+. P0 and P1 players
-        see a single-phase fight and the boss goes directly to ``defeated``.
-        """
-        _register_player(player_repository, balance=500)
-        monkeypatch.setattr(time, "time", lambda: 1_000_000)
-        monkeypatch.setattr(random, "random", lambda: 0.99)
-        dig_service.dig(10001, guild_id)
-        dig_repo.update_tunnel(10001, guild_id, depth=24, prestige_level=1)
-        progress = json.dumps({"25": {"boss_id": "grothak", "status": "active"}})
-        dig_repo.update_tunnel(10001, guild_id, boss_progress=progress)
-
-        # Player hits, boss misses — alternating roll sequence so the test
-        # deterministically wins despite the post-revamp HP/hit scaling.
-        rolls = iter([0.0, 0.99] * 100)
-        monkeypatch.setattr(random, "random", lambda: next(rolls))
-        result = dig_service.fight_boss(10001, guild_id, "cautious", wager=10)
-        assert result["success"]
-        assert result.get("won") is True
-        # No phase 2 at P1
-        assert result.get("phase2_incoming") is not True
-
-        # Boss should go straight to defeated
-        tunnel = dig_repo.get_tunnel(10001, guild_id)
-        bp = json.loads(tunnel["boss_progress"])
-        entry = bp["25"]
-        status = entry.get("status") if isinstance(entry, dict) else entry
-        assert status == "defeated"
-
-
-# =============================================================================
-# Corruption System Tests
-# =============================================================================
-
-
-class TestCorruptionSystem:
-    """Test corruption roll mechanics."""
-
-    def test_no_corruption_below_p6(self, dig_service):
-        """_roll_corruption returns None at prestige < 6."""
-        for level in range(6):
-            result = dig_service._roll_corruption(level)
-            assert result is None, f"Expected None at prestige {level}"
-
-    def test_corruption_at_p6(self, dig_service):
-        """_roll_corruption returns an effect at prestige 6+."""
-        random.seed(42)
-        result = dig_service._roll_corruption(6)
-        assert result is not None
-        assert "id" in result
-        assert "description" in result
-        assert "effects" in result
-        assert isinstance(result["effects"], dict)
-
-    def test_corruption_effect_has_valid_fields(self, dig_service):
-        """Corruption effect dict has all expected fields."""
-        random.seed(0)
-        # Run multiple times to cover both bad and weird paths
-        found_any = False
-        for seed in range(50):
-            random.seed(seed)
-            result = dig_service._roll_corruption(8)
-            assert result is not None
-            assert "id" in result
-            assert "weird" in result
-            assert isinstance(result["weird"], bool)
-            found_any = True
-        assert found_any
-
-    def test_corruption_weird_ratio(self, dig_service):
-        """Corruption rolls are ~80% bad / ~20% weird over many trials."""
-        random.seed(12345)
-        weird_count = 0
-        total = 500
-        for _ in range(total):
-            result = dig_service._roll_corruption(6)
-            if result["weird"]:
-                weird_count += 1
-        # Should be roughly 20% weird (allow 10%-35% tolerance for randomness)
-        assert 50 <= weird_count <= 175, f"Weird ratio {weird_count}/{total} outside expected range"
-
-
-# =============================================================================
-# Mutation System Tests
-# =============================================================================
-
-
-class TestMutationSystem:
-    """Test mutation mechanics."""
-
-    def test_roll_mutations_returns_forced_and_choices(self, dig_service):
-        """_roll_mutations_for_prestige returns (forced, choices_list)."""
-        random.seed(42)
-        forced, choices = dig_service._roll_mutations_for_prestige()
-        # forced is a single dict
-        assert isinstance(forced, dict)
-        assert "id" in forced
-        assert "name" in forced
-        assert "description" in forced
-        assert "positive" in forced
-        # choices is a list of dicts
-        assert isinstance(choices, list)
-        assert len(choices) == 3
-        for c in choices:
-            assert "id" in c
-            assert "name" in c
-        # forced should not be in choices
-        choice_ids = {c["id"] for c in choices}
-        assert forced["id"] not in choice_ids
-
-    def test_apply_mutation_effects(self, dig_service):
-        """_apply_mutation_effects combines effect dicts."""
-        mutations = [
-            {"id": "cave_in_loot"},
-            {"id": "brittle_walls"},
-        ]
-        combined = dig_service._apply_mutation_effects(mutations)
-        # cave_in_loot has cave_in_loot_chance=0.30
-        assert combined.get("cave_in_loot_chance") == 0.30
-        # brittle_walls has cave_in_loss_bonus=2
-        assert combined.get("cave_in_loss_bonus") == 2
-
-    def test_apply_mutation_effects_stacks_numeric(self, dig_service):
-        """Numeric mutation effects from multiple mutations stack additively."""
-        # Two mutations with the same numeric key should add
-        mutations = [
-            {"id": "event_magnet"},     # event_chance_bonus=0.30
-            {"id": "treasure_sense"},   # artifact_chance_bonus=0.25
-        ]
-        combined = dig_service._apply_mutation_effects(mutations)
-        assert combined.get("event_chance_bonus") == 0.30
-        assert combined.get("artifact_chance_bonus") == 0.25
-
-    def test_get_mutations_empty(self, dig_service):
-        """_get_mutations returns empty list for tunnel with no mutations."""
-        tunnel = {"mutations": None}
-        assert dig_service._get_mutations(tunnel) == []
-        tunnel2 = {"mutations": ""}
-        assert dig_service._get_mutations(tunnel2) == []
-
-    def test_get_mutations_parses_json(self, dig_service):
-        """_get_mutations parses stored JSON correctly."""
-        data = [{"id": "cave_in_loot", "name": "Lucky Rubble"}]
-        tunnel = {"mutations": json.dumps(data)}
-        result = dig_service._get_mutations(tunnel)
-        assert len(result) == 1
-        assert result[0]["id"] == "cave_in_loot"
-
-    def test_mutations_stored_in_prestige(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """Prestige at P8+ stores mutations in tunnel."""
-        _register_player(player_repository, balance=500)
-        monkeypatch.setattr(time, "time", lambda: 1_000_000)
-        monkeypatch.setattr(random, "random", lambda: 0.99)
-        dig_service.dig(10001, guild_id)
-        all_bosses_defeated = {str(b): "defeated" for b in BOSS_BOUNDARIES}
-        all_bosses_defeated["300"] = "defeated"
-        dig_repo.update_tunnel(
-            10001, guild_id, depth=300,
-            boss_progress=json.dumps(all_bosses_defeated),
-            prestige_level=7,  # After prestige will become P8
-        )
-
-        random.seed(42)
-        result = dig_service.prestige(10001, guild_id, "advance_boost")
-        assert result["success"]
-        assert result["prestige_level"] == 8
-
-        # Mutations should be stored
-        tunnel = dig_repo.get_tunnel(10001, guild_id)
-        mutations_raw = tunnel.get("mutations")
-        assert mutations_raw is not None
-        mutations = json.loads(mutations_raw)
-        assert len(mutations) >= 1  # At least the forced mutation
-        # Result should contain mutation info
-        assert result.get("mutations") is not None
-
-
-# =============================================================================
-# Run Scoring Tests
-# =============================================================================
-
-
-class TestRunScoring:
-    """Test run score calculation."""
-
-    def test_calculate_run_score_basic(self, dig_service):
-        """Score based on depth + bosses + JC + artifacts + events."""
-        tunnel = {
-            "depth": 100,
-            "boss_progress": json.dumps({"25": "defeated", "50": "defeated", "75": "active", "100": "active"}),
-            "current_run_jc": 40,
-            "current_run_artifacts": 2,
-            "current_run_events": 5,
-            "prestige_level": 0,
-        }
-        score = dig_service._calculate_run_score(tunnel)
-        # base = depth*1 + bosses_defeated*50 + int(jc*0.5) + artifacts*25 + events*10
-        # = 100 + 2*50 + int(40*0.5) + 2*25 + 5*10
-        # = 100 + 100 + 20 + 50 + 50 = 320
-        # multiplier = 1 + 0*0.1 = 1.0
-        expected = int(320 * 1.0)
-        assert score == expected
-
-    def test_score_multiplier_at_higher_prestige(self, dig_service):
-        """Higher prestige levels multiply the score."""
-        tunnel_base = {
-            "depth": 50,
-            "boss_progress": json.dumps({"25": "defeated", "50": "active"}),
-            "current_run_jc": 20,
-            "current_run_artifacts": 1,
-            "current_run_events": 3,
-            "prestige_level": 0,
-        }
-        score_p0 = dig_service._calculate_run_score(tunnel_base)
-
-        tunnel_p5 = dict(tunnel_base)
-        tunnel_p5["prestige_level"] = 5
-        score_p5 = dig_service._calculate_run_score(tunnel_p5)
-        # multiplier at P5 = 1 + 5*0.1 = 1.5
-        assert score_p5 > score_p0
-        assert score_p5 == int(score_p0 * 1.5)
-
-    def test_score_multiplier_p10_includes_ascension(self, dig_service):
-        """P10 'The Endless' adds score_multiplier=2.0 on top of base multiplier."""
-        tunnel = {
-            "depth": 100,
-            "boss_progress": json.dumps({}),
-            "current_run_jc": 0,
-            "current_run_artifacts": 0,
-            "current_run_events": 0,
-            "prestige_level": 10,
-        }
-        score = dig_service._calculate_run_score(tunnel)
-        # base = 100
-        # base multiplier = 1 + 10*0.1 = 2.0
-        # ascension score_multiplier at P10 = 2.0
-        # total multiplier = 2.0 + 2.0 = 4.0
-        expected = int(100 * 4.0)
-        assert score == expected
-
-    def test_prestige_stores_run_score(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """Prestige stores best_run_score and resets counters."""
-        _register_player(player_repository, balance=500)
-        monkeypatch.setattr(time, "time", lambda: 1_000_000)
-        monkeypatch.setattr(random, "random", lambda: 0.99)
-        dig_service.dig(10001, guild_id)
-        all_bosses_defeated = {str(b): "defeated" for b in BOSS_BOUNDARIES}
-        all_bosses_defeated["300"] = "defeated"
-        dig_repo.update_tunnel(
-            10001, guild_id,
-            depth=300,
-            boss_progress=json.dumps(all_bosses_defeated),
-            current_run_jc=50,
-            current_run_artifacts=3,
-            current_run_events=10,
-        )
-
-        result = dig_service.prestige(10001, guild_id, "advance_boost")
-        assert result["success"]
-        assert result["run_score"] > 0
-        assert result["best_run_score"] > 0
-
-        # Counters should be reset
-        tunnel = dig_repo.get_tunnel(10001, guild_id)
-        assert tunnel.get("current_run_jc") == 0 or tunnel["current_run_jc"] == 0
-        assert tunnel.get("current_run_artifacts") == 0 or tunnel["current_run_artifacts"] == 0
-        assert tunnel.get("current_run_events") == 0 or tunnel["current_run_events"] == 0
-
-
-# =============================================================================
-# New Event Mechanics Tests
-# =============================================================================
-
-
-class TestNewEventMechanics:
-    """Test desperate and boon event mechanics."""
-
-    def test_event_pool_has_desperate_options(self):
-        """Some events in pool have desperate_option."""
-        from services.dig_constants import EVENT_POOL
-        desperate_events = [e for e in EVENT_POOL if e.get("desperate_option") is not None]
-        assert len(desperate_events) > 0, "Expected at least one event with desperate_option"
-
-    def test_event_pool_has_boon_options(self):
-        """Some events in pool have boon_options."""
-        from services.dig_constants import EVENT_POOL
-        boon_events = [e for e in EVENT_POOL if e.get("boon_options")]
-        assert len(boon_events) > 0, "Expected at least one event with boon_options"
-
-    def test_roll_event_filters_by_prestige(self, dig_service):
-        """roll_event still respects min_prestige if any event ever uses it.
-        Currently the pool has zero gated events (the original three were
-        unlocked), so this test passes vacuously and serves as a regression
-        guard for the filter mechanism if a gate is ever re-introduced."""
-        from services.dig_constants import EVENT_POOL
-        gated_ids = {e["id"] for e in EVENT_POOL if e.get("min_prestige", 0) > 0}
-        random.seed(42)
-        found_gated = set()
-        for _ in range(500):
-            event = dig_service.roll_event(200, luminosity=100, prestige_level=0)
-            if event and event["id"] in gated_ids:
-                found_gated.add(event["id"])
-        assert len(found_gated) == 0, f"Prestige-gated events should not appear at P0: {found_gated}"
-
-    def test_all_new_events_have_valid_structure(self):
-        """Every event in the pool has the required fields."""
-        from services.dig_constants import EVENT_POOL
-        for e in EVENT_POOL:
-            assert "id" in e, "Event missing 'id'"
-            assert "name" in e, f"Event {e.get('id', '?')} missing 'name'"
-            assert "complexity" in e, f"Event {e['id']} missing 'complexity'"
-            assert "rarity" in e, f"Event {e['id']} missing 'rarity'"
-            assert e["rarity"] in ("common", "uncommon", "rare", "legendary"), (
-                f"Event {e['id']} has invalid rarity: {e['rarity']}"
-            )
-            # safe_option must exist for all events (primary resolution path)
-            assert e.get("safe_option") is not None or e.get("boon_options") is not None, (
-                f"Event {e['id']} has neither safe_option nor boon_options"
-            )
-
-    def test_resolve_event_desperate_choice(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """resolve_event handles desperate choice correctly."""
-        from services.dig_constants import EVENT_POOL
-        desperate_events = [e for e in EVENT_POOL if e.get("desperate_option") is not None]
-        event = desperate_events[0]
-
-        _register_player(player_repository, balance=500)
-        monkeypatch.setattr(time, "time", lambda: 1_000_000)
-        monkeypatch.setattr(random, "random", lambda: 0.99)
-        dig_service.dig(10001, guild_id)
-        dig_repo.update_tunnel(10001, guild_id, depth=50)
-
-        random.seed(42)
-        result = dig_service.resolve_event(10001, guild_id, event["id"], "desperate")
-        assert result["success"]
-        assert result.get("choice") == "desperate"
-
-    def test_resolve_event_boon_choice(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """resolve_event handles boon choice correctly."""
-        from services.dig_constants import EVENT_POOL
-        boon_events = [e for e in EVENT_POOL if e.get("boon_options")]
-        event = boon_events[0]
-
-        _register_player(player_repository, balance=500)
-        monkeypatch.setattr(time, "time", lambda: 1_000_000)
-        monkeypatch.setattr(random, "random", lambda: 0.99)
-        dig_service.dig(10001, guild_id)
-        dig_repo.update_tunnel(10001, guild_id, depth=50)
-
-        result = dig_service.resolve_event(10001, guild_id, event["id"], "boon_0")
-        assert result["success"]
-        assert result.get("choice") == "boon_0"
-        assert result.get("buff_applied") is not None
-
-    def test_resolve_event_boon_invalid_index(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """resolve_event rejects invalid boon index."""
-        from services.dig_constants import EVENT_POOL
-        boon_events = [e for e in EVENT_POOL if e.get("boon_options")]
-        event = boon_events[0]
-
-        _register_player(player_repository, balance=500)
-        monkeypatch.setattr(time, "time", lambda: 1_000_000)
-        monkeypatch.setattr(random, "random", lambda: 0.99)
-        dig_service.dig(10001, guild_id)
-        dig_repo.update_tunnel(10001, guild_id, depth=50)
-
-        # Use an index beyond the number of boon options
-        num_boons = len(event["boon_options"])
-        result = dig_service.resolve_event(10001, guild_id, event["id"], f"boon_{num_boons + 10}")
-        assert not result["success"]
-
-
-# =============================================================================
-# Hall of Fame Tests
-# =============================================================================
-
-
-class TestHallOfFame:
-    """Test hall of fame leaderboard."""
-
-    def test_hall_of_fame_empty_guild(self, dig_service, guild_id):
-        """Hall of fame returns empty list for guild with no scores."""
-        result = dig_service.get_hall_of_fame(guild_id)
-        assert result["success"]
-        assert result["entries"] == []
-
-    def test_hall_of_fame_after_prestige(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """Hall of fame shows player after prestige with run score."""
-        _register_player(player_repository, balance=500)
-        monkeypatch.setattr(time, "time", lambda: 1_000_000)
-        monkeypatch.setattr(random, "random", lambda: 0.99)
-        dig_service.dig(10001, guild_id)
-        all_bosses_defeated = {str(b): "defeated" for b in BOSS_BOUNDARIES}
-        all_bosses_defeated["300"] = "defeated"
-        dig_repo.update_tunnel(
-            10001, guild_id,
-            depth=300,
-            boss_progress=json.dumps(all_bosses_defeated),
-            current_run_jc=30,
-            current_run_artifacts=2,
-            current_run_events=5,
-        )
-
-        result = dig_service.prestige(10001, guild_id, "advance_boost")
-        assert result["success"]
-
-        hof = dig_service.get_hall_of_fame(guild_id)
-        assert hof["success"]
-        assert len(hof["entries"]) == 1
-        assert hof["entries"][0]["discord_id"] == 10001
-        assert hof["entries"][0]["best_run_score"] > 0
-
-
-class TestEventPoolInvariants:
-    """Invariants on the EVENT_POOL itself, independent of the service."""
-
-    def test_every_non_boon_event_has_safe_option(self):
-        """After widening the encounter gate, any non-boon event reaches the
-        encounter UI via its safe_option. Events without one would orphan
-        into _build_dig_embed's text-only branch."""
-        from services.dig_constants import EVENT_POOL
-        offenders = [
-            e["id"] for e in EVENT_POOL
-            if e.get("complexity") != "boon" and not e.get("safe_option")
-        ]
-        assert offenders == [], (
-            f"Non-boon events missing safe_option: {offenders}. "
-            "These would render as orphaned flavor text."
-        )
-
-    def test_rarity_weights_constant(self):
-        from services.dig_service import RARITY_WEIGHTS
-        assert RARITY_WEIGHTS == {"common": 70, "uncommon": 20, "rare": 12, "legendary": 6}
-
-    def test_prestige_gates_unlocked(self):
-        """infernal_gate, aghanim_trial, neow_blessing should be rollable
-        for prestige-0 players after the unlock."""
-        from services.dig_constants import EVENT_POOL
-        unlocked = {"infernal_gate", "aghanim_trial", "neow_blessing"}
-        for e in EVENT_POOL:
-            if e["id"] in unlocked:
-                assert (e.get("min_prestige") or 0) == 0, (
-                    f"{e['id']} still has min_prestige={e.get('min_prestige')}"
-                )
-
-    def test_widened_depth_ranges(self):
-        """Verify the depth widening from the variance pass didn't get reverted."""
-        from services.dig_constants import EVENT_POOL
-        expected = {
-            "creeper_ambush": (0, 75),
-            "abandoned_minecart": (0, 75),
-            "villager_trade": (0, 80),
-            "enderman_stare": (0, 80),
-            "mob_spawner": (0, 75),
-            "witch_cauldron": (0, 75),
-            "azurite_deposit": (40, 120),
-            "crawler_breakdown": (40, 120),
-            "fossil_cache": (40, 120),
-            "breach_encounter": (40, 170),
-            "vaal_side_area": (40, 170),
-            "syndicate_ambush": (40, 170),
-            "delve_smuggler": (40, 170),
-            "brann_bronzebeard": (130, 290),
-            "earthen_cache": (130, 290),
-            "campfire_rest": (130, 300),
-            "zekvir_shadow": (130, 290),
-            "dark_rider": (130, 290),
-            "titan_relic": (130, 290),
-            "candle_glow": (130, 290),
-        }
-        by_id = {e["id"]: e for e in EVENT_POOL}
-        for eid, (lo, hi) in expected.items():
-            e = by_id[eid]
-            assert (e["min_depth"], e["max_depth"]) == (lo, hi), (
-                f"{eid}: expected ({lo},{hi}) got ({e['min_depth']},{e['max_depth']})"
-            )
-
-
-class TestRarityRebalance:
-    """Statistical test that the rarity rebalance lands rare share at ~4%."""
-
-    def test_rare_share_in_expected_band(self, dig_service):
-        from services.dig_constants import EVENT_POOL, get_layer
-        from services.dig_service import RARITY_WEIGHTS
-
-        # Use a depth/layer where we know there's a healthy mix of rarities.
-        # Compute expected rare share against the EVENT_POOL filter at the
-        # same depth, deriving the layer name dynamically so this stays
-        # correct if depth or layer boundaries change.
-        random.seed(20260412)
-        depth = 30
-        layer_name = get_layer(depth).name
-        rolls = 5000
-        rare_hits = 0
-        for _ in range(rolls):
-            ev = dig_service.roll_event(depth, luminosity=100, prestige_level=0)
-            if ev and ev.get("rarity") == "rare":
-                rare_hits += 1
-        share = rare_hits / rolls
-
-        # Expected rare share at this depth depends on the eligible pool.
-        # Compute it analytically using the same filter roll_event applies.
-        eligible = [
-            e for e in EVENT_POOL
-            if depth >= (e.get("min_depth") or 0)
-            and (e.get("max_depth") is None or depth <= e["max_depth"])
-            and (e.get("layer") is None or e["layer"] == layer_name)
-            and (e.get("min_prestige") or 0) == 0
-        ]
-        total_w = sum(RARITY_WEIGHTS[e.get("rarity", "common")] for e in eligible)
-        rare_w = sum(RARITY_WEIGHTS["rare"] for e in eligible if e.get("rarity") == "rare")
-        expected = rare_w / total_w if total_w else 0
-
-        # Allow ±2 percentage points around analytic expectation.
-        assert abs(share - expected) < 0.02, (
-            f"rare share {share:.3f} drifted from analytic {expected:.3f} "
-            f"(weights={RARITY_WEIGHTS})"
-        )

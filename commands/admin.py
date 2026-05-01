@@ -30,6 +30,11 @@ class AdminCommands(commands.Cog):
     """Admin-only slash commands."""
 
     admin = app_commands.Group(name="admin", description="Admin maintenance commands")
+    adjust = app_commands.Group(
+        name="adjust",
+        description="Adjust player rating fields",
+        parent=admin,
+    )
 
     def __init__(
         self,
@@ -822,6 +827,120 @@ class AdminCommands(commands.Cog):
         logger.info(
             f"Admin {interaction.user.id} ({interaction.user}) set initial rating for "
             f"{user.id} ({user}) to {rating} with RD={rd:.1f}"
+        )
+
+    @adjust.command(name="rating", description="Set a player's Glicko rating (Admin only)")
+    @app_commands.describe(
+        user="Player to adjust",
+        rating="New rating (0-3000)",
+    )
+    async def adjust_rating(
+        self, interaction: discord.Interaction, user: discord.Member, rating: float
+    ):
+        """Admin command to set rating without changing RD/uncertainty."""
+        if not has_admin_permission(interaction):
+            await interaction.response.send_message(
+                "❌ Admin only! You need Administrator or Manage Server permissions.",
+                ephemeral=True,
+            )
+            return
+
+        if rating < 0 or rating > 3000:
+            await interaction.response.send_message(
+                "❌ Rating must be between 0 and 3000.",
+                ephemeral=True,
+            )
+            return
+
+        guild_id = interaction.guild.id if interaction.guild else None
+        player = await asyncio.to_thread(self.player_service.get_player, user.id, guild_id)
+        if not player:
+            await interaction.response.send_message(
+                f"⚠️ {user.mention} is not registered.",
+                ephemeral=True,
+            )
+            return
+
+        rating_data = await asyncio.to_thread(
+            self.player_service.get_glicko_rating, user.id, guild_id
+        )
+        if not rating_data:
+            await interaction.response.send_message(
+                f"❌ {user.mention} has no Glicko rating.",
+                ephemeral=True,
+            )
+            return
+
+        old_rating, rd, vol = rating_data
+        await asyncio.to_thread(
+            self.player_service.update_glicko_rating, user.id, guild_id, rating, rd, vol
+        )
+
+        await interaction.response.send_message(
+            f"✅ Set rating for {user.mention}: {old_rating:.0f} → **{rating:.0f}** "
+            f"(RD kept at {rd:.1f}).",
+            ephemeral=True,
+        )
+        logger.info(
+            f"Admin {interaction.user.id} ({interaction.user}) adjusted rating for "
+            f"{user.id} ({user}): {old_rating:.1f} -> {rating:.1f}, RD kept at {rd:.1f}"
+        )
+
+    @adjust.command(name="rd", description="Set a player's Glicko RD/uncertainty (Admin only)")
+    @app_commands.describe(
+        user="Player to adjust",
+        rd="New rating deviation / uncertainty (0-350)",
+    )
+    async def adjust_rd(
+        self, interaction: discord.Interaction, user: discord.Member, rd: float
+    ):
+        """Admin command to set RD/uncertainty without changing rating."""
+        if not has_admin_permission(interaction):
+            await interaction.response.send_message(
+                "❌ Admin only! You need Administrator or Manage Server permissions.",
+                ephemeral=True,
+            )
+            return
+
+        if rd < 0 or rd > 350:
+            await interaction.response.send_message(
+                "❌ RD must be between 0 and 350.",
+                ephemeral=True,
+            )
+            return
+
+        guild_id = interaction.guild.id if interaction.guild else None
+        player = await asyncio.to_thread(self.player_service.get_player, user.id, guild_id)
+        if not player:
+            await interaction.response.send_message(
+                f"⚠️ {user.mention} is not registered.",
+                ephemeral=True,
+            )
+            return
+
+        rating_data = await asyncio.to_thread(
+            self.player_service.get_glicko_rating, user.id, guild_id
+        )
+        if not rating_data:
+            await interaction.response.send_message(
+                f"❌ {user.mention} has no Glicko rating.",
+                ephemeral=True,
+            )
+            return
+
+        rating, old_rd, vol = rating_data
+        await asyncio.to_thread(
+            self.player_service.update_glicko_rating, user.id, guild_id, rating, rd, vol
+        )
+
+        await interaction.response.send_message(
+            f"✅ Set RD for {user.mention}: {old_rd:.1f} → **{rd:.1f}** "
+            f"(rating kept at {rating:.0f}).",
+            ephemeral=True,
+        )
+        logger.info(
+            f"Admin {interaction.user.id} ({interaction.user}) adjusted RD for "
+            f"{user.id} ({user}): {old_rd:.1f} -> {rd:.1f}, rating kept at {rating:.1f}"
         )
 
     @admin.command(
