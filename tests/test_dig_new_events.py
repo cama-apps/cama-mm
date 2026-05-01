@@ -208,3 +208,88 @@ class TestEventRatesBumped:
         assert text.count('"The Hollow": 0.50') == 2, (
             "expected both event_rates dicts to use The Hollow=0.50"
         )
+
+
+RUMOR_PASS_IDS = (
+    "wisps_tether",
+    "tunnel_echoes",
+    "stalled_caravan",
+    "volatile_affix",
+    "rivals_cache",
+    "forsaken_pact",
+    "mapworks_drift",
+    "the_eye_opens",
+)
+
+
+class TestRumorPassEventsRegistered:
+    """The 8 rumor-pass events should appear in RANDOM_EVENTS and EVENT_POOL."""
+
+    def test_all_in_random_events(self):
+        ids = {e.id for e in RANDOM_EVENTS}
+        for new_id in RUMOR_PASS_IDS:
+            assert new_id in ids, f"{new_id} missing from RANDOM_EVENTS"
+
+    def test_all_in_event_pool(self):
+        pool_ids = {e["id"] for e in EVENT_POOL}
+        for new_id in RUMOR_PASS_IDS:
+            assert new_id in pool_ids, f"{new_id} missing from EVENT_POOL"
+
+    def test_all_have_two_descriptions(self):
+        by_id = {e.id: e for e in RANDOM_EVENTS}
+        for new_id in RUMOR_PASS_IDS:
+            event = by_id[new_id]
+            assert len(event.description) >= 2, (
+                f"{new_id} should have ≥2 description variants"
+            )
+
+
+class TestRumorPassEventShape:
+    """Splash configs and rarity tags follow the design intent."""
+
+    def _by_id(self, event_id: str):
+        return next(e for e in RANDOM_EVENTS if e.id == event_id)
+
+    def test_cross_player_events_have_splash(self):
+        cross_player = (
+            "wisps_tether", "tunnel_echoes", "rivals_cache",
+            "forsaken_pact", "mapworks_drift", "the_eye_opens",
+        )
+        for eid in cross_player:
+            event = self._by_id(eid)
+            assert event.splash is not None, f"{eid} should have a SplashConfig"
+            assert event.social is True, f"{eid} should be marked social"
+
+    def test_solo_events_have_no_splash(self):
+        for eid in ("stalled_caravan", "volatile_affix"):
+            event = self._by_id(eid)
+            assert event.splash is None, f"{eid} should not have a SplashConfig"
+
+    def test_rarity_distribution(self):
+        rarity_counts: dict[str, int] = {}
+        for eid in RUMOR_PASS_IDS:
+            r = self._by_id(eid).rarity
+            rarity_counts[r] = rarity_counts.get(r, 0) + 1
+        # 3 common, 3 uncommon, 1 rare, 1 legendary
+        assert rarity_counts == {"common": 3, "uncommon": 3, "rare": 1, "legendary": 1}
+
+    def test_eye_opens_has_desperate_option_and_dark_gate(self):
+        event = self._by_id("the_eye_opens")
+        assert event.desperate_option is not None
+        assert event.requires_dark is True
+        assert event.buff_on_success is not None
+
+    def test_volatile_affix_grants_buff(self):
+        event = self._by_id("volatile_affix")
+        assert event.buff_on_success is not None
+        assert event.buff_on_success.id == "affix_hum"
+
+    def test_splash_modes_only_use_existing(self):
+        valid_modes = {"burn", "grant", "steal"}
+        valid_strategies = {"random_active", "richest_n", "active_diggers"}
+        for eid in RUMOR_PASS_IDS:
+            event = self._by_id(eid)
+            if event.splash is None:
+                continue
+            assert event.splash.mode in valid_modes
+            assert event.splash.strategy in valid_strategies
