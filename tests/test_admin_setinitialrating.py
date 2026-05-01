@@ -15,11 +15,13 @@ class FakePlayerService:
         self._game_count = game_count
         self.rating_data = rating_data
         self.updates = []
+        self.game_count_calls = 0
 
     def get_player(self, _id, guild_id=None):
         return object() if self.exists else None
 
     def get_game_count(self, _id, guild_id=None):
+        self.game_count_calls += 1
         return self._game_count
 
     def get_glicko_rating(self, _id, guild_id=None):
@@ -81,3 +83,88 @@ async def test_setinitialrating_rejects_too_many_games(monkeypatch):
     assert not service.updates, "Should not update rating when too many games"
     assert any("too many games" in msg.lower() for msg, _ep in interaction.response_messages)
 
+
+@pytest.mark.asyncio
+async def test_adjust_rating_allows_many_games_and_preserves_rd(monkeypatch):
+    service = FakePlayerService(game_count=1000, rating_data=(1500.0, 110.0, 0.08))
+    admin_cmd = AdminCommands(
+        bot=None,
+        lobby_service=None,
+        player_service=service,
+        loan_service=None,
+        bankruptcy_service=None,
+    )
+    monkeypatch.setattr("commands.admin.has_admin_permission", lambda _i: True)
+
+    interaction = DummyInteraction()
+    target_user = types.SimpleNamespace(id=42, mention="<@42>")
+
+    await admin_cmd.adjust_rating.callback(admin_cmd, interaction, target_user, 2400.0)
+
+    assert service.game_count_calls == 0
+    assert service.updates == [(42, 2400.0, 110.0, 0.08)]
+    assert any("RD kept at 110.0" in msg for msg, _ep in interaction.response_messages)
+
+
+@pytest.mark.asyncio
+async def test_adjust_rd_preserves_rating_and_volatility(monkeypatch):
+    service = FakePlayerService(game_count=1000, rating_data=(1512.0, 95.0, 0.07))
+    admin_cmd = AdminCommands(
+        bot=None,
+        lobby_service=None,
+        player_service=service,
+        loan_service=None,
+        bankruptcy_service=None,
+    )
+    monkeypatch.setattr("commands.admin.has_admin_permission", lambda _i: True)
+
+    interaction = DummyInteraction()
+    target_user = types.SimpleNamespace(id=42, mention="<@42>")
+
+    await admin_cmd.adjust_rd.callback(admin_cmd, interaction, target_user, 180.0)
+
+    assert service.game_count_calls == 0
+    assert service.updates == [(42, 1512.0, 180.0, 0.07)]
+    assert any("rating kept at 1512" in msg for msg, _ep in interaction.response_messages)
+
+
+@pytest.mark.asyncio
+async def test_adjust_rating_rejects_non_admin(monkeypatch):
+    service = FakePlayerService(rating_data=(1500.0, 100.0, 0.07))
+    admin_cmd = AdminCommands(
+        bot=None,
+        lobby_service=None,
+        player_service=service,
+        loan_service=None,
+        bankruptcy_service=None,
+    )
+    monkeypatch.setattr("commands.admin.has_admin_permission", lambda _i: False)
+
+    interaction = DummyInteraction()
+    target_user = types.SimpleNamespace(id=42, mention="<@42>")
+
+    await admin_cmd.adjust_rating.callback(admin_cmd, interaction, target_user, 2400.0)
+
+    assert not service.updates
+    assert any("Admin only" in msg for msg, _ep in interaction.response_messages)
+
+
+@pytest.mark.asyncio
+async def test_adjust_rd_rejects_invalid_rd(monkeypatch):
+    service = FakePlayerService(rating_data=(1500.0, 100.0, 0.07))
+    admin_cmd = AdminCommands(
+        bot=None,
+        lobby_service=None,
+        player_service=service,
+        loan_service=None,
+        bankruptcy_service=None,
+    )
+    monkeypatch.setattr("commands.admin.has_admin_permission", lambda _i: True)
+
+    interaction = DummyInteraction()
+    target_user = types.SimpleNamespace(id=42, mention="<@42>")
+
+    await admin_cmd.adjust_rd.callback(admin_cmd, interaction, target_user, 351.0)
+
+    assert not service.updates
+    assert any("RD must be between 0 and 350" in msg for msg, _ep in interaction.response_messages)
