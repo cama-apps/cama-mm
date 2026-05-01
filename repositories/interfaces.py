@@ -1825,7 +1825,7 @@ class IDigRepository(ABC):
         target_id: int,
         guild_id: int,
         cost: int,
-        cheerer_last_dig_at: int,
+        cheerer_last_cheer_at: int,
         create_cheerer_tunnel_name: str | None,
         target_cheer_data_json: str,
     ) -> None: ...

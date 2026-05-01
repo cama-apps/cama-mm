@@ -13,6 +13,7 @@ from services.dig_constants import (
     BOSSES,
     CAVE_IN_BLOCK_LOSS_MAX,
     CAVE_IN_BLOCK_LOSS_MIN,
+    CHEER_COOLDOWN_SECONDS,
     DIG_TIPS,
     FIRST_DIG_ADVANCE_MAX,
     FIRST_DIG_ADVANCE_MIN,
@@ -1674,6 +1675,54 @@ class TestCheer:
 
         result = dig_service.cheer_boss(10001, 10001, guild_id)
         assert not result["success"]
+
+    def test_cheer_does_not_trigger_dig_cooldown(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+        """Cheering must not put the cheerer on the free-dig cooldown.
+
+        Regression: cheer_boss used to write last_dig_at, blocking the cheerer
+        from digging until the full free-dig cooldown elapsed.
+        """
+        _register_player(player_repository, discord_id=10001, balance=200)
+        _register_player(player_repository, discord_id=10002, balance=200)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+        dig_repo.update_tunnel(10001, guild_id, depth=24)
+
+        # 10002 has never dug; cheer_boss should succeed.
+        result = dig_service.cheer_boss(10002, 10001, guild_id)
+        assert result["success"]
+
+        # Right after the cheer (no time advance), 10002 should be able to dig.
+        dig_result = dig_service.dig(10002, guild_id)
+        assert dig_result["success"], (
+            f"cheer should not block dig, got: {dig_result.get('error')}"
+        )
+
+    def test_cheer_has_own_30s_cooldown(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+        """A cheerer cannot cheer twice inside CHEER_COOLDOWN_SECONDS."""
+        _register_player(player_repository, discord_id=10001, balance=200)
+        _register_player(player_repository, discord_id=10002, balance=200)
+        _register_player(player_repository, discord_id=10003, balance=200)
+        monkeypatch.setattr(time, "time", lambda: 1_000_000)
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        dig_service.dig(10001, guild_id)
+        dig_service.dig(10003, guild_id)
+        dig_repo.update_tunnel(10001, guild_id, depth=24)
+        dig_repo.update_tunnel(10003, guild_id, depth=24)
+
+        first = dig_service.cheer_boss(10002, 10001, guild_id)
+        assert first["success"]
+
+        # Same cheerer, different target — still on cooldown.
+        second = dig_service.cheer_boss(10002, 10003, guild_id)
+        assert not second["success"]
+        assert "cooldown" in second.get("error", "").lower()
+
+        # After the cheer cooldown, the same cheerer may cheer again.
+        monkeypatch.setattr(time, "time", lambda: 1_000_000 + CHEER_COOLDOWN_SECONDS + 1)
+        third = dig_service.cheer_boss(10002, 10003, guild_id)
+        assert third["success"]
 
 
 class TestBossErrors:

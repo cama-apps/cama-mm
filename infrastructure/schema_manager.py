@@ -354,6 +354,8 @@ class SchemaManager:
                 "predictions_fair_history_backfill_from_levels",
                 self._migration_predictions_fair_history_backfill_from_levels,
             ),
+            # Cheer cooldown decoupled from free-dig cooldown.
+            ("add_last_cheer_at_to_tunnels", self._migration_add_last_cheer_at_to_tunnels),
         ]
 
     # --- Migrations ---
@@ -2781,3 +2783,9 @@ class SchemaManager:
             )
             """
         )
+
+    def _migration_add_last_cheer_at_to_tunnels(self, cursor) -> None:
+        """Track the cheerer's last cheer timestamp so cheer can have its own
+        short cooldown without sharing the free-dig cooldown.
+        """
+        self._add_column_if_not_exists(cursor, "tunnels", "last_cheer_at", "INTEGER")

@@ -38,6 +38,7 @@ from services.dig_constants import (
     BOSS_TIER_BONUS,
     CAVE_IN_BLOCK_LOSS_MAX,
     CAVE_IN_BLOCK_LOSS_MIN,
+    CHEER_COOLDOWN_SECONDS,
     CONSUMABLE_ITEMS,
     CORRUPTION_BAD,
     CORRUPTION_WEIRD,
@@ -6675,14 +6676,16 @@ class DigService:
         if at_boss is None:
             return self._error("That player is not at a boss boundary.")
 
-        # Check cheerer cooldown
+        # Cheer has its own short cooldown — independent of the free-dig
+        # cooldown so a player who just dug can still cheer for someone else.
         cheerer_tunnel = self.dig_repo.get_tunnel(cheerer_id, guild_id)
         if cheerer_tunnel:
             cheerer_tunnel = dict(cheerer_tunnel)
-            cheerer_tunnel["discord_id"] = cheerer_id
-            cooldown = self._get_cooldown_remaining(cheerer_tunnel)
-            if cooldown > 0:
-                return self._error(f"You're on cooldown ({cooldown}s remaining).")
+            last_cheer_at = cheerer_tunnel.get("last_cheer_at") or 0
+            elapsed = int(time.time()) - int(last_cheer_at)
+            remaining = CHEER_COOLDOWN_SECONDS - elapsed
+            if remaining > 0:
+                return self._error(f"Cheer cooldown ({remaining}s remaining).")
 
         # Check cost
         cost = 3
@@ -6710,7 +6713,7 @@ class DigService:
             target_id=target_id,
             guild_id=guild_id,
             cost=cost,
-            cheerer_last_dig_at=now,
+            cheerer_last_cheer_at=now,
             create_cheerer_tunnel_name=None if cheerer_tunnel else self.generate_tunnel_name(),
             target_cheer_data_json=json.dumps(active_cheers),
         )
