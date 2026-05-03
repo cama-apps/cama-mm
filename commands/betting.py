@@ -1299,6 +1299,19 @@ class BettingCommands(commands.Cog):
             await interaction.followup.send(f"❌ {exc}", ephemeral=True)
             return
 
+        # Green steady bonus on bet placement (silent — no embed callout).
+        _mana_fx_bet = getattr(self.bot, "mana_effects_service", None)
+        if _mana_fx_bet is not None:
+            try:
+                _bet_fx = await asyncio.to_thread(_mana_fx_bet.get_effects, user_id, guild_id)
+                if _bet_fx.match_bet_steady_bonus > 0:
+                    await asyncio.to_thread(
+                        self.player_service.adjust_balance,
+                        user_id, guild_id, _bet_fx.match_bet_steady_bonus,
+                    )
+            except Exception:
+                logger.debug("Mana steady bonus on bet placement failed", exc_info=True)
+
         await self._update_shuffle_message_wagers(guild_id, pending_match_id)
 
         # Build response message
@@ -1310,15 +1323,19 @@ class BettingCommands(commands.Cog):
         # Include match ID note if there's a pending_match_id
         match_note = f" (Match #{pending_match_id})" if pending_match_id else ""
 
+        from utils.mana_display import resolve_mana_badge
+        _bet_badge = await resolve_mana_badge(self.bot, user_id, guild_id)
+        _bet_prefix = f"{_bet_badge} " if _bet_badge else ""
+
         if lev > 1:
             await interaction.followup.send(
-                f"Bet placed{match_note}: {amount} {JOPACOIN_EMOTE} on {team.name} at {lev}x leverage "
+                f"{_bet_prefix}Bet placed{match_note}: {amount} {JOPACOIN_EMOTE} on {team.name} at {lev}x leverage "
                 f"(effective: {effective_bet} {JOPACOIN_EMOTE}).{pool_warning}",
                 ephemeral=True,
             )
         else:
             await interaction.followup.send(
-                f"Bet placed{match_note}: {amount} {JOPACOIN_EMOTE} on {team.name}.{pool_warning}",
+                f"{_bet_prefix}Bet placed{match_note}: {amount} {JOPACOIN_EMOTE} on {team.name}.{pool_warning}",
                 ephemeral=True,
             )
 
@@ -1723,6 +1740,11 @@ class BettingCommands(commands.Cog):
         guild_id = guild.id if guild else None
         balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
 
+        # Mana emoji badge (empty string if unassigned)
+        from utils.mana_display import resolve_mana_badge
+        mana_badge = await resolve_mana_badge(self.bot, user_id, guild_id)
+        mana_prefix = f"{mana_badge} " if mana_badge else ""
+
         # Check for bankruptcy penalty
         penalty_info = ""
         if self.bankruptcy_service:
@@ -1755,7 +1777,7 @@ class BettingCommands(commands.Cog):
 
         if balance >= 0:
             await interaction.followup.send(
-                f"{interaction.user.mention} has {balance} {JOPACOIN_EMOTE}.{penalty_info}{loan_info}",
+                f"{mana_prefix}{interaction.user.mention} has {balance} {JOPACOIN_EMOTE}.{penalty_info}{loan_info}",
                 ephemeral=True,
             )
         else:
@@ -1763,7 +1785,7 @@ class BettingCommands(commands.Cog):
             garnishment_pct = int(GARNISHMENT_PERCENTAGE * 100)
 
             await interaction.followup.send(
-                f"{interaction.user.mention} has **{balance}** {JOPACOIN_EMOTE} (in debt)\n"
+                f"{mana_prefix}{interaction.user.mention} has **{balance}** {JOPACOIN_EMOTE} (in debt)\n"
                 f"Garnishment: {garnishment_pct}% of winnings go to debt repayment{penalty_info}{loan_info}\n\n"
                 f"Use `/bankruptcy` to clear your debt (with penalties).\n"
                 f"Use `/loan` to borrow more jopacoin (with a fee).",
@@ -3095,9 +3117,12 @@ class BettingCommands(commands.Cog):
         if mana_notes:
             mana_suffix = "\n" + " | ".join(mana_notes)
 
-        # Transfer succeeded - send success message
+        # Transfer succeeded - send success message (with mana badge for sender)
+        from utils.mana_display import resolve_mana_badge
+        _tip_badge = await resolve_mana_badge(self.bot, interaction.user.id, guild_id)
+        _tip_prefix = f"{_tip_badge} " if _tip_badge else ""
         await interaction.followup.send(
-            f"{interaction.user.mention} tipped {amount} {JOPACOIN_EMOTE} to {player.mention}! "
+            f"{_tip_prefix}{interaction.user.mention} tipped {amount} {JOPACOIN_EMOTE} to {player.mention}! "
             f"({fee} {JOPACOIN_EMOTE} fee to nonprofit){mana_suffix}",
             ephemeral=False,
         )
@@ -3496,6 +3521,10 @@ class BettingCommands(commands.Cog):
                 description=msg,
                 color=0x9B59B6,  # Purple for peak degen
             )
+            from utils.mana_display import resolve_mana_badge
+            _loan_badge = await resolve_mana_badge(self.bot, user_id, guild_id)
+            if _loan_badge:
+                embed.title = f"{_loan_badge} {embed.title}"
             embed.add_field(
                 name="The Damage",
                 value=(
@@ -3530,6 +3559,10 @@ class BettingCommands(commands.Cog):
                 description=msg,
                 color=0x2ECC71,  # Green
             )
+            from utils.mana_display import resolve_mana_badge
+            _loan_badge = await resolve_mana_badge(self.bot, user_id, guild_id)
+            if _loan_badge:
+                embed.title = f"{_loan_badge} {embed.title}"
             embed.add_field(
                 name="Details",
                 value=(

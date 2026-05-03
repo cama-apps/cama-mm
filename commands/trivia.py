@@ -199,8 +199,40 @@ class TriviaView(discord.ui.View):
         if is_correct:
             self.session.streak += 1
             jc = _jc_for_streak(self.session.streak)
-            self.session.total_jc += jc
             self.session.recent_categories.append(self.question.category)
+
+            # Apply mana effects on milestone payouts (jc > 0 = milestone hit).
+            mana_tithe = 0
+            if jc > 0:
+                mana_fx = getattr(self.cog.bot, "mana_effects_service", None)
+                if mana_fx is not None:
+                    try:
+                        effects = await asyncio.to_thread(
+                            mana_fx.get_effects, self.session.user_id, self.session.guild_id
+                        )
+                        # Red: +50% milestone payout
+                        if effects.trivia_payout_multiplier and effects.trivia_payout_multiplier != 1.0:
+                            jc = max(1, int(jc * effects.trivia_payout_multiplier))
+                        # Green: +1 steady per milestone
+                        if effects.trivia_streak_bonus > 0:
+                            jc += effects.trivia_streak_bonus
+                        # White: tithe to nonprofit fund
+                        if effects.plains_tithe_rate > 0:
+                            mana_tithe = max(1, int(jc * effects.plains_tithe_rate))
+                            jc -= mana_tithe
+                            loan_service = getattr(mana_fx, "loan_service", None)
+                            if loan_service is not None:
+                                try:
+                                    await asyncio.to_thread(
+                                        loan_service.add_to_nonprofit_fund,
+                                        self.session.guild_id,
+                                        mana_tithe,
+                                    )
+                                except Exception:
+                                    pass
+                    except Exception:
+                        logger.exception("Failed to apply trivia mana effects")
+            self.session.total_jc += jc
 
             # Award jopacoin (only when jc > 0)
             if jc > 0:

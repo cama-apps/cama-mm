@@ -339,13 +339,28 @@ class ShopCommands(commands.Cog):
             await interaction.response.send_message(msg, ephemeral=True)
             return
 
+        # Apply mana discount on info-style items.
+        recal_cost = SHOP_RECALIBRATE_COST
+        _mana_fx_recal = getattr(self.bot, "mana_effects_service", None)
+        if _mana_fx_recal is not None:
+            try:
+                _discounted = await asyncio.to_thread(
+                    _mana_fx_recal.apply_shop_discount,
+                    user_id, guild_id, SHOP_RECALIBRATE_COST,
+                    kind="info",
+                )
+                if isinstance(_discounted, int):
+                    recal_cost = _discounted
+            except Exception:
+                logger.debug("Mana discount lookup failed for recalibrate", exc_info=True)
+
         # Check balance
         balance = await asyncio.to_thread(
             self.player_service.get_balance, user_id, guild_id
         )
-        if balance < SHOP_RECALIBRATE_COST:
+        if balance < recal_cost:
             await interaction.response.send_message(
-                f"You need **{SHOP_RECALIBRATE_COST}** {JOPACOIN_EMOTE} to recalibrate "
+                f"You need **{recal_cost}** {JOPACOIN_EMOTE} to recalibrate "
                 f"but only have **{balance}** {JOPACOIN_EMOTE}.",
                 ephemeral=True,
             )
@@ -356,7 +371,7 @@ class ShopCommands(commands.Cog):
 
         # Deduct cost
         await asyncio.to_thread(
-            self.player_service.adjust_balance, user_id, guild_id, -SHOP_RECALIBRATE_COST
+            self.player_service.adjust_balance, user_id, guild_id, -recal_cost
         )
 
         # Execute recalibration
@@ -367,7 +382,7 @@ class ShopCommands(commands.Cog):
         if not result["success"]:
             # Refund on unexpected failure
             await asyncio.to_thread(
-                self.player_service.adjust_balance, user_id, guild_id, SHOP_RECALIBRATE_COST
+                self.player_service.adjust_balance, user_id, guild_id, recal_cost
             )
             await safe_followup(
                 interaction, content="Recalibration failed unexpectedly. You have been refunded."

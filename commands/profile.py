@@ -309,10 +309,15 @@ class ProfileCommands(commands.Cog):
             state = await asyncio.to_thread(bankruptcy_service.get_state, target_discord_id, guild_id)
             penalty_games = state.penalty_games_remaining
 
+        # Mana emoji badge
+        from utils.mana_display import resolve_mana_badge
+        mana_badge_str = await resolve_mana_badge(self.bot, target_discord_id, guild_id)
+        mana_prefix = f"{mana_badge_str} " if mana_badge_str else ""
+
         # Title with tombstone if penalized
         title_prefix = f"{TOMBSTONE_EMOJI} " if penalty_games > 0 else ""
         embed = discord.Embed(
-            title=f"{title_prefix}Profile: {target_user.display_name}",
+            title=f"{mana_prefix}{title_prefix}Profile: {target_user.display_name}",
             color=COLOR_BLUE,
         )
 

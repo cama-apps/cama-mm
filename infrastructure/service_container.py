@@ -362,6 +362,7 @@ class ServiceContainer:
         c["dig_service"] = DigService(
             dig_repo=c["dig_repo"],
             player_repo=c["player_repo"],
+            mana_effects_service=c.get("mana_effects_service"),
         )
 
         # Wire LLM engine service if AI is available

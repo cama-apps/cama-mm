@@ -230,9 +230,106 @@ def _get_events_with_art() -> set[str]:
 class DigService:
     """Encapsulates all tunnel digging minigame logic."""
 
-    def __init__(self, dig_repo: DigRepository, player_repo: PlayerRepository):
+    def __init__(
+        self,
+        dig_repo: DigRepository,
+        player_repo: PlayerRepository,
+        mana_effects_service=None,
+    ):
         self.dig_repo = dig_repo
         self.player_repo = player_repo
+        self.mana_effects_service = mana_effects_service
+
+    def _apply_mana_yield_modifier(
+        self, discord_id: int, guild_id, gross_jc: int
+    ) -> int:
+        """Silently modify a dig payout based on the player's mana effects.
+
+        No embed surfaces this — players discover it through play. Tithed JC
+        goes to the nonprofit fund directly (the helper bypasses
+        apply_plains_tithe because the JC hasn't been credited to the player's
+        balance yet at this point in the dig flow).
+        """
+        if self.mana_effects_service is None or gross_jc <= 0:
+            return gross_jc
+        try:
+            effects = self.mana_effects_service.get_effects(discord_id, guild_id)
+        except Exception:
+            return gross_jc
+        if effects.color is None:
+            return gross_jc
+
+        modified = gross_jc
+
+        # Mountain variance: chance of double or zero (same EV).
+        if effects.dig_yield_variance > 0:
+            roll = random.random()
+            if roll < effects.dig_yield_variance:
+                modified = modified * 2
+            elif roll < effects.dig_yield_variance * 2:
+                modified = 0
+
+        # Forest +1 steady bonus on any yield.
+        if effects.green_steady_bonus > 0 and modified > 0:
+            modified += effects.green_steady_bonus
+
+        # Plains tithe: transfer 5% to nonprofit fund.
+        if effects.plains_tithe_rate > 0 and modified > 0:
+            tithe = max(1, int(modified * effects.plains_tithe_rate))
+            modified -= tithe
+            loan_service = getattr(self.mana_effects_service, "loan_service", None)
+            if loan_service is not None:
+                try:
+                    loan_service.add_to_nonprofit_fund(guild_id, tithe)
+                except Exception:
+                    pass
+
+        # Blue tax on positive yields (deflationary, JC destroyed by design).
+        if effects.blue_tax_rate > 0 and modified > 0:
+            tax = max(1, int(modified * effects.blue_tax_rate))
+            modified -= tax
+
+        return max(0, modified)
+
+    def _apply_mana_hazard_modifier(
+        self, discord_id: int, guild_id, base_chance: float
+    ) -> float:
+        """Silently shift cave-in probability by the player's mana modifier.
+
+        Forest reduces, Mountain/Black raise. Clamped to [0, 1].
+        """
+        if self.mana_effects_service is None:
+            return base_chance
+        try:
+            effects = self.mana_effects_service.get_effects(discord_id, guild_id)
+        except Exception:
+            return base_chance
+        if effects.color is None or effects.dig_hazard_modifier == 0:
+            return base_chance
+        return max(0.0, min(1.0, base_chance + effects.dig_hazard_modifier))
+
+    def _apply_mana_caveins_refund(
+        self, discord_id: int, guild_id, paid_amount: int
+    ) -> int:
+        """Silently refund a fraction of paid-dig cost on a cave-in.
+
+        Blue: refund 50% of paid_amount (creates JC, mirrors blue_cashback_rate
+        intent). Other colors: no refund. Returns refunded amount.
+        """
+        if self.mana_effects_service is None or paid_amount <= 0:
+            return 0
+        try:
+            effects = self.mana_effects_service.get_effects(discord_id, guild_id)
+        except Exception:
+            return 0
+        if effects.color is None or effects.dig_paid_refund_on_caveins <= 0:
+            return 0
+        refund = max(1, int(paid_amount * effects.dig_paid_refund_on_caveins))
+        try:
+            self.player_repo.add_balance(discord_id, guild_id, refund)
+        except Exception:
+            return 0
+        return refund
 
     # ------------------------------------------------------------------
     # Helpers
@@ -2399,6 +2496,11 @@ class DigService:
         cave_in_chance *= relic_cavein_mod
         cave_in_chance = max(0.01, cave_in_chance)
 
+        # Silent mana hazard modifier (Forest -, Mountain/Black +).
+        cave_in_chance = self._apply_mana_hazard_modifier(
+            discord_id, guild_id, cave_in_chance
+        )
+
         # Mutation: thick_skin — first cave-in each day prevented
         thick_skin_saved = False
         if mutation_fx.get("daily_cave_in_shield"):
@@ -2660,6 +2762,9 @@ class DigService:
                 break
 
         jc_earned += streak_bonus
+
+        # Apply silent mana yield modifier before atomic commit.
+        jc_earned = self._apply_mana_yield_modifier(discord_id, guild_id, jc_earned)
 
         # 16. Roll for artifact (skip if corruption says so)
         artifact = None
@@ -3037,6 +3142,11 @@ class DigService:
             cave_in_chance *= 0.50
         cave_in_chance *= relic_cavein_mod
         cave_in_chance = max(0.01, cave_in_chance)
+
+        # Silent mana hazard modifier (Forest -, Mountain/Black +).
+        cave_in_chance = self._apply_mana_hazard_modifier(
+            discord_id, guild_id, cave_in_chance
+        )
 
         thick_skin_saved = False
         if mutation_fx.get("daily_cave_in_shield"):
@@ -4624,6 +4734,23 @@ class DigService:
 
         player_hp = int(stats["player_hp"])
         player_dmg = int(stats["player_dmg"])
+
+        # Silent mana variance modifier on damage values. Mountain bumps both
+        # sides on a coin flip (more swing); Forest narrows on a coin flip
+        # (steadier). Same EV in expectation; players see this as RNG.
+        if self.mana_effects_service is not None:
+            try:
+                _bf_effects = self.mana_effects_service.get_effects(discord_id, guild_id)
+                if (
+                    _bf_effects.color is not None
+                    and _bf_effects.boss_damage_variance_modifier != 0
+                    and random.random() < 0.5
+                ):
+                    _scale = 1.0 + _bf_effects.boss_damage_variance_modifier
+                    player_dmg = max(1, int(player_dmg * _scale))
+                    boss_dmg = max(1, int(boss_dmg * _scale))
+            except Exception:
+                pass
 
         # Estimate actual win probability via Monte Carlo on the entry
         # stats so the returned ``win_chance`` matches what ``scout_boss``

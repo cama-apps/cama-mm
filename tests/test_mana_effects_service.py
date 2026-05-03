@@ -106,6 +106,47 @@ class TestManaEffects:
         assert e.plains_guardian_aura is False
         assert e.swamp_siphon is False
 
+    def test_red_new_fields(self):
+        """Red has dig variance, boss damage variance, and trivia payout multiplier."""
+        e = ManaEffects.for_color("Red", "Mountain")
+        assert e.dig_yield_variance > 0
+        assert e.dig_dynamite_overyield_chance > 0
+        assert e.dig_paid_cost_modifier_pct < 0
+        assert e.boss_damage_variance_modifier > 0
+        assert e.trivia_payout_multiplier > 1.0
+
+    def test_blue_new_fields(self):
+        """Blue has dig refund, boss durability refund, predictions discount, shop discount, trivia hint."""
+        e = ManaEffects.for_color("Blue", "Island")
+        assert e.dig_paid_refund_on_caveins > 0
+        assert e.boss_durability_refund_rate > 0
+        assert e.pred_fee_discount_rate > 0
+        assert e.shop_info_discount_rate > 0
+        assert e.trivia_hint_bonus > 0
+
+    def test_green_new_fields(self):
+        """Green has dig hazard reduction, durability/cooldown bonuses, boss narrowing, match steady, trivia steady."""
+        e = ManaEffects.for_color("Green", "Forest")
+        assert e.dig_hazard_modifier < 0
+        assert e.dig_durability_bonus_ticks > 0
+        assert e.dig_cooldown_reduction_seconds > 0
+        assert e.boss_damage_variance_modifier < 0
+        assert e.match_bet_steady_bonus > 0
+        assert e.pred_steady_bonus > 0
+        assert e.shop_consumable_discount_rate > 0
+        assert e.trivia_streak_bonus > 0
+
+    def test_white_new_fields(self):
+        """White has boss durability prevention; tithe carries via plains_tithe_rate."""
+        e = ManaEffects.for_color("White", "Plains")
+        assert e.boss_durability_prevention_rate > 0
+        # plains_tithe_rate already covered above; new gambling tithes reuse it.
+
+    def test_black_new_fields(self):
+        """Black raises dig hazard chance (no siphon on dig yields)."""
+        e = ManaEffects.for_color("Black", "Swamp")
+        assert e.dig_hazard_modifier > 0
+
     def test_red_does_not_activate_other_colors(self):
         """Red effects should not activate Blue, Green, White, or Black effects."""
         e = ManaEffects.for_color("Red", "Mountain")
@@ -499,6 +540,55 @@ class TestManaEffectsService:
         bal = service["player_repo"].get_balance(50003, GID)
         assert bal == 200
         service["loan_service"].add_to_nonprofit_fund.assert_not_called()
+
+    # -------------------------------------------------------------------------
+    # apply_shop_discount
+    # -------------------------------------------------------------------------
+
+    def test_apply_shop_discount_blue_info(self, service):
+        """Blue gets 10% discount on info-style items."""
+        _register_player(service["player_repo"], 60001, balance=200)
+        today = get_today_pst()
+        service["mana_repo"].set_mana(60001, GID, "Island", today)
+
+        discounted = service["effects_service"].apply_shop_discount(60001, GID, 100, kind="info")
+        assert discounted == 90  # 10% off
+
+    def test_apply_shop_discount_green_consumable(self, service):
+        """Green gets 5% discount on consumables."""
+        _register_player(service["player_repo"], 60002, balance=200)
+        today = get_today_pst()
+        service["mana_repo"].set_mana(60002, GID, "Forest", today)
+
+        discounted = service["effects_service"].apply_shop_discount(60002, GID, 100, kind="consumable")
+        assert discounted == 95  # 5% off
+
+    def test_apply_shop_discount_no_match(self, service):
+        """Wrong color or wrong kind returns base cost."""
+        _register_player(service["player_repo"], 60003, balance=200)
+        today = get_today_pst()
+        service["mana_repo"].set_mana(60003, GID, "Mountain", today)
+
+        # Mountain has no shop discount
+        cost = service["effects_service"].apply_shop_discount(60003, GID, 100, kind="info")
+        assert cost == 100
+
+    def test_apply_shop_discount_zero_cost_passes_through(self, service):
+        """Zero/negative base cost is returned unchanged."""
+        _register_player(service["player_repo"], 60004, balance=200)
+        today = get_today_pst()
+        service["mana_repo"].set_mana(60004, GID, "Island", today)
+
+        assert service["effects_service"].apply_shop_discount(60004, GID, 0, kind="info") == 0
+
+    def test_apply_shop_discount_floors_at_one(self, service):
+        """Tiny base cost still costs at least 1 JC after discount."""
+        _register_player(service["player_repo"], 60005, balance=200)
+        today = get_today_pst()
+        service["mana_repo"].set_mana(60005, GID, "Island", today)
+
+        # 1 JC * 0.9 = 0.9 → int → 0, but floored to 1
+        assert service["effects_service"].apply_shop_discount(60005, GID, 1, kind="info") == 1
 
 
 # =============================================================================

@@ -120,6 +120,30 @@ class ManaEffectsService:
             return effects.green_gain_cap
         return gain
 
+    def apply_shop_discount(
+        self, discord_id: int, guild_id: int | None, base_cost: int, *, kind: str
+    ) -> int:
+        """Return the effective shop cost after the player's mana discount.
+
+        ``kind`` selects which discount field applies: 'info' for info-style
+        items (recalibrate, mystery gift), 'consumable' for dig consumables.
+        Returns ``base_cost`` if no discount applies. Always at least 1 JC.
+        """
+        if base_cost <= 0:
+            return base_cost
+        effects = self.get_effects(discord_id, guild_id)
+        if effects.color is None:
+            return base_cost
+        rate = 0.0
+        if kind == "info":
+            rate = effects.shop_info_discount_rate
+        elif kind == "consumable":
+            rate = effects.shop_consumable_discount_rate
+        if rate <= 0:
+            return base_cost
+        discounted = int(base_cost * (1.0 - rate))
+        return max(1, discounted)
+
     def apply_plains_tithe(self, discord_id: int, guild_id: int | None, gain: int) -> int:
         """Apply Plains' 5% tithe on gains. Tithed JC is transferred to the
         guild's nonprofit fund (not destroyed). Returns the tithe amount."""
