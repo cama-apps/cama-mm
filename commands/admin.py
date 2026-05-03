@@ -194,9 +194,11 @@ class AdminCommands(commands.Cog):
         fake_users_added = await asyncio.to_thread(_add_fake_users)
 
         # Update lobby message if it exists
-        lobby = self.lobby_service.get_lobby(guild_id=addfake_guild_id)  # In-memory read
-        message_id = self.lobby_service.get_lobby_message_id(guild_id=addfake_guild_id)
-        channel_id = self.lobby_service.get_lobby_channel_id(guild_id=addfake_guild_id)
+        lobby, message_id, channel_id = await asyncio.gather(
+            asyncio.to_thread(self.lobby_service.get_lobby, guild_id=addfake_guild_id),
+            asyncio.to_thread(self.lobby_service.get_lobby_message_id, guild_id=addfake_guild_id),
+            asyncio.to_thread(self.lobby_service.get_lobby_channel_id, guild_id=addfake_guild_id),
+        )
         if message_id and channel_id and lobby:
             try:
                 channel = self.bot.get_channel(channel_id)
@@ -319,9 +321,11 @@ class AdminCommands(commands.Cog):
         fake_users_added = await asyncio.to_thread(_fill_lobby)
 
         # Update lobby message if it exists
-        lobby = self.lobby_service.get_lobby(guild_id=fill_guild_id)  # In-memory read
-        message_id = self.lobby_service.get_lobby_message_id(guild_id=fill_guild_id)
-        channel_id = self.lobby_service.get_lobby_channel_id(guild_id=fill_guild_id)
+        lobby, message_id, channel_id = await asyncio.gather(
+            asyncio.to_thread(self.lobby_service.get_lobby, guild_id=fill_guild_id),
+            asyncio.to_thread(self.lobby_service.get_lobby_message_id, guild_id=fill_guild_id),
+            asyncio.to_thread(self.lobby_service.get_lobby_channel_id, guild_id=fill_guild_id),
+        )
         if message_id and channel_id and lobby:
             try:
                 channel = self.bot.get_channel(channel_id)
@@ -1191,7 +1195,7 @@ class AdminCommands(commands.Cog):
 
         # Update state
         pending_state["bet_lock_until"] = new_lock_until
-        match_service.set_last_shuffle(guild_id, pending_state)  # In-memory only
+        await asyncio.to_thread(match_service.set_last_shuffle, guild_id, pending_state)
         await asyncio.to_thread(
             match_service._persist_match_state, guild_id, pending_state
         )

@@ -7,6 +7,7 @@ using AI with strict whitelist enforcement.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from dataclasses import dataclass, field
@@ -254,21 +255,26 @@ class SQLQueryService:
             QueryResult with success status, SQL, and results
         """
         # 1. Check if AI features are enabled for this guild
-        if guild_id is not None and self.guild_config_repo and not self.guild_config_repo.get_ai_enabled(guild_id):
+        if (
+            guild_id is not None
+            and self.guild_config_repo
+            and not await asyncio.to_thread(self.guild_config_repo.get_ai_enabled, guild_id)
+        ):
             return QueryResult(
                 success=False,
                 error="AI features are not enabled for this server. An admin can enable them.",
             )
 
         # 2. Build schema context for the AI
-        schema_ctx = self._build_schema_context()
+        schema_ctx = await asyncio.to_thread(self._build_schema_context)
 
         # 3. Look up asker's username for self-referential queries
         asker_username = None
         if asker_discord_id:
             try:
                 normalized_guild = guild_id if guild_id is not None else 0
-                row = self.ai_query_repo.execute_readonly(
+                row = await asyncio.to_thread(
+                    self.ai_query_repo.execute_readonly,
                     "SELECT discord_username FROM players WHERE discord_id = ? AND guild_id = ?",
                     params=(asker_discord_id, normalized_guild),
                     max_rows=1,
@@ -302,7 +308,7 @@ class SQLQueryService:
 
         # 5. Execute the query
         try:
-            rows = self.ai_query_repo.execute_readonly(sql, max_rows=25)
+            rows = await asyncio.to_thread(self.ai_query_repo.execute_readonly, sql, max_rows=25)
             logger.info(f"Query executed successfully, {len(rows)} rows returned")
             return QueryResult(
                 success=True,

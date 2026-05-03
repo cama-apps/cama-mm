@@ -7,6 +7,7 @@ best-effort wrapped in try/except - failures never block normal bot operation.
 
 from __future__ import annotations
 
+import asyncio
 import io
 import logging
 import random
@@ -379,9 +380,9 @@ class NeonDegenService:
             if not self._roll(NEON_LAYER1_CHANCE):
                 return None
 
-            name = self._get_player_name(discord_id, guild_id)
+            name = await asyncio.to_thread(self._get_player_name, discord_id, guild_id)
             text = render_balance_check(name, balance)
-            ctx = self._build_player_context(discord_id, guild_id)
+            ctx = await asyncio.to_thread(self._build_player_context, discord_id, guild_id)
             text = await self._generate_text(
                 f"Client {name} checked their balance: {balance} JC",
                 ctx, text,
@@ -412,7 +413,7 @@ class NeonDegenService:
 
             text = render_bet_placed(amount, team, leverage)
             lev_note = f" at {leverage}x leverage" if leverage > 1 else ""
-            ctx = self._build_player_context(discord_id, guild_id)
+            ctx = await asyncio.to_thread(self._build_player_context, discord_id, guild_id)
             text = await self._generate_text(
                 f"Client placed {amount} JC bet on {team}{lev_note}",
                 ctx, text,
@@ -436,9 +437,9 @@ class NeonDegenService:
             if not self._is_enabled():
                 return None
 
-            name = self._get_player_name(discord_id, guild_id)
+            name = await asyncio.to_thread(self._get_player_name, discord_id, guild_id)
 
-            ctx = self._build_player_context(discord_id, guild_id)
+            ctx = await asyncio.to_thread(self._build_player_context, discord_id, guild_id)
 
             # Layer 2: Hit MAX_DEBT
             if new_balance <= -MAX_DEBT and self._roll(0.90):
@@ -477,9 +478,9 @@ class NeonDegenService:
             if not self._is_enabled():
                 return None
 
-            name = self._get_player_name(discord_id, guild_id)
+            name = await asyncio.to_thread(self._get_player_name, discord_id, guild_id)
 
-            ctx = self._build_player_context(discord_id, guild_id)
+            ctx = await asyncio.to_thread(self._build_player_context, discord_id, guild_id)
             event_desc = f"Client filed bankruptcy #{filing_number}. Debt cleared: {debt_cleared} JC"
 
             # Layer 3: 3rd+ bankruptcy - terminal crash GIF
@@ -529,9 +530,9 @@ class NeonDegenService:
             if not self._is_enabled():
                 return None
 
-            name = self._get_player_name(discord_id, guild_id)
+            name = await asyncio.to_thread(self._get_player_name, discord_id, guild_id)
 
-            ctx = self._build_player_context(discord_id, guild_id)
+            ctx = await asyncio.to_thread(self._build_player_context, discord_id, guild_id)
 
             # Layer 2: Negative loan (loan while in debt)
             if is_negative:
@@ -576,9 +577,9 @@ class NeonDegenService:
             if not self._is_enabled():
                 return None
 
-            name = self._get_player_name(discord_id, guild_id)
+            name = await asyncio.to_thread(self._get_player_name, discord_id, guild_id)
 
-            ctx = self._build_player_context(discord_id, guild_id)
+            ctx = await asyncio.to_thread(self._build_player_context, discord_id, guild_id)
 
             # Layer 2: Wheel BANKRUPT
             if result_value < 0 and self._roll(0.30):
@@ -628,7 +629,7 @@ class NeonDegenService:
                 text = render_lightning_bolt_overlay(total_taxed, players_hit)
                 text = await self._generate_text(
                     f"Lightning Bolt struck {players_hit} players for {total_taxed} JC total. All went to nonprofit.",
-                    self._build_player_context(discord_id, guild_id),
+                    await asyncio.to_thread(self._build_player_context, discord_id, guild_id),
                     text,
                 )
                 self._set_cooldown(discord_id, guild_id)
@@ -637,7 +638,7 @@ class NeonDegenService:
                 text = render_lightning_bolt(total_taxed, players_hit)
                 text = await self._generate_text(
                     f"Lightning Bolt struck {players_hit} players for {total_taxed} JC total. Wry commentary on suffering.",
-                    self._build_player_context(discord_id, guild_id),
+                    await asyncio.to_thread(self._build_player_context, discord_id, guild_id),
                     text,
                 )
                 self._set_cooldown(discord_id, guild_id)
@@ -662,9 +663,9 @@ class NeonDegenService:
                 streak = streak_data.get("streak", 0)
                 is_win = streak_data.get("is_win", False)
                 if abs(streak) >= 5 and player_id and self._roll(0.60):
-                    name = self._get_player_name(player_id, guild_id)
+                    name = await asyncio.to_thread(self._get_player_name, player_id, guild_id)
                     text = render_streak(name, abs(streak), is_win)
-                    ctx = self._build_player_context(player_id, guild_id)
+                    ctx = await asyncio.to_thread(self._build_player_context, player_id, guild_id)
                     text = await self._generate_text(
                         f"Client {name} is on a {abs(streak)}-game {'win' if is_win else 'loss'} streak",
                         ctx, text,
@@ -698,7 +699,7 @@ class NeonDegenService:
                 return None
 
             text = render_cooldown_hit(cooldown_type)
-            ctx = self._build_player_context(discord_id, guild_id)
+            ctx = await asyncio.to_thread(self._build_player_context, discord_id, guild_id)
             text = await self._generate_text(
                 f"Client tried to use {cooldown_type} but hit the cooldown",
                 ctx, text,
@@ -726,10 +727,10 @@ class NeonDegenService:
             if not self._roll(0.80):
                 return None
 
-            name = self._get_player_name(discord_id, guild_id)
+            name = await asyncio.to_thread(self._get_player_name, discord_id, guild_id)
             debt = abs(new_balance)
             text = render_debt_collector(name, debt)
-            ctx = self._build_player_context(discord_id, guild_id)
+            ctx = await asyncio.to_thread(self._build_player_context, discord_id, guild_id)
             text = await self._generate_text(
                 f"Client lost a {leverage}x leveraged bet of {amount} JC. Now in debt: {debt} JC",
                 ctx, text,
@@ -759,11 +760,11 @@ class NeonDegenService:
                 return None
             if degen_score < 90:
                 return None
-            if not self._check_one_time(discord_id, guild_id, "degen_90"):
+            if not await asyncio.to_thread(self._check_one_time, discord_id, guild_id, "degen_90"):
                 return None
 
-            name = self._get_player_name(discord_id, guild_id)
-            self._mark_one_time(discord_id, guild_id, "degen_90", layer=3)
+            name = await asyncio.to_thread(self._get_player_name, discord_id, guild_id)
+            await asyncio.to_thread(self._mark_one_time, discord_id, guild_id, "degen_90", layer=3)
 
             try:
                 from utils.neon_drawing import create_degen_certificate_gif
@@ -802,7 +803,7 @@ class NeonDegenService:
 
             from utils.neon_terminal import render_gamba_spectator
             text = render_gamba_spectator(display_name)
-            ctx = self._build_player_context(discord_id, guild_id)
+            ctx = await asyncio.to_thread(self._build_player_context, discord_id, guild_id)
             text = await self._generate_text(
                 f"Client {display_name} is watching the lobby. Spectator mode.",
                 ctx, text,
@@ -829,7 +830,7 @@ class NeonDegenService:
             if not self._check_cooldown(discord_id, guild_id):
                 return None
 
-            ctx = self._build_player_context(discord_id, guild_id)
+            ctx = await asyncio.to_thread(self._build_player_context, discord_id, guild_id)
 
             # Layer 2: Surveillance report (5%)
             if self._roll(0.05):
@@ -871,8 +872,8 @@ class NeonDegenService:
             if not self._is_enabled():
                 return None
 
-            name = self._get_player_name(discord_id, guild_id)
-            ctx = self._build_player_context(discord_id, guild_id)
+            name = await asyncio.to_thread(self._get_player_name, discord_id, guild_id)
+            ctx = await asyncio.to_thread(self._build_player_context, discord_id, guild_id)
 
             if won:
                 # Layer 1: Always fire on win (100%)
@@ -938,8 +939,10 @@ class NeonDegenService:
             if not self._roll(0.40):
                 return None
 
-            winner_name = self._get_player_name(winner_id, guild_id)
-            loser_name = self._get_player_name(loser_id, guild_id)
+            winner_name, loser_name = await asyncio.gather(
+                asyncio.to_thread(self._get_player_name, winner_id, guild_id),
+                asyncio.to_thread(self._get_player_name, loser_id, guild_id),
+            )
             text = render_coinflip(winner_name, loser_name)
             text = await self._generate_text(
                 f"Draft coinflip: {winner_name} won, {loser_name} lost",
@@ -960,7 +963,7 @@ class NeonDegenService:
         try:
             if not self._is_enabled():
                 return None
-            if not self._check_one_time(discord_id, guild_id, "registration"):
+            if not await asyncio.to_thread(self._check_one_time, discord_id, guild_id, "registration"):
                 return None
             if not self._roll(0.50):
                 return None
@@ -970,7 +973,7 @@ class NeonDegenService:
                 f"New player '{player_name}' just registered. 3 JC starting balance.",
                 {"name": player_name}, text,
             )
-            self._mark_one_time(discord_id, guild_id, "registration", layer=1)
+            await asyncio.to_thread(self._mark_one_time, discord_id, guild_id, "registration", layer=1)
             self._set_cooldown(discord_id, guild_id)
             return NeonResult(layer=1, text_block=text)
         except Exception as e:
@@ -1096,9 +1099,9 @@ class NeonDegenService:
             if not self._roll(0.35):
                 return None
 
-            name = self._get_player_name(discord_id, guild_id)
+            name = await asyncio.to_thread(self._get_player_name, discord_id, guild_id)
             text = render_all_in_bet(name, amount, percentage)
-            ctx = self._build_player_context(discord_id, guild_id)
+            ctx = await asyncio.to_thread(self._build_player_context, discord_id, guild_id)
             text = await self._generate_text(
                 f"Client {name} went ALL-IN with {amount} JC ({percentage:.0f}% of balance)",
                 ctx, text,
@@ -1127,9 +1130,9 @@ class NeonDegenService:
             if not self._roll(0.05):
                 return None
 
-            name = self._get_player_name(discord_id, guild_id)
+            name = await asyncio.to_thread(self._get_player_name, discord_id, guild_id)
             text = render_last_second_bet(name, seconds_remaining)
-            ctx = self._build_player_context(discord_id, guild_id)
+            ctx = await asyncio.to_thread(self._build_player_context, discord_id, guild_id)
             text = await self._generate_text(
                 f"Client {name} placed bet with only {seconds_remaining}s remaining",
                 ctx, text,
@@ -1183,9 +1186,9 @@ class NeonDegenService:
             if not self._roll(0.03):
                 return None
 
-            name = self._get_player_name(discord_id, guild_id)
+            name = await asyncio.to_thread(self._get_player_name, discord_id, guild_id)
             text = render_lobby_join(name, queue_position)
-            ctx = self._build_player_context(discord_id, guild_id)
+            ctx = await asyncio.to_thread(self._build_player_context, discord_id, guild_id)
             text = await self._generate_text(
                 f"Client {name} joined the queue at position {queue_position}",
                 ctx, text,
@@ -1215,8 +1218,10 @@ class NeonDegenService:
             if not self._roll(0.01):
                 return None
 
-            player1_name = self._get_player_name(player1_id, guild_id)
-            player2_name = self._get_player_name(player2_id, guild_id)
+            player1_name, player2_name = await asyncio.gather(
+                asyncio.to_thread(self._get_player_name, player1_id, guild_id),
+                asyncio.to_thread(self._get_player_name, player2_id, guild_id),
+            )
             text = render_rivalry_detected(player1_name, player2_name, games_together, winrate_vs)
             return NeonResult(layer=2, text_block=text)
         except Exception as e:
@@ -1240,7 +1245,7 @@ class NeonDegenService:
             if not self._roll(0.10):
                 return None
 
-            name = self._get_player_name(discord_id, guild_id)
+            name = await asyncio.to_thread(self._get_player_name, discord_id, guild_id)
 
             # Layer 3: 100+ games gets special treatment
             if total_games >= 100:
@@ -1256,7 +1261,7 @@ class NeonDegenService:
 
             # Layer 2: Standard milestone box
             text = render_games_milestone(name, total_games)
-            ctx = self._build_player_context(discord_id, guild_id)
+            ctx = await asyncio.to_thread(self._build_player_context, discord_id, guild_id)
             text = await self._generate_text(
                 f"Client {name} has played {total_games} games",
                 ctx, text,
@@ -1287,7 +1292,7 @@ class NeonDegenService:
             if not self._roll(0.50):
                 return None
 
-            name = self._get_player_name(discord_id, guild_id)
+            name = await asyncio.to_thread(self._get_player_name, discord_id, guild_id)
 
             # Layer 3: 8+ streak gets GIF
             if current_streak >= 8:
@@ -1302,7 +1307,7 @@ class NeonDegenService:
 
             # Layer 2: Standard streak box
             text = render_win_streak_record(name, current_streak)
-            ctx = self._build_player_context(discord_id, guild_id)
+            ctx = await asyncio.to_thread(self._build_player_context, discord_id, guild_id)
             text = await self._generate_text(
                 f"Client {name} broke their personal win streak record: {current_streak} games",
                 ctx, text,
@@ -1325,19 +1330,19 @@ class NeonDegenService:
                 return None
             if leverage < 2:
                 return None
-            if not self._check_one_time(discord_id, guild_id, "first_leverage"):
+            if not await asyncio.to_thread(self._check_one_time, discord_id, guild_id, "first_leverage"):
                 return None
             if not self._roll(0.80):
                 return None
 
-            name = self._get_player_name(discord_id, guild_id)
+            name = await asyncio.to_thread(self._get_player_name, discord_id, guild_id)
             text = render_first_leverage(name, leverage)
-            ctx = self._build_player_context(discord_id, guild_id)
+            ctx = await asyncio.to_thread(self._build_player_context, discord_id, guild_id)
             text = await self._generate_text(
                 f"Client {name} used leverage for the first time: {leverage}x",
                 ctx, text,
             )
-            self._mark_one_time(discord_id, guild_id, "first_leverage", layer=1)
+            await asyncio.to_thread(self._mark_one_time, discord_id, guild_id, "first_leverage", layer=1)
             self._set_cooldown(discord_id, guild_id)
             return NeonResult(layer=1, text_block=text)
         except Exception as e:
@@ -1356,19 +1361,19 @@ class NeonDegenService:
                 return None
             if total_bets != 100:
                 return None
-            if not self._check_one_time(discord_id, guild_id, "100_bets"):
+            if not await asyncio.to_thread(self._check_one_time, discord_id, guild_id, "100_bets"):
                 return None
             if not self._roll(0.50):
                 return None
 
-            name = self._get_player_name(discord_id, guild_id)
+            name = await asyncio.to_thread(self._get_player_name, discord_id, guild_id)
             text = render_bets_milestone(name, total_bets)
-            ctx = self._build_player_context(discord_id, guild_id)
+            ctx = await asyncio.to_thread(self._build_player_context, discord_id, guild_id)
             text = await self._generate_text(
                 f"Client {name} has placed 100 total bets",
                 ctx, text,
             )
-            self._mark_one_time(discord_id, guild_id, "100_bets", layer=2)
+            await asyncio.to_thread(self._mark_one_time, discord_id, guild_id, "100_bets", layer=2)
             self._set_cooldown(discord_id, guild_id)
             return NeonResult(layer=2, text_block=text)
         except Exception as e:
@@ -1411,8 +1416,10 @@ class NeonDegenService:
             if not self._roll(0.20):
                 return None
 
-            captain1_name = self._get_player_name(captain1_id, guild_id)
-            captain2_name = self._get_player_name(captain2_id, guild_id)
+            captain1_name, captain2_name = await asyncio.gather(
+                asyncio.to_thread(self._get_player_name, captain1_id, guild_id),
+                asyncio.to_thread(self._get_player_name, captain2_id, guild_id),
+            )
             text = render_captain_symmetry(captain1_name, captain2_name, abs(rating_diff))
             return NeonResult(layer=1, text_block=text)
         except Exception as e:
@@ -1481,7 +1488,11 @@ class NeonDegenService:
                 xpm = winner.get("xpm", 0)
                 fantasy = winner.get("fantasy_points")
                 discord_id = winner.get("discord_id")
-                player_name = self._get_player_name(discord_id, guild_id) if discord_id else "Unknown"
+                player_name = (
+                    await asyncio.to_thread(self._get_player_name, discord_id, guild_id)
+                    if discord_id
+                    else "Unknown"
+                )
 
                 # Build context from enriched match data
                 player_context: dict[str, Any] = {
@@ -1510,7 +1521,9 @@ class NeonDegenService:
 
                 # Merge historical player stats (rating, balance, gambling history)
                 if discord_id:
-                    historical = self._build_player_context(discord_id, guild_id)
+                    historical = await asyncio.to_thread(
+                        self._build_player_context, discord_id, guild_id
+                    )
                     # Add historical stats that aren't already in context
                     for key in ("balance", "lowest_balance", "win_rate", "bankruptcy_count", "degen_score"):
                         if key in historical:
@@ -1518,7 +1531,9 @@ class NeonDegenService:
                     # Add rating info from player repo
                     if self.player_repo:
                         try:
-                            player = self.player_repo.get_by_id(discord_id, guild_id)
+                            player = await asyncio.to_thread(
+                                self.player_repo.get_by_id, discord_id, guild_id
+                            )
                             if player:
                                 if player.glicko_rating is not None:
                                     player_context["rating"] = f"{player.glicko_rating:.0f}"

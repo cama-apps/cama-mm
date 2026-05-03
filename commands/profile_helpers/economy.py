@@ -46,7 +46,7 @@ async def build_economy_embed(
             None,
         )
 
-    player = player_repo.get_by_id(target_discord_id, guild_id)
+    player = await asyncio.to_thread(player_repo.get_by_id, target_discord_id, guild_id)
     if not player:
         return (
             discord.Embed(
@@ -79,7 +79,7 @@ async def build_economy_embed(
     )
 
     if loan_service:
-        loan_state = loan_service.get_state(target_discord_id, guild_id)
+        loan_state = await asyncio.to_thread(loan_service.get_state, target_discord_id, guild_id)
 
         loan_lines = [
             f"**Loans Taken:** {loan_state.total_loans_taken}",
@@ -105,8 +105,10 @@ async def build_economy_embed(
 
     if bankruptcy_service:
         bankruptcy_repo = bankruptcy_service.bankruptcy_repo
-        state_data = bankruptcy_repo.get_state(target_discord_id, guild_id)
-        bankruptcy_state = bankruptcy_service.get_state(target_discord_id, guild_id)
+        state_data = await asyncio.to_thread(bankruptcy_repo.get_state, target_discord_id, guild_id)
+        bankruptcy_state = await asyncio.to_thread(
+            bankruptcy_service.get_state, target_discord_id, guild_id
+        )
 
         bankruptcy_lines = []
         bankruptcy_count = state_data["bankruptcy_count"] if state_data else 0
@@ -129,7 +131,9 @@ async def build_economy_embed(
             inline=True,
         )
 
-    lowest_balance = player_repo.get_lowest_balance(target_discord_id, guild_id)
+    lowest_balance = await asyncio.to_thread(
+        player_repo.get_lowest_balance, target_discord_id, guild_id
+    )
     if lowest_balance is not None and lowest_balance < 0:
         embed.add_field(
             name="📉 Lowest Balance",
@@ -139,7 +143,9 @@ async def build_economy_embed(
 
     tip_service = cog._get_tip_service()
     if tip_service:
-        tip_stats = tip_service.get_user_tip_stats(target_discord_id, guild_id)
+        tip_stats = await asyncio.to_thread(
+            tip_service.get_user_tip_stats, target_discord_id, guild_id
+        )
 
         if tip_stats["tips_sent_count"] > 0 or tip_stats["tips_received_count"] > 0:
             tip_lines = []
@@ -178,8 +184,10 @@ async def _attach_balance_history_chart(
         return None
 
     try:
-        series, per_source_totals = balance_history_service.get_balance_event_series(
-            target_discord_id, guild_id
+        series, per_source_totals = await asyncio.to_thread(
+            balance_history_service.get_balance_event_series,
+            target_discord_id,
+            guild_id,
         )
     except Exception as e:  # defensive: underlying repos could raise
         logger.debug(f"Could not build balance history series: {e}")

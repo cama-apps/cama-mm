@@ -369,7 +369,9 @@ class RatingAnalysisCommands(commands.Cog):
         guild_id = interaction.guild.id if interaction.guild else None
 
         # Fetch player data
-        player = self.player_service.get_player(discord_id, guild_id)
+        player = await asyncio.to_thread(
+            self.player_service.get_player, discord_id, guild_id
+        )
         if not player:
             await safe_followup(
                 interaction,
@@ -378,7 +380,9 @@ class RatingAnalysisCommands(commands.Cog):
             return
 
         # Get OpenSkill rating
-        os_data = self.player_service.get_openskill_rating(discord_id, guild_id)
+        os_data = await asyncio.to_thread(
+            self.player_service.get_openskill_rating, discord_id, guild_id
+        )
 
         embed = discord.Embed(
             title=f"OpenSkill Rating: {target.display_name}",
@@ -433,7 +437,12 @@ class RatingAnalysisCommands(commands.Cog):
             )
 
             # Get recent rating history for this player
-            history = self.match_service.get_player_openskill_history(discord_id, guild_id, limit=5)
+            history = await asyncio.to_thread(
+                self.match_service.get_player_openskill_history,
+                discord_id,
+                guild_id,
+                limit=5,
+            )
             if history:
                 history_lines = []
                 for h in history:

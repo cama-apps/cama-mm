@@ -74,7 +74,7 @@ class EnrichmentCommands(commands.Cog):
             )
             return
 
-        self.guild_config_service.set_league_id(guild_id, league_id)
+        await asyncio.to_thread(self.guild_config_service.set_league_id, guild_id, league_id)
         await safe_followup(
             interaction,
             content=f"League ID set to **{league_id}** for this server.",
@@ -118,7 +118,9 @@ class EnrichmentCommands(commands.Cog):
 
         # Determine which internal match to enrich
         if internal_match_id:
-            match = self.match_service.get_match_by_id(internal_match_id, guild_id)
+            match = await asyncio.to_thread(
+                self.match_service.get_match_by_id, internal_match_id, guild_id
+            )
             if not match:
                 await safe_followup(
                     interaction,
@@ -128,7 +130,7 @@ class EnrichmentCommands(commands.Cog):
                 return
         else:
             # Use most recent match
-            match = self.match_service.get_most_recent_match(guild_id)
+            match = await asyncio.to_thread(self.match_service.get_most_recent_match, guild_id)
             if not match:
                 await safe_followup(
                     interaction,
@@ -170,14 +172,19 @@ class EnrichmentCommands(commands.Cog):
             return
 
         # Fetch enriched data for embed
-        match_data = self.match_service.get_match_by_id(internal_match_id, guild_id)
-        participants = self.match_service.get_match_participants(internal_match_id, guild_id)
+        match_data = await asyncio.to_thread(
+            self.match_service.get_match_by_id, internal_match_id, guild_id
+        )
+        participants = await asyncio.to_thread(
+            self.match_service.get_match_participants, internal_match_id, guild_id
+        )
 
         if match_data and participants:
             radiant = [p for p in participants if p.get("side") == "radiant"]
             dire = [p for p in participants if p.get("side") == "dire"]
 
-            embed = create_enriched_match_embed(
+            embed = await asyncio.to_thread(
+                create_enriched_match_embed,
                 match_id=internal_match_id,
                 valve_match_id=valve_match_id,
                 duration_seconds=match_data.get("duration_seconds"),
@@ -268,7 +275,7 @@ class EnrichmentCommands(commands.Cog):
             )
             return
 
-        config = self.guild_config_service.get_config(guild_id)
+        config = await asyncio.to_thread(self.guild_config_service.get_config, guild_id)
 
         if not config:
             await safe_followup(
@@ -317,7 +324,7 @@ class EnrichmentCommands(commands.Cog):
         guild_id = interaction.guild.id if interaction.guild else None
 
         # Validate player exists
-        player = self.player_service.get_player(target_id, guild_id)
+        player = await asyncio.to_thread(self.player_service.get_player, target_id, guild_id)
         if not player:
             await safe_followup(
                 interaction,
@@ -330,7 +337,9 @@ class EnrichmentCommands(commands.Cog):
         limit = max(1, min(limit, 10))
 
         # Get matches
-        matches = self.match_service.get_player_matches(target_id, guild_id, limit=limit)
+        matches = await asyncio.to_thread(
+            self.match_service.get_player_matches, target_id, guild_id, limit=limit
+        )
         if not matches:
             await safe_followup(
                 interaction,
@@ -368,7 +377,9 @@ class EnrichmentCommands(commands.Cog):
             side = match.get("side", "?").capitalize()
 
             # Get participants for this match
-            participants = self.match_service.get_match_participants(match_id, guild_id)
+            participants = await asyncio.to_thread(
+                self.match_service.get_match_participants, match_id, guild_id
+            )
 
             # Find this player's stats
             player_stats = None
@@ -499,7 +510,9 @@ class EnrichmentCommands(commands.Cog):
 
         # Get match - default to target's most recent match
         if match_id:
-            match_data = self.match_service.get_match_by_id(match_id, guild_id)
+            match_data = await asyncio.to_thread(
+                self.match_service.get_match_by_id, match_id, guild_id
+            )
             if not match_data:
                 await safe_followup(
                     interaction,
@@ -508,13 +521,19 @@ class EnrichmentCommands(commands.Cog):
                 return
         else:
             # Try to get target's most recent match first
-            user_matches = self.match_service.get_player_matches(target_id, guild_id, limit=1)
+            user_matches = await asyncio.to_thread(
+                self.match_service.get_player_matches, target_id, guild_id, limit=1
+            )
             if user_matches:
                 match_id = user_matches[0]["match_id"]
-                match_data = self.match_service.get_match_by_id(match_id, guild_id)
+                match_data = await asyncio.to_thread(
+                    self.match_service.get_match_by_id, match_id, guild_id
+                )
             else:
                 # Fall back to globally most recent
-                match_data = self.match_service.get_most_recent_match(guild_id)
+                match_data = await asyncio.to_thread(
+                    self.match_service.get_most_recent_match, guild_id
+                )
 
             if not match_data:
                 await safe_followup(
@@ -525,7 +544,9 @@ class EnrichmentCommands(commands.Cog):
             match_id = match_data["match_id"]
 
         # Get participants
-        participants = self.match_service.get_match_participants(match_id, guild_id)
+        participants = await asyncio.to_thread(
+            self.match_service.get_match_participants, match_id, guild_id
+        )
 
         if not participants:
             await safe_followup(
@@ -541,7 +562,8 @@ class EnrichmentCommands(commands.Cog):
         is_enriched = any(p.get("hero_id") for p in participants)
 
         if is_enriched:
-            embed = create_enriched_match_embed(
+            embed = await asyncio.to_thread(
+                create_enriched_match_embed,
                 match_id=match_id,
                 valve_match_id=match_data.get("valve_match_id"),
                 duration_seconds=match_data.get("duration_seconds"),
@@ -587,7 +609,8 @@ class EnrichmentCommands(commands.Cog):
             # Not enriched - show basic info
             from utils.embeds import create_match_summary_embed
 
-            embed = create_match_summary_embed(
+            embed = await asyncio.to_thread(
+                create_match_summary_embed,
                 match_id=match_id,
                 winning_team=match_data.get("winning_team", 1),
                 radiant_participants=radiant,
@@ -729,7 +752,9 @@ class EnrichmentCommands(commands.Cog):
         self, interaction: discord.Interaction, dry_run: bool, guild_id: int | None = None
     ):
         """Re-enrich matches that have enrichment but no fantasy data."""
-        matches = self.match_service.get_matches_without_fantasy_data(limit=100)
+        matches = await asyncio.to_thread(
+            self.match_service.get_matches_without_fantasy_data, limit=100
+        )
 
         if not matches:
             await safe_followup(
@@ -818,7 +843,7 @@ class EnrichmentCommands(commands.Cog):
             return
 
         guild_id = interaction.guild.id if interaction.guild else None
-        enriched_count = self.match_service.get_enriched_count(guild_id)
+        enriched_count = await asyncio.to_thread(self.match_service.get_enriched_count, guild_id)
 
         if enriched_count == 0:
             await safe_followup(
@@ -828,7 +853,7 @@ class EnrichmentCommands(commands.Cog):
             )
             return
 
-        wiped = self.match_service.wipe_all_enrichments(guild_id)
+        wiped = await asyncio.to_thread(self.match_service.wipe_all_enrichments, guild_id)
 
         await safe_followup(
             interaction,
@@ -858,7 +883,7 @@ class EnrichmentCommands(commands.Cog):
         if not await safe_defer(interaction, ephemeral=True):
             return
 
-        success = self.match_service.wipe_match_enrichment(match_id)
+        success = await asyncio.to_thread(self.match_service.wipe_match_enrichment, match_id)
 
         if success:
             await safe_followup(

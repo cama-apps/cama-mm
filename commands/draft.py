@@ -432,7 +432,7 @@ class DraftCommands(commands.Cog):
             f"Restartdraft command: User {user_id} ({interaction.user}) in guild {guild_id}"
         )
 
-        state = self.draft_state_manager.get_state(guild_id)
+        state = await asyncio.to_thread(self.draft_state_manager.get_state, guild_id)
         if not state:
             await interaction.response.send_message(
                 "❌ No active draft to restart.",
@@ -458,7 +458,7 @@ class DraftCommands(commands.Cog):
                 await asyncio.to_thread(self.match_service.clear_last_shuffle, guild_id)
 
         # Clear the draft state
-        self.draft_state_manager.clear_state(guild_id)
+        await asyncio.to_thread(self.draft_state_manager.clear_state, guild_id)
 
         # Get user name for the message
         user_name = interaction.user.display_name
@@ -725,7 +725,8 @@ class DraftCommands(commands.Cog):
 
         # Select captains
         try:
-            captain_pair = self.draft_service.select_captains(
+            captain_pair = await asyncio.to_thread(
+                self.draft_service.select_captains,
                 eligible_ids=eligible_captain_ids,
                 player_ratings=player_ratings,
                 specified_captain1=specified_captain1_id,
@@ -802,7 +803,8 @@ class DraftCommands(commands.Cog):
                     candidates_for_pool = non_captain_candidates
 
                 shuffler = BalancedShuffler()
-                draft_pool_result = shuffler.select_draft_pool(
+                draft_pool_result = await asyncio.to_thread(
+                    shuffler.select_draft_pool,
                     captain_a=captain_a,
                     captain_b=captain_b,
                     candidates=candidates_for_pool,
@@ -835,7 +837,8 @@ class DraftCommands(commands.Cog):
         except Exception as e:
             logger.info(f"Balanced pool selection unavailable ({e}), using fallback")
             try:
-                pool_result = self.draft_service.select_player_pool(
+                pool_result = await asyncio.to_thread(
+                    self.draft_service.select_player_pool,
                     lobby_player_ids=lobby_player_ids,
                     exclusion_counts=exclusion_counts,
                     forced_include_ids=[captain_pair.captain1_id, captain_pair.captain2_id],
@@ -861,7 +864,7 @@ class DraftCommands(commands.Cog):
 
         # Create draft state
         try:
-            state = self.draft_state_manager.create_draft(guild_id)
+            state = await asyncio.to_thread(self.draft_state_manager.create_draft, guild_id)
         except ValueError as e:
             await interaction.followup.send(f"❌ {e}", ephemeral=True)
             return False
@@ -892,8 +895,10 @@ class DraftCommands(commands.Cog):
             }
 
             # Perform coinflip
-            coinflip_winner_id = self.draft_service.coinflip(
-                captain_pair.captain1_id, captain_pair.captain2_id
+            coinflip_winner_id = await asyncio.to_thread(
+                self.draft_service.coinflip,
+                captain_pair.captain1_id,
+                captain_pair.captain2_id,
             )
             state.coinflip_winner_id = coinflip_winner_id
             state.phase = DraftPhase.WINNER_CHOICE
@@ -980,7 +985,7 @@ class DraftCommands(commands.Cog):
             return True
         except Exception:
             logger.error("Draft setup failed after state creation, cleaning up", exc_info=True)
-            self.draft_state_manager.clear_state(guild_id)
+            await asyncio.to_thread(self.draft_state_manager.clear_state, guild_id)
             raise
 
     # ========================================================================
@@ -1012,9 +1017,9 @@ class DraftCommands(commands.Cog):
             return
 
         # Acquire shuffle lock to prevent race conditions with /shuffle or concurrent /startdraft
-        self.lobby_manager._check_stale_lock(guild_id)
+        await asyncio.to_thread(self.lobby_manager._check_stale_lock, guild_id)
 
-        shuffle_lock = self.lobby_manager.get_shuffle_lock(guild_id)
+        shuffle_lock = await asyncio.to_thread(self.lobby_manager.get_shuffle_lock, guild_id)
         if shuffle_lock.locked():
             await interaction.followup.send(
                 "A shuffle or draft is already being processed. Please wait.",
@@ -1031,11 +1036,11 @@ class DraftCommands(commands.Cog):
             )
             return
 
-        self.lobby_manager.record_lock_acquired(guild_id)
+        await asyncio.to_thread(self.lobby_manager.record_lock_acquired, guild_id)
         try:
             await self._execute_startdraft(interaction, guild_id, captain1, captain2)
         finally:
-            self.lobby_manager.clear_lock_time(guild_id)
+            await asyncio.to_thread(self.lobby_manager.clear_lock_time, guild_id)
             shuffle_lock.release()
 
     async def _execute_startdraft(
@@ -1047,7 +1052,7 @@ class DraftCommands(commands.Cog):
     ):
         """Execute the startdraft logic. Called within the shuffle lock."""
         # Check for existing draft
-        if self.draft_state_manager.has_active_draft(guild_id):
+        if await asyncio.to_thread(self.draft_state_manager.has_active_draft, guild_id):
             await interaction.followup.send(
                 "❌ A draft is already in progress. Use `/draft restart` to restart it first.",
                 ephemeral=True,
@@ -1059,7 +1064,7 @@ class DraftCommands(commands.Cog):
         # so by the time /startdraft is called, all lobby players are guaranteed to be available.
 
         # Check lobby
-        lobby = self.lobby_manager.get_lobby(guild_id=guild_id)
+        lobby = await asyncio.to_thread(self.lobby_manager.get_lobby, guild_id=guild_id)
         if not lobby:
             await interaction.followup.send(
                 "❌ No active lobby. Use `/lobby` to create one first.",
@@ -1127,7 +1132,7 @@ class DraftCommands(commands.Cog):
 
     async def handle_winner_chose_side(self, interaction: discord.Interaction, guild_id: int):
         """Handle when coinflip winner chooses to pick side."""
-        state = self.draft_state_manager.get_state(guild_id)
+        state = await asyncio.to_thread(self.draft_state_manager.get_state, guild_id)
         if not state:
             await interaction.response.send_message("❌ Draft not found.", ephemeral=True)
             return
@@ -1164,7 +1169,7 @@ class DraftCommands(commands.Cog):
 
     async def handle_winner_chose_hero_pick(self, interaction: discord.Interaction, guild_id: int):
         """Handle when coinflip winner chooses to pick hero order."""
-        state = self.draft_state_manager.get_state(guild_id)
+        state = await asyncio.to_thread(self.draft_state_manager.get_state, guild_id)
         if not state:
             await interaction.response.send_message("❌ Draft not found.", ephemeral=True)
             return
@@ -1207,7 +1212,7 @@ class DraftCommands(commands.Cog):
         is_winner: bool,
     ):
         """Handle side choice (Radiant/Dire)."""
-        state = self.draft_state_manager.get_state(guild_id)
+        state = await asyncio.to_thread(self.draft_state_manager.get_state, guild_id)
         if not state:
             await interaction.response.send_message("❌ Draft not found.", ephemeral=True)
             return
@@ -1279,7 +1284,7 @@ class DraftCommands(commands.Cog):
         is_winner: bool,
     ):
         """Handle hero pick order choice (First/Second)."""
-        state = self.draft_state_manager.get_state(guild_id)
+        state = await asyncio.to_thread(self.draft_state_manager.get_state, guild_id)
         if not state:
             await interaction.response.send_message("❌ Draft not found.", ephemeral=True)
             return
@@ -1429,7 +1434,7 @@ class DraftCommands(commands.Cog):
         order: str,
     ):
         """Handle player draft order choice."""
-        state = self.draft_state_manager.get_state(guild_id)
+        state = await asyncio.to_thread(self.draft_state_manager.get_state, guild_id)
         if not state:
             await interaction.response.send_message("❌ Draft not found.", ephemeral=True)
             return
@@ -1727,7 +1732,7 @@ class DraftCommands(commands.Cog):
         player_id: int,
     ):
         """Handle when a captain picks a player."""
-        state = self.draft_state_manager.get_state(guild_id)
+        state = await asyncio.to_thread(self.draft_state_manager.get_state, guild_id)
         if not state:
             await interaction.response.send_message("❌ Draft not found.", ephemeral=True)
             return
@@ -1809,7 +1814,9 @@ class DraftCommands(commands.Cog):
                         if blind_result and blind_result.get("created", 0) > 0:
                             # Store blind bets result in pending state for embed display
                             pending_state["blind_bets_result"] = blind_result
-                            self.match_service.set_last_shuffle(guild_id, pending_state)
+                            await asyncio.to_thread(
+                                self.match_service.set_last_shuffle, guild_id, pending_state
+                            )
                             logger.info(
                                 f"Created {blind_result['created']} blind bets for draft"
                                 f"{' (BOMB POT)' if is_bomb_pot else ''}"
@@ -1838,7 +1845,7 @@ class DraftCommands(commands.Cog):
                 # Save thread ID before resetting lobby
                 lobby_service = getattr(self.bot, "lobby_service", None)
                 thread_id = (
-                    lobby_service.get_lobby_thread_id(guild_id=guild_id)
+                    await asyncio.to_thread(lobby_service.get_lobby_thread_id, guild_id=guild_id)
                     if lobby_service
                     else None
                 )
@@ -1897,7 +1904,7 @@ class DraftCommands(commands.Cog):
                 except Exception:
                     pass
             finally:
-                self.draft_state_manager.clear_state(guild_id)
+                await asyncio.to_thread(self.draft_state_manager.clear_state, guild_id)
             return
 
         # Update the draft UI
@@ -1910,7 +1917,7 @@ class DraftCommands(commands.Cog):
         side: str | None,
     ):
         """Handle when a player sets their side preference."""
-        state = self.draft_state_manager.get_state(guild_id)
+        state = await asyncio.to_thread(self.draft_state_manager.get_state, guild_id)
         if not state:
             await interaction.response.send_message("❌ Draft not found.", ephemeral=True)
             return
@@ -2288,14 +2295,14 @@ class DraftCommands(commands.Cog):
 
     async def _handle_draft_timeout(self, guild_id: int) -> None:
         """Handle draft timeout by clearing state and updating the message."""
-        state = self.draft_state_manager.get_state(guild_id)
+        state = await asyncio.to_thread(self.draft_state_manager.get_state, guild_id)
         if not state:
             return
 
         logger.info(f"Draft timed out for guild {guild_id} in phase {state.phase.value}")
 
         # Clear the draft state
-        self.draft_state_manager.clear_state(guild_id)
+        await asyncio.to_thread(self.draft_state_manager.clear_state, guild_id)
 
         # Try to update the message to show timeout
         if state.draft_message_id and state.draft_channel_id:

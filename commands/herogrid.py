@@ -5,6 +5,7 @@ Generates a player x hero grid visualization showing hero pool overlap.
 Circle size = games played, circle color = win rate.
 """
 
+import asyncio
 import logging
 
 import discord
@@ -26,7 +27,9 @@ class HeroGridCommands(commands.Cog):
         self.player_service = player_service
         self.lobby_manager = lobby_manager
 
-    def _resolve_player_ids(self, source_value: str, guild_id: int | None) -> tuple[list[int], str | None]:
+    def _resolve_player_ids(
+        self, source_value: str, guild_id: int | None
+    ) -> tuple[list[int], str | None]:
         """Resolve player IDs using a priority chain.
 
         Returns:
@@ -113,7 +116,9 @@ class HeroGridCommands(commands.Cog):
         guild_id = interaction.guild.id if interaction.guild else None
 
         # Determine player list via priority chain
-        player_ids, source_label = self._resolve_player_ids(source_value, guild_id)
+        player_ids, source_label = await asyncio.to_thread(
+            self._resolve_player_ids, source_value, guild_id
+        )
 
         if not player_ids and source_value == "lobby":
             await safe_followup(
@@ -138,7 +143,11 @@ class HeroGridCommands(commands.Cog):
         min_games = max(1, min(min_games, 10))
 
         # Fetch grid data
-        grid_data = self.match_service.get_multi_player_hero_stats(player_ids, guild_id)
+        grid_data = await asyncio.to_thread(
+            self.match_service.get_multi_player_hero_stats,
+            player_ids,
+            guild_id,
+        )
 
         if not grid_data:
             await safe_followup(
@@ -148,7 +157,7 @@ class HeroGridCommands(commands.Cog):
             return
 
         # Build player names dict (preserving order)
-        players = self.player_service.get_by_ids(player_ids, guild_id)
+        players = await asyncio.to_thread(self.player_service.get_by_ids, player_ids, guild_id)
         player_names = {}
         for p in players:
             player_names[p.discord_id] = p.name
@@ -162,7 +171,8 @@ class HeroGridCommands(commands.Cog):
         try:
             grid_title = f"Hero Grid: {source_label}" if source_label else "Hero Grid"
 
-            image_bytes = draw_hero_grid(
+            image_bytes = await asyncio.to_thread(
+                draw_hero_grid,
                 grid_data=grid_data,
                 player_names=player_names,
                 min_games=min_games,

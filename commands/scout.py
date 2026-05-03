@@ -62,7 +62,11 @@ class ScoutView(discord.ui.View):
     async def _generate_embed_and_file(self) -> tuple[discord.Embed, discord.File]:
         """Generate embed and image file for current page."""
         page_heroes = self._get_page_heroes()
-        scout_data = {"player_count": self.player_count, "total_matches": self.total_matches, "heroes": page_heroes}
+        scout_data = {
+            "player_count": self.player_count,
+            "total_matches": self.total_matches,
+            "heroes": page_heroes,
+        }
 
         image_bytes = await asyncio.to_thread(
             draw_scout_report,
@@ -261,7 +265,11 @@ class ScoutCommands(commands.Cog):
 
         if not player_ids:
             # Use context resolution with optional team filter
-            player_ids, source_label = self._resolve_player_context(guild_id, team_value)
+            player_ids, source_label = await asyncio.to_thread(
+                self._resolve_player_context,
+                guild_id,
+                team_value,
+            )
 
         if not player_ids:
             await safe_followup(
@@ -271,7 +279,12 @@ class ScoutCommands(commands.Cog):
             return
 
         # Fetch ALL hero data (no limit) for pagination
-        scout_data = self.match_service.get_scout_data(player_ids, guild_id, limit=100)
+        scout_data = await asyncio.to_thread(
+            self.match_service.get_scout_data,
+            player_ids,
+            guild_id,
+            limit=100,
+        )
 
         if not scout_data.get("heroes"):
             await safe_followup(
@@ -282,7 +295,7 @@ class ScoutCommands(commands.Cog):
             return
 
         # Build player names list
-        players_obj = self.player_service.get_by_ids(player_ids, guild_id)
+        players_obj = await asyncio.to_thread(self.player_service.get_by_ids, player_ids, guild_id)
         player_name_map = {p.discord_id: p.name for p in players_obj}
         player_names = []
         for pid in player_ids:

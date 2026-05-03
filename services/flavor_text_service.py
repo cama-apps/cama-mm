@@ -8,6 +8,7 @@ Provides two types of AI-generated text:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import random
@@ -352,14 +353,15 @@ class FlavorTextService:
         # Check if AI is enabled - fall back to examples if disabled
         ai_enabled = True
         if guild_id is not None and self.guild_config_repo:
-            ai_enabled = self.guild_config_repo.get_ai_enabled(guild_id)
+            ai_enabled = await asyncio.to_thread(self.guild_config_repo.get_ai_enabled, guild_id)
 
         if not ai_enabled:
             logger.info(f"AI disabled for guild {guild_id}, using fallback flavor")
             return self._get_fallback_flavor(event)
 
         # Build player context
-        context = PlayerContext.from_services(
+        context = await asyncio.to_thread(
+            PlayerContext.from_services,
             discord_id,
             self.player_repo,
             self.bankruptcy_service,
@@ -440,7 +442,11 @@ class FlavorTextService:
             Generated insight string or None on error/disabled
         """
         # Check if AI is enabled
-        if guild_id is not None and self.guild_config_repo and not self.guild_config_repo.get_ai_enabled(guild_id):
+        if (
+            guild_id is not None
+            and self.guild_config_repo
+            and not await asyncio.to_thread(self.guild_config_repo.get_ai_enabled, guild_id)
+        ):
             return None
 
         # Build prompt based on data type
