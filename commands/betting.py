@@ -1005,16 +1005,6 @@ class BettingCommands(commands.Cog):
                 "*Red mana burns bright.*"
             )
 
-        elif value == "FROZEN_ASSETS":
-            title = "🏝️❄️ FROZEN ASSETS"
-            color = discord.Color.from_str("#1e90ff")
-            description = (
-                "**FROZEN**\n\n"
-                "Your assets are frozen. Win 0 now, but your next gamba "
-                "is guaranteed to land on a 50+ JC wedge.\n\n"
-                "*The Island remembers.*"
-            )
-
         elif value == "OVERGROWTH":
             title = "🌲🌿 OVERGROWTH!"
             color = discord.Color.from_str("#228b22")
@@ -1022,16 +1012,6 @@ class BettingCommands(commands.Cog):
                 "**OVERGROWTH**\n\n"
                 "The Forest rewards consistency. You earn 10 JC per game played this week.\n\n"
                 "*Slow and steady wins the race.*"
-            )
-
-        elif value == "SANCTUARY":
-            title = "🌾✨ SANCTUARY"
-            color = discord.Color.from_str("#f5f5dc")
-            description = (
-                "**SANCTUARY**\n\n"
-                "A blessing radiates outward. Win 0, but all players who spin "
-                "the wheel in the next 24 hours get +5 JC added to their result.\n\n"
-                "*The Plains protect all.*"
             )
 
         elif value == "DECAY":
@@ -2401,20 +2381,6 @@ class BettingCommands(commands.Cog):
                 )
                 new_balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
 
-        elif result_value == "FROZEN_ASSETS":
-            # Blue: Win 0 now, but next gamba guaranteed 50+ wedge (stored as pardon-like token)
-            # For simplicity, store a "frozen_assets" flag in mana_shop_items
-            db = getattr(self.bot, "db", None)
-            if db:
-                import time as _time_fa
-                await asyncio.to_thread(
-                    lambda: db.execute_write(
-                        "INSERT INTO mana_shop_items (discord_id, guild_id, item_type, purchased_at, data) VALUES (?, ?, ?, ?, ?)",
-                        (user_id, interaction.guild.id if interaction.guild else 0, "frozen_assets", int(_time_fa.time()), "pending"),
-                    )
-                )
-            # No balance change
-
         elif result_value == "OVERGROWTH":
             # Green: Win 10 JC per game played this week
             player_obj = await asyncio.to_thread(self.player_service.get_player, user_id, guild_id)
@@ -2431,8 +2397,10 @@ class BettingCommands(commands.Cog):
                     games_this_week = max(1, (player_obj.wins + player_obj.losses) // 10)
             overgrowth_amount = max(10, games_this_week * 10)  # min 10 JC
             # Apply green gain cap
-            if effects and effects.green_gain_cap is not None:
-                overgrowth_amount = min(overgrowth_amount, effects.green_gain_cap)
+            if effects and mana_effects_service:
+                overgrowth_amount = await asyncio.to_thread(
+                    mana_effects_service.apply_green_cap, effects, overgrowth_amount
+                )
             garnishment_service = getattr(self.bot, "garnishment_service", None)
             if garnishment_service and new_balance < 0:
                 _res = await asyncio.to_thread(
@@ -2445,21 +2413,6 @@ class BettingCommands(commands.Cog):
                     self.player_service.adjust_balance, user_id, guild_id, overgrowth_amount
                 )
                 new_balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
-
-        elif result_value == "SANCTUARY":
-            # White: Win 0, but all spinners in next 24h get +5 JC
-            db = getattr(self.bot, "db", None)
-            if db:
-                import time as _time_sc
-                now_ts = int(_time_sc.time())
-                expires = now_ts + 24 * 3600
-                await asyncio.to_thread(
-                    lambda: db.execute_write(
-                        "INSERT INTO mana_shop_items (discord_id, guild_id, item_type, purchased_at, expires_at, data) VALUES (?, ?, ?, ?, ?, ?)",
-                        (user_id, interaction.guild.id if interaction.guild else 0, "sanctuary", now_ts, expires, "active"),
-                    )
-                )
-            # No balance change
 
         elif result_value == "DECAY":
             # Black: Top 3 wealthiest lose 60 JC each, #4 loses 80, spinner gains total

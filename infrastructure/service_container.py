@@ -351,6 +351,7 @@ class ServiceContainer:
             mana_service=c["mana_service"],
             player_repo=c["player_repo"],
             mana_repo=c["mana_repo"],
+            loan_service=c["loan_service"],
         )
 
     def _init_dig_service(self) -> None:

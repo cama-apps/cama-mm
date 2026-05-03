@@ -47,6 +47,25 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("cama_bot.commands.shop")
 
+
+def _today_4am_pst_unix() -> int:
+    """Return the unix timestamp of today's 4 AM PST reset boundary.
+
+    'Today' uses the same convention as `services.mana_service.get_today_pst`:
+    if the current LA time is before 4 AM, the boundary is yesterday's 4 AM.
+    """
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+
+    from services.mana_service import RESET_HOUR, RESET_TZ
+
+    la_tz = ZoneInfo(RESET_TZ)
+    now_la = datetime.now(la_tz)
+    boundary = now_la.replace(hour=RESET_HOUR, minute=0, second=0, microsecond=0)
+    if now_la.hour < RESET_HOUR:
+        boundary = boundary - timedelta(days=1)
+    return int(boundary.timestamp())
+
 # Bounty Hunter theme
 BOUNTY_HUNTER_ID = 62
 BOUNTY_HUNTER_COLOR = 0xD4AF37  # Gold fallback
@@ -1369,9 +1388,9 @@ class ShopCommands(commands.Cog):
     )
     @app_commands.choices(item=[
         app_commands.Choice(name="Pyroclasm (Red, 100 JC) - Destroy 10-30 JC from 3 random players", value="pyroclasm"),
-        app_commands.Choice(name="Mana Shield (Blue, 200 JC) - Next loss today halved", value="mana_shield"),
+        app_commands.Choice(name="Mana Shield (Blue, 200 JC) - Reclaim 50% of your largest 24h loss", value="mana_shield"),
         app_commands.Choice(name="Regrowth (Green, 100 JC) - Recover 25% of today's losses", value="regrowth"),
-        app_commands.Choice(name="Guardian Angel (Plains, 300 JC) - Protect a player from BANKRUPT", value="guardian_angel"),
+        app_commands.Choice(name="Guardian Angel (Plains, 300 JC) - Send 125 JC to a target player", value="guardian_angel"),
         app_commands.Choice(name="Soul Harvest (Swamp, 75 JC) - Drain 1 JC from all positive players", value="soul_harvest"),
     ])
     @app_commands.checks.cooldown(1, 10)
@@ -1465,74 +1484,67 @@ class ShopCommands(commands.Cog):
             )
 
         elif item_key == "mana_shield":
-            # Store shield state (expires at 4 AM PST)
-            import time as _time
-
-            from services.mana_service import get_today_pst
-            mana_repo = getattr(self.bot, "mana_repo", None)
-            if mana_repo:
-                now_ts = int(_time.time())
-                await asyncio.to_thread(
-                    mana_repo.insert_shop_item,
-                    user_id,
-                    guild_id,
-                    "mana_shield",
-                    now_ts,
-                    get_today_pst(),
-                )
-            new_balance = balance - cost
+            # Blue: refund 50% of the largest single loss in the past 24h, capped at 200 JC.
+            import time as _time_ms
+            now_ts = int(_time_ms.time())
+            cutoff = now_ts - 24 * 3600
+            largest_loss = await asyncio.to_thread(
+                self._compute_largest_recent_loss, user_id, guild_id, cutoff,
+            )
+            refund = min(200, largest_loss // 2)
+            if refund > 0:
+                await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, refund)
+            new_balance = balance - cost + refund
             await interaction.followup.send(
-                f"🏝️🛡️ **MANA SHIELD** — {interaction.user.mention}'s next JC loss today is reduced by 50%!\n"
-                f"Expires at 4 AM PST. (cost: {cost} {JOPACOIN_EMOTE}, balance: {new_balance})"
+                f"🏝️🛡️ **MANA SHIELD** — {interaction.user.mention} reclaims {refund} {JOPACOIN_EMOTE}.\n"
+                f"(50% of your largest loss in the past 24h, capped at 200. Cost: {cost} {JOPACOIN_EMOTE}, balance: {new_balance})"
             )
 
         elif item_key == "regrowth":
-            # Recover 25% of JC lost today (capped at 400 JC)
-            from services.mana_service import get_today_pst
-            mana_repo = getattr(self.bot, "mana_repo", None)
-            recovery = 0
-            if mana_repo:
-                today = get_today_pst()
-                total_lost = await asyncio.to_thread(
-                    mana_repo.get_daily_loss_total, user_id, guild_id, today,
-                )
-                recovery = min(400, int(total_lost * 0.25))
+            # Green: refund 25% of cumulative losses since today's 4 AM PST, capped at 200 JC.
+            cutoff = _today_4am_pst_unix()
+            total_lost = await asyncio.to_thread(
+                self._compute_cumulative_recent_losses, user_id, guild_id, cutoff,
+            )
+            recovery = min(200, total_lost // 4)
             if recovery > 0:
                 await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, recovery)
             new_balance = balance - cost + recovery
             await interaction.followup.send(
-                f"🌲💚 **REGROWTH** — {interaction.user.mention} recovers {recovery} {JOPACOIN_EMOTE}!\n"
-                f"(25% of today's losses, capped at 400. Cost: {cost} {JOPACOIN_EMOTE}, balance: {new_balance})"
+                f"🌲💚 **REGROWTH** — {interaction.user.mention} recovers {recovery} {JOPACOIN_EMOTE}.\n"
+                f"(25% of today's losses, capped at 200. Cost: {cost} {JOPACOIN_EMOTE}, balance: {new_balance})"
             )
 
         elif item_key == "guardian_angel":
             if not target:
-                # Refund
                 await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, cost)
                 await interaction.followup.send(
                     "Guardian Angel requires a `target` player. Usage: `/manashop item:Guardian Angel target:@player`",
                     ephemeral=True,
                 )
                 return
-            import time as _time
-            mana_repo = getattr(self.bot, "mana_repo", None)
-            if mana_repo:
-                now_ts = int(_time.time())
-                expires = now_ts + 7 * 24 * 3600  # 7 days
-                await asyncio.to_thread(
-                    mana_repo.insert_shop_item,
-                    user_id,
-                    guild_id,
-                    "guardian_angel",
-                    now_ts,
-                    None,
-                    target.id,
-                    expires,
+            if target.id == user_id:
+                await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, cost)
+                await interaction.followup.send(
+                    "Guardian Angel must target a player other than yourself.",
+                    ephemeral=True,
                 )
+                return
+            recipient = await asyncio.to_thread(self.player_service.get_player, target.id, guild_id)
+            if not recipient:
+                await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, cost)
+                await interaction.followup.send(
+                    f"{target.mention} is not registered.",
+                    ephemeral=True,
+                )
+                return
+            transfer_amount = 125
+            await asyncio.to_thread(
+                self.player_service.adjust_balance, target.id, guild_id, transfer_amount
+            )
             new_balance = balance - cost
             await interaction.followup.send(
-                f"🌾👼 **GUARDIAN ANGEL** — {interaction.user.mention} protects {target.mention}!\n"
-                f"Their next BANKRUPT spin will convert to LOSE. Expires in 7 days.\n"
+                f"🌾👼 **GUARDIAN ANGEL** — {interaction.user.mention} sends {transfer_amount} {JOPACOIN_EMOTE} to {target.mention}.\n"
                 f"(cost: {cost} {JOPACOIN_EMOTE}, balance: {new_balance})"
             )
 
@@ -1556,6 +1568,57 @@ class ShopCommands(commands.Cog):
                 f"(cost: {cost} {JOPACOIN_EMOTE}, balance: {new_balance})"
             )
 
+
+    def _compute_largest_recent_loss(
+        self, discord_id: int, guild_id: int | None, cutoff_ts: int
+    ) -> int:
+        """Return the largest single JC loss for the player since `cutoff_ts`.
+
+        Combines match-bet losses (`bet_repo.get_player_bet_history`) and wheel-spin
+        losses (`player_repo.get_wheel_spin_history`). Returns the absolute value
+        of the most negative outcome — 0 if no losses or no signal source available.
+        """
+        if not self.gambling_stats_service:
+            return 0
+        largest = 0
+        bet_repo = self.gambling_stats_service.bet_repo
+        player_repo = self.gambling_stats_service.player_repo
+        for bet in bet_repo.get_player_bet_history(discord_id, guild_id):
+            if bet.get("bet_time", 0) >= cutoff_ts and bet.get("outcome") == "lost":
+                loss_amt = abs(bet.get("profit", 0) or 0)
+                if loss_amt > largest:
+                    largest = loss_amt
+        for spin in player_repo.get_wheel_spin_history(discord_id, guild_id):
+            if spin.get("spin_time", 0) >= cutoff_ts:
+                result = spin.get("result", 0)
+                if isinstance(result, int) and result < 0:
+                    loss_amt = abs(result)
+                    if loss_amt > largest:
+                        largest = loss_amt
+        return largest
+
+    def _compute_cumulative_recent_losses(
+        self, discord_id: int, guild_id: int | None, cutoff_ts: int
+    ) -> int:
+        """Return the total JC lost by the player since `cutoff_ts`.
+
+        Sums match-bet losses and wheel-spin losses. Returns 0 if no losses or
+        no signal source available.
+        """
+        if not self.gambling_stats_service:
+            return 0
+        total = 0
+        bet_repo = self.gambling_stats_service.bet_repo
+        player_repo = self.gambling_stats_service.player_repo
+        for bet in bet_repo.get_player_bet_history(discord_id, guild_id):
+            if bet.get("bet_time", 0) >= cutoff_ts and bet.get("outcome") == "lost":
+                total += abs(bet.get("profit", 0) or 0)
+        for spin in player_repo.get_wheel_spin_history(discord_id, guild_id):
+            if spin.get("spin_time", 0) >= cutoff_ts:
+                result = spin.get("result", 0)
+                if isinstance(result, int) and result < 0:
+                    total += abs(result)
+        return total
 
     async def _handle_dig_item(self, interaction: discord.Interaction, item: str):
         """Handle dig consumable and pickaxe upgrade purchases from /shop."""

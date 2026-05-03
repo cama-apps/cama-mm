@@ -17,6 +17,7 @@ logger = logging.getLogger("cama_bot.services.mana_effects")
 if TYPE_CHECKING:
     from repositories.mana_repository import ManaRepository
     from repositories.player_repository import PlayerRepository
+    from services.loan_service import LoanService
     from services.mana_service import ManaService
 
 
@@ -28,10 +29,12 @@ class ManaEffectsService:
         mana_service: "ManaService",
         player_repo: "PlayerRepository",
         mana_repo: "ManaRepository",
+        loan_service: "LoanService",
     ):
         self.mana_service = mana_service
         self.player_repo = player_repo
         self.mana_repo = mana_repo
+        self.loan_service = loan_service
 
     def get_effects(self, discord_id: int, guild_id: int | None) -> ManaEffects:
         """Get active mana effects for a player.
@@ -118,10 +121,12 @@ class ManaEffectsService:
         return gain
 
     def apply_plains_tithe(self, discord_id: int, guild_id: int | None, gain: int) -> int:
-        """Apply Plains' 5% tithe on gains (auto-donated to nonprofit). Returns tithe amount."""
+        """Apply Plains' 5% tithe on gains. Tithed JC is transferred to the
+        guild's nonprofit fund (not destroyed). Returns the tithe amount."""
         effects = self.get_effects(discord_id, guild_id)
         if effects.plains_tithe_rate <= 0 or gain <= 0:
             return 0
         tithe = max(1, int(gain * effects.plains_tithe_rate))
         self.player_repo.add_balance(discord_id, guild_id, -tithe)
+        self.loan_service.add_to_nonprofit_fund(guild_id, tithe)
         return tithe
