@@ -750,12 +750,12 @@ def apply_mana_wedge(
     """
     Replace one generic wedge with a mana-color-specific bonus wedge.
 
-    Each color has a unique bonus wedge:
+    Three colors get a unique bonus wedge:
     - Red: ERUPTION - Win 2x what the previous spinner won (or 50 JC fallback)
-    - Blue: FROZEN ASSETS - Win 0 now, but next gamba guaranteed 50+ JC wedge
     - Green: OVERGROWTH - Win 10 JC per game played this week
-    - White: SANCTUARY - Win 0, but all spinners in next 24h get +5 JC
     - Black: DECAY - Top 3 wealthiest lose 40 JC each, #4 loses 50, you gain total
+
+    Blue and White players see normal wedges only — no special bonus wedge.
 
     Returns a modified copy of the wedge list with one wedge replaced.
     """
@@ -764,9 +764,7 @@ def apply_mana_wedge(
 
     MANA_WEDGES = {
         "Red": ("ERUPTION", "ERUPTION", "#ff4500"),
-        "Blue": ("FROZEN", "FROZEN_ASSETS", "#1e90ff"),
         "Green": ("GROWTH", "OVERGROWTH", "#228b22"),
-        "White": ("SANCT", "SANCTUARY", "#f5f5dc"),
         "Black": ("DECAY", "DECAY", "#4b0082"),
     }
 

@@ -358,6 +358,10 @@ class SchemaManager:
             ("add_last_cheer_at_to_tunnels", self._migration_add_last_cheer_at_to_tunnels),
             ("create_reminder_preferences_table", self._migration_create_reminder_preferences_table),
             ("add_dig_enabled_to_reminder_preferences", self._migration_add_dig_enabled_to_reminder_preferences),
+            # Drop the unused mana shop / mana daily loss tables. The
+            # delayed-token paths that wrote to them never had readers.
+            ("drop_mana_shop_items_table", self._migration_drop_mana_shop_items_table),
+            ("drop_mana_daily_losses_table", self._migration_drop_mana_daily_losses_table),
         ]
 
     # --- Migrations ---
@@ -2831,3 +2835,14 @@ class SchemaManager:
             "CREATE INDEX IF NOT EXISTS idx_reminder_prefs_dig "
             "ON reminder_preferences(guild_id, dig_enabled)"
         )
+
+    def _migration_drop_mana_shop_items_table(self, cursor) -> None:
+        """Drop the mana_shop_items table. All write sites have been removed
+        and no consumer code ever existed; the delayed-token wedges and shop
+        items have been replaced with immediate-effect alternatives."""
+        cursor.execute("DROP TABLE IF EXISTS mana_shop_items")
+
+    def _migration_drop_mana_daily_losses_table(self, cursor) -> None:
+        """Drop the mana_daily_losses table. The Regrowth shop item that read
+        from it has been rewritten to use existing bet/wheel-spin history."""
+        cursor.execute("DROP TABLE IF EXISTS mana_daily_losses")

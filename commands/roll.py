@@ -175,8 +175,10 @@ class RollCommands(commands.Cog):
             if won:
                 win_amount = jackpot_amount
                 # Green gain cap
-                if effects and effects.green_gain_cap is not None:
-                    win_amount = min(win_amount, effects.green_gain_cap)
+                if effects and mana_effects_service:
+                    win_amount = await asyncio.to_thread(
+                        mana_effects_service.apply_green_cap, effects, win_amount
+                    )
                 # Green steady bonus
                 if effects and effects.green_steady_bonus > 0:
                     win_amount += effects.green_steady_bonus

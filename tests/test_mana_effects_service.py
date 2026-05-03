@@ -199,10 +199,14 @@ class TestManaEffectsService:
         player_repo = PlayerRepository(repo_db_path)
         mana_service = _make_mana_service(mana_repo, player_repo)
 
+        loan_service = MagicMock()
+        loan_service.add_to_nonprofit_fund = MagicMock(return_value=0)
+
         effects_service = ManaEffectsService(
             mana_service=mana_service,
             player_repo=player_repo,
             mana_repo=mana_repo,
+            loan_service=loan_service,
         )
 
         return {
@@ -210,6 +214,7 @@ class TestManaEffectsService:
             "mana_service": mana_service,
             "mana_repo": mana_repo,
             "player_repo": player_repo,
+            "loan_service": loan_service,
         }
 
     def test_get_effects_no_mana(self, service):
@@ -460,7 +465,7 @@ class TestManaEffectsService:
     # -------------------------------------------------------------------------
 
     def test_apply_plains_tithe(self, service):
-        """Plains tithe deducts 5% of gains."""
+        """Plains tithe deducts 5% of gains and transfers to nonprofit fund."""
         _register_player(service["player_repo"], 50001, balance=200)
         today = get_today_pst()
         service["mana_repo"].set_mana(50001, GID, "Plains", today)
@@ -469,9 +474,10 @@ class TestManaEffectsService:
         assert tithe == 5  # 5% of 100
         bal = service["player_repo"].get_balance(50001, GID)
         assert bal == 195  # 200 - 5
+        service["loan_service"].add_to_nonprofit_fund.assert_called_once_with(GID, 5)
 
     def test_apply_plains_tithe_zero_gain(self, service):
-        """Plains tithe returns 0 for zero gain."""
+        """Plains tithe returns 0 for zero gain and does not transfer."""
         _register_player(service["player_repo"], 50002, balance=200)
         today = get_today_pst()
         service["mana_repo"].set_mana(50002, GID, "Plains", today)
@@ -480,9 +486,10 @@ class TestManaEffectsService:
         assert tithe == 0
         bal = service["player_repo"].get_balance(50002, GID)
         assert bal == 200
+        service["loan_service"].add_to_nonprofit_fund.assert_not_called()
 
     def test_apply_plains_tithe_no_plains(self, service):
-        """Non-plains player has no tithe."""
+        """Non-plains player has no tithe and does not trigger fund transfer."""
         _register_player(service["player_repo"], 50003, balance=200)
         today = get_today_pst()
         service["mana_repo"].set_mana(50003, GID, "Mountain", today)
@@ -491,6 +498,7 @@ class TestManaEffectsService:
         assert tithe == 0
         bal = service["player_repo"].get_balance(50003, GID)
         assert bal == 200
+        service["loan_service"].add_to_nonprofit_fund.assert_not_called()
 
 
 # =============================================================================
