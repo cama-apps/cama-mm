@@ -668,7 +668,11 @@ class PredictionCommands(commands.Cog):
             )
             chart_bytes = await asyncio.to_thread(
                 functools.partial(
-                    draw_market_fair_history, market_id, snapshots, created_at
+                    draw_market_fair_history,
+                    market_id,
+                    snapshots,
+                    created_at,
+                    title=view.get("question") or None,
                 )
             )
         except Exception as e:
