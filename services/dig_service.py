@@ -2828,7 +2828,9 @@ class DigService:
             depth_charge_bonus = 8
             advance += depth_charge_bonus
         advance = int(advance * (1.0 + perk_advance_bonus) * injury_advance_mod)
-        advance += int(perk_advance_flat)
+        # Half-up rounding so mixed_bonus's 0.5 contribution doesn't get
+        # silently truncated to 0 when picked alone.
+        advance += int(perk_advance_flat + 0.5)
         advance = max(1, advance)
         # Depth charge triggers mini cave-in penalty after advance
         if has_depth_charge:
@@ -2859,7 +2861,7 @@ class DigService:
             * jc_mult
             * self._luminosity_jc_multiplier(luminosity)
             * self._post_pinnacle_decay_factor(new_depth)
-        ) + magma_heart_bonus + int(perk_loot_flat)
+        ) + magma_heart_bonus + int(perk_loot_flat + 0.5)
         # Weather: flat JC bonus/penalty
         jc_earned += int(weather_fx.get("jc_bonus", 0))
         # Corruption: fixed JC override
@@ -3336,8 +3338,8 @@ class DigService:
             adv_fixed += 8
 
         adv_mult = (1.0 + perk_advance_bonus) * injury_advance_mod
-        advance_min = max(1, int((base_adv_min + adv_fixed) * adv_mult)) + int(perk_advance_flat)
-        advance_max = max(1, int((base_adv_max + adv_fixed) * adv_mult)) + int(perk_advance_flat)
+        advance_min = max(1, int((base_adv_min + adv_fixed) * adv_mult)) + int(perk_advance_flat + 0.5)
+        advance_max = max(1, int((base_adv_max + adv_fixed) * adv_mult)) + int(perk_advance_flat + 0.5)
         if has_depth_charge:
             advance_min = max(1, advance_min - 3)
             advance_max = max(1, advance_max - 3)
@@ -3355,7 +3357,7 @@ class DigService:
         jc_mult *= self._post_pinnacle_decay_factor(depth_before)
         if depth_before >= 276:
             jc_mult *= 0.83
-        jc_fixed = magma_heart_bonus + int(weather_fx.get("jc_bonus", 0)) + int(perk_loot_flat)
+        jc_fixed = magma_heart_bonus + int(weather_fx.get("jc_bonus", 0)) + int(perk_loot_flat + 0.5)
         jc_min = max(0, int(jc_min_base * jc_mult) + jc_fixed)
         jc_max = max(0, int(jc_max_base * jc_mult) + jc_fixed)
         if corruption and corruption["effects"].get("fixed_jc") is not None:
@@ -3700,7 +3702,7 @@ class DigService:
         advance = int(
             advance * (1.0 + p["perk_advance_bonus"]) * p["injury_advance_mod"]
         )
-        advance += int(p.get("perk_advance_flat", 0))
+        advance += int(p.get("perk_advance_flat", 0) + 0.5)
         advance = max(1, advance)
         if p["has_depth_charge"]:
             advance = max(1, advance - 3)
@@ -3735,7 +3737,7 @@ class DigService:
                 * self._post_pinnacle_decay_factor(new_depth)
             )
             + p["magma_heart_bonus"]
-            + int(p.get("perk_loot_flat", 0))
+            + int(p.get("perk_loot_flat", 0) + 0.5)
         )
         jc_earned += int(p["weather_fx"].get("jc_bonus", 0))
         if p["corruption"] and p["corruption"]["effects"].get("fixed_jc") is not None:

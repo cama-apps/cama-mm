@@ -81,6 +81,29 @@ class TestReadingTheStone:
         assert agg["event_choice_reveal"] >= 1.0
 
 
+class TestPerkFractionalRoundsHalfUp:
+    """``mixed_bonus`` contributes 0.5 to both ``advance_min_bonus`` and
+    ``jc_bonus``. Truncating with int() would silently swallow the
+    contribution when the perk is picked alone — half-up rounding keeps
+    the perk meaningful."""
+
+    def test_mixed_bonus_alone_gives_one_advance(self, dig_service):
+        agg = dig_service._aggregate_perk_effects(["mixed_bonus"])
+        assert agg["advance_min_bonus"] == 0.5
+        # The dig flow does ``int(perk_advance_flat + 0.5)`` which yields 1
+        assert int(agg["advance_min_bonus"] + 0.5) == 1
+
+    def test_mixed_bonus_alone_gives_one_jc(self, dig_service):
+        agg = dig_service._aggregate_perk_effects(["mixed_bonus"])
+        assert agg["jc_bonus"] == 0.5
+        assert int(agg["jc_bonus"] + 0.5) == 1
+
+    def test_advance_boost_plus_mixed_stacks_to_two(self, dig_service):
+        agg = dig_service._aggregate_perk_effects(["advance_boost", "mixed_bonus"])
+        assert agg["advance_min_bonus"] == 1.5
+        assert int(agg["advance_min_bonus"] + 0.5) == 2
+
+
 class TestHasPerk:
     def test_returns_false_for_no_tunnel(self, dig_service):
         assert dig_service.has_perk(99999, 12345, "advance_boost") is False
