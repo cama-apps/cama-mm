@@ -99,6 +99,7 @@ from services.dig_constants import (
     PLAYER_HIT_CEILING,
     PLAYER_HIT_FLOOR,
     PRESTIGE_HARD_CAP,
+    PRESTIGE_PERK_VALUES,
     PRESTIGE_PERKS,
     RELIC_SLOTS_BASE,
     RETREAT_BLOCK_LOSS_MAX,
@@ -484,6 +485,26 @@ class DigService:
             return json.loads(raw)
         except (json.JSONDecodeError, TypeError):
             return []
+
+    def _aggregate_perk_effects(self, perks: list[str]) -> dict[str, float]:
+        """Sum mechanical effects across all picked perks.
+
+        Each entry in ``PRESTIGE_PERK_VALUES[perk]`` contributes its
+        keys; duplicates (same perk picked across multiple prestiges)
+        sum naturally. Lookup returns 0.0 / falsy for missing keys.
+        """
+        aggregated: dict[str, float] = {}
+        for perk in perks:
+            for key, value in PRESTIGE_PERK_VALUES.get(perk, {}).items():
+                aggregated[key] = aggregated.get(key, 0.0) + float(value)
+        return aggregated
+
+    def has_perk(self, discord_id: int, guild_id, perk_id: str) -> bool:
+        """True if the player owns the given prestige perk."""
+        tunnel = self.dig_repo.get_tunnel(discord_id, guild_id)
+        if not tunnel:
+            return False
+        return perk_id in self._get_prestige_perks(dict(tunnel))
 
     def _get_miner_stats(self, tunnel: dict) -> dict:
         """Return normalized miner S stats and available point budget."""
@@ -1119,6 +1140,34 @@ class DigService:
             name = f"{slot_choice} (tier {tier})"
         return {"gear_id": gear_id, "slot": slot_choice, "tier": tier, "name": name}
 
+    # Probability that a prestige-gated relic drops on a boss kill,
+    # gated by ``min_prestige`` per relic.
+    _PRESTIGE_RELIC_DROP_RATE: float = 0.10
+
+    def _maybe_drop_prestige_relic(
+        self, discord_id: int, guild_id, prestige_level: int,
+    ) -> dict | None:
+        """Roll a prestige-gated relic on a boss kill.
+
+        Filters ``RELICS`` by ``min_prestige <= prestige_level`` and
+        considers only entries with ``min_prestige > 0`` (the new pool).
+        Uses the working ``add_artifact(... is_relic=True)`` signature
+        — never goes through the broken ``roll_artifact`` path.
+        """
+        from services.dig_constants import RELICS
+
+        eligible = [
+            r for r in RELICS
+            if r.min_prestige > 0 and r.min_prestige <= prestige_level
+        ]
+        if not eligible:
+            return None
+        if random.random() >= self._PRESTIGE_RELIC_DROP_RATE:
+            return None
+        choice = random.choice(eligible)
+        self.dig_repo.add_artifact(discord_id, guild_id, choice.id, is_relic=True)
+        return {"id": choice.id, "name": choice.name, "rarity": choice.rarity}
+
     def _get_queued_items_for_tunnel(self, discord_id: int, guild_id) -> list[dict]:
         """Get items queued for next dig from inventory table."""
         items = self.dig_repo.get_queued_items(discord_id, guild_id)
@@ -1231,29 +1280,42 @@ class DigService:
             return []
 
     def _next_boss_boundary(self, depth: int, boss_progress: dict) -> int | None:
-        """Return the next undefeated boss boundary above current depth, or None."""
+        """Return the lowest undefeated boss boundary, regardless of current depth.
+
+        A boundary is "undefeated" if its status is still active or only
+        partially cleared (phase1_defeated / phase2_defeated). Returning
+        boundaries the player has already crossed lets the dig flow cap
+        advance and re-fire the missed encounter.
+        """
         for b in sorted(BOSS_BOUNDARIES):
-            if depth < b and boss_progress.get(str(b)) == "active":
+            entry = boss_progress.get(str(b))
+            status = entry.get("status") if isinstance(entry, dict) else entry
+            if status in ("active", "phase1_defeated", "phase2_defeated"):
                 return b
         return None
 
     def _at_boss_boundary(self, depth: int, boss_progress: dict) -> int | None:
-        """Return the boss boundary if depth is exactly at one and boss is in
-        an unfinished state (active / phase1_defeated / phase2_defeated).
+        """Return the boss boundary if the player owes a fight at it.
 
-        The pinnacle (depth 300) is gated: it only fires once all 7 prior
-        tier bosses are marked defeated.
+        Fires when depth has reached or passed an unfinished boundary
+        (active / phase1_defeated / phase2_defeated). The ``>= b - 1``
+        check covers both the normal arrival case (depth == b - 1) and
+        the parked-past case (depth >= b) where a previous skip left
+        the boss undefeated.
+
+        The pinnacle (depth 300) is gated: it only fires once all 7
+        prior tier bosses are marked defeated.
         """
         for b in BOSS_BOUNDARIES:
             entry = boss_progress.get(str(b))
             status = entry.get("status") if isinstance(entry, dict) else entry
-            if depth == b - 1 and status in ("active", "phase1_defeated", "phase2_defeated"):
+            if depth >= b - 1 and status in ("active", "phase1_defeated", "phase2_defeated"):
                 return b
-        # Pinnacle: triggers after all 7 tiers cleared, when depth hits
-        # PINNACLE_DEPTH-1. Also re-procs if the player has tunneled past
-        # PINNACLE_REPROC_DEPTH without defeating it (catch-up for legacy
-        # tunnels that pre-date the pinnacle).
-        at_pinnacle_threshold = depth == PINNACLE_DEPTH - 1
+        # Pinnacle: triggers when depth has reached or passed
+        # PINNACLE_DEPTH-1 with the pinnacle still unfinished. The
+        # original PINNACLE_REPROC_DEPTH window is preserved as a
+        # belt-and-braces catch-up for very-deep legacy tunnels.
+        at_pinnacle_threshold = depth >= PINNACLE_DEPTH - 1
         in_reproc_window = depth >= PINNACLE_REPROC_DEPTH
         if at_pinnacle_threshold or in_reproc_window:
             all_tiers_cleared = all(
@@ -1798,7 +1860,7 @@ class DigService:
         drain = LUMINOSITY_DRAIN_PER_DIG.get(layer_name, 0)
         # Frostforged / Void-Touched pickaxe: -25% luminosity drain
         pickaxe_tier = self._get_active_pickaxe_tier(discord_id, guild_id, tunnel)
-        if pickaxe_tier >= 5:  # Frostforged or better
+        if pickaxe_tier >= 6:  # Frostforged or better
             drain = max(0, drain - drain // 4)
         # Past the pinnacle the deep grows hungry — drain ramps linearly
         # toward the hard cap, applying pressure to prestige.
@@ -1844,6 +1906,18 @@ class DigService:
         if luminosity >= LUMINOSITY_DARK:
             return LUMINOSITY_DARK_JC_MULTIPLIER
         return LUMINOSITY_PITCH_JC_MULTIPLIER
+
+    def _post_pinnacle_decay_factor(self, depth: int) -> float:
+        """Per-dig JC and artifact-rate multiplier past the pinnacle.
+
+        Returns 1.0 at or below the pinnacle, then loses 5 percentage
+        points per 25 depth beyond it, clamped at 0. Milestone bonuses
+        and streak JC are not affected — only the per-dig roll.
+        """
+        if depth <= PINNACLE_DEPTH:
+            return 1.0
+        steps_past = (depth - PINNACLE_DEPTH) // 25
+        return max(0.0, 1.0 - 0.05 * steps_past)
 
     # ------------------------------------------------------------------
     # Temp Buffs
@@ -1958,8 +2032,38 @@ class DigService:
         return forced_dict, choices_dicts
 
     def _chain_event(self, depth: int, prestige_level: int,
-                     trigger_rarity: str, luminosity: int = 100) -> dict | None:
-        """P7+: 25% chance to chain another event of same or higher rarity."""
+                     trigger_rarity: str, luminosity: int = 100,
+                     trigger_event_id: str | None = None) -> dict | None:
+        """P7+: 25% chance to chain another event of same or higher rarity.
+
+        P8+ override: if the resolving event has a ``next_event_id``
+        and the player meets that next event's ``min_prestige``, fire
+        it deterministically — used by lore-driven multi-step arcs.
+        """
+        if trigger_event_id and prestige_level >= 8:
+            trigger_def = next(
+                (e for e in EVENT_POOL if e["id"] == trigger_event_id), None,
+            )
+            chain_id = trigger_def.get("next_event_id") if trigger_def else None
+            if chain_id:
+                next_def = next(
+                    (e for e in EVENT_POOL if e["id"] == chain_id), None,
+                )
+                if next_def and prestige_level >= next_def.get("min_prestige", 0):
+                    return {
+                        "id": next_def["id"],
+                        "name": next_def["name"],
+                        "description": next_def["description"],
+                        "complexity": next_def.get("complexity", "choice"),
+                        "safe_option": next_def.get("safe_option"),
+                        "risky_option": next_def.get("risky_option"),
+                        "desperate_option": next_def.get("desperate_option"),
+                        "boon_options": next_def.get("boon_options"),
+                        "buff_on_success": next_def.get("buff_on_success"),
+                        "rarity": next_def.get("rarity", "common"),
+                        "chained": True,
+                    }
+
         if prestige_level < 7:
             return None
         if random.random() >= EVENT_CHAIN_CHANCE:
@@ -2469,9 +2573,12 @@ class DigService:
         pickaxe_advance_bonus = pickaxe_data.get("advance_bonus", 0)
         pickaxe_cavein_reduction = pickaxe_data.get("cave_in_reduction", 0)
 
-        perk_cavein_reduction = 0.05 if "reinforced_walls" in perks else 0.0
-        perk_advance_bonus = 0.1 if "efficient_digging" in perks else 0.0
-        perk_loot_bonus = 0.15 if "keen_eye" in perks else 0.0
+        perk_fx = self._aggregate_perk_effects(perks)
+        perk_cavein_reduction = perk_fx.get("cave_in_reduction", 0.0)
+        perk_advance_flat = perk_fx.get("advance_min_bonus", 0.0)
+        perk_loot_flat = perk_fx.get("jc_bonus", 0.0)
+        perk_advance_bonus = 0.0  # legacy multiplier slot, kept zero
+        perk_loot_bonus = 0.0  # legacy multiplier slot, kept zero
 
         # New expansion perks
         if "deep_sight" in perks and lum_info.get("drained", 0) > 0:
@@ -2561,11 +2668,15 @@ class DigService:
             block_loss += int(weather_fx.get("cave_in_loss_bonus", 0))
             # Mutation: brittle_walls — extra block loss
             block_loss += int(mutation_fx.get("cave_in_loss_bonus", 0))
+            # Perk: steady_hands reduces depth lost on cave-in
+            steady_hands_reduction = perk_fx.get("cave_in_loss_reduction", 0.0)
+            if steady_hands_reduction > 0:
+                block_loss = max(0, int(block_loss * (1.0 - steady_hands_reduction)))
             # Grappling hook prevents block loss
             if has_grappling_hook:
                 block_loss = 0
             # Void-Touched pickaxe: salvage 1 block on cave-in
-            elif pickaxe_tier >= 6:
+            elif pickaxe_tier >= 7:
                 block_loss = max(1, block_loss - 1)
             new_depth = max(0, depth_before - block_loss)
 
@@ -2717,6 +2828,7 @@ class DigService:
             depth_charge_bonus = 8
             advance += depth_charge_bonus
         advance = int(advance * (1.0 + perk_advance_bonus) * injury_advance_mod)
+        advance += int(perk_advance_flat)
         advance = max(1, advance)
         # Depth charge triggers mini cave-in penalty after advance
         if has_depth_charge:
@@ -2742,7 +2854,12 @@ class DigService:
         jc_earned = random.randint(jc_min, jc_max)
         # Ascension JC multiplier + weather JC multiplier
         jc_mult = 1.0 + perk_loot_bonus + ascension.get("jc_multiplier", 0) + weather_fx.get("jc_multiplier", 0)
-        jc_earned = int(jc_earned * jc_mult * self._luminosity_jc_multiplier(luminosity)) + magma_heart_bonus
+        jc_earned = int(
+            jc_earned
+            * jc_mult
+            * self._luminosity_jc_multiplier(luminosity)
+            * self._post_pinnacle_decay_factor(new_depth)
+        ) + magma_heart_bonus + int(perk_loot_flat)
         # Weather: flat JC bonus/penalty
         jc_earned += int(weather_fx.get("jc_bonus", 0))
         # Corruption: fixed JC override
@@ -2793,6 +2910,9 @@ class DigService:
             if streak >= threshold:
                 streak_bonus = STREAKS[threshold]
                 break
+
+        # Perk: patient_step boosts streak JC
+        streak_bonus = int(streak_bonus * (1.0 + perk_fx.get("streak_bonus_multiplier", 0.0)))
 
         jc_earned += streak_bonus
 
@@ -3137,9 +3257,12 @@ class DigService:
         pickaxe_advance_bonus = pickaxe_data.get("advance_bonus", 0)
         pickaxe_cavein_reduction = pickaxe_data.get("cave_in_reduction", 0)
 
-        perk_cavein_reduction = 0.05 if "reinforced_walls" in perks else 0.0
-        perk_advance_bonus = 0.1 if "efficient_digging" in perks else 0.0
-        perk_loot_bonus = 0.15 if "keen_eye" in perks else 0.0
+        perk_fx = self._aggregate_perk_effects(perks)
+        perk_cavein_reduction = perk_fx.get("cave_in_reduction", 0.0)
+        perk_advance_flat = perk_fx.get("advance_min_bonus", 0.0)
+        perk_loot_flat = perk_fx.get("jc_bonus", 0.0)
+        perk_advance_bonus = 0.0  # legacy multiplier slot, kept zero
+        perk_loot_bonus = 0.0  # legacy multiplier slot, kept zero
 
         if "deep_sight" in perks and lum_info.get("drained", 0) > 0:
             restored = max(1, lum_info["drained"] // 4)
@@ -3213,8 +3336,8 @@ class DigService:
             adv_fixed += 8
 
         adv_mult = (1.0 + perk_advance_bonus) * injury_advance_mod
-        advance_min = max(1, int((base_adv_min + adv_fixed) * adv_mult))
-        advance_max = max(1, int((base_adv_max + adv_fixed) * adv_mult))
+        advance_min = max(1, int((base_adv_min + adv_fixed) * adv_mult)) + int(perk_advance_flat)
+        advance_max = max(1, int((base_adv_max + adv_fixed) * adv_mult)) + int(perk_advance_flat)
         if has_depth_charge:
             advance_min = max(1, advance_min - 3)
             advance_max = max(1, advance_max - 3)
@@ -3229,9 +3352,10 @@ class DigService:
             + weather_fx.get("jc_multiplier", 0)
         )
         jc_mult *= self._luminosity_jc_multiplier(luminosity)
+        jc_mult *= self._post_pinnacle_decay_factor(depth_before)
         if depth_before >= 276:
             jc_mult *= 0.83
-        jc_fixed = magma_heart_bonus + int(weather_fx.get("jc_bonus", 0))
+        jc_fixed = magma_heart_bonus + int(weather_fx.get("jc_bonus", 0)) + int(perk_loot_flat)
         jc_min = max(0, int(jc_min_base * jc_mult) + jc_fixed)
         jc_max = max(0, int(jc_max_base * jc_mult) + jc_fixed)
         if corruption and corruption["effects"].get("fixed_jc") is not None:
@@ -3374,6 +3498,9 @@ class DigService:
             "pickaxe_advance_bonus": pickaxe_advance_bonus,
             "perk_advance_bonus": perk_advance_bonus,
             "perk_loot_bonus": perk_loot_bonus,
+            "perk_advance_flat": perk_advance_flat,
+            "perk_loot_flat": perk_loot_flat,
+            "perk_fx": perk_fx,
             "mole_claws_bonus": mole_claws_bonus,
             "magma_heart_bonus": magma_heart_bonus,
             "miner_stats": miner_stats,
@@ -3439,9 +3566,12 @@ class DigService:
                 block_loss = min(block_loss, int(weather_loss_cap))
             block_loss += int(p["weather_fx"].get("cave_in_loss_bonus", 0))
             block_loss += int(p["mutation_fx"].get("cave_in_loss_bonus", 0))
+            steady_hands_reduction = p.get("perk_fx", {}).get("cave_in_loss_reduction", 0.0)
+            if steady_hands_reduction > 0:
+                block_loss = max(0, int(block_loss * (1.0 - steady_hands_reduction)))
             if p["has_grappling_hook"]:
                 block_loss = 0
-            elif p["pickaxe_tier"] >= 6:
+            elif p["pickaxe_tier"] >= 7:
                 block_loss = max(1, block_loss - 1)
             new_depth = max(0, depth_before - block_loss)
 
@@ -3570,6 +3700,7 @@ class DigService:
         advance = int(
             advance * (1.0 + p["perk_advance_bonus"]) * p["injury_advance_mod"]
         )
+        advance += int(p.get("perk_advance_flat", 0))
         advance = max(1, advance)
         if p["has_depth_charge"]:
             advance = max(1, advance - 3)
@@ -3597,8 +3728,14 @@ class DigService:
             + p["weather_fx"].get("jc_multiplier", 0)
         )
         jc_earned = (
-            int(jc_earned * jc_mult * self._luminosity_jc_multiplier(luminosity))
+            int(
+                jc_earned
+                * jc_mult
+                * self._luminosity_jc_multiplier(luminosity)
+                * self._post_pinnacle_decay_factor(new_depth)
+            )
             + p["magma_heart_bonus"]
+            + int(p.get("perk_loot_flat", 0))
         )
         jc_earned += int(p["weather_fx"].get("jc_bonus", 0))
         if p["corruption"] and p["corruption"]["effects"].get("fixed_jc") is not None:
@@ -3639,6 +3776,10 @@ class DigService:
             if streak >= threshold:
                 streak_bonus = STREAKS[threshold]
                 break
+        # Perk: patient_step boosts streak JC
+        streak_bonus = int(
+            streak_bonus * (1.0 + p.get("perk_fx", {}).get("streak_bonus_multiplier", 0.0))
+        )
         jc_earned += streak_bonus
 
         # Apply silent mana yield modifier before commit (parity with dig() path).
@@ -3768,7 +3909,7 @@ class DigService:
             # Enforce game-rule constraints
             if p["has_grappling_hook"]:
                 block_loss = 0
-            elif p["pickaxe_tier"] >= 6:
+            elif p["pickaxe_tier"] >= 7:
                 block_loss = max(1, block_loss - 1)
             weather_loss_cap = p["weather_fx"].get("cave_in_loss_cap")
             if weather_loss_cap is not None:
@@ -5021,6 +5162,9 @@ class DigService:
             # Roll a possible gear drop on the full kill. Phase-1 transitions
             # do NOT roll — only completed kills.
             gear_drop = self._maybe_drop_gear(discord_id, guild_id, at_boss)
+            prestige_relic_drop = self._maybe_drop_prestige_relic(
+                discord_id, guild_id, tunnel.get("prestige_level", 0) or 0,
+            )
 
 
             return self._ok(
@@ -5045,6 +5189,7 @@ class DigService:
                 echo_killer_id=active_echo.get("killer_discord_id") if echo_applied else None,
                 gear_broken=gear_broken_names,
                 gear_drop=gear_drop,
+                prestige_relic_drop=prestige_relic_drop,
                 luminosity_display=self._luminosity_combat_display(tunnel),
             )
         else:
@@ -6569,6 +6714,9 @@ class DigService:
             defeat_msg = dialogue_list[-1] if dialogue_list else "Defeated!"
             # Boss-drop roll happens once per full kill, NOT on phase-1 transitions.
             gear_drop = self._maybe_drop_gear(discord_id, guild_id, at_boss)
+            prestige_relic_drop = self._maybe_drop_prestige_relic(
+                discord_id, guild_id, tunnel.get("prestige_level", 0) or 0,
+            )
 
             self.dig_repo.log_action(
                 discord_id=discord_id, guild_id=guild_id,
@@ -6606,6 +6754,7 @@ class DigService:
                 ),
                 gear_broken=gear_broken_names,
                 gear_drop=gear_drop,
+                prestige_relic_drop=prestige_relic_drop,
                 luminosity_display=self._luminosity_combat_display(tunnel),
             )
 
@@ -7080,6 +7229,26 @@ class DigService:
             mutations_json = json.dumps(active_mutations)
             mutation_info = {"forced": forced, "chosen": active_mutations[-1] if len(active_mutations) > 1 else None}
 
+        # Flat prestige grant: 1000 JC + one rare-or-better relic.
+        from services.dig_constants import RELICS
+
+        prestige_jc_grant = 1000
+        self.player_repo.add_balance(discord_id, guild_id, prestige_jc_grant)
+        eligible_relic_ids = [
+            r.id for r in RELICS if r.rarity in ("Rare", "Legendary")
+        ]
+        granted_relic = None
+        if eligible_relic_ids:
+            relic_id = random.choice(eligible_relic_ids)
+            self.dig_repo.add_artifact(discord_id, guild_id, relic_id, is_relic=True)
+            granted_def = next(r for r in RELICS if r.id == relic_id)
+            granted_relic = {
+                "id": relic_id,
+                "name": granted_def.name,
+                "rarity": granted_def.rarity,
+            }
+        prestige_grant = {"jc": prestige_jc_grant, "relic": granted_relic}
+
         # Reset tunnel — including pinnacle state so the next cycle re-rolls
         # a fresh pinnacle from the rotating pool on first encounter.
         boss_progress = {str(b): "active" for b in BOSS_BOUNDARIES}
@@ -7131,6 +7300,7 @@ class DigService:
             total_prestige_score=total_score,
             ascension_unlocked=ascension_info,
             mutations=mutation_info,
+            prestige_grant=prestige_grant,
         )
 
     # ------------------------------------------------------------------
@@ -7332,6 +7502,8 @@ class DigService:
         mutations = self._get_mutations(tunnel)
         mutation_fx = self._apply_mutation_effects(mutations)
         rate_mod *= (1.0 + mutation_fx.get("artifact_chance_bonus", 0))
+        # Post-pinnacle decay applies to artifact rate
+        rate_mod *= self._post_pinnacle_decay_factor(depth)
 
         # Roll for each rarity tier
         tiers = [
@@ -7780,10 +7952,13 @@ class DigService:
             log_action_type="event",
         )
 
-        # Check for event chaining (P7+)
-        chain_event = self._chain_event(new_depth, prestige_level,
-                                         event.get("rarity", "common"),
-                                         tunnel.get("luminosity", 100))
+        # Check for event chaining (P7+ random; P8+ deterministic via next_event_id)
+        chain_event = self._chain_event(
+            new_depth, prestige_level,
+            event.get("rarity", "common"),
+            tunnel.get("luminosity", 100),
+            trigger_event_id=event_id,
+        )
 
         return self._ok(
             event_name=event.get("name", "Unknown Event"),

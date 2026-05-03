@@ -452,7 +452,8 @@ class TestCaveIn:
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
         monkeypatch.setattr(random, "random", lambda: 0.99)
         dig_service.dig(10001, guild_id)
-        dig_repo.update_tunnel(10001, guild_id, depth=50)
+        boss_defeated = json.dumps({"25": "defeated", "50": "defeated"})
+        dig_repo.update_tunnel(10001, guild_id, depth=50, boss_progress=boss_defeated)
 
         monkeypatch.setattr(time, "time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1)
         monkeypatch.setattr(random, "random", lambda: 0.001)
@@ -1310,7 +1311,8 @@ class TestLuminosity:
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
         monkeypatch.setattr(random, "random", lambda: 0.99)
         dig_service.dig(10001, guild_id)
-        dig_repo.update_tunnel(10001, guild_id, depth=80)
+        boss_defeated = json.dumps({"25": "defeated", "50": "defeated", "75": "defeated"})
+        dig_repo.update_tunnel(10001, guild_id, depth=80, boss_progress=boss_defeated)
 
         monkeypatch.setattr(time, "time", lambda: 1_000_000 + FREE_DIG_COOLDOWN_SECONDS + 1)
         result = dig_service.dig(10001, guild_id)
@@ -1348,7 +1350,10 @@ class TestLuminosity:
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
         monkeypatch.setattr(ds_mod.random, "random", lambda: 0.99)
         dig_service.dig(10001, guild_id)
-        dig_repo.update_tunnel(10001, guild_id, depth=50)  # Stone layer, base 0.16
+        boss_defeated = json.dumps({"25": "defeated", "50": "defeated"})
+        dig_repo.update_tunnel(
+            10001, guild_id, depth=50, boss_progress=boss_defeated,
+        )  # Stone layer, base 0.16
 
         # Weather neutralized by fixture (effects stubbed to {})
 

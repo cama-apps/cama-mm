@@ -293,3 +293,95 @@ class TestRumorPassEventShape:
                 continue
             assert event.splash.mode in valid_modes
             assert event.splash.strategy in valid_strategies
+
+
+class TestPrestigeChainEncounter:
+    """The P8 lore-chain: three deterministic events linked via
+    next_event_id. Step 2 only fires from step 1 if prestige >= 8."""
+
+    HOLLOW_CHAIN_IDS = (
+        "hollow_court_overture",
+        "hollow_court_audience",
+        "hollow_court_recess",
+    )
+
+    def _by_id(self, event_id: str):
+        return next(e for e in RANDOM_EVENTS if e.id == event_id)
+
+    def test_chain_events_registered(self):
+        for cid in self.HOLLOW_CHAIN_IDS:
+            assert any(e.id == cid for e in RANDOM_EVENTS)
+            assert any(e["id"] == cid for e in EVENT_POOL)
+
+    def test_chain_events_gated_to_p8(self):
+        for cid in self.HOLLOW_CHAIN_IDS:
+            assert self._by_id(cid).min_prestige == 8
+
+    def test_chain_links_are_deterministic(self):
+        overture = self._by_id("hollow_court_overture")
+        audience = self._by_id("hollow_court_audience")
+        recess = self._by_id("hollow_court_recess")
+        assert overture.next_event_id == audience.id
+        assert audience.next_event_id == recess.id
+        assert recess.next_event_id is None
+
+    def test_p7_player_does_not_chain_into_step2(
+        self, dig_repo, player_repository, monkeypatch,
+    ):
+        from services.dig_service import DigService
+
+        svc = DigService(dig_repo, player_repository)
+        monkeypatch.setattr(svc, "_get_weather_effects", lambda gid, ln: {})
+        # Force the random-pool path to never fire so we only see deterministic
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        result = svc._chain_event(
+            depth=250, prestige_level=7, trigger_rarity="legendary",
+            trigger_event_id="hollow_court_overture",
+        )
+        assert result is None
+
+    def test_p8_player_chains_into_step2(
+        self, dig_repo, player_repository, monkeypatch,
+    ):
+        from services.dig_service import DigService
+
+        svc = DigService(dig_repo, player_repository)
+        monkeypatch.setattr(svc, "_get_weather_effects", lambda gid, ln: {})
+        monkeypatch.setattr(random, "random", lambda: 0.99)  # block random pool
+        result = svc._chain_event(
+            depth=250, prestige_level=8, trigger_rarity="legendary",
+            trigger_event_id="hollow_court_overture",
+        )
+        assert result is not None
+        assert result["id"] == "hollow_court_audience"
+        assert result["chained"] is True
+
+    def test_p8_player_chains_into_step3(
+        self, dig_repo, player_repository, monkeypatch,
+    ):
+        from services.dig_service import DigService
+
+        svc = DigService(dig_repo, player_repository)
+        monkeypatch.setattr(svc, "_get_weather_effects", lambda gid, ln: {})
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        result = svc._chain_event(
+            depth=250, prestige_level=8, trigger_rarity="legendary",
+            trigger_event_id="hollow_court_audience",
+        )
+        assert result is not None
+        assert result["id"] == "hollow_court_recess"
+
+    def test_p8_chain_terminates_at_step3(
+        self, dig_repo, player_repository, monkeypatch,
+    ):
+        from services.dig_service import DigService
+
+        svc = DigService(dig_repo, player_repository)
+        monkeypatch.setattr(svc, "_get_weather_effects", lambda gid, ln: {})
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        result = svc._chain_event(
+            depth=250, prestige_level=8, trigger_rarity="legendary",
+            trigger_event_id="hollow_court_recess",
+        )
+        # No next_event_id and random roll blocks fallback chain
+        assert result is None

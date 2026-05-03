@@ -757,9 +757,9 @@ def build_preconditions_context(preconditions: dict) -> str:
     if preconditions.get("has_sonar_pulse"):
         lines.append("Item active: Sonar Pulse (event preview)")
 
-    # Pickaxe tier 6+ (Void-Touched) salvages 1 block on cave-in
+    # Pickaxe tier 7+ (Void-Touched) salvages 1 block on cave-in
     pickaxe_tier = preconditions.get("pickaxe_tier", 0)
-    if pickaxe_tier >= 6:
+    if pickaxe_tier >= 7:
         lines.append(
             "Void-Touched Pickaxe: on cave-in, block loss is reduced by 1 "
             "(min 1). Factor this into your cave_in_block_loss."

@@ -102,6 +102,33 @@ class TestPrestige:
         bp = json.loads(tunnel["boss_progress"]) if tunnel["boss_progress"] else {}
         assert all(v == "active" for v in bp.values())
 
+    def test_prestige_grants_jc_and_relic(
+        self, dig_service, dig_repo, player_repository, guild_id, monkeypatch,
+    ):
+        """Prestige hands out 1000 JC + a rare-or-better relic."""
+        self._setup_prestige_ready(
+            dig_service, dig_repo, player_repository, guild_id, monkeypatch,
+        )
+        balance_before = player_repository.get_balance(10001, guild_id)
+        artifacts_before = dig_repo.get_artifacts(10001, guild_id)
+
+        result = dig_service.prestige(10001, guild_id, "advance_boost")
+        assert result["success"]
+
+        # JC payout
+        balance_after = player_repository.get_balance(10001, guild_id)
+        assert balance_after - balance_before == 1000
+
+        # Grant payload exposed
+        grant = result["prestige_grant"]
+        assert grant["jc"] == 1000
+        assert grant["relic"] is not None
+        assert grant["relic"]["rarity"] in ("Rare", "Legendary")
+
+        # Relic was actually persisted
+        artifacts_after = dig_repo.get_artifacts(10001, guild_id)
+        assert len(artifacts_after) == len(artifacts_before) + 1
+
 
 class TestAbandon:
     """Tests for tunnel abandonment."""
@@ -217,15 +244,20 @@ class TestExpandedPrestige:
         from services.dig_constants import MAX_PRESTIGE
         assert MAX_PRESTIGE == 10
 
-    def test_seven_pickaxe_tiers(self):
+    def test_pickaxe_tiers_define_full_ladder(self):
         from services.dig_constants import _PICKAXE_TIERS_DEF
-        assert len(_PICKAXE_TIERS_DEF) == 7
+        # 8 tiers: Wooden..Diamond, Obsidian, Stormrend (P2 unlock), Frostforged, Void-Touched
+        assert len(_PICKAXE_TIERS_DEF) == 8
         assert _PICKAXE_TIERS_DEF[-1].name == "Void-Touched"
+        assert _PICKAXE_TIERS_DEF[5].name == "Stormrend"
 
     def test_nine_prestige_perks(self):
-        assert len(PRESTIGE_PERKS) == 9
+        assert len(PRESTIGE_PERKS) == 12
         assert "deep_sight" in PRESTIGE_PERKS
         assert "the_endless" in PRESTIGE_PERKS
+        assert "patient_step" in PRESTIGE_PERKS
+        assert "steady_hands" in PRESTIGE_PERKS
+        assert "reading_the_stone" in PRESTIGE_PERKS
 
     def test_crowns_for_all_levels(self):
         from services.dig_constants import MAX_PRESTIGE, PRESTIGE_CROWNS

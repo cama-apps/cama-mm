@@ -462,19 +462,19 @@ class TestDigGearServiceApplyGearToCombat:
     def test_full_loadout_applies_each_axis(self, svc):
         base = dict(BOSS_DUEL_STATS["bold"])
         weapon = GearPiece(
-            id=1, slot=GearSlot.WEAPON, tier=6, durability=20,
+            id=1, slot=GearSlot.WEAPON, tier=7, durability=20,
             equipped=True, acquired_at=0, source="boss_drop",
-            tier_def=WEAPON_TIERS[6],
+            tier_def=WEAPON_TIERS[7],
         )
         armor = GearPiece(
-            id=2, slot=GearSlot.ARMOR, tier=6, durability=20,
+            id=2, slot=GearSlot.ARMOR, tier=7, durability=20,
             equipped=True, acquired_at=0, source="boss_drop",
-            tier_def=ARMOR_TIERS[6],
+            tier_def=ARMOR_TIERS[7],
         )
         boots = GearPiece(
-            id=3, slot=GearSlot.BOOTS, tier=6, durability=20,
+            id=3, slot=GearSlot.BOOTS, tier=7, durability=20,
             equipped=True, acquired_at=0, source="boss_drop",
-            tier_def=BOOTS_TIERS[6],
+            tier_def=BOOTS_TIERS[7],
         )
         loadout = GearLoadout(weapon=weapon, armor=armor, boots=boots)
         out = svc._apply_gear_to_combat(base, loadout)
@@ -484,12 +484,20 @@ class TestDigGearServiceApplyGearToCombat:
         assert abs(out["player_hit"] - (base["player_hit"] + 0.07)) < 1e-9
         assert abs(out["boss_hit"]  - (base["boss_hit"]  - 0.13)) < 1e-9
 
+    def test_drop_depth_map_uses_renumbered_tiers(self):
+        """Boss-drop depth map points at the new tier numbering after the
+        Stormrend insertion: 100 -> 4 (Obsidian), 150 -> 5 (Stormrend),
+        200 -> 6 (Frostforged), 275 -> 7 (Void-Touched)."""
+        from services.dig_constants import GEAR_DROP_DEPTH_TIER_MAP
+        assert GEAR_DROP_DEPTH_TIER_MAP == {100: 4, 150: 5, 200: 6, 275: 7}
+
     def test_armor_hp_progression_is_monotonic_and_meaningful(self):
         """Armor's HP bonus should increase by tier and produce a real
         soak in mid-tier gear (Diamond+) so the slot is felt in fights.
         Pins the post-buff curve."""
         bonuses = [t.player_hp_bonus for t in ARMOR_TIERS]
-        assert bonuses == [0, 0, 1, 2, 3, 3, 4]
+        # tiers 0..7: Wooden, Stone, Iron, Diamond, Obsidian, Stormrend, Frostforged, Void-Touched
+        assert bonuses == [0, 0, 1, 2, 3, 3, 3, 4]
         # Diamond+ should be at least +2 — anything less is invisible
         # against the base HP of 2-5 in BOSS_DUEL_STATS.
         assert ARMOR_TIERS[3].player_hp_bonus >= 2
@@ -498,19 +506,20 @@ class TestDigGearServiceApplyGearToCombat:
         """Weapon player_dmg should show real progression at Diamond and
         Frostforged so mid-tier purchases feel meaningful. Pins the curve."""
         dmg = [t.player_dmg for t in WEAPON_TIERS]
-        assert dmg == [0, 0, 0, 1, 1, 2, 2]
+        # tiers 0..7: Wooden, Stone, Iron, Diamond, Obsidian, Stormrend, Frostforged, Void-Touched
+        assert dmg == [0, 0, 0, 1, 1, 1, 2, 2]
         # Diamond is the first dmg-bearing pickaxe (depth 75 milestone).
         assert WEAPON_TIERS[3].player_dmg >= 1
-        # Frostforged is the next visible step (depth 200, P3 unlock).
-        assert WEAPON_TIERS[5].player_dmg >= 2
+        # Frostforged (now tier 6 after Stormrend insertion) is the next visible step.
+        assert WEAPON_TIERS[6].player_dmg >= 2
 
     def test_player_hit_clamps_to_ceiling(self, svc):
         base = {"player_hp": 5, "boss_hp": 5, "player_hit": 0.99, "player_dmg": 1,
                 "boss_hit": 0.5, "boss_dmg": 1}
         weapon = GearPiece(
-            id=1, slot=GearSlot.WEAPON, tier=6, durability=20,
+            id=1, slot=GearSlot.WEAPON, tier=7, durability=20,
             equipped=True, acquired_at=0, source="boss_drop",
-            tier_def=WEAPON_TIERS[6],
+            tier_def=WEAPON_TIERS[7],
         )
         loadout = GearLoadout(weapon=weapon)
         out = svc._apply_gear_to_combat(base, loadout)
@@ -521,9 +530,9 @@ class TestDigGearServiceApplyGearToCombat:
         base = {"player_hp": 5, "boss_hp": 5, "player_hit": 0.5, "player_dmg": 1,
                 "boss_hit": 0.05, "boss_dmg": 1}
         boots = GearPiece(
-            id=3, slot=GearSlot.BOOTS, tier=6, durability=20,
+            id=3, slot=GearSlot.BOOTS, tier=7, durability=20,
             equipped=True, acquired_at=0, source="boss_drop",
-            tier_def=BOOTS_TIERS[6],
+            tier_def=BOOTS_TIERS[7],
         )
         out = svc._apply_gear_to_combat(base, GearLoadout(boots=boots))
         assert out["boss_hit"] >= 0.05

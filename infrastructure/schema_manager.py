@@ -362,6 +362,10 @@ class SchemaManager:
             # delayed-token paths that wrote to them never had readers.
             ("drop_mana_shop_items_table", self._migration_drop_mana_shop_items_table),
             ("drop_mana_daily_losses_table", self._migration_drop_mana_daily_losses_table),
+            (
+                "renumber_pickaxe_tier_for_stormrend_insert",
+                self._migration_renumber_pickaxe_tier_for_stormrend_insert,
+            ),
         ]
 
     # --- Migrations ---
@@ -2846,3 +2850,18 @@ class SchemaManager:
         """Drop the mana_daily_losses table. The Regrowth shop item that read
         from it has been rewritten to use existing bet/wheel-spin history."""
         cursor.execute("DROP TABLE IF EXISTS mana_daily_losses")
+
+    def _migration_renumber_pickaxe_tier_for_stormrend_insert(self, cursor) -> None:
+        """A new tier ("Stormrend") was inserted between Obsidian (tier 4)
+        and Frostforged. Existing player tunnels and equipped gear that
+        reference the old tier indices need to shift up: 6 -> 7
+        (Void-Touched) and 5 -> 6 (Frostforged). Order matters — bump
+        the higher tier first so 5 -> 6 doesn't collide with the
+        previous Void-Touched rows.
+        """
+        # tunnels.pickaxe_tier (legacy persistent column).
+        cursor.execute("UPDATE tunnels SET pickaxe_tier = 7 WHERE pickaxe_tier = 6")
+        cursor.execute("UPDATE tunnels SET pickaxe_tier = 6 WHERE pickaxe_tier = 5")
+        # dig_gear.tier (per-piece, all three slots).
+        cursor.execute("UPDATE dig_gear SET tier = 7 WHERE tier = 6")
+        cursor.execute("UPDATE dig_gear SET tier = 6 WHERE tier = 5")
