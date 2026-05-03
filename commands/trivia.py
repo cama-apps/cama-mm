@@ -254,7 +254,7 @@ class TriviaView(discord.ui.View):
             next_num = self.question_num + 1
             next_view = TriviaView(self.session, next_q, next_num, self.cog)
             next_embed = _question_embed(next_q, next_num, self.session.streak, self.session.total_jc, self.session.user)
-            next_file = _prepare_question(next_embed, next_q)
+            next_file = await asyncio.to_thread(_prepare_question, next_embed, next_q)
             try:
                 send_kwargs = {"embed": next_embed, "view": next_view}
                 if next_file:
@@ -406,7 +406,7 @@ class TriviaCog(commands.Cog):
             return
 
         embed = _question_embed(question, 1, 0, 0, interaction.user)
-        file = _prepare_question(embed, question)
+        file = await asyncio.to_thread(_prepare_question, embed, question)
         view = TriviaView(session, question, 1, self)
         send_kwargs = {"embed": embed, "view": view}
         if file:

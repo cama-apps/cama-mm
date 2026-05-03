@@ -92,7 +92,9 @@ class ReminderService:
     async def notify_betting_subscribers(
         self, bot: "commands.Bot", guild_id: int, bet_lock_until: int
     ) -> None:
-        subscribers = self._notification_repo.get_enabled_users_for_type(guild_id, "betting")
+        subscribers = await asyncio.to_thread(
+            self._notification_repo.get_enabled_users_for_type, guild_id, "betting"
+        )
         if not subscribers:
             return
         remaining = max(0, bet_lock_until - int(time.time()))
@@ -114,16 +116,26 @@ class ReminderService:
 
         now = int(time.time())
         for guild_id in guild_ids:
-            for discord_id in self._notification_repo.get_enabled_users_for_type(guild_id, "wheel"):
-                last_spin = self._player_repo.get_last_wheel_spin(discord_id, guild_id)
+            wheel_subscribers = await asyncio.to_thread(
+                self._notification_repo.get_enabled_users_for_type, guild_id, "wheel"
+            )
+            for discord_id in wheel_subscribers:
+                last_spin = await asyncio.to_thread(
+                    self._player_repo.get_last_wheel_spin, discord_id, guild_id
+                )
                 if last_spin is None:
                     continue
                 next_spin = last_spin + WHEEL_COOLDOWN_SECONDS
                 if next_spin > now:
                     self.schedule_wheel_reminder(bot, discord_id, guild_id, next_spin)
 
-            for discord_id in self._notification_repo.get_enabled_users_for_type(guild_id, "trivia"):
-                last_trivia = self._player_repo.get_last_trivia_session(discord_id, guild_id)
+            trivia_subscribers = await asyncio.to_thread(
+                self._notification_repo.get_enabled_users_for_type, guild_id, "trivia"
+            )
+            for discord_id in trivia_subscribers:
+                last_trivia = await asyncio.to_thread(
+                    self._player_repo.get_last_trivia_session, discord_id, guild_id
+                )
                 if last_trivia is None:
                     continue
                 next_trivia = last_trivia + TRIVIA_COOLDOWN_SECONDS
@@ -131,8 +143,13 @@ class ReminderService:
                     self.schedule_trivia_reminder(bot, discord_id, guild_id, next_trivia)
 
             if self._dig_repo is not None:
-                for discord_id in self._notification_repo.get_enabled_users_for_type(guild_id, "dig"):
-                    tunnel = self._dig_repo.get_tunnel(discord_id, guild_id)
+                dig_subscribers = await asyncio.to_thread(
+                    self._notification_repo.get_enabled_users_for_type, guild_id, "dig"
+                )
+                for discord_id in dig_subscribers:
+                    tunnel = await asyncio.to_thread(
+                        self._dig_repo.get_tunnel, discord_id, guild_id
+                    )
                     if tunnel is None:
                         continue
                     last_dig_at = tunnel.get("last_dig_at") if isinstance(tunnel, dict) else getattr(tunnel, "last_dig_at", None)

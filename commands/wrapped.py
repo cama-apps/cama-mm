@@ -512,9 +512,12 @@ class WrappedCog(commands.Cog):
 
             avatar_cache = await _prefetch_avatars(interaction.guild, avatar_ids)
 
+            hero_names = await asyncio.to_thread(lambda: self.hero_names)
+
             # Build unified slide list
             year_label = server_wrapped.year_label
-            slides = _build_slides(
+            slides = await asyncio.to_thread(
+                _build_slides,
                 server_wrapped=server_wrapped,
                 personal_summary=personal_summary,
                 records_wrapped=records_wrapped,
@@ -524,7 +527,7 @@ class WrappedCog(commands.Cog):
                 role_breakdown=role_breakdown,
                 gamba_data=gamba_data,
                 rating_history=rating_history,
-                hero_names=self.hero_names,
+                hero_names=hero_names,
                 target_username=target_user.display_name,
                 target_user_id=target_user.id,
                 year_label=year_label,

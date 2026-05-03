@@ -8,6 +8,7 @@ The land is chosen automatically the first time /mana is run each day.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import TYPE_CHECKING
 
@@ -39,6 +40,7 @@ PAGE_SIZE = 12  # players per page on the guild board
 # Paginated guild board view
 # ---------------------------------------------------------------------------
 
+
 class ManaAllView(discord.ui.View):
     """Paginated view for the guild mana board."""
 
@@ -68,6 +70,7 @@ class ManaAllView(discord.ui.View):
 # ---------------------------------------------------------------------------
 # Command cog
 # ---------------------------------------------------------------------------
+
 
 class ManaCommands(commands.Cog):
     def __init__(self, bot: commands.Bot):
@@ -102,8 +105,12 @@ class ManaCommands(commands.Cog):
                     if any("ash" in role.name.lower() for role in member.roles):
                         ash_fan_ids.add(member.id)
 
-            mana_service.assign_all_daily_mana(guild_id, ash_fan_ids=ash_fan_ids)
-            rows = mana_service.mana_repo.get_all_mana(guild_id)
+            await asyncio.to_thread(
+                mana_service.assign_all_daily_mana,
+                guild_id,
+                ash_fan_ids=ash_fan_ids,
+            )
+            rows = await asyncio.to_thread(mana_service.mana_repo.get_all_mana, guild_id)
 
             # Build display-name lookup from guild cache
             member_lookup: dict[int, str] = {}
@@ -123,18 +130,27 @@ class ManaCommands(commands.Cog):
         target = user or interaction.user
         is_self = target.id == interaction.user.id
 
-        if is_self and not mana_service.has_assigned_today(target.id, guild_id):
+        if is_self and not await asyncio.to_thread(
+            mana_service.has_assigned_today,
+            target.id,
+            guild_id,
+        ):
             is_ash_fan = (
                 any("ash" in role.name.lower() for role in interaction.user.roles)
                 if interaction.guild
                 else False
             )
-            result = mana_service.assign_daily_mana(target.id, guild_id, is_ash_fan=is_ash_fan)
+            result = await asyncio.to_thread(
+                mana_service.assign_daily_mana,
+                target.id,
+                guild_id,
+                is_ash_fan=is_ash_fan,
+            )
             embed = _build_single_embed(target, result)
             await safe_followup(interaction, embed=embed)
             return
 
-        current = mana_service.get_current_mana(target.id, guild_id)
+        current = await asyncio.to_thread(mana_service.get_current_mana, target.id, guild_id)
         if current:
             embed = _build_single_embed(target, current)
         else:
@@ -145,6 +161,7 @@ class ManaCommands(commands.Cog):
 # ---------------------------------------------------------------------------
 # Embed / page builders
 # ---------------------------------------------------------------------------
+
 
 def _build_all_pages(
     rows: list[dict],

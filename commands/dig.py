@@ -3128,7 +3128,7 @@ class DigCommands(commands.Cog):
             item_file = None
             try:
                 from utils.dig_assets import get_item_art
-                item_file = get_item_art(item)
+                item_file = await asyncio.to_thread(get_item_art, item)
                 if item_file:
                     use_embed.set_thumbnail(url=f"attachment://{item_file.filename}")
             except Exception:
@@ -3354,7 +3354,7 @@ class DigCommands(commands.Cog):
         item_file = None
         try:
             from utils.dig_assets import get_item_art
-            item_file = get_item_art(item)
+            item_file = await asyncio.to_thread(get_item_art, item)
             if item_file:
                 buy_embed.set_thumbnail(url=f"attachment://{item_file.filename}")
         except Exception:
@@ -3826,7 +3826,7 @@ class DigCommands(commands.Cog):
                 self.dig_service.dig_repo.get_tunnel, interaction.user.id, guild_id
             )
             tier_idx = dict(tunnel_info).get("pickaxe_tier", 0) if tunnel_info else 0
-            inv_pickaxe_file = get_pickaxe_art(tier_idx)
+            inv_pickaxe_file = await asyncio.to_thread(get_pickaxe_art, tier_idx)
             if inv_pickaxe_file:
                 embed.set_thumbnail(url=f"attachment://{inv_pickaxe_file.filename}")
         except Exception:

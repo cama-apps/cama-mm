@@ -42,6 +42,69 @@ def get_all_python_files(directory: Path) -> list[Path]:
     return list(directory.rglob("*.py"))
 
 
+def _attr_chain(node: ast.AST) -> list[str] | None:
+    """Return dotted-name parts for a call target, if it is attribute/name based."""
+    parts: list[str] = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if isinstance(node, ast.Name):
+        parts.append(node.id)
+    elif isinstance(node, ast.Call):
+        parts.append("<call>")
+    else:
+        return None
+    return list(reversed(parts))
+
+
+def _is_asyncio_to_thread(call: ast.Call) -> bool:
+    return _attr_chain(call.func) in (["asyncio", "to_thread"], ["to_thread"])
+
+
+class _AsyncCallScanner(ast.NodeVisitor):
+    """Scan async functions while ignoring nested sync helpers/lambdas."""
+
+    def __init__(
+        self,
+        file_path: Path,
+        *,
+        reason_for_call,
+    ):
+        self.file_path = file_path
+        self.reason_for_call = reason_for_call
+        self.async_stack: list[str] = []
+        self.parents: list[ast.AST] = []
+        self.findings: list[str] = []
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef):
+        self.async_stack.append(node.name)
+        for stmt in node.body:
+            self.visit(stmt)
+        self.async_stack.pop()
+
+    def visit_FunctionDef(self, node: ast.FunctionDef):
+        return
+
+    def visit_Lambda(self, node: ast.Lambda):
+        return
+
+    def visit_Call(self, node: ast.Call):
+        chain = _attr_chain(node.func)
+        reason = self.reason_for_call(chain)
+        inside_to_thread = any(
+            isinstance(parent, ast.Call) and _is_asyncio_to_thread(parent)
+            for parent in self.parents
+        )
+        if reason and not _is_asyncio_to_thread(node) and not inside_to_thread:
+            call_name = ".".join(chain or [])
+            async_name = self.async_stack[-1] if self.async_stack else "<module>"
+            self.findings.append(f"{self.file_path}:{node.lineno}:{async_name}:{call_name} ({reason})")
+
+        self.parents.append(node)
+        self.generic_visit(node)
+        self.parents.pop()
+
+
 class TestDomainLayerConstraints:
     """Tests for domain layer architecture constraints."""
 
@@ -192,6 +255,234 @@ class TestCommandLayerConstraints:
                 "Commands should use services, not repositories directly. "
                 "Use TYPE_CHECKING guards for type-hint-only imports."
             )
+
+    def test_async_command_paths_offload_blocking_work(self):
+        """Async Discord paths should not run sync service/repo or drawing work inline."""
+        root = get_project_root()
+        paths = get_all_python_files(root / "commands") + [root / "bot.py"]
+
+        service_names = {
+            "ai_service",
+            "balance_history_service",
+            "bankruptcy_service",
+            "betting_service",
+            "dig_service",
+            "disburse_service",
+            "draft_service",
+            "enrichment_service",
+            "flavor_text_service",
+            "gambling_stats_service",
+            "guild_config_service",
+            "lobby_service",
+            "loan_service",
+            "mana_effects_service",
+            "mana_service",
+            "match_service",
+            "opendota_player_service",
+            "package_deal_service",
+            "player_service",
+            "prediction_service",
+            "recalibration_service",
+            "rebellion_service",
+            "reminder_service",
+            "soft_avoid_service",
+            "sql_query_service",
+            "tip_service",
+            "wrapped_service",
+        }
+        repo_like_names = {
+            "bankruptcy_repo",
+            "bet_repo",
+            "draft_state_manager",
+            "lobby_manager",
+            "mana_repo",
+            "match_repo",
+            "pairings_repo",
+            "player_repo",
+            "prediction_repo",
+        }
+        known_blocking_helpers = {
+            "compose_items_used",
+            "compose_shop_grid",
+            "draw_balance_chart",
+            "draw_calibration_curve",
+            "draw_gamba_chart",
+            "draw_hero_grid",
+            "draw_hero_performance_chart",
+            "draw_lane_distribution",
+            "draw_market_fair_history",
+            "draw_matches_table",
+            "draw_prediction_over_time",
+            "draw_rating_comparison_chart",
+            "draw_rating_distribution",
+            "draw_rating_history_chart",
+            "draw_role_graph",
+            "draw_scout_report",
+            "ensure_cached",
+            "get_boss_art",
+            "get_event_art",
+            "get_item_art",
+            "get_pickaxe_art",
+            "get_trivia_image",
+        }
+        known_async_methods = {
+            "generate_data_insight",
+            "generate_event_flavor",
+            "narrate_boss_fight",
+            "narrate_splash",
+            "notify_betting_subscribers",
+            "on_100_bets_milestone",
+            "on_all_in_bet",
+            "on_balance_check",
+            "on_bankruptcy",
+            "on_bet_placed",
+            "on_bet_settled",
+            "on_bomb_pot",
+            "on_captain_symmetry",
+            "on_cooldown_hit",
+            "on_degen_milestone",
+            "on_double_or_nothing",
+            "on_draft_coinflip",
+            "on_first_leverage_bet",
+            "on_gamba_spectator",
+            "on_games_milestone",
+            "on_last_second_bet",
+            "on_leverage_loss",
+            "on_lightning_bolt",
+            "on_lobby_join",
+            "on_loan",
+            "on_match_enriched",
+            "on_match_recorded",
+            "on_prediction_resolved",
+            "on_registration",
+            "on_rivalry_detected",
+            "on_simultaneous_events",
+            "on_soft_avoid",
+            "on_tip",
+            "on_unanimous_wrong",
+            "on_wheel_result",
+            "on_win_streak_record",
+            "query",
+            "reschedule_all",
+            "run_dig",
+        }
+        allowed_pure_leaf_calls = {
+            "_get_balance_history_service",
+            "_get_bankruptcy_service",
+            "_get_gambling_stats_service",
+            "_get_loan_service",
+            "_get_match_repo",
+            "_get_pairings_repo",
+            "_get_player_repo",
+            "_get_prediction_service",
+            "_get_tip_service",
+            "calculate_threshold",
+            "compute_repair_cost",
+            "get_creation_lock",
+            "get_layer",
+            "roll_battle",
+        }
+        allowed_pure_calls = {
+            "self.dig_service._force_event_for.add",
+            "self.disburse_service.METHOD_LABELS.get",
+        }
+
+        def reason_for_call(chain: list[str] | None) -> str | None:
+            if not chain:
+                return None
+            leaf = chain[-1]
+            full = ".".join(chain)
+            if leaf in known_async_methods or leaf in allowed_pure_leaf_calls or full in allowed_pure_calls:
+                return None
+            if leaf in known_blocking_helpers:
+                return "known blocking helper"
+            if any(
+                part in service_names
+                or part in repo_like_names
+                or part.endswith("_repo")
+                or part.endswith("_repository")
+                for part in chain
+            ):
+                return "sync service/repo call"
+            return None
+
+        findings = []
+        for path in paths:
+            try:
+                tree = ast.parse(path.read_text(), filename=str(path))
+            except SyntaxError:
+                continue
+            scanner = _AsyncCallScanner(path.relative_to(root), reason_for_call=reason_for_call)
+            scanner.visit(tree)
+            findings.extend(scanner.findings)
+
+        assert not findings, "Blocking calls in async command paths:\n" + "\n".join(findings)
+
+
+class TestServiceAsyncConstraints:
+    """Tests for async service methods used by command paths."""
+
+    def test_async_service_methods_offload_repository_calls(self):
+        """Async services should not do synchronous repository work on the event loop."""
+        root = get_project_root()
+        services_dir = root / "services"
+
+        repo_like_names = {
+            "ai_query_repo",
+            "bankruptcy_repo",
+            "bet_repo",
+            "dig_repo",
+            "guild_config_repo",
+            "lobby_repo",
+            "loan_repo",
+            "match_repo",
+            "notification_repo",
+            "player_repo",
+            "prediction_repo",
+        }
+        service_like_names = {
+            "bankruptcy_service",
+            "dig_service",
+            "gambling_stats_service",
+            "loan_service",
+            "match_service",
+            "player_service",
+        }
+        known_async_methods = {
+            "complete",
+            "generate_flavor",
+            "generate_sql",
+            "narrate_boss_fight",
+            "narrate_splash",
+            "notify_betting_subscribers",
+            "reschedule_all",
+            "run_dig",
+        }
+
+        def reason_for_call(chain: list[str] | None) -> str | None:
+            if not chain or chain[-1] in known_async_methods:
+                return None
+            if any(
+                part in repo_like_names
+                or part in service_like_names
+                or part.endswith("_repo")
+                or part.endswith("_repository")
+                for part in chain
+            ):
+                return "sync service/repo call"
+            return None
+
+        findings = []
+        for path in get_all_python_files(services_dir):
+            try:
+                tree = ast.parse(path.read_text(), filename=str(path))
+            except SyntaxError:
+                continue
+            scanner = _AsyncCallScanner(path.relative_to(root), reason_for_call=reason_for_call)
+            scanner.visit(tree)
+            findings.extend(scanner.findings)
+
+        assert not findings, "Blocking calls in async service methods:\n" + "\n".join(findings)
 
 
 class TestRepositoryLayerConstraints:

@@ -293,7 +293,7 @@ class ProfileCommands(commands.Cog):
             ), None
 
         try:
-            stats = player_service.get_stats(target_discord_id, guild_id)
+            stats = await asyncio.to_thread(player_service.get_stats, target_discord_id, guild_id)
         except ValueError:
             return discord.Embed(
                 title="Not Registered",
@@ -306,7 +306,7 @@ class ProfileCommands(commands.Cog):
         # Check for bankruptcy penalty
         penalty_games = 0
         if bankruptcy_service:
-            state = bankruptcy_service.get_state(target_discord_id, guild_id)
+            state = await asyncio.to_thread(bankruptcy_service.get_state, target_discord_id, guild_id)
             penalty_games = state.penalty_games_remaining
 
         # Title with tombstone if penalized
@@ -367,7 +367,9 @@ class ProfileCommands(commands.Cog):
             try:
                 from utils.hero_lookup import get_hero_name
 
-                hero_stats = match_repo.get_player_hero_stats(target_discord_id, guild_id)
+                hero_stats = await asyncio.to_thread(
+                    match_repo.get_player_hero_stats, target_discord_id, guild_id
+                )
                 if isinstance(hero_stats, dict):
                     hero_lines = []
                     if hero_stats.get("last_hero_id"):
@@ -413,7 +415,7 @@ class ProfileCommands(commands.Cog):
                 title="Error", description="Player repository unavailable", color=COLOR_RED
             ), None
 
-        player = player_repo.get_by_id(target_discord_id, guild_id)
+        player = await asyncio.to_thread(player_repo.get_by_id, target_discord_id, guild_id)
         if not player:
             return discord.Embed(
                 title="Not Registered",
@@ -424,11 +426,18 @@ class ProfileCommands(commands.Cog):
         # Get rating history — full for chart, recent slice for analytics
         full_history = []
         if match_repo and hasattr(match_repo, "get_player_rating_history_detailed"):
-            full_history = match_repo.get_player_rating_history_detailed(target_discord_id, guild_id, limit=999)
+            full_history = await asyncio.to_thread(
+                functools.partial(
+                    match_repo.get_player_rating_history_detailed,
+                    target_discord_id,
+                    guild_id,
+                    limit=999,
+                )
+            )
         history = full_history[:50]
 
         # Calculate percentile
-        all_players = player_repo.get_all(guild_id)
+        all_players = await asyncio.to_thread(player_repo.get_all, guild_id)
         rated_players = [p for p in all_players if p.glicko_rating is not None]
         percentile = None
         if player.glicko_rating and rated_players:
@@ -550,7 +559,7 @@ class ProfileCommands(commands.Cog):
                 # Get OpenSkill expected outcome
                 os_prob = None
                 if match_id and match_repo:
-                    os_ratings = match_repo.get_os_ratings_for_match(match_id)
+                    os_ratings = await asyncio.to_thread(match_repo.get_os_ratings_for_match, match_id)
                     if os_ratings["team1"] and os_ratings["team2"]:
                         team_num = h.get("team_number")
                         if team_num == 1:
@@ -651,7 +660,7 @@ class ProfileCommands(commands.Cog):
                 title="Error", description="Gambling stats service unavailable", color=COLOR_RED
             ), None
 
-        stats = gambling_stats_service.get_player_stats(target_discord_id, guild_id)
+        stats = await asyncio.to_thread(gambling_stats_service.get_player_stats, target_discord_id, guild_id)
 
         if not stats:
             return discord.Embed(
@@ -681,7 +690,11 @@ class ProfileCommands(commands.Cog):
         roi_str = f"+{stats.roi:.1%}" if stats.roi >= 0 else f"{stats.roi:.1%}"
 
         # Get current balance
-        player = player_service.get_player(target_discord_id, guild_id) if player_service else None
+        player = (
+            await asyncio.to_thread(player_service.get_player, target_discord_id, guild_id)
+            if player_service
+            else None
+        )
         balance = player.jopacoin_balance if player else 0
 
         embed.add_field(
@@ -785,7 +798,9 @@ class ProfileCommands(commands.Cog):
             )
 
         # Betting Impact section - how others bet on this player
-        impact_stats = gambling_stats_service.get_betting_impact_stats(target_discord_id, guild_id)
+        impact_stats = await asyncio.to_thread(
+            gambling_stats_service.get_betting_impact_stats, target_discord_id, guild_id
+        )
         if impact_stats:
             embed.add_field(
                 name="\u200b",  # Separator
@@ -873,7 +888,9 @@ class ProfileCommands(commands.Cog):
         # Generate P&L chart
         chart_file = None
         try:
-            pnl_series = gambling_stats_service.get_cumulative_pnl_series(target_discord_id, guild_id)
+            pnl_series = await asyncio.to_thread(
+                gambling_stats_service.get_cumulative_pnl_series, target_discord_id, guild_id
+            )
             if pnl_series and len(pnl_series) >= 2:
                 degen = stats.degen_score
                 chart_bytes = await asyncio.to_thread(
@@ -913,7 +930,9 @@ class ProfileCommands(commands.Cog):
             ), None
 
         # Get prediction stats
-        stats = prediction_service.get_user_prediction_stats(target_discord_id, guild_id)
+        stats = await asyncio.to_thread(
+            prediction_service.get_user_prediction_stats, target_discord_id, guild_id
+        )
 
         if not stats:
             return discord.Embed(
@@ -963,12 +982,14 @@ class ProfileCommands(commands.Cog):
         )
 
         # Active positions
-        positions = prediction_service.get_user_active_positions(target_discord_id, guild_id)
+        positions = await asyncio.to_thread(
+            prediction_service.get_user_active_positions, target_discord_id, guild_id
+        )
         if positions:
             position_lines = []
             for pos in positions[:3]:
                 emoji = "✅" if pos["position"] == "yes" else "❌"
-                odds_info = prediction_service.get_odds(pos["prediction_id"])
+                odds_info = await asyncio.to_thread(prediction_service.get_odds, pos["prediction_id"])
                 current_odds = odds_info["odds"].get(pos["position"], 0)
                 pool = odds_info["total_pool"]
                 yes_total = odds_info["yes_total"]
@@ -1000,7 +1021,9 @@ class ProfileCommands(commands.Cog):
             )
 
         # Recent resolved
-        resolved = prediction_service.get_user_resolved_positions(target_discord_id, guild_id)
+        resolved = await asyncio.to_thread(
+            prediction_service.get_user_resolved_positions, target_discord_id, guild_id
+        )
         if resolved:
             recent_lines = []
             for pos in resolved[:3]:
@@ -1042,7 +1065,7 @@ class ProfileCommands(commands.Cog):
                 title="Error", description="Player repository unavailable", color=COLOR_RED
             ), []
 
-        player = player_repo.get_by_id(target_discord_id, guild_id)
+        player = await asyncio.to_thread(player_repo.get_by_id, target_discord_id, guild_id)
         if not player:
             return discord.Embed(
                 title="Not Registered",
@@ -1051,7 +1074,7 @@ class ProfileCommands(commands.Cog):
             ), []
 
         # Get steam_id from repository (not a Player attribute)
-        steam_id = player_repo.get_steam_id(target_discord_id)
+        steam_id = await asyncio.to_thread(player_repo.get_steam_id, target_discord_id)
         if not steam_id:
             return discord.Embed(
                 title=f"Profile: {target_user.display_name} > Dota Stats",
@@ -1076,7 +1099,13 @@ class ProfileCommands(commands.Cog):
         # Get role distribution for chart - wrap in try/except for API errors
         role_dist = None
         try:
-            role_dist = opendota_service.get_hero_role_distribution(target_discord_id, match_limit=50)
+            role_dist = await asyncio.to_thread(
+                functools.partial(
+                    opendota_service.get_hero_role_distribution,
+                    target_discord_id,
+                    match_limit=50,
+                )
+            )
         except Exception as e:
             logger.warning(f"Failed to fetch role distribution from OpenDota: {e}")
 
@@ -1094,7 +1123,9 @@ class ProfileCommands(commands.Cog):
         # Get full stats for additional info - wrap in try/except for API errors
         full_stats = None
         try:
-            full_stats = opendota_service.get_full_stats(target_discord_id, match_limit=50)
+            full_stats = await asyncio.to_thread(
+                functools.partial(opendota_service.get_full_stats, target_discord_id, match_limit=50)
+            )
         except Exception as e:
             logger.warning(f"Failed to fetch full stats from OpenDota: {e}")
 
@@ -1187,7 +1218,7 @@ class ProfileCommands(commands.Cog):
                 title="Error", description="Pairings data unavailable", color=COLOR_RED
             ), None
 
-        player = player_repo.get_by_id(target_discord_id, guild_id)
+        player = await asyncio.to_thread(player_repo.get_by_id, target_discord_id, guild_id)
         if not player:
             return discord.Embed(
                 title="Not Registered",
@@ -1203,21 +1234,27 @@ class ProfileCommands(commands.Cog):
         min_games = 3
         limit = 5
 
-        def get_player_mention(discord_id: int) -> str:
+        async def get_player_mention(discord_id: int) -> str:
             """Get a mention string for a player."""
             if discord_id and discord_id > 0:
                 return f"<@{discord_id}>"
-            p = player_repo.get_by_id(discord_id, guild_id)
+            p = await asyncio.to_thread(player_repo.get_by_id, discord_id, guild_id)
             return p.name if p else f"Unknown ({discord_id})"
 
         # Best Teammates (highest win rate with)
-        best_teammates = pairings_repo.get_best_teammates(
-            target_discord_id, guild_id=guild_id, min_games=min_games, limit=limit
+        best_teammates = await asyncio.to_thread(
+            functools.partial(
+                pairings_repo.get_best_teammates,
+                target_discord_id,
+                guild_id=guild_id,
+                min_games=min_games,
+                limit=limit,
+            )
         )
         if best_teammates:
             lines = []
             for tm in best_teammates:
-                name = get_player_mention(tm["teammate_id"])
+                name = await get_player_mention(tm["teammate_id"])
                 wins = tm["wins_together"]
                 games = tm["games_together"]
                 rate = tm["win_rate"] * 100
@@ -1231,13 +1268,19 @@ class ProfileCommands(commands.Cog):
             embed.add_field(name="🏆 Best Teammates", value="No data yet", inline=True)
 
         # Worst Teammates (lowest win rate with)
-        worst_teammates = pairings_repo.get_worst_teammates(
-            target_discord_id, guild_id=guild_id, min_games=min_games, limit=limit
+        worst_teammates = await asyncio.to_thread(
+            functools.partial(
+                pairings_repo.get_worst_teammates,
+                target_discord_id,
+                guild_id=guild_id,
+                min_games=min_games,
+                limit=limit,
+            )
         )
         if worst_teammates:
             lines = []
             for tm in worst_teammates:
-                name = get_player_mention(tm["teammate_id"])
+                name = await get_player_mention(tm["teammate_id"])
                 wins = tm["wins_together"]
                 games = tm["games_together"]
                 rate = tm["win_rate"] * 100
@@ -1254,13 +1297,19 @@ class ProfileCommands(commands.Cog):
         embed.add_field(name="\u200b", value="\u200b", inline=True)
 
         # Dominates (best matchups against)
-        best_matchups = pairings_repo.get_best_matchups(
-            target_discord_id, guild_id=guild_id, min_games=min_games, limit=limit
+        best_matchups = await asyncio.to_thread(
+            functools.partial(
+                pairings_repo.get_best_matchups,
+                target_discord_id,
+                guild_id=guild_id,
+                min_games=min_games,
+                limit=limit,
+            )
         )
         if best_matchups:
             lines = []
             for m in best_matchups:
-                name = get_player_mention(m["opponent_id"])
+                name = await get_player_mention(m["opponent_id"])
                 wins = m["wins_against"]
                 games = m["games_against"]
                 rate = m["win_rate"] * 100
@@ -1274,13 +1323,19 @@ class ProfileCommands(commands.Cog):
             embed.add_field(name="😈 Dominates", value="No data yet", inline=True)
 
         # Struggles Against (worst matchups)
-        worst_matchups = pairings_repo.get_worst_matchups(
-            target_discord_id, guild_id=guild_id, min_games=min_games, limit=limit
+        worst_matchups = await asyncio.to_thread(
+            functools.partial(
+                pairings_repo.get_worst_matchups,
+                target_discord_id,
+                guild_id=guild_id,
+                min_games=min_games,
+                limit=limit,
+            )
         )
         if worst_matchups:
             lines = []
             for m in worst_matchups:
-                name = get_player_mention(m["opponent_id"])
+                name = await get_player_mention(m["opponent_id"])
                 wins = m["wins_against"]
                 games = m["games_against"]
                 rate = m["win_rate"] * 100
@@ -1297,13 +1352,19 @@ class ProfileCommands(commands.Cog):
         embed.add_field(name="\u200b", value="\u200b", inline=True)
 
         # Most Played With
-        most_played_with = pairings_repo.get_most_played_with(
-            target_discord_id, guild_id=guild_id, min_games=min_games, limit=limit
+        most_played_with = await asyncio.to_thread(
+            functools.partial(
+                pairings_repo.get_most_played_with,
+                target_discord_id,
+                guild_id=guild_id,
+                min_games=min_games,
+                limit=limit,
+            )
         )
         if most_played_with:
             lines = []
             for tm in most_played_with:
-                name = get_player_mention(tm["teammate_id"])
+                name = await get_player_mention(tm["teammate_id"])
                 wins = tm["wins_together"]
                 games = tm["games_together"]
                 rate = tm["win_rate"] * 100
@@ -1317,13 +1378,19 @@ class ProfileCommands(commands.Cog):
             embed.add_field(name="👥 Most Played With", value="No data yet", inline=True)
 
         # Most Played Against
-        most_played_against = pairings_repo.get_most_played_against(
-            target_discord_id, guild_id=guild_id, min_games=min_games, limit=limit
+        most_played_against = await asyncio.to_thread(
+            functools.partial(
+                pairings_repo.get_most_played_against,
+                target_discord_id,
+                guild_id=guild_id,
+                min_games=min_games,
+                limit=limit,
+            )
         )
         if most_played_against:
             lines = []
             for m in most_played_against:
-                name = get_player_mention(m["opponent_id"])
+                name = await get_player_mention(m["opponent_id"])
                 wins = m["wins_against"]
                 games = m["games_against"]
                 rate = m["win_rate"] * 100
@@ -1340,13 +1407,19 @@ class ProfileCommands(commands.Cog):
         embed.add_field(name="\u200b", value="\u200b", inline=True)
 
         # Evenly Matched (teammates with ~50% win rate)
-        even_teammates = pairings_repo.get_evenly_matched_teammates(
-            target_discord_id, guild_id=guild_id, min_games=min_games, limit=limit
+        even_teammates = await asyncio.to_thread(
+            functools.partial(
+                pairings_repo.get_evenly_matched_teammates,
+                target_discord_id,
+                guild_id=guild_id,
+                min_games=min_games,
+                limit=limit,
+            )
         )
         if even_teammates:
             lines = []
             for tm in even_teammates:
-                name = get_player_mention(tm["teammate_id"])
+                name = await get_player_mention(tm["teammate_id"])
                 wins = tm["wins_together"]
                 games = tm["games_together"]
                 lines.append(f"{name} ({wins}W/{games - wins}L)")
@@ -1359,13 +1432,19 @@ class ProfileCommands(commands.Cog):
             embed.add_field(name="⚖️ Even Teammates", value="No data yet", inline=True)
 
         # Evenly Matched Opponents
-        even_opponents = pairings_repo.get_evenly_matched_opponents(
-            target_discord_id, guild_id=guild_id, min_games=min_games, limit=limit
+        even_opponents = await asyncio.to_thread(
+            functools.partial(
+                pairings_repo.get_evenly_matched_opponents,
+                target_discord_id,
+                guild_id=guild_id,
+                min_games=min_games,
+                limit=limit,
+            )
         )
         if even_opponents:
             lines = []
             for m in even_opponents:
-                name = get_player_mention(m["opponent_id"])
+                name = await get_player_mention(m["opponent_id"])
                 wins = m["wins_against"]
                 games = m["games_against"]
                 lines.append(f"{name} ({wins}W/{games - wins}L)")
@@ -1381,7 +1460,14 @@ class ProfileCommands(commands.Cog):
         embed.add_field(name="\u200b", value="\u200b", inline=True)
 
         # Get totals for footer
-        counts = pairings_repo.get_pairing_counts(target_discord_id, guild_id=guild_id, min_games=min_games)
+        counts = await asyncio.to_thread(
+            functools.partial(
+                pairings_repo.get_pairing_counts,
+                target_discord_id,
+                guild_id=guild_id,
+                min_games=min_games,
+            )
+        )
         footer_parts = [f"Min {min_games} games"]
         if counts["unique_teammates"] > 0 or counts["unique_opponents"] > 0:
             footer_parts.append(
@@ -1412,7 +1498,7 @@ class ProfileCommands(commands.Cog):
                 title="Error", description="Repository unavailable", color=COLOR_RED
             ), []
 
-        player = player_repo.get_by_id(target_discord_id, guild_id)
+        player = await asyncio.to_thread(player_repo.get_by_id, target_discord_id, guild_id)
         if not player:
             return discord.Embed(
                 title="Not Registered",
@@ -1421,7 +1507,9 @@ class ProfileCommands(commands.Cog):
             ), []
 
         # Get enriched match count
-        enriched_count = match_repo.get_player_enriched_match_count(target_discord_id, guild_id)
+        enriched_count = await asyncio.to_thread(
+            match_repo.get_player_enriched_match_count, target_discord_id, guild_id
+        )
 
         if enriched_count == 0:
             return discord.Embed(
@@ -1442,7 +1530,14 @@ class ProfileCommands(commands.Cog):
         files = []
 
         # Get hero stats for chart
-        hero_stats = match_repo.get_player_hero_detailed_stats(target_discord_id, guild_id, limit=20)
+        hero_stats = await asyncio.to_thread(
+            functools.partial(
+                match_repo.get_player_hero_detailed_stats,
+                target_discord_id,
+                guild_id,
+                limit=20,
+            )
+        )
 
         # Generate hero performance chart
         if hero_stats:
@@ -1455,7 +1550,9 @@ class ProfileCommands(commands.Cog):
                 logger.debug(f"Could not generate hero chart: {e}")
 
         # Get overall stats for header
-        overall = match_repo.get_player_overall_hero_stats(target_discord_id, guild_id)
+        overall = await asyncio.to_thread(
+            match_repo.get_player_overall_hero_stats, target_discord_id, guild_id
+        )
         avg_kda = f"{overall['avg_kills']:.1f}/{overall['avg_deaths']:.1f}/{overall['avg_assists']:.1f}"
         embed.add_field(
             name="Overview",
@@ -1506,7 +1603,7 @@ class ProfileCommands(commands.Cog):
                 )
 
         # Lane performance
-        lane_stats = match_repo.get_player_lane_stats(target_discord_id, guild_id)
+        lane_stats = await asyncio.to_thread(match_repo.get_player_lane_stats, target_discord_id, guild_id)
         if lane_stats:
             lane_names = {1: "Safe", 2: "Mid", 3: "Off", 4: "Jungle"}
             lane_lines = []
@@ -1526,7 +1623,9 @@ class ProfileCommands(commands.Cog):
             )
 
         # Ward stats
-        ward_stats = match_repo.get_player_ward_stats_by_lane(target_discord_id, guild_id)
+        ward_stats = await asyncio.to_thread(
+            match_repo.get_player_ward_stats_by_lane, target_discord_id, guild_id
+        )
         if ward_stats and overall["total_obs"] + overall["total_sens"] > 0:
             ward_lines = [f"**Totals:** {overall['total_obs']} obs | {overall['total_sens']} sens"]
             # Aggregate by role type (support lanes vs core lanes)
@@ -1559,7 +1658,9 @@ class ProfileCommands(commands.Cog):
         embed.add_field(name="\u200b", value="━━━ **Hero Pairwise Stats** ━━━", inline=False)
 
         # Nemesis heroes (lose to)
-        nemesis = match_repo.get_player_nemesis_heroes(target_discord_id, guild_id, min_games=2)
+        nemesis = await asyncio.to_thread(
+            functools.partial(match_repo.get_player_nemesis_heroes, target_discord_id, guild_id, min_games=2)
+        )
         if nemesis:
             # Filter to actually high loss rate (>50%)
             nemesis_bad = [n for n in nemesis if n["loss_rate"] > 0.5][:3]
@@ -1575,7 +1676,9 @@ class ProfileCommands(commands.Cog):
                 )
 
         # Easy prey (beat)
-        easy = match_repo.get_player_easiest_opponents(target_discord_id, guild_id, min_games=2)
+        easy = await asyncio.to_thread(
+            functools.partial(match_repo.get_player_easiest_opponents, target_discord_id, guild_id, min_games=2)
+        )
         if easy:
             # Filter to actually high win rate (>50%)
             easy_good = [e for e in easy if e["win_rate"] > 0.5][:3]
@@ -1591,7 +1694,14 @@ class ProfileCommands(commands.Cog):
                 )
 
         # Best ally heroes
-        synergies = match_repo.get_player_best_hero_synergies(target_discord_id, guild_id, min_games=2)
+        synergies = await asyncio.to_thread(
+            functools.partial(
+                match_repo.get_player_best_hero_synergies,
+                target_discord_id,
+                guild_id,
+                min_games=2,
+            )
+        )
         if synergies:
             # Filter to high win rate
             synergies_good = [s for s in synergies if s["win_rate"] > 0.5][:3]
@@ -1608,7 +1718,14 @@ class ProfileCommands(commands.Cog):
                 )
 
         # Hero vs opponent hero matchups
-        hero_vs_hero = match_repo.get_player_hero_vs_opponent_heroes(target_discord_id, guild_id, min_games=2)
+        hero_vs_hero = await asyncio.to_thread(
+            functools.partial(
+                match_repo.get_player_hero_vs_opponent_heroes,
+                target_discord_id,
+                guild_id,
+                min_games=2,
+            )
+        )
         if hero_vs_hero:
             # Group by player's hero and find best/worst matchups
             by_my_hero: dict[int, list] = {}
@@ -1645,7 +1762,9 @@ class ProfileCommands(commands.Cog):
                 )
 
         # Best heroes by lane
-        hero_lane = match_repo.get_player_hero_lane_performance(target_discord_id, guild_id)
+        hero_lane = await asyncio.to_thread(
+            match_repo.get_player_hero_lane_performance, target_discord_id, guild_id
+        )
         if hero_lane:
             # Group by lane and find best hero for each
             by_lane: dict[int, list] = {}
@@ -1729,7 +1848,7 @@ class ProfileCommands(commands.Cog):
         # Check if player is registered
         player_repo = self._get_player_repo()
         if player_repo:
-            player = player_repo.get_by_id(target_discord_id, guild_id)
+            player = await asyncio.to_thread(player_repo.get_by_id, target_discord_id, guild_id)
             if not player:
                 await safe_followup(
                     interaction,
