@@ -297,7 +297,7 @@ class PaidDigView(discord.ui.View):
             return
         self.value = True
         self.stop()
-        await interaction.response.defer()
+        await safe_defer(interaction)
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.grey)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -306,7 +306,7 @@ class PaidDigView(discord.ui.View):
             return
         self.value = False
         self.stop()
-        await interaction.response.defer()
+        await safe_defer(interaction)
 
 
 class ConfirmSabotageView(discord.ui.View):
@@ -340,7 +340,7 @@ class ConfirmSabotageView(discord.ui.View):
             return
         self.value = True
         self.stop()
-        await interaction.response.defer()
+        await safe_defer(interaction)
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.grey)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -349,7 +349,7 @@ class ConfirmSabotageView(discord.ui.View):
             return
         self.value = False
         self.stop()
-        await interaction.response.defer()
+        await safe_defer(interaction)
 
 
 class BossWagerModal(discord.ui.Modal):
@@ -401,7 +401,7 @@ class BossWagerModal(discord.ui.Modal):
             )
             return
 
-        await interaction.response.defer()
+        await safe_defer(interaction)
         try:
             self.result = _wrap(await asyncio.to_thread(
                 self.dig_service.start_boss_duel,
@@ -797,11 +797,12 @@ def _build_boss_fight_result_embed(*, result, risk_tier: str, amount: int) -> di
 class BossDuelView(discord.ui.View):
     """Interactive view for a paused boss duel.
 
-    Rendered when ``start_boss_duel`` (or ``resume_boss_duel``) returns a
-    ``pending_prompt``. Creates one button per option in the mechanic's
-    three-reactive-option prompt. Click rolls the option's distribution and
-    resumes the duel. Timeout (120s) auto-picks the mechanic's designated
-    safe option.
+    Rendered whenever ``start_boss_duel`` or ``resume_boss_duel`` returns a
+    ``pending_prompt`` — the initial prompt and any continuation prompts both
+    re-instantiate this view via ``_render_resolution``. Creates one button
+    per option in the mechanic's three-reactive-option prompt. Click rolls the
+    option's distribution and resumes the duel. Timeout (120s) auto-picks the
+    mechanic's designated safe option.
     """
 
     def __init__(
@@ -849,7 +850,7 @@ class BossDuelView(discord.ui.View):
                     "Only the duelist can choose.", ephemeral=True,
                 )
                 return
-            await interaction.response.defer()
+            await safe_defer(interaction)
             await self._submit(option_idx)
         return callback
 
@@ -1003,7 +1004,7 @@ class EventEncounterView(discord.ui.View):
         if interaction.user.id != self.user_id:
             await interaction.response.send_message("This isn't your event.", ephemeral=True)
             return
-        await interaction.response.defer()
+        await safe_defer(interaction)
         result = await self._resolve("desperate")
         await self._send_result(interaction, result)
         self.stop()
@@ -1013,7 +1014,7 @@ class EventEncounterView(discord.ui.View):
         if interaction.user.id != self.user_id:
             await interaction.response.send_message("This isn't your event.", ephemeral=True)
             return
-        await interaction.response.defer()
+        await safe_defer(interaction)
         result = await self._resolve("safe")
         await self._send_result(interaction, result)
         self.stop()
@@ -1023,7 +1024,7 @@ class EventEncounterView(discord.ui.View):
         if interaction.user.id != self.user_id:
             await interaction.response.send_message("This isn't your event.", ephemeral=True)
             return
-        await interaction.response.defer()
+        await safe_defer(interaction)
         result = await self._resolve("risky")
         await self._send_result(interaction, result)
         self.stop()
@@ -1165,7 +1166,7 @@ class BoonSelectionView(discord.ui.View):
             if interaction.user.id != self.user_id:
                 await interaction.response.send_message("This isn't your event.", ephemeral=True)
                 return
-            await interaction.response.defer()
+            await safe_defer(interaction)
             event_id = self.event_data.get("id", "") if isinstance(self.event_data, dict) else ""
             try:
                 result = _wrap(await asyncio.to_thread(
@@ -1224,8 +1225,20 @@ class BossEncounterView(discord.ui.View):
         self.boss_info = boss_info
         self.has_lantern = has_lantern
         self.dig_flavor_service = dig_flavor_service
+        self.message: discord.Message | None = None
         if not has_lantern:
             self.scout.disabled = True
+
+    async def on_timeout(self):
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                child.disabled = True
+        if self.message is None:
+            return
+        try:
+            await self.message.edit(view=self)
+        except (discord.NotFound, discord.HTTPException) as exc:
+            logger.warning("Boss encounter timeout edit failed: %s", exc)
 
     @discord.ui.button(label="Fight", style=discord.ButtonStyle.danger, emoji="\u2694\ufe0f")
     async def fight(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1242,24 +1255,27 @@ class BossEncounterView(discord.ui.View):
         if interaction.user.id != self.user_id:
             await interaction.response.send_message("Only the tunnel owner can retreat.", ephemeral=True)
             return
-        await interaction.response.defer()
+        await safe_defer(interaction)
         try:
             result = _wrap(await asyncio.to_thread(
                 self.dig_service.retreat_boss, self.user_id, self.guild_id
             ))
             if not getattr(result, "success", True):
-                await interaction.followup.send(
-                    getattr(result, "error", "Retreat failed."), ephemeral=True
+                await safe_followup(
+                    interaction,
+                    content=getattr(result, "error", "Retreat failed."),
+                    ephemeral=True,
                 )
             else:
                 loss = getattr(result, "loss", 0)
                 new_depth = getattr(result, "new_depth", 0)
-                await interaction.followup.send(
-                    f"You retreated safely, losing {loss} blocks. Now at depth {new_depth}."
+                await safe_followup(
+                    interaction,
+                    content=f"You retreated safely, losing {loss} blocks. Now at depth {new_depth}.",
                 )
         except Exception as e:
             logger.error("Boss retreat error: %s", e, exc_info=True)
-            await interaction.followup.send("Retreat failed.", ephemeral=True)
+            await safe_followup(interaction, content="Retreat failed.", ephemeral=True)
         self.stop()
 
     @discord.ui.button(label="Scout", style=discord.ButtonStyle.primary, emoji="\U0001f526")
@@ -1267,14 +1283,16 @@ class BossEncounterView(discord.ui.View):
         if interaction.user.id != self.user_id:
             await interaction.response.send_message("Only the tunnel owner can scout.", ephemeral=True)
             return
-        await interaction.response.defer()
+        await safe_defer(interaction)
         try:
             info = _wrap(await asyncio.to_thread(
                 self.dig_service.scout_boss, self.user_id, self.guild_id
             ))
             if not getattr(info, "success", True):
-                await interaction.followup.send(
-                    getattr(info, "error", "Scouting failed."), ephemeral=True
+                await safe_followup(
+                    interaction,
+                    content=getattr(info, "error", "Scouting failed."),
+                    ephemeral=True,
                 )
                 return
             boss_name = getattr(info, "boss_name", "Unknown Boss")
@@ -1336,17 +1354,17 @@ class BossEncounterView(discord.ui.View):
                 description="\n".join(lines),
                 color=0xFFD700,
             )
-            await interaction.followup.send(embed=embed, ephemeral=True)
+            await safe_followup(interaction, embed=embed, ephemeral=True)
         except Exception as e:
             logger.error("Boss scout error: %s", e, exc_info=True)
-            await interaction.followup.send("Scouting failed.", ephemeral=True)
+            await safe_followup(interaction, content="Scouting failed.", ephemeral=True)
 
     @discord.ui.button(label="Cheer", style=discord.ButtonStyle.success, emoji="\U0001f4e3")
     async def cheer(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id == self.user_id:
             await interaction.response.send_message("You can't cheer for yourself!", ephemeral=True)
             return
-        await interaction.response.defer()
+        await safe_defer(interaction)
         try:
             result = _wrap(await asyncio.to_thread(
                 self.dig_service.cheer_boss,
@@ -1356,17 +1374,20 @@ class BossEncounterView(discord.ui.View):
             ))
             if not getattr(result, "success", True):
                 error_msg = getattr(result, "error", "Cheer failed.")
-                await interaction.followup.send(error_msg, ephemeral=True)
+                await safe_followup(interaction, content=error_msg, ephemeral=True)
                 return
             boost_pct = int(getattr(result, "total_boost", 0) * 100)
             cheer_count = getattr(result, "cheer_count", 0)
-            await interaction.followup.send(
-                f"{interaction.user.display_name} cheers for the fighter! "
-                f"Boss odds boosted by +{boost_pct}% ({cheer_count}/3 cheers)"
+            await safe_followup(
+                interaction,
+                content=(
+                    f"{interaction.user.display_name} cheers for the fighter! "
+                    f"Boss odds boosted by +{boost_pct}% ({cheer_count}/3 cheers)"
+                ),
             )
         except Exception as e:
             logger.error("Boss cheer error: %s", e, exc_info=True)
-            await interaction.followup.send("Cheer failed.", ephemeral=True)
+            await safe_followup(interaction, content="Cheer failed.", ephemeral=True)
 
 
 class PrestigePerksView(discord.ui.View):
@@ -1398,7 +1419,7 @@ class PrestigePerksView(discord.ui.View):
             if interaction.user.id != self.user_id:
                 await interaction.response.send_message("This isn't your prestige.", ephemeral=True)
                 return
-            await interaction.response.defer()
+            await safe_defer(interaction)
             try:
                 mutation_choice = getattr(self, "_mutation_choice", None)
                 result = _wrap(await asyncio.to_thread(
@@ -1559,7 +1580,7 @@ class MutationSelectionView(discord.ui.View):
             if interaction.user.id != self.user_id:
                 await interaction.response.send_message("This isn't your prestige.", ephemeral=True)
                 return
-            await interaction.response.defer()
+            await safe_defer(interaction)
             # Store the mutation choice on the perk view so it can pass it to prestige()
             self.perks_view._mutation_choice = mut.get("id")
             await interaction.followup.send(embed=self.perks_embed, view=self.perks_view)
@@ -1722,7 +1743,7 @@ class GearPanelView(discord.ui.View):
         if not self._check_owner(interaction):
             await interaction.response.send_message("This isn't your gear panel.", ephemeral=True)
             return
-        await interaction.response.defer()
+        await safe_defer(interaction)
         inventory = await asyncio.to_thread(
             self.dig_service.get_inventory_gear, self.user_id, self.guild_id
         )
@@ -1753,7 +1774,7 @@ class GearPanelView(discord.ui.View):
         if not self._check_owner(interaction):
             await interaction.response.send_message("This isn't your gear panel.", ephemeral=True)
             return
-        await interaction.response.defer()
+        await safe_defer(interaction)
         inventory = await asyncio.to_thread(
             self.dig_service.get_inventory_gear, self.user_id, self.guild_id
         )
@@ -1781,7 +1802,7 @@ class GearPanelView(discord.ui.View):
         if not self._check_owner(interaction):
             await interaction.response.send_message("This isn't your gear panel.", ephemeral=True)
             return
-        await interaction.response.defer()
+        await safe_defer(interaction)
         inventory = await asyncio.to_thread(
             self.dig_service.get_inventory_gear, self.user_id, self.guild_id
         )
@@ -1805,7 +1826,7 @@ class GearPanelView(discord.ui.View):
         if not self._check_owner(interaction):
             await interaction.response.send_message("This isn't your gear panel.", ephemeral=True)
             return
-        await interaction.response.defer()
+        await safe_defer(interaction)
         # Run repair_all directly — the cost is shown in the result.
         result = _wrap(await asyncio.to_thread(
             self.dig_service.repair_all_gear, self.user_id, self.guild_id
@@ -1885,7 +1906,7 @@ class GearSelectView(discord.ui.View):
         if interaction.user.id != self.user_id:
             await interaction.response.send_message("Not your panel.", ephemeral=True)
             return
-        await interaction.response.defer()
+        await safe_defer(interaction)
         value = self.select.values[0]
         if value == "noop":
             await self.parent._refresh(interaction)
@@ -1942,7 +1963,7 @@ class GearSelectView(discord.ui.View):
         if interaction.user.id != self.user_id:
             await interaction.response.send_message("Not your panel.", ephemeral=True)
             return
-        await interaction.response.defer()
+        await safe_defer(interaction)
         await self.parent._refresh(interaction)
 
 
@@ -1962,7 +1983,7 @@ class ConfirmAbandonView(discord.ui.View):
             return
         self.value = True
         self.stop()
-        await interaction.response.defer()
+        await safe_defer(interaction)
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.grey)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1971,7 +1992,7 @@ class ConfirmAbandonView(discord.ui.View):
             return
         self.value = False
         self.stop()
-        await interaction.response.defer()
+        await safe_defer(interaction)
 
 
 # ---------------------------------------------------------------------------
@@ -2326,6 +2347,7 @@ class DigCommands(commands.Cog):
         view = BossEncounterView(self.dig_service, interaction.user.id, guild_id, boss_info, has_lantern, dig_flavor_service=self.dig_flavor_service)
         msg = await self._send_public_dig(interaction, embed=embed, view=view, file=boss_file)
         if msg:
+            view.message = msg
             try:
                 await msg.add_reaction("\U0001f480")
             except Exception:
