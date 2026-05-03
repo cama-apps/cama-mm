@@ -394,8 +394,6 @@ class Database:
             Match ID
         """
         # Determine which API is being used and normalize to team1=Radiant, team2=Dire
-        isinstance(winning_team, str)
-
         if isinstance(winning_team, int):
             # Old API: team1/team2 with winning_team as 1 or 2
             if team1_ids is not None and team2_ids is not None:
@@ -407,9 +405,6 @@ class Database:
             else:
                 raise ValueError("Old API requires team1_ids and team2_ids")
             winning_team_db = winning_team
-            # Old API: treat team1 as Radiant, team2 as Dire going forward
-            set(team1_ids)
-            set(team2_ids)
         elif isinstance(winning_team, str):
             # New API: Radiant/Dire directly
             if winning_team not in ("radiant", "dire"):
@@ -420,8 +415,6 @@ class Database:
             team1_ids = radiant_team_ids
             team2_ids = dire_team_ids
             winning_team_db = 1 if winning_team == "radiant" else 2
-            set(radiant_team_ids)
-            set(dire_team_ids)
         else:
             raise ValueError("winning_team must be 'radiant'/'dire' (str) or 1/2 (int)")
 
@@ -536,7 +529,7 @@ class Database:
 
     def increment_exclusion_count(self, discord_id: int, guild_id: int = 0):
         """
-        Increment a player's exclusion count by 5.
+        Increment a player's exclusion count by 6.
         Called when a player is excluded from a match.
 
         Args:
