@@ -32,7 +32,7 @@ from utils.interaction_safety import safe_defer, safe_followup
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
 
 if TYPE_CHECKING:
-    from services.dig_llm_service import DigLLMService
+    from services.dig_flavor_service import DigFlavorService
     from services.dig_service import DigService
 
 logger = logging.getLogger("cama_bot.commands.dig")
@@ -370,12 +370,12 @@ class BossWagerModal(discord.ui.Modal):
         required=True,
     )
 
-    def __init__(self, dig_service: DigService, user_id: int, guild_id: int | None, dig_llm_service=None):
+    def __init__(self, dig_service: DigService, user_id: int, guild_id: int | None, dig_flavor_service=None):
         super().__init__(title="Boss Fight Wager")
         self.dig_service = dig_service
         self.user_id = user_id
         self.guild_id = guild_id
-        self.dig_llm_service = dig_llm_service
+        self.dig_flavor_service = dig_flavor_service
         self.result = None
 
     async def on_submit(self, interaction: discord.Interaction):
@@ -431,7 +431,7 @@ class BossWagerModal(discord.ui.Modal):
                     initial_result=self.result,
                     risk_tier=tier,
                     wager=amount,
-                    dig_llm_service=self.dig_llm_service,
+                    dig_flavor_service=self.dig_flavor_service,
                 )
                 embed = _build_duel_prompt_embed(self.result)
                 msg = await interaction.followup.send(embed=embed, view=view, wait=True)
@@ -492,16 +492,11 @@ class BossWagerModal(discord.ui.Modal):
             # LLM narrative for the boss fight (best-effort)
             boss_narrative = None
             result_dict = self.result._d if hasattr(self.result, "_d") else {}
-            if self.dig_llm_service and result_dict:
+            if self.dig_flavor_service and result_dict:
                 try:
-                    engine_mode = await asyncio.to_thread(
-                        self.dig_service.dig_repo.get_engine_mode,
-                        self.user_id, self.guild_id,
+                    boss_narrative = await self.dig_flavor_service.narrate_boss_fight(
+                        result_dict, self.user_id, self.guild_id,
                     )
-                    if engine_mode == "llm":
-                        boss_narrative = await self.dig_llm_service.narrate_boss_fight(
-                            result_dict, self.user_id, self.guild_id,
-                        )
                 except Exception:
                     logger.debug("Boss fight narration failed", exc_info=True)
 
@@ -620,31 +615,17 @@ def _build_duel_prompt_embed(result) -> discord.Embed:
     lum_line = raw.get("luminosity_display")
     if lum_line:
         embed.add_field(name="​", value=lum_line, inline=False)
-    challenge = raw.get("timed_challenge")
-    if challenge:
-        kind = challenge.get("kind", "challenge")
-        question = challenge.get("question", "?")
-        window = int(challenge.get("time_window_seconds", 0))
+    opts = pp.get("options") or []
+    if opts:
+        lines = [f"**{o['option_idx'] + 1}.** {o['label']}" for o in opts]
         embed.add_field(
-            name=("Math" if kind == "arithmetic" else ("Riddle" if kind == "riddle" else "Challenge")),
+            name="Your choice",
             value=(
-                f"```{question}```\n"
-                f"Click **Solve** and type your answer. Within **{window}s** for the best outcome."
+                "\n".join(lines)
+                + "\n\n*(120s before the safe option is auto-picked.)*"
             ),
             inline=False,
         )
-    else:
-        opts = pp.get("options") or []
-        if opts:
-            lines = [f"**{o['option_idx'] + 1}.** {o['label']}" for o in opts]
-            embed.add_field(
-                name="Your choice",
-                value=(
-                    "\n".join(lines)
-                    + "\n\n*(120s before the safe option is auto-picked.)*"
-                ),
-                inline=False,
-            )
     return embed
 
 
@@ -809,53 +790,7 @@ def _build_boss_fight_result_embed(*, result, risk_tier: str, amount: int) -> di
                     value="\n".join(f"• {s}" for s in (relic.get("stats") or [])) or "—",
                     inline=False,
                 )
-    # Timed-input resolution surface (which option the answer mapped to).
-    challenge_res = getattr(result, "timed_challenge_resolution", None)
-    if challenge_res:
-        if challenge_res.get("correct"):
-            tag = "in time" if challenge_res.get("in_time") else "late"
-            embed.add_field(
-                name="Answer",
-                value=f"`{challenge_res.get('submitted')}` — correct, {tag}.",
-                inline=False,
-            )
-        else:
-            expected = challenge_res.get("expected_answer")
-            embed.add_field(
-                name="Answer",
-                value=(
-                    f"`{challenge_res.get('submitted')}` — wrong."
-                    + (f" The right answer was `{expected}`." if expected else "")
-                ),
-                inline=False,
-            )
     return embed
-
-
-class _TimedAnswerModal(discord.ui.Modal):
-    """Text-input modal for arithmetic / riddle pinnacle prompts.
-
-    The user types their answer; on submit, we forward it to the
-    enclosing ``BossDuelView`` which calls ``submit_timed_answer`` on the
-    service. The service evaluates correctness + elapsed time and maps
-    that to one of the mechanic's three options.
-    """
-
-    def __init__(self, *, view: BossDuelView, question: str, kind: str, window_seconds: int):
-        title_kind = "Math" if kind == "arithmetic" else ("Riddle" if kind == "riddle" else "Answer")
-        super().__init__(title=f"{title_kind} ({window_seconds}s window)"[:45])
-        self._view = view
-        self._answer = discord.ui.TextInput(
-            label=question[:45] or "Your answer",
-            placeholder=question[:100] if len(question) > 45 else "Type your answer here",
-            required=True,
-            max_length=80,
-        )
-        self.add_item(self._answer)
-
-    async def on_submit(self, interaction: discord.Interaction) -> None:
-        await interaction.response.defer()
-        await self._view._submit_timed(self._answer.value or "")
 
 
 class BossDuelView(discord.ui.View):
@@ -877,7 +812,7 @@ class BossDuelView(discord.ui.View):
         initial_result,
         risk_tier: str,
         wager: int,
-        dig_llm_service=None,
+        dig_flavor_service=None,
     ):
         super().__init__(timeout=120)
         self.dig_service = dig_service
@@ -885,7 +820,7 @@ class BossDuelView(discord.ui.View):
         self.guild_id = guild_id
         self.risk_tier = risk_tier
         self.wager = wager
-        self.dig_llm_service = dig_llm_service
+        self.dig_flavor_service = dig_flavor_service
         self.message: discord.Message | None = None
         self._resolved = False
 
@@ -895,32 +830,16 @@ class BossDuelView(discord.ui.View):
         )
         pp = raw.get("pending_prompt") or {}
         self._safe_option_idx = int(pp.get("safe_option_idx", 0))
-        # Timed-input prompts (arithmetic / riddle) render a single
-        # "Solve" button that pops a modal — not three option buttons.
-        challenge = raw.get("timed_challenge")
-        self._timed_challenge = challenge
-        if challenge:
-            kind = challenge.get("kind", "challenge")
-            window = int(challenge.get("time_window_seconds", 0))
-            label = f"Solve ({window}s window)"
+        for opt in pp.get("options", []):
+            idx = int(opt.get("option_idx", 0))
+            label = (opt.get("label") or f"Option {idx + 1}")[:80]
             btn = discord.ui.Button(
-                label=label[:80],
-                style=discord.ButtonStyle.success,
-                custom_id="duel_timed_open",
+                label=label,
+                style=discord.ButtonStyle.primary,
+                custom_id=f"duel_opt_{idx}",
             )
-            btn.callback = self._make_timed_callback(kind)
+            btn.callback = self._make_callback(idx)
             self.add_item(btn)
-        else:
-            for opt in pp.get("options", []):
-                idx = int(opt.get("option_idx", 0))
-                label = (opt.get("label") or f"Option {idx + 1}")[:80]
-                btn = discord.ui.Button(
-                    label=label,
-                    style=discord.ButtonStyle.primary,
-                    custom_id=f"duel_opt_{idx}",
-                )
-                btn.callback = self._make_callback(idx)
-                self.add_item(btn)
 
     def _make_callback(self, option_idx: int):
         async def callback(interaction: discord.Interaction):
@@ -932,46 +851,6 @@ class BossDuelView(discord.ui.View):
             await interaction.response.defer()
             await self._submit(option_idx)
         return callback
-
-    def _make_timed_callback(self, kind: str):
-        """Open a TextInput modal for arithmetic / riddle prompts."""
-        async def callback(interaction: discord.Interaction):
-            if interaction.user.id != self.user_id:
-                await interaction.response.send_message(
-                    "Only the duelist can answer.", ephemeral=True,
-                )
-                return
-            challenge = self._timed_challenge or {}
-            modal = _TimedAnswerModal(
-                view=self,
-                question=challenge.get("question", "?"),
-                kind=kind,
-                window_seconds=int(challenge.get("time_window_seconds", 0)),
-            )
-            await interaction.response.send_modal(modal)
-        return callback
-
-    async def _submit_timed(self, answer_text: str) -> None:
-        if self._resolved:
-            return
-        self._resolved = True
-        for child in self.children:
-            if isinstance(child, discord.ui.Button):
-                child.disabled = True
-        try:
-            result = _wrap(await asyncio.to_thread(
-                self.dig_service.submit_timed_answer,
-                self.user_id, self.guild_id, answer_text,
-            ))
-        except Exception as e:
-            logger.error("Timed answer submit failed: %s", e, exc_info=True)
-            await self._edit_message(content="Timed answer failed.", embed=None, view=None)
-            return
-        if not getattr(result, "success", True):
-            err = getattr(result, "error", "Timed answer failed.")
-            await self._edit_message(content=err, embed=None, view=None)
-            return
-        await self._render_resolution(result)
 
     async def on_timeout(self):
         if self._resolved:
@@ -1008,7 +887,7 @@ class BossDuelView(discord.ui.View):
                 user_id=self.user_id, guild_id=self.guild_id,
                 initial_result=result,
                 risk_tier=self.risk_tier, wager=self.wager,
-                dig_llm_service=self.dig_llm_service,
+                dig_flavor_service=self.dig_flavor_service,
             )
             embed = _build_duel_prompt_embed(result)
             await self._edit_message(embed=embed, view=new_view)
@@ -1072,7 +951,7 @@ class EventEncounterView(discord.ui.View):
         event_data: dict,
         luminosity: int = 100,
         target_channel: discord.abc.Messageable | None = None,
-        dig_llm_service: DigLLMService | None = None,
+        dig_flavor_service: DigFlavorService | None = None,
     ):
         super().__init__(timeout=60)
         self.dig_service = dig_service
@@ -1080,7 +959,7 @@ class EventEncounterView(discord.ui.View):
         self.guild_id = guild_id
         self.event_data = event_data
         self.target_channel = target_channel
-        self.dig_llm_service = dig_llm_service
+        self.dig_flavor_service = dig_flavor_service
         safe_label = "Play it safe"
         risky_label = "Take the risk"
         if isinstance(event_data, dict):
@@ -1226,11 +1105,11 @@ class EventEncounterView(discord.ui.View):
         splash_obj = getattr(result, "splash", None)
         splash_d = splash_obj._d if hasattr(splash_obj, "_d") else splash_obj
         if isinstance(splash_d, dict) and splash_d.get("victims"):
-            if self.dig_llm_service is not None:
+            if self.dig_flavor_service is not None:
                 depth_after = getattr(result, "depth_after", 0) or getattr(result, "depth", 0)
                 layer_def = get_layer_def(int(depth_after) if depth_after else 0)
                 digger_layer = layer_def.name if layer_def else "Dirt"
-                narrative = await self.dig_llm_service.narrate_splash(
+                narrative = await self.dig_flavor_service.narrate_splash(
                     digger_id=self.user_id,
                     guild_id=self.guild_id or 0,
                     event_name=event.get("name", "Unknown Event"),
@@ -1335,7 +1214,7 @@ class BossEncounterView(discord.ui.View):
         guild_id: int | None,
         boss_info: object,
         has_lantern: bool = False,
-        dig_llm_service=None,
+        dig_flavor_service=None,
     ):
         super().__init__(timeout=60)
         self.dig_service = dig_service
@@ -1343,7 +1222,7 @@ class BossEncounterView(discord.ui.View):
         self.guild_id = guild_id
         self.boss_info = boss_info
         self.has_lantern = has_lantern
-        self.dig_llm_service = dig_llm_service
+        self.dig_flavor_service = dig_flavor_service
         if not has_lantern:
             self.scout.disabled = True
 
@@ -1353,7 +1232,7 @@ class BossEncounterView(discord.ui.View):
             # Others can cheer, not fight
             await interaction.response.send_message("Only the tunnel owner can fight.", ephemeral=True)
             return
-        modal = BossWagerModal(self.dig_service, self.user_id, self.guild_id, dig_llm_service=self.dig_llm_service)
+        modal = BossWagerModal(self.dig_service, self.user_id, self.guild_id, dig_flavor_service=self.dig_flavor_service)
         await interaction.response.send_modal(modal)
         self.stop()
 
@@ -2097,10 +1976,10 @@ class ConfirmAbandonView(discord.ui.View):
 class DigCommands(commands.Cog):
     dig = app_commands.Group(name="dig", description="Tunnel digging minigame")
 
-    def __init__(self, bot: commands.Bot, dig_service: DigService, dig_llm_service: DigLLMService | None = None):
+    def __init__(self, bot: commands.Bot, dig_service: DigService, dig_flavor_service: DigFlavorService | None = None):
         self.bot = bot
         self.dig_service = dig_service
-        self.dig_llm_service = dig_llm_service
+        self.dig_flavor_service = dig_flavor_service
         self._last_weather_date: str | None = None
 
     async def cog_load(self) -> None:
@@ -2249,43 +2128,30 @@ class DigCommands(commands.Cog):
             return interaction.channel
 
     # ------------------------------------------------------------------
-    # DM Mode helpers
+    # Dig flavor helper
     # ------------------------------------------------------------------
 
-    def _is_dm_mode(self) -> bool:
-        """Whether the DM engine service is available."""
-        return self.dig_llm_service is not None and self.dig_llm_service.dig_service is not None
+    async def _run_dig(self, user_id: int, guild_id: int | None, paid: bool = False):
+        """Run a deterministic dig, then layer LLM flavor on top.
 
-    async def _run_dm_dig(
-        self, user_id: int, guild_id: int | None, paid: bool = False,
-    ):
-        """Execute a DM-powered dig if the player opted in.
-
-        Returns ``(result, used_dm)`` — *result* is the wrapped result
-        ready for embed building, *used_dm* is True if the DM path was
-        taken (or its fallback).  Returns ``(None, False)`` if the player
-        is in legacy mode so the caller can fall through to ``dig()``.
+        Mechanics are decided by ``DigService.dig`` and persisted before
+        flavor runs. The flavor pass mutates the raw result dict to add
+        narrative/NPC fields and (rarely) a small JC delta. On any flavor
+        failure, the raw result is returned unchanged.
         """
-        if not self._is_dm_mode():
-            return None, False
-        try:
-            engine_mode = await asyncio.to_thread(
-                self.dig_service.dig_repo.get_engine_mode, user_id, guild_id,
-            )
-            if engine_mode != "llm":
-                return None, False
-
-            terminal, preconditions = await asyncio.to_thread(
-                self.dig_service.dig_with_preconditions, user_id, guild_id, paid,
-            )
-            if terminal is not None:
-                return _wrap(terminal), True
-            # DM decides the outcome (falls back to deterministic internally)
-            result = await self.dig_llm_service.run_dig(user_id, guild_id, preconditions)
-            return _wrap(result), True
-        except Exception:
-            logger.warning("DM dig failed, falling through to legacy", exc_info=True)
-            return None, False
+        raw = await asyncio.to_thread(
+            self.dig_service.dig, user_id, guild_id, paid=paid,
+        )
+        if (
+            self.dig_flavor_service is not None
+            and isinstance(raw, dict)
+            and raw.get("success", False)
+        ):
+            try:
+                await self.dig_flavor_service.flavor(raw, user_id, guild_id)
+            except Exception:
+                logger.debug("dig flavor failed", exc_info=True)
+        return _wrap(raw)
 
     # ------------------------------------------------------------------
     # Autocomplete helpers
@@ -2353,17 +2219,12 @@ class DigCommands(commands.Cog):
 
         await safe_defer(interaction)
 
-        # DM-first flow: if player opted into DM mode, use preconditions + LLM
-        result, used_dm = await self._run_dm_dig(interaction.user.id, guild_id)
-        if not used_dm:
-            try:
-                result = _wrap(await asyncio.to_thread(
-                    self.dig_service.dig, interaction.user.id, guild_id
-                ))
-            except Exception as e:
-                logger.error("Dig error: %s", e, exc_info=True)
-                await safe_followup(interaction, content="Dig failed. Try again later.", ephemeral=True)
-                return
+        try:
+            result = await self._run_dig(interaction.user.id, guild_id)
+        except Exception as e:
+            logger.error("Dig error: %s", e, exc_info=True)
+            await safe_followup(interaction, content="Dig failed. Try again later.", ephemeral=True)
+            return
 
         # Non-cooldown errors (cooldown is handled by the paid_dig_available branch)
         if not getattr(result, "success", False) and not getattr(result, "paid_dig_available", False):
@@ -2457,7 +2318,7 @@ class DigCommands(commands.Cog):
         if lum_line:
             embed.add_field(name="\u200b", value=lum_line, inline=False)
 
-        view = BossEncounterView(self.dig_service, interaction.user.id, guild_id, boss_info, has_lantern, dig_llm_service=self.dig_llm_service)
+        view = BossEncounterView(self.dig_service, interaction.user.id, guild_id, boss_info, has_lantern, dig_flavor_service=self.dig_flavor_service)
         msg = await self._send_public_dig(interaction, embed=embed, view=view, file=boss_file)
         if msg:
             try:
@@ -2495,19 +2356,14 @@ class DigCommands(commands.Cog):
             embed=discord.Embed(title="Digging...", description="Your pickaxe swings.", color=0xFFA500),
             view=None,
         )
-        # DM-first flow for paid dig
-        paid_result, used_dm = await self._run_dm_dig(
-            interaction.user.id, guild_id, paid=True,
-        )
-        if not used_dm:
-            try:
-                paid_result = _wrap(await asyncio.to_thread(
-                    self.dig_service.dig, interaction.user.id, guild_id, paid=True
-                ))
-            except Exception as e:
-                logger.error("Paid dig error: %s", e)
-                await msg.edit(content="Paid dig failed.", embed=None, view=None)
-                return
+        try:
+            paid_result = await self._run_dig(
+                interaction.user.id, guild_id, paid=True,
+            )
+        except Exception as e:
+            logger.error("Paid dig error: %s", e)
+            await msg.edit(content="Paid dig failed.", embed=None, view=None)
+            return
         if not getattr(paid_result, "success", False):
             err = getattr(paid_result, "error", "Paid dig failed.")
             await msg.edit(content=err, embed=None, view=None)
@@ -2632,7 +2488,7 @@ class DigCommands(commands.Cog):
         view = EventEncounterView(
             self.dig_service, interaction.user.id, guild_id, event_data,
             luminosity=_lum_val, target_channel=target_channel,
-            dig_llm_service=self.dig_llm_service,
+            dig_flavor_service=self.dig_flavor_service,
         )
         if event_file:
             await self._send_public_dig(interaction, embed=event_embed, view=view, file=event_file)
@@ -4173,56 +4029,6 @@ class DigCommands(commands.Cog):
     # 19. /dig guide — Paginated help
     # ------------------------------------------------------------------
 
-    @dig.command(name="mode", description="Switch between legacy and DM Mode (AI-narrated) dig")
-    @app_commands.describe(mode="Choose your dig experience")
-    @app_commands.choices(mode=[
-        app_commands.Choice(name="Legacy (deterministic)", value="legacy"),
-        app_commands.Choice(name="DM Mode (AI-narrated)", value="llm"),
-    ])
-    async def dig_mode(self, interaction: discord.Interaction, mode: app_commands.Choice[str]):
-        if not await require_dig_channel(interaction):
-            return
-
-        player = await _check_registered(interaction, self.bot)
-        if not player:
-            return
-
-        guild_id = interaction.guild.id if interaction.guild else None
-
-        if mode.value == "llm" and not self.dig_llm_service:
-            await interaction.response.send_message(
-                "DM Mode is not available (AI service not configured).", ephemeral=True,
-            )
-            return
-
-        # Ensure tunnel exists before setting mode (create one if needed)
-        tunnel = await asyncio.to_thread(
-            self.dig_service.dig_repo.get_tunnel,
-            interaction.user.id, guild_id,
-        )
-        if not tunnel:
-            await asyncio.to_thread(
-                self.dig_service.dig_repo.create_tunnel,
-                interaction.user.id, guild_id, f"{interaction.user.display_name}'s Tunnel",
-            )
-
-        await asyncio.to_thread(
-            self.dig_service.dig_repo.set_engine_mode,
-            interaction.user.id, guild_id, mode.value,
-        )
-
-        if mode.value == "llm":
-            desc = "**DM Mode enabled.** Your digs will now be narrated by an AI Dungeon Master with personalized storytelling."
-        else:
-            desc = "**Legacy mode enabled.** Your digs will use the standard deterministic engine."
-
-        embed = discord.Embed(
-            title="Dig Mode Updated",
-            description=desc,
-            color=0x5865F2,
-        )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
     @dig.command(name="guide", description="Learn how to dig")
     async def dig_guide(self, interaction: discord.Interaction):
         if not await require_dig_channel(interaction):
@@ -4515,5 +4321,5 @@ async def setup(bot: commands.Bot):
     dig_service = getattr(bot, "dig_service", None)
     if dig_service is None:
         raise RuntimeError("Dig service not registered on bot.")
-    dig_llm_service = getattr(bot, "dig_llm_service", None)
-    await bot.add_cog(DigCommands(bot, dig_service, dig_llm_service))
+    dig_flavor_service = getattr(bot, "dig_flavor_service", None)
+    await bot.add_cog(DigCommands(bot, dig_service, dig_flavor_service))

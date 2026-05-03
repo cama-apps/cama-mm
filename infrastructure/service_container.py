@@ -365,23 +365,29 @@ class ServiceContainer:
             mana_effects_service=c.get("mana_effects_service"),
         )
 
-        # Wire LLM engine service if AI is available
+        # Wire LLM flavor layer if AI is available
         ai_service = c.get("ai_service")
         if ai_service:
             try:
-                from services.dig_llm_service import DigLLMService
+                from services.dig_dm_context import DigDMContextBuilder
+                from services.dig_flavor_service import DigFlavorService
 
-                c["dig_llm_service"] = DigLLMService(
+                context_builder = DigDMContextBuilder(
+                    dig_repo=c["dig_repo"],
+                    match_repo=c["match_repo"],
+                    loan_repo=c["loan_repo"],
+                )
+                c["dig_flavor_service"] = DigFlavorService(
                     ai_service=ai_service,
                     dig_repo=c["dig_repo"],
                     player_repo=c["player_repo"],
-                    dig_service=c["dig_service"],
+                    context_builder=context_builder,
                 )
             except Exception:
-                logger.warning("Failed to initialize DigLLMService", exc_info=True)
-                c["dig_llm_service"] = None
+                logger.warning("Failed to initialize DigFlavorService", exc_info=True)
+                c["dig_flavor_service"] = None
         else:
-            c["dig_llm_service"] = None
+            c["dig_flavor_service"] = None
 
     def _init_extras(self) -> None:
         """Neon Degen Terminal and Wrapped services."""
@@ -478,7 +484,7 @@ class ServiceContainer:
         bot.mana_effects_service = c["mana_effects_service"]
         bot.dig_service = c["dig_service"]
         bot.dig_repo = c["dig_repo"]
-        bot.dig_llm_service = c.get("dig_llm_service")
+        bot.dig_flavor_service = c.get("dig_flavor_service")
         bot.notification_repo = c["notification_repo"]
         bot.reminder_service = c["reminder_service"]
 

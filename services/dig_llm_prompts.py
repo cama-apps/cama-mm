@@ -1,10 +1,10 @@
 """
-Compressed game ruleset, tool definitions, and context builders for the
-LLM-powered dig game engine.
+Tool definitions, system prompts, and context builders for the dig flavor
+LLM layer.
 
-This module is pure data + helpers -- no external dependencies beyond the
-standard library.  It is imported by ``DigLLMService`` to construct the
-messages list that gets sent to ``AIService.call_with_tools``.
+Pure data + helpers -- no external dependencies beyond the standard library.
+Imported by ``DigFlavorService`` to construct the messages list that gets
+sent to ``AIService.call_with_tools``.
 """
 
 from __future__ import annotations
@@ -54,44 +54,89 @@ def _get_layer_name(depth: int) -> str:
 
 
 # ===================================================================
-# Tool definition -- structured narrative output
+# Tool definition -- single fat narrate_dig + splash narration
 # ===================================================================
 
-DIG_OUTCOME_TOOL: dict[str, Any] = {
+NARRATE_DIG_TOOL: dict[str, Any] = {
     "type": "function",
     "function": {
-        "name": "narrate_dig_outcome",
-        "description": "Narrate a dig outcome. Mechanics are already resolved.",
+        "name": "narrate_dig",
+        "description": (
+            "Add flavor on top of an already-resolved dig outcome. Mechanics "
+            "are immutable; this call writes prose and optional embellishments "
+            "(NPC line, narrative-only event pick, small JC nudge, memory note)."
+        ),
         "parameters": {
             "type": "object",
             "properties": {
                 "narrative": {
                     "type": "string",
-                    "description": "2-4 sentences. Personalized, vivid, layer-specific.",
-                },
-                "event_flavor": {
-                    "type": "string",
-                    "description": "Personalized event description, or empty.",
-                },
-                "cave_in_flavor": {
-                    "type": "string",
-                    "description": "Personalized cave-in description, or empty.",
+                    "description": (
+                        "2-4 sentences, ≤300 chars total. Atmospheric, on the "
+                        "rolled tone profile. NEVER include numbers, JC amounts, "
+                        "block counts, depths, or percentages — those live in "
+                        "the embed fields below your prose."
+                    ),
                 },
                 "tone": {
                     "type": "string",
-                    "enum": [
-                        "dramatic",
-                        "humorous",
-                        "ominous",
-                        "triumphant",
-                        "melancholy",
-                        "absurd",
-                    ],
-                    "description": "Emotional tone.",
+                    "enum": ["cosmic_dread", "industrial_grim", "cryptic_folkloric"],
+                    "description": (
+                        "MUST match the tone profile injected into the system "
+                        "prompt for this dig. If you return a different one, "
+                        "the validator will overwrite it."
+                    ),
                 },
                 "callback_reference": {
                     "type": "string",
-                    "description": "Reference to a past notable moment, or empty.",
+                    "description": (
+                        "Optional. A short fragment from prior memory worth "
+                        "calling back to (vow, NPC encounter, recurring motif). "
+                        "Empty string if nothing fits."
+                    ),
+                },
+                "picked_event_id": {
+                    "type": "string",
+                    "description": (
+                        "Optional. When the user message lists ELIGIBLE EVENTS, "
+                        "pick exactly one id from that list. Out-of-list ids "
+                        "are silently dropped. Empty string for no event."
+                    ),
+                },
+                "npc_appearance": {
+                    "type": "object",
+                    "description": (
+                        "Optional. Either a roster id (preferred) or an "
+                        "invented title; plus the NPC's single short line. "
+                        "Invented names will be persisted to memory."
+                    ),
+                    "properties": {
+                        "id_or_name": {
+                            "type": "string",
+                            "description": "Roster id (e.g. 'the_old_hand') or invented title.",
+                        },
+                        "line": {
+                            "type": "string",
+                            "description": "One short line, ≤200 chars, in the NPC's voice.",
+                        },
+                    },
+                },
+                "flavor_bonus_pct": {
+                    "type": "number",
+                    "description": (
+                        "Optional. JC nudge as a signed percent of jc_earned. "
+                        "Will be CLAMPED to ±cap (announced in system prompt). "
+                        "Use sparingly — only when the moment earns it. "
+                        "0 or omitted = no nudge."
+                    ),
+                },
+                "memory_update": {
+                    "type": "string",
+                    "description": (
+                        "Optional. Rewrite your scratchpad — what you want to "
+                        "remember about this player for next time. ≤2KB. "
+                        "Omit to leave existing memory unchanged."
+                    ),
                 },
             },
             "required": ["narrative", "tone"],
@@ -126,142 +171,91 @@ SPLASH_NARRATION_TOOL: dict[str, Any] = {
     },
 }
 
-DIG_ENGINE_TOOL: dict[str, Any] = {
-    "type": "function",
-    "function": {
-        "name": "resolve_dig",
-        "description": "Resolve a dig. Return only mechanical decisions, no narration.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "advance": {
-                    "type": "integer",
-                    "description": "Blocks advanced. 0 if cave-in. Within [advance_min, advance_max].",
-                },
-                "jc_earned": {
-                    "type": "integer",
-                    "description": "JC earned. Within [jc_min, jc_max].",
-                },
-                "cave_in": {
-                    "type": "boolean",
-                    "description": "Whether cave-in occurs. Use dice + cave-in chance.",
-                },
-                "cave_in_block_loss": {
-                    "type": "integer",
-                    "description": "Blocks lost (3-8). 0 if no cave-in.",
-                },
-                "cave_in_type": {
-                    "type": "string",
-                    "enum": ["none", "stun", "injury", "medical_bill"],
-                    "description": "Consequence type. 'none' if no cave-in.",
-                },
-                "cave_in_jc_lost": {
-                    "type": "integer",
-                    "description": "JC lost for medical_bill type. 0 otherwise.",
-                },
-                "event_id": {
-                    "type": "string",
-                    "description": "Event ID from available list, or empty for no event.",
-                },
-                "event_description": {
-                    "type": "string",
-                    "description": "Personalized event description, or empty.",
-                },
-            },
-            "required": [
-                "advance",
-                "jc_earned",
-                "cave_in",
-            ],
-        },
-    },
+# ===================================================================
+# Tone profiles (one is randomly rolled per dig and injected into prompt)
+# ===================================================================
+
+TONE_PROFILES: dict[str, str] = {
+    "cosmic_dread": (
+        "Cosmic / mythic dread. The depths are old and indifferent. The "
+        "player is small. Something ancient watches. Hushed, ominous, "
+        "sparing with words. Reference Annihilation, Dark Souls item "
+        "descriptions. Avoid action verbs when stillness will do."
+    ),
+    "industrial_grim": (
+        "Industrial / blue-collar grim. Tunnels are dirty, the pickaxes "
+        "are real, the danger is mechanical. Workers, debt, dust. Terse "
+        "and stoic, dark humor when something goes wrong. Reference "
+        "Disco Elysium worker dialogue, early Coen Brothers."
+    ),
+    "cryptic_folkloric": (
+        "Cryptic / folkloric. Local superstition, half-remembered rules, "
+        "things you don't say aloud. Oblique and rhythmic, repetition and "
+        "refrains. Reference Annie Proulx, regional folklore, weird "
+        "Americana. The narration is allowed to speak in fragments."
+    ),
 }
 
 # ===================================================================
-# System prompt -- compressed game ruleset (~800 tokens)
+# System prompt template -- additive flavor only
 # ===================================================================
 
-DIG_SYSTEM_PROMPT: str = """\
-You are the Dungeon Master for a tunnel-digging minigame inside a Discord bot \
-for a Dota 2 inhouse league. Players dig deeper underground, earn JC \
-(Jopacoins), fight bosses, find artifacts, and prestige.
+DIG_FLAVOR_SYSTEM_PROMPT_TEMPLATE: str = """\
+You are an additive flavor layer on top of a Dota 2 inhouse Discord bot's \
+tunnel-mining minigame. The mechanical outcome of this dig (advance, JC, \
+cave-in, milestones, splashes) HAS ALREADY BEEN COMPUTED AND PERSISTED. You \
+do not decide what happened. You write prose and select on-tone color around it.
 
-LAYERS (depth -> name | cave-in% | JC range | advance):
-  0-25 Dirt 5% 0-1 JC 1-3 blk | 26-50 Stone 10% 0-2 JC 1-3 blk
-  51-75 Crystal 18% 1-3 JC 1-2 blk | 76-100 Magma 25% 1-5 JC 1-2 blk
-  101-150 Abyss 35% 2-8 JC 1-2 blk | 151-200 Fungal Depths 40% 3-10 JC 1-2 blk
-  201-275 Frozen Core 45% 4-12 JC 1-2 blk | 276+ The Hollow 50% 5-15 JC 1-1 blk
+TONE PROFILE FOR THIS DIG: {tone_name}
+{tone_guide}
 
-BOSSES at depths 25/50/75/100/150/200/275:
-  Grothak / Crystalia / Magmus Rex / The Void Warden / Sporeling Sovereign / \
-Chronofrost / The Nameless Depth
+YOUR JOB: Call narrate_dig with at least narrative + tone. You may also pass:
+  - picked_event_id — pick from the ELIGIBLE EVENTS list in the user message, \
+    when there is one. Out-of-list ids are silently dropped.
+  - npc_appearance — invoke a canon NPC from the NPC ROSTER, OR invent a new \
+    titled figure when none fits. Invented names are persisted to memory and \
+    can recur. Roster and invention are weighted equally — pick whichever the \
+    moment calls for. Use sparingly; not every dig needs an NPC.
+  - flavor_bonus_pct — your one tiny mechanical knob. CAP FOR THIS DIG: \
+    ±{bonus_cap}%. Out-of-range values are clamped silently. Use only when a \
+    narrative beat earns the swing. Most digs should be 0.
+  - memory_update — rewrite your scratchpad. Up to 2KB. Keep what matters; \
+    drop what's stale. Omit to leave it unchanged.
 
-PICKAXES (7 tiers): Wooden > Stone > Iron > Diamond > Obsidian > Frostforged > \
-Void-Touched. Higher tiers grant advance bonus, cave-in reduction, loot bonus.
+HARD RULES:
+  - NUMBERS ARE FORBIDDEN IN PROSE. No JC amounts, no block counts, no \
+    depth integers, no percentages, no times. The embed shows mechanics; \
+    your narrative is atmosphere only. Narration containing digits will be \
+    rejected and replaced with canned text.
+  - STAY ON THE TONE PROFILE above. Reread it if you forget which voice.
+  - Tight: ≤300 characters, 2-4 sentences max.
+  - Reference the active player by their Discord display name. Other miners' \
+    names are fine when narratively useful.
+  - Only narrate what ACTUALLY HAPPENED. The DIG OUTCOME section is \
+    authoritative. Don't describe a cave-in if there was none, don't claim \
+    a milestone the player didn't cross.
+  - Don't expose mechanics. Don't say "luminosity" — say "light", "glow", \
+    "the dark". Don't name S stats — show them indirectly.
 
-CAVE-INS: Lose 6-14 blocks. Secondary effects: stun (skip next dig), injury \
-(reduced advance 3 digs), or medical bill (lose JC). Mitigated by Hard Hat \
-charges, pickaxe tier, and prestige perks.
+NPC TIPS:
+  - Each canon NPC has triggers describing when they fit. Honor them.
+  - Invented NPCs should be titled (no proper names). "The Watcher", "the \
+    Saw-bones", "the One Who Listens" — never "Eli" or "Marda".
+  - One NPC per dig at most. Most digs have none.
 
-LIGHT (0-100, labeled "luminosity" in data): Drains each dig. \
-Bright/Dim/Dark/Pitch Black. Lower light increases cave-in chance and \
-reduces JC earnings. Lanterns restore it. Narrate as "light", "glow", \
-"darkness" — never use the word "luminosity" in your narrative.
+OUTPUT: Always call narrate_dig. No plain text responses.\
+"""
 
-PRESTIGE (0-10): Reset depth to 0, keep pickaxe, gain perks. Ascension \
-modifiers add difficulty + rewards. Higher prestige unlocks better pickaxes \
-and deeper content.
 
-MULTIPLAYER: Sabotage (reduce target's depth), Help (grant blocks), Cheer \
-(boost ally's boss fight). Social actions cost JC and have cooldowns.
+def build_dig_flavor_system_prompt(tone_key: str, bonus_cap_pct: float) -> str:
+    """Render the flavor system prompt with the rolled tone + bonus cap injected."""
+    tone_guide = TONE_PROFILES.get(tone_key, TONE_PROFILES["industrial_grim"])
+    return DIG_FLAVOR_SYSTEM_PROMPT_TEMPLATE.format(
+        tone_name=tone_key,
+        tone_guide=tone_guide,
+        bonus_cap=int(bonus_cap_pct),
+    )
 
-WEATHER: Daily per-layer modifiers. Each day 2 layers get weather affecting \
-advance, JC, cave-in chance, and event rates.
-
-YOUR ROLE: The game engine has already computed the mechanical outcome \
-(blocks gained, JC earned, cave-ins, events, milestones). Your job is to \
-narrate the outcome with personality and flair, personalized to the player's \
-history, play style, and current context.
-
-WHAT TO NARRATE (check the DIG OUTCOME section carefully):
-  - If there was a LAYER TRANSITION, celebrate entering the new layer \
-("the crystal walls give way to bubbling magma")
-  - If there was a MILESTONE BONUS, acknowledge the big JC payout \
-("ancient treasure spills from a cracked wall")
-  - If there was a CAVE-IN, be dramatic about the collapse and its consequence
-  - If there was an ARTIFACT FOUND, celebrate the discovery
-  - If there was a BOSS ENCOUNTER, build tension for the upcoming fight
-  - If there was a STREAK BONUS, note the player's consistency
-  - The miner's BACKSTORY is their identity — weave it into the narrative \
-when set.
-  - Show the EFFECTS of S stats indirectly — a high-Strength miner swings \
-powerfully, high-Smarts notices details, high-Stamina endures hardship. \
-Never name the stats directly ("Stamina", "Strength") in your text.
-  - Reference equipped relics, active weather, and light level (called \
-"luminosity" in the data — narrate as "light", "glow", "darkness", etc.)
-  - Keep narratives to 2-4 sentences. Be vivid, specific to the layer.
-  - ONLY narrate things that ACTUALLY HAPPENED in the outcome. If cave_in is \
-not in the outcome, do NOT describe walls collapsing or blocks being lost.
-
-CRITICAL: Do NOT repeat exact numbers (blocks gained/lost, JC amounts, depths) \
-in your narrative — those are already shown in the embed fields below your text. \
-Focus on atmosphere, emotion, and flavor. Say "the walls collapse around you" \
-not "you lost 7 blocks". Say "gold glints in the rubble" not "you earned 5 JC".
-
-DIG HISTORY for personalization: cave-in streaks, depth milestones, \
-boss victories, ally cheers, rival sabotage dynamics. Use MULTIPLAYER context \
-(revenge windows, active cheers, rivalries) for narrative flavor.
-
-BOSS FIGHTS: If the outcome describes a boss fight, narrate the battle itself. \
-Reference the boss's personality and title, the player's risk choice \
-(cautious/bold/reckless), and the miner's backstory and S stats. On victory, \
-make it epic. On defeat, make it dramatic but leave hope. On first clears, \
-acknowledge the significance. Keep it to 2-3 sentences — the boss art carries \
-the visual weight."""
-
-# ===================================================================
-# DM engine system prompt -- LLM makes mechanical decisions
-# ===================================================================
 
 SPLASH_NARRATION_SYSTEM_PROMPT: str = """\
 You write a single short prose beat — 1 to 2 sentences, ≤200 characters total — \
@@ -287,54 +281,6 @@ Style:
 OUTPUT: Call the narrate_splash tool with the prose in the 'narrative' field. \
 Nothing else.\
 """
-
-
-DIG_ENGINE_SYSTEM_PROMPT: str = """\
-You are the Dungeon Master for a tunnel-digging minigame. You DECIDE what \
-happens when a player digs!
-
-All effective ranges (advance, JC, cave-in chance, events) are pre-computed \
-and provided in the DIG PRECONDITIONS section. Your choices MUST stay within \
-those ranges.
-
-CAVE-INS: Player loses 6-14 blocks. Secondary: stun (skip next dig), injury \
-(reduced advance 3 digs), or medical_bill (lose JC).
-
-ITEM CONSTRAINTS (from preconditions):
-  - Hard Hat active → cave-in CANNOT happen.
-  - Grappling Hook active → cave_in_block_loss MUST be 0.
-  - Void-Touched Pickaxe → subtract 1 from cave_in_block_loss (min 1).
-  - Weather loss cap → cave_in_block_loss must not exceed it.
-
-LUMINOSITY (0-100): Lower light increases danger. Bright/Dim/Dark/Pitch Black.
-
-PRESTIGE (0-10): Higher prestige = deeper content + harder challenges.
-
-YOUR DECISIONS: You receive pre-calculated effective ranges (after all gear, \
-perks, and modifiers). Your choices MUST stay within these ranges:
-  - advance: within [advance_min, advance_max]
-  - jc_earned: within [jc_min, jc_max]
-  - cave_in: you decide (cave-in chance is provided as guidance)
-  - cave_in_block_loss: 3-8 if cave-in, 0 if not
-  - cave_in_type: stun/injury/medical_bill if cave-in, none if not
-  - event: pick from available events or skip (event chance is guidance)
-
-DECISION GUIDELINES:
-  - Dice results are pre-rolled in the DICE RESULTS section. Treat them as \
-binding randomness.
-  - Use cave-in chance as probability: if the cave_in d100 is under the \
-chance, trigger a cave-in unless a rule prevents it.
-  - For events, use event chance similarly. STRONGLY prefer ★ events (has artwork).
-  - Reward persistence; introduce tension on hot streaks.
-  - Personalize consequences: a veteran players may get dramatic cave-ins; new players get gentler ones.
-
-HISTORY AWARENESS:
-  - Check DIG HISTORY for recent cave-ins. Don't pile more on a \
-player who just had several.
-  - Reward persistence and long streaks with slightly better outcomes.
-  - Consider social context (cheers, sabotage, rivalry).
-
-OUTPUT: Return ONLY mechanical decisions via resolve_dig. No narrative.\""""
 
 # ===================================================================
 # Play style descriptions
@@ -1100,27 +1046,8 @@ def build_dig_history_context(recent_actions: list[dict], tunnel: dict) -> str:
     return "\n".join(lines)
 
 
-def build_dice_results_context(dice_results: list[dict]) -> str:
-    """Serialize app-rolled dice results for the final DM resolution call."""
-    if not dice_results:
-        return ""
-    lines = ["Use these dice as binding randomness:"]
-    for result in dice_results:
-        label = result.get("label", "roll")
-        sides = result.get("sides", "?")
-        rolls = result.get("rolls", [])
-        modifier = result.get("modifier", 0)
-        total = result.get("total", 0)
-        roll_text = ", ".join(str(r) for r in rolls)
-        if modifier:
-            lines.append(f"{label}: d{sides} [{roll_text}] + {modifier} = {total}")
-        else:
-            lines.append(f"{label}: d{sides} [{roll_text}] = {total}")
-    return "\n".join(lines)
-
-
 # ===================================================================
-# Message builder
+# Message builders
 # ===================================================================
 
 
@@ -1131,19 +1058,27 @@ def build_messages(
     outcome: str,
     multiplayer: str,
     history: str = "",
+    dm_context: str = "",
+    eligible_events: str = "",
 ) -> list[dict[str, str]]:
-    """Construct the messages list for ``AIService.call_with_tools``.
+    """Construct the messages list for the dig flavor LLM call.
 
-    Returns a two-element list: a system message and a user message
-    combining all context sections with clear section headers.
+    ``dm_context`` is the pre-loaded narrative memory + roster + out-of-world
+    bundle (rendered by ``services.dig_dm_context.render_dm_context_section``).
+    ``eligible_events`` is a one-line list of event ids the LLM may pick from
+    via ``picked_event_id``; empty string when no event is eligible.
     """
     user_sections: list[str] = []
 
     user_sections.append("=== PLAYER STATE ===\n" + player_state)
     user_sections.append("=== PERSONALITY ===\n" + personality)
+    if dm_context:
+        user_sections.append("=== DM CONTEXT ===\n" + dm_context)
     if history:
         user_sections.append("=== DIG HISTORY ===\n" + history)
     user_sections.append("=== DIG OUTCOME ===\n" + outcome)
+    if eligible_events:
+        user_sections.append("=== ELIGIBLE EVENTS ===\n" + eligible_events)
 
     if multiplayer:
         user_sections.append("=== MULTIPLAYER ===\n" + multiplayer)
@@ -1183,35 +1118,3 @@ def build_splash_narration_messages(
     ]
 
 
-def build_engine_messages(
-    system_prompt: str,
-    player_state: str,
-    personality: str,
-    preconditions_ctx: str,
-    multiplayer: str,
-    dice_results: str = "",
-    history: str = "",
-) -> list[dict[str, str]]:
-    """Construct the messages list for the DM engine mode.
-
-    Similar to ``build_messages`` but uses preconditions context instead
-    of a post-hoc outcome context.
-    """
-    user_sections: list[str] = []
-
-    user_sections.append("=== PLAYER STATE ===\n" + player_state)
-    user_sections.append("=== PERSONALITY ===\n" + personality)
-    if history:
-        user_sections.append("=== DIG HISTORY ===\n" + history)
-    user_sections.append("=== DIG PRECONDITIONS ===\n" + preconditions_ctx)
-
-    if dice_results:
-        user_sections.append("=== DICE RESULTS ===\n" + dice_results)
-
-    if multiplayer:
-        user_sections.append("=== MULTIPLAYER ===\n" + multiplayer)
-
-    return [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": "\n\n".join(user_sections)},
-    ]

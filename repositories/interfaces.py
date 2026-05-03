@@ -1873,19 +1873,19 @@ class IDigRepository(ABC):
         log_action_type: str = "sabotage",
     ) -> dict: ...
 
-    # Engine mode
-    @abstractmethod
-    def get_engine_mode(self, discord_id: int, guild_id: int) -> str: ...
-
-    @abstractmethod
-    def set_engine_mode(self, discord_id: int, guild_id: int, mode: str) -> None: ...
-
     # Personality
     @abstractmethod
     def get_personality(self, discord_id: int, guild_id: int) -> dict | None: ...
 
     @abstractmethod
     def upsert_personality(self, discord_id: int, guild_id: int, data: dict) -> None: ...
+
+    # DM narrative memory
+    @abstractmethod
+    def get_dm_memory(self, discord_id: int, guild_id: int) -> str: ...
+
+    @abstractmethod
+    def set_dm_memory(self, discord_id: int, guild_id: int, text: str) -> None: ...
 
     # Social actions
     @abstractmethod

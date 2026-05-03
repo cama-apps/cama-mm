@@ -104,8 +104,6 @@ class DigRepository(BaseRepository, IDigRepository):
         "void_bait_digs",
         # dig_thick_skin_date migration
         "thick_skin_date",
-        # dig_engine_mode_column migration
-        "engine_mode",
         # dig_miner_profile_columns migration
         "miner_origin", "miner_about", "stat_strength", "stat_smarts",
         "stat_stamina", "stat_points", "stat_boss_awards",
@@ -234,6 +232,26 @@ class DigRepository(BaseRepository, IDigRepository):
             cursor = conn.cursor()
             cursor.execute(query, params)
             return [row["actor_id"] for row in cursor.fetchall() if row["actor_id"] is not None]
+
+    def count_recent_boss_kills(self, guild_id: int, hours: int = 24) -> int:
+        """Count successful boss-fight actions in the guild over the recent window.
+
+        Used by the dig flavor context to surface "the deep crew came back
+        hours ago" / "the depths have been quiet" callbacks. Only victories
+        count; defeats are noisy and less narratively useful.
+        """
+        gid = self.normalize_guild_id(guild_id)
+        cutoff = int(time.time()) - max(0, hours) * 3600
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT COUNT(*) AS n FROM dig_actions "
+                "WHERE guild_id = ? AND action_type = 'boss_fight' "
+                "AND created_at >= ? AND detail LIKE '%\"won\": true%'",
+                (gid, cutoff),
+            )
+            row = cursor.fetchone()
+            return int(row["n"]) if row and row["n"] is not None else 0
 
     # ── Weather ──────────────────────────────────────────────────────────
 
@@ -1346,19 +1364,6 @@ class DigRepository(BaseRepository, IDigRepository):
             )
             return [dict(row) for row in cursor.fetchall()]
 
-    # ── Engine Mode (legacy/llm toggle) ─────────────────────────────────
-
-    def get_engine_mode(self, discord_id: int, guild_id: int) -> str:
-        """Get the dig engine mode for a player ('legacy' or 'llm')."""
-        tunnel = self.get_tunnel(discord_id, guild_id)
-        if tunnel is None:
-            return "legacy"
-        return tunnel.get("engine_mode", "legacy") or "legacy"
-
-    def set_engine_mode(self, discord_id: int, guild_id: int, mode: str) -> None:
-        """Set the dig engine mode for a player."""
-        self.update_tunnel(discord_id, guild_id, engine_mode=mode)
-
     # ── Personality (LLM player profiling) ──────────────────────────────
 
     def get_personality(self, discord_id: int, guild_id: int) -> dict | None:
@@ -1418,6 +1423,51 @@ class DigRepository(BaseRepository, IDigRepository):
                     data.get("social_summary", ""),
                     now,
                 ),
+            )
+
+    # ── DM narrative memory (per-player, per-guild scratchpad) ──────────
+
+    DM_MEMORY_MAX_BYTES: int = 2048
+
+    def get_dm_memory(self, discord_id: int, guild_id: int) -> str:
+        """Return the DM's narrative memory blob for a player, or empty string."""
+        gid = self.normalize_guild_id(guild_id)
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT summary_text FROM dig_dm_memory "
+                "WHERE discord_id = ? AND guild_id = ?",
+                (discord_id, gid),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return ""
+            return row["summary_text"] or ""
+
+    def set_dm_memory(self, discord_id: int, guild_id: int, text: str) -> None:
+        """Persist a DM memory blob, truncating at the byte cap.
+
+        Last-write-wins; intentionally no row-level locking. Two concurrent
+        digs from the same player can clobber each other and that's fine —
+        memory rewrites overlap heavily anyway.
+        """
+        gid = self.normalize_guild_id(guild_id)
+        text = text or ""
+        encoded = text.encode("utf-8")
+        if len(encoded) > self.DM_MEMORY_MAX_BYTES:
+            text = encoded[: self.DM_MEMORY_MAX_BYTES].decode("utf-8", errors="ignore")
+        now = int(time.time())
+        with self.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO dig_dm_memory (discord_id, guild_id, summary_text, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(discord_id, guild_id) DO UPDATE SET
+                    summary_text = excluded.summary_text,
+                    updated_at = excluded.updated_at
+                """,
+                (discord_id, gid, text, now),
             )
 
     # ── Social Action Queries ───────────────────────────────────────────

@@ -10,7 +10,6 @@ import json
 import logging
 import random
 import time
-import unicodedata
 
 from domain.models.dig_gear import GearLoadout, GearPiece, GearSlot
 from repositories.dig_repository import DigRepository
@@ -1655,112 +1654,6 @@ class DigService:
             pass
         # Other stats (jc_multiplier, cave_in_reduction, lum_refill, etc.)
         # apply at dig-time, not boss-fight time. They're aggregated separately.
-
-    def _generate_timed_challenge(self, kind: str) -> dict:
-        """Generate a timed-input challenge for a pinnacle mechanic.
-
-        Returns a dict with:
-          - kind: "arithmetic" | "riddle"
-          - question: the text to show the player
-          - answer_canonical: a string used to evaluate (lowercased, stripped)
-          - accepted: list of accepted lowercase answers (riddles can have synonyms)
-          - time_window_seconds: how many seconds counts as "fast"
-          - started_at: unix timestamp at challenge generation
-        """
-        now = int(time.time())
-        if kind == "arithmetic":
-            # (2-9) * (2-9) + (1-9), as the user spec'd. Always non-negative.
-            a = random.randint(2, 9)
-            b = random.randint(2, 9)
-            c = random.randint(1, 9)
-            answer = a * b + c
-            return {
-                "kind": "arithmetic",
-                "question": f"{a} * {b} + {c} = ?",
-                "answer_canonical": str(answer),
-                "accepted": [str(answer)],
-                "time_window_seconds": 20,
-                "started_at": now,
-            }
-        if kind == "riddle":
-            from domain.models.boss_mechanics import RIDDLE_POOL as _POOL
-            text, accepted = random.choice(_POOL)
-            return {
-                "kind": "riddle",
-                "question": text,
-                "answer_canonical": accepted[0],
-                "accepted": [a.lower().strip() for a in accepted],
-                "time_window_seconds": 30,
-                "started_at": now,
-            }
-        # Unknown kind — pretend timeout.
-        return {
-            "kind": kind, "question": "?", "answer_canonical": "",
-            "accepted": [], "time_window_seconds": 0, "started_at": now,
-        }
-
-    def _evaluate_timed_answer(
-        self, challenge: dict, answer_text: str, now: int,
-    ) -> int:
-        """Map a submitted answer + elapsed time to one of three options.
-
-        Returns 0 for correct+fast, 1 for correct+slow, 2 for wrong/timeout.
-        """
-        if not challenge:
-            return 2
-        def _norm(s: str) -> str:
-            return " ".join(unicodedata.normalize("NFKD", s or "").lower().split())
-        cleaned = _norm(answer_text)
-        accepted = [_norm(a) for a in challenge.get("accepted", [])]
-        is_correct = bool(cleaned and cleaned in accepted)
-        elapsed = max(0, int(now) - int(challenge.get("started_at", now)))
-        within_window = elapsed <= int(challenge.get("time_window_seconds", 0))
-        if is_correct and within_window:
-            return 0
-        if is_correct:
-            return 1
-        return 2
-
-    def submit_timed_answer(
-        self, discord_id: int, guild_id, answer_text: str,
-    ) -> dict:
-        """Player-submitted answer for an active timed-input pinnacle prompt.
-
-        Reads the active duel state, evaluates the answer against the
-        persisted challenge, and resumes the duel with the mapped option_idx.
-
-        Uses ``claim_active_duel`` (atomic read-and-delete) so a second
-        concurrent submission — e.g. a duplicate Discord modal ``on_submit``
-        from a network retry — gets ``None`` and bails out instead of
-        triggering a double resolution.
-        """
-        state_row = self.dig_repo.claim_active_duel(discord_id, guild_id)
-        if state_row is None:
-            return self._error("No active timed prompt to submit.")
-        try:
-            status_effects = json.loads(state_row["status_effects"] or "{}")
-        except (json.JSONDecodeError, TypeError):
-            status_effects = {}
-        challenge = status_effects.get("timed_challenge")
-        if not challenge:
-            return self._error("Active prompt is not a timed-input challenge.")
-        option_idx = self._evaluate_timed_answer(
-            challenge, answer_text, int(time.time()),
-        )
-        result = self.resume_boss_duel(
-            discord_id, guild_id, option_idx=option_idx, state_row=state_row,
-        )
-        # Surface what the player was being asked, plus the resolution outcome,
-        # so the UI can show "you answered 47 (correct, in time)" or similar.
-        if isinstance(result, dict) and result.get("success") is not False:
-            result.setdefault("timed_challenge_resolution", {
-                "option_idx": option_idx,
-                "submitted": answer_text,
-                "correct": option_idx in (0, 1),
-                "in_time": option_idx == 0,
-                "expected_answer": challenge.get("answer_canonical"),
-            })
-        return result
 
     def _pinnacle_dmg_per_100_count(self, loadout) -> int:
         """Count how many ``dmg_plus_per_100`` stats are equipped on
@@ -5421,12 +5314,6 @@ class DigService:
         mechanic = _get_mechanic(mechanic_id) if mechanic_id else None
         attempts = (tunnel.get("boss_attempts", 0) or 0) + 1
 
-        # If the rolled mechanic is a timed-input prompt (arithmetic / riddle),
-        # generate the challenge now so it persists with the duel state.
-        challenge: dict | None = None
-        if mechanic is not None and mechanic.timed_input_kind:
-            challenge = self._generate_timed_challenge(mechanic.timed_input_kind)
-
         round_log: list[dict] = []
         won: bool | None = None
         for round_num in range(1, BOSS_ROUND_CAP + 1):
@@ -5461,7 +5348,6 @@ class DigService:
                             "boss_hp_max": boss_hp_max,
                             "phase_key": phase_key,
                         },
-                        "timed_challenge": challenge,
                         "gear_snapshot_ids": [
                             int(p.id)
                             for p in (loadout.weapon, loadout.armor, loadout.boots)
@@ -5476,14 +5362,6 @@ class DigService:
                     "boss_dmg": boss_dmg,
                 }
                 self.dig_repo.save_active_duel(discord_id, guild_id, state)
-                response_extras = {}
-                if challenge is not None:
-                    response_extras["timed_challenge"] = {
-                        "kind": challenge["kind"],
-                        "question": challenge["question"],
-                        "time_window_seconds": challenge["time_window_seconds"],
-                        "started_at": challenge["started_at"],
-                    }
                 return self._ok(
                     pending_prompt=self._serialize_prompt(mechanic),
                     boss_id=pinnacle_id,
@@ -5501,7 +5379,6 @@ class DigService:
                     phase=phase_idx,
                     phase_total=3,
                     luminosity_display=self._luminosity_combat_display(tunnel),
-                    **response_extras,
                 )
 
             entry: dict = {"round": round_num}
@@ -6187,8 +6064,8 @@ class DigService:
         """Resume a paused duel after the player picks a reactive option.
 
         ``state_row`` may be supplied by the caller when the row was already
-        atomically claimed (see ``submit_timed_answer``). When omitted, the
-        row is read from the repo as usual.
+        atomically claimed. When omitted, the row is read from the repo as
+        usual.
         """
         from domain.models.boss_mechanics import get_mechanic as _get_mechanic
         from services.dig_constants import get_boss_by_id as _get_boss

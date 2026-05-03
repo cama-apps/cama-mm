@@ -326,6 +326,7 @@ class TestCommandLayerConstraints:
             "get_trivia_image",
         }
         known_async_methods = {
+            "flavor",
             "generate_data_insight",
             "generate_event_flavor",
             "narrate_boss_fight",
@@ -364,7 +365,6 @@ class TestCommandLayerConstraints:
             "on_win_streak_record",
             "query",
             "reschedule_all",
-            "run_dig",
         }
         allowed_pure_leaf_calls = {
             "_get_balance_history_service",
@@ -450,13 +450,13 @@ class TestServiceAsyncConstraints:
         }
         known_async_methods = {
             "complete",
+            "flavor",
             "generate_flavor",
             "generate_sql",
             "narrate_boss_fight",
             "narrate_splash",
             "notify_betting_subscribers",
             "reschedule_all",
-            "run_dig",
         }
 
         def reason_for_call(chain: list[str] | None) -> str | None:

@@ -10,12 +10,13 @@ import pytest
 
 from repositories.dig_repository import DigRepository
 from repositories.player_repository import PlayerRepository
+from services.dig_flavor_service import DigFlavorService
+from services.dig_flavor_validator import validate_splash_narrative
 from services.dig_llm_prompts import (
     SPLASH_NARRATION_SYSTEM_PROMPT,
     SPLASH_NARRATION_TOOL,
     build_splash_narration_messages,
 )
-from services.dig_llm_service import DigLLMService, DigLLMValidator
 from tests.conftest import TEST_GUILD_ID
 
 
@@ -56,28 +57,19 @@ def _register(player_repo, discord_id: int, name: str | None = None) -> None:
 
 class TestValidateSplashNarrative:
     def test_returns_string_under_cap(self):
-        v = DigLLMValidator()
-        out = v.validate_splash_narrative({"narrative": "Short and sweet."})
-        assert out == "Short and sweet."
+        assert validate_splash_narrative("Short and sweet.") == "Short and sweet."
 
     def test_clamps_to_200_chars(self):
-        v = DigLLMValidator()
         big = "x" * 500
-        out = v.validate_splash_narrative({"narrative": big})
+        out = validate_splash_narrative(big)
         assert len(out) <= 200
         assert out.endswith("...")
 
-    def test_missing_field_returns_empty(self):
-        v = DigLLMValidator()
-        assert v.validate_splash_narrative({}) == ""
-
     def test_blank_string_returns_empty(self):
-        v = DigLLMValidator()
-        assert v.validate_splash_narrative({"narrative": "   "}) == ""
+        assert validate_splash_narrative("   ") == ""
 
     def test_strips_whitespace(self):
-        v = DigLLMValidator()
-        assert v.validate_splash_narrative({"narrative": "  hi  "}) == "hi"
+        assert validate_splash_narrative("  hi  ") == "hi"
 
 
 # ---------------------------------------------------------------------------
@@ -129,7 +121,7 @@ class TestBuildSplashNarrationMessages:
 
 
 # ---------------------------------------------------------------------------
-# narrate_splash (DigLLMService)
+# narrate_splash (DigFlavorService)
 # ---------------------------------------------------------------------------
 
 
@@ -147,7 +139,8 @@ class TestNarrateSplash:
                 tool_name="narrate_splash",
                 tool_args={"narrative": "Something gentle and luminous happens."},
             ))
-        return DigLLMService(ai_service, dig_repo, player_repo)
+        context_builder = MagicMock()
+        return DigFlavorService(ai_service, dig_repo, player_repo, context_builder)
 
     @pytest.mark.asyncio
     async def test_returns_narrative_on_success(self, dig_repo, player_repository):

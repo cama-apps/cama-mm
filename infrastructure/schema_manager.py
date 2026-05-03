@@ -366,6 +366,7 @@ class SchemaManager:
                 "renumber_pickaxe_tier_for_stormrend_insert",
                 self._migration_renumber_pickaxe_tier_for_stormrend_insert,
             ),
+            ("create_dig_dm_memory_table", self._migration_create_dig_dm_memory_table),
         ]
 
     # --- Migrations ---
@@ -2865,3 +2866,17 @@ class SchemaManager:
         # dig_gear.tier (per-piece, all three slots).
         cursor.execute("UPDATE dig_gear SET tier = 7 WHERE tier = 6")
         cursor.execute("UPDATE dig_gear SET tier = 6 WHERE tier = 5")
+
+    def _migration_create_dig_dm_memory_table(self, cursor) -> None:
+        """Create dig_dm_memory table for the DM's per-player narrative scratchpad."""
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS dig_dm_memory (
+                discord_id   INTEGER NOT NULL,
+                guild_id     INTEGER NOT NULL DEFAULT 0,
+                summary_text TEXT NOT NULL DEFAULT '',
+                updated_at   INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (discord_id, guild_id)
+            )
+            """
+        )
