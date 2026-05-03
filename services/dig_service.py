@@ -273,16 +273,21 @@ class DigService:
         if effects.green_steady_bonus > 0 and modified > 0:
             modified += effects.green_steady_bonus
 
-        # Plains tithe: transfer 5% to nonprofit fund.
-        if effects.plains_tithe_rate > 0 and modified > 0:
+        # Plains tithe: transfer 5% to nonprofit fund. Skip the tithe entirely
+        # if the loan_service is missing or the transfer fails — never destroy
+        # JC silently.
+        loan_service = getattr(self.mana_effects_service, "loan_service", None)
+        if effects.plains_tithe_rate > 0 and modified > 0 and loan_service is not None:
             tithe = max(1, int(modified * effects.plains_tithe_rate))
-            modified -= tithe
-            loan_service = getattr(self.mana_effects_service, "loan_service", None)
-            if loan_service is not None:
-                try:
-                    loan_service.add_to_nonprofit_fund(guild_id, tithe)
-                except Exception:
-                    pass
+            try:
+                loan_service.add_to_nonprofit_fund(guild_id, tithe)
+                modified -= tithe
+            except Exception:
+                logger.warning(
+                    "Plains tithe transfer failed in dig; tithe skipped "
+                    "rather than destroying JC.",
+                    exc_info=True,
+                )
 
         # Blue tax on positive yields (deflationary, JC destroyed by design).
         if effects.blue_tax_rate > 0 and modified > 0:
@@ -290,6 +295,35 @@ class DigService:
             modified -= tax
 
         return max(0, modified)
+
+    def _apply_mana_paid_cost_modifier(
+        self, discord_id: int, guild_id, base_cost: int
+    ) -> int:
+        """Silently apply the player's mana paid-cost modifier (Mountain -5%)."""
+        if self.mana_effects_service is None or base_cost <= 0:
+            return base_cost
+        try:
+            effects = self.mana_effects_service.get_effects(discord_id, guild_id)
+        except Exception:
+            return base_cost
+        if effects.color is None or effects.dig_paid_cost_modifier_pct == 0:
+            return base_cost
+        adjusted = int(base_cost * (1.0 + effects.dig_paid_cost_modifier_pct))
+        return max(1, adjusted)
+
+    def _apply_mana_cooldown_reduction(
+        self, discord_id: int, guild_id, cooldown_seconds: int
+    ) -> int:
+        """Silently apply the player's mana cooldown reduction (Forest -30s)."""
+        if self.mana_effects_service is None or cooldown_seconds <= 0:
+            return cooldown_seconds
+        try:
+            effects = self.mana_effects_service.get_effects(discord_id, guild_id)
+        except Exception:
+            return cooldown_seconds
+        if effects.color is None or effects.dig_cooldown_reduction_seconds <= 0:
+            return cooldown_seconds
+        return max(1, cooldown_seconds - effects.dig_cooldown_reduction_seconds)
 
     def _apply_mana_hazard_modifier(
         self, discord_id: int, guild_id, base_chance: float
@@ -308,28 +342,6 @@ class DigService:
             return base_chance
         return max(0.0, min(1.0, base_chance + effects.dig_hazard_modifier))
 
-    def _apply_mana_caveins_refund(
-        self, discord_id: int, guild_id, paid_amount: int
-    ) -> int:
-        """Silently refund a fraction of paid-dig cost on a cave-in.
-
-        Blue: refund 50% of paid_amount (creates JC, mirrors blue_cashback_rate
-        intent). Other colors: no refund. Returns refunded amount.
-        """
-        if self.mana_effects_service is None or paid_amount <= 0:
-            return 0
-        try:
-            effects = self.mana_effects_service.get_effects(discord_id, guild_id)
-        except Exception:
-            return 0
-        if effects.color is None or effects.dig_paid_refund_on_caveins <= 0:
-            return 0
-        refund = max(1, int(paid_amount * effects.dig_paid_refund_on_caveins))
-        try:
-            self.player_repo.add_balance(discord_id, guild_id, refund)
-        except Exception:
-            return 0
-        return refund
 
     # ------------------------------------------------------------------
     # Helpers
@@ -2266,14 +2278,19 @@ class DigService:
         #    short-circuited above.
         paid_dig_cost = 0
         if not is_first_dig:
-            cooldown_remaining = self._get_cooldown_remaining(tunnel)
+            cooldown_remaining = self._apply_mana_cooldown_reduction(
+                discord_id, guild_id, self._get_cooldown_remaining(tunnel)
+            )
             if cooldown_remaining > 0:
                 if not paid:
                     pd = tunnel.get("paid_dig_date")
                     pc = tunnel.get("paid_digs_today") or 0
                     if pd != today:
                         pc = 0
-                    preview_cost = self._calculate_paid_dig_cost(tunnel, pc)
+                    preview_cost = self._apply_mana_paid_cost_modifier(
+                        discord_id, guild_id,
+                        self._calculate_paid_dig_cost(tunnel, pc),
+                    )
                     return {
                         "success": False,
                         "error": f"Dig on cooldown ({cooldown_remaining}s remaining).",
@@ -2289,7 +2306,10 @@ class DigService:
                 if paid_date != today:
                     paid_count = 0
 
-                paid_dig_cost = self._calculate_paid_dig_cost(tunnel, paid_count)
+                paid_dig_cost = self._apply_mana_paid_cost_modifier(
+                    discord_id, guild_id,
+                    self._calculate_paid_dig_cost(tunnel, paid_count),
+                )
 
                 balance = self.player_repo.get_balance(discord_id, guild_id)
                 if balance < paid_dig_cost:
@@ -2519,6 +2539,19 @@ class DigService:
 
         if cave_in:
             # 10. Cave-in consequences
+            # Silent Blue mana refund: a fraction of paid_dig_cost comes back
+            # to soften the blow. Folded into the same atomic commit as the
+            # cave-in balance delta below.
+            blue_refund = 0
+            if paid_dig_cost > 0 and self.mana_effects_service is not None:
+                try:
+                    _bf = self.mana_effects_service.get_effects(discord_id, guild_id)
+                    if _bf.color is not None and _bf.dig_paid_refund_on_caveins > 0:
+                        blue_refund = max(
+                            1, int(paid_dig_cost * _bf.dig_paid_refund_on_caveins)
+                        )
+                except Exception:
+                    blue_refund = 0
             block_loss = random.randint(CAVE_IN_BLOCK_LOSS_MIN, CAVE_IN_BLOCK_LOSS_MAX)
             # Weather: cap on block loss (e.g. Mudslide Warning)
             weather_loss_cap = weather_fx.get("cave_in_loss_cap")
@@ -2545,7 +2578,7 @@ class DigService:
                 "total_digs": (tunnel.get("total_digs", 0) or 0) + 1,
                 "last_dig_at": now,
             }
-            cave_in_balance_delta = 0
+            cave_in_balance_delta = blue_refund
 
             if thick_skin_saved:
                 cave_in_tunnel_updates["thick_skin_date"] = today
@@ -3607,6 +3640,9 @@ class DigService:
                 streak_bonus = STREAKS[threshold]
                 break
         jc_earned += streak_bonus
+
+        # Apply silent mana yield modifier before commit (parity with dig() path).
+        jc_earned = self._apply_mana_yield_modifier(discord_id, guild_id, jc_earned)
 
         # Artifact
         artifact = None
@@ -5196,6 +5232,21 @@ class DigService:
             player_dmg = max(0, player_dmg + int(phase_event_obj.player_dmg_delta))
         # Pinnacle relic stat: dmg per 100 depth (300 → +3 per stack).
         player_dmg += self._pinnacle_dmg_per_100_count(loadout) * (PINNACLE_DEPTH // 100)
+
+        # Silent mana variance modifier (parity with fight_boss).
+        if self.mana_effects_service is not None:
+            try:
+                _pin_effects = self.mana_effects_service.get_effects(discord_id, guild_id)
+                if (
+                    _pin_effects.color is not None
+                    and _pin_effects.boss_damage_variance_modifier != 0
+                    and random.random() < 0.5
+                ):
+                    _pin_scale = 1.0 + _pin_effects.boss_damage_variance_modifier
+                    player_dmg = max(1, int(player_dmg * _pin_scale))
+                    boss_dmg = max(1, int(boss_dmg * _pin_scale))
+            except Exception:
+                pass
 
         # Consume the pending phase event (one-shot) so it doesn't fire again.
         if phase_event_obj is not None:
