@@ -59,13 +59,20 @@ class EnrichedMatchView(discord.ui.View):
             logger.debug("Failed to generate advantage graph for match %s", self.match_id)
         return None
 
+    async def _safe_edit_response(self, interaction: discord.Interaction, **kwargs) -> None:
+        """Edit the response, swallowing expired-token / unknown-interaction failures."""
+        try:
+            await interaction.response.edit_message(**kwargs)
+        except (discord.NotFound, discord.HTTPException) as exc:
+            logger.warning("Match view edit failed: %s", exc)
+
     @discord.ui.button(label="< Prev", style=discord.ButtonStyle.secondary)
     async def prev_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if self.page > 0:
             self.page = 0
             self._update_buttons()
-            await interaction.response.edit_message(
-                embed=self.embed, attachments=[], view=self,
+            await self._safe_edit_response(
+                interaction, embed=self.embed, attachments=[], view=self,
             )
 
     @discord.ui.button(label="Next >", style=discord.ButtonStyle.primary)
@@ -79,12 +86,15 @@ class EnrichedMatchView(discord.ui.View):
                 graph_embed = discord.Embed(color=0x2F3136)
                 graph_embed.set_image(url="attachment://advantage.png")
                 graph_embed.set_footer(text=f"Match #{self.match_id} — Team Advantages Per Minute")
-                await interaction.response.edit_message(
-                    embed=graph_embed, attachments=[graph_file], view=self,
+                await self._safe_edit_response(
+                    interaction, embed=graph_embed, attachments=[graph_file], view=self,
                 )
             else:
                 # Fallback — shouldn't happen since we hide buttons when no data
-                await interaction.response.defer()
+                try:
+                    await interaction.response.defer()
+                except (discord.NotFound, discord.HTTPException) as exc:
+                    logger.warning("Match view fallback defer failed: %s", exc)
 
     async def on_timeout(self):
         """Disable buttons on timeout."""
