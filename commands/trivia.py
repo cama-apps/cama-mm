@@ -216,20 +216,29 @@ class TriviaView(discord.ui.View):
                         # Green: +1 steady per milestone
                         if effects.trivia_streak_bonus > 0:
                             jc += effects.trivia_streak_bonus
-                        # White: tithe to nonprofit fund
-                        if effects.plains_tithe_rate > 0:
+                        # White: tithe to nonprofit fund. Skip if the tithe
+                        # would zero out the player's payout, or if loan_service
+                        # is missing / fails — never destroy JC silently.
+                        loan_service = getattr(mana_fx, "loan_service", None)
+                        if (
+                            effects.plains_tithe_rate > 0
+                            and loan_service is not None
+                            and jc > 1
+                        ):
                             mana_tithe = max(1, int(jc * effects.plains_tithe_rate))
-                            jc -= mana_tithe
-                            loan_service = getattr(mana_fx, "loan_service", None)
-                            if loan_service is not None:
+                            if mana_tithe < jc:
                                 try:
                                     await asyncio.to_thread(
                                         loan_service.add_to_nonprofit_fund,
                                         self.session.guild_id,
                                         mana_tithe,
                                     )
+                                    jc -= mana_tithe
                                 except Exception:
-                                    pass
+                                    logger.warning(
+                                        "Trivia tithe transfer failed; tithe skipped.",
+                                        exc_info=True,
+                                    )
                     except Exception:
                         logger.exception("Failed to apply trivia mana effects")
             self.session.total_jc += jc
