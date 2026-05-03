@@ -112,6 +112,7 @@ from services.dig_constants import (
     WEATHER_BY_ID,
     WIN_CHANCE_CAP,
     WIN_CHANCE_FLOOR,
+    format_relic_label,
 )
 
 logger = logging.getLogger("cama_bot.services.dig")
@@ -4217,16 +4218,10 @@ class DigService:
             a = dict(a)
             if a.get("is_relic"):
                 artifact_id = a.get("artifact_id", "")
-                # Look up name from pool
-                name = artifact_id
-                for pool_item in ARTIFACT_POOL:
-                    if pool_item["id"] == artifact_id:
-                        name = pool_item["name"]
-                        break
                 relics.append({
                     "id": artifact_id,
                     "db_id": a.get("id"),
-                    "name": name,
+                    "name": format_relic_label(artifact_id),
                     "equipped": a.get("equipped", 0),
                 })
         return relics

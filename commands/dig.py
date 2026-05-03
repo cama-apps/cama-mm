@@ -23,6 +23,7 @@ from services.dig_constants import (
     LUMINOSITY_PITCH_BLACK,
     MAX_INVENTORY_SLOTS,
     PICKAXE_TIERS,
+    format_relic_label,
     pick_description,
 )
 from services.dig_constants import get_layer as get_layer_def
@@ -1650,11 +1651,15 @@ def _build_gear_embed(
 
     relics = loadout.get("relics") or []
     if relics:
-        names = ", ".join(r.get("artifact_id", "?") for r in relics)
-        relic_value = f"**{len(relics)}** equipped: {names}"
+        relic_field_name = f"Relics ({len(relics)} equipped)"
+        relic_value = "\n".join(
+            f"• {format_relic_label(r.get('artifact_id', ''), with_stats=True)}"
+            for r in relics
+        )
     else:
+        relic_field_name = "Relics"
         relic_value = "_None equipped_"
-    embed.add_field(name="Relics", value=relic_value, inline=False)
+    embed.add_field(name=relic_field_name, value=relic_value, inline=False)
 
     inv_count = len(inventory)
     damaged_count = len(damaged)

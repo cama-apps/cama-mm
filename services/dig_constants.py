@@ -6016,37 +6016,37 @@ class RelicStatRoll:
 
 PINNACLE_RELIC_STAT_POOL: tuple[RelicStatRoll, ...] = (
     # Combat
-    RelicStatRoll("hp_plus_1",        "+1 player HP",
+    RelicStatRoll("hp_plus_1",        "Tougher skin",
                   {"player_hp_bonus": 1}),
-    RelicStatRoll("hit_plus_002",     "+0.02 player_hit",
+    RelicStatRoll("hit_plus_002",     "Steadier hands",
                   {"player_hit_bonus": 0.02}),
-    RelicStatRoll("dmg_plus_per_100", "+1 player_dmg per 100 depth",
+    RelicStatRoll("dmg_plus_per_100", "Stronger with depth",
                   {"player_dmg_per_100_depth": 1}),
-    RelicStatRoll("boss_hit_minus",   "-0.02 boss_hit",
+    RelicStatRoll("boss_hit_minus",   "Bosses miss more often",
                   {"boss_hit_offset": -0.02}),
-    RelicStatRoll("boss_hp_minus_10", "-10% boss starting HP",
+    RelicStatRoll("boss_hp_minus_10", "Bosses arrive weakened",
                   {"boss_hp_multiplier": -0.10}),
-    RelicStatRoll("boss_payout_5",    "+5% boss payout",
+    RelicStatRoll("boss_payout_5",    "Bosses pay better",
                   {"boss_payout_bonus": 0.05}),
     # Dig
-    RelicStatRoll("jc_plus_5",        "+5% JC on dig",
+    RelicStatRoll("jc_plus_5",        "Richer veins",
                   {"jc_multiplier": 0.05}),
-    RelicStatRoll("cave_in_minus_5",  "-5% cave-in chance",
+    RelicStatRoll("cave_in_minus_5",  "Steadier ceilings",
                   {"cave_in_reduction": 0.05}),
-    RelicStatRoll("lum_refill_2",     "+2 luminosity refill per day",
+    RelicStatRoll("lum_refill_2",     "Brighter mornings",
                   {"lum_refill_bonus": 2}),
-    RelicStatRoll("durability_minus", "-10% gear durability tick",
+    RelicStatRoll("durability_minus", "Gear lasts longer",
                   {"durability_reduction": 0.10}),
-    RelicStatRoll("inventory_plus_1", "+1 inventory slot",
+    RelicStatRoll("inventory_plus_1", "Roomier pack",
                   {"inventory_bonus": 1}),
     # Utility
-    RelicStatRoll("streak_immunity",  "Once per delve, streak does not break on missed day",
+    RelicStatRoll("streak_immunity",  "Streak persists, once per delve",
                   {"streak_immunity": True}),
-    RelicStatRoll("extra_relic_slot", "+1 equipped-relic slot",
+    RelicStatRoll("extra_relic_slot", "Another relic finds room",
                   {"relic_slot_bonus": 1}),
-    RelicStatRoll("scout_free",       "Boss scout costs 0 cooldown",
+    RelicStatRoll("scout_free",       "Scouting comes cheap",
                   {"scout_free": True}),
-    RelicStatRoll("cheer_buff",       "Cheers from others give +6% (was +5%)",
+    RelicStatRoll("cheer_buff",       "Cheers ring louder",
                   {"cheer_bonus": 0.01}),
 )
 
@@ -6065,6 +6065,41 @@ PINNACLE_RELIC_BASE_NAME: dict[str, str] = {
 # Flat JC reward layered on top of the relic drop.
 PINNACLE_BASE_JC_REWARD: int = 500
 PINNACLE_JC_PER_PRESTIGE: int = 100
+
+
+_RELIC_NAME_BY_ID: dict[str, str] = {r.id: r.name for r in RELICS}
+_PINNACLE_STAT_LABEL_BY_ID: dict[str, str] = {
+    s.id: s.label for s in PINNACLE_RELIC_STAT_POOL
+}
+
+
+def format_relic_label(artifact_id: str, *, with_stats: bool = False) -> str:
+    """Render a relic's display name from its stored artifact_id.
+
+    Plain relics resolve via the RELICS registry. Pinnacle ids of the form
+    ``pinnacle:<base>:<suffix>:<stat1>:<stat2>`` are parsed into
+    ``"<base> of <suffix>"``; with ``with_stats=True`` the recognized stat
+    labels are appended in parens.
+    """
+    if not artifact_id:
+        return "?"
+    if artifact_id.startswith("pinnacle:"):
+        parts = artifact_id.split(":")
+        if len(parts) >= 3:
+            base = parts[1]
+            suffix = parts[2]
+            label = f"{base} of {suffix}"
+            if with_stats:
+                stat_labels = [
+                    _PINNACLE_STAT_LABEL_BY_ID[sid]
+                    for sid in parts[3:]
+                    if sid in _PINNACLE_STAT_LABEL_BY_ID
+                ]
+                if stat_labels:
+                    label += f" ({', '.join(stat_labels)})"
+            return label
+        return artifact_id
+    return _RELIC_NAME_BY_ID.get(artifact_id, artifact_id)
 
 
 # ---------------------------------------------------------------------------

@@ -24,6 +24,7 @@ from services.dig_constants import (
     GEAR_TIER_TABLES,
     PLAYER_HIT_CEILING,
     WEAPON_TIERS,
+    format_relic_label,
 )
 from services.dig_service import DigService
 
@@ -628,3 +629,41 @@ class TestDigGearServiceTryDebit:
         starting = svc.player_repo.get_balance(player, 0)
         assert svc.player_repo.try_debit(player, 0, 0) is True
         assert svc.player_repo.get_balance(player, 0) == starting
+
+
+# =============================================================================
+# Relic label formatter
+# =============================================================================
+
+
+class TestRelicLabelFormatter:
+    """format_relic_label resolves plain + pinnacle artifact_ids to display
+    strings. Pure function over the constants module — no fixtures needed."""
+
+    def test_plain_known_relic(self):
+        assert format_relic_label("frozen_clock") == "Frozen Clock"
+
+    def test_plain_known_relic_with_stats_flag_unchanged(self):
+        # with_stats only adds parens for pinnacles; plain relics ignore it
+        assert format_relic_label("frozen_clock", with_stats=True) == "Frozen Clock"
+
+    def test_pinnacle_without_stats(self):
+        pid = "pinnacle:Pickaxe:Patience:boss_hit_minus:hp_plus_1"
+        assert format_relic_label(pid) == "Pickaxe of Patience"
+
+    def test_pinnacle_with_stats(self):
+        pid = "pinnacle:Pickaxe:Patience:boss_hit_minus:hp_plus_1"
+        assert (
+            format_relic_label(pid, with_stats=True)
+            == "Pickaxe of Patience (Bosses miss more often, Tougher skin)"
+        )
+
+    def test_unknown_plain_id_returns_raw(self):
+        assert format_relic_label("not_a_real_relic") == "not_a_real_relic"
+
+    def test_pinnacle_skips_unknown_stat_id(self):
+        pid = "pinnacle:Pickaxe:Patience:bogus_stat:hp_plus_1"
+        assert (
+            format_relic_label(pid, with_stats=True)
+            == "Pickaxe of Patience (Tougher skin)"
+        )
