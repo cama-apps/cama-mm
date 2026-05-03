@@ -24,6 +24,26 @@ from utils.drawing._common import (
 )
 
 
+def _wrap_text(text: str, font, max_width: int) -> list[str]:
+    """Greedy word-wrap. Single words longer than max_width get their own line
+    and overflow rather than breaking mid-word."""
+    words = text.split()
+    if not words:
+        return [""]
+    lines: list[str] = []
+    current = words[0]
+    for word in words[1:]:
+        candidate = f"{current} {word}"
+        w, _ = _get_text_size(font, candidate)
+        if w <= max_width:
+            current = candidate
+        else:
+            lines.append(current)
+            current = word
+    lines.append(current)
+    return lines
+
+
 def draw_market_fair_history(
     market_id: int,
     snapshots: list[tuple[int, int]],
@@ -47,12 +67,7 @@ def draw_market_fair_history(
     height = 280
     padding_left = 50
     padding_right = 30
-    padding_top = 40
     padding_bottom = 40
-    chart_x = padding_left
-    chart_y = padding_top
-    chart_width = width - padding_left - padding_right
-    chart_height = height - padding_top - padding_bottom
 
     img = Image.new("RGBA", (width, height), DISCORD_BG)
     draw = ImageDraw.Draw(img)
@@ -61,7 +76,22 @@ def draw_market_fair_history(
     label_font = _get_font(12)
 
     title_text = title or f"Market #{market_id} — fair history"
-    draw.text((padding_left, 12), title_text, fill=DISCORD_WHITE, font=title_font)
+    wrap_width = width - padding_left - padding_right
+    title_lines = _wrap_text(title_text, title_font, wrap_width)
+    line_height = 22
+    # Keep total image height at 280; long titles eat into the plot area.
+    padding_top = 12 + len(title_lines) * line_height + 6
+    chart_x = padding_left
+    chart_y = padding_top
+    chart_width = wrap_width
+    chart_height = max(40, height - padding_top - padding_bottom)
+    for i, line in enumerate(title_lines):
+        draw.text(
+            (padding_left, 12 + i * line_height),
+            line,
+            fill=DISCORD_WHITE,
+            font=title_font,
+        )
 
     now_ts = int(_dt.datetime.now(_dt.UTC).timestamp())
     if snapshots:
