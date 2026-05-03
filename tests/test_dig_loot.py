@@ -419,9 +419,10 @@ class TestNewItemsAndArtifacts:
         assert "torch" in CONSUMABLES
         assert "void_bait" in CONSUMABLES
 
-    def test_35_artifacts(self):
+    def test_artifact_count(self):
         from services.dig_constants import ALL_ARTIFACTS
-        assert len(ALL_ARTIFACTS) == 35
+        # 35 base + 3 P5-gated relics added in the prestige-pull pass
+        assert len(ALL_ARTIFACTS) == 38
 
     def test_fungal_artifacts_exist(self):
         from services.dig_constants import ALL_ARTIFACTS
@@ -648,3 +649,50 @@ class TestRarityRebalance:
             f"rare share {share:.3f} drifted from analytic {expected:.3f} "
             f"(weights={RARITY_WEIGHTS})"
         )
+
+
+class TestPrestigeRelicPool:
+    """P5-gated relic drops on boss kills."""
+
+    def test_three_p5_relics_defined(self):
+        from services.dig_constants import RELICS
+        p5_relics = [r for r in RELICS if r.min_prestige >= 5]
+        assert len(p5_relics) == 3
+        ids = {r.id for r in p5_relics}
+        assert ids == {"hollow_fang", "echo_lantern", "patient_stone"}
+
+    def test_p5_relics_cover_each_axis(self):
+        from services.dig_constants import RELICS
+        ids = {r.id for r in RELICS if r.min_prestige >= 5}
+        # boss-combat, dig-economy, risk-mit (one each)
+        assert "hollow_fang" in ids
+        assert "echo_lantern" in ids
+        assert "patient_stone" in ids
+
+    def test_drop_returns_none_for_low_prestige(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        """A P3 player can never roll the new pool, even on lucky rolls."""
+        _register_player(player_repository, balance=200)
+        monkeypatch.setattr(random, "random", lambda: 0.0)  # always succeed
+        result = dig_service._maybe_drop_prestige_relic(10001, 12345, prestige_level=3)
+        assert result is None
+
+    def test_drop_can_return_relic_at_p5(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        """A P5 player with a max-luck roll gets a P5-gated relic."""
+        _register_player(player_repository, balance=200)
+        monkeypatch.setattr(random, "random", lambda: 0.0)
+        result = dig_service._maybe_drop_prestige_relic(10001, 12345, prestige_level=5)
+        assert result is not None
+        assert result["id"] in {"hollow_fang", "echo_lantern", "patient_stone"}
+
+    def test_drop_rate_gates_unlucky_roll(
+        self, dig_service, dig_repo, player_repository, monkeypatch,
+    ):
+        """High random roll (above drop rate) returns None even at high prestige."""
+        _register_player(player_repository, balance=200)
+        monkeypatch.setattr(random, "random", lambda: 0.99)  # above 10% rate
+        result = dig_service._maybe_drop_prestige_relic(10001, 12345, prestige_level=10)
+        assert result is None

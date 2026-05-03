@@ -701,6 +701,28 @@ def _build_boss_fight_result_embed(*, result, risk_tier: str, amount: int) -> di
                 value="First clear bonus: use `/dig miner build` to allocate it.",
                 inline=False,
             )
+        gear_drop = getattr(result, "gear_drop", None)
+        if gear_drop:
+            gd = gear_drop if isinstance(gear_drop, dict) else (
+                gear_drop._d if hasattr(gear_drop, "_d") else None
+            )
+            if gd:
+                embed.add_field(
+                    name="Boss Drop",
+                    value=f"**{gd.get('name', 'Gear')}** ({gd.get('slot', 'gear')})",
+                    inline=False,
+                )
+        relic_drop = getattr(result, "prestige_relic_drop", None)
+        if relic_drop:
+            rd = relic_drop if isinstance(relic_drop, dict) else (
+                relic_drop._d if hasattr(relic_drop, "_d") else None
+            )
+            if rd:
+                embed.add_field(
+                    name="Relic Found",
+                    value=f"**{rd.get('name', 'Relic')}**",
+                    inline=False,
+                )
     else:
         loss = abs(getattr(result, "jc_delta", 0)) or amount
         knockback = getattr(result, "knockback", 0)
@@ -1527,6 +1549,26 @@ class PrestigePerksView(discord.ui.View):
                     embed.add_field(
                         name=f"Ascension Unlocked: {asc_d.get('name', '?')}",
                         value=f"Penalty: {asc_d.get('penalty', '?')}\nReward: {asc_d.get('reward', '?')}",
+                        inline=False,
+                    )
+
+                # Prestige flat-grant: show JC + relic
+                grant = getattr(result, "prestige_grant", None)
+                if grant:
+                    grant_d = grant if isinstance(grant, dict) else (
+                        grant._d if hasattr(grant, "_d") else {}
+                    )
+                    jc_amt = grant_d.get("jc", 0) if isinstance(grant_d, dict) else 0
+                    relic = grant_d.get("relic") if isinstance(grant_d, dict) else None
+                    relic_d = relic if isinstance(relic, dict) else (
+                        relic._d if hasattr(relic, "_d") else None
+                    )
+                    grant_parts = [f"+{jc_amt} {JOPACOIN_EMOTE}"]
+                    if relic_d:
+                        grant_parts.append(f"**{relic_d.get('name', 'Relic')}** ({relic_d.get('rarity', '?')})")
+                    embed.add_field(
+                        name="Prestige Grant",
+                        value=" · ".join(grant_parts),
                         inline=False,
                     )
 
@@ -2569,6 +2611,19 @@ class DigCommands(commands.Cog):
         event_file = await self._resolve_event_art(event_data.get("id", ""), result)
         if event_file:
             event_embed.set_image(url=f"attachment://{event_file.filename}")
+
+        # Perk: reading_the_stone reveals odds for risky options
+        has_reveal_perk = await asyncio.to_thread(
+            self.dig_service.has_perk, interaction.user.id, guild_id, "reading_the_stone",
+        )
+        if has_reveal_perk:
+            odds_lines = []
+            for key, label in (("risky_option", "Risky"), ("desperate_option", "Desperate")):
+                opt = event_data.get(key) if isinstance(event_data, dict) else None
+                if isinstance(opt, dict) and "success_chance" in opt:
+                    odds_lines.append(f"{label}: {int(opt['success_chance'] * 100)}%")
+            if odds_lines:
+                event_embed.add_field(name="Odds", value="\n".join(odds_lines), inline=False)
 
         _lum_info = getattr(result, "luminosity_info", None)
         _lum_val = (_lum_info.get("luminosity_after", 100) if isinstance(_lum_info, dict)

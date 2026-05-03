@@ -480,12 +480,17 @@ class TestPersistedHPCarry:
         accessor, mutated, and re-serialized — collapsing every other
         boundary's dict entry to a status string."""
         _at_boss(dig_service, dig_repo, player_repository, monkeypatch, depth=49)
+        # Boundary 25 must be defeated so the fight target is 50 (catch-up
+        # would otherwise route the encounter to the lowest active boss).
+        # Carry data lives on boundary 100 — a deeper, untouched boundary
+        # whose dict shape is what we're verifying survives a loss at 50.
         progress = json.dumps({
-            "25": {
-                "boss_id": "grothak", "status": "active",
+            "25": {"boss_id": "grothak", "status": "defeated"},
+            "50": {"boss_id": "crystalia", "status": "active"},
+            "100": {
+                "boss_id": "vorgath", "status": "active",
                 "hp_remaining": 2, "hp_max": 10, "last_engaged_at": 1_000,
             },
-            "50": {"boss_id": "crystalia", "status": "active"},
         })
         dig_repo.update_tunnel(10001, TEST_GUILD_ID, boss_progress=progress)
         # All rolls fail → both miss every round → BOSS_ROUND_CAP loss.
@@ -497,15 +502,15 @@ class TestPersistedHPCarry:
         assert result["success"] is True
         assert result["won"] is False
 
-        # Boundary 25's wounded carry must still be a dict with hp_remaining.
+        # Boundary 100's wounded carry must still be a dict with hp_remaining.
         fresh = dict(dig_repo.get_tunnel(10001, TEST_GUILD_ID))
         bp = json.loads(fresh["boss_progress"])
-        entry_25 = bp.get("25")
-        assert isinstance(entry_25, dict), (
-            f"Boundary 25 lost its dict shape after a loss at 50; got {entry_25!r}"
+        entry_100 = bp.get("100")
+        assert isinstance(entry_100, dict), (
+            f"Boundary 100 lost its dict shape after a loss at 50; got {entry_100!r}"
         )
-        assert entry_25.get("hp_remaining") == 2
-        assert entry_25.get("hp_max") == 10
+        assert entry_100.get("hp_remaining") == 2
+        assert entry_100.get("hp_max") == 10
 
 
     def test_retreat_preserves_other_boundaries(

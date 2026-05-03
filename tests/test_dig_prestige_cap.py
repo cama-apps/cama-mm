@@ -33,6 +33,10 @@ def dig_service(dig_repo, player_repository, monkeypatch):
 
 
 def _seed_player(dig_service, dig_repo, player_repository, depth: int, luminosity: int = 100):
+    import json as _json
+
+    from services.dig_constants import BOSS_BOUNDARIES, PINNACLE_DEPTH
+
     player_repository.add(
         discord_id=10001,
         discord_username="Player10001",
@@ -45,6 +49,11 @@ def _seed_player(dig_service, dig_repo, player_repository, depth: int, luminosit
     player_repository.update_balance(10001, 12345, 10000)
     random.seed(0)
     dig_service.dig(10001, 12345)
+    # Mark all bosses (tier + pinnacle) defeated so deep-depth digs are
+    # not intercepted by boss-skip catch-up. These tests measure
+    # luminosity drain and the hard cap, not boss flow.
+    bp = {str(b): "defeated" for b in BOSS_BOUNDARIES}
+    bp[str(PINNACLE_DEPTH)] = "defeated"
     # Cooldown bypass: zero out last_dig_at so subsequent digs can run.
     # Pin last_lum_update_at to the mocked clock so any lazy-decay path
     # sees zero elapsed time and the luminosity invariant remains a
@@ -53,6 +62,7 @@ def _seed_player(dig_service, dig_repo, player_repository, depth: int, luminosit
         10001, 12345,
         depth=depth, luminosity=luminosity,
         last_dig_at=0, last_lum_update_at=1_000_000,
+        boss_progress=_json.dumps(bp),
     )
 
 
@@ -173,3 +183,41 @@ class TestDeepDrainRamp:
             assert result.get("success"), f"dig at {d} failed: {result.get('error')}"
             drains.append(result["luminosity_info"]["drained"])
         assert drains[0] < drains[1] < drains[2], drains
+
+
+class TestPostPinnacleDecay:
+    """Per-dig JC and artifact rate fall off past the pinnacle so
+    grinders see diminishing returns rather than free farm."""
+
+    def test_factor_at_or_below_pinnacle_is_one(self, dig_service):
+        from services.dig_constants import PINNACLE_DEPTH
+
+        assert dig_service._post_pinnacle_decay_factor(0) == 1.0
+        assert dig_service._post_pinnacle_decay_factor(PINNACLE_DEPTH - 1) == 1.0
+        assert dig_service._post_pinnacle_decay_factor(PINNACLE_DEPTH) == 1.0
+
+    def test_factor_steps_down_per_25_depth(self, dig_service):
+        from services.dig_constants import PINNACLE_DEPTH
+
+        # First step at depth 325: -5%
+        assert dig_service._post_pinnacle_decay_factor(PINNACLE_DEPTH + 25) == pytest.approx(0.95)
+        # Depth 400: 4 steps × 5% = 20% off → 0.80
+        assert dig_service._post_pinnacle_decay_factor(PINNACLE_DEPTH + 100) == pytest.approx(0.80)
+        # Depth 500: 8 steps × 5% = 40% off → 0.60
+        assert dig_service._post_pinnacle_decay_factor(PINNACLE_DEPTH + 200) == pytest.approx(0.60)
+
+    def test_factor_clamps_at_zero(self, dig_service):
+        from services.dig_constants import PINNACLE_DEPTH
+
+        # At -5% per 25 depth, factor hits 0 at PINNACLE + 500 (depth 800)
+        # which is well past PRESTIGE_HARD_CAP, so we test a hypothetical
+        # to confirm the clamp.
+        assert dig_service._post_pinnacle_decay_factor(PINNACLE_DEPTH + 1000) == 0.0
+
+    def test_partial_steps_round_down(self, dig_service):
+        from services.dig_constants import PINNACLE_DEPTH
+
+        # 24 depth past pinnacle: still 0 steps → factor 1.0
+        assert dig_service._post_pinnacle_decay_factor(PINNACLE_DEPTH + 24) == 1.0
+        # 26 depth past: 1 step → factor 0.95
+        assert dig_service._post_pinnacle_decay_factor(PINNACLE_DEPTH + 26) == pytest.approx(0.95)

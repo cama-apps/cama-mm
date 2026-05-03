@@ -232,6 +232,7 @@ _PICKAXE_TIERS_DEF: list[PickaxeTier] = [
     PickaxeTier("Iron",         1, 0.05, 0, depth_required=50,  jc_cost=50,   prestige_required=0),
     PickaxeTier("Diamond",      2, 0.05, 2, depth_required=75,  jc_cost=150,  prestige_required=0),
     PickaxeTier("Obsidian",     3, 0.10, 3, depth_required=100, jc_cost=300,  prestige_required=1),
+    PickaxeTier("Stormrend",    3, 0.15, 3, depth_required=150, jc_cost=450,  prestige_required=2),
     PickaxeTier("Frostforged",  3, 0.20, 3, depth_required=200, jc_cost=600,  prestige_required=3),
     PickaxeTier("Void-Touched", 4, 0.20, 5, depth_required=275, jc_cost=1200, prestige_required=5),
 ]
@@ -264,7 +265,7 @@ GEAR_BOSS_DROP_RATE: float = 0.07
 # Maps boss-boundary depth → tier index of the dropped piece. Boundaries
 # missing from this map (25/50/75) drop nothing; players buy low-tier
 # shop gear there instead.
-GEAR_DROP_DEPTH_TIER_MAP: dict[int, int] = {100: 4, 150: 4, 200: 5, 275: 6}
+GEAR_DROP_DEPTH_TIER_MAP: dict[int, int] = {100: 4, 150: 5, 200: 6, 275: 7}
 # One-shot grants the first time a player crosses these depths (slot,
 # tier). Implementation reads this lazily in dig advance flow; the user
 # only ever sees one of each.
@@ -298,11 +299,15 @@ WEAPON_TIERS: list[GearTierDef] = [
                 player_dmg=1, player_hit=0.04,
                 advance_bonus=3, cave_in_reduction=0.10, loot_bonus=3,
                 shop_price=300,  depth_required=100, prestige_required=1),
-    GearTierDef("Frostforged Pickaxe",  tier=5, slot=GearSlot.WEAPON,
+    GearTierDef("Stormrend Pickaxe",    tier=5, slot=GearSlot.WEAPON,
+                player_dmg=1, player_hit=0.045,
+                advance_bonus=3, cave_in_reduction=0.15, loot_bonus=3,
+                shop_price=450,  depth_required=150, prestige_required=2),
+    GearTierDef("Frostforged Pickaxe",  tier=6, slot=GearSlot.WEAPON,
                 player_dmg=2, player_hit=0.05,
                 advance_bonus=3, cave_in_reduction=0.20, loot_bonus=3,
                 shop_price=600,  depth_required=200, prestige_required=3),
-    GearTierDef("Void-Touched Pickaxe", tier=6, slot=GearSlot.WEAPON,
+    GearTierDef("Void-Touched Pickaxe", tier=7, slot=GearSlot.WEAPON,
                 player_dmg=2, player_hit=0.07,
                 advance_bonus=4, cave_in_reduction=0.20, loot_bonus=5,
                 shop_price=1200, depth_required=275, prestige_required=5),
@@ -322,9 +327,11 @@ ARMOR_TIERS: list[GearTierDef] = [
                 player_hp_bonus=2, shop_price=180,  depth_required=75),
     GearTierDef("Obsidian Plate",     tier=4, slot=GearSlot.ARMOR,
                 player_hp_bonus=3, shop_price=350,  depth_required=100, prestige_required=1),
-    GearTierDef("Frostforged Plate",  tier=5, slot=GearSlot.ARMOR,
+    GearTierDef("Stormrend Plate",    tier=5, slot=GearSlot.ARMOR,
+                player_hp_bonus=3, shop_price=525,  depth_required=150, prestige_required=2),
+    GearTierDef("Frostforged Plate",  tier=6, slot=GearSlot.ARMOR,
                 player_hp_bonus=3, shop_price=700,  depth_required=200, prestige_required=3),
-    GearTierDef("Void-Touched Plate", tier=6, slot=GearSlot.ARMOR,
+    GearTierDef("Void-Touched Plate", tier=7, slot=GearSlot.ARMOR,
                 player_hp_bonus=4, shop_price=1400, depth_required=275, prestige_required=5),
 ]
 
@@ -342,9 +349,11 @@ BOOTS_TIERS: list[GearTierDef] = [
                 boss_hit_reduction=0.06, shop_price=200,  depth_required=75),
     GearTierDef("Obsidian Boots",     tier=4, slot=GearSlot.BOOTS,
                 boss_hit_reduction=0.08, shop_price=400,  depth_required=100, prestige_required=1),
-    GearTierDef("Frostforged Boots",  tier=5, slot=GearSlot.BOOTS,
+    GearTierDef("Stormrend Boots",    tier=5, slot=GearSlot.BOOTS,
+                boss_hit_reduction=0.09, shop_price=600,  depth_required=150, prestige_required=2),
+    GearTierDef("Frostforged Boots",  tier=6, slot=GearSlot.BOOTS,
                 boss_hit_reduction=0.10, shop_price=800,  depth_required=200, prestige_required=3),
-    GearTierDef("Void-Touched Boots", tier=6, slot=GearSlot.BOOTS,
+    GearTierDef("Void-Touched Boots", tier=7, slot=GearSlot.BOOTS,
                 boss_hit_reduction=0.13, shop_price=1500, depth_required=275, prestige_required=5),
 ]
 
@@ -1096,6 +1105,7 @@ class ArtifactDef:
     lore_text: str
     is_relic: bool
     effect: str | None              # description of mechanical effect, or None
+    min_prestige: int = 0           # gates the artifact behind a prestige threshold (0 = available from P0)
 
 
 RARITY_DROP_RATES: dict[str, float] = {
@@ -1196,6 +1206,38 @@ RELICS: list[ArtifactDef] = [
         lore_text="A living thread connecting you to the fungal network. When you help someone, the network amplifies it.",
         is_relic=True,
         effect="+5% help bonus when helping others",
+    ),
+    # P5-gated relics — only drop from boss kills once you've prestiged five times.
+    # Mixed bag: one boss-combat, one dig-economy, one risk-mitigation.
+    ArtifactDef(
+        id="hollow_fang",
+        name="Hollow Fang",
+        layer="The Hollow",
+        rarity="Legendary",
+        lore_text="Bone shorn from something the Hollow forgot to swallow. It hums when bosses are near.",
+        is_relic=True,
+        effect="+15% damage against bosses",
+        min_prestige=5,
+    ),
+    ArtifactDef(
+        id="echo_lantern",
+        name="Echo Lantern",
+        layer="The Hollow",
+        rarity="Rare",
+        lore_text="A lamp that catches sound instead of light. Reverberations slip a few extra coins from each stone.",
+        is_relic=True,
+        effect="+15% JC yield per dig",
+        min_prestige=5,
+    ),
+    ArtifactDef(
+        id="patient_stone",
+        name="Patient Stone",
+        layer="The Hollow",
+        rarity="Rare",
+        lore_text="Worn smooth by a hand that waited too long. Steadies the ground beneath you.",
+        is_relic=True,
+        effect="-30% depth lost to cave-ins",
+        min_prestige=5,
     ),
 ]
 
@@ -1506,6 +1548,7 @@ class RandomEvent:
     desperate_option: EventChoice | None = None   # third choice: very low odds, massive reward/fail
     boon_options: tuple[TempBuff, ...] | None = None  # for complexity="boon" events
     min_prestige: int = 0           # minimum prestige level required
+    next_event_id: str | None = None  # deterministic chain-next; only consumed when prestige >= min_prestige
     # Splash: optional penalty applied to other players in the guild when
     # this event resolves (see SplashConfig.trigger for which outcome fires it).
     splash: SplashConfig | None = None
@@ -4878,6 +4921,82 @@ RANDOM_EVENTS: list[RandomEvent] = [
             trigger="success", mode="steal",
         ),
     ),
+    # ===================================================================
+    # P8 DETERMINISTIC CHAIN — three-act lore arc.
+    # Lore-driven, modest payouts. Only fires when prestige >= 8.
+    # Step 1 spawns from the rare-event pool; step 2 and 3 chain from
+    # the previous step's resolution via ``next_event_id``.
+    # ===================================================================
+    RandomEvent(
+        id="hollow_court_overture",
+        name="Overture of the Hollow Court",
+        description=(
+            "Something old turns to face you in the dark. There is a hush, then a single chord — a voice you do not recognize asking if you have brought tribute.",
+            "The tunnel ends in a doorway that should not be here. A hush sits behind it, attentive.",
+            "You step into a chamber that listens before you speak. A formal stillness, like a court before its monarch arrives.",
+        ),
+        min_depth=200, max_depth=None,
+        safe_option=EventChoice(
+            "Bow and withdraw",
+            success=EventOutcome("You bow without breaking eye contact and back into the corridor. The court remembers courtesy.", 0, 5, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Approach the throne",
+            success=EventOutcome("You walk the length of the hall. Something nods, very slightly. You are permitted to continue.", 0, 12, False),
+            failure=EventOutcome("You misstep on a tile that wasn't there. The court does not laugh.", -3, -3, False),
+            success_chance=0.70,
+        ),
+        rarity="legendary",
+        min_prestige=8,
+        next_event_id="hollow_court_audience",
+    ),
+    RandomEvent(
+        id="hollow_court_audience",
+        name="Audience with the Hollow Court",
+        description=(
+            "The chamber widens. Figures you cannot quite focus on take their seats around you. A question is being asked, though no one has spoken.",
+            "Three thrones, three figures, three questions. None of them are for you. You are merely allowed to listen.",
+        ),
+        min_depth=200, max_depth=None,
+        safe_option=EventChoice(
+            "Listen",
+            success=EventOutcome("You learn nothing you can repeat aloud. But you understand something about the tunnels you didn't before.", 0, 8, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Answer the question that wasn't asked",
+            success=EventOutcome("The court goes still. One of the figures rises and offers you something small and very old.", 0, 20, False),
+            failure=EventOutcome("Whatever you said, it was wrong. The chamber dims a degree.", -2, -5, False),
+            success_chance=0.55,
+        ),
+        rarity="legendary",
+        min_prestige=8,
+        next_event_id="hollow_court_recess",
+    ),
+    RandomEvent(
+        id="hollow_court_recess",
+        name="The Court Recesses",
+        description=(
+            "The figures stand without sound. Doors that were not there a moment ago open onto corridors you have never seen.",
+            "A recess is called. You are not invited to follow. You are also not asked to leave.",
+        ),
+        min_depth=200, max_depth=None,
+        safe_option=EventChoice(
+            "Take the corridor that leads back",
+            success=EventOutcome("You return to your tunnel with the certainty that something is now keeping track of you.", 0, 10, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Take the corridor that leads further",
+            success=EventOutcome("You walk a little further than wisdom suggests. When you come back you find a small offering tucked into your pack.", 0, 25, False),
+            failure=EventOutcome("The corridor folds you back into the main tunnel, but not before something costs you.", -4, -8, False),
+            success_chance=0.50,
+        ),
+        rarity="legendary",
+        min_prestige=8,
+        next_event_id=None,
+    ),
 ]
 
 
@@ -5287,9 +5406,13 @@ PRESTIGE_PERKS: list[str] = [
     "tunnel_mastery",
     "dark_adaptation",
     "the_endless",
+    "patient_step",
+    "steady_hands",
+    "reading_the_stone",
 ]
 
-# Per-prestige-level bonuses for each perk
+# Per-pick mechanical bonuses for each perk. The aggregator sums these
+# across all picked perks to produce the player's effective effect dict.
 PRESTIGE_PERK_VALUES: dict[str, dict[str, float]] = {
     "advance_boost": {"advance_min_bonus": 1.0},
     "cave_in_resistance": {"cave_in_reduction": 0.05},
@@ -5300,6 +5423,9 @@ PRESTIGE_PERK_VALUES: dict[str, dict[str, float]] = {
     "tunnel_mastery": {"expedition_reward_bonus": 0.50},
     "dark_adaptation": {"dim_cave_in_immunity": 1.0},
     "the_endless": {"hollow_advance_bonus": 1.0},  # The Hollow advance becomes 1-2
+    "patient_step": {"streak_bonus_multiplier": 0.5},
+    "steady_hands": {"cave_in_loss_reduction": 0.25},
+    "reading_the_stone": {"event_choice_reveal": 1.0},
 }
 
 
@@ -7353,6 +7479,7 @@ EVENT_POOL: list[dict] = [
             for b in e.boon_options
         ] if e.boon_options else None,
         "min_prestige": e.min_prestige,
+        "next_event_id": e.next_event_id,
         "splash": {
             "strategy": e.splash.strategy,
             "victim_count": e.splash.victim_count,
