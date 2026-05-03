@@ -289,7 +289,7 @@ class DigFlavorService:
             if validated is None:
                 return result
 
-            self._apply_flavor_to_result(
+            await self._apply_flavor_to_result(
                 result, validated, jc_earned, discord_id, guild_id,
             )
             return result
@@ -298,7 +298,7 @@ class DigFlavorService:
             logger.debug("Dig flavor failed, returning raw result", exc_info=True)
             return result
 
-    def _apply_flavor_to_result(
+    async def _apply_flavor_to_result(
         self,
         result: dict,
         validated: FlavorResult,
@@ -306,7 +306,12 @@ class DigFlavorService:
         discord_id: int,
         guild_id: int,
     ) -> None:
-        """Merge validated flavor output into the result dict + persist side effects."""
+        """Merge validated flavor output into the result dict + persist side effects.
+
+        DB writes are offloaded via ``asyncio.to_thread`` so the event loop
+        isn't blocked on SQLite for the duration of a balance adjust + memory
+        write per dig.
+        """
         result["llm_narrative"] = validated.narrative
         result["llm_tone"] = validated.tone
         if validated.callback_reference:
@@ -321,7 +326,9 @@ class DigFlavorService:
             delta = int(round(jc_earned * validated.flavor_bonus_pct / 100.0))
             if delta != 0:
                 try:
-                    self.player_repo.add_balance(discord_id, guild_id, delta)
+                    await asyncio.to_thread(
+                        self.player_repo.add_balance, discord_id, guild_id, delta,
+                    )
                     result["llm_jc_delta"] = delta
                 except Exception:
                     logger.debug("Flavor JC delta apply failed", exc_info=True)
@@ -329,7 +336,8 @@ class DigFlavorService:
         # Memory rewrite: last-write-wins.
         if validated.memory_update is not None:
             try:
-                self.dig_repo.set_dm_memory(
+                await asyncio.to_thread(
+                    self.dig_repo.set_dm_memory,
                     discord_id, guild_id, validated.memory_update,
                 )
             except Exception:

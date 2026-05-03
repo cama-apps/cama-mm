@@ -367,6 +367,10 @@ class SchemaManager:
                 self._migration_renumber_pickaxe_tier_for_stormrend_insert,
             ),
             ("create_dig_dm_memory_table", self._migration_create_dig_dm_memory_table),
+            (
+                "clear_dig_active_duels_for_retired_timed_mechanics",
+                self._migration_clear_dig_active_duels_for_retired_timed_mechanics,
+            ),
         ]
 
     # --- Migrations ---
@@ -2879,4 +2883,22 @@ class SchemaManager:
                 PRIMARY KEY (discord_id, guild_id)
             )
             """
+        )
+
+    def _migration_clear_dig_active_duels_for_retired_timed_mechanics(
+        self, cursor,
+    ) -> None:
+        """Clear any in-flight duels paused on the retired arithmetic / riddle
+        pinnacle mechanics. Without this, players whose duel was waiting on the
+        text-input modal at deploy time would be stuck forever — the modal UI
+        and the resolver branch both no longer exist.
+
+        Idempotent: it's a DELETE filtered by mechanic_id, so a fresh DB or a
+        DB that has none of these rows is a no-op.
+        """
+        cursor.execute(
+            "DELETE FROM dig_active_duels "
+            "WHERE mechanic_id IN ("
+            "  'pinnacle_arithmetic_challenge', 'pinnacle_riddle_challenge'"
+            ")"
         )
