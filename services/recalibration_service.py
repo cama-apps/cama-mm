@@ -19,6 +19,7 @@ from config import (
 RECALIBRATION_MIN_GAMES = 5
 from repositories.player_repository import PlayerRepository
 from repositories.recalibration_repository import RecalibrationRepository
+from utils.guild import normalize_guild_id
 
 logger = logging.getLogger("cama_bot.services.recalibration")
 
@@ -93,11 +94,6 @@ class RecalibrationService:
             cooldown_ends_at=cooldown_ends if is_on_cooldown else None,
         )
 
-    @staticmethod
-    def _normalize_guild_id(guild_id: int | None) -> int:
-        """Normalize guild_id at the service boundary (None -> 0)."""
-        return guild_id if guild_id is not None else 0
-
     def can_recalibrate(self, discord_id: int, guild_id: int | None) -> dict:
         """
         Check if a player can recalibrate.
@@ -106,7 +102,7 @@ class RecalibrationService:
             Dict with 'allowed' (bool) and 'reason' (str if not allowed)
         """
         # Normalize guild_id (None -> 0) at the entry point.
-        normalized_guild_id = self._normalize_guild_id(guild_id)
+        normalized_guild_id = normalize_guild_id(guild_id)
 
         # Check if player exists
         player = self.player_repo.get_by_id(discord_id, normalized_guild_id)
@@ -172,7 +168,7 @@ class RecalibrationService:
         # get_state / update_glicko_rating in this method happened to work
         # because normalize was also duplicated here, but the two entry points
         # were subtly inconsistent. Collapse to a single normalization.
-        normalized_guild_id = self._normalize_guild_id(guild_id)
+        normalized_guild_id = normalize_guild_id(guild_id)
 
         check = self.can_recalibrate(discord_id, normalized_guild_id)
         if not check["allowed"]:
@@ -241,7 +237,7 @@ class RecalibrationService:
         # Normalize guild_id (None -> 0) at the service boundary so the player
         # lookup, state read, and repo reset all key off the same row that
         # can_recalibrate / recalibrate would touch.
-        normalized_guild_id = self._normalize_guild_id(guild_id)
+        normalized_guild_id = normalize_guild_id(guild_id)
 
         player = self.player_repo.get_by_id(discord_id, normalized_guild_id)
         if not player:

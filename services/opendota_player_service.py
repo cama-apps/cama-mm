@@ -133,96 +133,94 @@ class OpenDotaPlayerService:
             logger.error(f"Error fetching profile for steam_id {steam_id}: {e}")
             return None
 
-    def _fetch_win_loss(self, steam_id: int) -> dict:
-        """Fetch win/loss totals."""
+    def _safe_get(self, path: str, *, context: str):
+        """GET an OpenDota endpoint; return parsed JSON or None on any failure."""
         try:
-            response = self.api.make_request(f"{self.api.BASE_URL}/players/{steam_id}/wl")
+            response = self.api.make_request(f"{self.api.BASE_URL}{path}")
             if response and response.status_code == 200:
                 return response.json()
         except Exception as e:
-            logger.error(f"Error fetching W/L for {steam_id}: {e}")
-        return {"win": 0, "lose": 0}
+            logger.error(f"Error fetching {context}: {e}")
+        return None
+
+    def _fetch_win_loss(self, steam_id: int) -> dict:
+        """Fetch win/loss totals."""
+        data = self._safe_get(f"/players/{steam_id}/wl", context=f"W/L for {steam_id}")
+        return data or {"win": 0, "lose": 0}
 
     def _fetch_totals(self, steam_id: int) -> dict:
         """Fetch player totals for calculating averages."""
-        try:
-            response = self.api.make_request(f"{self.api.BASE_URL}/players/{steam_id}/totals")
-            if response and response.status_code == 200:
-                totals_data = response.json()
-                result = {}
-                for item in totals_data:
-                    field = item.get("field")
-                    n = item.get("n", 0)
-                    total = item.get("sum", 0)
-                    if n > 0:
-                        avg = total / n
-                        if field == "kills":
-                            result["avg_kills"] = round(avg, 1)
-                        elif field == "deaths":
-                            result["avg_deaths"] = round(avg, 1)
-                        elif field == "assists":
-                            result["avg_assists"] = round(avg, 1)
-                        elif field == "gold_per_min":
-                            result["avg_gpm"] = int(avg)
-                        elif field == "xp_per_min":
-                            result["avg_xpm"] = int(avg)
-                        elif field == "last_hits":
-                            result["avg_last_hits"] = int(avg)
-                return result
-        except Exception as e:
-            logger.error(f"Error fetching totals for {steam_id}: {e}")
-        return {}
+        totals_data = self._safe_get(
+            f"/players/{steam_id}/totals", context=f"totals for {steam_id}"
+        )
+        if not totals_data:
+            return {}
+        result: dict = {}
+        for item in totals_data:
+            field = item.get("field")
+            n = item.get("n", 0)
+            total = item.get("sum", 0)
+            if n <= 0:
+                continue
+            avg = total / n
+            if field == "kills":
+                result["avg_kills"] = round(avg, 1)
+            elif field == "deaths":
+                result["avg_deaths"] = round(avg, 1)
+            elif field == "assists":
+                result["avg_assists"] = round(avg, 1)
+            elif field == "gold_per_min":
+                result["avg_gpm"] = int(avg)
+            elif field == "xp_per_min":
+                result["avg_xpm"] = int(avg)
+            elif field == "last_hits":
+                result["avg_last_hits"] = int(avg)
+        return result
 
     def _fetch_top_heroes(self, steam_id: int, limit: int = 5) -> list[dict]:
         """Fetch top heroes by games played."""
-        try:
-            response = self.api.make_request(f"{self.api.BASE_URL}/players/{steam_id}/heroes")
-            if response and response.status_code == 200:
-                heroes_data = response.json()
-                # Sort by games and take top N
-                top = sorted(heroes_data, key=lambda x: x.get("games", 0), reverse=True)[:limit]
-                return [
-                    {
-                        "hero_id": h["hero_id"],
-                        "hero_name": get_hero_name(int(h["hero_id"])),
-                        "games": h.get("games", 0),
-                        "wins": h.get("win", 0),
-                        "win_rate": self._calc_win_rate(
-                            h.get("win", 0), h.get("games", 0) - h.get("win", 0)
-                        ),
-                    }
-                    for h in top
-                    if h.get("games", 0) > 0
-                ]
-        except Exception as e:
-            logger.error(f"Error fetching heroes for {steam_id}: {e}")
-        return []
+        heroes_data = self._safe_get(
+            f"/players/{steam_id}/heroes", context=f"heroes for {steam_id}"
+        )
+        if not heroes_data:
+            return []
+        top = sorted(heroes_data, key=lambda x: x.get("games", 0), reverse=True)[:limit]
+        return [
+            {
+                "hero_id": h["hero_id"],
+                "hero_name": get_hero_name(int(h["hero_id"])),
+                "games": h.get("games", 0),
+                "wins": h.get("win", 0),
+                "win_rate": self._calc_win_rate(
+                    h.get("win", 0), h.get("games", 0) - h.get("win", 0)
+                ),
+            }
+            for h in top
+            if h.get("games", 0) > 0
+        ]
 
     def _fetch_recent_matches(self, steam_id: int, limit: int = 5) -> list[dict]:
         """Fetch recent matches."""
-        try:
-            response = self.api.make_request(
-                f"{self.api.BASE_URL}/players/{steam_id}/recentMatches"
-            )
-            if response and response.status_code == 200:
-                matches_data = response.json()[:limit]
-                return [
-                    {
-                        "match_id": m.get("match_id"),
-                        "hero_id": m.get("hero_id"),
-                        "hero_name": get_hero_name(m.get("hero_id", 0)),
-                        "kills": m.get("kills", 0),
-                        "deaths": m.get("deaths", 0),
-                        "assists": m.get("assists", 0),
-                        "won": self._did_win(m),
-                        "duration": m.get("duration", 0),
-                        "start_time": m.get("start_time", 0),
-                    }
-                    for m in matches_data
-                ]
-        except Exception as e:
-            logger.error(f"Error fetching recent matches for {steam_id}: {e}")
-        return []
+        matches_data = self._safe_get(
+            f"/players/{steam_id}/recentMatches",
+            context=f"recent matches for {steam_id}",
+        )
+        if not matches_data:
+            return []
+        return [
+            {
+                "match_id": m.get("match_id"),
+                "hero_id": m.get("hero_id"),
+                "hero_name": get_hero_name(m.get("hero_id", 0)),
+                "kills": m.get("kills", 0),
+                "deaths": m.get("deaths", 0),
+                "assists": m.get("assists", 0),
+                "won": self._did_win(m),
+                "duration": m.get("duration", 0),
+                "start_time": m.get("start_time", 0),
+            }
+            for m in matches_data[:limit]
+        ]
 
     def _did_win(self, match: dict) -> bool:
         """Determine if player won the match."""

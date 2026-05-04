@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -18,6 +19,18 @@ if TYPE_CHECKING:
     from services.flavor_personas import FlavorPersona
 
 logger = logging.getLogger("cama_bot.services.ai")
+
+# Strip control chars + newlines + backticks from values that are interpolated
+# into LLM prompts so a hostile display name can't end the prompt block early
+# or smuggle in a fake instruction line.
+_PROMPT_UNSAFE_CHARS = re.compile(r"[\x00-\x1f\x7f`]")
+
+
+def _sanitize_for_prompt(value: str | None, *, fallback: str = "Unknown", max_len: int = 64) -> str:
+    if not value:
+        return fallback
+    cleaned = _PROMPT_UNSAFE_CHARS.sub("", value).strip()
+    return (cleaned[:max_len] or fallback)
 
 
 # Tool definitions for structured outputs
@@ -298,13 +311,16 @@ class AIService:
         Returns:
             Dict with "sql" and "explanation" keys, or "error" on failure
         """
-        # Build asker context for self-referential queries
+        # Build asker context for self-referential queries.
+        # Username is user-controlled (stored at registration); sanitize before
+        # interpolating so a display name can't smuggle prompt directives.
         asker_context = ""
         if asker_discord_id:
+            safe_username = _sanitize_for_prompt(asker_username)
             asker_context = f"""
 The person asking this question:
 - discord_id: {asker_discord_id}
-- discord_username: {asker_username or 'Unknown'}
+- discord_username: {safe_username}
 
 When they say "me", "my", "I", or "myself", use their discord_id in WHERE clauses.
 Example: "what's my win rate?" → WHERE discord_id = {asker_discord_id}
