@@ -605,7 +605,11 @@ class PredictionService:
         initial_fair: int | None = None,
         channel_id: int | None = None,
     ) -> dict[str, Any]:
-        """Create a new order-book market and post the initial ladder."""
+        """Create a new order-book market and post the initial ladder.
+
+        Both the market row and its initial book go in via a single repo call
+        so the market never lands as ``status='open'`` with an empty book.
+        """
         if not question or len(question.strip()) < 5:
             raise ValueError("Question must be at least 5 characters.")
         if initial_fair is None:
@@ -615,16 +619,15 @@ class PredictionService:
                 f"initial_fair must be in [{PREDICTION_PRICE_LOW}, {PREDICTION_PRICE_HIGH}]."
             )
 
+        levels = self._build_initial_levels(initial_fair)
         prediction_id = self.prediction_repo.create_orderbook_prediction(
             guild_id=guild_id,
             creator_id=creator_id,
             question=question.strip(),
             initial_fair=initial_fair,
             channel_id=channel_id,
+            initial_levels=levels,
         )
-
-        levels = self._build_initial_levels(initial_fair)
-        self.prediction_repo.replace_levels(prediction_id, levels)
 
         return {
             "prediction_id": prediction_id,

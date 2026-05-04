@@ -810,8 +810,13 @@ class IPredictionRepository(ABC):
         question: str,
         initial_fair: int,
         channel_id: int | None = None,
+        initial_levels: list[tuple[str, int, int]] | None = None,
     ) -> int:
-        """Create a prediction with the order-book schema (current_price, no closes_at). Returns prediction_id."""
+        """Create a prediction with the order-book schema (current_price, no closes_at).
+
+        Pass ``initial_levels`` to seed the book in the same transaction as the
+        market row so an open market never has an empty book. Returns prediction_id.
+        """
         ...
 
     @abstractmethod

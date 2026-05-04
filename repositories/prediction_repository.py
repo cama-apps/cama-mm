@@ -966,12 +966,18 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
         question: str,
         initial_fair: int,
         channel_id: int | None = None,
+        initial_levels: list[tuple[str, int, int]] | None = None,
     ) -> int:
         """Create a prediction in the new order-book mechanic.
 
         Stores ``current_price = initial_fair`` and uses ``closes_at = 0``
         as a sentinel meaning 'no scheduled close' (the legacy NOT NULL column
         is satisfied; new code never reads it).
+
+        ``initial_levels`` is inserted in the same transaction so the market
+        never lands in storage with status='open' and no book. Callers that
+        omit it (legacy paths) get an empty book and must call
+        ``replace_levels`` themselves.
         """
         normalized_guild = self.normalize_guild_id(guild_id)
         now = int(time.time())
@@ -1007,6 +1013,18 @@ class PredictionRepository(BaseRepository, IPredictionRepository):
                 """,
                 (prediction_id, normalized_guild, now, initial_fair),
             )
+            if initial_levels:
+                for side, price, size in initial_levels:
+                    if side not in self.VALID_BOOK_SIDES:
+                        raise ValueError(f"Invalid book side: {side}")
+                    cursor.execute(
+                        """
+                        INSERT INTO prediction_levels
+                            (prediction_id, side, price, remaining_size, posted_at)
+                        VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (prediction_id, side, price, size, now),
+                    )
             return prediction_id
 
     def replace_levels(
