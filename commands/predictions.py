@@ -649,6 +649,32 @@ class PredictionCommands(commands.Cog):
         embed.set_footer(text=f"{PREDICTION_CONTRACT_VALUE} jopa per winning contract")
         return embed
 
+    _MENTION_RE = re.compile(r"<@!?(\d+)>")
+
+    def _resolve_mentions_for_chart(self, text: str, guild_id: int | None) -> str:
+        """Replace ``<@id>`` / ``<@!id>`` with ``@displayname`` for the PNG title.
+
+        PIL renders the title verbatim, so a question like "will <@627> win?"
+        leaks the raw mention syntax otherwise. Falls back to ``@unknown`` when
+        the user isn't cached.
+        """
+        if not text or "<@" not in text:
+            return text
+        guild = self.bot.get_guild(int(guild_id)) if guild_id else None
+
+        def _repl(match: re.Match) -> str:
+            user_id = int(match.group(1))
+            if guild is not None:
+                member = guild.get_member(user_id)
+                if member is not None:
+                    return f"@{member.display_name}"
+            user = self.bot.get_user(user_id)
+            if user is not None:
+                return f"@{user.display_name}"
+            return "@unknown"
+
+        return self._MENTION_RE.sub(_repl, text)
+
     async def _render_market_chart_file(self, view: dict) -> discord.File | None:
         """Render the per-market fair-history chart as a discord.File.
 
@@ -660,6 +686,8 @@ class PredictionCommands(commands.Cog):
             return None
         guild_id = int(view.get("guild_id") or 0)
         created_at = int(view.get("created_at") or 0)
+        question = view.get("question") or None
+        title = self._resolve_mentions_for_chart(question, guild_id) if question else None
         try:
             snapshots = await asyncio.to_thread(
                 self.prediction_service.prediction_repo.get_fair_history,
@@ -672,7 +700,7 @@ class PredictionCommands(commands.Cog):
                     market_id,
                     snapshots,
                     created_at,
-                    title=view.get("question") or None,
+                    title=title,
                 )
             )
         except Exception as e:
