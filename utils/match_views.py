@@ -55,8 +55,10 @@ class EnrichedMatchView(discord.ui.View):
             if buf:
                 self._graph_cache = buf.read()
                 return discord.File(BytesIO(self._graph_cache), filename="advantage.png")
-        except Exception:
-            logger.debug("Failed to generate advantage graph for match %s", self.match_id)
+        except Exception as exc:
+            logger.warning(
+                "Failed to generate advantage graph for match %s: %s", self.match_id, exc,
+            )
         return None
 
     async def _safe_edit_response(self, interaction: discord.Interaction, **kwargs) -> None:

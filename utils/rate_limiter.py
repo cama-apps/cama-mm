@@ -7,6 +7,7 @@ but it prevents accidental spam and protects expensive commands.
 
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass
 
@@ -54,7 +55,7 @@ class RateLimiter:
 
         if len(hits) >= limit:
             oldest = min(hits)
-            retry_after = int(max(0.0, (oldest + per_seconds) - now) + 0.999)
+            retry_after = math.ceil(max(0.0, (oldest + per_seconds) - now))
             self._hits[key] = hits
             return RateLimitResult(allowed=False, retry_after_seconds=retry_after)
 
