@@ -2773,6 +2773,13 @@ class DigService:
         else:
             jc_earned = max(0, jc_earned)
 
+        # Silent mana yield modifier applies to the random base loot only.
+        # Deterministic payouts (milestones, streak, mana steady bonus that
+        # _apply_mana_yield_modifier itself adds) come AFTER, so a Mountain
+        # "zero" roll can't obliterate a streak bonus the embed already
+        # promised the player.
+        jc_earned = self._apply_mana_yield_modifier(discord_id, guild_id, jc_earned)
+
         # 14. Check milestones (with ascension milestone multiplier).
         # Only award milestones that extend the tunnel's all-time high
         # so boss cave-ins cannot be farmed by re-crossing boundaries.
@@ -2811,9 +2818,6 @@ class DigService:
         streak_bonus = int(streak_bonus * (1.0 + perk_fx.get("streak_bonus_multiplier", 0.0)))
 
         jc_earned += streak_bonus
-
-        # Apply silent mana yield modifier before atomic commit.
-        jc_earned = self._apply_mana_yield_modifier(discord_id, guild_id, jc_earned)
 
         # 16. Roll for artifact (skip if corruption says so)
         artifact = None
@@ -3645,6 +3649,10 @@ class DigService:
         else:
             jc_earned = max(0, jc_earned)
 
+        # Silent mana yield modifier applies to the random base loot only —
+        # deterministic milestone and streak bonuses come after.
+        jc_earned = self._apply_mana_yield_modifier(discord_id, guild_id, jc_earned)
+
         # Milestones (anti-farm: only award on depths that extend all-time high).
         milestone_bonus = 0
         milestone_mult = 1.0 + p["ascension"].get("milestone_multiplier", 0)
@@ -3677,9 +3685,6 @@ class DigService:
             streak_bonus * (1.0 + p.get("perk_fx", {}).get("streak_bonus_multiplier", 0.0))
         )
         jc_earned += streak_bonus
-
-        # Apply silent mana yield modifier before commit (parity with dig() path).
-        jc_earned = self._apply_mana_yield_modifier(discord_id, guild_id, jc_earned)
 
         # Artifact
         artifact = None
