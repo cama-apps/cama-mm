@@ -241,26 +241,38 @@ class DigService:
         self.player_repo = player_repo
         self.mana_effects_service = mana_effects_service
 
-    def _apply_mana_yield_modifier(
-        self, discord_id: int, guild_id, gross_jc: int
-    ) -> int:
-        """Silently modify a dig payout based on the player's mana effects.
+    def _mana_effects_or_none(self, discord_id: int, guild_id):
+        """Resolve the player's active mana effects, swallowing lookup errors.
 
-        No embed surfaces this — players discover it through play. Tithed JC
-        goes to the nonprofit fund directly (the helper bypasses
-        apply_plains_tithe because the JC hasn't been credited to the player's
-        balance yet at this point in the dig flow).
+        Returns ``None`` when there is no service wired, no active mana, or the
+        lookup raised — callers should treat that as "no modifiers apply".
         """
-        if self.mana_effects_service is None or gross_jc <= 0:
-            return gross_jc
+        if self.mana_effects_service is None:
+            return None
         try:
             effects = self.mana_effects_service.get_effects(discord_id, guild_id)
         except Exception:
-            return gross_jc
+            return None
         if effects.color is None:
-            return gross_jc
+            return None
+        return effects
 
-        modified = gross_jc
+    def _apply_mana_yield_variance(
+        self, discord_id: int, guild_id, base_jc: int
+    ) -> int:
+        """Apply Mountain variance + Forest steady bonus to a base loot roll.
+
+        These mods touch only the random base loot — deterministic milestone
+        and streak bonuses are added afterwards so a Mountain "zero" roll never
+        wipes out a payout the embed already promised the player.
+        """
+        if base_jc <= 0:
+            return base_jc
+        effects = self._mana_effects_or_none(discord_id, guild_id)
+        if effects is None:
+            return base_jc
+
+        modified = base_jc
 
         # Mountain variance: chance of double or zero (same EV).
         if effects.dig_yield_variance > 0:
@@ -270,13 +282,34 @@ class DigService:
             elif roll < effects.dig_yield_variance * 2:
                 modified = 0
 
-        # Forest +1 steady bonus on any yield.
+        # Forest +1 steady bonus on any positive yield.
         if effects.green_steady_bonus > 0 and modified > 0:
             modified += effects.green_steady_bonus
 
-        # Plains tithe: transfer 5% to nonprofit fund. Skip the tithe entirely
-        # if the loan_service is missing or the transfer fails — never destroy
-        # JC silently.
+        return max(0, modified)
+
+    def _apply_mana_yield_taxes(
+        self, discord_id: int, guild_id, total_jc: int
+    ) -> int:
+        """Apply Plains tithe + Blue tax to the player's full dig payout.
+
+        Tax/tithe apply to the *total* (base + milestone + streak) so the
+        deflationary pressure matches /roll and /betting paths. Plains tithed
+        JC is forwarded to the nonprofit fund (the helper bypasses
+        ``apply_plains_tithe`` because the JC hasn't been credited to the
+        player's balance yet — atomic_tunnel_balance_update applies the net
+        delta later in the dig flow).
+        """
+        if total_jc <= 0:
+            return total_jc
+        effects = self._mana_effects_or_none(discord_id, guild_id)
+        if effects is None:
+            return total_jc
+
+        modified = total_jc
+
+        # Plains tithe: transfer 5% to nonprofit fund. Skip if the transfer
+        # fails — never destroy JC silently.
         loan_service = getattr(self.mana_effects_service, "loan_service", None)
         if effects.plains_tithe_rate > 0 and modified > 0 and loan_service is not None:
             tithe = max(1, int(modified * effects.plains_tithe_rate))
@@ -2773,12 +2806,9 @@ class DigService:
         else:
             jc_earned = max(0, jc_earned)
 
-        # Silent mana yield modifier applies to the random base loot only.
-        # Deterministic payouts (milestones, streak, mana steady bonus that
-        # _apply_mana_yield_modifier itself adds) come AFTER, so a Mountain
-        # "zero" roll can't obliterate a streak bonus the embed already
-        # promised the player.
-        jc_earned = self._apply_mana_yield_modifier(discord_id, guild_id, jc_earned)
+        # Mana variance + steady bonus on base loot only — protects deterministic
+        # milestone/streak from a Mountain "zero" roll.
+        jc_earned = self._apply_mana_yield_variance(discord_id, guild_id, jc_earned)
 
         # 14. Check milestones (with ascension milestone multiplier).
         # Only award milestones that extend the tunnel's all-time high
@@ -2818,6 +2848,10 @@ class DigService:
         streak_bonus = int(streak_bonus * (1.0 + perk_fx.get("streak_bonus_multiplier", 0.0)))
 
         jc_earned += streak_bonus
+
+        # Plains tithe / Blue tax apply to the full payout (base + milestone +
+        # streak) so the deflationary pressure matches /roll and /betting.
+        jc_earned = self._apply_mana_yield_taxes(discord_id, guild_id, jc_earned)
 
         # 16. Roll for artifact (skip if corruption says so)
         artifact = None
@@ -3649,9 +3683,8 @@ class DigService:
         else:
             jc_earned = max(0, jc_earned)
 
-        # Silent mana yield modifier applies to the random base loot only —
-        # deterministic milestone and streak bonuses come after.
-        jc_earned = self._apply_mana_yield_modifier(discord_id, guild_id, jc_earned)
+        # Mana variance + steady bonus on base loot only.
+        jc_earned = self._apply_mana_yield_variance(discord_id, guild_id, jc_earned)
 
         # Milestones (anti-farm: only award on depths that extend all-time high).
         milestone_bonus = 0
@@ -3685,6 +3718,9 @@ class DigService:
             streak_bonus * (1.0 + p.get("perk_fx", {}).get("streak_bonus_multiplier", 0.0))
         )
         jc_earned += streak_bonus
+
+        # Plains tithe / Blue tax apply to the full payout.
+        jc_earned = self._apply_mana_yield_taxes(discord_id, guild_id, jc_earned)
 
         # Artifact
         artifact = None
