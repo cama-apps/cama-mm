@@ -929,6 +929,13 @@ async def on_raw_reaction_add(payload):
                     pass
             return
 
+        # Re-fetch the lobby after the join lands so the embed update and
+        # readycheck see the post-join roster. The earlier fetch (line ~801)
+        # is from before the join, so under concurrent reactions it can lag.
+        lobby = await asyncio.to_thread(bot.lobby_service.get_lobby, guild_id=payload_guild_id)
+        if not lobby:
+            return
+
         await update_lobby_message(message, lobby, payload.guild_id)
 
         # Mention user in thread to subscribe them

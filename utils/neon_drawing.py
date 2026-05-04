@@ -511,7 +511,9 @@ def create_don_coin_flip_gif(name: str, balance_lost: int) -> io.BytesIO:
 
     # Phase 2: Slowing down, background flickers red (15 frames)
     for i in range(15):
-        bg_red = int(30 * (i / 15))
+        # Denominator 14 so the last frame (i=14) hits full intensity, matching
+        # the other 15-frame phases in this file.
+        bg_red = int(30 * (i / 14))
         bg = (10 + bg_red, 10, 15)
         img = Image.new("RGBA", (WIDTH, HEIGHT), (*bg, 255))
         draw = ImageDraw.Draw(img)
