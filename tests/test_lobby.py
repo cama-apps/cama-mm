@@ -15,17 +15,20 @@ from tests.fakes.lobby_repo import FakeLobbyRepo
 
 
 def _cleanup_db_file(db_path: str) -> None:
-    """Close sqlite handles and remove temp db with retries for Windows."""
+    """Close sqlite handles and remove temp db; retry once on Windows PermissionError."""
     try:
         import sqlite3
 
         sqlite3.connect(db_path).close()
     except Exception:
         pass
-    time.sleep(0.1)
     try:
         os.unlink(db_path)
+        return
+    except FileNotFoundError:
+        return
     except PermissionError:
+        # Windows can hold the file briefly after the connection closes.
         time.sleep(0.2)
         try:
             os.unlink(db_path)
