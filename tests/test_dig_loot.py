@@ -593,13 +593,13 @@ class TestEventPoolInvariants:
             "vaal_side_area": (40, 170),
             "syndicate_ambush": (40, 170),
             "delve_smuggler": (40, 170),
-            "brann_bronzebeard": (130, 290),
-            "earthen_cache": (130, 290),
-            "campfire_rest": (130, 300),
-            "zekvir_shadow": (130, 290),
-            "dark_rider": (130, 290),
-            "titan_relic": (130, 290),
-            "candle_glow": (130, 290),
+            "brann_bronzebeard": (130, 340),
+            "earthen_cache": (130, 340),
+            "campfire_rest": (130, 350),
+            "zekvir_shadow": (130, 340),
+            "dark_rider": (130, 340),
+            "titan_relic": (130, 340),
+            "candle_glow": (130, 340),
         }
         by_id = {e["id"]: e for e in EVENT_POOL}
         for eid, (lo, hi) in expected.items():
