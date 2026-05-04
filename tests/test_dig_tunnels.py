@@ -13,6 +13,7 @@ from services.dig_constants import (
     BOSS_BOUNDARIES,
     FREE_DIG_COOLDOWN_SECONDS,
     MAX_PRESTIGE,
+    PINNACLE_DEPTH,
     PRESTIGE_PERKS,
 )
 from services.dig_service import DigService
@@ -57,8 +58,8 @@ class TestPrestige:
         monkeypatch.setattr(random, "random", lambda: 0.99)
         dig_service.dig(10001, guild_id)
         all_bosses_defeated = {str(b): "defeated" for b in BOSS_BOUNDARIES}
-        all_bosses_defeated["300"] = "defeated"
-        dig_repo.update_tunnel(10001, guild_id, depth=300, boss_progress=json.dumps(all_bosses_defeated))
+        all_bosses_defeated[str(PINNACLE_DEPTH)] = "defeated"
+        dig_repo.update_tunnel(10001, guild_id, depth=PINNACLE_DEPTH, boss_progress=json.dumps(all_bosses_defeated))
 
     def test_prestige_resets_depth(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
         """Depth resets to 0."""
@@ -524,9 +525,9 @@ class TestMutationSystem:
         monkeypatch.setattr(random, "random", lambda: 0.99)
         dig_service.dig(10001, guild_id)
         all_bosses_defeated = {str(b): "defeated" for b in BOSS_BOUNDARIES}
-        all_bosses_defeated["300"] = "defeated"
+        all_bosses_defeated[str(PINNACLE_DEPTH)] = "defeated"
         dig_repo.update_tunnel(
-            10001, guild_id, depth=300,
+            10001, guild_id, depth=PINNACLE_DEPTH,
             boss_progress=json.dumps(all_bosses_defeated),
             prestige_level=7,  # After prestige will become P8
         )
@@ -611,10 +612,10 @@ class TestRunScoring:
         monkeypatch.setattr(random, "random", lambda: 0.99)
         dig_service.dig(10001, guild_id)
         all_bosses_defeated = {str(b): "defeated" for b in BOSS_BOUNDARIES}
-        all_bosses_defeated["300"] = "defeated"
+        all_bosses_defeated[str(PINNACLE_DEPTH)] = "defeated"
         dig_repo.update_tunnel(
             10001, guild_id,
-            depth=300,
+            depth=PINNACLE_DEPTH,
             boss_progress=json.dumps(all_bosses_defeated),
             current_run_jc=50,
             current_run_artifacts=3,
@@ -649,10 +650,10 @@ class TestHallOfFame:
         monkeypatch.setattr(random, "random", lambda: 0.99)
         dig_service.dig(10001, guild_id)
         all_bosses_defeated = {str(b): "defeated" for b in BOSS_BOUNDARIES}
-        all_bosses_defeated["300"] = "defeated"
+        all_bosses_defeated[str(PINNACLE_DEPTH)] = "defeated"
         dig_repo.update_tunnel(
             10001, guild_id,
-            depth=300,
+            depth=PINNACLE_DEPTH,
             boss_progress=json.dumps(all_bosses_defeated),
             current_run_jc=30,
             current_run_artifacts=2,

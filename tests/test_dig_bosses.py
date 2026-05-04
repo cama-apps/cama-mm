@@ -79,7 +79,7 @@ def _all_tiers_cleared_progress() -> dict:
     return {str(b): "defeated" for b in BOSS_BOUNDARIES}
 
 
-def _at_pinnacle(dig_repo, depth=299):
+def _at_pinnacle(dig_repo, depth=PINNACLE_DEPTH - 1):
     """Place the player at the pinnacle threshold with all tiers cleared."""
     bp = _all_tiers_cleared_progress()
     dig_repo.update_tunnel(
@@ -180,21 +180,21 @@ class TestScaleBossStats:
     def test_depth_scaling_hp(self):
         base = {"player_hp": 5, "boss_hp": 4, "player_hit": 0.6,
                 "player_dmg": 1, "boss_hit": 0.3, "boss_dmg": 1}
-        # Bruiser archetype at the pinnacle (depth 300) gets BOSS_TIER_BONUS[300]['hp'].
+        # Bruiser archetype at the pinnacle gets BOSS_TIER_BONUS[PINNACLE_DEPTH]['hp'].
         scaled = self.service._scale_boss_stats(
-            base, boss_id="grothak", at_boss=300, prestige_level=0,
+            base, boss_id="grothak", at_boss=PINNACLE_DEPTH, prestige_level=0,
         )
-        assert scaled["boss_hp"] == 4 + int(BOSS_TIER_BONUS[300]["hp"])
+        assert scaled["boss_hp"] == 4 + int(BOSS_TIER_BONUS[PINNACLE_DEPTH]["hp"])
 
     def test_depth_scaling_hit_and_dmg(self):
         base = {"player_hp": 5, "boss_hp": 4, "player_hit": 0.6,
                 "player_dmg": 1, "boss_hit": 0.3, "boss_dmg": 1}
-        # Bruiser at depth 300 (pinnacle): boss_hit/dmg = base + tier table entry.
+        # Bruiser at the pinnacle: boss_hit/dmg = base + tier table entry.
         scaled = self.service._scale_boss_stats(
-            base, boss_id="grothak", at_boss=300, prestige_level=0,
+            base, boss_id="grothak", at_boss=PINNACLE_DEPTH, prestige_level=0,
         )
-        assert scaled["boss_hit"] == pytest.approx(0.30 + BOSS_TIER_BONUS[300]["hit"])
-        assert scaled["boss_dmg"] == 1 + int(BOSS_TIER_BONUS[300]["dmg"])
+        assert scaled["boss_hit"] == pytest.approx(0.30 + BOSS_TIER_BONUS[PINNACLE_DEPTH]["hit"])
+        assert scaled["boss_dmg"] == 1 + int(BOSS_TIER_BONUS[PINNACLE_DEPTH]["dmg"])
 
     def test_prestige_scaling(self):
         base = {"player_hp": 5, "boss_hp": 4, "player_hit": 0.6,
@@ -233,10 +233,10 @@ class TestScaleBossStats:
         base = {"player_hp": 5, "boss_hp": 4, "player_hit": 0.6,
                 "player_dmg": 1, "boss_hit": 0.3, "boss_dmg": 1}
         no_echo = self.service._scale_boss_stats(
-            base, boss_id="grothak", at_boss=300, prestige_level=0, echo_applied=False,
+            base, boss_id="grothak", at_boss=PINNACLE_DEPTH, prestige_level=0, echo_applied=False,
         )
         with_echo = self.service._scale_boss_stats(
-            base, boss_id="grothak", at_boss=300, prestige_level=0, echo_applied=True,
+            base, boss_id="grothak", at_boss=PINNACLE_DEPTH, prestige_level=0, echo_applied=True,
         )
         assert with_echo["boss_hp"] == max(1, int(round(no_echo["boss_hp"] * 0.75)))
 
@@ -491,12 +491,12 @@ class TestPinnacleBoundary:
         partial["275"] = "active"  # leave the last tier undefeated
         dig_repo.update_tunnel(
             10001, TEST_GUILD_ID,
-            depth=299,
+            depth=PINNACLE_DEPTH - 1,
             boss_progress=json.dumps(partial),
         )
         tunnel = dig_repo.get_tunnel(10001, TEST_GUILD_ID)
         bp = dig_service._get_boss_progress(dict(tunnel))
-        result = dig_service._at_boss_boundary(299, bp)
+        result = dig_service._at_boss_boundary(PINNACLE_DEPTH - 1, bp)
         assert result != PINNACLE_DEPTH
         assert result == 275
 
@@ -511,7 +511,7 @@ class TestPinnacleBoundary:
 
         tunnel = dig_repo.get_tunnel(10001, TEST_GUILD_ID)
         bp = dig_service._get_boss_progress(dict(tunnel))
-        assert dig_service._at_boss_boundary(299, bp) == PINNACLE_DEPTH
+        assert dig_service._at_boss_boundary(PINNACLE_DEPTH - 1, bp) == PINNACLE_DEPTH
 
     def test_pinnacle_does_not_re_fire_after_defeat(
         self, dig_service, dig_repo, player_repository, monkeypatch,
@@ -522,15 +522,15 @@ class TestPinnacleBoundary:
         dig_service.dig(10001, TEST_GUILD_ID)
 
         bp = _all_tiers_cleared_progress()
-        bp["300"] = "defeated"
+        bp[str(PINNACLE_DEPTH)] = "defeated"
         dig_repo.update_tunnel(
             10001, TEST_GUILD_ID,
-            depth=299,
+            depth=PINNACLE_DEPTH - 1,
             boss_progress=json.dumps(bp),
         )
         tunnel = dig_repo.get_tunnel(10001, TEST_GUILD_ID)
         bp_dict = dig_service._get_boss_progress(dict(tunnel))
-        assert dig_service._at_boss_boundary(299, bp_dict) is None
+        assert dig_service._at_boss_boundary(PINNACLE_DEPTH - 1, bp_dict) is None
 
 
 class TestPinnacleReproc:
@@ -652,7 +652,7 @@ class TestPinnacleReproc:
         dig_service.dig(10001, TEST_GUILD_ID)
 
         bp = _all_tiers_cleared_progress()  # pinnacle absent
-        below = PINNACLE_REPROC_DEPTH - 50  # depth 350, past pinnacle but below legacy reproc
+        below = PINNACLE_REPROC_DEPTH - 50  # depth 400, past pinnacle (350) but below legacy reproc (450)
         dig_repo.update_tunnel(
             10001, TEST_GUILD_ID,
             depth=below,
@@ -815,7 +815,7 @@ class TestPinnacleFight:
         tunnel = dig_repo.get_tunnel(10001, TEST_GUILD_ID)
         assert tunnel["pinnacle_phase"] == 2
         bp = json.loads(tunnel["boss_progress"])
-        entry = bp["300"]
+        entry = bp[str(PINNACLE_DEPTH)]
         status = entry.get("status") if isinstance(entry, dict) else entry
         assert status == "phase1_defeated"
 
@@ -876,11 +876,12 @@ class TestPinnacleFight:
         result = dig_service.fight_boss(10001, TEST_GUILD_ID, "reckless", wager=0)
         assert result["won"] is False
         assert result["boundary"] == PINNACLE_DEPTH
-        # Phase HP persisted per-phase under "300:1"
+        # Phase HP persisted per-phase under f"{PINNACLE_DEPTH}:1"
         tunnel = dig_repo.get_tunnel(10001, TEST_GUILD_ID)
         bp = json.loads(tunnel["boss_progress"])
-        assert "300:1" in bp
-        assert bp["300:1"]["hp_remaining"] >= 0
+        phase_key = f"{PINNACLE_DEPTH}:1"
+        assert phase_key in bp
+        assert bp[phase_key]["hp_remaining"] >= 0
 
 # --- Prestige gating -------------------------------------------------
 
@@ -896,7 +897,7 @@ class TestPinnaclePrestigeGate:
         bp = _all_tiers_cleared_progress()  # 7 tiers cleared, no pinnacle
         dig_repo.update_tunnel(
             10001, TEST_GUILD_ID,
-            depth=300,
+            depth=PINNACLE_DEPTH,
             boss_progress=json.dumps(bp),
         )
         check = dig_service.can_prestige(10001, TEST_GUILD_ID)
@@ -911,10 +912,10 @@ class TestPinnaclePrestigeGate:
         monkeypatch.setattr(random, "random", lambda: 0.99)
         dig_service.dig(10001, TEST_GUILD_ID)
         bp = _all_tiers_cleared_progress()
-        bp["300"] = "defeated"
+        bp[str(PINNACLE_DEPTH)] = "defeated"
         dig_repo.update_tunnel(
             10001, TEST_GUILD_ID,
-            depth=300,
+            depth=PINNACLE_DEPTH,
             boss_progress=json.dumps(bp),
         )
         check = dig_service.can_prestige(10001, TEST_GUILD_ID)
@@ -928,10 +929,10 @@ class TestPinnaclePrestigeGate:
         monkeypatch.setattr(random, "random", lambda: 0.99)
         dig_service.dig(10001, TEST_GUILD_ID)
         bp = _all_tiers_cleared_progress()
-        bp["300"] = "defeated"
+        bp[str(PINNACLE_DEPTH)] = "defeated"
         dig_repo.update_tunnel(
             10001, TEST_GUILD_ID,
-            depth=300,
+            depth=PINNACLE_DEPTH,
             boss_progress=json.dumps(bp),
             pinnacle_boss_id="forgotten_king",
             pinnacle_phase=0,
@@ -945,30 +946,31 @@ class TestPinnaclePrestigeGate:
     def test_prestige_clears_stale_pinnacle_phase_keys(
         self, dig_service, dig_repo, player_repository, monkeypatch,
     ):
-        """Stale ``"300:N"`` composite phase keys in boss_progress must not
-        survive a prestige reset, otherwise next-cycle pinnacle fights would
-        pick up phantom HP from the previous run.
+        """Stale per-phase composite phase keys (``f"{PINNACLE_DEPTH}:N"``)
+        in boss_progress must not survive a prestige reset, otherwise
+        next-cycle pinnacle fights would pick up phantom HP from the
+        previous run.
         """
         _register(player_repository)
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
         monkeypatch.setattr(random, "random", lambda: 0.99)
         dig_service.dig(10001, TEST_GUILD_ID)
         bp = _all_tiers_cleared_progress()
-        bp["300"] = "defeated"
+        bp[str(PINNACLE_DEPTH)] = "defeated"
         # Simulate stale per-phase HP entries left from this cycle's fight.
-        bp["300:1"] = {"hp_remaining": 5, "hp_max": 18, "last_engaged_at": 999_000}
-        bp["300:2"] = {"hp_remaining": 12, "hp_max": 18}
-        bp["300:3"] = {"hp_remaining": 0, "hp_max": 21}
+        bp[f"{PINNACLE_DEPTH}:1"] = {"hp_remaining": 5, "hp_max": 18, "last_engaged_at": 999_000}
+        bp[f"{PINNACLE_DEPTH}:2"] = {"hp_remaining": 12, "hp_max": 18}
+        bp[f"{PINNACLE_DEPTH}:3"] = {"hp_remaining": 0, "hp_max": 21}
         dig_repo.update_tunnel(
             10001, TEST_GUILD_ID,
-            depth=300, boss_progress=json.dumps(bp),
+            depth=PINNACLE_DEPTH, boss_progress=json.dumps(bp),
             pinnacle_boss_id="forgotten_king", pinnacle_phase=3,
         )
         result = dig_service.prestige(10001, TEST_GUILD_ID, "advance_boost")
         assert result["success"]
         tunnel = dig_repo.get_tunnel(10001, TEST_GUILD_ID)
         new_bp = json.loads(tunnel["boss_progress"])
-        for key in ("300", "300:1", "300:2", "300:3"):
+        for key in (str(PINNACLE_DEPTH), f"{PINNACLE_DEPTH}:1", f"{PINNACLE_DEPTH}:2", f"{PINNACLE_DEPTH}:3"):
             assert key not in new_bp, f"stale key {key!r} survived prestige reset"
 
 
@@ -1001,9 +1003,9 @@ class TestPinnacleForeshadow:
         monkeypatch.setattr(random, "random", lambda: 0.99)
         dig_service.dig(10001, TEST_GUILD_ID)
         bp = _all_tiers_cleared_progress()
-        bp["300"] = "defeated"
+        bp[str(PINNACLE_DEPTH)] = "defeated"
         dig_repo.update_tunnel(
-            10001, TEST_GUILD_ID, depth=300,
+            10001, TEST_GUILD_ID, depth=PINNACLE_DEPTH,
             boss_progress=json.dumps(bp),
         )
         tunnel = dict(dig_repo.get_tunnel(10001, TEST_GUILD_ID))

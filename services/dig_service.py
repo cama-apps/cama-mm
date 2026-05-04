@@ -819,7 +819,7 @@ class DigService:
           - ``fresh_hp`` if no persisted HP exists.
 
         ``at_boss`` is normally an int boundary depth (e.g. 25), but pinnacle
-        callers pass a composite phase key string like ``"300:1"``.
+        callers pass a composite phase key string like ``f"{PINNACLE_DEPTH}:1"``.
         """
         entry = boss_progress.get(str(at_boss))
         if not isinstance(entry, dict):
@@ -860,7 +860,7 @@ class DigService:
         HP at the moment the fight ended (0 on a player win, otherwise the
         leftover after the duel loop). ``at_boss`` is normally an int boundary
         depth (e.g. 25), but pinnacle callers pass a composite phase key
-        string like ``"300:1"``.
+        string like ``f"{PINNACLE_DEPTH}:1"``.
         """
         raw = boss_progress.get(str(at_boss))
         if isinstance(raw, dict):
@@ -906,7 +906,7 @@ class DigService:
             archetype_name = BOSS_ARCHETYPE_BY_ID.get(boss_id, "bruiser")
         archetype = BOSS_ARCHETYPES.get(archetype_name, BOSS_ARCHETYPES["bruiser"])
 
-        # Boundary key for the tier lookup. Pinnacle uses depth 300; for
+        # Boundary key for the tier lookup. Pinnacle uses PINNACLE_DEPTH; for
         # off-boundary calls (defensive), pick the highest boundary <= at_boss.
         tier_key = at_boss if at_boss in BOSS_TIER_BONUS else max(
             (k for k in BOSS_TIER_BONUS if k <= at_boss), default=25,

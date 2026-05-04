@@ -26,6 +26,7 @@ from services.dig_constants import (
     MILESTONES,
     PAID_DIG_COSTS_PER_DAY,
     PICKAXE_TIERS,
+    PINNACLE_DEPTH,
     SABOTAGE_BASE_COST,
     SABOTAGE_COOLDOWN_SECONDS,
     SABOTAGE_COST_DIVISOR,
@@ -1003,9 +1004,9 @@ class TestBoss:
         result = dig_service.prestige(10001, guild_id, "advance_boost")
         assert not result["success"]
 
-        # Now mark ALL bosses defeated, including the pinnacle at depth 300.
+        # Now mark ALL bosses defeated, including the pinnacle.
         all_defeated = {str(b): "defeated" for b in BOSS_BOUNDARIES}
-        all_defeated["300"] = "defeated"
+        all_defeated[str(PINNACLE_DEPTH)] = "defeated"
         dig_repo.update_tunnel(10001, guild_id, boss_progress=json.dumps(all_defeated))
         result = dig_service.prestige(10001, guild_id, "advance_boost")
         assert result["success"]

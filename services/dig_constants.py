@@ -82,7 +82,7 @@ MILESTONES: dict[int, int] = {
     150: 30,
     200: 50,
     275: 80,
-    300: 100,
+    350: 100,
     400: 150,
 }
 
@@ -1013,7 +1013,7 @@ BOSS_TIER_BONUS: dict[int, dict[str, float]] = {
     150: {"hp": 5,  "hit": 0.04, "dmg": 0, "pen": 0.05},
     200: {"hp": 5,  "hit": 0.05, "dmg": 0, "pen": 0.06},
     275: {"hp": 6,  "hit": 0.06, "dmg": 0, "pen": 0.06},
-    300: {"hp": 9,  "hit": 0.10, "dmg": 0, "pen": 0.06},   # pinnacle: HP grind, no dmg cliff
+    350: {"hp": 9,  "hit": 0.10, "dmg": 0, "pen": 0.06},   # pinnacle: HP grind, no dmg cliff
 }
 BOSS_PRESTIGE_BONUS: dict[int, dict[str, float]] = {
     # prestige: {boss_hp_add, boss_hit_add, boss_dmg_add, player_hit_pen}
@@ -1087,7 +1087,7 @@ BOSS_PAYOUTS: dict[int, tuple[float, float, float]] = {
     150: (2.9, 5.8, 9.8),
     200: (3.3, 6.6, 11.3),
     275: (3.6, 7.8, 12.0),
-    300: (2.5, 3.8, 7.5),
+    350: (2.5, 3.8, 7.5),
 }
 
 
@@ -3280,7 +3280,7 @@ RANDOM_EVENTS: list[RandomEvent] = [
             "A ruddy dwarf looks up from a journal and beams at you. 'Well met! Down to explore? Aye, I could use the company.'",
             "A bearded figure in explorer's gear waves from a small camp. 'Ah, a fellow delver! Share a fire and I'll share a trick or two.'",
         ),
-        min_depth=130, max_depth=290,
+        min_depth=130, max_depth=340,
         safe_option=EventChoice(
             "Take nothing",
             success=EventOutcome("You decline.", 0, 0, False),
@@ -3306,7 +3306,7 @@ RANDOM_EVENTS: list[RandomEvent] = [
             "A heavy stone chest rests in an alcove, bound with dwarven ironwork. The runes on the lid are mostly faded.",
             "A runebound chest the color of mountains. The seals have been broken and rewritten many times. They are weakest now.",
         ),
-        min_depth=130, max_depth=290,
+        min_depth=130, max_depth=340,
         safe_option=EventChoice(
             "Force open carefully",
             success=EventOutcome("The lock gives way. Modest treasure inside.", 0, 4, False),
@@ -3327,7 +3327,7 @@ RANDOM_EVENTS: list[RandomEvent] = [
             "Someone has left a campfire burning in a sheltered alcove. A neat bedroll. A whetstone on a flat rock. An invitation.",
             "A small fire crackles in a pit, warming a space someone else clearly used as camp. Everything needed for a short rest is laid out.",
         ),
-        min_depth=130, max_depth=300,
+        min_depth=130, max_depth=350,
         safe_option=EventChoice(
             "Rest by the fire",
             success=EventOutcome("You sit. The warmth seeps into your bones. A moment of peace.", 0, 0, False),
@@ -3349,7 +3349,7 @@ RANDOM_EVENTS: list[RandomEvent] = [
             "The tunnel ends in legs — eight of them, too long, folded against a body the size of a house. Eight red pinpricks focus on you.",
             "A shape the size of a barn occupies the chamber ahead. Only the eyes move. They move to you.",
         ),
-        min_depth=130, max_depth=290,
+        min_depth=130, max_depth=340,
         safe_option=EventChoice(
             "Find another way",
             success=EventOutcome("A detour. Longer, but you keep your limbs.", -2, 0, False),
@@ -3377,7 +3377,7 @@ RANDOM_EVENTS: list[RandomEvent] = [
             "Out of the spore-mist rides a figure on a horse made of bones. The rider is cloaked. The rider extends a gauntlet.",
             "A horseman parts the fungal fog. Both rider and mount are skeletal. A gauntleted hand rises in a greeting, or a demand.",
         ),
-        min_depth=130, max_depth=290,
+        min_depth=130, max_depth=340,
         safe_option=EventChoice(
             "Bow and let it pass",
             success=EventOutcome("It drops a coin as tribute. Respect, it seems, has value.", 0, 2, False),
@@ -3405,7 +3405,7 @@ RANDOM_EVENTS: list[RandomEvent] = [
             "A relic built by hands that were not human sits on a plinth. Three runes orbit it slowly. You are invited to touch one.",
             "A device older than the rock around it hums at chest height. It offers three glowing options. You do not know what they mean.",
         ),
-        min_depth=130, max_depth=290,
+        min_depth=130, max_depth=340,
         safe_option=EventChoice(
             "Take nothing",
             success=EventOutcome("You decline.", 0, 0, False),
@@ -3431,7 +3431,7 @@ RANDOM_EVENTS: list[RandomEvent] = [
             "In the middle of the ice, a single candle burns. No drafts. No breath. No reason. Its light reaches further than it should.",
             "A candle sits on a simple iron holder in the frozen dark. Its flame is steady. Its warmth is real. Its presence makes no sense.",
         ),
-        min_depth=130, max_depth=290,
+        min_depth=130, max_depth=340,
         safe_option=EventChoice(
             "Light your torch from it",
             success=EventOutcome("The flame passes to your torch. The candle keeps burning.", 0, 0, False),
@@ -5053,7 +5053,7 @@ VISIBLE_ACHIEVEMENTS: list[AchievementDef] = [
     ]),
     # Expansion achievements
     AchievementDef("depth_deep", "Depth Explorer", "Reach extreme depths", [
-        AchievementTier("Bronze", 150), AchievementTier("Silver", 200), AchievementTier("Gold", 300),
+        AchievementTier("Bronze", 150), AchievementTier("Silver", 200), AchievementTier("Gold", 350),
     ]),
     AchievementDef("events_survived", "Event Survivor", "Survive risky event outcomes", [
         AchievementTier("Bronze", 5), AchievementTier("Silver", 20), AchievementTier("Gold", 50),
@@ -5330,20 +5330,20 @@ LUMINOSITY_DRAIN_PER_DIG: dict[str, int] = {
 
 # Hard depth wall: the deep refuses to yield further. Players hitting
 # this depth must prestige to continue. Sized so that post-pinnacle
-# (depth 300) progress feels like a slow descent under pressure rather
+# (depth 350) progress feels like a slow descent under pressure rather
 # than an open runway.
 PRESTIGE_HARD_CAP: int = 500
 # Past this depth the drain rate accelerates linearly — +1 extra drain
 # per LUMINOSITY_DEEP_DRAIN_BLOCKS_PER_STEP blocks. At cap (depth 500)
 # the bonus is +10, doubling The Hollow's base drain.
-LUMINOSITY_DEEP_DRAIN_START_DEPTH: int = 300
+LUMINOSITY_DEEP_DRAIN_START_DEPTH: int = 350
 LUMINOSITY_DEEP_DRAIN_BLOCKS_PER_STEP: int = 20
 
 # Pinnacle catch-up: if a player tunneled past the pinnacle without
 # defeating it (legacy tunnels that pre-date the pinnacle, or skipped
 # encounters), the pinnacle re-procs at this depth so prestige isn't
 # permanently locked out. Tier bosses must still all be cleared.
-PINNACLE_REPROC_DEPTH: int = 400
+PINNACLE_REPROC_DEPTH: int = 450
 
 # Thresholds and their gameplay effects
 LUMINOSITY_BRIGHT: int = 76       # 76-100: normal
@@ -5844,13 +5844,13 @@ PHASE_TRANSITION_EVENTS: list[PhaseTransitionEvent] = [
 # ---------------------------------------------------------------------------
 # Pinnacle Boss (boss revamp)
 # ---------------------------------------------------------------------------
-# A new 8th boss boundary at depth 300 that gates prestige. One of three
+# A new 8th boss boundary at depth 350 that gates prestige. One of three
 # pinnacle candidates is rolled and locked per prestige cycle.
 # Always 3 phases. Drops a relic with 2 random rolls on victory.
 
-PINNACLE_DEPTH: int = 300
-PINNACLE_RETREAT_FORESHADOW_DEPTH: int = 285  # /dig info hints from this depth
-PINNACLE_FORESHADOW_DEPTH: int = 276          # subtle hint after T275 cleared
+PINNACLE_DEPTH: int = 350
+PINNACLE_RETREAT_FORESHADOW_DEPTH: int = 335  # /dig info hints from this depth
+PINNACLE_FORESHADOW_DEPTH: int = 326          # subtle hint after T275 cleared
 
 
 @dataclass(frozen=True)
@@ -6823,7 +6823,7 @@ BOSS_DIALOGUE_V2: dict[str, dict[str, list[str]]] = {
             "Inspect closely. Royalty rewards attention.",
         ],
     },
-    # ---- Pinnacle pool (depth 300) -------------------------------------
+    # ---- Pinnacle pool (depth 350) -------------------------------------
     "forgotten_king": {
         "first_meet": [
             "Hello, child. You have walked far. Sit. No, stand. I forget which is the etiquette.",

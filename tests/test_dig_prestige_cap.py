@@ -139,7 +139,7 @@ class TestDeepDrainRamp:
         assert result.get("success"), f"dig failed: {result.get('error')}"
         lum_info = result.get("luminosity_info") or {}
         base = LUMINOSITY_DRAIN_PER_DIG["The Hollow"]
-        # depth-1 = 499, expected bonus = (499-300)//20 = 9; total = 19
+        # bonus = (depth_before - LUMINOSITY_DEEP_DRAIN_START_DEPTH) // step
         # (depth ramp uses depth_before, captured before the dig advance)
         expected_bonus = (PRESTIGE_HARD_CAP - 1 - LUMINOSITY_DEEP_DRAIN_START_DEPTH) // (
             LUMINOSITY_DEEP_DRAIN_BLOCKS_PER_STEP
@@ -154,7 +154,7 @@ class TestDeepDrainRamp:
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
         _seed_player(
             dig_service, dig_repo, player_repository,
-            depth=LUMINOSITY_DEEP_DRAIN_START_DEPTH - 50,
+            depth=LUMINOSITY_DEEP_DRAIN_START_DEPTH - 100,
         )
         random.seed(99)
         result = dig_service.dig(10001, 12345)
