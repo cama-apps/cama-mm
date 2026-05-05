@@ -376,8 +376,8 @@ class TestDigGearServiceEquipUnequip:
 
 
 class TestDigGearServiceRepair:
-    def test_repair_charges_33pct_of_tier_price(self, svc, player):
-        # Diamond Plate: tier 3, shop_price 180 -> repair = 59 (180 * 0.33)
+    def test_repair_charges_15pct_of_tier_price(self, svc, player):
+        # Diamond Plate: tier 3, shop_price 180 -> repair = 27 (180 * 0.15)
         r = svc.buy_gear(player, 0, "armor", 3)
         gid = r["gear_id"]
         # Drop durability to 5 manually
@@ -385,8 +385,8 @@ class TestDigGearServiceRepair:
         bal_before = svc.player_repo.get_balance(player, 0)
         result = svc.repair_gear(player, 0, gid)
         assert result["success"]
-        assert result["cost"] == 59
-        assert svc.player_repo.get_balance(player, 0) == bal_before - 59
+        assert result["cost"] == 27
+        assert svc.player_repo.get_balance(player, 0) == bal_before - 27
         assert svc.dig_repo.get_gear_by_id(gid)["durability"] == GEAR_MAX_DURABILITY
 
     def test_repair_refuses_when_full(self, svc, player):
@@ -396,8 +396,12 @@ class TestDigGearServiceRepair:
         assert "full durability" in result["error"]
 
     def test_repair_all_sums_costs(self, svc, player):
-        a = svc.buy_gear(player, 0, "armor", 1)["gear_id"]   # 20 * 0.33 = 7
-        b = svc.buy_gear(player, 0, "boots", 2)["gear_id"]   # 70 * 0.33 = 23
+        # 15% repair pct: armor:1 (20 JC) -> 3, boots:2 (70 JC) -> round(10.5)=10
+        a = svc.buy_gear(player, 0, "armor", 1)["gear_id"]
+        b = svc.buy_gear(player, 0, "boots", 2)["gear_id"]
+        # /repair all only touches equipped pieces — equip both first.
+        svc.equip_gear(player, 0, a)
+        svc.equip_gear(player, 0, b)
         # Damage both
         svc.dig_repo.repair_gear(a, 5)
         svc.dig_repo.repair_gear(b, 7)
@@ -405,13 +409,50 @@ class TestDigGearServiceRepair:
         result = svc.repair_all_gear(player, 0)
         assert result["success"]
         assert result["repaired"] == 2
-        assert result["cost"] == 7 + 23
-        assert svc.player_repo.get_balance(player, 0) == bal_before - 30
+        assert result["cost"] == 3 + 10
+        assert svc.player_repo.get_balance(player, 0) == bal_before - 13
 
     def test_repair_all_with_nothing_damaged_errors(self, svc, player):
         svc.buy_gear(player, 0, "armor", 1)  # full durability
         result = svc.repair_all_gear(player, 0)
         assert not result["success"]
+
+    def test_repair_all_skips_damaged_unequipped_pieces(self, svc, player):
+        # Two pieces owned, both damaged, neither equipped — repair_all
+        # should refuse with the equipped-specific error message rather
+        # than blindly repairing them.
+        a = svc.buy_gear(player, 0, "armor", 1)["gear_id"]
+        b = svc.buy_gear(player, 0, "boots", 1)["gear_id"]
+        svc.dig_repo.repair_gear(a, 5)
+        svc.dig_repo.repair_gear(b, 5)
+        bal_before = svc.player_repo.get_balance(player, 0)
+
+        result = svc.repair_all_gear(player, 0)
+
+        assert not result["success"]
+        assert "equipped" in result["error"].lower()
+        # Balance untouched.
+        assert svc.player_repo.get_balance(player, 0) == bal_before
+        # Gear still damaged.
+        assert svc.dig_repo.get_gear_by_id(a)["durability"] == 5
+        assert svc.dig_repo.get_gear_by_id(b)["durability"] == 5
+
+    def test_compute_repair_all_cost_matches_actual_debit(self, svc, player):
+        # The UI cost preview must match what repair_all_gear actually
+        # debits — both are equipped-only after this patch.
+        a = svc.buy_gear(player, 0, "armor", 1)["gear_id"]   # equipped target
+        b = svc.buy_gear(player, 0, "boots", 1)["gear_id"]   # NOT equipped
+        svc.equip_gear(player, 0, a)
+        svc.dig_repo.repair_gear(a, 5)
+        svc.dig_repo.repair_gear(b, 5)
+
+        preview = svc.compute_repair_all_cost(player, 0)
+        bal_before = svc.player_repo.get_balance(player, 0)
+        result = svc.repair_all_gear(player, 0)
+
+        assert result["success"]
+        assert preview == result["cost"]
+        assert svc.player_repo.get_balance(player, 0) == bal_before - result["cost"]
 
 
 class TestDigGearServiceRelicCap:
@@ -588,12 +629,12 @@ class TestDigGearServiceAtomicDebit:
     def test_repair_succeeds_when_just_funded(self, svc, player):
         """``try_debit`` is a single conditional UPDATE — if it succeeds the
         balance is debited atomically by exactly ``cost`` JC."""
-        # Buy Diamond Plate (180 JC) while flush, then drain balance to 60
-        # and damage the piece. Diamond repair = 59 JC, so 60 is enough.
+        # Buy Diamond Plate (180 JC) while flush, then drain balance to 28
+        # and damage the piece. Diamond repair = 27 JC (15%), so 28 is enough.
         gid = svc.buy_gear(player, 0, "armor", 3)["gear_id"]
-        svc.player_repo.add_balance(player, 0, -(svc.player_repo.get_balance(player, 0) - 60))
+        svc.player_repo.add_balance(player, 0, -(svc.player_repo.get_balance(player, 0) - 28))
         svc.dig_repo.repair_gear(gid, 5)
-        assert svc.player_repo.get_balance(player, 0) == 60
+        assert svc.player_repo.get_balance(player, 0) == 28
         r = svc.repair_gear(player, 0, gid)
         assert r["success"]
         assert svc.player_repo.get_balance(player, 0) == 1

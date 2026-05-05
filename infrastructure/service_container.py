@@ -363,6 +363,7 @@ class ServiceContainer:
             dig_repo=c["dig_repo"],
             player_repo=c["player_repo"],
             mana_effects_service=c.get("mana_effects_service"),
+            bankruptcy_repo=c.get("bankruptcy_repo"),
         )
 
         # Wire LLM flavor layer if AI is available

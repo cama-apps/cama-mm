@@ -1567,8 +1567,8 @@ class TestCheer:
         assert len(cheers) == 1
         assert cheers[0]["cheerer_id"] == 10002
 
-    def test_cheer_charges_cheerer_not_target(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
-        """Cheer costs 3 JC from the cheerer, not the target."""
+    def test_cheer_is_free_for_cheerer_and_target(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
+        """Cheering is free — neither cheerer nor target's balance changes."""
         _register_player(player_repository, discord_id=10001, balance=200)
         _register_player(player_repository, discord_id=10002, balance=200)
         monkeypatch.setattr(time, "time", lambda: 1_000_000)
@@ -1583,7 +1583,7 @@ class TestCheer:
 
         dig_service.cheer_boss(10002, 10001, guild_id)
 
-        assert player_repository.get_balance(10002, guild_id) == balance_cheerer_before - 3
+        assert player_repository.get_balance(10002, guild_id) == balance_cheerer_before
         assert player_repository.get_balance(10001, guild_id) == balance_target_before
 
     def test_cheer_increases_boss_win_chance(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
@@ -1639,7 +1639,8 @@ class TestCheer:
 
         result = dig_service.cheer_boss(10005, 10001, guild_id)
         assert not result["success"]
-        assert "maximum" in result.get("error", "").lower()
+        err = result.get("error", "").lower()
+        assert "full cheer boost" in err or "maximum" in err
 
     def test_cheer_slots_free_after_expiry(self, dig_service, dig_repo, player_repository, guild_id, monkeypatch):
         """After cheers expire, new cheers can be added past the old max."""

@@ -9,6 +9,7 @@ import json
 import logging
 import random
 import time
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import discord
@@ -440,54 +441,28 @@ class BossWagerModal(discord.ui.Modal):
                 self.stop()
                 return
 
-            # Phase 2 incoming — fake victory then reveal transform
+            # Phase 2 incoming — survival flavor + auto-engage next phase.
+            # The wager rides forward (carried on boss_progress), so the new
+            # encounter view will skip the wager modal on Fight.
             if getattr(self.result, "phase2_incoming", False):
-                phase2_name = getattr(self.result, "phase2_name", "???")
-                phase2_title = getattr(self.result, "phase2_title", "")
-                p2_dialogue = getattr(self.result, "dialogue", "...")
                 boss_name = getattr(self.result, "boss_name", "the boss")
-
                 victory_embed = discord.Embed(
-                    title="Victory!",
-                    description=f"You defeated **{boss_name}**!",
+                    title="Phase Cleared",
+                    description=f"You broke **{boss_name}** — it staggers...",
                     color=0x00FF00,
                 )
-                msg = await interaction.followup.send(embed=victory_embed, wait=True)
-
+                await interaction.followup.send(embed=victory_embed)
                 await asyncio.sleep(2)
-
-                phase2_embed = discord.Embed(
-                    title=f"{phase2_title or phase2_name} Emerges!",
-                    description=(
-                        f"Wait... **{boss_name}** is transforming!\n\n"
-                        f"**{phase2_name}**\n"
-                        f"*{p2_dialogue}*\n\n"
-                        "The fight continues!"
-                    ),
-                    color=0x8B0000,
-                )
-                phase2_embed.set_footer(text="Use /dig go to encounter the boss again")
-
-                # Try to load phase 2 boss art — prefer the locked boss_id,
-                # fall back to the depth boundary for the grandfathered slug.
-                p2_file = None
-                boundary = getattr(self.result, "boundary", None)
-                boss_id = getattr(self.result, "boss_id", "") or boundary
-                if boss_id:
-                    try:
-                        from utils.dig_assets import get_boss_art
-                        new_depth = getattr(self.result, "new_depth", 0)
-                        ld = get_layer_def(new_depth or boundary)
-                        ln = ld.name if ld else "Dirt"
-                        p2_file = await asyncio.to_thread(get_boss_art, boss_id, "phase2", ln)
-                    except Exception:
-                        pass
-
-                if p2_file:
-                    phase2_embed.set_image(url=f"attachment://{p2_file.filename}")
-                    await msg.edit(embed=phase2_embed, attachments=[p2_file])
-                else:
-                    await msg.edit(embed=phase2_embed)
+                channel = interaction.channel
+                if channel is not None:
+                    await _post_phase_transition_followup(
+                        channel,
+                        dig_service=self.dig_service,
+                        user_id=self.user_id,
+                        guild_id=self.guild_id,
+                        result=self.result,
+                        dig_flavor_service=self.dig_flavor_service,
+                    )
                 return
 
             # LLM narrative for the boss fight (best-effort)
@@ -579,6 +554,191 @@ class BossWagerModal(discord.ui.Modal):
             await interaction.followup.send("Boss fight failed. Try again.", ephemeral=True)
 
 
+async def _post_phase_transition_followup(
+    channel,
+    *,
+    dig_service: DigService,
+    user_id: int,
+    guild_id: int | None,
+    result,
+    dig_flavor_service=None,
+) -> None:
+    """Post the transformation flavor embed and auto-engage the next phase.
+
+    Posts directly to the supplied ``channel`` (typically
+    ``interaction.channel`` or ``view.message.channel``) so the helper can
+    be invoked from both interaction and view contexts uniformly.
+    """
+    phase2_name = getattr(result, "phase2_name", "???")
+    phase2_title = getattr(result, "phase2_title", "")
+    p2_dialogue = getattr(result, "dialogue", "...")
+    boss_name = getattr(result, "boss_name", "the boss")
+    wager = getattr(result, "wager", 0)
+
+    transition_embed = discord.Embed(
+        title=f"{phase2_title or phase2_name} Emerges!",
+        description=(
+            f"**{boss_name}** is transforming!\n\n"
+            f"**{phase2_name}**\n"
+            f"*{p2_dialogue}*"
+        ),
+        color=0x8B0000,
+    )
+    if wager:
+        transition_embed.add_field(
+            name="​",
+            value=f"Your **{wager}** {JOPACOIN_EMOTE} wager rides on the next phase.",
+            inline=False,
+        )
+
+    # Phase-3 transitions (from the resume_boss_duel path) reach this helper
+    # with phase3_incoming=True; pick the right asset key so the embed art
+    # matches the phase the player is actually about to fight.
+    phase_key = "phase3" if getattr(result, "phase3_incoming", False) else "phase2"
+    p2_file = None
+    boundary = getattr(result, "boundary", None)
+    boss_id = getattr(result, "boss_id", "") or boundary
+    if boss_id:
+        try:
+            from utils.dig_assets import get_boss_art
+            new_depth = getattr(result, "new_depth", 0)
+            ld = get_layer_def(new_depth or boundary)
+            ln = ld.name if ld else "Dirt"
+            p2_file = await asyncio.to_thread(get_boss_art, boss_id, phase_key, ln)
+        except Exception:
+            p2_file = None
+
+    if p2_file:
+        transition_embed.set_image(url=f"attachment://{p2_file.filename}")
+        await channel.send(embed=transition_embed, file=p2_file)
+    else:
+        await channel.send(embed=transition_embed)
+
+    # Refetch the encounter for the next phase and post a fresh
+    # BossEncounterView. The Fight button will see the carry and skip the
+    # wager modal.
+    try:
+        info_dict = await asyncio.to_thread(
+            dig_service.build_next_boss_encounter, user_id, guild_id,
+        )
+    except Exception:
+        logger.debug("Phase auto-continue: build_next_boss_encounter failed", exc_info=True)
+        info_dict = None
+    if not info_dict:
+        # Service couldn't build the next encounter — surface a recovery
+        # hint so the player isn't left staring at a dead-end embed.
+        await channel.send(
+            content="The next phase didn't load — use `/dig go` to engage it.",
+        )
+        return
+
+    next_info = SimpleNamespace(**info_dict)
+    encounter_embed = discord.Embed(
+        title=f"Boss Encountered: {getattr(next_info, 'name', 'Unknown Boss')}!",
+        description=getattr(next_info, "dialogue", ""),
+        color=0xFF0000,
+    )
+    lum_line = getattr(next_info, "luminosity_display", None)
+    if lum_line:
+        encounter_embed.add_field(name="​", value=lum_line, inline=False)
+    view = BossEncounterView(
+        dig_service, user_id, guild_id, next_info,
+        getattr(next_info, "has_lantern", False),
+        dig_flavor_service=dig_flavor_service,
+    )
+    msg = await channel.send(embed=encounter_embed, view=view)
+    if msg:
+        view.message = msg
+
+
+async def _resolve_carried_phase_fight(
+    interaction: discord.Interaction,
+    *,
+    dig_service: DigService,
+    user_id: int,
+    guild_id: int | None,
+    risk_tier: str,
+    wager: int,
+    dig_flavor_service=None,
+) -> None:
+    """Engage a multi-phase fight using the carried wager (no modal).
+
+    Mirrors the modal's on_submit result handling so phase 2/3 fights flow
+    through the same mechanic-prompt / transformation / final-result paths.
+    """
+    try:
+        result = _wrap(await asyncio.to_thread(
+            dig_service.start_boss_duel, user_id, guild_id, risk_tier, wager,
+        ))
+    except Exception as e:
+        logger.error("Carried-phase fight error: %s", e, exc_info=True)
+        await safe_followup(interaction, content="Boss fight failed.", ephemeral=True)
+        return
+
+    if not getattr(result, "success", True):
+        await safe_followup(
+            interaction,
+            content=getattr(result, "error", "Boss fight failed."),
+            ephemeral=True,
+        )
+        return
+
+    if getattr(result, "pending_prompt", None):
+        view = BossDuelView(
+            dig_service=dig_service,
+            user_id=user_id,
+            guild_id=guild_id,
+            initial_result=result,
+            risk_tier=risk_tier,
+            wager=wager,
+            dig_flavor_service=dig_flavor_service,
+        )
+        embed = _build_duel_prompt_embed(result)
+        msg = await interaction.followup.send(embed=embed, view=view, wait=True)
+        view.message = msg
+        return
+
+    if getattr(result, "phase2_incoming", False) or getattr(result, "phase3_incoming", False):
+        channel = interaction.channel
+        if channel is not None:
+            await _post_phase_transition_followup(
+                channel,
+                dig_service=dig_service, user_id=user_id, guild_id=guild_id,
+                result=result, dig_flavor_service=dig_flavor_service,
+            )
+        return
+
+    embed = discord.Embed(
+        title="Boss Fight Result",
+        color=0x00FF00 if getattr(result, "won", False) else 0xFF0000,
+    )
+    boss_name = getattr(result, "boss_name", "the boss")
+    win_chance = getattr(result, "win_chance", 0)
+    if getattr(result, "won", False):
+        payout = getattr(result, "payout", 0) or getattr(result, "jc_delta", 0)
+        embed.description = (
+            f"Victory! You defeated **{boss_name}** and earned "
+            f"**{payout}** {JOPACOIN_EMOTE}!"
+        )
+    else:
+        loss = abs(getattr(result, "jc_delta", 0))
+        knockback = getattr(result, "knockback", 0)
+        embed.description = (
+            f"Defeat! **{boss_name}** overpowered you. "
+            f"You lost **{loss}** {JOPACOIN_EMOTE} and were knocked back "
+            f"{knockback} blocks."
+        )
+    embed.add_field(
+        name="Details",
+        value=(
+            f"Risk: {risk_tier.title()} | Pre-fight win chance: "
+            f"{int(win_chance * 100)}%"
+        ),
+        inline=False,
+    )
+    await interaction.followup.send(embed=embed)
+
+
 def _build_duel_prompt_embed(result) -> discord.Embed:
     """Embed rendered alongside a BossDuelView's three reactive option buttons.
 
@@ -589,7 +749,9 @@ def _build_duel_prompt_embed(result) -> discord.Embed:
     pp = raw.get("pending_prompt") or {}
     boss_name = raw.get("boss_name") or "the boss"
     player_hp = raw.get("player_hp", 0)
+    player_hp_max = raw.get("player_hp_max", player_hp)
     boss_hp = raw.get("boss_hp", 0)
+    boss_hp_max = raw.get("boss_hp_max", boss_hp)
     round_num = raw.get("round_num", 0)
     is_pinnacle = bool(raw.get("is_pinnacle"))
     phase = raw.get("phase")
@@ -610,7 +772,10 @@ def _build_duel_prompt_embed(result) -> discord.Embed:
     )
     embed.add_field(
         name="State",
-        value=f"You: **{player_hp}** HP  |  {boss_name}: **{boss_hp}** HP",
+        value=(
+            f"You: **{player_hp}/{player_hp_max}** HP  |  "
+            f"{boss_name}: **{boss_hp}/{boss_hp_max}** HP"
+        ),
         inline=False,
     )
     lum_line = raw.get("luminosity_display")
@@ -894,6 +1059,32 @@ class BossDuelView(discord.ui.View):
             embed = _build_duel_prompt_embed(result)
             await self._edit_message(embed=embed, view=new_view)
             new_view.message = self.message
+            self.stop()
+            return
+
+        # Multi-phase transition through a mid-fight prompt: clean up the
+        # active duel message and post the auto-continue follow-up.
+        if (getattr(result, "phase2_incoming", False)
+                or getattr(result, "phase3_incoming", False)) \
+                and not getattr(result, "is_pinnacle", False):
+            cleared_embed = discord.Embed(
+                title="Phase Cleared",
+                description=(
+                    f"You broke **{getattr(result, 'boss_name', 'the boss')}** — "
+                    "it staggers..."
+                ),
+                color=0x00FF00,
+            )
+            await self._edit_message(embed=cleared_embed, view=None)
+            channel = getattr(self.message, "channel", None) if self.message else None
+            if channel is not None:
+                await _post_phase_transition_followup(
+                    channel,
+                    dig_service=self.dig_service,
+                    user_id=self.user_id, guild_id=self.guild_id,
+                    result=result,
+                    dig_flavor_service=self.dig_flavor_service,
+                )
             self.stop()
             return
 
@@ -1245,6 +1436,24 @@ class BossEncounterView(discord.ui.View):
         if interaction.user.id != self.user_id:
             # Others can cheer, not fight
             await interaction.response.send_message("Only the tunnel owner can fight.", ephemeral=True)
+            return
+        # Multi-phase carry: a prior phase win locked the original wager onto
+        # this boss. Skip the wager modal \u2014 the carried stake rides forward.
+        carried = await asyncio.to_thread(
+            self.dig_service.get_carried_wager, self.user_id, self.guild_id,
+        )
+        if carried:
+            await safe_defer(interaction)
+            await _resolve_carried_phase_fight(
+                interaction,
+                dig_service=self.dig_service,
+                user_id=self.user_id,
+                guild_id=self.guild_id,
+                risk_tier=carried["risk_tier"],
+                wager=int(carried["wager"]),
+                dig_flavor_service=self.dig_flavor_service,
+            )
+            self.stop()
             return
         modal = BossWagerModal(self.dig_service, self.user_id, self.guild_id, dig_flavor_service=self.dig_flavor_service)
         await interaction.response.send_modal(modal)
@@ -2952,14 +3161,30 @@ class DigCommands(commands.Cog):
         def _get(obj, key, default=None):
             return obj.get(key, default) if isinstance(obj, dict) else getattr(obj, key, default)
 
+        def _resolve_name(entry) -> str:
+            discord_id = _get(entry, "discord_id", None)
+            tunnel_name = _get(entry, "tunnel_name", None)
+            display = None
+            if discord_id is not None and interaction.guild is not None:
+                member = interaction.guild.get_member(int(discord_id))
+                if member is not None:
+                    display = member.display_name or member.name
+            display = display or tunnel_name or (
+                f"Tunnel #{discord_id}" if discord_id is not None else "Unknown"
+            )
+            if len(display) > 20:
+                display = display[:19] + "…"
+            return display
+
         max_depth = max(_get(e, "depth", 0) for e in entries[:10]) or 1
         for i, entry in enumerate(entries[:10], 1):
-            name = _get(entry, "tunnel_name", None) or f"Tunnel #{_get(entry, 'discord_id', '?')}"
+            name = _resolve_name(entry)
             depth = _get(entry, "depth", 0)
-            layer = self.dig_service.get_layer(depth).get("name", "Dirt")
+            prestige = _get(entry, "prestige_level", 0) or 0
+            prestige_tag = f" (P{prestige})" if prestige > 0 else ""
             bar_len = max(1, int(20 * depth / max_depth))
             bar = "\u2588" * bar_len
-            lines.append(f"`{i:>2}.` **{name}** — {depth} ({layer})\n`{bar}`")
+            lines.append(f"`{i:>2}.` **{name}** — Depth {depth}{prestige_tag}\n`{bar}`")
 
         # Requester's position
         user_pos = getattr(lb, "user_position", None)
@@ -3211,6 +3436,9 @@ class DigCommands(commands.Cog):
         app_commands.Choice(name="Stone Boots (25 JC)",   value="boots:1"),
         app_commands.Choice(name="Iron Boots (70 JC)",    value="boots:2"),
         app_commands.Choice(name="Diamond Boots (200 JC)", value="boots:3"),
+        app_commands.Choice(name="Stone Pickaxe (Tier 1) — 15 JC",   value="weapon:1"),
+        app_commands.Choice(name="Iron Pickaxe (Tier 2) — 50 JC",    value="weapon:2"),
+        app_commands.Choice(name="Diamond Pickaxe (Tier 3) — 150 JC", value="weapon:3"),
     ])
     async def dig_buy(self, interaction: discord.Interaction, item: str):
         if not await require_dig_channel(interaction):
@@ -3233,10 +3461,16 @@ class DigCommands(commands.Cog):
             except ValueError:
                 tier = -1
             try:
-                result = _wrap(await asyncio.to_thread(
-                    self.dig_service.buy_gear,
-                    interaction.user.id, guild_id, slot, tier,
-                ))
+                if slot in ("weapon", "pickaxe"):
+                    result = _wrap(await asyncio.to_thread(
+                        self.dig_service.upgrade_pickaxe_to_tier,
+                        interaction.user.id, guild_id, tier,
+                    ))
+                else:
+                    result = _wrap(await asyncio.to_thread(
+                        self.dig_service.buy_gear,
+                        interaction.user.id, guild_id, slot, tier,
+                    ))
             except Exception as e:
                 logger.error("Dig buy_gear error: %s", e)
                 await safe_followup(interaction, content="Purchase failed.", ephemeral=True)
