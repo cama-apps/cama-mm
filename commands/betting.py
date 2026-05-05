@@ -4272,13 +4272,16 @@ class BettingCommands(commands.Cog):
         attack_ids = [v["discord_id"] for v in vote_result["attack_voter_ids"]]
 
         victory_threshold = rebellion_service.calculate_threshold(eff_atk, eff_def)
+        wheel_win_pct = rebellion_service.calculate_wheel_win_probability(victory_threshold) * 100
+        rebel_win_pct = rebellion_service.calculate_attacker_win_probability(victory_threshold) * 100
 
         war_embed = discord.Embed(
             title="⚔️ THE WHEEL TAKES THE FIELD ⚔️",
             description=(
                 f"**WAR HAS BEEN DECLARED!**\n\n"
                 f"The realm has spoken. **{eff_atk:.1f}** rebels rise against **{eff_def:.1f}** defenders.\n\n"
-                f"**The Wheel rolls to battle. If it rolls ≥ {victory_threshold}, the Wheel survives.**\n\n"
+                f"**The Wheel rolls to battle. If it rolls ≥ {victory_threshold}, the Wheel survives.**\n"
+                f"Battle odds: **Wheel {wheel_win_pct:.0f}%** / **Rebels {rebel_win_pct:.0f}%**\n\n"
                 f"*Stakes for the victors:*\n"
                 f"⚔️ **Rebel win:** +{15} JC each, inciter penalty halved, WAR SCAR on wheel\n"
                 f"🛡️ **Wheel win:** Defenders get stake back + 20 JC, inciter +1 penalty, WAR TROPHY on wheel\n\n"
@@ -4319,7 +4322,8 @@ class BettingCommands(commands.Cog):
                 title=f"⚔️ BATTLE COMMENCES IN {i}... ⚔️",
                 description=(
                     f"The armies are assembled. The Wheel trembles.\n"
-                    f"Victory threshold: **{victory_threshold}**"
+                    f"Victory threshold: **{victory_threshold}**\n"
+                    f"Wheel win chance: **{wheel_win_pct:.0f}%**"
                 ),
                 color=discord.Color.from_str("#ff4444"),
             )
