@@ -250,28 +250,56 @@ class TestThresholdFormula:
         assert threshold == 25  # REBELLION_BASE_THRESHOLD
 
     def test_threshold_more_defenders(self, rebellion_service):
-        """More defenders = higher threshold (wheel harder to beat)."""
+        """More defenders lower the target, making the Wheel more likely to survive."""
         threshold = rebellion_service.calculate_threshold(5.0, 8.0)
-        # net_defenders = 8 - 5 = 3, step=5 → 25 + 15 = 40
-        assert threshold == 40
+        # net_attackers = 5 - 8 = -3, step=5 -> 25 - 15 = 10
+        assert threshold == 10
 
     def test_threshold_more_attackers(self, rebellion_service):
-        """More attackers = lower threshold (wheel easier to beat)."""
+        """More attackers raise the target, making the Wheel less likely to survive."""
         threshold = rebellion_service.calculate_threshold(8.0, 5.0)
-        # net_defenders = 5 - 8 = -3, step=5 → 25 - 15 = 10
-        assert threshold == 10
+        # net_attackers = 8 - 5 = 3, step=5 -> 25 + 15 = 40
+        assert threshold == 40
+
+    def test_fractional_veteran_votes_affect_threshold(self, rebellion_service):
+        """Veteran half-votes should influence the battle odds, not only quorum."""
+        threshold = rebellion_service.calculate_threshold(5.5, 5.0)
+        assert threshold == 28
 
     def test_threshold_clamped_min(self, rebellion_service):
         """Threshold never goes below REBELLION_MIN_THRESHOLD."""
         from config import REBELLION_MIN_THRESHOLD
-        threshold = rebellion_service.calculate_threshold(100.0, 1.0)
+        threshold = rebellion_service.calculate_threshold(1.0, 100.0)
         assert threshold == REBELLION_MIN_THRESHOLD
 
     def test_threshold_clamped_max(self, rebellion_service):
         """Threshold never goes above REBELLION_MAX_THRESHOLD."""
         from config import REBELLION_MAX_THRESHOLD
-        threshold = rebellion_service.calculate_threshold(1.0, 100.0)
+        threshold = rebellion_service.calculate_threshold(100.0, 1.0)
         assert threshold == REBELLION_MAX_THRESHOLD
+
+    def test_wheel_win_probability_uses_inclusive_threshold(self, rebellion_service):
+        """A threshold of 25 means rolls 25-100 win for the Wheel: 76 outcomes."""
+        assert rebellion_service.calculate_wheel_win_probability(25) == pytest.approx(0.76)
+        assert rebellion_service.calculate_attacker_win_probability(25) == pytest.approx(0.24)
+
+    def test_defenders_increase_wheel_win_probability(self, rebellion_service):
+        """Extra defenders should improve the Wheel's battle odds."""
+        base = rebellion_service.calculate_threshold(5.0, 5.0)
+        defended = rebellion_service.calculate_threshold(5.0, 8.0)
+
+        assert rebellion_service.calculate_wheel_win_probability(defended) > (
+            rebellion_service.calculate_wheel_win_probability(base)
+        )
+
+    def test_attackers_decrease_wheel_win_probability(self, rebellion_service):
+        """Extra attackers should improve the inciter/rebel battle odds."""
+        base = rebellion_service.calculate_threshold(5.0, 5.0)
+        attacked = rebellion_service.calculate_threshold(8.0, 5.0)
+
+        assert rebellion_service.calculate_wheel_win_probability(attacked) < (
+            rebellion_service.calculate_wheel_win_probability(base)
+        )
 
 
 # ---------------------------------------------------------------------------
