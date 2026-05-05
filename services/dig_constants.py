@@ -57,7 +57,7 @@ def get_layer(depth: int) -> LayerDef:
 # Pacing Constants
 # ---------------------------------------------------------------------------
 
-FREE_DIG_COOLDOWN_SECONDS: int = 10_800          # 3 hours
+FREE_DIG_COOLDOWN_SECONDS: int = 7_200           # 2 hours
 CHEER_COOLDOWN_SECONDS: int = 30                 # short anti-spam, independent of dig
 
 PAID_DIG_COSTS_PER_DAY: list[int] = [3, 6, 12, 24, 48]
@@ -260,7 +260,7 @@ PICKAXE_TIERS: list[dict] = [
 from domain.models.dig_gear import GearSlot, GearTierDef  # noqa: E402
 
 GEAR_MAX_DURABILITY: int = 20
-GEAR_REPAIR_COST_PCT: float = 0.33
+GEAR_REPAIR_COST_PCT: float = 0.15
 GEAR_BOSS_DROP_RATE: float = 0.07
 # Maps boss-boundary depth → tier index of the dropped piece. Boundaries
 # missing from this map (25/50/75) drop nothing; players buy low-tier
@@ -463,6 +463,27 @@ class BossDef:
     boss_id: str = ""               # stable unique identifier (e.g. "grothak", "pudge")
     mechanic_pool: tuple[str, ...] = ()  # keys into MECHANIC_REGISTRY; one rolled per fight
     stinger_id: str = ""            # key into STINGER_REGISTRY; fires on player loss
+    # Per-boss outcome flavor pools. Empty defaults fall back to the generic
+    # GENERIC_VICTORY_LINES / GENERIC_DEFEAT_LINES pools at render time. Use
+    # the {boss} token to reference the boss name.
+    victory_lines: tuple[str, ...] = ()
+    defeat_lines: tuple[str, ...] = ()
+
+
+# Fallback flavor pools — used when a BossDef doesn't define its own.
+# Atmospheric, no mechanic exposition (per the dig flavor preference).
+GENERIC_VICTORY_LINES: tuple[str, ...] = (
+    "{boss} folds. The dark settles back into stone.",
+    "{boss} sinks to the floor without a word.",
+    "Something in {boss} unwinds, then stills.",
+    "You step over {boss}'s outline. The hollow opens.",
+)
+GENERIC_DEFEAT_LINES: tuple[str, ...] = (
+    "{boss} watches you stagger back the way you came.",
+    "The blow lands. {boss} doesn't follow — doesn't need to.",
+    "You don't remember falling. You remember the silence after.",
+    "{boss} resumes its waiting. The tunnel resumes its quiet.",
+)
 
 
 BOSSES: dict[int, BossDef] = {
@@ -491,6 +512,18 @@ BOSSES: dict[int, BossDef] = {
         boss_id="grothak",
         mechanic_pool=("grothak_earthquake", "grothak_crumble_wall"),
         stinger_id="grothak_crumble",
+        victory_lines=(
+            "{boss} sinks down with a long, tired sigh. Finally a nap.",
+            "{boss} cracks once and goes quiet. The dirt accepts him back.",
+            "You climb past {boss}'s shoulder. He doesn't get up.",
+            "{boss} mutters something about his back and lies down.",
+        ),
+        defeat_lines=(
+            "{boss} flicks you back like a beetle. The dust takes a while to settle.",
+            "You wake up uphill of where you fell. {boss} is already snoring.",
+            "{boss} barely moved. You moved a lot.",
+            "Something in your ribs argues with something in your knees. {boss} grunts.",
+        ),
     ),
     50: BossDef(
         depth=50,
@@ -513,6 +546,18 @@ BOSSES: dict[int, BossDef] = {
         boss_id="crystalia",
         mechanic_pool=("crystalia_prism", "crystalia_shatter"),
         stinger_id="crystalia_shard",
+        victory_lines=(
+            "{boss} shatters along a perfect axis. She would have appreciated the angle.",
+            "Light fractures off {boss}'s last facet and goes elsewhere.",
+            "{boss} chimes once, beautifully, and stops.",
+            "The crystal lattice unravels. Symmetry was never the point.",
+        ),
+        defeat_lines=(
+            "{boss} catches your reflection wrong and the room turns inside out.",
+            "Your own face stares back from a thousand shards. None of them help.",
+            "{boss} corrects you, geometrically. It hurts in two dimensions at once.",
+            "Light enters {boss} and does not leave. Neither do you, for a while.",
+        ),
     ),
     75: BossDef(
         depth=75,
@@ -535,6 +580,18 @@ BOSSES: dict[int, BossDef] = {
         boss_id="magmus_rex",
         mechanic_pool=("magmus_eruption", "magmus_meteor"),
         stinger_id="magmus_burn",
+        victory_lines=(
+            "{boss} cools to a slow red and stops complaining.",
+            "The lava settles. {boss} mutters about Bali and dims.",
+            "{boss} sinks back into the floor he came out of.",
+            "A last belch of smoke. {boss} is officially on PTO.",
+        ),
+        defeat_lines=(
+            "{boss} doesn't even sit up. He just sets things on fire.",
+            "The heat finds parts of you that aren't supposed to feel heat.",
+            "{boss} yawns and the chamber turns orange.",
+            "You retreat smoking. {boss} goes back to sulking.",
+        ),
     ),
     100: BossDef(
         depth=100,
@@ -557,6 +614,18 @@ BOSSES: dict[int, BossDef] = {
         boss_id="void_warden",
         mechanic_pool=("voidwarden_collapse", "voidwarden_silence"),
         stinger_id="void_collapse",
+        victory_lines=(
+            "{boss} blinks out. The dark stays. The point is debatable.",
+            "{boss} dissolves into the kind of quiet that has weight.",
+            "{boss} looks at you, then looks at nothing, then is nothing.",
+            "{boss} steps backwards into a place that isn't a place.",
+        ),
+        defeat_lines=(
+            "{boss} doesn't strike. It just stops being looked at, and you fall.",
+            "The void around {boss} folds you somewhere else, briefly, badly.",
+            "Nothing happens for a long time. Then you're a long way back up.",
+            "{boss} blinks. You wake up below where you started.",
+        ),
     ),
     150: BossDef(
         depth=150,
@@ -579,6 +648,18 @@ BOSSES: dict[int, BossDef] = {
         boss_id="sporeling_sovereign",
         mechanic_pool=("sporeling_cloud", "sporeling_roots"),
         stinger_id="sporeling_rot",
+        victory_lines=(
+            "{boss} releases a final breath of pollen, then settles into mulch.",
+            "The colony quiets. {boss} is now the soil it always claimed to be.",
+            "{boss} loosens at the edges and rejoins the floor.",
+            "Something old roots itself, gently, and stops moving.",
+        ),
+        defeat_lines=(
+            "{boss}'s spores find your lungs first. Everything else is paperwork.",
+            "Roots tighten around your boots. {boss} hums, satisfied.",
+            "The chamber smells like wet stone and old growth. You wake up moss-warm.",
+            "{boss} barely stirred. The colony did the work.",
+        ),
     ),
     200: BossDef(
         depth=200,
@@ -601,6 +682,18 @@ BOSSES: dict[int, BossDef] = {
         boss_id="chronofrost",
         mechanic_pool=("chronofrost_still", "chronofrost_rewind"),
         stinger_id="chronofrost_stillness",
+        victory_lines=(
+            "{boss} smiles the smile of someone who saw this coming.",
+            "{boss} stops, exactly when expected. Time exhales.",
+            "{boss} folds out of the moment. The chamber loses a tense.",
+            "{boss} looks at you for an instant that lasts a year, then is gone.",
+        ),
+        defeat_lines=(
+            "{boss} pauses. Time pauses. You don't.",
+            "The minute repeats. So does your mistake.",
+            "{boss} watches the same blow land four times before letting it.",
+            "You look up. Someone is wearing your face. {boss} is patient.",
+        ),
     ),
     275: BossDef(
         depth=275,
@@ -623,6 +716,18 @@ BOSSES: dict[int, BossDef] = {
         boss_id="nameless_depth",
         mechanic_pool=("nameless_whisper", "nameless_silence"),
         stinger_id="nameless_erase",
+        victory_lines=(
+            "{boss} steps aside. The hollow that's left has the shape of a person.",
+            "{boss} dissolves without complaint. You don't ask whose name was on it.",
+            "Something underfoot lets go. {boss} is no longer a thing you remember.",
+            "{boss} smiles. You think it might be at you. You hope it isn't.",
+        ),
+        defeat_lines=(
+            "{boss} doesn't fight. {boss} just keeps knowing your name.",
+            "You forget why you came. {boss} reminds you, gently, the wrong way.",
+            "Something unwrites itself. You wake up further up than you should be.",
+            "{boss} watches you go. You feel watched for hours after.",
+        ),
     ),
 }
 
@@ -5837,6 +5942,53 @@ PHASE_TRANSITION_EVENTS: list[PhaseTransitionEvent] = [
         flavor="Reality folds inward.",
         description="Both lose 2 HP.",
         player_hp_delta=-2, boss_hp_delta=-2,
+    ),
+    PhaseTransitionEvent(
+        id="echoing_drip",
+        flavor="A drip falls somewhere far below. The sound never lands.",
+        description="The dark presses closer. -3 luminosity.",
+        luminosity_delta=-3,
+    ),
+    PhaseTransitionEvent(
+        id="iron_tang",
+        flavor="The air goes coppery. Something old just opened its eyes.",
+        description="The boss strikes truer (+4% boss_hit).",
+        boss_hit_offset=0.04,
+    ),
+    PhaseTransitionEvent(
+        id="shifting_walls",
+        flavor="The walls breathe in once. They do not breathe out.",
+        description="-2 player HP from the squeeze.",
+        player_hp_delta=-2,
+    ),
+    PhaseTransitionEvent(
+        id="hollow_tone",
+        flavor="A tone hums through the stone — too low to hear, too loud to ignore.",
+        description="-2% player_hit, +2% boss_hit.",
+        player_hit_offset=-0.02, boss_hit_offset=0.02,
+    ),
+    PhaseTransitionEvent(
+        id="crystal_bloom",
+        flavor="Veins of pale crystal bloom across the floor.",
+        description="+10 luminosity, +1 player damage from a fragment grabbed mid-fight.",
+        luminosity_delta=10, player_dmg_delta=1,
+    ),
+    PhaseTransitionEvent(
+        id="tremor",
+        flavor="The mountain shifts on its bones.",
+        description="Both fighters stumble: -1 player_dmg, -1 boss_dmg.",
+        player_dmg_delta=-1, boss_dmg_delta=-1,
+    ),
+    PhaseTransitionEvent(
+        id="ash_fall",
+        flavor="Black ash drifts down from a ceiling that wasn't there before.",
+        description="-5 luminosity, -2% player_hit.",
+        luminosity_delta=-5, player_hit_offset=-0.02,
+    ),
+    PhaseTransitionEvent(
+        id="quiet",
+        flavor="Everything stops. Even the dark holds its breath.",
+        description="The pause leaves no mark. The fight resumes.",
     ),
 ]
 

@@ -236,10 +236,12 @@ class DigService:
         dig_repo: DigRepository,
         player_repo: PlayerRepository,
         mana_effects_service=None,
+        bankruptcy_repo=None,
     ):
         self.dig_repo = dig_repo
         self.player_repo = player_repo
         self.mana_effects_service = mana_effects_service
+        self.bankruptcy_repo = bankruptcy_repo
 
     def _mana_effects_or_none(self, discord_id: int, guild_id):
         """Resolve the player's active mana effects, swallowing lookup errors.
@@ -401,13 +403,30 @@ class DigService:
         mutations = self._get_mutations(tunnel)
         mutation_fx = self._apply_mutation_effects(mutations)
         cooldown += int(mutation_fx.get("cooldown_bonus_seconds", 0))
-        # Check for stun from injury
+        # Check for stun from injury (overrides base + mutation bonus).
         injury = json.loads(tunnel["injury_state"]) if tunnel.get("injury_state") else None
         if injury and injury.get("type") == "slower_cooldown":
             cooldown = INJURY_SLOW_COOLDOWN
         cooldown = self._apply_stamina_to_cooldown(cooldown, tunnel)
+        # Bankruptcy halves whatever cooldown survived. Applied LAST so an
+        # injury override (which wipes prior adjustments) still gets halved.
+        if self._is_bankrupt(tunnel.get("discord_id"), tunnel.get("guild_id")):
+            cooldown //= 2
         remaining = cooldown - elapsed
         return max(0, remaining)
+
+    def _is_bankrupt(self, discord_id, guild_id) -> bool:
+        """True if the player currently has bankruptcy penalty games remaining.
+
+        Used to halve the dig cooldown so bankrupt players can grind back
+        faster. Falls back to False if the bankruptcy repo isn't wired.
+        """
+        if self.bankruptcy_repo is None or discord_id is None:
+            return False
+        try:
+            return int(self.bankruptcy_repo.get_penalty_games(int(discord_id), guild_id)) > 0
+        except Exception:
+            return False
 
     def _get_layer(self, depth: int) -> dict:
         """Return layer info for given depth."""
@@ -842,6 +861,137 @@ class DigService:
             hp_remaining = min(hp_max, hp_remaining + two_hour_blocks * BOSS_HP_REGEN_PER_2_HOURS)
         return max(1, hp_remaining), hp_max
 
+    def build_next_boss_encounter(self, discord_id: int, guild_id) -> dict | None:
+        """Public boss-info payload for the player's current boss boundary, or None.
+
+        Used by the auto-continue UX: after a phase-1 victory clears the
+        encounter view, we re-fetch the next-phase encounter info and post a
+        fresh BossEncounterView. The boss_progress now reflects the next
+        phase, so the dialogue / boss state line up with what the player is
+        about to fight.
+        """
+        tunnel = self.dig_repo.get_tunnel(discord_id, guild_id)
+        if tunnel is None:
+            return None
+        tunnel = dict(tunnel)
+        boss_progress = self._get_boss_progress_entries(tunnel)
+        depth = tunnel.get("depth", 0)
+        at_boss = self._at_boss_boundary(depth, boss_progress)
+        if at_boss is None:
+            return None
+        info = self._build_boss_info(discord_id, guild_id, tunnel, at_boss)
+        if isinstance(info, dict):
+            return info
+        # Some _build_boss_info paths return a dataclass — coerce.
+        return info.__dict__ if hasattr(info, "__dict__") else None
+
+    def get_carried_wager(self, discord_id: int, guild_id) -> dict | None:
+        """Public: return carried-wager state for the player's current boss boundary, or None.
+
+        UI uses this to decide whether to skip the wager modal — a phase 2/3
+        encounter inherits the original wager + risk_tier from phase 1.
+        Returns ``{wager, risk_tier, boundary}`` when present.
+        """
+        tunnel = self.dig_repo.get_tunnel(discord_id, guild_id)
+        if tunnel is None:
+            return None
+        boss_progress = self._get_boss_progress_entries(dict(tunnel))
+        depth = tunnel["depth"] if "depth" in tunnel.keys() else 0
+        at_boss = self._at_boss_boundary(depth, boss_progress)
+        if at_boss is None:
+            return None
+        carried = self._get_carried_wager(boss_progress, at_boss)
+        if carried is None:
+            return None
+        wager, risk_tier = carried
+        return {"wager": wager, "risk_tier": risk_tier, "boundary": at_boss}
+
+    def _pick_boss_outcome_line(
+        self, *, boss=None, boss_name: str = "the boss",
+        boundary: int | None = None, won: bool,
+    ) -> str:
+        """Random pick from per-boss victory/defeat pools (or generic fallback).
+
+        ``boss`` is a BossDef when available (from _ensure_boss_locked); we
+        fall back to looking up the boundary in BOSSES if not. ``{boss}``
+        tokens in the line are substituted with ``boss_name``.
+        """
+        from services.dig_constants import (
+            BOSSES,
+            GENERIC_DEFEAT_LINES,
+            GENERIC_VICTORY_LINES,
+        )
+        bd = boss if boss is not None else (
+            BOSSES.get(boundary) if boundary is not None else None
+        )
+        pool = ()
+        if bd is not None:
+            pool = bd.victory_lines if won else bd.defeat_lines
+        if not pool:
+            pool = GENERIC_VICTORY_LINES if won else GENERIC_DEFEAT_LINES
+        line = random.choice(pool)
+        return line.replace("{boss}", boss_name)
+
+    # Flat denominator for the wager-skin bonus. Going all-in with a small
+    # balance does NOT max the bonus — only stakes that meet this threshold
+    # do, by design.
+    _WAGER_SKIN_BONUS_DENOMINATOR: int = 500
+    _WAGER_SKIN_BONUS_MAX: float = 0.03
+
+    def _wager_skin_bonus(self, wager: int) -> float:
+        """Silent +0..+3% hit bonus that scales with wager size.
+
+        ``wager_ratio = min(1.0, wager / 500)`` so a 500+ JC wager maxes the
+        bonus. No UI surface — this only nudges the per-round hit roll. Free
+        fights (wager == 0) get nothing.
+        """
+        if wager <= 0:
+            return 0.0
+        ratio = min(1.0, wager / float(self._WAGER_SKIN_BONUS_DENOMINATOR))
+        return ratio * self._WAGER_SKIN_BONUS_MAX
+
+    def _get_carried_wager(self, boss_progress: dict, at_boss) -> tuple[int, str] | None:
+        """Return (wager, risk_tier) carried from a prior phase win, or None.
+
+        A multi-phase boss fight stores the original wager + risk_tier on the
+        boss_progress entry when phase 1 (or 2) is cleared, so the next phase
+        rides the same stake. Returns None when there is no carry.
+        """
+        entry = boss_progress.get(str(at_boss))
+        if not isinstance(entry, dict):
+            return None
+        cw = entry.get("carried_wager")
+        crt = entry.get("carried_risk_tier")
+        if cw is None or crt is None:
+            return None
+        try:
+            return (int(cw), str(crt))
+        except (TypeError, ValueError):
+            return None
+
+    def _set_carried_wager(
+        self, boss_progress: dict, at_boss, wager: int, risk_tier: str,
+    ) -> None:
+        """Store a wager + risk_tier on the boss_progress entry for next phase."""
+        entry = boss_progress.get(str(at_boss))
+        if isinstance(entry, dict):
+            entry = dict(entry)
+        elif isinstance(entry, str):
+            entry = {"status": entry}
+        else:
+            entry = {}
+        entry["carried_wager"] = int(wager)
+        entry["carried_risk_tier"] = str(risk_tier)
+        boss_progress[str(at_boss)] = entry
+
+    def _clear_carried_wager(self, boss_progress: dict, at_boss) -> None:
+        """Drop carried_wager / carried_risk_tier from a boss_progress entry."""
+        entry = boss_progress.get(str(at_boss))
+        if isinstance(entry, dict):
+            entry.pop("carried_wager", None)
+            entry.pop("carried_risk_tier", None)
+            boss_progress[str(at_boss)] = entry
+
     def _persist_boss_hp_after_fight(
         self,
         boss_progress: dict,
@@ -1036,12 +1186,16 @@ class DigService:
         return self._gear_repair_cost(slot, tier)
 
     def compute_repair_all_cost(self, discord_id: int, guild_id) -> int:
-        """Sum repair cost across every damaged piece the player owns."""
+        """Sum repair cost across every damaged EQUIPPED piece the player owns.
+
+        Mirrors ``repair_all_gear``'s equipped-only filter so the UI cost
+        estimate matches what would actually be debited.
+        """
         rows = self.dig_repo.get_gear(discord_id, guild_id)
         return sum(
             self._gear_repair_cost(r["slot"], int(r["tier"]))
             for r in rows
-            if int(r["durability"]) < GEAR_MAX_DURABILITY
+            if int(r["durability"]) < GEAR_MAX_DURABILITY and int(r["equipped"]) == 1
         )
 
     def repair_gear(self, discord_id: int, guild_id, gear_id: int) -> dict:
@@ -1073,8 +1227,14 @@ class DigService:
         balance no repair runs and no JC is deducted.
         """
         rows = self.dig_repo.get_gear(discord_id, guild_id)
-        damaged = [r for r in rows if int(r["durability"]) < GEAR_MAX_DURABILITY]
+        damaged = [
+            r for r in rows
+            if int(r["durability"]) < GEAR_MAX_DURABILITY and int(r["equipped"]) == 1
+        ]
         if not damaged:
+            any_damaged = any(int(r["durability"]) < GEAR_MAX_DURABILITY for r in rows)
+            if any_damaged:
+                return self._error("No equipped gear needs repair.")
             return self._error("Nothing to repair.")
         total_cost = sum(self._gear_repair_cost(r["slot"], int(r["tier"])) for r in damaged)
         if total_cost > 0 and not self.player_repo.try_debit(discord_id, guild_id, total_cost):
@@ -4267,6 +4427,34 @@ class DigService:
                 })
         return relics
 
+    def upgrade_pickaxe_to_tier(
+        self, discord_id: int, guild_id, target_tier: int,
+    ) -> dict:
+        """Upgrade the pickaxe to the given tier — must be exactly current+1.
+
+        Backs ``/dig buy weapon:N``. Reuses the same gating as
+        ``upgrade_pickaxe`` (depth, prestige, JC cost) by delegating once the
+        target matches current+1. Rejects non-sequential targets so players
+        cannot tier-skip through the dig command surface.
+        """
+        tunnel = self.dig_repo.get_tunnel(discord_id, guild_id)
+        if tunnel is None:
+            return self._error("You don't have a tunnel.")
+        current_tier = self._get_active_pickaxe_tier(
+            discord_id, guild_id, dict(tunnel),
+        )
+        if target_tier != current_tier + 1:
+            if target_tier <= current_tier:
+                return self._error("You already have that pickaxe tier or higher.")
+            next_name = (
+                PICKAXE_TIERS[current_tier + 1]["name"]
+                if current_tier + 1 < len(PICKAXE_TIERS) else "next tier"
+            )
+            return self._error(
+                f"Buy {next_name} first — pickaxes upgrade one tier at a time."
+            )
+        return self.upgrade_pickaxe(discord_id, guild_id)
+
     def upgrade_pickaxe(self, discord_id: int, guild_id) -> dict:
         """Upgrade pickaxe to next tier if requirements met.
 
@@ -4735,13 +4923,19 @@ class DigService:
         if at_boss is None:
             return self._error("You're not at a boss boundary.")
 
+        # Multi-phase carry: prior phase win locks original wager + risk on
+        # the boss_progress entry — the next phase rides the same stake.
+        carried = self._get_carried_wager(boss_progress, at_boss)
+        if carried is not None:
+            wager, risk_tier = carried
+
         if risk_tier not in ("cautious", "bold", "reckless"):
             return self._error("Invalid risk tier. Choose: cautious, bold, reckless.")
 
         if wager < 0:
             return self._error("Wager must be non-negative.")
 
-        if wager > 0:
+        if wager > 0 and carried is None:
             balance = self.player_repo.get_balance(discord_id, guild_id)
             if balance < wager:
                 return self._error(f"You only have {balance} JC (wager: {wager}).")
@@ -4835,6 +5029,7 @@ class DigService:
             - depth_hit_penalty - prestige_hit_penalty - phase2_penalty
             + cheer_bonus
             + lum_hit_offset
+            + self._wager_skin_bonus(wager)
         )
         if wager == 0:
             player_hit *= BOSS_FREE_FIGHT_ACCURACY_MOD
@@ -4965,7 +5160,11 @@ class DigService:
                     _next_entry.pop("hp_max", None)
                     boss_progress[str(at_boss)] = _next_entry
                 else:
-                    boss_progress[str(at_boss)] = next_status
+                    boss_progress[str(at_boss)] = {"status": next_status}
+                # Lock the original wager + risk_tier so the next phase rides
+                # the same stake (no new wager modal on the next /dig go).
+                if wager > 0:
+                    self._set_carried_wager(boss_progress, at_boss, wager, risk_tier)
                 self.dig_repo.atomic_tunnel_balance_update(
                     discord_id, guild_id,
                     tunnel_updates={
@@ -5025,6 +5224,8 @@ class DigService:
                 "hp_max": boss_hp_max,
                 "last_engaged_at": int(now),
             }
+            # Carried wager is settled by the payout below; drop the markers.
+            self._clear_carried_wager(boss_progress, at_boss)
             prev_max_depth = tunnel.get("max_depth", 0) or 0
 
             # Compute stat point award (pure) so it can fold into the atomic
@@ -5087,8 +5288,9 @@ class DigService:
                 {"action": "boss_win", "boundary": at_boss, "boss_progress": boss_progress},
             )
 
-            dialogue_list = BOSS_DIALOGUE.get(at_boss, ["..."])
-            defeat_msg = dialogue_list[-1] if dialogue_list else "Defeated!"
+            defeat_msg = self._pick_boss_outcome_line(
+                boundary=at_boss, boss_name=boss_name, won=True,
+            )
 
             # Roll a possible gear drop on the full kill. Phase-1 transitions
             # do NOT roll — only completed kills.
@@ -5135,6 +5337,9 @@ class DigService:
                 ending_hp=max(0, boss_hp), hp_max=boss_hp_max,
                 won=False, outcome="loss", now=now,
             )
+            # Loss forfeits the carried wager; drop the markers so the next
+            # encounter starts fresh.
+            self._clear_carried_wager(boss_progress, at_boss)
 
             # Tunnel knockback + wager forfeit + audit log commit together.
             # The old flow could forfeit the wager without recording the
@@ -5168,7 +5373,9 @@ class DigService:
                 new_depth=new_depth,
                 boss_hp_remaining=max(0, boss_hp),
                 boss_hp_max=boss_hp_max,
-                dialogue=f"{boss_name} sends you flying back {knockback} blocks!",
+                dialogue=self._pick_boss_outcome_line(
+                    boundary=at_boss, boss_name=boss_name, won=False,
+                ),
                 achievements=[],
                 round_log=round_log,
                 echo_applied=echo_applied,
@@ -5893,11 +6100,17 @@ class DigService:
         at_boss = self._at_boss_boundary(depth, boss_progress)
         if at_boss is None:
             return self._error("You're not at a boss boundary.")
+        # Multi-phase carry: a prior phase win locks the original wager + risk
+        # onto the boss_progress entry. The next phase fight rides the same
+        # stake — caller args are ignored when a carry is present.
+        carried = self._get_carried_wager(boss_progress, at_boss)
+        if carried is not None:
+            wager, risk_tier = carried
         if risk_tier not in ("cautious", "bold", "reckless"):
             return self._error("Invalid risk tier. Choose: cautious, bold, reckless.")
         if wager < 0:
             return self._error("Wager must be non-negative.")
-        if wager > 0:
+        if wager > 0 and carried is None:
             balance = self.player_repo.get_balance(discord_id, guild_id)
             if balance < wager:
                 return self._error(f"You only have {balance} JC (wager: {wager}).")
@@ -5974,6 +6187,7 @@ class DigService:
             - depth_hit_penalty - prestige_hit_penalty - phase2_penalty
             + cheer_bonus
             + lum_hit_offset
+            + self._wager_skin_bonus(wager)
         )
         if wager == 0:
             player_hit *= BOSS_FREE_FIGHT_ACCURACY_MOD
@@ -6049,7 +6263,9 @@ class DigService:
                     risk_tier=risk_tier,
                     wager=wager,
                     player_hp=player_hp,
+                    player_hp_max=int(stats["player_hp"]),
                     boss_hp=boss_hp,
+                    boss_hp_max=int(boss_hp_max),
                     round_num=round_num,
                     round_log=round_log,
                     win_chance=round(win_chance, 2),
@@ -6516,6 +6732,10 @@ class DigService:
                         "boss_id": boss.boss_id if boss else "",
                         "status": next_status,
                     }
+                # Lock the original wager + risk_tier onto the entry so the
+                # next phase rides the same stake (no new wager modal).
+                if wager > 0:
+                    self._set_carried_wager(boss_progress, at_boss, wager, risk_tier)
                 self.dig_repo.update_tunnel(
                     discord_id, guild_id,
                     boss_progress=json.dumps(boss_progress),
@@ -6588,6 +6808,8 @@ class DigService:
                     "boss_id": boss.boss_id if boss else "",
                     "status": "defeated",
                 }
+            # Carried wager is settled by the payout below; drop the markers.
+            self._clear_carried_wager(boss_progress, at_boss)
             stat_point_awarded = self._award_boss_stat_point_if_first(
                 discord_id, guild_id, tunnel, at_boss,
             )
@@ -6622,11 +6844,9 @@ class DigService:
                 {**tunnel, "depth": new_depth},
                 {"action": "boss_win", "boundary": at_boss, "boss_progress": boss_progress},
             )
-            dialogue_list = (
-                boss.dialogue if (boss is not None and boss.dialogue)
-                else BOSS_DIALOGUE.get(at_boss, ["..."])
+            defeat_msg = self._pick_boss_outcome_line(
+                boss=boss, boss_name=boss_name, boundary=at_boss, won=True,
             )
-            defeat_msg = dialogue_list[-1] if dialogue_list else "Defeated!"
             # Boss-drop roll happens once per full kill, NOT on phase-1 transitions.
             gear_drop = self._maybe_drop_gear(discord_id, guild_id, at_boss)
             prestige_relic_drop = self._maybe_drop_prestige_relic(
@@ -6696,6 +6916,8 @@ class DigService:
                 hp_max=max(1, int(boss_hp_max)),
                 won=False, outcome="loss", now=int(now),
             )
+        # Loss forfeits the carried wager; drop the markers.
+        self._clear_carried_wager(bp_for_persist, at_boss)
         self.dig_repo.update_tunnel(
             discord_id, guild_id,
             depth=new_depth,
@@ -6729,7 +6951,9 @@ class DigService:
             extra_knockback=extra_kb,
             extra_cooldown_s=extra_cd,
             new_depth=new_depth,
-            dialogue=f"{boss_name} sends you flying back {knockback} blocks!",
+            dialogue=self._pick_boss_outcome_line(
+                boss=boss, boss_name=boss_name, boundary=at_boss, won=False,
+            ),
             achievements=[],
             round_log=round_log,
             echo_applied=echo_applied,
@@ -6768,6 +6992,15 @@ class DigService:
         now = int(time.time())
         cooldown_until = now + RETREAT_COOLDOWN_SECONDS
 
+        # Multi-phase carry: retreating from a phase-2/3 encounter forfeits
+        # half of the carried wager. Pure phase-1 retreat (no carry) keeps
+        # the existing behavior of "no JC at risk".
+        carried = self._get_carried_wager(boss_progress, at_boss)
+        carried_forfeit = 0
+        if carried is not None:
+            carried_wager_amount, _ = carried
+            carried_forfeit = carried_wager_amount // 2
+
         # Mark last_outcome so the next encounter's dialogue uses
         # ``after_retreat`` lines.
         entry = self._read_boss_progress_entry(boss_progress, at_boss)
@@ -6778,20 +7011,27 @@ class DigService:
         if isinstance(bp_raw, dict):
             entry.setdefault("boss_id", bp_raw.get("boss_id", ""))
         boss_progress[str(at_boss)] = entry
+        # Drop the carry markers so the next encounter starts fresh.
+        self._clear_carried_wager(boss_progress, at_boss)
 
-        self.dig_repo.update_tunnel(
+        # Tunnel mutation + carry-forfeit debit + audit log commit together;
+        # without the atomic helper a crash between the boss_progress wipe
+        # and the JC debit would let the player keep both phase-1 progress
+        # and the full carried wager.
+        self.dig_repo.atomic_tunnel_balance_update(
             discord_id, guild_id,
-            depth=new_depth,
-            boss_progress=json.dumps(boss_progress),
-            retreat_cooldown_until=cooldown_until,
-        )
-        self.dig_repo.log_action(
-            discord_id=discord_id, guild_id=guild_id,
-            action_type="boss_retreat",
-            details=json.dumps({
+            balance_delta=-carried_forfeit if carried_forfeit > 0 else 0,
+            tunnel_updates={
+                "depth": new_depth,
+                "boss_progress": json.dumps(boss_progress),
+                "retreat_cooldown_until": cooldown_until,
+            },
+            log_detail={
                 "boundary": at_boss, "loss": loss,
                 "cooldown_until": cooldown_until,
-            }),
+                "carried_wager_forfeit": carried_forfeit,
+            },
+            log_action_type="boss_retreat",
         )
 
         return self._ok(
@@ -6799,6 +7039,7 @@ class DigService:
             loss=loss,
             new_depth=new_depth,
             retreat_cooldown_until=cooldown_until,
+            carried_wager_forfeit=carried_forfeit,
         )
 
     def scout_boss(self, discord_id: int, guild_id) -> dict:
@@ -6960,7 +7201,7 @@ class DigService:
         )
 
     def cheer_boss(self, cheerer_id: int, target_id: int, guild_id) -> dict:
-        """Cheer for a player fighting a boss. Costs cooldown + 3 JC."""
+        """Cheer for a player fighting a boss. Free; capped at 3 per fight."""
         if cheerer_id == target_id:
             return self._error("You can't cheer for yourself.")
 
@@ -6986,18 +7227,14 @@ class DigService:
             if remaining > 0:
                 return self._error(f"Cheer cooldown ({remaining}s remaining).")
 
-        # Check cost
-        cost = 3
-        balance = self.player_repo.get_balance(cheerer_id, guild_id)
-        if balance < cost:
-            return self._error(f"Cheering costs {cost} JC but you only have {balance} JC.")
+        cost = 0
 
-        # Check max cheers (3 max = +15%)
+        # Check max cheers (3 max = +15%) — global per-fight cap.
         cheers = self._get_cheers(target_tunnel)
         now = int(time.time())
         active_cheers = [c for c in cheers if c.get("expires_at", 0) > now]
         if len(active_cheers) >= 3:
-            return self._error("This player already has maximum cheers (3).")
+            return self._error("Boss already at full cheer boost (3/3).")
 
         # Debit cheerer + cheerer cooldown (optional create) + target cheer
         # data commit together. The old flow could charge the cheerer with
