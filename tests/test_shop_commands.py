@@ -344,6 +344,35 @@ async def test_handle_witchs_curse_insufficient_balance():
 
 
 @pytest.mark.asyncio
+async def test_handle_witchs_curse_refunds_on_cast_failure():
+    """If cast_curse raises after the balance is debited, the buyer must be refunded."""
+    bot = MagicMock()
+    player_service = MagicMock()
+    player_service.get_player.side_effect = [object(), object()]
+    player_service.get_balance.return_value = SHOP_WITCHS_CURSE_COST + 100
+    curse_service = MagicMock()
+    curse_service.cast_curse = AsyncMock(side_effect=RuntimeError("db locked"))
+
+    commands = ShopCommands(bot, player_service, curse_service=curse_service)
+    interaction = _make_interaction()
+    target = SimpleNamespace(id=2002, mention="<@2002>", display_name="Victim")
+
+    await commands._handle_witchs_curse(interaction, target=target)
+
+    # Two adjust_balance calls: the debit, then the refund.
+    assert player_service.adjust_balance.call_count == 2
+    debit_args = player_service.adjust_balance.call_args_list[0].args
+    refund_args = player_service.adjust_balance.call_args_list[1].args
+    assert debit_args == (interaction.user.id, None, -SHOP_WITCHS_CURSE_COST)
+    assert refund_args == (interaction.user.id, None, SHOP_WITCHS_CURSE_COST)
+    # User gets an ephemeral failure message (not the success "hex sealed" line).
+    interaction.followup.send.assert_awaited()
+    failure_kwargs = interaction.followup.send.call_args.kwargs
+    assert failure_kwargs.get("ephemeral") is True
+    assert "refund" in failure_kwargs.get("content", "").lower()
+
+
+@pytest.mark.asyncio
 async def test_handle_witchs_curse_success_anonymous():
     bot = MagicMock()
     player_service = MagicMock()

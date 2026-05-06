@@ -2477,8 +2477,12 @@ class DigCommands(commands.Cog):
                 self.bot, interaction.user.id, guild_id, int(time.time()) + FREE_DIG_COOLDOWN_SECONDS
             )
 
-        # Witch's Curse: roll on successful dig outcomes (skip first-dig welcome).
-        if not getattr(result, "is_first_dig", False):
+        # Witch's Curse: roll on successful dig outcomes only — skip the first-dig welcome
+        # and the paid_dig_available cooldown prompt (no actual dig happened on those paths).
+        if (
+            not getattr(result, "is_first_dig", False)
+            and not getattr(result, "paid_dig_available", False)
+        ):
             curse_service = getattr(self.bot, "curse_service", None)
             if curse_service is not None and interaction.channel is not None:
                 from services.curse_service import spawn_curse_flame
