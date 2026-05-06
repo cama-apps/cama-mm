@@ -306,6 +306,27 @@ class BuyContractsModal(discord.ui.Modal):
 
         await self.cog.refresh_market_embed(self.prediction_id)
 
+        # Witch's Curse: prediction placement is degen-coded → loss-rated for the buyer.
+        bot = getattr(self.cog, "bot", None)
+        curse_service = getattr(bot, "curse_service", None) if bot is not None else None
+        if curse_service is not None and interaction.channel is not None:
+            from services.curse_service import spawn_curse_flame
+            guild_id = interaction.guild.id if interaction.guild else None
+            spawn_curse_flame(
+                curse_service,
+                interaction.channel,
+                target_id=interaction.user.id,
+                guild_id=guild_id,
+                system="prediction",
+                outcome="loss",
+                event_context={
+                    "side": self.side,
+                    "contracts": result["contracts"],
+                    "total_cost": result["total_cost"],
+                },
+                target_display_name=getattr(interaction.user, "display_name", None),
+            )
+
 
 class SellContractsModal(discord.ui.Modal):
     contracts = discord.ui.TextInput(

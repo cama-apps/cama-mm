@@ -107,14 +107,10 @@ ROULETTE_ENTRIES: list[RouletteEntry] = [
     RouletteEntry("dig insure"),
     # --- shop actions with prefilled item (no target/hero needed) ---
     RouletteEntry("shop", {"item": "announce"}, label="shop flex"),
+    RouletteEntry("shop", {"item": "jopa_coin"}, label="shop jopa_coin"),
     RouletteEntry("shop", {"item": "mystery_gift"}, label="shop mystery_gift"),
     RouletteEntry("shop", {"item": "double_or_nothing"}, label="shop double_or_nothing"),
     RouletteEntry("shop", {"item": "recalibrate"}, label="shop recalibrate"),
-    RouletteEntry("shop", {"item": "dig_dynamite"}, label="shop dig_dynamite"),
-    RouletteEntry("shop", {"item": "dig_hard_hat"}, label="shop dig_hard_hat"),
-    RouletteEntry("shop", {"item": "dig_lantern"}, label="shop dig_lantern"),
-    RouletteEntry("shop", {"item": "dig_reinforcement"}, label="shop dig_reinforcement"),
-    RouletteEntry("shop", {"item": "dig_upgrade"}, label="shop dig_upgrade"),
 ]
 
 

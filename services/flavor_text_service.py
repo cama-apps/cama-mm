@@ -563,3 +563,122 @@ Be clear and informative. Keep it conversational but not too casual.""",
             "Highlight the leaders and playfully roast anyone in debt."
         )
         return "\n".join(parts)
+
+    async def generate_curse_flame(
+        self,
+        guild_id: int | None,
+        target_id: int,
+        system: str,
+        outcome: str,
+        event_context: dict,
+        stack_count: int,
+        target_display_name: str | None = None,
+    ) -> str | None:
+        """Generate a witch-themed flame for the Witch's Curse hook.
+
+        Uses the same per-guild AI gate and PlayerContext assembly as
+        ``generate_event_flavor`` but with a different system prompt
+        (first-person witch voice, hard content no-list, stack-aware coven
+        narration). Returns ``None`` when AI is disabled, the player context
+        cannot be built, or the model fails — caller treats that as silent skip.
+        """
+        if guild_id is not None and self.guild_config_repo:
+            ai_enabled = await asyncio.to_thread(self.guild_config_repo.get_ai_enabled, guild_id)
+            if not ai_enabled:
+                return None
+
+        context = await asyncio.to_thread(
+            PlayerContext.from_services,
+            target_id,
+            self.player_repo,
+            self.bankruptcy_service,
+            self.loan_service,
+            self.gambling_stats_service,
+            guild_id=guild_id,
+        )
+        if not context:
+            return None
+
+        display_name = (target_display_name or context.username or "the cursed soul").strip()
+
+        player_context_dict = {
+            "display_name": display_name,
+            "balance": context.balance,
+            "debt_amount": context.debt_amount,
+            "match_win_rate": f"{context.win_rate:.0f}%" if context.win_rate else None,
+            "bet_win_rate": f"{context.bet_win_rate:.0f}%" if context.bet_win_rate else None,
+            "degen_score": context.degen_score,
+            "bankruptcy_count": context.bankruptcy_count,
+            "total_loans": context.total_loans,
+            "negative_loans": context.negative_loans,
+            "biggest_win": context.biggest_win,
+            "biggest_loss": context.biggest_loss,
+            "lowest_balance": context.lowest_balance,
+        }
+
+        if stack_count >= 3:
+            voice_hint = (
+                f"There are {stack_count} hexes on this target — speak as a coven "
+                "(\"we cackle\", \"three voices laugh\"). Never reveal who cast."
+            )
+        elif stack_count == 2:
+            voice_hint = (
+                "There are 2 hexes on this target — you may briefly nod to a sister witch, "
+                "but never reveal who cast."
+            )
+        else:
+            voice_hint = "You are alone — speak as a single witch."
+
+        system_prompt = (
+            "You are a malevolent Dota 2 witch's hex spirit. A target has been cursed by an "
+            "anonymous player; their action just triggered the hex.\n"
+            "Speak in first person, theatrically cackling. 1 short sentence, max 2. "
+            f"{voice_hint}\n"
+            "Reference SPECIFIC personal context to make the burn land — their balance, debt, "
+            "win rate, bankruptcy history, biggest losses, and the action they just took.\n"
+            f"Refer to the target by their display name \"{display_name}\". Do NOT use @mentions or Discord IDs.\n"
+            "HARD RULES — NEVER violate:\n"
+            "- No slurs, no commentary on real-world identity (race, gender, orientation, "
+            "religion, appearance, nationality)\n"
+            "- No threats, no NSFW, no harassment about real-world traits\n"
+            "- No mentioning the player's actual Discord ID\n"
+            "Stay focused on the in-game action and bot-tracked behavior (matches, bets, "
+            "debt, dig outcomes). Be funny, not cruel. Output ONLY the witch's line, "
+            "no preamble, no quotation marks, no emoji."
+        )
+
+        examples = [
+            "still no farm at 25 minutes? darling, even my familiar plays Spectre better than you.",
+            "another loan? we cackle in unison — your debt is louder than my cauldron.",
+            "ten jopacoin to your name and you tipped someone? bold of you to weaponize generosity as a personality.",
+        ]
+
+        user_prompt = (
+            f"System: {system}\n"
+            f"Outcome: {outcome}\n"
+            f"Stack count: {stack_count}\n"
+            f"Player context: {json.dumps(player_context_dict)}\n"
+            f"Event details: {json.dumps(event_context)}\n\n"
+            "Few-shot examples (do not copy):\n- "
+            + "\n- ".join(examples)
+            + "\n\nWrite the witch's line now."
+        )
+
+        try:
+            result = await self.ai_service.complete(
+                prompt=user_prompt,
+                system_prompt=system_prompt,
+                temperature=0.9,
+                max_tokens=120,
+            )
+        except Exception as e:
+            logger.warning("generate_curse_flame failed: %s", e)
+            return None
+
+        if not result:
+            return None
+
+        cleaned = result.strip().strip('"').strip("'")
+        if not cleaned:
+            return None
+        return cleaned

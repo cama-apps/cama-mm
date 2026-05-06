@@ -21,13 +21,16 @@ from config import (
     SHOP_ANNOUNCE_COST,
     SHOP_ANNOUNCE_TARGET_COST,
     SHOP_DOUBLE_OR_NOTHING_COST,
-    SHOP_MYSTERY_GIFT_COST,
+    SHOP_JOPA_COIN_COST,
+    SHOP_NEW_MYSTERY_GIFT_COST,
     SHOP_PACKAGE_DEAL_BASE_COST,
     SHOP_PACKAGE_DEAL_RATING_DIVISOR,
     SHOP_PROTECT_HERO_COST,
     SHOP_RECALIBRATE_COST,
     SHOP_SOFT_AVOID_COST,
+    SHOP_WITCHS_CURSE_COST,
     SOFT_AVOID_GAMES_DURATION,
+    WITCHS_CURSE_DURATION_DAYS,
 )
 from services.flavor_text_service import EVENT_EXAMPLES, FlavorEvent
 from services.permissions import has_admin_permission
@@ -39,6 +42,7 @@ from utils.neon_helpers import get_neon_service
 from utils.rate_limiter import GLOBAL_RATE_LIMITER
 
 if TYPE_CHECKING:
+    from services.curse_service import CurseService
     from services.dig_service import DigService
     from services.flavor_text_service import FlavorTextService
     from services.gambling_stats_service import GamblingStatsService
@@ -111,6 +115,7 @@ class ShopCommands(commands.Cog):
         gambling_stats_service: GamblingStatsService | None = None,
         recalibration_service: RecalibrationService | None = None,
         dig_service: DigService | None = None,
+        curse_service: CurseService | None = None,
     ):
         self.bot = bot
         self.player_service = player_service
@@ -119,6 +124,7 @@ class ShopCommands(commands.Cog):
         self.gambling_stats_service = gambling_stats_service
         self.recalibration_service = recalibration_service
         self.dig_service = dig_service
+        self.curse_service = curse_service
 
     async def hero_autocomplete(
         self, interaction: discord.Interaction, current: str
@@ -150,8 +156,16 @@ class ShopCommands(commands.Cog):
                 value="protect_hero",
             ),
             app_commands.Choice(
-                name=f"Mystery Gift ({SHOP_MYSTERY_GIFT_COST} jopacoin)",
+                name=f"Jopa Coin(TM) ({SHOP_JOPA_COIN_COST} jopacoin)",
+                value="jopa_coin",
+            ),
+            app_commands.Choice(
+                name=f"Mystery Gift ({SHOP_NEW_MYSTERY_GIFT_COST} jopacoin)",
                 value="mystery_gift",
+            ),
+            app_commands.Choice(
+                name=f"Witch's Curse ({SHOP_WITCHS_CURSE_COST} jopacoin)",
+                value="witchs_curse",
             ),
             app_commands.Choice(
                 name=f"Double or Nothing ({SHOP_DOUBLE_OR_NOTHING_COST} jopacoin)",
@@ -188,18 +202,7 @@ class ShopCommands(commands.Cog):
             except Exception:
                 pass  # Fall back to default label
 
-        # Dig items
-        dig_items = []
-        if self.dig_service:
-            dig_items = [
-                app_commands.Choice(name="Dynamite (5 jopacoin) — +5 blocks", value="dig_dynamite"),
-                app_commands.Choice(name="Hard Hat (8 jopacoin) — cave-in shield", value="dig_hard_hat"),
-                app_commands.Choice(name="Lantern (4 jopacoin) — scan + protection", value="dig_lantern"),
-                app_commands.Choice(name="Reinforcement (6 jopacoin) — decay + sabotage shield", value="dig_reinforcement"),
-                app_commands.Choice(name="Pickaxe Upgrade — upgrade your pickaxe", value="dig_upgrade"),
-            ]
-
-        all_items = static_items + [recal_choice] + dig_items
+        all_items = static_items + [recal_choice]
 
         if current:
             all_items = [c for c in all_items if current.lower() in c.name.lower()]
@@ -259,8 +262,19 @@ class ShopCommands(commands.Cog):
                 )
                 return
             await self._handle_protect_hero(interaction, hero=hero)
+        elif item == "jopa_coin":
+            await self._handle_jopa_coin(interaction)
         elif item == "mystery_gift":
             await self._handle_mystery_gift(interaction)
+        elif item == "witchs_curse":
+            if not target:
+                await interaction.response.send_message(
+                    "You selected 'Witch's Curse' but didn't specify a target. "
+                    "The hex needs a victim.",
+                    ephemeral=True,
+                )
+                return
+            await self._handle_witchs_curse(interaction, target=target)
         elif item == "double_or_nothing":
             await self._handle_double_or_nothing(interaction)
         elif item == "soft_avoid":
@@ -283,8 +297,6 @@ class ShopCommands(commands.Cog):
             await self._handle_package_deal(interaction, target=target)
         elif item == "recalibrate":
             await self._handle_recalibrate(interaction)
-        elif item.startswith("dig_"):
-            await self._handle_dig_item(interaction, item)
         elif item == "recalibrate_cooldown":
             # User selected the ON COOLDOWN item — block with cooldown info
             guild_id = interaction.guild.id if interaction.guild else None
@@ -809,16 +821,15 @@ class ShopCommands(commands.Cog):
         # Confirm to the user (this posts to where the command was invoked)
         await safe_followup(interaction, content=content, embed=embed)
 
-    async def _handle_mystery_gift(
+    async def _handle_jopa_coin(
         self,
         interaction: discord.Interaction,
     ):
-        """Handle the mystery gift purchase."""
+        """Pure-flex Jopa Coin(TM) announcement. The mechanic is just the flex."""
         user_id = interaction.user.id
         guild_id = interaction.guild.id if interaction.guild else None
-        cost = SHOP_MYSTERY_GIFT_COST
+        cost = SHOP_JOPA_COIN_COST
 
-        # Check if registered
         player = await asyncio.to_thread(self.player_service.get_player, user_id, guild_id)
         if not player:
             await interaction.response.send_message(
@@ -827,7 +838,6 @@ class ShopCommands(commands.Cog):
             )
             return
 
-        # Check balance
         balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
         if balance < cost:
             await interaction.response.send_message(
@@ -836,25 +846,151 @@ class ShopCommands(commands.Cog):
             )
             return
 
-        # Defer before deduction so the 3s response window can't expire after we
-        # take the JC but before we confirm. Without this, a slow followup leaves
-        # the user charged with no feedback.
         if not await safe_defer(interaction, ephemeral=False):
             return
 
-        # Deduct cost
         await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, -cost)
 
-        # Build the announcement embed
         embed = discord.Embed(
-            title="🎁 Mystery Gift Redeemed!",
-            description=f"{interaction.user.mention} has redeemed a **Mystery Gift**!",
-            color=0x9B59B6,  # Purple for mystery
+            title="🪙 Jopa Coin(TM) Minted!",
+            description=f"{interaction.user.mention} has minted a **Jopa Coin(TM)**!",
+            color=0xD4AF37,  # Gold
         )
         embed.set_footer(text=f"Cost: {cost} jopacoin")
 
-        # Send public announcement
         await safe_followup(interaction, embed=embed)
+        self._maybe_curse_flame_for_shop(interaction, user_id, guild_id, item="jopa_coin")
+
+    async def _handle_mystery_gift(
+        self,
+        interaction: discord.Interaction,
+    ):
+        """20k Mystery Gift. Bot side is a flex announcement; the real gift is fulfilled IRL."""
+        user_id = interaction.user.id
+        guild_id = interaction.guild.id if interaction.guild else None
+        cost = SHOP_NEW_MYSTERY_GIFT_COST
+
+        player = await asyncio.to_thread(self.player_service.get_player, user_id, guild_id)
+        if not player:
+            await interaction.response.send_message(
+                "You need to `/player register` before you can shop.",
+                ephemeral=True,
+            )
+            return
+
+        balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
+        if balance < cost:
+            await interaction.response.send_message(
+                f"You need {cost} {JOPACOIN_EMOTE} for this, but you only have {balance}.",
+                ephemeral=True,
+            )
+            return
+
+        if not await safe_defer(interaction, ephemeral=False):
+            return
+
+        await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, -cost)
+
+        embed = discord.Embed(
+            title="🎁 Mystery Gift Redeemed!",
+            description=f"{interaction.user.mention} has redeemed a **Mystery Gift**!",
+            color=0x9B59B6,  # Purple
+        )
+        embed.set_footer(text=f"Cost: {cost} jopacoin")
+
+        await safe_followup(interaction, embed=embed)
+        self._maybe_curse_flame_for_shop(interaction, user_id, guild_id, item="mystery_gift")
+
+    async def _handle_witchs_curse(
+        self,
+        interaction: discord.Interaction,
+        target: discord.Member,
+    ):
+        """Cast a 7-day Witch's Curse on the target. Anonymous; only ephemeral confirmation."""
+        user_id = interaction.user.id
+        guild_id = interaction.guild.id if interaction.guild else None
+        cost = SHOP_WITCHS_CURSE_COST
+
+        if self.curse_service is None:
+            await interaction.response.send_message(
+                "The witch's craft is currently unavailable.", ephemeral=True
+            )
+            return
+
+        player = await asyncio.to_thread(self.player_service.get_player, user_id, guild_id)
+        if not player:
+            await interaction.response.send_message(
+                "You need to `/player register` before you can shop.",
+                ephemeral=True,
+            )
+            return
+
+        target_player = await asyncio.to_thread(
+            self.player_service.get_player, target.id, guild_id
+        )
+        if not target_player:
+            await interaction.response.send_message(
+                f"{target.display_name} is not registered. The hex needs a willing victim of the league.",
+                ephemeral=True,
+            )
+            return
+
+        balance = await asyncio.to_thread(self.player_service.get_balance, user_id, guild_id)
+        if balance < cost:
+            await interaction.response.send_message(
+                f"You need {cost} {JOPACOIN_EMOTE} for the hex, but you only have {balance}.",
+                ephemeral=True,
+            )
+            return
+
+        # Ephemeral defer — the curse is anonymous, only the caster gets confirmation.
+        if not await safe_defer(interaction, ephemeral=True):
+            return
+
+        await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, -cost)
+        await self.curse_service.cast_curse(
+            caster_id=user_id,
+            target_id=target.id,
+            guild_id=guild_id,
+            days=WITCHS_CURSE_DURATION_DAYS,
+        )
+
+        await safe_followup(
+            interaction,
+            content=(
+                f"🧙‍♀️ Your hex on **{target.display_name}** is sealed for "
+                f"{WITCHS_CURSE_DURATION_DAYS} days. The chat will see — they will not see you."
+            ),
+            ephemeral=True,
+        )
+        # Buying a curse still counts as the buyer engaging with the shop — if
+        # the buyer is themselves cursed, fire the roll (neutral 5%).
+        self._maybe_curse_flame_for_shop(interaction, user_id, guild_id, item="witchs_curse")
+
+    def _maybe_curse_flame_for_shop(
+        self,
+        interaction: discord.Interaction,
+        user_id: int,
+        guild_id: int | None,
+        *,
+        item: str,
+    ) -> None:
+        """Spawn a fire-and-forget curse roll for a shop purchase by a (possibly cursed) buyer."""
+        from services.curse_service import spawn_curse_flame
+
+        target_display_name = (
+            interaction.user.display_name if hasattr(interaction.user, "display_name") else None
+        )
+        spawn_curse_flame(
+            self.curse_service,
+            interaction.channel,
+            target_id=user_id,
+            guild_id=guild_id,
+            system="shop",
+            outcome="neutral",
+            event_context={"item": item},
+            target_display_name=target_display_name,
+        )
 
     async def _handle_double_or_nothing(
         self,
@@ -1635,75 +1771,6 @@ class ShopCommands(commands.Cog):
                     total += abs(result)
         return total
 
-    async def _handle_dig_item(self, interaction: discord.Interaction, item: str):
-        """Handle dig consumable and pickaxe upgrade purchases from /shop."""
-        if not self.dig_service:
-            await interaction.response.send_message(
-                "Mining system is not available.", ephemeral=True
-            )
-            return
-
-        user_id = interaction.user.id
-        guild_id = interaction.guild.id if interaction.guild else None
-
-        # Check registration
-        player = await asyncio.to_thread(self.player_service.get_player, user_id, guild_id)
-        if not player:
-            await interaction.response.send_message(
-                "You need to `/player register` before you can buy dig items.", ephemeral=True
-            )
-            return
-
-        if item == "dig_upgrade":
-            await safe_defer(interaction)
-            result = await asyncio.to_thread(
-                self.dig_service.upgrade_pickaxe, user_id, guild_id
-            )
-            if not result.get("success"):
-                await safe_followup(
-                    interaction,
-                    content=result.get("error", "Upgrade failed."),
-                    ephemeral=True,
-                )
-                return
-            embed = discord.Embed(
-                title="Pickaxe Upgraded!",
-                description=(
-                    f"You upgraded to **{result.get('new_tier', 'next tier')}**!\n"
-                    f"Cost: **{result.get('cost', 0)}** {JOPACOIN_EMOTE}"
-                ),
-                color=0xB0BEC5,
-            )
-            await safe_followup(interaction, embed=embed)
-            return
-
-        # Consumable purchase: dig_dynamite -> dynamite, etc.
-        item_type = item.removeprefix("dig_")
-        await safe_defer(interaction)
-        result = await asyncio.to_thread(
-            self.dig_service.buy_item, user_id, guild_id, item_type
-        )
-        if not result.get("success"):
-            await safe_followup(
-                interaction,
-                content=result.get("error", "Purchase failed."),
-                ephemeral=True,
-            )
-            return
-
-        embed = discord.Embed(
-            title="Item Purchased!",
-            description=(
-                f"Bought **{result.get('item', item_type)}** for "
-                f"**{result.get('cost', 0)}** {JOPACOIN_EMOTE}\n"
-                f"Balance: **{result.get('balance_after', '?')}** {JOPACOIN_EMOTE}\n\n"
-                f"Use `/dig use {item_type}` to queue it for your next dig."
-            ),
-            color=0xD4AF37,
-        )
-        await safe_followup(interaction, embed=embed)
-
-
 async def setup(bot: commands.Bot):
     player_service = getattr(bot, "player_service", None)
     if player_service is None:
@@ -1714,8 +1781,9 @@ async def setup(bot: commands.Bot):
     gambling_stats_service = getattr(bot, "gambling_stats_service", None)
     recalibration_service = getattr(bot, "recalibration_service", None)
     dig_service = getattr(bot, "dig_service", None)
+    curse_service = getattr(bot, "curse_service", None)
 
     await bot.add_cog(ShopCommands(
         bot, player_service, match_service, flavor_text_service, gambling_stats_service,
-        recalibration_service, dig_service,
+        recalibration_service, dig_service, curse_service,
     ))

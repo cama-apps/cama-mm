@@ -3110,6 +3110,26 @@ class BettingCommands(commands.Cog):
             if candidates:
                 await self._send_first_neon_result(interaction, *candidates)
 
+        # Witch's Curse: wheel result for the spinner.
+        # Positive integer payout → win, negative integer → loss, special wedges → neutral.
+        curse_service = getattr(self.bot, "curse_service", None)
+        if curse_service is not None and interaction.channel is not None:
+            from services.curse_service import spawn_curse_flame
+            if isinstance(result_value, int):
+                wheel_outcome = "win" if result_value > 0 else ("loss" if result_value < 0 else "neutral")
+            else:
+                wheel_outcome = "neutral"
+            spawn_curse_flame(
+                curse_service,
+                interaction.channel,
+                target_id=user_id,
+                guild_id=guild_id,
+                system="wheel",
+                outcome=wheel_outcome,
+                event_context={"wedge": result_wedge[0], "value": result_value, "new_balance": new_balance},
+                target_display_name=getattr(interaction.user, "display_name", None),
+            )
+
     @app_commands.command(name="tip", description="Give jopacoin to another player")
     @app_commands.describe(
         player="Player to tip",
@@ -3289,6 +3309,21 @@ class BettingCommands(commands.Cog):
             f"({fee} {JOPACOIN_EMOTE} fee to nonprofit){mana_suffix}",
             ephemeral=False,
         )
+
+        # Witch's Curse: tipping out is degen-coded → loss-rated for the sender.
+        curse_service = getattr(self.bot, "curse_service", None)
+        if curse_service is not None and interaction.channel is not None:
+            from services.curse_service import spawn_curse_flame
+            spawn_curse_flame(
+                curse_service,
+                interaction.channel,
+                target_id=interaction.user.id,
+                guild_id=guild_id,
+                system="tip",
+                outcome="loss",
+                event_context={"amount": amount, "recipient_id": player.id},
+                target_display_name=getattr(interaction.user, "display_name", None),
+            )
 
         # Neon Degen Terminal hook
         neon = self._get_neon_service()
@@ -3775,6 +3810,26 @@ class BettingCommands(commands.Cog):
             embed.add_field(name="Mana Effects", value=_loan_mana_suffix.strip(), inline=False)
 
         await interaction.followup.send(embed=embed)
+
+        # Witch's Curse: taking a loan is degen-coded → loss-rated.
+        curse_service = getattr(self.bot, "curse_service", None)
+        if curse_service is not None and interaction.channel is not None:
+            from services.curse_service import spawn_curse_flame
+            spawn_curse_flame(
+                curse_service,
+                interaction.channel,
+                target_id=user_id,
+                guild_id=guild_id,
+                system="loan",
+                outcome="loss",
+                event_context={
+                    "amount": result.amount,
+                    "fee": result.fee,
+                    "total_owed": result.total_owed,
+                    "was_negative_loan": result.was_negative_loan,
+                },
+                target_display_name=getattr(interaction.user, "display_name", None),
+            )
 
         # Neon Degen Terminal hook
         neon = self._get_neon_service()

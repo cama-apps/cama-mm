@@ -69,14 +69,10 @@ class TestRussianRouletteRegistration:
 
         safe_items = {
             "announce",
+            "jopa_coin",
             "mystery_gift",
             "double_or_nothing",
             "recalibrate",
-            "dig_dynamite",
-            "dig_hard_hat",
-            "dig_lantern",
-            "dig_reinforcement",
-            "dig_upgrade",
         }
         shop_entries = [e for e in ROULETTE_ENTRIES if e.command == "shop"]
         assert shop_entries, "expected at least one /shop entry"
