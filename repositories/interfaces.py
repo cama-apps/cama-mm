@@ -1455,6 +1455,20 @@ class IManaRepository(ABC):
         """Return all mana rows for the guild."""
         ...
 
+    @abstractmethod
+    def is_bankrupt_buff_used(
+        self, discord_id: int, guild_id: int | None, buff: str
+    ) -> bool:
+        """Return True if the named buff (insurance/reroll) is already used for today."""
+        ...
+
+    @abstractmethod
+    def claim_bankrupt_buff_atomic(
+        self, discord_id: int, guild_id: int | None, buff: str
+    ) -> bool:
+        """Atomically mark the buff used for today. Returns True if claim succeeded."""
+        ...
+
 
 class IRebellionRepository(ABC):
     """Repository for wheel war (rebellion) data access."""

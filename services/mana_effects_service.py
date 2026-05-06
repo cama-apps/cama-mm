@@ -55,6 +55,56 @@ class ManaEffectsService:
         land = mana.get("land")
         return ManaEffects.for_color(color, land)
 
+    def apply_bankrupt_stipend(
+        self, discord_id: int, guild_id: int | None, land: str
+    ) -> int:
+        """If the player is bankrupt (balance ≤ 0) and just rolled White mana (Plains),
+        deduct up to WHITE_BANKRUPT_STIPEND from the nonprofit fund and credit it.
+
+        Returns the amount actually paid (0 if not eligible or fund empty).
+        """
+        if land != "Plains":
+            return 0
+        from config import WHITE_BANKRUPT_STIPEND
+
+        if WHITE_BANKRUPT_STIPEND <= 0:
+            return 0
+
+        player = self.player_repo.get_by_id(
+            discord_id, self.player_repo.normalize_guild_id(guild_id)
+        )
+        if player is None or player.jopacoin_balance > 0:
+            return 0
+
+        try:
+            fund = self.loan_service.get_nonprofit_fund(guild_id)
+        except Exception:
+            logger.exception("Failed to read nonprofit fund for stipend")
+            return 0
+
+        amount = min(WHITE_BANKRUPT_STIPEND, max(fund, 0))
+        if amount <= 0:
+            return 0
+
+        try:
+            self.loan_service.subtract_from_nonprofit_fund(guild_id, amount)
+        except Exception:
+            logger.exception("Failed to deduct stipend from nonprofit fund")
+            return 0
+
+        try:
+            self.player_repo.add_balance(
+                discord_id, self.player_repo.normalize_guild_id(guild_id), amount
+            )
+        except Exception:
+            logger.exception("Stipend balance adjust failed; refunding nonprofit")
+            try:
+                self.loan_service.add_to_nonprofit_fund(guild_id, amount)
+            except Exception:
+                logger.exception("Stipend refund to nonprofit also failed")
+            return 0
+        return amount
+
     def execute_siphon(self, discord_id: int, guild_id: int | None) -> dict | None:
         """Execute Swamp's parasitic siphon: steal 1-3 JC from a random player.
 

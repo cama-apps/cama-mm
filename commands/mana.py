@@ -146,7 +146,19 @@ class ManaCommands(commands.Cog):
                 guild_id,
                 is_ash_fan=is_ash_fan,
             )
-            embed = _build_single_embed(target, result)
+            stipend_paid = 0
+            mana_fx = getattr(interaction.client, "mana_effects_service", None)
+            if mana_fx is not None:
+                try:
+                    stipend_paid = await asyncio.to_thread(
+                        mana_fx.apply_bankrupt_stipend,
+                        target.id,
+                        guild_id,
+                        result["land"],
+                    )
+                except Exception:
+                    logger.exception("Failed to apply White stipend")
+            embed = _build_single_embed(target, result, stipend_paid=stipend_paid)
             await safe_followup(interaction, embed=embed)
             return
 
@@ -217,6 +229,8 @@ def _build_all_pages(
 def _build_single_embed(
     member: discord.Member | discord.User,
     mana: dict,
+    *,
+    stipend_paid: int = 0,
 ) -> discord.Embed:
     land = mana["land"]
     color_name = mana.get("color", LAND_COLORS.get(land, "Unknown"))
@@ -232,6 +246,12 @@ def _build_single_embed(
     )
     embed.add_field(name="Land", value=f"{emoji} **{land}** · {color_name} Mana", inline=False)
     embed.add_field(name="Assigned", value=date_label, inline=True)
+    if stipend_paid > 0:
+        embed.add_field(
+            name="Stipend",
+            value=f"+{stipend_paid} JC (nonprofit fund)",
+            inline=False,
+        )
     if isinstance(member, discord.Member) and member.display_avatar:
         embed.set_thumbnail(url=member.display_avatar.url)
     return embed

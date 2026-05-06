@@ -371,6 +371,8 @@ class SchemaManager:
                 "clear_dig_active_duels_for_retired_timed_mechanics",
                 self._migration_clear_dig_active_duels_for_retired_timed_mechanics,
             ),
+            # Daily mana flags for bankruptcy-specific buffs (Green insurance, Red re-roll)
+            ("add_bankrupt_buff_flags_to_player_mana", self._migration_add_bankrupt_buff_flags_to_player_mana),
         ]
 
     # --- Migrations ---
@@ -1933,6 +1935,18 @@ class SchemaManager:
                 PRIMARY KEY (discord_id, guild_id)
             )
             """
+        )
+
+    def _migration_add_bankrupt_buff_flags_to_player_mana(self, cursor) -> None:
+        """Track per-day usage of Green insurance and Red re-roll bankruptcy buffs.
+
+        Both reset naturally with each new mana row (4 AM PST).
+        """
+        self._add_column_if_not_exists(
+            cursor, "player_mana", "bankrupt_insurance_used", "INTEGER DEFAULT 0"
+        )
+        self._add_column_if_not_exists(
+            cursor, "player_mana", "bankrupt_reroll_used", "INTEGER DEFAULT 0"
         )
 
     def _migration_create_trivia_sessions_table(self, cursor) -> None:

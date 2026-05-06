@@ -135,9 +135,9 @@ async def test_wheel_positive_applies_garnishment():
 
     commands = BettingCommands(bot, betting_service, match_service, player_service)
 
-    # With balance=-100 (negative), the bankrupt wheel is used — find value=20 in it
-    target_idx = next(i for i, w in enumerate(BANKRUPT_WHEEL_WEDGES) if w[1] == 20)
-    expected_win = 20
+    # With balance=-100 (negative), the bankrupt wheel is used — find a positive numeric wedge.
+    target_idx = next(i for i, w in enumerate(BANKRUPT_WHEEL_WEDGES) if isinstance(w[1], int) and w[1] > 0)
+    expected_win = BANKRUPT_WHEEL_WEDGES[target_idx][1]
 
     # Mock _create_wheel_gif_file to avoid GIF generation calling random.randint
     with patch.object(commands, "_create_wheel_gif_file", return_value=MagicMock()):
@@ -1302,15 +1302,13 @@ def test_bankrupt_wheel_has_correct_numbered_count():
     assert numbered == 9, f"Expected 9 numbered wedges, got {numbered}"
 
 
-def test_bankrupt_wheel_removes_high_values():
-    """Highest value wedges (100, 80, 70, etc) should be removed."""
+def test_bankrupt_wheel_has_positive_numeric_wedges():
+    """Bankrupt wheel should have positive numeric wedges to support its +25 EV target."""
     from utils.wheel_drawing import BANKRUPT_WHEEL_WEDGES
 
     values = [w[1] for w in BANKRUPT_WHEEL_WEDGES if isinstance(w[1], int) and w[1] > 0]
-    assert 100 not in values, "100 should be removed from bankrupt wheel"
-    assert 80 not in values, "80 should be removed from bankrupt wheel"
-    assert 70 not in values, "70 should be removed from bankrupt wheel"
-    assert 60 not in values, "60 should be removed from bankrupt wheel"
+    assert len(values) >= 8, f"Expected at least 8 positive numerics, got {len(values)}"
+    assert max(values) >= 75, "Bankrupt wheel should reach at least 75 JC to deliver positive EV"
 
 
 def test_bankrupt_wheel_keeps_special_wedges():
@@ -1333,28 +1331,18 @@ def test_bankrupt_wheel_has_extension_slices():
 
 
 def test_bankrupt_wheel_total_wedge_count():
-    """Bankrupt wheel should have 24 wedges total (matches normal wheel count).
-
-    Composition:
-    - 2 BANKRUPT, 1 LOSE, 3 special shells/bolt, 2 extension slices = 8 non-positive
-    - 9 numbered (1,2,5,10,10,15,15,20,20)
-    - 7 new unique mechanics (JAILBREAK, CHAIN_REACTION, TOWN_TRIAL, DISCOVER, EMERGENCY, COMMUNE, COMEBACK)
-    Total = 8 + 9 + 7 = 24
-    """
+    """Bankrupt wheel should have 24 wedges total (matches normal wheel count)."""
     from utils.wheel_drawing import BANKRUPT_WHEEL_WEDGES
 
     assert len(BANKRUPT_WHEEL_WEDGES) == 24, f"Expected 24 wedges, got {len(BANKRUPT_WHEEL_WEDGES)}"
 
 
-def test_bankrupt_wheel_keeps_low_value_wedges():
-    """Low value wedges (5, 10, 15, 20) should remain on bankrupt wheel."""
+def test_bankrupt_wheel_has_a_floor_wedge():
+    """Bankrupt wheel should have at least one small-value wedge as a floor outcome."""
     from utils.wheel_drawing import BANKRUPT_WHEEL_WEDGES
 
     values = [w[1] for w in BANKRUPT_WHEEL_WEDGES if isinstance(w[1], int) and w[1] > 0]
-    assert 5 in values, "5 should remain on bankrupt wheel"
-    assert 10 in values, "10 should remain on bankrupt wheel"
-    assert 15 in values, "15 should remain on bankrupt wheel"
-    assert 20 in values, "20 should remain on bankrupt wheel"
+    assert min(values) <= 50, f"Bankrupt wheel should have at least one wedge ≤50 JC, smallest is {min(values)}"
 
 
 def test_bankrupt_wheel_extension_slices_have_dark_red_colors():
@@ -1419,35 +1407,22 @@ def test_bankrupt_wheel_has_all_new_slices():
     assert "REVEAL" not in special_values, "REVEAL should NOT be on bankrupt wheel"
 
 
-def test_bankrupt_wheel_has_micro_win_slices():
-    """Bankrupt wheel should have 1 JC and 2 JC slices."""
-    from utils.wheel_drawing import BANKRUPT_WHEEL_WEDGES
-
-    values = [w[1] for w in BANKRUPT_WHEEL_WEDGES if isinstance(w[1], int) and w[1] > 0]
-    assert 1 in values, "1 JC (BREADCRUMBS) should be on bankrupt wheel"
-    assert 2 in values, "2 JC (PITY PRIZE) should be on bankrupt wheel"
-
-
 def test_bankrupt_wheel_ev_maintained():
-    """Bankrupt wheel expected value should match WHEEL_TARGET_EV."""
-    from utils.wheel_drawing import (
-        _SPECIAL_WEDGE_EST_EVS,
-        BANKRUPT_WHEEL_WEDGES,
-        _load_special_wedge_evs,
-    )
-
-    _load_special_wedge_evs()
+    """Bankrupt wheel expected value (using bankrupt-context overrides) should
+    match WHEEL_BANKRUPT_TARGET_EV."""
+    from config import WHEEL_BANKRUPT_TARGET_EV
+    from utils.wheel_drawing import BANKRUPT_WHEEL_WEDGES, bankrupt_special_ev
 
     total_value = 0.0
     for _, v, _ in BANKRUPT_WHEEL_WEDGES:
         if isinstance(v, int):
             total_value += v
         elif isinstance(v, str):
-            total_value += _SPECIAL_WEDGE_EST_EVS.get(v, 0.0)
+            total_value += bankrupt_special_ev(v)
 
     expected_value = total_value / len(BANKRUPT_WHEEL_WEDGES)
-    assert abs(expected_value - WHEEL_TARGET_EV) <= 1, (
-        f"Bankrupt wheel EV ~{WHEEL_TARGET_EV}, got {expected_value:.2f}"
+    assert abs(expected_value - WHEEL_BANKRUPT_TARGET_EV) <= 1, (
+        f"Bankrupt wheel EV ~{WHEEL_BANKRUPT_TARGET_EV}, got {expected_value:.2f}"
     )
 
 

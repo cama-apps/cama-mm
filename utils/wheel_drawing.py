@@ -6,7 +6,7 @@ import random
 
 from PIL import Image, ImageDraw, ImageFont
 
-from config import WHEEL_GOLDEN_TARGET_EV, WHEEL_TARGET_EV
+from config import WHEEL_BANKRUPT_TARGET_EV, WHEEL_GOLDEN_TARGET_EV, WHEEL_TARGET_EV
 
 # Cached fonts for performance (loaded once, not per frame)
 _CACHED_FONTS: dict[str, ImageFont.FreeTypeFont | ImageFont.ImageFont] = {}
@@ -298,10 +298,17 @@ def _load_special_wedge_evs() -> None:
         return
     from config import (
         WHEEL_BLUE_SHELL_EST_EV,
+        WHEEL_CHAIN_REACTION_EST_EV,
         WHEEL_COMEBACK_EST_EV,
         WHEEL_COMMUNE_EST_EV,
+        WHEEL_DISCOVER_EST_EV,
+        WHEEL_EMERGENCY_EST_EV,
+        WHEEL_EXTEND_1_EST_EV,
+        WHEEL_EXTEND_2_EST_EV,
+        WHEEL_JAILBREAK_EST_EV,
         WHEEL_LIGHTNING_BOLT_EST_EV,
         WHEEL_RED_SHELL_EST_EV,
+        WHEEL_TOWN_TRIAL_EST_EV,
     )
     _SPECIAL_WEDGE_EST_EVS.update({
         "RED_SHELL": WHEEL_RED_SHELL_EST_EV,
@@ -309,6 +316,13 @@ def _load_special_wedge_evs() -> None:
         "LIGHTNING_BOLT": WHEEL_LIGHTNING_BOLT_EST_EV,
         "COMMUNE": WHEEL_COMMUNE_EST_EV,
         "COMEBACK": WHEEL_COMEBACK_EST_EV,
+        "EXTEND_1": WHEEL_EXTEND_1_EST_EV,
+        "EXTEND_2": WHEEL_EXTEND_2_EST_EV,
+        "JAILBREAK": WHEEL_JAILBREAK_EST_EV,
+        "EMERGENCY": WHEEL_EMERGENCY_EST_EV,
+        "CHAIN_REACTION": WHEEL_CHAIN_REACTION_EST_EV,
+        "TOWN_TRIAL": WHEEL_TOWN_TRIAL_EST_EV,
+        "DISCOVER": WHEEL_DISCOVER_EST_EV,
     })
 
 
@@ -374,50 +388,77 @@ WHEEL_WEDGES = _calculate_adjusted_wedges(WHEEL_TARGET_EV)
 
 
 # Hardcoded 24-slice bankrupt wheel for players in bankruptcy penalty.
-# Same count as normal wheel, filled with punishments, mocking micro-wins,
-# and unique social/interactive outcomes.
 # BANKRUPT value is a placeholder (-100); _calculate_bankrupt_adjusted_wedges()
-# recalculates it to maintain WHEEL_TARGET_EV.
+# recalculates it to maintain WHEEL_BANKRUPT_TARGET_EV.
+# Numeric wedges are buffed vs. the normal wheel — bankrupt players need bigger
+# pay-outs to overcome the BANKRUPT/EXTEND/CHAIN_REACTION drag.
+# Wedges ordered by color (spectrum): black/gray → green → teal → blue → orange → red.
 _BASE_BANKRUPT_WHEEL_WEDGES = [
-    # Kept from normal wheel: non-numbered special/negative
+    # Black/gray
     ("BANKRUPT", -100, "#1a1a1a"),
     ("BANKRUPT", -100, "#1a1a1a"),
     ("LOSE", 0, "#4a4a4a"),
+    # Greens (dark to bright)
+    ("JAIL", "JAILBREAK", "#0a2a0a"),       # Remove 1 penalty game
+    ("SEIZE", "COMMUNE", "#1a2a1a"),         # All +balance players donate 1 JC to spinner
+    ("30", 30, "#2d5a27"),
+    ("50", 50, "#3d7a37"),
+    ("50", 50, "#3d7a37"),
+    ("75", 75, "#4d9a47"),
+    ("75", 75, "#4d9a47"),
+    ("100", 100, "#5dba57"),
+    ("100", 100, "#5dba57"),
+    # Teal/blue
+    ("FIND", "DISCOVER", "#1a2a2a"),         # Spinner picks from 3 options (60s)
+    ("CHAIN", "CHAIN_REACTION", "#1a1a3a"),  # Copy last normal wheel result
+    ("CLUTCH", "COMEBACK", "#0a1a2a"),       # One-use pardon: next BANKRUPT becomes LOSE
     ("BLUE", "BLUE_SHELL", "#3498db"),
+    # Olive/orange transition
+    ("50", 50, "#3a3a1a"),
+    ("75", 75, "#3a3500"),
     ("BOLT", "LIGHTNING_BOLT", "#f39c12"),
-    ("RED", "RED_SHELL", "#e74c3c"),
-    # Kept: extension slices (add penalty games)
+    ("SOS", "EMERGENCY", "#2a1a00"),         # All +balance players lose ≤10 JC
+    # Reds
+    ("TRIAL", "TOWN_TRIAL", "#2a1a1a"),      # Server-wide vote (3 options, 5 min)
     ("+1", "EXTEND_1", "#8B0000"),
     ("+2", "EXTEND_2", "#660000"),
-    # Kept: low-value numbered wins
-    ("5", 5, "#2d5a27"),
-    ("10", 10, "#3d7a37"),
-    ("10", 10, "#3d7a37"),
-    ("15", 15, "#4d9a47"),
-    ("15", 15, "#4d9a47"),
-    ("20", 20, "#5dba57"),
-    ("20", 20, "#5dba57"),
-    # New: mocking micro-wins
-    ("1", 1, "#3a3a1a"),
-    ("2", 2, "#3a3500"),
-    # New: unique mechanics
-    ("JAIL", "JAILBREAK", "#0a2a0a"),       # Remove 1 penalty game
-    ("CHAIN", "CHAIN_REACTION", "#1a1a3a"),  # Copy last normal wheel result
-    ("TRIAL", "TOWN_TRIAL", "#2a1a1a"),      # Server-wide vote (3 options, 5 min)
-    ("FIND", "DISCOVER", "#1a2a2a"),         # Spinner picks from 3 options (60s)
-    ("SOS", "EMERGENCY", "#2a1a00"),         # All +balance players lose ≤10 JC
-    ("SEIZE", "COMMUNE", "#1a2a1a"),         # All +balance players donate 1 JC to spinner
-    ("CLUTCH", "COMEBACK", "#0a1a2a"),       # One-use pardon: next BANKRUPT becomes LOSE
+    ("RED", "RED_SHELL", "#e74c3c"),
 ]
+
+
+# Bankrupt-context EV overrides for shared wedges. The bankrupt spinner
+# experiences these wedges differently — they have no positive balance to be
+# taxed (LIGHTNING_BOLT, EMERGENCY) and the shell mechanics are guaranteed
+# steals (since a bankrupt player is never #1 or rank-above-themselves).
+_BANKRUPT_SPECIAL_OVERRIDES: dict[str, float] = {
+    "LIGHTNING_BOLT": 0.0,
+    "EMERGENCY": 0.0,
+    "BLUE_SHELL": 8.0,
+    "RED_SHELL": 5.0,
+}
+
+
+def bankrupt_special_ev(wedge_value: str) -> float:
+    """Resolve a special wedge's EV in bankrupt-spinner context.
+
+    Bankrupt-context overrides (e.g., LIGHTNING_BOLT = 0 since the spinner has
+    no positive balance to tax) take precedence over the global estimates.
+    """
+    _load_special_wedge_evs()
+    if wedge_value in _BANKRUPT_SPECIAL_OVERRIDES:
+        return _BANKRUPT_SPECIAL_OVERRIDES[wedge_value]
+    return _SPECIAL_WEDGE_EST_EVS.get(wedge_value, 0.0)
 
 
 def _calculate_bankrupt_adjusted_wedges(target_ev: float) -> list[tuple[str, int | str, str]]:
     """
     Calculate bankrupt wheel wedges with BANKRUPT value adjusted to hit target EV.
 
-    Same logic as _calculate_adjusted_wedges() but applied to _BASE_BANKRUPT_WHEEL_WEDGES.
-    New string-valued slices (JAILBREAK, CHAIN_REACTION, etc.) have estimated EV of 0.
-    BANKRUPT is capped at -1 minimum.
+    All bankrupt-specific string wedges (EXTEND_1, EXTEND_2, JAILBREAK, EMERGENCY,
+    CHAIN_REACTION, TOWN_TRIAL, DISCOVER) have honest EV estimates. Shared wedges
+    (LIGHTNING_BOLT, EMERGENCY, BLUE_SHELL, RED_SHELL) use bankrupt-context
+    overrides because their effect on the spinner differs from the normal wheel.
+    BANKRUPT is capped at -1 minimum (always nets negative for the spinner).
     """
     _load_special_wedge_evs()
     num_wedges = len(_BASE_BANKRUPT_WHEEL_WEDGES)
@@ -428,7 +469,7 @@ def _calculate_bankrupt_adjusted_wedges(target_ev: float) -> list[tuple[str, int
     )
 
     special_ev_sum = sum(
-        _SPECIAL_WEDGE_EST_EVS.get(v, 0.0)
+        bankrupt_special_ev(v)
         for _, v, _ in _BASE_BANKRUPT_WHEEL_WEDGES
         if isinstance(v, str)
     )
@@ -458,7 +499,7 @@ def _calculate_bankrupt_adjusted_wedges(target_ev: float) -> list[tuple[str, int
 
 
 # Calculate bankrupt wheel wedges (24-slice wheel for players in bankruptcy penalty)
-BANKRUPT_WHEEL_WEDGES = _calculate_bankrupt_adjusted_wedges(WHEEL_TARGET_EV)
+BANKRUPT_WHEEL_WEDGES = _calculate_bankrupt_adjusted_wedges(WHEEL_BANKRUPT_TARGET_EV)
 
 
 # ---------------------------------------------------------------------------
