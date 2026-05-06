@@ -948,12 +948,22 @@ class ShopCommands(commands.Cog):
             return
 
         await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, -cost)
-        await self.curse_service.cast_curse(
-            caster_id=user_id,
-            target_id=target.id,
-            guild_id=guild_id,
-            days=WITCHS_CURSE_DURATION_DAYS,
-        )
+        try:
+            await self.curse_service.cast_curse(
+                caster_id=user_id,
+                target_id=target.id,
+                guild_id=guild_id,
+                days=WITCHS_CURSE_DURATION_DAYS,
+            )
+        except Exception:
+            # Refund on unexpected failure so the buyer isn't charged for a hex that didn't land.
+            await asyncio.to_thread(self.player_service.adjust_balance, user_id, guild_id, cost)
+            await safe_followup(
+                interaction,
+                content="The hex faltered unexpectedly. You have been refunded.",
+                ephemeral=True,
+            )
+            return
 
         await safe_followup(
             interaction,
