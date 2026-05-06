@@ -196,7 +196,11 @@ WHEEL_COMMUNE_EST_EV = _parse_float("WHEEL_COMMUNE_EST_EV", 8.0)
 # estimated ~15 JC value (soft positive: negates a future BANKRUPT hit)
 WHEEL_COMEBACK_EST_EV = _parse_float("WHEEL_COMEBACK_EST_EV", 15.0)
 # Bankrupt-only wedges: previously calibrated as 0, now have honest estimates
-# so the BANKRUPT wedge value compensates correctly.
+# so the BANKRUPT wedge value compensates correctly. Note: a few normal-wheel
+# wedges (LIGHTNING_BOLT, EMERGENCY, BLUE_SHELL, RED_SHELL) are overridden in
+# utils/wheel_drawing.py::_BANKRUPT_SPECIAL_OVERRIDES because a bankrupt
+# spinner has no positive balance to tax — the constants below stay accurate
+# for the normal wheel context.
 WHEEL_EXTEND_1_EST_EV = _parse_float("WHEEL_EXTEND_1_EST_EV", -10.0)
 WHEEL_EXTEND_2_EST_EV = _parse_float("WHEEL_EXTEND_2_EST_EV", -20.0)
 WHEEL_JAILBREAK_EST_EV = _parse_float("WHEEL_JAILBREAK_EST_EV", 10.0)
