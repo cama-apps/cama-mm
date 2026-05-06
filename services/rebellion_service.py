@@ -321,10 +321,20 @@ class RebellionService:
     # ------------------------------------------------------------------
 
     def calculate_threshold(self, attack_count: float, defend_count: float) -> int:
-        """Calculate the wheel victory threshold."""
-        net_defenders = int(defend_count) - int(attack_count)
-        raw = REBELLION_BASE_THRESHOLD + REBELLION_THRESHOLD_STEP * net_defenders
-        return max(REBELLION_MIN_THRESHOLD, min(REBELLION_MAX_THRESHOLD, raw))
+        """Calculate the minimum d100 roll the Wheel needs to survive."""
+        net_attackers = attack_count - defend_count
+        raw = REBELLION_BASE_THRESHOLD + REBELLION_THRESHOLD_STEP * net_attackers
+        threshold = int(raw + 0.5)
+        return max(REBELLION_MIN_THRESHOLD, min(REBELLION_MAX_THRESHOLD, threshold))
+
+    def calculate_wheel_win_probability(self, victory_threshold: int) -> float:
+        """Return the Wheel's exact win probability for the inclusive 1-100 roll."""
+        threshold = max(1, min(101, int(victory_threshold)))
+        return (101 - threshold) / 100.0
+
+    def calculate_attacker_win_probability(self, victory_threshold: int) -> float:
+        """Return the attackers' exact win probability for the inclusive 1-100 roll."""
+        return 1.0 - self.calculate_wheel_win_probability(victory_threshold)
 
     def roll_battle(self) -> int:
         """Roll the wheel battle result (1–100)."""
