@@ -1953,3 +1953,31 @@ class IReminderRepository(ABC):
 
     @abstractmethod
     def get_enabled_users_for_type(self, guild_id: int, reminder_type: str) -> list[int]: ...
+
+
+class ICurseRepository(ABC):
+    """Repository for the Witch's Curse feature."""
+
+    @abstractmethod
+    def cast_or_extend(
+        self,
+        guild_id: int | None,
+        caster_id: int,
+        target_id: int,
+        days: int,
+    ) -> int:
+        """Insert a new curse or extend an existing (caster, target, guild) curse.
+
+        Returns the resulting expires_at as a unix epoch second.
+        """
+        ...
+
+    @abstractmethod
+    def count_active_curses_for_target(
+        self,
+        target_id: int,
+        guild_id: int | None,
+        now: int,
+    ) -> int:
+        """Number of unexpired curses on this target. Drives both is_cursed and stack_count."""
+        ...

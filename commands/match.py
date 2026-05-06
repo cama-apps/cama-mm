@@ -1386,6 +1386,74 @@ class MatchCommands(commands.Cog):
         message = f"✅ Match recorded — {winning_team_name}{confirmations_text}.{distribution_text}"
         await interaction.followup.send(message, ephemeral=False)
 
+        # Witch's Curse hooks — fire-and-forget per cursed engager (no-ops fast for non-cursed).
+        curse_service = getattr(self.bot, "curse_service", None)
+        if curse_service is not None and interaction.channel is not None:
+            from services.curse_service import spawn_curse_flame
+
+            channel = interaction.channel
+
+            def _resolve_name(uid: int) -> str | None:
+                if guild is not None and hasattr(guild, "get_member"):
+                    member = guild.get_member(uid)
+                    if member is not None:
+                        return member.display_name
+                return None
+
+            for uid in record_result.get("winning_player_ids", []) or []:
+                spawn_curse_flame(
+                    curse_service,
+                    channel,
+                    target_id=uid,
+                    guild_id=guild_id,
+                    system="match",
+                    outcome="win",
+                    event_context={"team": "winner"},
+                    target_display_name=_resolve_name(uid),
+                )
+            for uid in record_result.get("losing_player_ids", []) or []:
+                spawn_curse_flame(
+                    curse_service,
+                    channel,
+                    target_id=uid,
+                    guild_id=guild_id,
+                    system="match",
+                    outcome="loss",
+                    event_context={"team": "loser"},
+                    target_display_name=_resolve_name(uid),
+                )
+            seen_betters: set[int] = set()
+            for entry in winners or []:
+                uid = entry.get("discord_id")
+                if uid is None or uid in seen_betters:
+                    continue
+                seen_betters.add(uid)
+                spawn_curse_flame(
+                    curse_service,
+                    channel,
+                    target_id=uid,
+                    guild_id=guild_id,
+                    system="bet",
+                    outcome="win",
+                    event_context={"side": "winner"},
+                    target_display_name=_resolve_name(uid),
+                )
+            for entry in losers or []:
+                uid = entry.get("discord_id")
+                if uid is None or uid in seen_betters:
+                    continue
+                seen_betters.add(uid)
+                spawn_curse_flame(
+                    curse_service,
+                    channel,
+                    target_id=uid,
+                    guild_id=guild_id,
+                    system="bet",
+                    outcome="loss",
+                    event_context={"side": "loser"},
+                    target_display_name=_resolve_name(uid),
+                )
+
         # Finalize lobby thread with results (use saved thread_id since pending state is cleared)
         await self._finalize_lobby_thread(
             guild_id, winning_result, thread_id=thread_id_for_finalize

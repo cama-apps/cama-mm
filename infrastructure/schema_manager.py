@@ -373,6 +373,8 @@ class SchemaManager:
             ),
             # Daily mana flags for bankruptcy-specific buffs (Green insurance, Red re-roll)
             ("add_bankrupt_buff_flags_to_player_mana", self._migration_add_bankrupt_buff_flags_to_player_mana),
+            # Witch's Curse: per-target hex with anonymous casters and 7-day duration
+            ("create_curses_table", self._migration_create_curses_table),
         ]
 
     # --- Migrations ---
@@ -1947,6 +1949,38 @@ class SchemaManager:
         )
         self._add_column_if_not_exists(
             cursor, "player_mana", "bankrupt_reroll_used", "INTEGER DEFAULT 0"
+        )
+
+    def _migration_create_curses_table(self, cursor) -> None:
+        """Per-target curses with anonymous casters.
+
+        One row per (caster, target, guild) active curse. Multiple rows allowed
+        per target. expires_at is a unix epoch second; queries filter
+        `WHERE expires_at > now`. No periodic prune — slow-growth accepted.
+        """
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS curses (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                target_discord_id INTEGER NOT NULL,
+                guild_id INTEGER NOT NULL DEFAULT 0,
+                caster_discord_id INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_curses_target_active
+            ON curses(target_discord_id, guild_id, expires_at)
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_curses_caster_target
+            ON curses(caster_discord_id, target_discord_id, guild_id)
+            """
         )
 
     def _migration_create_trivia_sessions_table(self, cursor) -> None:

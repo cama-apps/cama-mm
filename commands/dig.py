@@ -2477,6 +2477,42 @@ class DigCommands(commands.Cog):
                 self.bot, interaction.user.id, guild_id, int(time.time()) + FREE_DIG_COOLDOWN_SECONDS
             )
 
+        # Witch's Curse: roll on successful dig outcomes (skip first-dig welcome).
+        if not getattr(result, "is_first_dig", False):
+            curse_service = getattr(self.bot, "curse_service", None)
+            if curse_service is not None and interaction.channel is not None:
+                from services.curse_service import spawn_curse_flame
+                if (
+                    getattr(result, "cave_in", False)
+                    or getattr(result, "died", False)
+                    or getattr(result, "death", False)
+                ):
+                    dig_outcome = "loss"
+                elif (
+                    getattr(result, "coins_earned", 0)
+                    or getattr(result, "blocks_dug", 0)
+                    or getattr(result, "boss_encounter", False)
+                ):
+                    dig_outcome = "win"
+                else:
+                    dig_outcome = "neutral"
+                spawn_curse_flame(
+                    curse_service,
+                    interaction.channel,
+                    target_id=interaction.user.id,
+                    guild_id=guild_id,
+                    system="dig",
+                    outcome=dig_outcome,
+                    event_context={
+                        "depth": getattr(result, "depth", None),
+                        "blocks_dug": getattr(result, "blocks_dug", None),
+                        "coins_earned": getattr(result, "coins_earned", None),
+                        "cave_in": getattr(result, "cave_in", False),
+                        "boss_encounter": getattr(result, "boss_encounter", False),
+                    },
+                    target_display_name=getattr(interaction.user, "display_name", None),
+                )
+
         # Dispatch by result shape. Each branch handles its own reply + reactions.
         if getattr(result, "is_first_dig", False):
             await self._send_first_dig_welcome(interaction)

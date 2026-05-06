@@ -84,6 +84,7 @@ class ServiceContainer:
         self._init_match_services()
         self._init_advanced_services()
         self._init_ai_services()
+        self._init_curse_service()
         self._init_rebellion_service()
         self._init_mana_service()
         self._init_dig_service()
@@ -105,6 +106,7 @@ class ServiceContainer:
     def _init_repositories(self) -> None:
         from repositories.bankruptcy_repository import BankruptcyRepository
         from repositories.bet_repository import BetRepository
+        from repositories.curse_repository import CurseRepository
         from repositories.dig_repository import DigRepository
         from repositories.disburse_repository import DisburseRepository
         from repositories.guild_config_repository import GuildConfigRepository
@@ -146,6 +148,7 @@ class ServiceContainer:
             "mana_repo": ManaRepository(p),
             "dig_repo": DigRepository(p),
             "notification_repo": NotificationRepository(p),
+            "curse_repo": CurseRepository(p),
         })
 
     def _init_core_services(self) -> None:
@@ -324,6 +327,17 @@ class ServiceContainer:
         c["sql_query_service"] = sql_query_service
         c["flavor_text_service"] = flavor_text_service
 
+    def _init_curse_service(self) -> None:
+        """Witch's Curse service. Depends on flavor_text_service (optional)."""
+        from services.curse_service import CurseService
+
+        c = self._components
+        c["curse_service"] = CurseService(
+            curse_repo=c["curse_repo"],
+            flavor_text_service=c.get("flavor_text_service"),
+            guild_config_repo=c.get("guild_config_repo"),
+        )
+
     def _init_rebellion_service(self) -> None:
         """Rebellion (Wheel War) service."""
         from services.rebellion_service import RebellionService
@@ -488,6 +502,8 @@ class ServiceContainer:
         bot.dig_flavor_service = c.get("dig_flavor_service")
         bot.notification_repo = c["notification_repo"]
         bot.reminder_service = c["reminder_service"]
+        bot.curse_repo = c["curse_repo"]
+        bot.curse_service = c["curse_service"]
 
         # AI services (may be None)
         bot.ai_service = c["ai_service"]
