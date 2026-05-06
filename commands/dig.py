@@ -2482,17 +2482,11 @@ class DigCommands(commands.Cog):
             curse_service = getattr(self.bot, "curse_service", None)
             if curse_service is not None and interaction.channel is not None:
                 from services.curse_service import spawn_curse_flame
-                if (
-                    getattr(result, "cave_in", False)
-                    or getattr(result, "died", False)
-                    or getattr(result, "death", False)
-                ):
+                jc_earned = getattr(result, "jc_earned", 0) or 0
+                advance = getattr(result, "advance", 0) or 0
+                if getattr(result, "cave_in", False):
                     dig_outcome = "loss"
-                elif (
-                    getattr(result, "coins_earned", 0)
-                    or getattr(result, "blocks_dug", 0)
-                    or getattr(result, "boss_encounter", False)
-                ):
+                elif jc_earned > 0 or advance > 0 or getattr(result, "boss_encounter", False):
                     dig_outcome = "win"
                 else:
                     dig_outcome = "neutral"
@@ -2504,11 +2498,12 @@ class DigCommands(commands.Cog):
                     system="dig",
                     outcome=dig_outcome,
                     event_context={
-                        "depth": getattr(result, "depth", None),
-                        "blocks_dug": getattr(result, "blocks_dug", None),
-                        "coins_earned": getattr(result, "coins_earned", None),
+                        "depth_after": getattr(result, "depth_after", None),
+                        "advance": advance,
+                        "jc_earned": jc_earned,
                         "cave_in": getattr(result, "cave_in", False),
                         "boss_encounter": getattr(result, "boss_encounter", False),
+                        "tunnel_name": getattr(result, "tunnel_name", None),
                     },
                     target_display_name=getattr(interaction.user, "display_name", None),
                 )
