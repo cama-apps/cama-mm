@@ -444,6 +444,28 @@ class ScryingView(discord.ui.View):
         self.stop()
 
 
+class WheelRerollView(discord.ui.View):
+    """Red mana bankrupt re-roll: one click to re-spin on LOSE/EXTEND."""
+
+    def __init__(self, user_id: int, timeout: float = 30.0):
+        super().__init__(timeout=timeout)
+        self.user_id = user_id
+        self.clicked = False
+
+    @discord.ui.button(label="Re-roll", style=discord.ButtonStyle.danger)
+    async def reroll_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("Not your spin!", ephemeral=True)
+            return
+        self.clicked = True
+        button.disabled = True
+        try:
+            await interaction.response.edit_message(view=self)
+        except discord.HTTPException:
+            pass
+        self.stop()
+
+
 class BettingCommands(commands.Cog):
     """Slash commands to place and view wagers."""
 
@@ -2125,6 +2147,28 @@ class BettingCommands(commands.Cog):
             result_wedge = ("LOSE", 0, "#4a4a4a")
             _guardian_activated = True
 
+        # Green mana: bankrupt insurance — first BANKRUPT per mana day downgraded to LOSE
+        _insurance_activated = False
+        if (
+            not _guardian_activated
+            and effects
+            and effects.color == "Green"
+            and is_eligible_for_bad_gamba
+            and isinstance(result_wedge[1], int)
+            and result_wedge[1] < 0
+        ):
+            mana_service_ins = getattr(self.bot, "mana_service", None)
+            mana_repo_ins = getattr(mana_service_ins, "mana_repo", None) if mana_service_ins else None
+            if mana_repo_ins is not None:
+                try:
+                    if await asyncio.to_thread(
+                        mana_repo_ins.claim_bankrupt_buff_atomic, user_id, guild_id, "insurance"
+                    ):
+                        result_wedge = ("LOSE", 0, "#4a4a4a")
+                        _insurance_activated = True
+                except Exception:
+                    logger.debug("Failed to claim Green insurance", exc_info=True)
+
         # Consume war spin if active
         if _active_war_id and _rebellion_svc_gamba:
             await asyncio.to_thread(
@@ -2134,6 +2178,27 @@ class BettingCommands(commands.Cog):
         # Defer first - GIF generation can take a few seconds
         if not _scrying_deferred:
             await interaction.response.defer()
+
+        # Blue mana: bankrupt-wheel peek — surface 3 random wedges before the spin
+        if effects and effects.color == "Blue" and is_eligible_for_bad_gamba:
+            sample = random.sample(wedges, min(3, len(wedges)))
+
+            def _peek_label(w):
+                label, val, _ = w
+                if isinstance(val, int):
+                    return f"{val} JC" if val != 0 else "LOSE"
+                return str(label)
+
+            preview = ", ".join(_peek_label(w) for w in sample)
+            peek_embed = discord.Embed(
+                title="Wheel preview",
+                description=f"Blue mana reveals: {preview}",
+                color=discord.Color.blue(),
+            )
+            try:
+                await interaction.followup.send(embed=peek_embed)
+            except Exception:
+                logger.debug("Failed to send Blue mana peek", exc_info=True)
 
         # Generate the complete animation GIF (plays once, ~20 seconds)
         user_display = interaction.user.name
@@ -2159,6 +2224,75 @@ class BettingCommands(commands.Cog):
         # - Creep: 15 frames * ~150ms avg = 2.3s + pause
         # Total spinning: ~8-15s depending on ending style
         await asyncio.sleep(15.0)
+
+        # Red mana: bankrupt re-roll on LOSE/EXTEND_1/EXTEND_2 (one per mana day).
+        # Runs BEFORE applying the result so we never need to reverse side effects.
+        _reroll_used = False
+        _candidate_value = result_wedge[1]
+        _reroll_eligible = (
+            effects
+            and effects.color == "Red"
+            and is_eligible_for_bad_gamba
+            and (_candidate_value == 0 or _candidate_value in ("EXTEND_1", "EXTEND_2"))
+        )
+        if _reroll_eligible:
+            mana_service_rr = getattr(self.bot, "mana_service", None)
+            mana_repo_rr = getattr(mana_service_rr, "mana_repo", None) if mana_service_rr else None
+            if mana_repo_rr is not None:
+                try:
+                    already_used = await asyncio.to_thread(
+                        mana_repo_rr.is_bankrupt_buff_used, user_id, guild_id, "reroll"
+                    )
+                except Exception:
+                    already_used = True
+                    logger.debug("Failed to read reroll flag", exc_info=True)
+                if not already_used:
+                    view = WheelRerollView(user_id=user_id, timeout=30.0)
+                    prompt_embed = discord.Embed(
+                        title="Re-roll available",
+                        description=(
+                            f"{interaction.user.mention} — Red mana lets you re-roll once. "
+                            f"30 seconds to decide."
+                        ),
+                        color=discord.Color.red(),
+                    )
+                    prompt_msg = None
+                    try:
+                        prompt_msg = await interaction.followup.send(embed=prompt_embed, view=view)
+                        await view.wait()
+                    except Exception:
+                        logger.debug("Failed to present re-roll prompt", exc_info=True)
+                    if view.clicked:
+                        try:
+                            claimed = await asyncio.to_thread(
+                                mana_repo_rr.claim_bankrupt_buff_atomic,
+                                user_id, guild_id, "reroll",
+                            )
+                        except Exception:
+                            claimed = False
+                            logger.debug("Failed to claim re-roll", exc_info=True)
+                        if claimed:
+                            result_idx = random.randint(0, len(wedges) - 1)
+                            result_wedge = wedges[result_idx]
+                            new_gif = await asyncio.to_thread(
+                                self._create_wheel_gif_file,
+                                result_idx,
+                                user_display,
+                                is_eligible_for_bad_gamba,
+                                is_golden,
+                                wedges=wedges,
+                            )
+                            try:
+                                await message.edit(attachments=[new_gif])
+                            except Exception:
+                                logger.debug("Failed to edit message with re-roll GIF", exc_info=True)
+                            await asyncio.sleep(15.0)
+                            _reroll_used = True
+                    if prompt_msg is not None:
+                        try:
+                            await prompt_msg.delete()
+                        except Exception:
+                            pass
 
         # Apply the result
         result_value = result_wedge[1]
@@ -2901,6 +3035,22 @@ class BettingCommands(commands.Cog):
             result_embed.add_field(
                 name="🌾 Guardian Aura",
                 value="Plains mana converted BANKRUPT to LOSE!",
+                inline=False,
+            )
+
+        # Add Green insurance notification if it triggered
+        if _insurance_activated:
+            result_embed.add_field(
+                name="Insurance",
+                value="Insurance applied: BANKRUPT → LOSE",
+                inline=False,
+            )
+
+        # Add Red re-roll notification if it triggered
+        if _reroll_used:
+            result_embed.add_field(
+                name="Re-roll",
+                value="Red mana re-roll used",
                 inline=False,
             )
 

@@ -177,6 +177,8 @@ WHEEL_MAX_REWARD = _parse_int("WHEEL_MAX_REWARD", 100)
 WHEEL_ANIMATION_FRAMES = _parse_int("WHEEL_ANIMATION_FRAMES", 5)  # Number of spin frames
 WHEEL_FRAME_DELAY_MS = _parse_int("WHEEL_FRAME_DELAY_MS", 1000)  # Delay between frames (ms)
 WHEEL_TARGET_EV = _parse_float("WHEEL_TARGET_EV", -25.0)  # Target expected value per spin
+# Bankrupt wheel target EV: positive so the wheel pays out on average — easier escape.
+WHEEL_BANKRUPT_TARGET_EV = _parse_float("WHEEL_BANKRUPT_TARGET_EV", 25.0)
 
 # Estimated EV for special wedges — total economic impact, not just spinner's personal outcome.
 # Used to adjust BANKRUPT value so overall wheel drain stays at WHEEL_TARGET_EV.
@@ -193,6 +195,15 @@ WHEEL_COMMUNE_EST_EV = _parse_float("WHEEL_COMMUNE_EST_EV", 8.0)
 # COMEBACK: grants one-use pardon token; next BANKRUPT becomes LOSE
 # estimated ~15 JC value (soft positive: negates a future BANKRUPT hit)
 WHEEL_COMEBACK_EST_EV = _parse_float("WHEEL_COMEBACK_EST_EV", 15.0)
+# Bankrupt-only wedges: previously calibrated as 0, now have honest estimates
+# so the BANKRUPT wedge value compensates correctly.
+WHEEL_EXTEND_1_EST_EV = _parse_float("WHEEL_EXTEND_1_EST_EV", -10.0)
+WHEEL_EXTEND_2_EST_EV = _parse_float("WHEEL_EXTEND_2_EST_EV", -20.0)
+WHEEL_JAILBREAK_EST_EV = _parse_float("WHEEL_JAILBREAK_EST_EV", 10.0)
+WHEEL_EMERGENCY_EST_EV = _parse_float("WHEEL_EMERGENCY_EST_EV", -25.0)
+WHEEL_CHAIN_REACTION_EST_EV = _parse_float("WHEEL_CHAIN_REACTION_EST_EV", -25.0)
+WHEEL_TOWN_TRIAL_EST_EV = _parse_float("WHEEL_TOWN_TRIAL_EST_EV", 0.0)
+WHEEL_DISCOVER_EST_EV = _parse_float("WHEEL_DISCOVER_EST_EV", 5.0)
 
 # Lightning Bolt (wheel wedge: server-wide tax to nonprofit)
 LIGHTNING_BOLT_PCT_MIN = _parse_float("LIGHTNING_BOLT_PCT_MIN", 0.02)
@@ -320,6 +331,10 @@ PREDICTION_MAX_CONTRACTS_PER_TRADE = _parse_int("PREDICTION_MAX_CONTRACTS_PER_TR
 TRIVIA_COOLDOWN_SECONDS = _parse_int("TRIVIA_COOLDOWN_SECONDS", 21600)  # 6 hours
 TRIVIA_ANSWER_TIMEOUT_SECONDS = _parse_int("TRIVIA_ANSWER_TIMEOUT_SECONDS", 15)
 TRIVIA_REWARD_PER_QUESTION = _parse_int("TRIVIA_REWARD_PER_QUESTION", 1)
+TRIVIA_BANKRUPT_MULTIPLIER = _parse_float("TRIVIA_BANKRUPT_MULTIPLIER", 2.0)  # Milestone multiplier when balance ≤ 0
+
+# White mana stipend (paid from nonprofit fund on /mana claim while bankrupt)
+WHITE_BANKRUPT_STIPEND = _parse_int("WHITE_BANKRUPT_STIPEND", 5)
 
 
 # Neon Degen Terminal Easter Egg configuration

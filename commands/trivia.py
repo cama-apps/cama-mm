@@ -241,6 +241,18 @@ class TriviaView(discord.ui.View):
                                     )
                     except Exception:
                         logger.exception("Failed to apply trivia mana effects")
+                # Bankrupt buff: multiply milestone payout when balance ≤ 0.
+                # Stacks multiplicatively with mana effects above.
+                try:
+                    from config import TRIVIA_BANKRUPT_MULTIPLIER
+                    player_service = self.cog.bot.player_service
+                    pre_balance = await asyncio.to_thread(
+                        player_service.get_balance, self.session.user_id, self.session.guild_id
+                    )
+                    if pre_balance <= 0 and TRIVIA_BANKRUPT_MULTIPLIER != 1.0:
+                        jc = max(1, int(jc * TRIVIA_BANKRUPT_MULTIPLIER))
+                except Exception:
+                    logger.exception("Failed to apply trivia bankrupt multiplier")
             self.session.total_jc += jc
 
             # Award jopacoin (only when jc > 0)
