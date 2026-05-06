@@ -451,6 +451,7 @@ class WheelRerollView(discord.ui.View):
         super().__init__(timeout=timeout)
         self.user_id = user_id
         self.clicked = False
+        self.message: discord.Message | None = None
 
     @discord.ui.button(label="Re-roll", style=discord.ButtonStyle.danger)
     async def reroll_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -464,6 +465,17 @@ class WheelRerollView(discord.ui.View):
         except discord.HTTPException:
             pass
         self.stop()
+
+    async def on_timeout(self):
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                child.disabled = True
+        if self.message is None:
+            return
+        try:
+            await self.message.edit(view=self)
+        except (discord.NotFound, discord.HTTPException):
+            pass
 
 
 class BettingCommands(commands.Cog):
@@ -2185,8 +2197,8 @@ class BettingCommands(commands.Cog):
 
             def _peek_label(w):
                 label, val, _ = w
-                if isinstance(val, int):
-                    return f"{val} JC" if val != 0 else "LOSE"
+                if isinstance(val, int) and val > 0:
+                    return f"{val} JC"
                 return str(label)
 
             preview = ", ".join(_peek_label(w) for w in sample)
@@ -2259,6 +2271,7 @@ class BettingCommands(commands.Cog):
                     prompt_msg = None
                     try:
                         prompt_msg = await interaction.followup.send(embed=prompt_embed, view=view)
+                        view.message = prompt_msg
                         await view.wait()
                     except Exception:
                         logger.debug("Failed to present re-roll prompt", exc_info=True)

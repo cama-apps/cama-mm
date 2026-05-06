@@ -85,6 +85,21 @@ class TestBankruptWheelEV:
 
         assert abs(mean - WHEEL_TARGET_EV) <= 1.0
 
+    def test_bankrupt_wheel_distinct_from_normal_wheel(self):
+        """The bankrupt and normal wheels must be different lists. Guards
+        against an accidental swap (e.g. re-roll picking from the wrong set).
+        """
+        from utils.wheel_drawing import BANKRUPT_WHEEL_WEDGES, WHEEL_WEDGES
+
+        assert BANKRUPT_WHEEL_WEDGES != WHEEL_WEDGES
+        # Bankrupt wheel includes recovery-themed wedges that don't exist on
+        # the normal wheel (JAILBREAK, EMERGENCY, EXTEND_*, DISCOVER, etc.).
+        bankrupt_specials = {v for _, v, _ in BANKRUPT_WHEEL_WEDGES if isinstance(v, str)}
+        normal_specials = {v for _, v, _ in WHEEL_WEDGES if isinstance(v, str)}
+        assert bankrupt_specials - normal_specials, (
+            "Bankrupt wheel should have at least one wedge not present on the normal wheel"
+        )
+
 
 # =============================================================================
 # Daily mana flag idempotency (Green insurance, Red re-roll)
