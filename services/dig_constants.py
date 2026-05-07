@@ -1657,6 +1657,11 @@ class RandomEvent:
     # Splash: optional penalty applied to other players in the guild when
     # this event resolves (see SplashConfig.trigger for which outcome fires it).
     splash: SplashConfig | None = None
+    # Guild modifier set on risky/desperate success — drives marquee events
+    # that toll a guild-wide window (e.g. helltide_active). The dict carries
+    # ``id``, ``duration_seconds``, and an optional ``payload``. Requires
+    # ``DigService.dig_guild_modifier_repo`` to be wired or it's a no-op.
+    guild_modifier_on_success: dict | None = None
 
 
 def pick_description(event: Any) -> str:
@@ -5102,6 +5107,527 @@ RANDOM_EVENTS: list[RandomEvent] = [
         min_prestige=8,
         next_event_id=None,
     ),
+
+    # =====================================================================
+    # Roguelike pacing-v2 expansion. Atmospheric only: no proper nouns,
+    # no mechanic exposition in flavor. Each event carries 2 of 3 traits
+    # from {risky, deflationary, cross-player}. Splash uses the existing
+    # resolver; lingering effects use temp_buffs / guild modifiers.
+    # =====================================================================
+
+    # ---- Common tier (4) -----------------------------------------------
+
+    RandomEvent(
+        id="crimson_drizzle",
+        name="Crimson Drizzle",
+        description=(
+            "A fine red rain leaks from the ceiling. It does not pool — it stains.",
+            "The drip is warm. It hisses on your lantern and writes nothing.",
+            "Red beads gather on your sleeves. You can feel them counting.",
+        ),
+        min_depth=None, max_depth=None,
+        safe_option=EventChoice(
+            "Wait under cover",
+            success=EventOutcome("You shelter. The drizzle thins.", 0, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Press on through it",
+            success=EventOutcome("You break out the other side, stained but ahead.", 4, -8, False),
+            failure=EventOutcome("The rain finds something on you and takes it.", 0, -15, False),
+            success_chance=0.55,
+        ),
+        rarity="common",
+    ),
+
+    RandomEvent(
+        id="glyph_pulse",
+        name="Glyph Pulse",
+        description=(
+            "A glyph drawn in old salt thrums on the wall. It wants something.",
+            "The mark on the stone tightens, then relaxes. Tightens, then relaxes.",
+            "A faint figure-eight glyph hums where you set your hand.",
+        ),
+        min_depth=None, max_depth=None,
+        safe_option=EventChoice(
+            "Step around it",
+            success=EventOutcome("You give the glyph a wide berth.", 0, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Press your palm to it (offer 20)",
+            success=EventOutcome("Heat runs into your arm and you feel quicker.", 0, -20, False),
+            failure=EventOutcome("The glyph drinks your offering and gives nothing back.", 0, -20, False),
+            success_chance=0.55,
+        ),
+        rarity="common",
+        buff_on_success=TempBuff(
+            id="glyph_pulse_buff", name="Quickened Step",
+            duration_digs=2, effect={"advance_bonus": 2},
+        ),
+    ),
+
+    RandomEvent(
+        id="mossfire_echo",
+        name="Mossfire Echo",
+        description=(
+            "Soft green flame nests in the moss. It moves with you when you walk.",
+            "The mossfire lights without heat. It is hungry in a quiet way.",
+            "A patch of luminous moss flickers. Some of it follows.",
+        ),
+        min_depth=None, max_depth=None,
+        safe_option=EventChoice(
+            "Pass without engaging",
+            success=EventOutcome("The fire forgets you and goes to sleep.", 0, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Feed it a coin (offer 30)",
+            success=EventOutcome("The fire breathes in. Its warmth wraps your shoulders.", 0, -30, False),
+            failure=EventOutcome("The fire takes your coin and snuffs out without thanks.", 0, -30, False),
+            success_chance=0.50,
+        ),
+        rarity="common",
+        buff_on_success=TempBuff(
+            id="mossfire_echo_buff", name="Sheltered",
+            duration_digs=3, effect={"cave_in_reduction": 0.10},
+        ),
+    ),
+
+    RandomEvent(
+        id="mana_fountain_crack",
+        name="Mana Fountain Crack",
+        description=(
+            "A vein of bright water has cracked the wall. It tastes of summer storms.",
+            "A spring breaks open at your feet. It smells like a struck flint.",
+            "Cold sweet water leaks through stone that should not leak.",
+        ),
+        min_depth=None, max_depth=None,
+        safe_option=EventChoice(
+            "Sip a little, leave the rest",
+            success=EventOutcome("You drink politely. Your lantern feels heavier.", 0, 4, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Drink your fill",
+            success=EventOutcome("The spring fills you up and you set off, brimming.", 3, 6, False),
+            failure=EventOutcome("Something in the water bites back.", 0, -25, False),
+            success_chance=0.55,
+        ),
+        rarity="common",
+        buff_on_success=TempBuff(
+            id="fountain_buff", name="Spring-touched",
+            duration_digs=2, effect={"cave_in_reduction": 0.10},
+        ),
+    ),
+
+    # ---- Uncommon tier (11) --------------------------------------------
+
+    RandomEvent(
+        id="the_hooked_stranger",
+        name="The Hooked Stranger",
+        description=(
+            "A chain unspools from a hole that should not be there. It rattles, listening.",
+            "Something on the far side of the wall throws a hook and waits.",
+            "A heavy hook drags through the rock and stops near your boot.",
+        ),
+        min_depth=10, max_depth=None,
+        safe_option=EventChoice(
+            "Step back into shadow",
+            success=EventOutcome("You let the chain drift. It withdraws, disappointed.", 0, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Grab the chain and pull",
+            success=EventOutcome("Whatever was on the other end drops what it carried at your feet.", 0, 0, False),
+            failure=EventOutcome("The chain pulls back. Something comes off you when it lets go.", 0, -20, False),
+            success_chance=0.45,
+        ),
+        rarity="uncommon",
+        splash=SplashConfig(strategy="random_active", victim_count=1, penalty_jc=30, trigger="success", mode="steal"),
+    ),
+
+    RandomEvent(
+        id="whispering_token",
+        name="Whispering Token",
+        description=(
+            "A coin made of teeth glints in the dust. It is whispering a price.",
+            "The token in the dirt is too warm to be metal.",
+            "A coin sits where no one dropped it. It hums when you breathe near it.",
+        ),
+        min_depth=20, max_depth=None,
+        safe_option=EventChoice(
+            "Leave it",
+            success=EventOutcome("You walk past. The whispering follows for a while, then fades.", 0, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Pocket it",
+            success=EventOutcome("The token settles into your bag and pays out a debt you didn't know you'd struck.", 4, 22, False),
+            failure=EventOutcome("The token bites your palm shut and takes its price.", 0, -28, False),
+            success_chance=0.50,
+        ),
+        rarity="uncommon",
+    ),
+
+    RandomEvent(
+        id="the_beasts_pit",
+        name="The Beast's Pit",
+        description=(
+            "The tunnel widens into a pit whose bottom is full of slow eyes.",
+            "A reek rolls up from a drop. Something below shifts its weight.",
+            "An old pit yawns ahead. The dust in it is breathing.",
+        ),
+        min_depth=80, max_depth=None,
+        safe_option=EventChoice(
+            "Edge around the pit",
+            success=EventOutcome("You skirt the lip and lose a little ground.", -3, -4, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Drop in and challenge it",
+            success=EventOutcome("The thing below flinches. You climb out with a fistful of someone else's spoils.", 0, 0, False),
+            failure=EventOutcome("It catches you on the way down. You leave bloody.", -2, -25, True),
+            success_chance=0.45,
+        ),
+        rarity="uncommon",
+        splash=SplashConfig(strategy="deepest_n", victim_count=1, penalty_jc=50, trigger="success", mode="steal"),
+    ),
+
+    RandomEvent(
+        id="aegis_denial",
+        name="Aegis Denial",
+        description=(
+            "A shattered ward thrums against your fingers. It would like to be whole again.",
+            "Pieces of an old ward are scattered like teeth. They click when they sense each other.",
+            "A broken ward leans against the wall. It is trying to remember its purpose.",
+        ),
+        min_depth=120, max_depth=None,
+        safe_option=EventChoice(
+            "Leave the ward broken",
+            success=EventOutcome("You leave the ward and the moment passes.", 0, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Bind it to yourself (offer 50)",
+            success=EventOutcome("The ward chooses a target and pulls. Coin spills your way.", 0, -50, False),
+            failure=EventOutcome("The ward chooses you. The shards take their tribute.", 0, -50, False),
+            success_chance=0.50,
+        ),
+        rarity="uncommon",
+        splash=SplashConfig(strategy="deepest_n", victim_count=1, penalty_jc=60, trigger="success", mode="steal"),
+    ),
+
+    RandomEvent(
+        id="sanguine_pact",
+        name="Sanguine Pact",
+        description=(
+            "A vein in the stone runs hot. It is asking for a sip of yours.",
+            "A red bead floats in the air at chest height, waiting.",
+            "Something has tied a thread of blood between two walls. It hums.",
+        ),
+        min_depth=40, max_depth=None,
+        safe_option=EventChoice(
+            "Refuse the bargain",
+            success=EventOutcome("You refuse. The thread snaps and the air settles.", 0, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Open a finger (offer 40)",
+            success=EventOutcome("The pact takes its cut and quickens your hands.", 0, -40, False),
+            failure=EventOutcome("The pact takes more than was offered.", 0, -55, False),
+            success_chance=0.55,
+        ),
+        rarity="uncommon",
+        buff_on_success=TempBuff(
+            id="sanguine_pact_buff", name="Sanguine",
+            duration_digs=3, effect={"advance_bonus": 3},
+        ),
+    ),
+
+    RandomEvent(
+        id="time_walker",
+        name="Time Walker",
+        description=(
+            "A second of the air has gotten stuck. It moves slowly past your face.",
+            "The shadows in this corridor lag behind their owners.",
+            "Your watch stops. So does the dust.",
+        ),
+        min_depth=30, max_depth=None,
+        safe_option=EventChoice(
+            "Wait it out",
+            success=EventOutcome("Time resumes. You go on.", 0, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Step through the slowed second",
+            success=EventOutcome("You take three strides for one. Your tunnel jumps.", 6, 0, False),
+            failure=EventOutcome("Time snaps back hard. The walls come with it.", 0, -10, True),
+            success_chance=0.45,
+        ),
+        rarity="uncommon",
+    ),
+
+    RandomEvent(
+        id="bounty_marker",
+        name="Bounty Marker",
+        description=(
+            "A small brass marker has been driven into the rock. It carries a name in scratchwork.",
+            "Someone has nailed a sigil to the wall. It points at gold somewhere up the line.",
+            "A marker hums against the stone. It is aimed away from you.",
+        ),
+        min_depth=40, max_depth=None,
+        safe_option=EventChoice(
+            "Leave the marker alone",
+            success=EventOutcome("You walk past. Whoever it points at stays unmolested.", 0, -3, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Trip the marker",
+            success=EventOutcome("The marker fires. Wealth bleeds out of someone with too much of it.", 0, -10, False),
+            failure=EventOutcome("The marker turns on you mid-trip.", 0, -25, False),
+            success_chance=0.55,
+        ),
+        rarity="uncommon",
+        splash=SplashConfig(strategy="richest_n", victim_count=2, penalty_jc=40, trigger="success", mode="burn"),
+    ),
+
+    RandomEvent(
+        id="mages_archive",
+        name="Mage's Archive",
+        description=(
+            "An archive in a side-cavity has gotten damp. The pages still glow.",
+            "Someone left a book on a shelf carved into the wall. The ink moves.",
+            "A small library has been embedded in the rock. It is reading itself aloud.",
+        ),
+        min_depth=20, max_depth=None,
+        safe_option=EventChoice(
+            "Leave the books",
+            success=EventOutcome("You leave it for whoever finds it next.", 0, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Read a passage (offer 50)",
+            success=EventOutcome("A useful page settles into your head.", 0, -50, False),
+            failure=EventOutcome("The book takes your coin and writes a name in it. Yours.", 0, -50, False),
+            success_chance=0.50,
+        ),
+        rarity="uncommon",
+        buff_on_success=TempBuff(
+            id="archive_buff", name="Read In",
+            duration_digs=4, effect={"advance_bonus": 2, "cave_in_reduction": 0.05},
+        ),
+    ),
+
+    RandomEvent(
+        id="phantom_strike",
+        name="Phantom Strike",
+        description=(
+            "Three of you take the next swing. Two of them aren't quite there.",
+            "The pickaxe doubles. So do you. Briefly.",
+            "Your shadow takes a step before you do. So does your reflection.",
+        ),
+        min_depth=30, max_depth=None,
+        safe_option=EventChoice(
+            "Center yourself and continue",
+            success=EventOutcome("You shake the doubling and dig on.", 1, 4, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Strike with all three",
+            success=EventOutcome("Three swings land at once. Coin scatters and most of it sticks.", 0, 18, False),
+            failure=EventOutcome("Two of you miss and take it out on the third.", 0, -22, False),
+            success_chance=0.45,
+        ),
+        rarity="uncommon",
+    ),
+
+    RandomEvent(
+        id="silken_cocoon",
+        name="Silken Cocoon",
+        description=(
+            "Threads of dry silk have grown across the corridor. They are stronger than they look.",
+            "A spread of pale silk has knit itself into the rock. You stick to it on contact.",
+            "The walls have been wrapped in something patient. It is not done weaving.",
+        ),
+        min_depth=10, max_depth=None,
+        safe_option=EventChoice(
+            "Cut a careful path",
+            success=EventOutcome("You pick your way through. Slow but unscathed.", -1, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Push straight through",
+            success=EventOutcome("You break the cocoon. The next swing comes easy.", -2, 0, False),
+            failure=EventOutcome("The silk takes pieces of you with it.", -3, -8, False),
+            success_chance=0.60,
+        ),
+        rarity="uncommon",
+        buff_on_success=TempBuff(
+            id="silken_cocoon_buff", name="Snapped Free",
+            duration_digs=1, effect={"advance_bonus": 5},
+        ),
+    ),
+
+    RandomEvent(
+        id="the_mothers_mark",
+        name="The Mother's Mark",
+        description=(
+            "A figure painted on the wall has opened her eyes. They follow.",
+            "An old mother sigil has been chalked here. It is brighter than chalk allows.",
+            "A figure in the rock turns her head as you pass. She marks you.",
+        ),
+        min_depth=80, max_depth=None,
+        safe_option=EventChoice(
+            "Avoid her gaze",
+            success=EventOutcome("You keep your eyes down. The painting goes still.", 0, -5, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Meet her eyes",
+            success=EventOutcome("She sees you back. Something in your shadow changes weight.", 4, 8, False),
+            failure=EventOutcome("She looks away. You feel her displeasure on your back.", 0, -18, True),
+            success_chance=0.50,
+        ),
+        rarity="uncommon",
+        buff_on_success=TempBuff(
+            id="mothers_mark", name="Marked",
+            duration_digs=5, effect={"cave_in_reduction": -0.05},
+        ),
+    ),
+
+    # ---- Marquee tier (3) ----------------------------------------------
+
+    RandomEvent(
+        id="helltide_bell",
+        name="Helltide Bell",
+        description=(
+            "A bell that no one has ever cast tolls inside the rock. The air thickens.",
+            "Far below, a bell that should not exist begins to ring. The walls hum with it.",
+            "A great red note rolls through the tunnel. The whole mine shifts to its key.",
+        ),
+        min_depth=None, max_depth=None,
+        safe_option=EventChoice(
+            "Cover your ears and wait",
+            success=EventOutcome("You hold your hands to your ears. The bell tolls anyway.", 0, -2, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Strike the bell yourself",
+            success=EventOutcome("Your blow lands. The toll rolls through the whole mine and stays.", 0, -50, False),
+            failure=EventOutcome("The bell rejects your hand. You leave coin on the floor.", 0, -50, False),
+            success_chance=0.50,
+        ),
+        rarity="legendary",
+        guild_modifier_on_success={
+            "id": "helltide_active",
+            "duration_seconds": 1800,
+            "payload": {"tax_per_dig": 5},
+        },
+    ),
+
+    RandomEvent(
+        id="the_sundering",
+        name="The Sundering",
+        description=(
+            "A long crack in the wall opens like an eye and watches.",
+            "Something old is splitting along its joints. The dust rearranges itself in patterns.",
+            "A shape under the rock breaks into pieces and the pieces still know each other.",
+        ),
+        min_depth=120, max_depth=None,
+        safe_option=EventChoice(
+            "Back away from the crack",
+            success=EventOutcome("You retreat. The crack closes its eye.", -3, -10, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Drive your pickaxe into it",
+            success=EventOutcome("The crack flinches and gives up something it had been holding.", 0, 25, False),
+            failure=EventOutcome("The crack opens wider. It is in you now.", 0, -50, True),
+            success_chance=0.45,
+        ),
+        rarity="legendary",
+        buff_on_success=TempBuff(
+            id="sundered", name="Sundered",
+            duration_digs=5, effect={"advance_bonus": -3, "cave_in_reduction": -0.05},
+        ),
+    ),
+
+    RandomEvent(
+        id="the_black_kings_bargain",
+        name="The Black King's Bargain",
+        description=(
+            "A black-iron stave is pressed into the wall. Its inscription is in a king's hand.",
+            "An old contract has been engraved into the stone. It has a place for your name.",
+            "A length of iron bar leans against the rock. A king's bargain hums in it.",
+        ),
+        min_depth=120, max_depth=None,
+        safe_option=EventChoice(
+            "Refuse the contract",
+            success=EventOutcome("You decline. The bar dims.", 0, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Sign the contract (tribute 100)",
+            success=EventOutcome("The bar warms in your grip. Nothing in this stretch can touch you.", 0, -100, False),
+            failure=EventOutcome("The bar takes your tribute and offers nothing back.", 0, -100, False),
+            success_chance=0.55,
+        ),
+        rarity="legendary",
+        buff_on_success=TempBuff(
+            id="black_kings_bargain", name="King's Bargain",
+            duration_digs=5, effect={"cave_in_reduction": 1.0, "advance_bonus": -1},
+        ),
+    ),
+
+    # ---- Filler / additional events (2) --------------------------------
+
+    RandomEvent(
+        id="the_old_gods_tongue",
+        name="The Old God's Tongue",
+        description=(
+            "A great tongue of black stone protrudes from the wall and licks the air.",
+            "Something on the other side of the rock is tasting the corridor.",
+            "A black stone tongue has unrolled across the floor. It knows your weight.",
+        ),
+        min_depth=20, max_depth=None,
+        safe_option=EventChoice(
+            "Walk on the tongue (no coin)",
+            success=EventOutcome("Walking on the tongue costs you blood instead of coin.", -2, 0, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Pay the tongue and pass",
+            success=EventOutcome("The tongue tastes the coin and lets you through.", 2, -20, False),
+            failure=EventOutcome("The tongue tastes more than offered.", 0, -45, False),
+            success_chance=0.55,
+        ),
+        rarity="rare",
+    ),
+
+    RandomEvent(
+        id="crimson_rain_ladder",
+        name="Crimson Rain Ladder",
+        description=(
+            "The rain in this stretch is climbing back up. It has somewhere to be.",
+            "A ladder of red water rises through the ceiling. It has hands.",
+            "The drizzle reverses. It is going up to find someone.",
+        ),
+        min_depth=20, max_depth=None,
+        safe_option=EventChoice(
+            "Wait below the ladder",
+            success=EventOutcome("You let the ladder finish climbing.", 0, -2, False),
+            failure=None, success_chance=1.0,
+        ),
+        risky_option=EventChoice(
+            "Climb behind it",
+            success=EventOutcome("You go up alongside the rain. It splashes the rest of the mine on the way.", 4, 5, False),
+            failure=EventOutcome("The ladder lets go. You come down with it.", -2, -10, True),
+            success_chance=0.45,
+        ),
+        rarity="uncommon",
+        splash=SplashConfig(strategy="active_diggers", victim_count=3, penalty_jc=12, trigger="success", mode="burn"),
+    ),
 ]
 
 
@@ -6330,6 +6856,151 @@ CAVE_IN_STUN_HOURS_MIN: int = 2
 CAVE_IN_STUN_HOURS_MAX: int = 4
 CAVE_IN_MEDICAL_BILL_DIVISOR: int = 6       # cost = max(1, depth // divisor)
 CAVE_IN_MEDICAL_BILL_MIN: int = 1
+
+# Depth bands. Cave-ins escalate as the tunnel goes deeper.
+CAVE_IN_BAND_SHALLOW: str = "shallow"
+CAVE_IN_BAND_MID: str = "mid"
+CAVE_IN_BAND_DEEP: str = "deep"
+CAVE_IN_BAND_ENDGAME: str = "endgame"
+
+CAVE_IN_DEPTH_BAND_MID: int = 50
+CAVE_IN_DEPTH_BAND_DEEP: int = 150
+CAVE_IN_DEPTH_BAND_ENDGAME: int = 250
+
+# Per-band block loss ranges (shallow matches legacy MIN/MAX).
+CAVE_IN_BLOCK_LOSS_RANGES: dict[str, tuple[int, int]] = {
+    CAVE_IN_BAND_SHALLOW: (CAVE_IN_BLOCK_LOSS_MIN, CAVE_IN_BLOCK_LOSS_MAX),
+    CAVE_IN_BAND_MID: (8, 18),
+    CAVE_IN_BAND_DEEP: (12, 25),
+    CAVE_IN_BAND_ENDGAME: (16, 32),
+}
+
+# Per-band medical-bill ranges.
+CAVE_IN_MEDICAL_BILL_RANGES: dict[str, tuple[int, int]] = {
+    CAVE_IN_BAND_SHALLOW: (3, 9),
+    CAVE_IN_BAND_MID: (6, 15),
+    CAVE_IN_BAND_DEEP: (12, 25),
+    CAVE_IN_BAND_ENDGAME: (18, 40),
+}
+
+# Stun = extra digs of slower cooldown after the cave-in.
+CAVE_IN_STUN_DIGS_BY_BAND: dict[str, int] = {
+    CAVE_IN_BAND_SHALLOW: 2,
+    CAVE_IN_BAND_MID: 3,
+    CAVE_IN_BAND_DEEP: 4,
+    CAVE_IN_BAND_ENDGAME: 5,
+}
+
+# Injury = digs of reduced advance after the cave-in.
+CAVE_IN_INJURY_DIGS_BY_BAND: dict[str, int] = {
+    CAVE_IN_BAND_SHALLOW: 3,
+    CAVE_IN_BAND_MID: 4,
+    CAVE_IN_BAND_DEEP: 5,
+    CAVE_IN_BAND_ENDGAME: 6,
+}
+
+# Consequence weights (percent) per band. Total of each row = 100. New
+# consequence types appear at deeper bands. The resolver must reroll if the
+# selected consequence isn't applicable in the current state (e.g.
+# spilled_satchel with empty inventory).
+CAVE_IN_CONSEQUENCE_WEIGHTS: dict[str, list[tuple[str, int]]] = {
+    CAVE_IN_BAND_SHALLOW: [
+        ("stun", 30), ("injury", 30), ("medical_bill", 40),
+    ],
+    CAVE_IN_BAND_MID: [
+        ("stun", 25), ("injury", 25), ("medical_bill", 30),
+        ("gear_nick", 10), ("spilled_satchel", 5),
+        ("snuffed_light", 4), ("cracked_hat", 1),
+    ],
+    CAVE_IN_BAND_DEEP: [
+        ("stun", 20), ("injury", 20), ("medical_bill", 25),
+        ("gear_nick", 15), ("spilled_satchel", 8),
+        ("snuffed_light", 7), ("cracked_hat", 5),
+    ],
+    CAVE_IN_BAND_ENDGAME: [
+        ("stun", 18), ("injury", 18), ("medical_bill", 22),
+        ("gear_nick", 18), ("spilled_satchel", 10),
+        ("snuffed_light", 9), ("cracked_hat", 5),
+    ],
+}
+
+# Catastrophic sub-roll: after the cave-in resolves, this fraction become
+# catastrophic instead. Catastrophic cave-ins layer on heavy effects:
+# multi-dig stun, depth roll-back to nearest milestone, all temp_buffs
+# cleared, deep gear hit, and a heavy medical bill.
+CAVE_IN_CATASTROPHIC_PCT_BY_BAND: dict[str, float] = {
+    CAVE_IN_BAND_SHALLOW: 0.0,
+    CAVE_IN_BAND_MID: 0.01,
+    CAVE_IN_BAND_DEEP: 0.03,
+    CAVE_IN_BAND_ENDGAME: 0.05,
+}
+
+CAVE_IN_CATASTROPHIC_MEDICAL_BILL: tuple[int, int] = (50, 200)
+CAVE_IN_CATASTROPHIC_STUN_DIGS_RANGE: tuple[int, int] = (3, 5)
+CAVE_IN_CATASTROPHIC_GEAR_TICKS: int = 3
+CAVE_IN_CATASTROPHIC_MILESTONE_STEP: int = 25  # roll back to floor((depth-1)/step)*step
+
+# Helltide bell: marquee guild-wide modifier set by an event. While active,
+# every dig in the guild burns this many JC from its yield (pure deflation,
+# coins are destroyed not transferred).
+HELLTIDE_MODIFIER_ID: str = "helltide_active"
+HELLTIDE_MODIFIER_DURATION_SECONDS: int = 1800  # 30 minutes
+HELLTIDE_TAX_PER_DIG: int = 5
+
+
+def cave_in_band(depth: int) -> str:
+    """Classify a tunnel depth into one of the four cave-in escalation bands."""
+    if depth >= CAVE_IN_DEPTH_BAND_ENDGAME:
+        return CAVE_IN_BAND_ENDGAME
+    if depth >= CAVE_IN_DEPTH_BAND_DEEP:
+        return CAVE_IN_BAND_DEEP
+    if depth >= CAVE_IN_DEPTH_BAND_MID:
+        return CAVE_IN_BAND_MID
+    return CAVE_IN_BAND_SHALLOW
+
+
+def pick_cave_in_consequence(
+    band: str,
+    *,
+    has_consumables: bool,
+    has_equipped_gear: bool,
+    can_lower_luminosity: bool,
+    has_hard_hat_charges: bool,
+) -> str:
+    """Weighted-pick a cave-in consequence id for the given band.
+
+    Filters out consequences whose state requirement isn't met, then renormalizes
+    the remaining weights and rolls. Falls back to ``"medical_bill"`` if no
+    consequence is applicable (extremely unlikely, but defensive).
+    """
+    applicable = {
+        "stun": True,
+        "injury": True,
+        "medical_bill": True,
+        "gear_nick": has_equipped_gear,
+        "spilled_satchel": has_consumables,
+        "snuffed_light": can_lower_luminosity,
+        "cracked_hat": has_hard_hat_charges,
+    }
+    weights = [(cid, w) for cid, w in CAVE_IN_CONSEQUENCE_WEIGHTS[band] if applicable.get(cid, False) and w > 0]
+    if not weights:
+        return "medical_bill"
+    total = sum(w for _, w in weights)
+    roll = random.randint(1, total)
+    upto = 0
+    for cid, w in weights:
+        upto += w
+        if roll <= upto:
+            return cid
+    return weights[-1][0]
+
+
+def roll_catastrophic_cave_in(band: str) -> bool:
+    """True if this cave-in escalates to catastrophic for the given band."""
+    pct = CAVE_IN_CATASTROPHIC_PCT_BY_BAND.get(band, 0.0)
+    if pct <= 0:
+        return False
+    return random.random() < pct
 
 
 # ---------------------------------------------------------------------------
@@ -7662,6 +8333,7 @@ EVENT_POOL: list[dict] = [
             "trigger": e.splash.trigger,
             "mode": e.splash.mode,
         } if e.splash else None,
+        "guild_modifier_on_success": dict(e.guild_modifier_on_success) if e.guild_modifier_on_success else None,
     }
     for e in RANDOM_EVENTS
 ]

@@ -107,6 +107,7 @@ class ServiceContainer:
         from repositories.bankruptcy_repository import BankruptcyRepository
         from repositories.bet_repository import BetRepository
         from repositories.curse_repository import CurseRepository
+        from repositories.dig_guild_modifier_repository import DigGuildModifierRepository
         from repositories.dig_repository import DigRepository
         from repositories.disburse_repository import DisburseRepository
         from repositories.guild_config_repository import GuildConfigRepository
@@ -149,6 +150,7 @@ class ServiceContainer:
             "dig_repo": DigRepository(p),
             "notification_repo": NotificationRepository(p),
             "curse_repo": CurseRepository(p),
+            "dig_guild_modifier_repo": DigGuildModifierRepository(p),
         })
 
     def _init_core_services(self) -> None:
@@ -378,6 +380,7 @@ class ServiceContainer:
             player_repo=c["player_repo"],
             mana_effects_service=c.get("mana_effects_service"),
             bankruptcy_repo=c.get("bankruptcy_repo"),
+            dig_guild_modifier_repo=c.get("dig_guild_modifier_repo"),
         )
 
         # Wire LLM flavor layer if AI is available
@@ -504,6 +507,7 @@ class ServiceContainer:
         bot.reminder_service = c["reminder_service"]
         bot.curse_repo = c["curse_repo"]
         bot.curse_service = c["curse_service"]
+        bot.dig_guild_modifier_repo = c["dig_guild_modifier_repo"]
 
         # AI services (may be None)
         bot.ai_service = c["ai_service"]
